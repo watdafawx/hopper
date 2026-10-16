@@ -1,0 +1,2170 @@
+//! The Settings page: a sidebar of categories (with a search over every
+//! setting) beside one category at a time, as cards of rows: what it is on
+//! the left, its control on the right.
+//!
+//! Switches, choices and the theme apply at once. Text and folder fields
+//! save when they lose focus or on Enter, with a "Saved" tick, or say
+//! inline why they didn't. Buttons are only for actions (test, install…).
+
+use crate::java_form::JavaForm;
+use crate::store::Store;
+use crate::widgets;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::radio::RadioGroup;
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
+    h_flex, v_flex,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use std::collections::HashMap;
+use std::path::Path;
+use std::rc::Rc;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+const SAVED_KEY: &str = "Saved. Paste a new key to replace it";
+/// How wide the cards get.
+const MAX_W: f32 = 50.;
+/// How long a "Saved" tick and a search highlight stay.
+const TICK: Duration = Duration::from_millis(2500);
+const FLASH: Duration = Duration::from_millis(1800);
+
+// ---- categories and the settings in them --------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Category {
+    General,
+    Accounts,
+    Folders,
+    Launchers,
+    Java,
+    Servers,
+    Content,
+    Appearance,
+    Updates,
+    Advanced,
+}
+
+impl Category {
+    pub const ALL: [Category; 10] = [
+        Category::General,
+        Category::Accounts,
+        Category::Folders,
+        Category::Launchers,
+        Category::Java,
+        Category::Servers,
+        Category::Content,
+        Category::Appearance,
+        Category::Updates,
+        Category::Advanced,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::General => "General",
+            Category::Accounts => "Accounts",
+            Category::Folders => "Library & folders",
+            Category::Launchers => "Other launchers",
+            Category::Java => "Playing & Java",
+            Category::Servers => "Servers",
+            Category::Content => "CurseForge & Modrinth",
+            Category::Appearance => "Appearance",
+            Category::Updates => "Updates & install",
+            Category::Advanced => "Advanced",
+        }
+    }
+
+    pub fn icon(self) -> IconName {
+        match self {
+            Category::General => IconName::SlidersHorizontal,
+            Category::Accounts => IconName::UserRound,
+            Category::Folders => IconName::FolderOpen,
+            Category::Launchers => IconName::Layers,
+            Category::Java => IconName::Cpu,
+            Category::Servers => IconName::Server,
+            Category::Content => IconName::Compass,
+            Category::Appearance => IconName::Palette,
+            Category::Updates => IconName::Download,
+            Category::Advanced => IconName::Wrench,
+        }
+    }
+
+    /// The line under the category's title.
+    fn blurb(self) -> &'static str {
+        match self {
+            Category::General => "How the library behaves day to day.",
+            Category::Accounts => "Who plays: your Microsoft accounts.",
+            Category::Folders => "Where Hopper finds your instances and Minecraft's launcher.",
+            Category::Launchers => "Instances from other launchers, managed where they are, without copying.",
+            Category::Java => "How games start, what happens while one runs, and memory and Java for instances that don't set their own.",
+            Category::Servers => "Your server packs, servers hosted on this PC, and the panel that runs them.",
+            Category::Content => "The CurseForge API key, and where Browse looks first.",
+            Category::Appearance => "Theme and size.",
+            Category::Updates => "Hopper's version, its updates, and installing it.",
+            Category::Advanced => "The notification-area icon, website links and Hopper's own files.",
+        }
+    }
+
+    /// A category from a word ("java", "servers", "curseforge"…), for the
+    /// palette and the MCP `navigate` tool.
+    pub fn find(word: &str) -> Option<Category> {
+        let w = word.trim().to_lowercase();
+        if w.is_empty() {
+            return None;
+        }
+        Category::ALL
+            .into_iter()
+            .find(|c| c.label().to_lowercase().starts_with(&w))
+            .or_else(|| {
+                Category::ALL
+                    .into_iter()
+                    .find(|c| c.label().to_lowercase().contains(&w))
+            })
+    }
+
+    /// Every setting's name in it, for the palette's search.
+    pub fn keywords(self) -> &'static str {
+        static WORDS: OnceLock<Vec<String>> = OnceLock::new();
+        let all = WORDS.get_or_init(|| {
+            Category::ALL
+                .iter()
+                .map(|c| {
+                    ENTRIES
+                        .iter()
+                        .filter(|e| e.cat == *c)
+                        .map(|e| format!("{} {}", e.label, e.words))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_lowercase()
+                })
+                .collect()
+        });
+        let ix = Category::ALL.iter().position(|c| *c == self).unwrap_or(0);
+        &all[ix]
+    }
+}
+
+/// One setting, as search finds it.
+struct Entry {
+    cat: Category,
+    id: &'static str,
+    label: &'static str,
+    desc: &'static str,
+    /// Other words it answers to.
+    words: &'static str,
+}
+
+const fn e(
+    cat: Category,
+    id: &'static str,
+    label: &'static str,
+    desc: &'static str,
+    words: &'static str,
+) -> Entry {
+    Entry { cat, id, label, desc, words }
+}
+
+use Category as C;
+
+/// Every setting, in page order. Rows take their label and description
+/// from here (some descriptions change with the state).
+const ENTRIES: &[Entry] = &[
+    e(C::General, "instance-tab", "Instances open on", "The tab an instance shows first when Hopper starts.", "overview mods tab start"),
+    e(C::General, "dependents", "Mods others need", "Turning off a mod that others need, or turning on one that needs mods that are off.", "dependencies deps required library"),
+    e(C::General, "delete-permanently", "Skip the Recycle Bin", "Deleted instances, worlds and backups are removed for good, so they don't fill up your C: drive. Off sends them to the Recycle Bin.", "delete recycle bin trash permanent disk space"),
+    e(C::Accounts, "account", "Microsoft accounts", "Switch which one starts your games, add another, or sign one out.", "sign in login microsoft profile skin"),
+    e(C::Folders, "instances-root", "Instances folder", "Where your instances live. CurseForge's Instances folder works.", "path directory library"),
+    e(C::Folders, "launcher-dir", "Launcher folder", "The folder with minecraft.exe. CurseForge keeps one in Curse\\Install.", "minecraft.exe mojang path directory"),
+    e(C::Launchers, "launchers", "Other launchers", "Found on this PC, and folders you add. Each one's instances can be managed in Hopper.", "modrinth prism multimc atlauncher gdlauncher ftb import manage"),
+    e(C::Java, "launch-with", "Launch with", "Hopper starts games itself with your Microsoft sign-in, like CurseForge. Mojang's launcher opens instead and you press Play there.", "launcher native mojang direct"),
+    e(C::Java, "minimize", "Minimize while playing", "Hide Hopper while a game runs, and bring it back when it closes.", "minimize window hide"),
+    e(C::Java, "record", "Record how games run", "FPS, frame times, CPU, RAM, GPU and GC pauses of each run, to compare Java arguments. See an instance's Performance tab.", "performance fps stats gc record benchmark"),
+    e(C::Java, "memory", "Memory", "For instances that don't set their own.", "ram xmx gb heap"),
+    e(C::Java, "java", "Java", "The Java instances use unless they pick one.", "jdk jre runtime path"),
+    e(C::Java, "java-args", "Java arguments", "Extra arguments for instances that leave theirs blank.", "jvm flags aikar g1 zgc generator presets xms xmx graalvm"),
+    e(C::Java, "get-java", "Get Java", "Downloads into Hopper's own folder; they show in every Java list. GraalVM comes under Oracle's free terms (GraalVM Free Terms and Conditions).", "download temurin graalvm jdk"),
+    e(C::Servers, "servers-root", "Server packs", "The folder your server folders are in (a shared folder for a server on another PC).", "folder rig path directory"),
+    e(C::Servers, "hosted-root", "Hosted servers", "Servers Hopper runs on this PC live here.", "folder host path directory"),
+    e(C::Servers, "server-host", "Server host", "The server PC's name or address, for status pings.", "hostname ping address rig"),
+    e(C::Servers, "auto-update", "Update paired servers", "After a pack update, update its paired server too (only while it is offline).", "rig auto update"),
+    e(C::Servers, "panel-kind", "Panel", "The panel that runs your servers: start, stop, console and backups.", "crafty mcss pterodactyl server panel"),
+    e(C::Servers, "panel-url", "Address", "Where the panel answers, like https://myserver:8443.", "url https server panel"),
+    e(C::Servers, "panel-key", "API key", "Kept in Windows Credential Manager, not in settings.json.", "token server panel"),
+    e(C::Servers, "panel-cert", "Self-signed certificate", "Accept a certificate the panel makes for itself.", "https ssl tls server panel"),
+    e(C::Servers, "panel-test", "Connection", "Whether the panel answers with this address and key.", "test server panel"),
+    e(C::Content, "cf-key", "CurseForge API key", "Needed for CurseForge: browsing, installs and updates. Get one at console.curseforge.com.", "api key token console"),
+    e(C::Content, "browse-source", "Browse searches", "Which site Browse opens on. Switch any time in Browse too.", "modrinth curseforge source search"),
+    e(C::Appearance, "theme", "Theme", "Hopper's colors. Your own theme files go in the folder next to it.", "dark light color colour glass mica"),
+    e(C::Appearance, "zoom", "Zoom", "Ctrl + and Ctrl - change it anywhere; Ctrl 0 resets it.", "scale size font bigger smaller"),
+    e(C::Updates, "self-update", "Hopper updates", "Hopper checks for new releases at start and every 30 minutes, and updates itself from them.", "version upgrade release"),
+    e(C::Updates, "update-repo", "Update source", "The GitHub repository (owner/name) Hopper's releases come from.", "github repo repository"),
+    e(C::Updates, "start-menu", "Start menu", "Adds this copy of Hopper to the Start menu without installing it, so you can pin it to Start.", "pin start menu shortcut taskbar portable"),
+    e(C::Updates, "install", "Install", "Copies Hopper into your apps with Start menu and desktop shortcuts. No admin rights needed.", "shortcut start menu uninstall"),
+    e(C::Updates, "setup", "Setup", "The steps Hopper shows on its first start: install, CurseForge key, instances, servers and theme.", "wizard first run onboarding welcome"),
+    e(C::Advanced, "tray-icon", "Notification-area icon", "Hopper's icon by the clock, with notifications for what finishes while it's in the background. From the next start.", "tray notifications background"),
+    e(C::Advanced, "links", "Website links", "Open curseforge.com's Install buttons in Hopper. Turning this off gives them back to the CurseForge app.", "curseforge protocol handler url install button"),
+    e(C::Advanced, "data-folder", "Hopper's data folder", "Settings, the palette's recent picks and other files Hopper keeps.", "appdata settings.json files"),
+];
+
+fn entry(id: &str) -> &'static Entry {
+    ENTRIES
+        .iter()
+        .find(|e| e.id == id)
+        .unwrap_or_else(|| panic!("no settings entry {id}"))
+}
+
+/// A setting's id as the page knows it (`"zoom"`, `"cf-key"`…).
+pub fn entry_id(id: &str) -> Option<&'static str> {
+    ENTRIES.iter().find(|e| e.id == id).map(|e| e.id)
+}
+
+/// The settings matching every word of `query` (in page order).
+fn matches(query: &str) -> Vec<&'static Entry> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    ENTRIES
+        .iter()
+        .filter(|e| {
+            let hay = format!("{} {} {} {}", e.label, e.desc, e.words, e.cat.label()).to_lowercase();
+            words.iter().all(|w| hay.contains(w.as_str()))
+        })
+        .collect()
+}
+
+// ---- text fields ----------------------------------------------------------------
+
+/// The text fields that save on their own (when they lose focus, or on Enter).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Text {
+    Instances,
+    Launcher,
+    ServerPacks,
+    Hosted,
+    Host,
+    PanelUrl,
+    UpdateRepo,
+}
+
+impl Text {
+    const ALL: [Text; 7] = [
+        Text::Instances,
+        Text::Launcher,
+        Text::ServerPacks,
+        Text::Hosted,
+        Text::Host,
+        Text::PanelUrl,
+        Text::UpdateRepo,
+    ];
+
+    fn saved(self, s: &hopper::settings::Settings) -> &str {
+        match self {
+            Text::Instances => &s.instances_root,
+            Text::Launcher => &s.launcher_dir,
+            Text::ServerPacks => &s.servers_root,
+            Text::Hosted => &s.hosted_root,
+            Text::Host => &s.server_host,
+            Text::PanelUrl => &s.panel_url,
+            Text::UpdateRepo => &s.update_repo,
+        }
+    }
+
+    fn set(self, s: &mut hopper::settings::Settings, v: String) {
+        match self {
+            Text::Instances => s.instances_root = v,
+            Text::Launcher => s.launcher_dir = v,
+            Text::ServerPacks => s.servers_root = v,
+            Text::Hosted => s.hosted_root = v,
+            Text::Host => s.server_host = v,
+            Text::PanelUrl => s.panel_url = v,
+            Text::UpdateRepo => s.update_repo = v,
+        }
+    }
+
+    /// The library is read again after it changes.
+    fn refreshes(self) -> bool {
+        matches!(
+            self,
+            Text::Instances | Text::Launcher | Text::ServerPacks | Text::Hosted | Text::Host
+        )
+    }
+
+    /// Why `v` can't be saved, if it can't.
+    fn problem(self, v: &str) -> Option<&'static str> {
+        if v.is_empty() {
+            return None;
+        }
+        match self {
+            Text::Instances | Text::Launcher | Text::ServerPacks if !Path::new(v).is_dir() => {
+                Some("Folder not found, so not saved.")
+            }
+            Text::PanelUrl if !(v.starts_with("https://") || v.starts_with("http://")) => {
+                Some("Start it with https:// (or http://).")
+            }
+            Text::UpdateRepo if v.split('/').filter(|p| !p.trim().is_empty()).count() != 2 => {
+                Some("Use owner/name, like watdafawx/hopper.")
+            }
+            _ => None,
+        }
+    }
+}
+
+/// What a text field says under itself after a save.
+enum Note {
+    Saved(Instant),
+    /// Why the value wasn't saved, and that value.
+    Problem(&'static str, String),
+    Info(&'static str),
+}
+
+// ---- the page --------------------------------------------------------------------
+
+pub struct SettingsPage {
+    store: Entity<Store>,
+    category: Category,
+    search: Entity<InputState>,
+    query: String,
+    scroll: ScrollHandle,
+    /// The setting to bring into view at the next render.
+    reveal: Option<&'static str>,
+    /// The setting just jumped to, lit up for a moment, and its turn.
+    flash: Option<(&'static str, usize)>,
+    flashes: usize,
+    texts: HashMap<Text, Entity<InputState>>,
+    notes: HashMap<Text, Note>,
+    /// A new panel API key; empty keeps the saved one.
+    panel_token: Entity<InputState>,
+    panel_key_saved: bool,
+    /// The last connection test: Ok(summary) or Err(why).
+    panel_test: Option<Result<String, String>>,
+    panel_testing: bool,
+    /// A new CurseForge key; empty keeps the current one.
+    cf_key: Entity<InputState>,
+    cf_test: Option<Result<String, String>>,
+    cf_testing: bool,
+    installing: bool,
+    java: Entity<JavaForm>,
+    launchers: Entity<crate::launchers_list::LaunchersList>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// What the Settings page asks of the app.
+pub enum SettingsEvent {
+    /// "Run setup again".
+    RunSetup,
+    /// Browse should search Modrinth (true) or CurseForge.
+    BrowseSource(bool),
+}
+
+impl EventEmitter<SettingsEvent> for SettingsPage {}
+
+impl SettingsPage {
+    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let s = store.read(cx).settings().clone();
+        let mut texts = HashMap::new();
+        for t in Text::ALL {
+            let value = t.saved(&s).to_string();
+            let placeholder = match t {
+                Text::PanelUrl => "https://myserver:8443",
+                Text::UpdateRepo => hopper::settings::DEFAULT_UPDATE_REPO,
+                Text::Host => "myserver",
+                _ => "",
+            };
+            texts.insert(
+                t,
+                cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(placeholder)
+                        .default_value(value)
+                }),
+            );
+        }
+        let search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search settings")
+                .clean_on_escape()
+        });
+        let cf_key = cx.new(|cx| {
+            InputState::new(window, cx).masked(true).placeholder(
+                if hopper::cf::api_key_source().is_some_and(|(_, s)| s == hopper::cf::KeySource::Saved) {
+                    SAVED_KEY
+                } else {
+                    "Paste your CurseForge API key"
+                },
+            )
+        });
+        let panel_key_saved = hopper::panel::token().is_some();
+        let panel_token = cx.new(|cx| {
+            InputState::new(window, cx).masked(true).placeholder(if panel_key_saved {
+                SAVED_KEY
+            } else {
+                "Paste the panel's API key"
+            })
+        });
+        let java = cx.new(|cx| JavaForm::new(store.clone(), None, window, cx));
+        java.update(cx, |j, cx| {
+            j.set(
+                s.default_memory_mb,
+                &s.default_java_path,
+                &s.default_java_args,
+                None,
+                window,
+                cx,
+            )
+        });
+        let mut subs = vec![
+            // Java defaults apply as they change.
+            cx.observe(&java, |this, java, cx| {
+                let (mem, path, args) = java.read(cx).values();
+                this.store.update(cx, |s, cx| {
+                    s.update_settings(
+                        |st| {
+                            st.default_memory_mb = mem.max(1024);
+                            st.default_java_path = path;
+                            st.default_java_args = args;
+                        },
+                        cx,
+                    )
+                });
+                cx.notify();
+            }),
+            cx.subscribe(&search, |this, state, e: &InputEvent, cx| match e {
+                InputEvent::Change => {
+                    this.query = state.read(cx).value().to_string();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    if let Some(hit) = matches(&this.query).first() {
+                        this.jump(hit.id, cx);
+                    }
+                }
+                _ => {}
+            }),
+            cx.subscribe_in(&cf_key, window, |this, _, e: &InputEvent, window, cx| match e {
+                InputEvent::PressEnter { .. } => this.save_cf_key(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            }),
+            cx.subscribe_in(&panel_token, window, |this, _, e: &InputEvent, window, cx| match e {
+                InputEvent::PressEnter { .. } => this.save_panel(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            }),
+            // Settings changed elsewhere (the setup wizard): show them,
+            // unless that field is being edited.
+            cx.observe_in(&store, window, |this, store, window, cx| {
+                let s = store.read(cx).settings().clone();
+                for t in Text::ALL {
+                    let input = this.texts[&t].clone();
+                    let saved = t.saved(&s).to_string();
+                    let shown = input.read(cx).value().trim().to_string();
+                    let editing = input.read(cx).focus_handle(cx).is_focused(window);
+                    if shown != saved && !editing && !matches!(this.notes.get(&t), Some(Note::Problem(..))) {
+                        input.update(cx, |i, cx| i.set_value(saved, window, cx));
+                    }
+                }
+            }),
+        ];
+        for t in Text::ALL {
+            subs.push(cx.subscribe(&texts[&t], move |this, _, e: &InputEvent, cx| match e {
+                InputEvent::Blur | InputEvent::PressEnter { .. } => this.commit(t, cx),
+                // Editing what was turned down clears why. (Enter also
+                // reports a change, of nothing.)
+                InputEvent::Change => {
+                    let now = this.texts[&t].read(cx).value().trim().to_string();
+                    if matches!(this.notes.get(&t), Some(Note::Problem(_, was)) if *was != now) {
+                        this.notes.remove(&t);
+                    }
+                    cx.notify();
+                }
+                _ => {}
+            }));
+        }
+        let launchers = cx.new(|_| crate::launchers_list::LaunchersList::new(store.clone()));
+        subs.push(cx.observe(&launchers, |_, _, cx| cx.notify()));
+        Self {
+            store,
+            category: Category::General,
+            search,
+            query: String::new(),
+            scroll: ScrollHandle::new(),
+            reveal: None,
+            flash: None,
+            flashes: 0,
+            texts,
+            notes: HashMap::new(),
+            panel_token,
+            panel_key_saved,
+            panel_test: None,
+            panel_testing: false,
+            cf_key,
+            cf_test: None,
+            cf_testing: false,
+            installing: false,
+            launchers,
+            java,
+            _subscriptions: subs,
+        }
+    }
+
+    /// Shows a category (from the palette, Ctrl+, or another page).
+    pub fn show(&mut self, category: Category, cx: &mut Context<Self>) {
+        if self.category != category {
+            self.category = category;
+            self.scroll.set_offset(point(px(0.), px(0.)));
+        }
+        cx.notify();
+    }
+
+    /// Shows a setting and lights it up for a moment.
+    pub fn jump(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        self.show(entry(id).cat, cx);
+        self.reveal = Some(id);
+        self.flashes += 1;
+        let turn = self.flashes;
+        self.flash = Some((id, turn));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FLASH).await;
+            this.update(cx, |this, cx| {
+                if this.flash.is_some_and(|(_, t)| t == turn) {
+                    this.flash = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    /// Saves a text field when it changed and makes sense.
+    fn commit(&mut self, t: Text, cx: &mut Context<Self>) {
+        let typed = self.texts[&t].read(cx).value().trim().to_string();
+        let saved = t.saved(self.store.read(cx).settings()).to_string();
+        if typed == saved {
+            if matches!(self.notes.get(&t), Some(Note::Problem(..))) {
+                self.notes.remove(&t);
+                cx.notify();
+            }
+            return;
+        }
+        if let Some(why) = t.problem(&typed) {
+            self.notes.insert(t, Note::Problem(why, typed));
+            cx.notify();
+            return;
+        }
+        let missing = t == Text::Hosted && !typed.is_empty() && !Path::new(&typed).is_dir();
+        self.store.update(cx, |s, cx| {
+            s.update_settings(|st| t.set(st, typed), cx);
+            if t.refreshes() {
+                s.refresh();
+            }
+            cx.notify();
+        });
+        self.notes.insert(
+            t,
+            if missing {
+                Note::Info("Saved. The folder doesn't exist yet.")
+            } else {
+                Note::Saved(Instant::now())
+            },
+        );
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TICK + Duration::from_millis(100)).await;
+            this.update(cx, |this, cx| {
+                if matches!(this.notes.get(&t), Some(Note::Saved(at)) if at.elapsed() >= TICK) {
+                    this.notes.remove(&t);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The "Saved" tick, or why it wasn't saved, under a text field.
+    fn note(&self, t: Text, cx: &App) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let line = |icon: IconName, text: &'static str, color: Hsla| {
+            h_flex()
+                .gap_1()
+                .text_xs()
+                .text_color(color)
+                .child(Icon::new(icon).xsmall())
+                .child(text)
+                .into_any_element()
+        };
+        match self.notes.get(&t)? {
+            Note::Saved(at) if at.elapsed() < TICK => {
+                Some(line(IconName::Check, "Saved", theme.success))
+            }
+            Note::Saved(_) => None,
+            Note::Problem(why, _) => Some(line(IconName::TriangleAlert, why, theme.warning)),
+            Note::Info(what) => Some(line(IconName::Info, what, theme.muted_foreground)),
+        }
+    }
+
+    /// A folder field with Browse…; both save at once.
+    fn folder(&self, t: Text, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let input = self.texts[&t].clone();
+        h_flex()
+            .gap_2()
+            .child(div().w(rems(20.)).child(Input::new(&input).small()))
+            .child(
+                Button::new(SharedString::from(format!("browse-{t:?}")))
+                    .outline()
+                    .small()
+                    .label("Browse…")
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        let rx = cx.prompt_for_paths(PathPromptOptions {
+                            files: false,
+                            directories: true,
+                            multiple: false,
+                            prompt: Some("Use this folder".into()),
+                        });
+                        let input = input.clone();
+                        cx.spawn_in(window, async move |this, cx| {
+                            if let Ok(Ok(Some(p))) = rx.await
+                                && let Some(p) = p.into_iter().next()
+                            {
+                                let p = p.to_string_lossy().into_owned();
+                                cx.update(|window, cx| {
+                                    input.update(cx, |s, cx| s.set_value(p, window, cx));
+                                    this.update(cx, |this, cx| this.commit(t, cx)).ok();
+                                })
+                                .ok();
+                            }
+                        })
+                        .detach();
+                    })),
+            )
+    }
+
+    /// Saves the panel's address and (when typed) its API key, then tests it.
+    fn save_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit(Text::PanelUrl, cx);
+        let key = self.panel_token.read(cx).value().trim().to_string();
+        if !key.is_empty() {
+            if let Err(e) = hopper::panel::set_token(&key) {
+                window.push_notification(Notification::error(format!("{e:#}")), cx);
+                return;
+            }
+            self.panel_key_saved = true;
+            self.panel_token.update(cx, |s, cx| {
+                s.set_value(String::new(), window, cx);
+                s.set_placeholder(SAVED_KEY, window, cx);
+            });
+        }
+        self.test_panel(cx);
+    }
+
+    fn test_panel(&mut self, cx: &mut Context<Self>) {
+        let s = self.store.read(cx).settings().clone();
+        let Some(panel) = hopper::panel::from_settings(&s) else {
+            self.panel_test = Some(Err("Add the address and an API key first.".into()));
+            cx.notify();
+            return;
+        };
+        self.panel_testing = true;
+        self.panel_test = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    panel
+                        .servers()
+                        .map(|list| {
+                            let names: Vec<String> = list.iter().map(|s| s.name.clone()).collect();
+                            format!("Connected: {} servers ({})", list.len(), names.join(", "))
+                        })
+                        .map_err(|e| format!("{e:#}"))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.panel_testing = false;
+                this.panel_test = Some(r);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn save_cf_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.cf_key.read(cx).value().trim().to_string();
+        if key.is_empty() {
+            return;
+        }
+        match hopper::cf::set_api_key(&key) {
+            Ok(()) => {
+                self.cf_key.update(cx, |s, cx| {
+                    s.set_value(String::new(), window, cx);
+                    s.set_placeholder(SAVED_KEY, window, cx);
+                });
+                self.cf_test = None;
+                // Browse and updates can run now.
+                self.store.update(cx, |s, cx| {
+                    s.refresh();
+                    cx.notify();
+                });
+                window.push_notification(Notification::success("CurseForge key saved."), cx);
+            }
+            Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+        }
+        cx.notify();
+    }
+
+    /// Asks CurseForge whether the typed key (or else the current one) works.
+    fn test_cf_key(&mut self, cx: &mut Context<Self>) {
+        let typed = self.cf_key.read(cx).value().trim().to_string();
+        let key = Some(typed)
+            .filter(|k| !k.is_empty())
+            .or_else(|| hopper::cf::api_key().map(String::from));
+        let Some(key) = key else {
+            self.cf_test = Some(Err("Paste a key first.".into()));
+            cx.notify();
+            return;
+        };
+        self.cf_testing = true;
+        self.cf_test = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    hopper::cf::test_key(&key)
+                        .map(|()| "CurseForge accepts this key.".to_string())
+                        .map_err(|e| format!("{e:#}"))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.cf_testing = false;
+                this.cf_test = Some(r);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.installing = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { hopper::setup::install(true) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.installing = false;
+                let n = match r {
+                    Ok(_) => Notification::success(
+                        "Hopper is installed. Find it in the Start menu or on the desktop.",
+                    ),
+                    Err(e) => Notification::error(format!("{e:#}")),
+                };
+                window.push_notification(n, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn switch(
+        &self,
+        id: &'static str,
+        on: bool,
+        set: fn(&mut hopper::settings::Settings, bool),
+        cx: &mut Context<Self>,
+    ) -> Switch {
+        Switch::new(id)
+            .checked(on)
+            .on_click(cx.listener(move |this, v: &bool, _, cx| {
+                let v = *v;
+                this.store
+                    .update(cx, |s, cx| s.update_settings(|st| set(st, v), cx));
+            }))
+    }
+
+    // ---- categories ----------------------------------------------------------------
+
+    fn general(&self, s: &hopper::settings::Settings, rem: Pixels, cx: &mut Context<Self>) -> Vec<Block> {
+        let mode = s.dependents.clone();
+        let deps_ix = match mode.as_str() {
+            "all" => 1,
+            "only" => 2,
+            _ => 0,
+        };
+        vec![Block::card(
+            None,
+            vec![
+                Row::new("instance-tab").control(segmented(
+                    "instance-tab",
+                    &["Overview", "Mods"],
+                    usize::from(s.instance_opens_mods),
+                    cx.listener(|this, ix: &usize, _, cx| {
+                        let mods = *ix == 1;
+                        this.store.update(cx, |s, cx| {
+                            s.update_settings(|st| st.instance_opens_mods = mods, cx)
+                        });
+                    }),
+                )),
+                Row::new("dependents").control(div().w(rems(15.)).child(widgets::picker(
+                    "dependents",
+                    ["Ask each time", "Change them too", "Only change that mod"][deps_ix].to_string(),
+                    ["Ask each time", "Change them too", "Only change that mod"]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, l)| (l.to_string(), i == deps_ix))
+                        .collect(),
+                    rem,
+                    {
+                        let store = self.store.clone();
+                        Rc::new(move |ix, _, cx| {
+                            let v = ["ask", "all", "only"][ix.min(2)].to_string();
+                            store.update(cx, |s, cx| s.update_settings(|st| st.dependents = v, cx));
+                        })
+                    },
+                ))),
+                Row::new("delete-permanently").control(self.switch(
+                    "delete-permanently",
+                    s.delete_permanently,
+                    |st, v| st.delete_permanently = v,
+                    cx,
+                )),
+            ],
+        )]
+    }
+
+    fn accounts(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {
+        let theme = cx.theme().clone();
+        let store = self.store.read(cx);
+        let accounts = store.accounts().clone();
+        let legacy = store.legacy_login() && accounts.list.is_empty();
+        let mut list = accounts.list.clone();
+        // Active first, then by last use.
+        let is_active = |a: &hopper::accounts::Saved| accounts.active.as_deref() == Some(a.id.as_str());
+        list.sort_by(|a, b| is_active(b).cmp(&is_active(a)).then(b.last_used.cmp(&a.last_used)));
+        let rows: Vec<AnyElement> = list
+            .iter()
+            .map(|a| {
+                let active = is_active(a);
+                let sub = if active {
+                    "Starts your games".to_string()
+                } else {
+                    a.last_used
+                        .as_deref()
+                        .map(|t| format!("Used {}", hopper::time::relative(t).to_lowercase()))
+                        .unwrap_or_else(|| "Not used yet".into())
+                };
+                let (id, saved) = (a.id.clone(), a.clone());
+                h_flex()
+                    .gap_3()
+                    .py_1()
+                    .child(crate::accounts::head(store, a, rems(2.25), cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().font_semibold().truncate().child(a.name.clone()))
+                                    .when(active, |r| r.child(widgets::pill("Active", theme.success, true))),
+                            )
+                            .child(widgets::caption(sub, cx).text_xs()),
+                    )
+                    .when(!active, |r| {
+                        r.child(
+                            Button::new(SharedString::from(format!("switch:{}", a.id)))
+                                .small()
+                                .outline()
+                                .label("Switch")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    crate::accounts::switch_account(&this.store, id.clone(), window, cx)
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new(SharedString::from(format!("signout:{}", a.id)))
+                            .small()
+                            .ghost()
+                            .icon(IconName::LogOut)
+                            .tooltip("Sign out")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                crate::accounts::ask_sign_out(this.store.clone(), saved.clone(), window, cx)
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let empty = rows.is_empty() && !legacy;
+        let below = v_flex()
+            .gap_1()
+            .children(rows)
+            .when(legacy, |r| {
+                r.child(
+                    h_flex()
+                        .gap_3()
+                        .child(div().font_semibold().child(s.signed_in_as.clone().unwrap_or_else(|| "Saved sign-in".into())))
+                        .child(widgets::caption("Saved sign-in", cx).text_xs()),
+                )
+            })
+            .when(empty, |r| r.child(widgets::caption("Not signed in. Add an account to start games directly.", cx)));
+        let any = !list.is_empty() || legacy;
+        let account = Row::new("account")
+            .control(
+                h_flex()
+                    .gap_2()
+                    .when(any, |r| {
+                        r.child(
+                            Button::new("manage-accounts")
+                                .small()
+                                .ghost()
+                                .icon(IconName::Shirt)
+                                .label("Skins & names…")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    crate::accounts::open(this.store.clone(), window, cx)
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("add-account")
+                            .small()
+                            .when(any, |b| b.outline())
+                            .when(!any, |b| b.primary())
+                            .icon(IconName::UserPlus)
+                            .label(if any { "Add account" } else { "Sign in with Microsoft" })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                crate::accounts::add_account(&this.store, window, cx)
+                            })),
+                    ),
+            )
+            .below(below);
+        vec![Block::card(None, vec![account])]
+    }
+
+    /// "Launch with": Mojang's launcher or Hopper's own start.
+    fn launch_row(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Row {
+        Row::new("launch-with").below(
+            v_flex()
+                .gap_2()
+                .child(
+                    RadioGroup::new("launch-with")
+                        .children([
+                            "Mojang's launcher (opens it; press Play there)",
+                            "Hopper directly, like CurseForge (Microsoft sign-in, no launcher)",
+                        ])
+                        .selected_index(Some(usize::from(s.launch_native)))
+                        .on_change(cx.listener(|this, ix: &usize, _, cx| {
+                            let native = *ix == 1;
+                            this.store.update(cx, |s, cx| {
+                                s.update_settings(
+                                    |st| {
+                                        st.launch_native = native;
+                                        st.launch_picked = true;
+                                    },
+                                    cx,
+                                )
+                            });
+                        })),
+                )
+                .when(s.launch_native && hopper::msauth::client_id().is_none(), |r| {
+                    r.child(warning(
+                        "Needs MS_CLIENT_ID in .env: an Azure app id approved for the Minecraft API.",
+                        cx,
+                    ))
+                }),
+        )
+    }
+
+    fn folders(&self, cx: &mut Context<Self>) -> Vec<Block> {
+        vec![Block::card(
+            None,
+            vec![
+                Row::new("instances-root")
+                    .control(self.folder(Text::Instances, cx))
+                    .note(self.note(Text::Instances, cx)),
+                Row::new("launcher-dir")
+                    .control(self.folder(Text::Launcher, cx))
+                    .note(self.note(Text::Launcher, cx)),
+            ],
+        )]
+    }
+
+    fn launchers(&self, cx: &mut Context<Self>) -> Vec<Block> {
+        let (managed, found) = self.launchers.read(cx).counts(cx);
+        vec![Block::card(
+            None,
+            vec![Row::new("launchers")
+                .control(widgets::pill(
+                    if found == 0 {
+                        "None found".to_string()
+                    } else {
+                        format!("{managed} of {found} managed")
+                    },
+                    if managed > 0 { cx.theme().success } else { cx.theme().muted_foreground },
+                    managed > 0,
+                ))
+                .below(self.launchers.clone())],
+        )]
+    }
+
+    fn java(&self, s: &hopper::settings::Settings, window: &mut Window, cx: &mut Context<Self>) -> Vec<Block> {
+        let rem = window.rem_size();
+        let [memory, java, args] = self.java.update(cx, |j, cx| j.parts(rem, cx));
+        let get_java = h_flex()
+            .gap_2()
+            .flex_wrap()
+            .children([8u32, 17, 21, 25].map(|m| {
+                let store = self.store.clone();
+                Button::new(("get-java", m as usize))
+                    .small()
+                    .outline()
+                    .icon(IconName::Download)
+                    .label(format!("Java {m}"))
+                    .tooltip("Eclipse Temurin")
+                    .on_click(move |_, _, cx| {
+                        store.update(cx, |s, cx| {
+                            s.download_java(m);
+                            cx.notify();
+                        })
+                    })
+            }))
+            .children(hopper::javadl::GRAALVM_MAJORS.iter().map(|&m| {
+                let store = self.store.clone();
+                Button::new(("get-graal", m as usize))
+                    .small()
+                    .outline()
+                    .icon(IconName::Download)
+                    .label(format!("GraalVM {m}"))
+                    .tooltip("Oracle GraalVM: often faster for big modpacks")
+                    .on_click(move |_, _, cx| {
+                        store.update(cx, |s, cx| {
+                            s.download_graalvm(m);
+                            cx.notify();
+                        })
+                    })
+            }));
+        vec![
+            Block::card(
+                None,
+                vec![
+                    self.launch_row(s, cx),
+                    Row::new("minimize").control(self.switch(
+                        "minimize",
+                        s.minimize_while_playing,
+                        |st, v| st.minimize_while_playing = v,
+                        cx,
+                    )),
+                    Row::new("record").control(self.switch(
+                        "record",
+                        s.record_sessions,
+                        |st, v| st.record_sessions = v,
+                        cx,
+                    )),
+                ],
+            ),
+            Block::card(
+                Some("Java defaults"),
+                vec![
+                    Row::new("memory").control(memory),
+                    Row::new("java").below(java),
+                    Row::new("java-args").below(args),
+                    Row::new("get-java").below(get_java),
+                ],
+            ),
+        ]
+    }
+
+    fn servers(&self, s: &hopper::settings::Settings, window: &mut Window, cx: &mut Context<Self>) -> Vec<Block> {
+        let rem = window.rem_size();
+        let theme = cx.theme().clone();
+        let kind = s.panel_kind.clone();
+        let kind_label = hopper::panel::KINDS
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map_or("Crafty Controller 4", |(_, n)| n)
+            .to_string();
+        let kind_help = match kind.as_str() {
+            "mcss" => "API key: MCSS Web Panel → API keys. Its web API must be on (port 25560 by default).",
+            "pterodactyl" => "API key: a client key (ptlc_…) from Account → API Credentials. The console stays in the panel.",
+            _ => "API key: in Crafty, your user → API Keys, with the Commands permission.",
+        };
+        let store = self.store.clone();
+        let picker = widgets::picker(
+            "panel-kind",
+            kind_label,
+            hopper::panel::KINDS
+                .iter()
+                .map(|(k, n)| (n.to_string(), *k == kind))
+                .collect(),
+            rem,
+            Rc::new(move |ix, _, cx| {
+                if let Some((k, _)) = hopper::panel::KINDS.get(ix) {
+                    let k = k.to_string();
+                    store.update(cx, |s, cx| s.update_settings(|st| st.panel_kind = k, cx));
+                }
+            }),
+        );
+        let key_typed = !self.panel_token.read(cx).value().trim().is_empty();
+        let result: AnyElement = match &self.panel_test {
+            _ if self.panel_testing => widgets::caption("Connecting…", cx).into_any_element(),
+            Some(Ok(t)) => status_line(IconName::CircleCheck, t.clone(), theme.success),
+            Some(Err(e)) => status_line(IconName::CircleX, e.clone(), theme.danger),
+            None => widgets::caption("Not tested yet.", cx).text_xs().into_any_element(),
+        };
+        let configured = !s.panel_url.trim().is_empty() && self.panel_key_saved;
+        vec![
+            Block::card(
+                Some("Server packs and hosting"),
+                vec![
+                    Row::new("servers-root")
+                        .control(self.folder(Text::ServerPacks, cx))
+                        .note(self.note(Text::ServerPacks, cx)),
+                    Row::new("hosted-root")
+                        .control(self.folder(Text::Hosted, cx))
+                        .note(self.note(Text::Hosted, cx)),
+                    Row::new("server-host")
+                        .control(div().w(rems(12.)).child(Input::new(&self.texts[&Text::Host]).small()))
+                        .note(self.note(Text::Host, cx)),
+                    Row::new("auto-update").control(self.switch(
+                        "auto-update",
+                        s.auto_update_servers,
+                        |st, v| st.auto_update_servers = v,
+                        cx,
+                    )),
+                ],
+            ),
+            Block::card(
+                Some("Server panel"),
+                vec![
+                    Row::new("panel-kind")
+                        .desc(kind_help)
+                        .control(div().w(rems(15.)).child(picker)),
+                    Row::new("panel-url")
+                        .control(div().w(rems(20.)).child(Input::new(&self.texts[&Text::PanelUrl]).small()))
+                        .note(self.note(Text::PanelUrl, cx)),
+                    Row::new("panel-key")
+                        .control(
+                            h_flex()
+                                .gap_2()
+                                .child(div().w(rems(17.)).child(Input::new(&self.panel_token).small().mask_toggle()))
+                                .child(
+                                    Button::new("panel-save")
+                                        .small()
+                                        .primary()
+                                        .label("Save and test")
+                                        .disabled(!key_typed)
+                                        .on_click(cx.listener(|this, _, window, cx| this.save_panel(window, cx))),
+                                ),
+                        )
+                        .note(Some(if self.panel_key_saved {
+                            widgets::pill("Saved", theme.success, false).into_any_element()
+                        } else {
+                            widgets::pill("Missing", theme.warning, false).into_any_element()
+                        })),
+                    Row::new("panel-cert").control(self.switch(
+                        "panel-self-signed",
+                        s.panel_self_signed,
+                        |st, v| st.panel_self_signed = v,
+                        cx,
+                    )),
+                    Row::new("panel-test")
+                        .note(Some(result))
+                        .control(
+                            Button::new("panel-test")
+                                .small()
+                                .outline()
+                                .icon(IconName::Activity)
+                                .label("Test")
+                                .loading(self.panel_testing)
+                                .disabled(self.panel_testing || !configured)
+                                .when(!configured, |b| b.tooltip("Add the address and an API key first"))
+                                .on_click(cx.listener(|this, _, _, cx| this.test_panel(cx))),
+                        ),
+                ],
+            ),
+        ]
+    }
+
+    fn content(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {
+        use hopper::cf::KeySource;
+        let theme = cx.theme().clone();
+        let source = hopper::cf::api_key_source().map(|(_, s)| s);
+        let (pill, desc) = match source {
+            Some(KeySource::Env) => (
+                widgets::pill("From .env", theme.info, true),
+                "From CF_API_KEY in .env, which wins over a saved key.",
+            ),
+            Some(KeySource::Saved) => (
+                widgets::pill("Saved", theme.success, true),
+                "Saved in Windows Credential Manager. Paste another to replace it.",
+            ),
+            Some(KeySource::BuiltIn) => (
+                widgets::pill("Built in", theme.muted_foreground, true),
+                "Built into this copy of Hopper. Paste your own to use it instead.",
+            ),
+            None => (
+                widgets::pill("Missing", theme.danger, true),
+                "Needed for CurseForge: browsing, installs and updates. Get one at console.curseforge.com.",
+            ),
+        };
+        let typed = !self.cf_key.read(cx).value().trim().is_empty();
+        let result: Option<AnyElement> = match &self.cf_test {
+            _ if self.cf_testing => Some(widgets::caption("Asking CurseForge…", cx).text_xs().into_any_element()),
+            Some(Ok(t)) => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
+            Some(Err(e)) => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
+            None => None,
+        };
+        let key = Row::new("cf-key")
+            .desc(desc)
+            .control(pill)
+            .note(result)
+            .below(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(div().w(rems(22.)).child(Input::new(&self.cf_key).small().mask_toggle()))
+                    .child(
+                        Button::new("cf-key-save")
+                            .small()
+                            .primary()
+                            .label("Save")
+                            .disabled(!typed)
+                            .on_click(cx.listener(|this, _, window, cx| this.save_cf_key(window, cx))),
+                    )
+                    .child(
+                        Button::new("cf-key-test")
+                            .small()
+                            .outline()
+                            .icon(IconName::Activity)
+                            .label("Test")
+                            .tooltip(if typed { "Tests the key you pasted, without saving it" } else { "Tests the key in use" })
+                            .loading(self.cf_testing)
+                            .disabled(self.cf_testing || (!typed && source.is_none()))
+                            .on_click(cx.listener(|this, _, _, cx| this.test_cf_key(cx))),
+                    )
+                    .when(source == Some(KeySource::Saved), |r| {
+                        r.child(
+                            Button::new("cf-key-remove")
+                                .small()
+                                .ghost()
+                                .label("Remove")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if let Err(e) = hopper::cf::set_api_key("") {
+                                        window.push_notification(Notification::error(format!("{e:#}")), cx);
+                                    }
+                                    this.cf_key.update(cx, |s, cx| {
+                                        s.set_placeholder("Paste your CurseForge API key", window, cx)
+                                    });
+                                    this.cf_test = None;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            );
+        let browse = Row::new("browse-source").control(
+            TabBar::new("browse-source")
+                .segmented()
+                .small()
+                .selected_index(usize::from(s.browse_modrinth))
+                .child(Tab::new().label("CurseForge"))
+                .child(Tab::new().label("Modrinth"))
+                .on_click(cx.listener(|_, ix: &usize, _, cx| {
+                    cx.emit(SettingsEvent::BrowseSource(*ix == 1))
+                })),
+        );
+        vec![Block::card(None, vec![key, browse])]
+    }
+
+    fn appearance(&self, s: &hopper::settings::Settings, window: &mut Window, cx: &mut Context<Self>) -> Vec<Block> {
+        let rem = window.rem_size();
+        let theme = h_flex()
+            .gap_1()
+            .child(div().w(rems(15.)).child(self.theme_picker(s, rem)))
+            .child(
+                Button::new("theme-folder")
+                    .ghost()
+                    .small()
+                    .icon(IconName::FolderOpen)
+                    .tooltip("Your own themes: gpui-component theme .json files go here")
+                    .on_click(|_, _, _| {
+                        if let Some(d) = crate::theme::custom_dir() {
+                            let _ = std::fs::create_dir_all(&d);
+                            crate::store::open_path(&d);
+                        }
+                    }),
+            )
+            .child(
+                Button::new("theme-reload")
+                    .ghost()
+                    .small()
+                    .icon(IconName::RefreshCw)
+                    .tooltip("Read the theme folder again")
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        let n = crate::theme::reload_custom();
+                        window.push_notification(Notification::info(format!("{n} themes of your own.")), cx);
+                        cx.notify();
+                    })),
+            );
+        let zoom = s.zoom;
+        let zooms = crate::app::AppView::ZOOMS;
+        let store = self.store.clone();
+        let zoom_picker = widgets::picker(
+            "zoom",
+            format!("{zoom}%"),
+            zooms
+                .iter()
+                .map(|z| (if *z == 100 { "100% (default)".to_string() } else { format!("{z}%") }, *z == zoom))
+                .collect(),
+            rem,
+            Rc::new(move |ix, _, cx| {
+                if let Some(z) = zooms.get(ix).copied() {
+                    crate::theme::set_zoom(z, cx);
+                    store.update(cx, |s, cx| s.update_settings(|st| st.zoom = z, cx));
+                }
+            }),
+        );
+        vec![Block::card(
+            None,
+            vec![
+                Row::new("theme").control(theme),
+                Row::new("zoom").control(div().w(rems(9.)).child(zoom_picker)),
+            ],
+        )]
+    }
+
+    fn updates(&self, cx: &mut Context<Self>) -> Vec<Block> {
+        use crate::store::SelfUpdate;
+        let theme = cx.theme().clone();
+        let state = self.store.read(cx).self_update().cloned();
+        let check = Button::new("self-check")
+            .small()
+            .outline()
+            .icon(IconName::RefreshCw)
+            .label("Check now")
+            .disabled(matches!(state, Some(SelfUpdate::Checking | SelfUpdate::Installing(_))))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.commit(Text::UpdateRepo, cx);
+                this.store.update(cx, |s, cx| {
+                    s.check_self_update();
+                    cx.notify();
+                });
+            }));
+        let (pill, line, action): (Div, Option<SharedString>, Option<AnyElement>) = match state {
+            None => (widgets::pill("Not checked", theme.muted_foreground, false), None, Some(check.into_any_element())),
+            Some(SelfUpdate::Checking) => (widgets::pill("Checking…", theme.info, true), None, None),
+            Some(SelfUpdate::UpToDate) => (
+                widgets::pill("Up to date", theme.success, true),
+                Some("This is the latest release.".into()),
+                Some(check.into_any_element()),
+            ),
+            Some(SelfUpdate::Available(r)) => (
+                widgets::pill(format!("{} is out", r.version), theme.primary, true),
+                None,
+                Some(
+                    Button::new("self-update")
+                        .small()
+                        .primary()
+                        .icon(IconName::Download)
+                        .label(format!("Update to {}", r.version))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.store.update(cx, |s, cx| {
+                                s.install_self_update();
+                                cx.notify();
+                            })
+                        }))
+                        .into_any_element(),
+                ),
+            ),
+            Some(SelfUpdate::Installing(v)) => (widgets::pill(format!("Installing {v}…"), theme.info, true), None, None),
+            Some(SelfUpdate::Ready(v)) => (
+                widgets::pill(format!("{v} installed"), theme.success, true),
+                Some("It runs from the next start.".into()),
+                Some(
+                    Button::new("self-restart")
+                        .small()
+                        .primary()
+                        .label("Restart now")
+                        .on_click(|_, _, cx| restart(cx))
+                        .into_any_element(),
+                ),
+            ),
+            Some(SelfUpdate::Failed(e)) => (
+                widgets::pill("Check failed", theme.danger, true),
+                Some(e.into()),
+                Some(check.into_any_element()),
+            ),
+        };
+        let whats_new = Button::new("whats-new")
+            .small()
+            .ghost()
+            .icon(IconName::Info)
+            .label("What's new")
+            .on_click(cx.listener(|this, _, window, cx| {
+                let repo = this.store.read(cx).settings().update_repo.clone();
+                crate::whats_new::open_recent(repo, window, cx);
+            }));
+        let version = h_flex()
+            .gap_3()
+            .child(widgets::stat_tile(hopper::selfupdate::CURRENT, "Version", cx))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(pill)
+                    .when_some(line, |c, l| c.child(widgets::caption(l, cx).text_xs())),
+            )
+            .child(whats_new);
+
+        // Install: here, or where it is.
+        let install = if hopper::setup::running_installed() {
+            let dir = hopper::setup::install_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
+            Row::new("install")
+                .desc(format!("Installed in {dir}. Remove it from Windows Settings → Apps."))
+                .control(widgets::pill("Installed", theme.success, true))
+        } else {
+            let other = hopper::setup::installed_exe();
+            let busy = self.installing;
+            Row::new("install")
+                .when(other.is_some(), |r| {
+                    r.desc("A copy is already installed. Installing replaces it with this one.")
+                })
+                .control(
+                    h_flex()
+                        .gap_2()
+                        .when_some(other, |r, exe| {
+                            r.child(
+                                Button::new("open-installed")
+                                    .small()
+                                    .ghost()
+                                    .label("Open the installed Hopper")
+                                    .on_click(move |_, _, cx| {
+                                        if std::process::Command::new(&exe).spawn().is_ok() {
+                                            cx.quit();
+                                        }
+                                    }),
+                            )
+                        })
+                        .child(
+                            Button::new("install-hopper")
+                                .small()
+                                .outline()
+                                .icon(IconName::Download)
+                                .label(if hopper::setup::installed_exe().is_some() {
+                                    "Install this version"
+                                } else {
+                                    "Install Hopper"
+                                })
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, window, cx| this.install(window, cx))),
+                        ),
+                )
+        };
+        // Start menu shortcut for a copy that isn't installed.
+        let start_menu = (!hopper::setup::running_installed()).then(|| {
+            let added = hopper::setup::in_start_menu();
+            Row::new("start-menu").control(
+                Button::new("start-menu")
+                    .small()
+                    .outline()
+                    .icon(if added { IconName::Close } else { IconName::Plus })
+                    .label(if added { "Remove from Start menu" } else { "Add to Start menu" })
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        let (r, ok) = if added {
+                            (hopper::setup::remove_from_start_menu(), "Removed Hopper from the Start menu.")
+                        } else {
+                            (
+                                hopper::setup::add_to_start_menu(),
+                                "Hopper is in the Start menu. To pin it, right-click it there and pick Pin to Start.",
+                            )
+                        };
+                        let n = match r {
+                            Ok(()) => Notification::success(ok),
+                            Err(e) => Notification::error(format!("{e:#}")),
+                        };
+                        window.push_notification(n, cx);
+                        cx.notify();
+                    })),
+            )
+        });
+        vec![
+            Block::card(
+                None,
+                vec![
+                    Row::new("self-update").control_any(action).below(version),
+                    Row::new("update-repo")
+                        .control(div().w(rems(16.)).child(Input::new(&self.texts[&Text::UpdateRepo]).small()))
+                        .note(self.note(Text::UpdateRepo, cx)),
+                ],
+            ),
+            Block::card(
+                None,
+                std::iter::once(install)
+                    .chain(start_menu)
+                    .chain([Row::new("setup").control(
+                        Button::new("run-setup")
+                            .small()
+                            .outline()
+                            .icon(IconName::Sparkles)
+                            .label("Run setup again")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::RunSetup))),
+                    )])
+                    .collect(),
+            ),
+        ]
+    }
+
+    fn advanced(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {
+        let links = Switch::new("links")
+            .checked(s.links_enabled)
+            .on_click(cx.listener(|this, v: &bool, window, cx| {
+                let on = *v;
+                let prev = this.store.read(cx).settings().links_prev_handler.clone();
+                let r = if on {
+                    hopper::links::take_over().map(Some)
+                } else {
+                    hopper::links::give_back(prev.as_deref()).map(|()| None)
+                };
+                match r {
+                    Ok(prev) => this.store.update(cx, |s, cx| {
+                        s.update_settings(
+                            |st| {
+                                if let Some(p) = prev {
+                                    st.links_prev_handler = p;
+                                }
+                                st.links_enabled = on;
+                            },
+                            cx,
+                        )
+                    }),
+                    Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+                }
+            }));
+        let data = directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().to_path_buf());
+        vec![Block::card(
+            None,
+            vec![
+                Row::new("tray-icon").control(self.switch("tray-icon", s.tray_icon, |st, v| st.tray_icon = v, cx)),
+                Row::new("links").control(links),
+                Row::new("data-folder")
+                    .when_some(data.clone(), |r, d| r.desc(d.display().to_string()))
+                    .control(
+                        Button::new("data-folder")
+                            .small()
+                            .outline()
+                            .icon(IconName::FolderOpen)
+                            .label("Open")
+                            .disabled(data.is_none())
+                            .on_click(move |_, _, _| {
+                                if let Some(d) = &data {
+                                    crate::store::open_path(d);
+                                }
+                            }),
+                    ),
+            ],
+        )]
+    }
+
+    /// The theme menu: each with a strip of its colors.
+    fn theme_picker(&self, s: &hopper::settings::Settings, rem: Pixels) -> impl IntoElement + use<> {
+        use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+        let current = if s.theme_name.is_empty() && s.theme == 1 {
+            crate::theme::HOPPER_DARK.to_string()
+        } else if s.theme_name.is_empty() && s.theme == 2 {
+            crate::theme::HOPPER_LIGHT.to_string()
+        } else {
+            s.theme_name.clone()
+        };
+        let label = if current.is_empty() { "Follow Windows".to_string() } else { current.clone() };
+        let store = self.store.clone();
+        Button::new("theme")
+            .outline()
+            .small()
+            .w_full()
+            .label(label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu: PopupMenu, _, _| {
+                let mut menu = menu
+                    .min_w(rems(17.).to_pixels(rem))
+                    .max_h(rems(28.).to_pixels(rem))
+                    .scrollable(true);
+                for name in std::iter::once(String::new()).chain(crate::theme::names()) {
+                    let checked = name == current;
+                    let (n2, store) = (name.clone(), store.clone());
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, cx| theme_row(&name, cx))
+                            .checked(checked)
+                            .on_click(move |_, _, cx| {
+                                let name = n2.clone();
+                                store.update(cx, |s, cx| {
+                                    s.update_settings(
+                                        |st| {
+                                            st.theme_name = name.clone();
+                                            st.theme = 0;
+                                        },
+                                        cx,
+                                    )
+                                });
+                                let zoom = store.read(cx).settings().zoom;
+                                crate::theme::apply(&name, 0, zoom, cx);
+                            }),
+                    );
+                }
+                menu
+            })
+    }
+
+    /// The status pill beside a category's title.
+    fn header_status(&self, cx: &App) -> Option<Div> {
+        let theme = cx.theme();
+        match self.category {
+            Category::Servers => {
+                let s = self.store.read(cx).settings();
+                Some(if s.panel_url.trim().is_empty() {
+                    widgets::pill("No panel", theme.muted_foreground, false)
+                } else {
+                    let name = hopper::panel::KINDS
+                        .iter()
+                        .find(|(k, _)| *k == s.panel_kind)
+                        .map_or("Panel", |(_, n)| n);
+                    widgets::pill(name.split(" (").next().unwrap_or(name).to_string(), theme.primary, true)
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let hits = matches(&self.query);
+        let searching = !self.query.trim().is_empty();
+        let item = |id: ElementId, icon: IconName, label: SharedString, active: bool| {
+            h_flex()
+                .id(id)
+                .h(rems(2.))
+                .px_2p5()
+                .gap_2p5()
+                .rounded(theme.radius)
+                .text_sm()
+                .cursor_pointer()
+                .when(active, |r| r.bg(theme.list_active).font_medium())
+                .when(!active, |r| r.hover(|s| s.bg(theme.list_hover)))
+                .child(
+                    Icon::new(icon)
+                        .small()
+                        .text_color(if active { theme.primary } else { theme.muted_foreground }),
+                )
+                .child(div().flex_1().min_w_0().truncate().child(label))
+        };
+        let body: AnyElement = if searching {
+            v_flex()
+                .gap_0p5()
+                .child(
+                    div()
+                        .px_2p5()
+                        .pb_1()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(theme.muted_foreground)
+                        .child(match hits.len() {
+                            0 => "NO MATCHES".to_string(),
+                            1 => "1 MATCH".to_string(),
+                            n => format!("{n} MATCHES"),
+                        }),
+                )
+                .children(hits.into_iter().enumerate().map(|(i, e)| {
+                    let id = e.id;
+                    v_flex()
+                        .id(("settings-hit", i))
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded(theme.radius)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.list_hover))
+                        .when(i == 0, |r| r.bg(theme.list_hover))
+                        .child(div().text_sm().truncate().child(e.label))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(Icon::new(e.cat.icon()).xsmall())
+                                .child(e.cat.label()),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| this.jump(id, cx)))
+                }))
+                .into_any_element()
+        } else {
+            v_flex()
+                .gap_0p5()
+                .children(Category::ALL.into_iter().map(|c| {
+                    item(
+                        ElementId::Name(format!("settings-cat:{}", c.label()).into()),
+                        c.icon(),
+                        c.label().into(),
+                        c == self.category,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.show(c, cx)))
+                }))
+                .into_any_element()
+        };
+        v_flex()
+            .id("settings-sidebar")
+            .w(rems(15.))
+            .flex_none()
+            .h_full()
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.sidebar_border)
+            .child(
+                v_flex()
+                    .px_3()
+                    .pt_4()
+                    .pb_3()
+                    .gap_3()
+                    .child(div().px_1().text_lg().font_semibold().child("Settings"))
+                    .child(
+                        Input::new(&self.search)
+                            .small()
+                            .prefix(Icon::new(IconName::Search).small())
+                            .cleanable(true),
+                    ),
+            )
+            .child(
+                div()
+                    .id("settings-nav")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_3()
+                    .pb_3()
+                    .child(body),
+            )
+            .child(
+                h_flex()
+                    .px_4()
+                    .py_2p5()
+                    .border_t_1()
+                    .border_color(theme.sidebar_border)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(if searching { "Enter opens the first match · Esc clears" } else { "Ctrl+, opens Settings · Ctrl+F searches" }),
+            )
+    }
+}
+
+impl Render for SettingsPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let s = self.store.read(cx).settings().clone();
+        let cat = self.category;
+        let blocks = match cat {
+            Category::General => self.general(&s, window.rem_size(), cx),
+            Category::Accounts => self.accounts(&s, cx),
+            Category::Folders => self.folders(cx),
+            Category::Launchers => self.launchers(cx),
+            Category::Java => self.java(&s, window, cx),
+            Category::Servers => self.servers(&s, window, cx),
+            Category::Content => self.content(&s, cx),
+            Category::Appearance => self.appearance(&s, window, cx),
+            Category::Updates => self.updates(cx),
+            Category::Advanced => self.advanced(&s, cx),
+        };
+        let theme = cx.theme().clone();
+        let header = h_flex()
+            .w_full()
+            .max_w(rems(MAX_W))
+            .gap_4()
+            .pb_2()
+            .child(
+                div()
+                    .flex_none()
+                    .size(rems(2.75))
+                    .rounded(theme.radius_lg)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme.primary.opacity(0.12))
+                    .border_1()
+                    .border_color(theme.primary.opacity(0.25))
+                    .text_color(theme.primary)
+                    .child(Icon::new(cat.icon())),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_2xl().font_semibold().child(cat.label()))
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(cat.blurb())),
+            )
+            .children(self.header_status(cx));
+
+        // Every row is a child of the scrolled column, so search can scroll
+        // to it.
+        let mut children: Vec<AnyElement> = vec![header.into_any_element()];
+        let mut index: HashMap<&'static str, usize> = HashMap::new();
+        for block in blocks {
+            let Block::Card(title, rows) = block;
+            if let Some(t) = title {
+                children.push(
+                    div()
+                        .w_full()
+                        .max_w(rems(MAX_W))
+                        .pt_4()
+                        .pb_2()
+                        .px_1()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(theme.muted_foreground)
+                        .child(t.to_uppercase())
+                        .into_any_element(),
+                );
+            } else {
+                children.push(div().h_4().into_any_element());
+            }
+            let n = rows.len();
+            for (i, row) in rows.into_iter().enumerate() {
+                index.insert(row.id, children.len());
+                let flash = self.flash.filter(|(id, _)| *id == row.id).map(|(_, t)| t);
+                children.push(row.render(i == 0, i + 1 == n, flash, cx));
+            }
+        }
+        if let Some(id) = self.reveal.take()
+            && let Some(ix) = index.get(id)
+        {
+            // The one before it shows at the top, for context.
+            self.scroll.scroll_to_top_of_item(ix.saturating_sub(1));
+        }
+
+        h_flex()
+            .id("settings-page")
+            .size_full()
+            .child(self.sidebar(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .relative()
+                    .child(
+                        div()
+                            .id("settings-pane")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .px_8()
+                            .pt_6()
+                            .pb_12()
+                            .flex()
+                            .flex_col()
+                            .children(children),
+                    )
+                    .vertical_scrollbar(&self.scroll),
+            )
+    }
+}
+
+// ---- rows and cards ----------------------------------------------------------------
+
+/// A titled card of rows.
+enum Block {
+    Card(Option<&'static str>, Vec<Row>),
+}
+
+impl Block {
+    fn card(title: Option<&'static str>, rows: Vec<Row>) -> Self {
+        Block::Card(title, rows)
+    }
+}
+
+/// One setting: its label and description on the left, its control on the
+/// right, and maybe more under both.
+struct Row {
+    id: &'static str,
+    desc: Option<SharedString>,
+    control: Option<AnyElement>,
+    note: Option<AnyElement>,
+    below: Option<AnyElement>,
+}
+
+impl Row {
+    fn new(id: &'static str) -> Self {
+        Self {
+            id,
+            desc: None,
+            control: None,
+            note: None,
+            below: None,
+        }
+    }
+
+    /// A description other than the usual one.
+    fn desc(mut self, d: impl Into<SharedString>) -> Self {
+        self.desc = Some(d.into());
+        self
+    }
+
+    fn control(mut self, c: impl IntoElement) -> Self {
+        self.control = Some(c.into_any_element());
+        self
+    }
+
+    fn control_any(mut self, c: Option<AnyElement>) -> Self {
+        self.control = c;
+        self
+    }
+
+    /// A status line under the description.
+    fn note(mut self, n: Option<AnyElement>) -> Self {
+        self.note = n;
+        self
+    }
+
+    fn below(mut self, b: impl IntoElement) -> Self {
+        self.below = Some(b.into_any_element());
+        self
+    }
+
+    fn when(self, cond: bool, f: impl FnOnce(Self) -> Self) -> Self {
+        if cond { f(self) } else { self }
+    }
+
+    fn when_some<T>(self, v: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
+        match v {
+            Some(v) => f(self, v),
+            None => self,
+        }
+    }
+
+    fn render(self, first: bool, last: bool, flash: Option<usize>, cx: &App) -> AnyElement {
+        let theme = cx.theme();
+        let e = entry(self.id);
+        let desc = self.desc.unwrap_or_else(|| e.desc.into());
+        let radius = theme.radius_lg;
+        let border = theme.foreground.opacity(0.09);
+        let text = v_flex()
+            .flex_1()
+            .min_w(rems(14.))
+            .gap_0p5()
+            .child(div().text_sm().font_medium().child(e.label))
+            .when(!desc.is_empty(), |c| {
+                c.child(
+                    div()
+                        .text_xs()
+                        .line_height(rems(1.1))
+                        .text_color(theme.muted_foreground)
+                        .child(desc),
+                )
+            })
+            .children(self.note.map(|n| h_flex().pt_1().child(n)));
+        let head = h_flex()
+            .w_full()
+            .flex_wrap()
+            .gap_x_6()
+            .gap_y_2()
+            .child(text)
+            .children(self.control.map(|c| h_flex().flex_none().child(c)));
+        v_flex()
+            .id(self.id)
+            .relative()
+            .w_full()
+            .max_w(rems(MAX_W))
+            .px_4()
+            .py_3()
+            .gap_3()
+            .bg(theme.foreground.opacity(0.025))
+            .border_color(border)
+            .border_l_1()
+            .border_r_1()
+            .border_t_1()
+            .when(first, |d| d.rounded_tl(radius).rounded_tr(radius))
+            .when(last, |d| d.border_b_1().rounded_bl(radius).rounded_br(radius))
+            .child(head)
+            .children(self.below.map(|b| div().w_full().child(b)))
+            .when_some(flash, |d, turn| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .when(first, |d| d.rounded_tl(radius).rounded_tr(radius))
+                        .when(last, |d| d.rounded_bl(radius).rounded_br(radius))
+                        .bg(theme.primary.opacity(0.14))
+                        .border_1()
+                        .border_color(theme.primary.opacity(0.7))
+                        .with_animation(
+                            ("settings-flash", turn),
+                            Animation::new(FLASH).with_easing(ease_in_out),
+                            |el, t| el.opacity(if t < 0.4 { 1.0 } else { 1.0 - (t - 0.4) / 0.6 }),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+/// Two or three choices side by side.
+fn segmented(
+    id: &'static str,
+    labels: &[&'static str],
+    selected: usize,
+    on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    TabBar::new(id)
+        .segmented()
+        .small()
+        .selected_index(selected)
+        .children(labels.iter().map(|l| Tab::new().label(*l)))
+        .on_click(on_pick)
+}
+
+fn warning(text: &'static str, cx: &App) -> impl IntoElement {
+    h_flex()
+        .gap_1p5()
+        .text_sm()
+        .text_color(cx.theme().warning)
+        .child(Icon::new(IconName::TriangleAlert).small())
+        .child(text)
+}
+
+/// A colored line with an icon: a test result.
+fn status_line(icon: IconName, text: String, color: Hsla) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .text_xs()
+        .text_color(color)
+        .child(Icon::new(icon).xsmall().flex_none())
+        .child(div().min_w_0().child(text))
+        .into_any_element()
+}
+
+/// Starts Hopper again (the updated exe) and quits this one.
+pub fn restart(cx: &mut App) {
+    match std::env::current_exe() {
+        Ok(exe) => {
+            if let Err(e) = std::process::Command::new(exe).spawn() {
+                log::error!("restarting: {e}");
+                return;
+            }
+            cx.quit();
+        }
+        Err(e) => log::error!("restarting: {e}"),
+    }
+}
+
+/// One theme in the menu: its colors, its name, and whether it's glass.
+fn theme_row(name: &str, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let swatch: AnyElement = if name.is_empty() {
+        // Follow Windows: Hopper Dark beside Hopper Light.
+        let [d, ..] = crate::theme::swatch(crate::theme::HOPPER_DARK);
+        let [l, ..] = crate::theme::swatch(crate::theme::HOPPER_LIGHT);
+        h_flex()
+            .child(div().w_5().h_4().bg(d))
+            .child(div().w_5().h_4().bg(l))
+            .into_any_element()
+    } else {
+        let [bg, panel, accent, fg] = crate::theme::swatch(name);
+        h_flex()
+            .child(div().w_2p5().h_4().bg(panel))
+            .child(
+                h_flex()
+                    .w_8()
+                    .h_4()
+                    .bg(bg)
+                    .items_center()
+                    .justify_center()
+                    .gap_0p5()
+                    .child(div().size_1p5().rounded_full().bg(accent))
+                    .child(div().w_2().h_0p5().rounded_full().bg(fg)),
+            )
+            .into_any_element()
+    };
+    h_flex()
+        .gap_2p5()
+        .child(
+            div()
+                .flex_none()
+                .rounded(px(3.))
+                .overflow_hidden()
+                .border_1()
+                .border_color(theme.border)
+                .child(swatch),
+        )
+        .child(div().flex_1().child(if name.is_empty() {
+            "Follow Windows".to_string()
+        } else {
+            name.to_string()
+        }))
+        .when(crate::theme::is_glass(name), |r| {
+            r.child(div().text_xs().text_color(theme.muted_foreground).child("glass"))
+        })
+        .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Category, ENTRIES, Text, matches};
+
+    #[test]
+    fn entries_are_unique_and_in_page_order() {
+        let mut seen = std::collections::HashSet::new();
+        let mut last = 0;
+        for e in ENTRIES {
+            assert!(seen.insert(e.id), "duplicate {}", e.id);
+            let ix = Category::ALL.iter().position(|c| *c == e.cat).unwrap();
+            assert!(ix >= last, "{} is out of order", e.id);
+            last = ix;
+        }
+        // Every category has something in it.
+        for c in Category::ALL {
+            assert!(ENTRIES.iter().any(|e| e.cat == c), "{c:?} is empty");
+        }
+    }
+
+    #[test]
+    fn search_matches_every_word() {
+        let ids = |q: &str| matches(q).iter().map(|e| e.id).collect::<Vec<_>>();
+        assert!(ids("zoom").contains(&"zoom"));
+        assert!(ids("panel key").contains(&"panel-key"));
+        assert!(!ids("panel key").contains(&"cf-key"));
+        assert!(ids("crafty").contains(&"panel-kind"));
+        assert!(ids("").is_empty());
+        assert!(ids("nothing-like-this").is_empty());
+    }
+
+    #[test]
+    fn categories_by_word() {
+        assert_eq!(Category::find("java"), Some(Category::Java));
+        assert_eq!(Category::find("Servers"), Some(Category::Servers));
+        assert_eq!(Category::find("curseforge"), Some(Category::Content));
+        assert_eq!(Category::find("modrinth"), Some(Category::Content));
+        assert_eq!(Category::find(""), None);
+    }
+
+    #[test]
+    fn text_checks() {
+        assert!(Text::PanelUrl.problem("rig:8443").is_some());
+        assert!(Text::PanelUrl.problem("https://rig:8443").is_none());
+        assert!(Text::UpdateRepo.problem("watdafawx/hopper").is_none());
+        assert!(Text::UpdateRepo.problem("hopper").is_some());
+        assert!(Text::Instances.problem("").is_none());
+        assert!(Text::Instances.problem("Z:\\surely\\not\\here").is_some());
+        assert!(Text::Host.problem("anything").is_none());
+    }
+}

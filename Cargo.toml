@@ -1,0 +1,81 @@
+[package]
+name = "hopper"
+version = "0.8.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+description = "A native Minecraft modpack and server manager"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+directories = "6"
+log = "0.4"
+env_logger = "0.11"
+ureq = { version = "3", features = ["json"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+tiny_http = "0.12"
+base64 = "0.22"
+flate2 = "1"
+trash = "5"
+sha1_smol = { version = "1", features = ["std"] }
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+regex = "1"
+keyring = { version = "3", features = ["windows-native"] }
+similar = "2"
+# The app: GPUI, gpui-component and Lucide icons in one crate.
+gpui-kit = "0.7"
+
+# The window handle for screenshots and backdrops (the versions GPUI uses).
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+# The small window that fetches website-only CurseForge files (WebView2).
+wry = "0.57"
+tao = "0.37"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security_Cryptography",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Performance",
+    "Win32_System_Time",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Controls",
+    "Win32_Storage_Xps",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+winresource = "0.1"
+
+[[bin]]
+name = "hopper"
+path = "src/gpui/main.rs"
+
+# GPUI lays out and paints every frame; unoptimized it can't keep 60 fps.
+# Optimize dependencies in dev builds, keep Hopper's own code debuggable.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Local test builds: release speed at runtime, but parallel codegen, no LTO
+# and incremental, so a small change rebuilds in seconds, not minutes.
+# CI and shipped builds keep using `release`.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true
+strip = false

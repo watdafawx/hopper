@@ -1,0 +1,54 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching Cargo.toml's version) to build Hopper
+# and attach hopper.exe and a zip to that release. Copies of Hopper update
+# themselves from these.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        # Full history: build.rs builds the release notes into the exe for
+        # What's new from the "Hopper x.y.z" commits.
+        with:
+          fetch-depth: 0
+      - name: Rust (from rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} doesn't match Cargo.toml version $v" }
+      - name: Build
+        # The Azure app id for Microsoft sign-in, when the repo has the secret.
+        env:
+          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+        run: cargo build --release --bin hopper
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\hopper.exe dist\hopper.exe
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          Compress-Archive -Path dist\hopper.exe -DestinationPath "dist\hopper-$v-win64.zip"
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ github.ref_name }}"
+          gh release view $v 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            # Notes: the release commit's body, then the commits since the last tag.
+            ./scripts/release-notes.ps1 $v '${{ github.repository }}' | Set-Content -Encoding utf8 notes.md
+            gh release create $v --title "Hopper $($v.TrimStart('v'))" --notes-file notes.md
+          }
+          gh release upload $v dist\hopper.exe "dist\hopper-$($v.TrimStart('v'))-win64.zip" --clobber

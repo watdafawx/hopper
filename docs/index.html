@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hopper · Minecraft modpack and server manager</title>
+<meta name="description" content="A fast, native Minecraft modpack and server manager for Windows. Play CurseForge and Modrinth packs, update mods, run servers and keep them in step with your packs.">
+<meta property="og:title" content="Hopper">
+<meta property="og:description" content="A fast, native Minecraft modpack and server manager for Windows.">
+<meta property="og:image" content="https://watdafawx.github.io/hopper/screenshots/overview.png">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#121214">
+<link rel="icon" href="favicon.png">
+<script>document.documentElement.className="js"</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0c0c0e;--bg2:#121214;--panel:#16161a;--panel2:#1b1b20;--line:#26262c;
+  --fg:#ededef;--mut:#a1a1aa;--dim:#71717a;
+  --acc:#f97316;--acc2:#fb8a3c;--acc-ink:#1c0d02;--ok:#22c55e;
+  --r:14px;--max:1180px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--fg);font:16px/1.6 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+.wrap{max-width:var(--max);margin:0 auto;padding:0 16px}
+code,.mono{font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;font-size:.88em}
+code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
+
+/* ascii ocean */
+#ocean{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;
+  /* Calm behind the headline, full strength toward the edges. */
+  -webkit-mask-image:radial-gradient(ellipse 55% 45% at 50% 32%,rgba(0,0,0,.35),#000 100%);
+          mask-image:radial-gradient(ellipse 55% 45% at 50% 32%,rgba(0,0,0,.35),#000 100%)}
+header,main,footer{position:relative;z-index:1}
+
+/* nav */
+nav{position:sticky;top:0;z-index:20;background:rgba(12,12,14,.78);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid transparent;transition:border-color .2s}
+nav.scrolled{border-bottom-color:var(--line)}
+nav .wrap{display:flex;align-items:center;gap:24px;height:64px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-.01em}
+.brand img{width:30px;height:30px;image-rendering:pixelated}
+.links{display:flex;gap:22px;margin-left:auto;font-size:14px;color:var(--mut)}
+.links a:hover{color:var(--fg)}
+.btn{display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:15px;border-radius:10px;padding:11px 18px;transition:transform .15s,background .15s,border-color .15s;white-space:nowrap}
+.btn svg{width:18px;height:18px;flex:none}
+.btn.primary{background:var(--acc);color:var(--acc-ink)}
+.btn.primary:hover{background:var(--acc2);transform:translateY(-1px)}
+.btn.ghost{border:1px solid var(--line);background:var(--panel)}
+.btn.ghost:hover{border-color:#3a3a42;transform:translateY(-1px)}
+.btn.sm{padding:8px 14px;font-size:14px}
+
+/* hero */
+.hero{position:relative;padding:84px 0 40px;text-align:center}
+.hero::before{content:"";position:absolute;inset:-120px 0 auto;height:640px;background:radial-gradient(600px 300px at 50% 30%,rgba(249,115,22,.20),transparent 70%);pointer-events:none}
+.pill{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--mut);border:1px solid var(--line);background:var(--panel);border-radius:99px;padding:5px 12px 5px 6px;margin-bottom:26px}
+.pill b{background:var(--acc);color:var(--acc-ink);border-radius:99px;padding:1px 8px;font-size:12px}
+h1{font-size:clamp(38px,6.4vw,70px);line-height:1.04;font-weight:800;letter-spacing:-.035em;max-width:900px;margin:0 auto}
+h1 em{font-style:normal;background:linear-gradient(90deg,#fb923c,#f97316 50%,#ea580c);-webkit-background-clip:text;background-clip:text;color:transparent}
+.lede{font-size:clamp(17px,2vw,20px);color:var(--mut);max-width:680px;margin:22px auto 0}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:34px}
+.fine{font-size:13px;color:var(--dim);margin-top:14px}
+.shot{position:relative;margin:58px auto 0;max-width:1120px;border-radius:16px;padding:1px;background:linear-gradient(180deg,#3a3a44,#1a1a1f 60%)}
+.shot::after{content:"";position:absolute;inset:40px 10% -40px;background:rgba(249,115,22,.22);filter:blur(80px);z-index:-1}
+.shot img{border-radius:15px;width:100%;height:auto}
+
+/* stats strip */
+.strip{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin:72px 0 0}
+.strip div{background:var(--bg2);padding:22px 20px}
+.strip b{display:block;font-size:22px;letter-spacing:-.01em}
+.strip span{font-size:14px;color:var(--mut)}
+
+/* sections */
+section{padding:96px 0 0}
+.eyebrow{font:500 12px "JetBrains Mono",monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--acc)}
+h2{font-size:clamp(28px,4vw,42px);line-height:1.12;letter-spacing:-.025em;font-weight:800;margin-top:10px}
+.sub{color:var(--mut);font-size:18px;max-width:640px;margin-top:12px}
+.head{margin-bottom:40px}
+.head.center{text-align:center}.head.center .sub{margin-left:auto;margin-right:auto}
+
+/* feature grid */
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:22px;transition:border-color .2s,transform .2s}
+.card:hover{border-color:#f9731655;transform:translateY(-2px)}
+.ico{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;background:#f9731618;color:var(--acc);margin-bottom:14px}
+.ico svg{width:20px;height:20px}
+.card h3{font-size:17px;margin-bottom:6px;letter-spacing:-.01em}
+.card p{font-size:14.5px;color:var(--mut)}
+
+/* spotlights */
+.spot{display:grid;grid-template-columns:5fr 7fr;gap:56px;align-items:center;padding-top:96px}
+.spot.flip{grid-template-columns:7fr 5fr}
+.spot.flip .txt{order:2}
+.spot h2{font-size:clamp(26px,3.2vw,36px)}
+.spot ul{list-style:none;margin-top:22px;display:grid;gap:12px}
+.spot li{display:flex;gap:12px;color:#d4d4d8;font-size:15.5px}
+.spot li::before{content:"";flex:none;width:18px;height:18px;margin-top:3px;border-radius:50%;background:#f9731620 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f97316' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center/11px no-repeat}
+.frame{border-radius:14px;padding:1px;background:linear-gradient(160deg,#3a3a44,#1a1a1f 70%);cursor:zoom-in;transition:transform .25s}
+.frame:hover{transform:scale(1.01)}
+.frame img{border-radius:13px;width:100%;height:auto}
+
+/* gallery */
+.gallery{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.gallery figure{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;cursor:zoom-in;transition:border-color .2s,transform .2s}
+.gallery figure:hover{border-color:#f9731655;transform:translateY(-2px)}
+.gallery img{aspect-ratio:16/10;object-fit:cover;object-position:top left;width:100%}
+.gallery figcaption{padding:12px 16px;font-size:14px;color:var(--mut)}
+
+/* steps */
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;counter-reset:s}
+.step{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:24px;counter-increment:s}
+.step::before{content:counter(s);display:grid;place-items:center;width:30px;height:30px;border-radius:8px;background:var(--acc);color:var(--acc-ink);font-weight:800;font-size:15px;margin-bottom:14px}
+.step h3{font-size:17px;margin-bottom:6px}
+.step p{font-size:14.5px;color:var(--mut)}
+.step a{color:var(--acc)}
+.note{margin-top:14px;background:linear-gradient(120deg,#f9731614,#f9731604);border:1px solid #f9731640;border-radius:var(--r);padding:20px 22px;font-size:15px;color:#d4d4d8}
+.note b{color:var(--fg)}
+
+/* faq */
+.faq{max-width:820px;margin:0 auto;display:grid;gap:10px}
+details{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:0 20px}
+summary{cursor:pointer;list-style:none;padding:18px 0;font-weight:600;display:flex;justify-content:space-between;gap:16px}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"+";color:var(--acc);font-size:20px;line-height:1;transition:transform .2s}
+details[open] summary::after{transform:rotate(45deg)}
+details p{color:var(--mut);font-size:15px;padding-bottom:18px}
+details a{color:var(--acc)}
+
+/* final cta */
+.final{margin:110px 0 0;text-align:center;padding:64px 24px;border:1px solid var(--line);border-radius:20px;background:radial-gradient(500px 220px at 50% 0%,rgba(249,115,22,.18),transparent 70%),var(--bg2)}
+.final img{width:72px;height:72px;margin:0 auto 18px;image-rendering:pixelated}
+footer{padding:48px 0 56px;color:var(--dim);font-size:14px}
+footer .wrap{display:flex;gap:20px;flex-wrap:wrap;align-items:center}
+footer .r{margin-left:auto;display:flex;gap:18px}
+footer a:hover{color:var(--fg)}
+
+/* story */
+.story{display:grid;grid-template-columns:auto 1fr;gap:28px;align-items:start;max-width:880px;margin:0 auto;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:36px 40px}
+.story img{width:64px;height:64px;image-rendering:pixelated}
+.story h2{font-size:clamp(24px,3vw,32px);margin-top:6px}
+.story p{color:#d4d4d8;font-size:16.5px;margin-top:14px}
+.story p.sig{color:var(--dim);font-size:14px}
+@media (max-width:600px){.story{grid-template-columns:1fr;padding:26px 22px;gap:14px}}
+
+/* panels table */
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--panel)}
+.tbl table{width:100%;border-collapse:collapse;font-size:14.5px;min-width:640px}
+.tbl th,.tbl td{padding:12px 16px;text-align:left;border-bottom:1px solid var(--line)}
+.tbl thead th{font-size:13px;color:var(--fg);background:var(--panel2)}
+.tbl tbody th{font-weight:500;color:#d4d4d8}
+.tbl tr:last-child th,.tbl tr:last-child td{border-bottom:0}
+.y{color:var(--ok);font-weight:600}.n{color:var(--dim)}
+.limits{margin-top:22px;display:grid;grid-template-columns:1fr 1fr;gap:10px 28px;list-style:none}
+.limits li{font-size:14.5px;color:var(--mut);padding-left:18px;position:relative}
+.limits li::before{content:"";position:absolute;left:0;top:10px;width:6px;height:6px;border-radius:50%;background:var(--dim)}
+.limits b{color:#d4d4d8;font-weight:600}
+.hack{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.hack pre{margin-top:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;font:13px/1.6 "JetBrains Mono",monospace;color:#d4d4d8}
+@media (max-width:900px){.hack,.limits{grid-template-columns:minmax(0,1fr)}}
+
+/* lightbox */
+.lb{position:fixed;inset:0;z-index:50;background:rgba(5,5,7,.92);display:none;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}
+.lb.on{display:flex}
+.lb img{max-width:100%;max-height:100%;border-radius:10px;box-shadow:0 30px 80px #000}
+
+/* reveal */
+.js .rv{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s cubic-bezier(.2,.8,.2,1)}
+.js .rv.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){.js .rv{opacity:1;transform:none;transition:none}html{scroll-behavior:auto}}
+
+@media (max-width:900px){
+  .grid,.gallery,.steps{grid-template-columns:1fr 1fr}
+  .spot,.spot.flip{grid-template-columns:1fr;gap:28px;padding-top:72px}
+  .spot.flip .txt{order:0}
+  .strip{grid-template-columns:1fr 1fr}
+  .links{display:none}
+  nav .btn{margin-left:auto}
+}
+@media (max-width:600px){
+  .grid,.gallery,.steps{grid-template-columns:1fr}
+  .hero{padding-top:56px}
+  section{padding-top:72px}
+  footer .r{margin-left:0}
+}
+</style>
+</head>
+<body>
+<canvas id="ocean" aria-hidden="true"></canvas>
+
+<nav id="nav">
+  <div class="wrap">
+    <a class="brand" href="#"><img src="hopper.png" alt="">Hopper</a>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#servers">Servers</a>
+      <a href="#panels">Panels</a>
+      <a href="#screens">Screenshots</a>
+      <a href="#start">Get started</a>
+      <a href="#faq">FAQ</a>
+      <a href="#hack">Contribute</a>
+      <a href="https://github.com/watdafawx/hopper">GitHub</a>
+    </div>
+    <a class="btn primary sm" href="https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 21h16"/></svg>Download
+    </a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <a class="pill" id="ver" href="https://github.com/watdafawx/hopper/releases/latest"><b>New</b><span>See what's in the latest release</span></a>
+    <h1>Your modpacks and servers, in <em>one fast app</em>.</h1>
+    <p class="lede">Hopper is a native Minecraft launcher and server manager for Windows. Play CurseForge and Modrinth packs, keep hundreds of mods up to date, and keep your servers in step with them.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10 4.5v7H3zM11 4.3 21 3v8.5H11zM3 12.5h7v7L3 18.5zM11 12.5h10V21l-10-1.3z"/></svg>Download for Windows
+      </a>
+      <a class="btn ghost" href="https://github.com/watdafawx/hopper">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0C17.3 4.9 18.3 5.2 18.3 5.2c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5Z"/></svg>View on GitHub
+      </a>
+    </div>
+    <p class="fine">Free and open source (MIT) · Windows 10 and 11 · One exe, no admin rights · Updates itself</p>
+    <div class="shot rv"><img src="screenshots/overview.png" width="1782" height="1090" alt="Hopper showing an All the Mods 10 instance with its pack page, playtime and mod count"></div>
+
+    <div class="strip rv">
+      <div><b>Native</b><span>Rust on GPUI. No Electron, no browser inside.</span></div>
+      <div><b>In place</b><span>Reads CurseForge, Prism, Modrinth App and more without copying.</span></div>
+      <div><b>1,000+ mods</b><span>Updates, side checks and profiles that stay fast.</span></div>
+      <div><b>19 themes</b><span>Dark and light, plus your own theme files.</span></div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section id="story">
+  <div class="story rv">
+    <img src="hopper.png" alt="">
+    <div>
+      <div class="eyebrow">Why Hopper</div>
+      <h2>Built out of frustration, grown out of need</h2>
+      <p>Hopper started as a tool just for me. The CurseForge app was painfully slow with big packs, and it was missing the small things that make modded Minecraft pleasant: seeing what an update actually changes, keeping a server's mods in line with the pack.</p>
+      <p>So I wrote my own. Every feature since has come from something I needed while playing and running servers: performance tracking when a pack felt sluggish, Server sync when keeping the server up to date became a chore. If you've hit the same walls, it should feel right at home.</p>
+      <p>Full disclosure: I have a full-time job, and Hopper is what I do after it. To keep up, a lot of the code (especially the boilerplate) is written by AI. The testing isn't. Every feature gets clicked through by hand, by me, in the real app, usually with a modpack open in the background. Claude does the typing; I do the poking.</p>
+      <p class="sig">— watdafawx, Hopper's developer</p>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="head center rv">
+    <div class="eyebrow">Features</div>
+    <h2>Everything a modded player needs</h2>
+    <p class="sub">Hopper replaces the CurseForge app for playing packs, then goes further: performance tracking, a proper log viewer and real server tools.</p>
+  </div>
+  <div class="grid">
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V4.5A1.5 1.5 0 0 1 5.5 3H9v18H5.5A1.5 1.5 0 0 1 4 19.5zM13 3h3l4 18h-3z"/></svg></div><h3>Library</h3><p>Every instance with its pack art, playtime, mods, worlds and screenshots. Update packs with a preview that keeps your config changes.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div><h3>Browse</h3><p>Search CurseForge and Modrinth for mods, modpacks, shaders, resource packs and worlds. Dependencies come along.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></div><h3>Performance</h3><p>Each run is recorded: FPS, 1% lows, frame times, CPU, RAM, GPU, GC pauses and load time. Compare Java presets side by side. Nothing is injected.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg></div><h3>Logs &amp; crashes</h3><p>The game's live log, debug.log and every crash report, with search and an errors-only filter. One click shares a log on mclo.gs.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></div><h3>Servers</h3><p>Start, stop and watch servers through Crafty, MCSS or Pterodactyl, or host one on this PC with Java picked for you.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13l-3-3M20 17H7l3 3"/></svg></div><h3>Server sync</h3><p>Compare a server with its pack and push or pull mods and configs. Client-only mods stay off. Backups and undo included.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div><h3>Other launchers</h3><p>Manage Modrinth App, Prism / MultiMC, ATLauncher, GDLauncher and FTB App instances where they already are.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg></div><h3>Accounts</h3><p>Several Microsoft accounts. Change your skin from a file, a URL or your recent skins, plus your cape and name.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="m8.2 10.8 7.6-3.6M8.2 13.2l7.6 3.6"/></svg></div><h3>Peers</h3><p>Sync an instance with a friend's PC on your network, so everyone joins with the same mods.</p></div>
+  </div>
+</section>
+
+<div class="spot" id="mods">
+  <div class="txt rv">
+    <div class="eyebrow">Mods</div>
+    <h2>Hundreds of updates, one click</h2>
+    <p class="sub">See every mod with its file, author, side and the version it moves to.</p>
+    <ul>
+      <li>Updates shown old → new, with "Update all"</li>
+      <li>Profiles to switch sets of mods on and off</li>
+      <li>Mods you added yourself are kept apart from the pack's</li>
+      <li>Files CurseForge only lets you get in a browser are picked up from Downloads automatically</li>
+    </ul>
+  </div>
+  <div class="frame rv"><img src="screenshots/mods.png" width="1782" height="1172" alt="Mods tab with update arrows from old to new versions" loading="lazy"></div>
+</div>
+
+<div class="spot flip" id="servers">
+  <div class="txt rv">
+    <div class="eyebrow">Servers</div>
+    <h2>Your servers, next to your packs</h2>
+    <p class="sub">Hopper works with servers wherever their files are: this PC, another PC at home, or a host running Pterodactyl.</p>
+    <ul>
+      <li>CPU, memory, players and world size, live</li>
+      <li>Console, backups, server.properties and JVM presets</li>
+      <li>Daily restarts with warnings, and crash recovery</li>
+      <li>Host a pack's server on this PC in a few clicks</li>
+    </ul>
+  </div>
+  <div class="frame rv"><img src="screenshots/servers.png" width="1782" height="1172" alt="A running server managed through Crafty, with CPU, memory and players" loading="lazy"></div>
+</div>
+
+<div class="spot" id="sync">
+  <div class="txt rv">
+    <div class="eyebrow">Server sync</div>
+    <h2>Server and pack, always in step</h2>
+    <p class="sub">Update the pack, then update the server to match. Hopper knows which mods belong on a server and which don't.</p>
+    <ul>
+      <li>Mod by mod: in sync, update, client only, server only</li>
+      <li>Configs compared too</li>
+      <li>Every change backed up, with history and undo</li>
+    </ul>
+  </div>
+  <div class="frame rv"><img src="screenshots/sync.png" width="1782" height="1172" alt="Server sync comparing a server's mods with its pack" loading="lazy"></div>
+</div>
+
+<div class="spot flip" id="logs">
+  <div class="txt rv">
+    <div class="eyebrow">Logs &amp; crashes</div>
+    <h2>Every log, one tab away</h2>
+    <p class="sub">The game's live log, debug.log and every crash report in one place, quick to search even when they're huge.</p>
+    <ul>
+      <li>Search, and "errors and warnings only"</li>
+      <li>The latest crash's summary up top</li>
+      <li>Share a log on mclo.gs with your name taken out</li>
+      <li>Crash help: checks the pack for <a href="https://modrinth.com/mod/crash-assistant" style="color:var(--acc)">Crash Assistant</a>, KostromDan's mod that explains crashes in game, and installs it in one click</li>
+    </ul>
+  </div>
+  <div class="frame rv"><img src="screenshots/logs.png" width="1782" height="1172" alt="Logs and crashes tab with the latest crash and Crash Assistant installed" loading="lazy"></div>
+</div>
+
+<section id="panels">
+  <div class="head center rv">
+    <div class="eyebrow">Server panels</div>
+    <h2>Works with the panel you already use</h2>
+    <p class="sub">Hopper talks to Crafty Controller 4, MCSS and Pterodactyl (or Pelican) through their own APIs with an API key you make in the panel. Your panel keeps running the servers. Hopper is the remote control.</p>
+  </div>
+  <div class="tbl rv"><table>
+    <thead><tr><th></th><th>Crafty Controller 4</th><th>MCSS</th><th>Pterodactyl / Pelican</th><th>Hosted by Hopper</th></tr></thead>
+    <tbody>
+            <tr><th>Start, stop, restart, kill</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><th>CPU and memory</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><th>Players online</th><td>Names and count</td><td>Count</td><td class="n">No</td><td>Names and count</td></tr>
+      <tr><th>World size</th><td class="y">Yes</td><td class="n">No</td><td class="n">No</td><td class="n">No</td></tr>
+      <tr><th>Read the console</th><td class="y">Yes</td><td class="y">Yes</td><td class="n">No (open it in the panel)</td><td class="y">Yes</td></tr>
+      <tr><th>Send console commands</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><th>Backups: list, run, restore</th><td class="y">Yes</td><td class="n">No (use MCSS)</td><td class="n">No (use the panel)</td><td>A backup mod's backups</td></tr>
+      <tr><th>Launch command follows NeoForge updates</th><td class="y">Yes</td><td class="n">No</td><td class="n">No</td><td>Yes (Hopper runs it)</td></tr>
+      <tr><th>Server sync (copy mods and configs)</th><td>If the folder is shared</td><td>If the folder is shared</td><td class="n">No (files live in its volumes)</td><td class="y">Yes</td></tr>
+    </tbody>
+  </table></div>
+  <ul class="limits rv">
+    <li><b>One panel at a time.</b> Settings → Servers takes one panel address and key.</li>
+    <li><b>Crafty</b> needs an API key with the Commands permission. Its self-signed certificate is accepted when you tick the box.</li>
+    <li><b>MCSS</b> doesn't report ports, so servers pair by folder or name.</li>
+    <li><b>Pterodactyl</b> needs a client key (<code>ptlc_…</code>). Its console is a websocket Hopper doesn't read yet.</li>
+    <li><b>Server sync needs the files as a folder</b>: this PC, or a share on another PC at home. No SFTP or FTP yet.</li>
+    <li><b>Hosted by Hopper</b> servers run while Hopper does. Quitting stops them, saving the world first.</li>
+  </ul>
+</section>
+
+<section id="hack">
+  <div class="head center rv">
+    <div class="eyebrow">Open source</div>
+    <h2>Easy to hack on. Fork it, change it, send a PR.</h2>
+    <p class="sub">Hopper is plain Rust with no web stack, MIT licensed, and built to be changed. If it's missing something you need, it's likely a small change.</p>
+  </div>
+  <div class="hack">
+    <div class="card rv"><h3>Build it in one command</h3><p>Install Rust, clone, run. Dependencies are optimized even in dev builds, so the app runs at full speed while you work on it.</p>
+<pre>git clone https://github.com/watdafawx/hopper
+cd hopper
+cargo run --bin hopper</pre></div>
+    <div class="card rv"><h3>Small, separate pieces</h3><p>The library (<code>src/*.rs</code>: CurseForge, Modrinth, instances, servers, logs) is apart from the app (<code>src/gpui/</code>), with tests for the library. A new server panel is one file implementing the <code>ServerPanel</code> trait.</p></div>
+    <div class="card rv"><h3>Themes are files</h3><p>Drop a theme JSON in the themes folder (Settings → Appearance opens it) and press refresh. No rebuild needed.</p></div>
+    <div class="card rv"><h3>Scriptable</h3><p><code>hopper --mcp</code> serves MCP on localhost, so scripts and AI agents can screenshot, click and navigate the app. Handy for testing your changes.</p></div>
+  </div>
+  <div class="note rv" style="text-align:center"><b>Forks and pull requests are welcome.</b> Fix a bug, add a panel or a launcher, or take it somewhere new. <a href="https://github.com/watdafawx/hopper/fork" style="color:var(--acc)">Fork on GitHub</a> · <a href="https://github.com/watdafawx/hopper/pulls" style="color:var(--acc)">Open a PR</a> · <a href="https://github.com/watdafawx/hopper/issues" style="color:var(--acc)">Report an issue</a></div>
+</section>
+
+<section id="screens">
+  <div class="head center rv">
+    <div class="eyebrow">Screenshots</div>
+    <h2>A closer look</h2>
+  </div>
+  <div class="gallery">
+    <figure class="rv"><img src="screenshots/palette.png" alt="Ctrl+K command palette" loading="lazy"><figcaption><b>Ctrl+K</b> jumps to any instance, tab, server or mod</figcaption></figure>
+    <figure class="rv"><img src="screenshots/browse.png" alt="Browsing CurseForge modpacks" loading="lazy"><figcaption><b>Browse</b> CurseForge and Modrinth</figcaption></figure>
+    <figure class="rv"><img src="screenshots/accounts.png" alt="Accounts dialog with skin editor" loading="lazy"><figcaption><b>Accounts</b>: skin, cape and name</figcaption></figure>
+  </div>
+</section>
+
+<section id="start">
+  <div class="head center rv">
+    <div class="eyebrow">Get started</div>
+    <h2>Up and running in a minute</h2>
+  </div>
+  <div class="steps">
+    <div class="step rv"><h3>Download</h3><p>Get <a href="https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe">hopper.exe</a> and run it. Settings → Updates &amp; install → Install adds Start menu and desktop shortcuts, no admin needed.</p></div>
+    <div class="step rv"><h3>Point it at your packs</h3><p>The setup wizard finds CurseForge's Instances folder and other launchers on this PC. Nothing is copied or moved.</p></div>
+    <div class="step rv"><h3>Add a CurseForge key</h3><p>Free from <a href="https://console.curseforge.com/">console.curseforge.com</a>. Modrinth works without one.</p></div>
+  </div>
+  <div class="note rv"><b>Why a key of your own?</b> CurseForge requires every app to use an API key for searching, installing and checking for updates. Hopper doesn't ship a shared one, so each person uses their own. It stays on your PC in Windows Credential Manager.</div>
+</section>
+
+<section id="faq">
+  <div class="head center rv">
+    <div class="eyebrow">FAQ</div>
+    <h2>Questions</h2>
+  </div>
+  <div class="faq">
+    <details class="rv"><summary>Is Hopper free?</summary><p>Yes. It's open source under the MIT license, with no ads and no accounts of its own.</p></details>
+    <details class="rv"><summary>Will it touch my existing CurseForge instances?</summary><p>Hopper reads CurseForge's folder in place and works on those instances directly, the same way CurseForge does. Updates and syncs make backups first, and pack updates show a preview before anything changes.</p></details>
+    <details class="rv"><summary>Does it work on macOS or Linux?</summary><p>Not yet. Hopper is Windows only for now (Windows 10 and 11).</p></details>
+    <details class="rv"><summary>How does it measure FPS without a mod?</summary><p>It reads Windows' own present events for the game's window, plus Java's GC log. Nothing is injected into Minecraft. FPS needs admin or membership in the Performance Log Users group.</p></details>
+    <details class="rv"><summary>Can it manage a server at a host?</summary><p>If the host runs Pterodactyl (or Pelican), add it as the server panel for start, stop, restart, kill, stats and console commands. Copying files to a host isn't supported yet; use your host's file manager or SFTP with the server pack Hopper downloads.</p></details>
+    <details class="rv"><summary>Was AI used to build Hopper?</summary><p>Yes, and proudly so. Hopper is a hobby project squeezed in around a full-time job, so a lot of the code (especially the boilerplate) is written by Anthropic's Claude. The testing is all by hand: every feature gets clicked through in the real app before it ships. Claude does the typing; the developer does the poking. From v0.8.0 on, commits Claude helped with say "Co-Authored-By: Claude", so the <a href="https://github.com/watdafawx/hopper/commits/main">commit history</a> shows exactly which ones (earlier history was folded into one fresh start).</p></details>
+    <details class="rv"><summary>How do updates work?</summary><p>Hopper checks its latest GitHub release when it starts and offers to update itself. Each release lists what changed in the What's new dialog.</p></details>
+  </div>
+</section>
+
+<div class="final rv">
+  <img src="hopper.png" alt="">
+  <h2>Ready to hop in?</h2>
+  <p class="sub" style="margin:12px auto 0">One exe, no installer needed.</p>
+  <div class="cta">
+    <a class="btn primary" href="https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 21h16"/></svg>Download for Windows
+    </a>
+    <a class="btn ghost" href="https://github.com/watdafawx/hopper/releases">All releases</a>
+  </div>
+</div>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Hopper · MIT License · Built with help from AI · Not affiliated with Mojang, Microsoft, CurseForge or Modrinth.</span>
+    <div class="r">
+      <a href="https://github.com/watdafawx/hopper">GitHub</a>
+      <a href="https://github.com/watdafawx/hopper/releases">Releases</a>
+      <a href="https://github.com/watdafawx/hopper/issues">Issues</a>
+    </div>
+  </div>
+</footer>
+
+<div class="lb" id="lb"><img alt=""></div>
+
+<script src="ocean.js" defer></script>
+<script>
+(() => {
+  const nav = document.getElementById('nav');
+  const onScroll = () => nav.classList.toggle('scrolled', scrollY > 8);
+  addEventListener('scroll', onScroll, { passive: true }); onScroll();
+
+  const io = new IntersectionObserver(es => es.forEach(e => {
+    if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+  }), { rootMargin: '0px 0px -8% 0px' });
+  document.querySelectorAll('.rv').forEach(el => io.observe(el));
+
+  const lb = document.getElementById('lb'), lbImg = lb.querySelector('img');
+  document.querySelectorAll('.frame img, .gallery img, .shot img').forEach(img => {
+    img.parentElement.addEventListener('click', () => { lbImg.src = img.src; lbImg.alt = img.alt; lb.classList.add('on'); });
+  });
+  const close = () => lb.classList.remove('on');
+  lb.addEventListener('click', close);
+  addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+
+  // Latest version in the hero pill.
+  fetch('https://api.github.com/repos/watdafawx/hopper/releases/latest')
+    .then(r => r.ok ? r.json() : null)
+    .then(r => { if (r && r.tag_name) document.querySelector('#ver span').textContent = 'Hopper ' + r.tag_name.replace(/^v/, '') + ' is out: see what’s new'; })
+    .catch(() => {});
+})();
+</script>
+</body>
+</html>
