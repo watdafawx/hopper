@@ -4,6 +4,7 @@
 //! `--mock-accounts` (or `HOPPER_MOCK_ACCOUNTS=1`) runs it against made-up
 //! accounts in memory: no network, no Credential Manager, nothing saved.
 
+use crate::skin_viewer::{CapeChoice, SkinViewer, ViewerEvent};
 use crate::skins::{self, View};
 use crate::store::Store;
 use crate::widgets;
@@ -23,11 +24,13 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::accounts::{Accounts, Saved};
-use hopper::mcprofile::{self, Api, McProfile, NameChange, NameStatus, Variant};
+use hopper::defaultskins::{self, Defaults};
+use hopper::mcprofile::{self, Api, McProfile, NameChange, NameStatus, SkinLink, Variant};
+use hopper::skin3d::Pose;
 use hopper::skinhistory::{self, History};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 /// The id the view uses for the old single sign-in before it is copied.
@@ -473,6 +476,45 @@ enum NameCheck {
     Failed(String),
 }
 
+/// A skin on the preview, not worn yet.
+struct Pending {
+    label: String,
+    png: Vec<u8>,
+    /// The PNG as a file, for the preview.
+    path: PathBuf,
+    variant: Variant,
+}
+
+impl Pending {
+    /// Checks the PNG, guesses the arms when not given, and keeps a file of
+    /// it when it has none.
+    fn new(label: String, png: Vec<u8>, variant: Option<Variant>, path: Option<PathBuf>) -> anyhow::Result<Self> {
+        mcprofile::check_skin_png(&png)?;
+        let variant = match variant {
+            Some(v) => v,
+            None => {
+                let img = image::load_from_memory(&png)?.to_rgba8();
+                if hopper::skinrender::looks_slim(&img) {
+                    Variant::Slim
+                } else {
+                    Variant::Classic
+                }
+            }
+        };
+        let path = match path {
+            Some(p) => p,
+            None => {
+                let dir = std::env::temp_dir().join("hopper-skin-preview");
+                std::fs::create_dir_all(&dir)?;
+                let p = dir.join(format!("{}.png", sha1_smol::Sha1::from(&png).digest()));
+                std::fs::write(&p, &png)?;
+                p
+            }
+        };
+        Ok(Self { label, png, path, variant })
+    }
+}
+
 pub struct AccountsView {
     store: Entity<Store>,
     /// Skin, Cape or Name.
@@ -487,7 +529,14 @@ pub struct AccountsView {
     current_file: Option<String>,
     history: Vec<skinhistory::Entry>,
     busy: Option<SharedString>,
-    back: bool,
+    /// A skin on the preview that isn't worn yet.
+    pending: Option<Pending>,
+    /// Reading a skin for the preview (a file or a link).
+    loading: Option<SharedString>,
+    defaults: Load<Defaults>,
+    /// Which arms the default skins show.
+    default_slim: bool,
+    viewer: Entity<SkinViewer>,
     show_url: bool,
     name_input: Entity<InputState>,
     url_input: Entity<InputState>,
@@ -499,9 +548,14 @@ pub struct AccountsView {
 impl AccountsView {
     fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("New name"));
-        let url_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("https://…/skin.png"));
+        let url_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Skin URL, NameMC link or player name")
+        });
+        let viewer = cx.new(SkinViewer::new);
         let subs = vec![
+            cx.subscribe_in(&viewer, window, |this, _, e: &ViewerEvent, window, cx| match e {
+                ViewerEvent::Dropped(path) => this.preview_file(path.clone(), window, cx),
+            }),
             cx.observe(&store, |this, store, cx| {
                 let target = Self::target(&store, cx);
                 if target != this.for_id
@@ -532,7 +586,11 @@ impl AccountsView {
             current_file: None,
             history: history().map(|h| h.list()).unwrap_or_default(),
             busy: None,
-            back: false,
+            pending: None,
+            loading: None,
+            defaults: Load::Loading,
+            default_slim: false,
+            viewer,
             show_url: false,
             name_input,
             url_input,
@@ -541,7 +599,30 @@ impl AccountsView {
             _subs: subs,
         };
         view.load(cx);
+        view.load_defaults(cx);
         view
+    }
+
+    /// Mojang's default skins: from the cache, else from the game jar.
+    fn load_defaults(&mut self, cx: &mut Context<Self>) {
+        if let Some(d) = defaultskins::cached() {
+            self.defaults = Load::Ready(d);
+            return;
+        }
+        self.defaults = Load::Loading;
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_spawn(async { defaultskins::fetch() }).await;
+            this.update(cx, |this, cx| {
+                this.defaults = match r {
+                    Ok(d) => Load::Ready(d),
+                    Err(e) => Load::Failed(format!("{e:#}")),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     /// The account to show: the active one, or the old sign-in.
@@ -650,6 +731,7 @@ impl AccountsView {
         self.busy = Some(doing.into());
         let generation = self.generation;
         let renamed = matches!(op, Op::Rename(_));
+        let uploaded = matches!(op, Op::Upload(..));
         cx.spawn_in(window, async move |this, cx| {
             let r = cx.background_spawn(async move { run(op) }).await;
             let r = match r {
@@ -672,6 +754,9 @@ impl AccountsView {
                             if renamed {
                                 this.name_input.update(cx, |s, cx| s.set_value("", window, cx));
                                 this.name_check = NameCheck::Empty;
+                            }
+                            if uploaded {
+                                this.pending = None;
                             }
                             window.push_notification(Notification::success(success), cx);
                         }
@@ -711,7 +796,7 @@ impl AccountsView {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Use this skin".into()),
+            prompt: Some("Preview this skin".into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
@@ -720,29 +805,52 @@ impl AccountsView {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            let read = cx
+            this.update_in(cx, |this, window, cx| this.preview_file(path, window, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Puts a skin file on the preview.
+    fn preview_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let label = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Skin".into());
+        self.load_pending("Reading the skin", label, window, cx, move || {
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("Couldn't read {}", path.display()))?;
+            Ok((bytes, None, Some(path)))
+        });
+    }
+
+    /// Gets a skin in the background and puts it on the preview, to wear
+    /// with Apply. `work` gives the PNG, its arms if known, and its file if
+    /// it has one.
+    fn load_pending(
+        &mut self,
+        doing: &'static str,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        work: impl FnOnce() -> anyhow::Result<(Vec<u8>, Option<Variant>, Option<PathBuf>)> + Send + 'static,
+    ) {
+        self.loading = Some(doing.into());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx
                 .background_spawn(async move {
-                    let bytes = std::fs::read(&path)
-                        .with_context(|| format!("Couldn't read {}", path.display()))?;
-                    mcprofile::check_skin_png(&bytes)?;
-                    let img = image::load_from_memory(&bytes)?.to_rgba8();
-                    let v = if hopper::skinrender::looks_slim(&img) {
-                        Variant::Slim
-                    } else {
-                        Variant::Classic
-                    };
-                    anyhow::Ok((bytes, v))
+                    let (bytes, variant, path) = work()?;
+                    Pending::new(label, bytes, variant, path)
                 })
                 .await;
-            this.update_in(cx, |this, window, cx| match read {
-                Ok((bytes, v)) => this.change(
-                    "Uploading your skin",
-                    Op::Upload(v, bytes),
-                    format!("Skin uploaded ({} arms).", v.label().to_lowercase()),
-                    window,
-                    cx,
-                ),
-                Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+            this.update_in(cx, |this, window, cx| {
+                this.loading = None;
+                match r {
+                    Ok(p) => this.pending = Some(p),
+                    Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+                }
+                cx.notify();
             })
             .ok();
         })
@@ -750,30 +858,56 @@ impl AccountsView {
     }
 
     fn apply_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.url_input.read(cx).value().trim().to_string();
-        if url.is_empty() {
+        let input = self.url_input.read(cx).value().trim().to_string();
+        if input.is_empty() {
             return;
         }
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            window.push_notification(
-                Notification::error("A skin URL starts with http:// or https://."),
-                cx,
-            );
-            return;
-        }
-        let v = self.active_skin().map(|s| s.variant).unwrap_or_default();
+        let link = match mcprofile::parse_skin_link(&input) {
+            Ok(l) => l,
+            Err(e) => {
+                window.push_notification(Notification::error(e), cx);
+                return;
+            }
+        };
+        let label = match &link {
+            SkinLink::Player(n) => format!("{n}'s skin"),
+            SkinLink::Png(_) => "Skin from a link".to_string(),
+        };
         self.show_url = false;
         self.url_input.update(cx, |s, cx| s.set_value("", window, cx));
+        self.load_pending("Fetching the skin", label, window, cx, move || {
+            let (bytes, variant) = mcprofile::fetch_skin(&link)?;
+            Ok((bytes, variant, None))
+        });
+    }
+
+    /// Wears the skin on the preview.
+    fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = &self.pending else { return };
+        let (v, png, label) = (p.variant, p.png.clone(), p.label.clone());
         self.change(
-            "Changing your skin",
-            Op::SkinUrl(v, url),
-            "Skin changed.".into(),
+            "Uploading your skin",
+            Op::Upload(v, png),
+            format!("Now wearing {label} ({} arms).", v.label().to_lowercase()),
             window,
             cx,
         );
     }
 
+    fn preview_default(&mut self, d: defaultskins::DefaultSkin, window: &mut Window, cx: &mut Context<Self>) {
+        let variant = if d.slim { Variant::Slim } else { Variant::Classic };
+        self.load_pending("Reading the skin", d.label(), window, cx, move || {
+            Ok((std::fs::read(&d.path)?, Some(variant), Some(d.path)))
+        });
+    }
+
     fn set_variant(&mut self, v: Variant, window: &mut Window, cx: &mut Context<Self>) {
+        // A skin not worn yet only changes on the preview.
+        if let Some(p) = &mut self.pending {
+            p.variant = v;
+            cx.notify();
+            return;
+        }
         let Some(skin) = self.active_skin() else { return };
         if skin.variant == v {
             return;
@@ -813,18 +947,12 @@ impl AccountsView {
         });
     }
 
-    fn wear(&mut self, e: skinhistory::Entry, window: &mut Window, cx: &mut Context<Self>) {
+    fn preview_recent(&mut self, e: skinhistory::Entry, window: &mut Window, cx: &mut Context<Self>) {
         let Some(h) = history() else { return };
-        match std::fs::read(h.path(&e)) {
-            Ok(bytes) => self.change(
-                "Uploading your skin",
-                Op::Upload(e.variant, bytes),
-                "Skin changed.".into(),
-                window,
-                cx,
-            ),
-            Err(err) => window.push_notification(Notification::error(format!("{err:#}")), cx),
-        }
+        let path = h.path(&e);
+        self.load_pending("Reading the skin", "A recent skin".into(), window, cx, move || {
+            Ok((std::fs::read(&path)?, Some(e.variant), Some(path)))
+        });
     }
 
     fn forget(&mut self, file: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1155,60 +1283,134 @@ impl AccountsView {
         let store = self.store.read(cx);
         let skin = p.active_skin().cloned();
         let variant = skin.as_ref().map(|s| s.variant).unwrap_or_default();
-        let cape = p
-            .active_cape()
-            .and_then(|c| store.image(&c.url))
-            .map(|p| p.to_path_buf());
-        let texture = skin.as_ref().and_then(|s| store.image(&s.url)).map(|p| p.to_path_buf());
-        let drawn = texture.as_ref().and_then(|t| {
-            skins::image(
-                t,
-                View::Body {
-                    slim: variant.is_slim(),
-                    back: self.back,
-                    cape: cape.clone(),
-                },
-            )
+        let worn = skin.as_ref().and_then(|s| store.image(&s.url)).map(Path::to_path_buf);
+        let capes: Vec<CapeChoice> = p
+            .capes
+            .iter()
+            .filter_map(|c| {
+                let path = store.image(&c.url)?.to_path_buf();
+                let label = if c.alias.is_empty() { "Cape".to_string() } else { c.alias.clone() };
+                Some(CapeChoice { label: label.into(), path })
+            })
+            .collect();
+        let active_cape = p.active_cape().and_then(|c| store.image(&c.url)).map(Path::to_path_buf);
+        let elytra = self.defaults.ready().and_then(|d| d.elytra.clone());
+        let shown_variant = self.pending.as_ref().map_or(variant, |p| p.variant);
+        let shown = self.pending.as_ref().map(|p| p.path.clone()).or(worn.clone());
+        self.viewer.update(cx, |v, _| {
+            v.set_skin(shown, shown_variant.is_slim());
+            v.set_capes(capes, active_cape);
+            v.set_default_elytra(elytra);
         });
+        let pose = self.viewer.read(cx).pose();
         let busy = self.busy.is_some();
+
+        // Under the preview: what it shows, and Apply.
+        let bar = h_flex()
+            .gap_2()
+            .px_1()
+            .min_h(rems(2.25))
+            .map(|r| match (&self.loading, &self.pending) {
+                (Some(doing), _) => r
+                    .child(Spinner::new().small())
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(doing.clone())),
+                (None, Some(pend)) => r
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().font_semibold().truncate().child(pend.label.clone()))
+                            .child(widgets::caption(
+                                format!("Preview · {} arms", pend.variant.label().to_lowercase()),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        Button::new("discard-preview")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Undo2)
+                            .tooltip("Back to the skin you wear")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.pending = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("apply-skin")
+                            .small()
+                            .primary()
+                            .label("Apply")
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| this.apply_pending(window, cx))),
+                    ),
+                (None, None) => r
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().font_semibold().truncate().child(p.name.clone()))
+                            .child(widgets::caption("The skin you wear", cx)),
+                    )
+                    .child(Button::new("apply-skin").small().primary().label("Apply").disabled(true)),
+            });
         let preview = v_flex()
             .flex_none()
-            .w(rems(12.))
-            .items_center()
-            .gap_3()
-            .py_4()
-            .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.muted.opacity(0.5))
-            .child(
-                div()
-                    .w(rems(7.))
-                    .h(rems(14.))
-                    .flex()
+            .w(rems(15.))
+            .gap_2()
+            .child(div().h(rems(25.)).child(self.viewer.clone()))
+            .child(bar);
+
+        let pose_ix = Pose::ALL.iter().position(|p| *p == pose).unwrap_or(0);
+        let viewer = self.viewer.clone();
+        let mut poses = TabBar::new("pose").segmented().xsmall().selected_index(pose_ix);
+        for p in Pose::ALL {
+            poses = poses.child(Tab::new().label(p.label()));
+        }
+        let poses = poses.on_click(move |ix: &usize, _, cx| {
+            let p = Pose::ALL[*ix];
+            viewer.update(cx, |v, cx| v.set_pose(p, cx));
+        });
+
+        // The worn skin beside the previewed one.
+        let compare = self.pending.as_ref().map(|pend| {
+            let thumb = |path: Option<&Path>, slim: bool, label: &'static str| {
+                let drawn = path.and_then(|t| {
+                    skins::image(t, View::Body { slim, back: false, cape: None })
+                });
+                v_flex()
                     .items_center()
-                    .justify_center()
-                    .map(|d| match drawn {
-                        Some(i) => d.child(img(i).size_full()),
-                        None => d.child(Spinner::new()),
-                    }),
-            )
-            .child(
-                TabBar::new("skin-side")
-                    .segmented()
-                    .xsmall()
-                    .selected_index(usize::from(self.back))
-                    .child(Tab::new().label("Front"))
-                    .child(Tab::new().label("Back"))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.back = *ix == 1;
-                        cx.notify();
-                    })),
-            );
+                    .gap_1()
+                    .child(
+                        div()
+                            .w(rems(3.5))
+                            .h(rems(7.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when_some(drawn, |d, i| d.child(img(i).size_full())),
+                    )
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(label))
+            };
+            v_flex()
+                .gap_1p5()
+                .child(section_title("Before and after", cx))
+                .child(
+                    h_flex()
+                        .gap_4()
+                        .items_center()
+                        .child(thumb(worn.as_deref(), variant.is_slim(), "Now"))
+                        .child(Icon::new(IconName::ArrowRight).text_color(theme.muted_foreground))
+                        .child(thumb(Some(&pend.path), pend.variant.is_slim(), "After Apply")),
+                )
+        });
+
         let controls = v_flex()
             .flex_1()
             .min_w_0()
             .gap_4()
+            .child(v_flex().gap_1p5().child(section_title("Pose", cx)).child(poses))
             .child(
                 v_flex()
                     .gap_1p5()
@@ -1217,7 +1419,7 @@ impl AccountsView {
                         TabBar::new("variant")
                             .segmented()
                             .small()
-                            .selected_index(usize::from(variant.is_slim()))
+                            .selected_index(usize::from(shown_variant.is_slim()))
                             .child(Tab::new().label("Classic (4 px)").disabled(busy))
                             .child(Tab::new().label("Slim (3 px)").disabled(busy))
                             .on_click(cx.listener(|this, ix: &usize, window, cx| {
@@ -1237,9 +1439,9 @@ impl AccountsView {
                             .child(
                                 Button::new("upload-skin")
                                     .small()
-                                    .primary()
-                                    .icon(IconName::Upload)
-                                    .label("Upload skin…")
+                                    .outline()
+                                    .icon(IconName::FolderOpen)
+                                    .label("Open skin file…")
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.pick_skin_file(window, cx)
@@ -1250,7 +1452,7 @@ impl AccountsView {
                                     .small()
                                     .outline()
                                     .icon(IconName::Link)
-                                    .label("Use skin from URL")
+                                    .label("From a link or name")
                                     .disabled(busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.show_url = !this.show_url;
@@ -1281,7 +1483,7 @@ impl AccountsView {
                                     Button::new("apply-url")
                                         .small()
                                         .primary()
-                                        .label("Use")
+                                        .label("Preview")
                                         .disabled(busy)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.apply_url(window, cx)
@@ -1290,78 +1492,174 @@ impl AccountsView {
                         )
                     })
                     .child(note(
-                        "A skin is a 64×64 (or old 64×32) PNG. Slim arms are guessed from the file; switch them above.",
+                        "Open a 64×64 PNG, drop one on the preview, or paste a skin URL, a NameMC link or a player name. Nothing changes on your account until you press Apply.",
                         cx,
                     )),
-            );
+            )
+            .children(compare);
+        let defaults = self.default_skins(cx);
         let recent = self.recent_skins(window, cx);
         v_flex()
             .gap_5()
             .child(h_flex().gap_5().items_start().child(preview).child(controls))
+            .child(defaults)
             .child(recent)
             .into_any_element()
     }
 
+    /// A skin tile: the player's front, a name under it, a check when worn
+    /// and a ring when it's on the preview.
+    fn skin_tile(
+        &self,
+        id: SharedString,
+        drawn: Option<Arc<Image>>,
+        label: Option<String>,
+        worn: bool,
+        previewing: bool,
+        cx: &App,
+    ) -> Stateful<Div> {
+        let theme = cx.theme();
+        v_flex()
+            .id(id)
+            .relative()
+            .w(rems(4.5))
+            .p_1p5()
+            .gap_1()
+            .items_center()
+            .rounded(theme.radius)
+            .border_1()
+            .map(|d| {
+                if previewing {
+                    d.border_color(theme.primary).bg(theme.primary.opacity(0.1))
+                } else {
+                    d.border_color(theme.border)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.list_hover))
+                }
+            })
+            .child(
+                div()
+                    .h(rems(5.5))
+                    .w(rems(2.75))
+                    .when_some(drawn, |d, i| d.child(img(i).size_full())),
+            )
+            .when_some(label, |d, l| d.child(div().text_xs().truncate().max_w_full().child(l)))
+            .when(worn, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_1()
+                        .right_1()
+                        .text_color(theme.primary)
+                        .child(Icon::new(IconName::CircleCheck).xsmall()),
+                )
+            })
+    }
+
+    fn default_skins(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let busy = self.busy.is_some();
+        let pending = self.pending.as_ref().map(|p| p.path.clone());
+        let body: AnyElement = match &self.defaults {
+            Load::Loading => h_flex()
+                .gap_2()
+                .child(Spinner::new().small())
+                .child(widgets::caption("Getting them from Mojang…", cx))
+                .into_any_element(),
+            Load::Failed(e) => h_flex()
+                .gap_2()
+                .child(widgets::caption(format!("Couldn't get them: {e}"), cx))
+                .child(
+                    Button::new("retry-defaults")
+                        .xsmall()
+                        .outline()
+                        .label("Try again")
+                        .on_click(cx.listener(|this, _, _, cx| this.load_defaults(cx))),
+                )
+                .into_any_element(),
+            Load::Ready(d) => {
+                let tiles: Vec<AnyElement> = d
+                    .skins
+                    .iter()
+                    .filter(|s| s.slim == self.default_slim)
+                    .map(|s| {
+                        let drawn = skins::image(&s.path, View::Body { slim: s.slim, back: false, cape: None });
+                        let previewing = pending.as_deref() == Some(s.path.as_path());
+                        let pick = s.clone();
+                        self.skin_tile(
+                            SharedString::from(format!("default:{}:{}", s.name, s.slim)),
+                            drawn,
+                            Some(s.label()),
+                            false,
+                            previewing,
+                            cx,
+                        )
+                        .when(!previewing && !busy, |d| {
+                            d.on_click(cx.listener(move |this, _, window, cx| {
+                                this.preview_default(pick.clone(), window, cx)
+                            }))
+                        })
+                        .into_any_element()
+                    })
+                    .collect();
+                h_flex().gap_2().flex_wrap().children(tiles).into_any_element()
+            }
+        };
+        v_flex()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(section_title("Default skins", cx))
+                    .child(
+                        TabBar::new("default-arms")
+                            .segmented()
+                            .xsmall()
+                            .selected_index(usize::from(self.default_slim))
+                            .child(Tab::new().label("Classic"))
+                            .child(Tab::new().label("Slim"))
+                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                this.default_slim = *ix == 1;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(body)
+    }
+
     fn recent_skins(&self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme().clone();
         let busy = self.busy.is_some();
         let Some(h) = history() else {
             return div().into_any_element();
         };
+        let pending = self.pending.as_ref().map(|p| p.path.clone());
         let tiles: Vec<AnyElement> = self
             .history
             .iter()
             .map(|e| {
                 let current = self.current_file.as_deref() == Some(e.file.as_str());
+                let path = h.path(e);
+                let previewing = pending.as_deref() == Some(path.as_path());
                 let drawn = skins::image(
-                    &h.path(e),
+                    &path,
                     View::Body {
                         slim: e.variant.is_slim(),
                         back: false,
                         cape: None,
                     },
                 );
-                let (wear, forget) = (e.clone(), e.file.clone());
-                div()
-                    .id(SharedString::from(format!("hist:{}", e.file)))
+                let (pick, forget) = (e.clone(), e.file.clone());
+                self.skin_tile(SharedString::from(format!("hist:{}", e.file)), drawn, None, current, previewing, cx)
                     .group("hist")
-                    .relative()
-                    .w(rems(4.5))
-                    .h(rems(7.))
-                    .p_1p5()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .map(|d| {
-                        if current {
-                            d.border_color(theme.primary).bg(theme.primary.opacity(0.1))
-                        } else {
-                            d.border_color(theme.border)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.list_hover))
-                        }
-                    })
-                    .when_some(drawn, |d, i| d.child(img(i).h_full().w(rems(2.75))))
-                    .when(current, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .top_1()
-                                .right_1()
-                                .text_color(theme.primary)
-                                .child(Icon::new(IconName::CircleCheck).xsmall()),
-                        )
-                    })
-                    .when(!current && !busy, |d| {
+                    .when(!previewing && !busy, |d| {
                         d.tooltip(|w, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new("Wear this skin").build(w, cx)
+                            gpui_kit::component::tooltip::Tooltip::new("Preview this skin").build(w, cx)
                         })
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.wear(wear.clone(), window, cx)
+                            this.preview_recent(pick.clone(), window, cx)
                         }))
-                        .child(
+                    })
+                    .when(!current && !busy, |d| {
+                        d.child(
                             div()
                                 .absolute()
                                 .top_0p5()
@@ -1390,7 +1688,7 @@ impl AccountsView {
                 h_flex()
                     .gap_2()
                     .child(section_title("Recent skins", cx))
-                    .child(widgets::caption("Kept on this PC; click one to wear it again.", cx)),
+                    .child(widgets::caption("Kept on this PC; click one to preview it.", cx)),
             )
             .map(|r| {
                 if tiles.is_empty() {
@@ -1505,7 +1803,7 @@ impl AccountsView {
                 h_flex()
                     .gap_2()
                     .child(section_title("Your capes", cx))
-                    .child(widgets::caption("Pick the one others see; the skin's Back view shows it on you.", cx)),
+                    .child(widgets::caption("Pick the one others see; turn the skin preview to see it on you.", cx)),
             )
             .child(h_flex().gap_2().flex_wrap().children(tiles))
             .into_any_element()

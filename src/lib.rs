@@ -59,6 +59,8 @@ pub mod settings;
 pub mod sharecode;
 pub mod setup;
 pub mod shortcut;
+pub mod defaultskins;
+pub mod skin3d;
 pub mod skinhistory;
 pub mod skinrender;
 pub mod source;

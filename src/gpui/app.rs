@@ -476,6 +476,7 @@ impl AppView {
                     }
                 }
                 "redeem" => crate::dialogs::open_redeem(this.store.clone(), window, cx),
+                "accounts" => crate::accounts::open(this.store.clone(), window, cx),
                 _ => {}
             });
         }

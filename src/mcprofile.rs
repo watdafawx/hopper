@@ -418,9 +418,133 @@ pub fn parse_name_change(v: Value) -> anyhow::Result<NameChange> {
     serde_json::from_value(v).context("Mojang sent name change details Hopper can't read")
 }
 
+// ---- skins from links ---------------------------------------------------------
+
+/// Where a pasted skin link points.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkinLink {
+    /// A PNG to download.
+    Png(String),
+    /// A player whose current skin to copy.
+    Player(String),
+}
+
+/// Reads a skin URL, a NameMC skin or profile link, or a player name.
+pub fn parse_skin_link(input: &str) -> Result<SkinLink, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("Paste a skin link or a player name.".into());
+    }
+    if validate_name(s).is_ok() {
+        return Ok(SkinLink::Player(s.to_string()));
+    }
+    let Some(rest) = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")) else {
+        return Err("Paste a skin URL (https://…), a NameMC link or a player name.".into());
+    };
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = host.to_ascii_lowercase();
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    let mut parts = path.split('/').filter(|p| !p.is_empty());
+    if host == "namemc.com" || host.ends_with(".namemc.com") && host != "s.namemc.com" {
+        return match (parts.next(), parts.next()) {
+            (Some("skin"), Some(id)) if id.chars().all(|c| c.is_ascii_alphanumeric()) => {
+                Ok(SkinLink::Png(format!("https://s.namemc.com/i/{id}.png")))
+            }
+            (Some("profile"), Some(who)) => {
+                // "Name.1" is NameMC's way to tell same-named profiles apart.
+                let name = who.split('.').next().unwrap_or(who);
+                validate_name(name).map(|_| SkinLink::Player(name.to_string()))
+            }
+            _ => Err("That NameMC page isn't a skin or a profile.".into()),
+        };
+    }
+    Ok(SkinLink::Png(s.to_string()))
+}
+
+fn get(url: &str) -> anyhow::Result<Response> {
+    agent().get(url).call().with_context(|| format!("Couldn't reach {url}"))
+}
+
+/// The PNG behind a link, with the arms Mojang says the player uses (for
+/// player links). Blocking.
+pub fn fetch_skin(link: &SkinLink) -> anyhow::Result<(Vec<u8>, Option<Variant>)> {
+    let (url, variant) = match link {
+        SkinLink::Png(u) => (u.clone(), None),
+        SkinLink::Player(name) => {
+            let mut r = get(&format!("https://api.mojang.com/users/profiles/minecraft/{name}"))?;
+            if matches!(r.status().as_u16(), 204 | 404) {
+                bail!("There's no Minecraft player named {name}.");
+            }
+            if !r.status().is_success() {
+                bail!("Mojang answered {} looking up {name}.", r.status().as_u16());
+            }
+            let v: Value = r.body_mut().read_json()?;
+            let id = v["id"].as_str().context("Mojang sent no player id")?;
+            let mut r = get(&format!("https://sessionserver.mojang.com/session/minecraft/profile/{id}"))?;
+            if !r.status().is_success() {
+                bail!("Mojang answered {} reading {name}'s skin.", r.status().as_u16());
+            }
+            let v: Value = r.body_mut().read_json()?;
+            skin_from_session_profile(&v).with_context(|| format!("{name} has no skin Hopper can read"))?
+        }
+    };
+    let mut r = get(&url)?;
+    if !r.status().is_success() {
+        bail!("{url} answered {}.", r.status().as_u16());
+    }
+    let bytes = r.body_mut().with_config().limit(1 << 20).read_to_vec()?;
+    check_skin_png(&bytes)?;
+    Ok((bytes, variant))
+}
+
+/// The skin URL and arms in a session server profile (its base64 textures).
+pub fn skin_from_session_profile(v: &Value) -> anyhow::Result<(String, Option<Variant>)> {
+    use base64::Engine as _;
+    let prop = v["properties"]
+        .as_array()
+        .and_then(|ps| ps.iter().find(|p| p["name"] == "textures"))
+        .and_then(|p| p["value"].as_str())
+        .context("no textures")?;
+    let raw = base64::engine::general_purpose::STANDARD.decode(prop)?;
+    let t: Value = serde_json::from_slice(&raw)?;
+    let skin = &t["textures"]["SKIN"];
+    let url = skin["url"].as_str().context("no skin")?.to_string();
+    let slim = skin["metadata"]["model"].as_str() == Some("slim");
+    Ok((url, Some(if slim { Variant::Slim } else { Variant::Classic })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skin_links() {
+        use SkinLink::*;
+        assert_eq!(parse_skin_link(" jeb_ "), Ok(Player("jeb_".into())));
+        assert_eq!(
+            parse_skin_link("https://namemc.com/skin/b5b2b4f09c6d4b39"),
+            Ok(Png("https://s.namemc.com/i/b5b2b4f09c6d4b39.png".into()))
+        );
+        assert_eq!(parse_skin_link("https://de.namemc.com/profile/Notch.1?x=1"), Ok(Player("Notch".into())));
+        assert_eq!(
+            parse_skin_link("https://s.namemc.com/i/abc.png"),
+            Ok(Png("https://s.namemc.com/i/abc.png".into()))
+        );
+        assert_eq!(parse_skin_link("http://x.y/s.png"), Ok(Png("http://x.y/s.png".into())));
+        assert!(parse_skin_link("not a link").is_err());
+        assert!(parse_skin_link("https://namemc.com/server/x").is_err());
+    }
+
+    #[test]
+    fn session_profile_textures() {
+        use base64::Engine as _;
+        let t = r#"{"textures":{"SKIN":{"url":"http://textures.minecraft.net/texture/ab","metadata":{"model":"slim"}}}}"#;
+        let v = json!({"properties": [{"name": "textures", "value": base64::engine::general_purpose::STANDARD.encode(t)}]});
+        assert_eq!(
+            skin_from_session_profile(&v).unwrap(),
+            ("http://textures.minecraft.net/texture/ab".to_string(), Some(Variant::Slim))
+        );
+    }
 
     const PROFILE: &str = r#"{
         "id": "069a79f444e94726a5befca90e38aaf5",
