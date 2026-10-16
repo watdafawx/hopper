@@ -97,6 +97,8 @@ h2{font-size:clamp(28px,4vw,42px);line-height:1.12;letter-spacing:-.025em;font-w
 .spot h2{font-size:clamp(26px,3.2vw,36px)}
 .spot ul{list-style:none;margin-top:22px;display:grid;gap:12px}
 .spot li{display:flex;gap:12px;color:#d4d4d8;font-size:15.5px}
+.spot li a{color:var(--acc)}
+.spot li a:hover{text-decoration:underline}
 .spot li::before{content:"";flex:none;width:18px;height:18px;margin-top:3px;border-radius:50%;background:#f9731620 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f97316' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center/11px no-repeat}
 .frame{border-radius:14px;padding:1px;background:linear-gradient(160deg,#3a3a44,#1a1a1f 70%);cursor:zoom-in;transition:transform .25s}
 .frame:hover{transform:scale(1.01)}
@@ -322,7 +324,7 @@ footer a:hover{color:var(--fg)}
       <li>Search, and "errors and warnings only"</li>
       <li>The latest crash's summary up top</li>
       <li>Share a log on mclo.gs with your name taken out</li>
-      <li>Crash help: checks the pack for <a href="https://modrinth.com/mod/crash-assistant" style="color:var(--acc)">Crash Assistant</a>, KostromDan's mod that explains crashes in game, and installs it in one click</li>
+      <li><span>Crash help: checks the pack for <a href="https://modrinth.com/mod/crash-assistant">Crash Assistant</a>, KostromDan's mod that explains crashes in game, and installs it in one click</span></li>
     </ul>
   </div>
   <div class="frame rv"><img src="screenshots/logs.png" width="1782" height="1172" alt="Logs and crashes tab with the latest crash and Crash Assistant installed" loading="lazy"></div>
