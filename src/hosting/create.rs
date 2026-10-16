@@ -471,6 +471,57 @@ pub fn create_from_instance(
     })
 }
 
+/// A server for a modpack that publishes no server files: installs the
+/// client pack (`file`, a version of `pack`) into a throwaway folder beside
+/// the servers, then builds the server from it like
+/// [`create_from_instance`]: the loader's server, the mods that belong on a
+/// server (client-only ones left out and listed in the report) and the
+/// pack's config, defaultconfigs, kubejs and scripts. The pack's Minecraft
+/// and loader replace whatever `opts` holds. The throwaway folder is
+/// removed afterwards, whatever happens. Returns the report and the
+/// options the server was made with.
+pub fn create_from_client_pack(
+    pack: &crate::cf::Mod,
+    file: &crate::cf::File,
+    opts: &CreateOptions,
+    job: &Job,
+) -> anyhow::Result<(CreateReport, CreateOptions)> {
+    anyhow::ensure!(!opts.name.trim().is_empty(), "Give the server a name.");
+    if opts.folder().exists() {
+        bail!("{} already exists.", opts.folder().display());
+    }
+    let stage = opts.servers_root.join(format!(
+        ".hopper-build-{}",
+        Instance::folder_name(&opts.name)
+    ));
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage)?;
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(stage.clone());
+
+    job.detail(format!("Installing {} to read its mods and config", pack.name));
+    let place = crate::browse::Placement {
+        instances_root: &stage,
+        target: None,
+        dest: None,
+    };
+    let (root, _) =
+        crate::browse::install_project(pack, Some(file.clone()), crate::cf::CLASS_MODPACKS, place, job)?;
+    job.check_cancelled()?;
+    let inst = crate::instances::load(&root)
+        .with_context(|| format!("reading the installed pack at {}", root.display()))?;
+    let mut opts = opts.clone();
+    opts.mc_version = inst.game_version.clone();
+    opts.loader = ServerLoader::from_instance(&inst.loader)?;
+    let r = create_from_instance(&inst, &opts, &HashSet::new(), job)?;
+    Ok((r, opts))
+}
+
 fn copy_instance_files(inst: &Instance, root: &Path, mods: &[String], job: &Job) -> anyhow::Result<(usize, usize)> {
     let mods_dir = root.join("mods");
     fs::create_dir_all(&mods_dir)?;
@@ -601,5 +652,45 @@ mod tests {
         println!("server.jar: {len} bytes");
         assert!(len > 1_000_000);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Network, a few hundred MB: a server for Cobblemon Official Modpack
+    /// (Fabric, no server files) built from its client pack, as Browse's
+    /// Build a server makes it. Needs Java 21 in HOPPER_TEST_JAVA. The EULA
+    /// stays unaccepted.
+    /// `cargo test --lib real_server_from_client_pack -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_server_from_client_pack() {
+        let java = std::env::var("HOPPER_TEST_JAVA").expect("HOPPER_TEST_JAVA");
+        let pack = crate::source::get_mod(crate::modrinth::num_id("5FFgwNNP")).unwrap();
+        let file = crate::browse::newest_pack_file(&pack).unwrap();
+        let dir = std::env::temp_dir().join(format!("hopper-clientpack-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let opts = CreateOptions::new("Cobblemon test", &dir, "", ServerLoader::Vanilla, Path::new(&java));
+        let jobs = crate::jobs::Jobs::default();
+        let (r, used) = create_from_client_pack(&pack, &file, &opts, &jobs.start("t")).unwrap();
+        println!("{} {:?}: {} mods, {} files", used.mc_version, used.loader, r.mods_copied, r.files_copied);
+        for (f, why) in &r.skipped {
+            println!("  left out {f}: {why}");
+        }
+        assert!(matches!(used.loader, ServerLoader::Fabric(_)));
+        assert!(r.mods_copied > 10 && !r.skipped.is_empty());
+        assert!(r.root.join("run.bat").is_file() && r.root.join("config").is_dir());
+        let mods: Vec<String> = fs::read_dir(r.root.join("mods"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_lowercase())
+            .collect();
+        assert!(mods.iter().any(|m| m.contains("cobblemon")));
+        assert!(!mods.iter().any(|m| m.contains("sodium")), "{mods:?}");
+        // The throwaway client install is gone.
+        assert!(!fs::read_dir(&dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".hopper-build")));
+        // HOPPER_TEST_KEEP=1 keeps the server to try starting it.
+        if std::env::var_os("HOPPER_TEST_KEEP").is_some() {
+            println!("kept {}", r.root.display());
+        } else {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }

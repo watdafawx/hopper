@@ -1828,6 +1828,50 @@ impl Store {
         });
     }
 
+    /// Makes a server to host here from a modpack that has no server
+    /// files, built from its client pack (see
+    /// `hosting::create_from_client_pack`), then lists it. The mods left
+    /// out as client-only are listed in the task and in
+    /// `left-out-client-mods.txt` in the server folder.
+    pub fn create_hosted_from_client_pack(
+        &self,
+        opts: hopper::hosting::CreateOptions,
+        pack: hopper::cf::Mod,
+        file: hopper::cf::File,
+        done: impl FnOnce(PathBuf) + Send + 'static,
+    ) {
+        let title = format!("Creating {}", opts.name);
+        self.spawn_job(title, move |job| {
+            let (r, used) = hopper::hosting::create_from_client_pack(&pack, &file, &opts, job)?;
+            job.note(format!(
+                "Built from the client pack: {} mods copied, {} left out as client-only.",
+                r.mods_copied,
+                r.skipped.len()
+            ));
+            if !r.skipped.is_empty() {
+                let lines: Vec<String> = r.skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
+                let _ = std::fs::write(
+                    r.root.join("left-out-client-mods.txt"),
+                    format!(
+                        "Hopper left these mods out of the server as client-only. If the server needs one, copy it from the pack into mods.
+
+{}
+",
+                        lines.join("
+")
+                    ),
+                );
+                job.note(format!("Left out: {}", lines.join("; ")));
+            }
+            if let Some(n) = r.note.clone() {
+                job.note(n);
+            }
+            let _ = hosted_meta(&used).save(&r.root);
+            done(r.root);
+            Ok(Msg::ServersChanged)
+        });
+    }
+
     /// Downloads Java `major` (Temurin) into Hopper's runtimes, then looks
     /// for Java again.
     pub fn download_java(&mut self, major: u32) {

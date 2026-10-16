@@ -14,7 +14,8 @@ pub mod script;
 pub mod server_pack;
 
 pub use create::{
-    CreateOptions, CreateReport, ServerLoader, create_from_instance, create_server, java_check,
+    CreateOptions, CreateReport, ServerLoader, create_from_client_pack, create_from_instance,
+    create_server, java_check,
 };
 pub use jvm::{JvmArgs, JvmPreset};
 pub use local_panel::LocalPanel;

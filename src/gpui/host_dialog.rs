@@ -125,11 +125,20 @@ pub fn best_java(store: &Entity<Store>, game_version: &str, cx: &App) -> Option<
         .map(|r| r.install.exe)
 }
 
-/// A pack's official server files found in Browse, and the pack version
-/// they go with.
+/// What a server for a pack from Browse is built from.
+#[derive(Clone)]
+pub enum Build {
+    /// The pack author's server files.
+    ServerFiles(hopper::browse::ServerFiles),
+    /// The client pack (this version of it), for packs without server
+    /// files: client-only mods are left out.
+    ClientPack(Box<hopper::cf::Mod>, Box<hopper::cf::File>),
+}
+
+/// A pack from Browse to host, and the pack version it builds from.
 #[derive(Clone)]
 pub struct PackFiles {
-    pub files: hopper::browse::ServerFiles,
+    pub build: Build,
     /// The pack's name.
     pub name: String,
     /// The pack version's name, e.g. "All the Mods 10-6.0".
@@ -141,7 +150,7 @@ pub struct PackFiles {
 
 impl PackFiles {
     /// From the pack version's file (see `browse::server_files_version`).
-    pub fn new(files: hopper::browse::ServerFiles, name: String, version: &hopper::cf::File) -> Self {
+    pub fn new(build: Build, name: String, version: &hopper::cf::File) -> Self {
         let tags = &version.game_versions;
         let game_version = tags
             .iter()
@@ -155,7 +164,7 @@ impl PackFiles {
             .cloned()
             .unwrap_or_default();
         PackFiles {
-            files,
+            build,
             name,
             version: version.display_name.clone(),
             game_version,
@@ -310,7 +319,17 @@ impl HostForm {
             Err(_) => return false,
         };
         match &this.source {
-            Source::Files(p) => this.store.read(cx).create_hosted_from_files(opts, p.files.clone(), |_| {}),
+            Source::Files(p) => match &p.build {
+                Build::ServerFiles(files) => {
+                    this.store.read(cx).create_hosted_from_files(opts, files.clone(), |_| {})
+                }
+                Build::ClientPack(pack, file) => this.store.read(cx).create_hosted_from_client_pack(
+                    opts,
+                    (**pack).clone(),
+                    (**file).clone(),
+                    |_| {},
+                ),
+            },
             Source::Instance(r) => {
                 let pack = this.server_pack && this.has_pack(cx);
                 this.store.read(cx).create_hosted(opts, Some(r.clone()), pack, |_| {})
@@ -401,11 +420,21 @@ impl Render for HostForm {
         let source_field = match &files {
             Some(p) => Field::new()
                 .label("Start from")
-                .description(format!(
-                    "The pack author's server mods and configs, on {} {}. Often a big download.",
-                    if p.loader.is_empty() { "Minecraft" } else { p.loader.as_str() },
-                    p.game_version
-                ))
+                .description({
+                    let on = format!(
+                        "{} {}",
+                        if p.loader.is_empty() { "Minecraft" } else { p.loader.as_str() },
+                        p.game_version
+                    );
+                    match &p.build {
+                        Build::ServerFiles(_) => format!(
+                            "The pack author's server mods and configs, on {on}. Often a big download."
+                        ),
+                        Build::ClientPack(..) => format!(
+                            "Built from the client pack on {on}, client-only mods left out."
+                        ),
+                    }
+                })
                 .child(
                     h_flex()
                         .gap_2()
@@ -542,10 +571,39 @@ pub fn open_for_files(
             .await;
         handle
             .update(cx, |_, window, cx| match r {
-                Ok(v) => open_files(store, PackFiles::new(files, name, &v), window, cx),
+                Ok(v) => open_files(store, PackFiles::new(Build::ServerFiles(files), name, &v), window, cx),
                 Err(e) => window.push_notification(
                     gpui_kit::component::notification::Notification::error(format!(
                         "Couldn't look up {name}: {e:#}"
+                    )),
+                    cx,
+                ),
+            })
+            .ok();
+    })
+    .detach();
+}
+
+/// Looks up the newest version of `pack` (a modpack without server
+/// files), then opens [`open_files`] to build a server from the client pack.
+pub fn open_for_client_pack(store: Entity<Store>, pack: hopper::cf::Mod, window: &mut Window, cx: &mut App) {
+    let handle = window.window_handle();
+    cx.spawn(async move |cx| {
+        let p2 = pack.clone();
+        let r = cx
+            .background_spawn(async move { hopper::browse::newest_pack_file(&p2) })
+            .await;
+        handle
+            .update(cx, |_, window, cx| match r {
+                Ok(f) => {
+                    let name = pack.name.clone();
+                    let build = Build::ClientPack(Box::new(pack), Box::new(f.clone()));
+                    open_files(store, PackFiles::new(build, name, &f), window, cx)
+                }
+                Err(e) => window.push_notification(
+                    gpui_kit::component::notification::Notification::error(format!(
+                        "Couldn't look up {}: {e:#}",
+                        pack.name
                     )),
                     cx,
                 ),

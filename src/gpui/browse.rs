@@ -625,9 +625,14 @@ impl BrowseView {
 
     /// The "Server files" badge: a menu to download the pack's server zip
     /// or host a server from it on this PC.
-    fn server_badge(&self, m: &cf::Mod, id: ElementId, _: &Context<Self>) -> Option<AnyElement> {
-        let files = self.server_files_of(m)?;
-        let (store, name) = (self.store.clone(), m.name.clone());
+    fn server_badge(&self, m: &cf::Mod, id: ElementId, long: bool, cx: &Context<Self>) -> Option<AnyElement> {
+        if !hopper::browse::is_modpack(m, self.class) {
+            return None;
+        }
+        let Some(files) = self.server_files_of(m) else {
+            return self.build_button(m, id, long, cx);
+        };
+        let (store, name, pack) = (self.store.clone(), m.name.clone(), m.clone());
         Some(
             Button::new(id)
                 .xsmall()
@@ -638,6 +643,7 @@ impl BrowseView {
                 .dropdown_menu(move |menu, _, _| {
                     let (s1, f1, n1) = (store.clone(), files.clone(), name.clone());
                     let (s2, f2, n2) = (store.clone(), files.clone(), name.clone());
+                    let (s3, p3) = (store.clone(), pack.clone());
                     menu.item(
                         PopupMenuItem::new("Download the server pack…")
                             .icon(IconName::Download)
@@ -652,6 +658,38 @@ impl BrowseView {
                                 crate::host_dialog::open_for_files(s2.clone(), f2.clone(), n2.clone(), window, cx)
                             }),
                     )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Build a server from this pack instead…")
+                            .icon(IconName::ServerCog)
+                            .on_click(move |_, window, cx| {
+                                crate::host_dialog::open_for_client_pack(s3.clone(), p3.clone(), window, cx)
+                            }),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// For a pack with no server files (as far as known): build a server
+    /// from its client pack, leaving client-only mods out.
+    fn build_button(&self, m: &cf::Mod, id: ElementId, long: bool, _: &Context<Self>) -> Option<AnyElement> {
+        // A Modrinth pack not looked up yet may still have server files.
+        if m.modrinth.is_some() && !self.server_files.contains_key(&m.id) {
+            return None;
+        }
+        let (store, pack) = (self.store.clone(), m.clone());
+        Some(
+            Button::new(id)
+                .xsmall()
+                .ghost()
+                .icon(IconName::ServerCog)
+                .label(if long { "Build a server from this pack" } else { "Build a server" })
+                .tooltip("No official server files: build a server on this PC from this pack, leaving client-only mods out")
+                .on_click(move |_, window, cx| {
+                    // Not a click on the card: the page stays as it is.
+                    cx.stop_propagation();
+                    crate::host_dialog::open_for_client_pack(store.clone(), pack.clone(), window, cx)
                 })
                 .into_any_element(),
         )
@@ -1628,7 +1666,7 @@ impl BrowseView {
                 h_flex()
                     .flex_none()
                     .gap_1()
-                    .children(self.server_badge(m, id("server"), cx))
+                    .children(self.server_badge(m, id("server"), false, cx))
                     .child(action)
                     .child(self.bookmark_button(m, id("bookmark"), cx)),
             )
@@ -1885,7 +1923,7 @@ impl BrowseView {
                                     .label(format!("Open on {site}"))
                                     .on_click(move |_, _, cx| cx.open_url(&page)),
                             )
-                            .children(self.server_badge(m, "detail-server".into(), cx))
+                            .children(self.server_badge(m, "detail-server".into(), true, cx))
                             .children(self.server_files_of(m).map(|files| {
                                 let (store, name) = (self.store.clone(), m.name.clone());
                                 Button::new("detail-host")

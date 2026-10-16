@@ -274,6 +274,21 @@ pub fn server_files_version(s: &ServerFiles) -> anyhow::Result<cf::File> {
     }
 }
 
+/// The pack file an install of modpack `m` picks: CurseForge's main
+/// file, else the newest release (the newest file when none is a release).
+pub fn newest_pack_file(m: &cf::Mod) -> anyhow::Result<cf::File> {
+    if m.modrinth.is_none() && m.main_file_id != 0 {
+        return cf::file(m.id, m.main_file_id);
+    }
+    let files = crate::source::files(m.id, "", Loader::Any)?;
+    files
+        .iter()
+        .find(|f| f.release_type == 1)
+        .or(files.first())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("{} has no files", m.name))
+}
+
 /// Saves the server zip to `dest`.
 pub fn download_server_files(s: &ServerFiles, dest: &Path, job: &Job) -> anyhow::Result<()> {
     let f = server_zip(s)?;

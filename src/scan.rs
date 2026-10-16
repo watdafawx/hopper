@@ -174,9 +174,13 @@ fn read_entry(zip: &mut zip::ZipArchive<fs::File>, name: &str) -> Option<String>
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ModsToml {
     #[serde(default)]
     mods: Vec<ModsTomlEntry>,
+    /// Forge 1.20+: the mod only runs on the client.
+    #[serde(default)]
+    client_side_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -188,15 +192,22 @@ struct ModsTomlEntry {
     display_name: String,
     #[serde(default)]
     version: String,
+    /// "IGNORE_ALL_VERSION": servers don't need it (a client-only mod).
+    #[serde(default)]
+    display_test: String,
 }
 
 fn read_mods_toml(text: &str, m: &mut ModInfo) {
     let Ok(data) = toml::from_str::<ModsToml>(text) else {
         return;
     };
+    let client_only = data.client_side_only;
     let Some(first) = data.mods.into_iter().next() else {
         return;
     };
+    if client_only || first.display_test.eq_ignore_ascii_case("IGNORE_ALL_VERSION") {
+        m.side = "client".into();
+    }
     m.mod_id = first.mod_id;
     m.mod_name = first.display_name;
     m.version = first.version;
@@ -377,6 +388,31 @@ pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mods_toml_marks_client_only_mods() {
+        let read = |t: &str| {
+            let mut m = ModInfo::default();
+            read_mods_toml(t, &mut m);
+            m
+        };
+        let m = read("modLoader=\"javafml\"
+[[mods]]
+modId=\"zoomify\"
+displayTest=\"IGNORE_ALL_VERSION\"
+");
+        assert_eq!((m.mod_id.as_str(), m.side.as_str()), ("zoomify", "client"));
+        let m = read("clientSideOnly=true
+[[mods]]
+modId=\"oculus\"
+");
+        assert_eq!(m.side, "client");
+        let m = read("[[mods]]
+modId=\"create\"
+displayTest=\"MATCH_VERSION\"
+");
+        assert_eq!(m.side, "");
+    }
     use std::cmp::Ordering;
 
     #[test]

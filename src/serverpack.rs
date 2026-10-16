@@ -107,7 +107,7 @@ pub fn annotate(
             }
         },
         Some(_) => {
-            out.note = Some("This pack has no server pack; using CurseForge's client tags.".into());
+            out.note = Some("This pack has no server pack; using the mods' client-only tags.".into());
             None
         }
         None => None,
@@ -151,7 +151,11 @@ pub fn annotate(
             Some(mt) if !mt.has(&m.file_name, m.project_id) => {
                 Some("The pack author left this out of the server pack".into())
             }
-            None if a.env == "client" => Some("Tagged client-only on CurseForge".into()),
+            None if a.env == "client" => Some(if a.mr_project.is_empty() {
+                "Tagged client-only on CurseForge".into()
+            } else {
+                "Client-only on Modrinth".into()
+            }),
             _ => None,
         };
         out.flagged += m.wont_sync.is_some() as usize;
