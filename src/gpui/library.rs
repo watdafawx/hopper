@@ -166,8 +166,6 @@ const SIDEBAR_COLLAPSE: f32 = 10.0;
 const RAIL: f32 = 4.5;
 
 pub struct LibraryView {
-    /// The tasks button at the sidebar's foot (set by the app).
-    pub(crate) tasks: Option<Entity<crate::tasks::TasksButton>>,
     /// The list's width while its edge is being dragged.
     drag_width: Option<f32>,
     /// Instance groups folded shut.
@@ -314,7 +312,6 @@ impl LibraryView {
             InstTab::Overview
         };
         let mut view = Self {
-            tasks: None,
             drag_width: None,
             folded: Default::default(),
             store,
@@ -809,7 +806,6 @@ impl LibraryView {
                     .children(items)
                     .overflow_y_scrollbar(),
             )
-            .children(self.tasks.clone().map(|t| div().pt_2().pb_3().child(t)))
     }
 
     fn full_sidebar(&self, width: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -908,15 +904,6 @@ impl LibraryView {
                     ),
             )
             .child(self.instance_list(cx))
-            .children(self.tasks.clone().map(|t| {
-                h_flex()
-                    .flex_none()
-                    .px_3()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(cx.theme().sidebar_border)
-                    .child(t)
-            }))
     }
 
     fn instance_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

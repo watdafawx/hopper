@@ -1,6 +1,6 @@
-//! The tasks button at the foot of the sidebar (in the title bar on other
-//! pages): a badge while jobs run, a popover listing every job, and a file
-//! that flies into it when a job starts.
+//! The tasks button in the title bar, beside the account, on every page: a
+//! badge while jobs run, a popover listing every job, and a file that flies
+//! into it when a job starts.
 
 use crate::store::Store;
 use gpui_kit::assets::IconName;
@@ -313,19 +313,16 @@ impl Render for TasksButton {
         let tip: SharedString = match (running.len(), attention) {
             (0, 0) => "Tasks".into(),
             (0, n) => format!("{n} task{} need{} a look", if n == 1 { "" } else { "s" }, if n == 1 { "s" } else { "" }).into(),
-            (n, _) => format!(
-                "{n} task{} running: {}",
-                if n == 1 { "" } else { "s" },
-                running[running.len() - 1].title
-            )
-            .into(),
+            // Short: a long tooltip spills over the page below the bar.
+            (n, _) => format!("{n} task{} running", if n == 1 { "" } else { "s" }).into(),
         };
         let bounds = self.bounds.clone();
         let (primary, open) = (theme.primary, self.open);
         div()
             .id("tasks-button")
             .relative()
-            .size(rems(2.25))
+            // Fits the title bar with its badge, which stays inside.
+            .size(rems(1.75))
             .flex_none()
             .flex()
             .items_center()
@@ -344,14 +341,14 @@ impl Render for TasksButton {
                     .absolute()
                     .size_full(),
             )
-            .child(Icon::new(IconName::Download))
+            .child(Icon::new(IconName::Download).small())
             .when_some(progress, |d, p| {
                 d.child(
                     div()
                         .absolute()
-                        .bottom(px(3.))
-                        .left(rems(0.5))
-                        .right(rems(0.5))
+                        .bottom(px(2.))
+                        .left(rems(0.375))
+                        .right(rems(0.375))
                         .h(px(2.))
                         .rounded_full()
                         .bg(theme.muted)
@@ -370,10 +367,10 @@ impl Render for TasksButton {
                 d.child(
                     div()
                         .absolute()
-                        .top(px(-3.))
-                        .right(px(-3.))
-                        .min_w(px(15.))
-                        .h(px(15.))
+                        .top(px(0.))
+                        .right(px(-5.))
+                        .min_w(px(13.))
+                        .h(px(13.))
                         .px(px(3.))
                         .rounded_full()
                         .bg(bg)

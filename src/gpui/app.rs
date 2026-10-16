@@ -141,7 +141,6 @@ impl AppView {
         let sync = cx.new(|cx| SyncPage::new(store.clone(), window, cx));
         let settings = cx.new(|cx| SettingsPage::new(store.clone(), window, cx));
         let tasks = cx.new(|cx| crate::tasks::TasksButton::new(store.clone(), cx));
-        library.update(cx, |l, _| l.tasks = Some(tasks.clone()));
         let subs = vec![
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.observe(&tasks, |_, _, cx| cx.notify()),
@@ -835,8 +834,8 @@ impl AppView {
                     )
                 })
                 .children(self.update_button(cx))
-                // The Library has it at the foot of its sidebar.
-                .when(self.page != Page::Library, |r| r.child(self.tasks.clone()))
+                // One place on every page, beside the account.
+                .child(self.tasks.clone())
                 .children(account)
                 .child(
                     Button::new("open-palette")
