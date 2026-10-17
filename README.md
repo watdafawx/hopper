@@ -26,7 +26,7 @@ In the open: most of Hopper's code is written with help from AI, Anthropic's Cla
 - **Hosting**: run servers on your own PC: from a pack's official server pack or the instance's mods, with Java picked or downloaded for you, a server.properties editor, JVM presets, daily restarts with warnings and crash recovery. A backup mod's backups (SimpleBackups, FTB Backups, Advanced Backups…) are listed and restorable.
 - **Server sync**: compare a server with its pack and push or pull mods and configs, with backups and undo.
 - **Logs & crashes**: the game's live log, debug.log and crash reports, with search, an errors-only filter and mclo.gs sharing. Crash help checks the pack for [Crash Assistant](https://modrinth.com/mod/crash-assistant), KostromDan's mod that explains crashes in game, and installs it in one click.
-- **Accounts**: several Microsoft accounts; change your skin (upload, URL, recent skins), cape and name.
+- **Accounts**: several Microsoft accounts; try skins on an animated 3D model (walk, run, swim, dance and more), then change your skin (file, link or player name), cape and name.
 - **Ctrl+K**: jump to any instance, tab, server or mod, or run an action.
 - **Ctrl+,**: Settings, with a search over every setting (Ctrl+F there too).
 - **Peers**: sync an instance with a friend's PC on your network.
@@ -36,10 +36,12 @@ In the open: most of Hopper's code is written with help from AI, Anthropic's Cla
 
 | | |
 |---|---|
-| ![Mods, with updates shown old → new](docs/screenshots/mods.png) | ![Ctrl+K command palette](docs/screenshots/palette.png) |
-| Mods, with updates shown old → new | Ctrl+K: jump anywhere or run an action |
-| ![Browse](docs/screenshots/browse.png) | ![Accounts: skin, cape and name](docs/screenshots/accounts.png) |
-| Browse CurseForge and Modrinth | Accounts: skin, cape and name |
+| ![Mods, with updates shown old → new](docs/screenshots/mods.png) | ![Versions and changelogs](docs/screenshots/changelogs.png) |
+| Mods, with updates shown old → new | Every changelog since your version |
+| ![Added by me](docs/screenshots/added-by-me.png) | ![3D skin preview](docs/screenshots/accounts.png) |
+| Added by me: the mods you added, plus duplicate and missing-dependency warnings | Accounts: an animated 3D skin preview |
+| ![Browse](docs/screenshots/browse.png) | ![Ctrl+K command palette](docs/screenshots/palette.png) |
+| Browse CurseForge and Modrinth | Ctrl+K: jump anywhere or run an action |
 | ![A running server through Crafty](docs/screenshots/servers.png) | ![Server sync](docs/screenshots/sync.png) |
 | A running server through its panel | Server sync: a server against its pack |
 | ![Logs & crashes](docs/screenshots/logs.png) | |
