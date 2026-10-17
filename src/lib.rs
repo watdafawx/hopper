@@ -60,6 +60,7 @@ pub mod sharecode;
 pub mod setup;
 pub mod shortcut;
 pub mod defaultskins;
+pub mod randomskins;
 pub mod skin3d;
 pub mod skinhistory;
 pub mod skinrender;

@@ -566,6 +566,13 @@ pub struct AccountsView {
     viewer: Entity<SkinViewer>,
     /// The account list's width while its edge is dragged, in rem.
     drag_width: Option<f32>,
+    /// Skins to browse: found so far, the names in shuffled order, and how
+    /// far down that order the lookups have got.
+    discover: Vec<(hopper::randomskins::Found, PathBuf)>,
+    discover_order: Vec<&'static str>,
+    discover_next: usize,
+    discover_loading: bool,
+    discover_error: Option<String>,
     show_url: bool,
     name_input: Entity<InputState>,
     url_input: Entity<InputState>,
@@ -621,6 +628,11 @@ impl AccountsView {
             default_slim: false,
             viewer,
             drag_width: None,
+            discover: Vec::new(),
+            discover_order: Vec::new(),
+            discover_next: 0,
+            discover_loading: false,
+            discover_error: None,
             show_url: false,
             name_input,
             url_input,
@@ -630,7 +642,64 @@ impl AccountsView {
         };
         view.load(cx);
         view.load_defaults(cx);
+        view.shuffle_discover(cx);
         view
+    }
+
+    /// A new order of players to browse, from the first page.
+    fn shuffle_discover(&mut self, cx: &mut Context<Self>) {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_nanos() as u64);
+        self.discover_order = hopper::randomskins::shuffled(seed);
+        self.discover.clear();
+        self.discover_next = 0;
+        self.discover_error = None;
+        self.discover_loading = false;
+        self.more_discover(cx);
+    }
+
+    /// Looks up the next page of players' skins.
+    fn more_discover(&mut self, cx: &mut Context<Self>) {
+        const PAGE: usize = 12;
+        if self.discover_loading || self.discover_next >= self.discover_order.len() {
+            return;
+        }
+        let end = (self.discover_next + PAGE).min(self.discover_order.len());
+        let names: Vec<&'static str> = self.discover_order[self.discover_next..end].to_vec();
+        let order = self.discover_order.clone();
+        self.discover_loading = true;
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { hopper::randomskins::resolve(&names) })
+                .await;
+            this.update(cx, |this, cx| {
+                // A shuffle since then started over.
+                if this.discover_order != order {
+                    return;
+                }
+                this.discover_loading = false;
+                match r {
+                    Ok(found) => {
+                        this.discover.extend(found);
+                        this.discover_next = end;
+                        this.discover_error = None;
+                    }
+                    Err(e) => this.discover_error = Some(format!("{e:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn preview_found(&mut self, f: hopper::randomskins::Found, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let label = format!("{}'s skin", f.name);
+        self.load_pending("Reading the skin", label, window, cx, move || {
+            Ok((std::fs::read(&path)?, Some(f.variant), Some(path)))
+        });
     }
 
     /// Mojang's default skins: from the cache, else from the game jar.
@@ -1661,7 +1730,15 @@ impl AccountsView {
                         r.child(
                             h_flex()
                                 .gap_2()
-                                .child(div().flex_1().child(Input::new(&self.url_input).small()))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        // A single-line input passes Enter on, and the
+                                        // dialog takes it as OK and closes; Enter here
+                                        // previews the link instead (PressEnter).
+                                        .on_action(|_: &gpui_kit::component::dialog::Confirm, _, _| {})
+                                        .child(Input::new(&self.url_input).small()),
+                                )
                                 .child(
                                     Button::new("apply-url")
                                         .small()
@@ -1681,11 +1758,13 @@ impl AccountsView {
             )
             .children(compare);
         let defaults = self.default_skins(cx);
+        let discover = self.discover_skins(cx);
         let recent = self.recent_skins(window, cx);
         v_flex()
             .gap_5()
             .child(h_flex().gap_5().items_start().child(preview).child(controls))
             .child(defaults)
+            .child(discover)
             .child(recent)
             .into_any_element()
     }
@@ -1807,6 +1886,83 @@ impl AccountsView {
                     ),
             )
             .child(body)
+    }
+
+    fn discover_skins(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let busy = self.busy.is_some();
+        let pending = self.pending.as_ref().map(|p| p.path.clone());
+        let mut tiles: Vec<AnyElement> = self
+            .discover
+            .iter()
+            .map(|(f, path)| {
+                let drawn = skins::image(path, View::Body { slim: f.variant.is_slim(), back: false, cape: None });
+                let previewing = pending.as_deref() == Some(path.as_path());
+                let (pick, file) = (f.clone(), path.clone());
+                self.skin_tile(
+                    SharedString::from(format!("discover:{}", f.name)),
+                    drawn,
+                    Some(f.name.clone()),
+                    false,
+                    previewing,
+                    cx,
+                )
+                .when(!previewing && !busy, |d| {
+                    d.on_click(cx.listener(move |this, _, window, cx| {
+                        this.preview_found(pick.clone(), file.clone(), window, cx)
+                    }))
+                })
+                .into_any_element()
+            })
+            .collect();
+        let more_left = self.discover_next < self.discover_order.len();
+        if self.discover_loading {
+            tiles.push(
+                v_flex()
+                    .w(rems(4.5))
+                    .h(rems(7.75))
+                    .items_center()
+                    .justify_center()
+                    .child(Spinner::new())
+                    .into_any_element(),
+            );
+        } else if more_left {
+            tiles.push(
+                v_flex()
+                    .w(rems(4.5))
+                    .h(rems(7.75))
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Button::new("discover-more")
+                            .small()
+                            .outline()
+                            .label("More")
+                            .on_click(cx.listener(|this, _, _, cx| this.more_discover(cx))),
+                    )
+                    .into_any_element(),
+            );
+        }
+        v_flex()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(section_title("Discover skins", cx))
+                    .child(
+                        Button::new("discover-shuffle")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Shuffle)
+                            .tooltip("Other players")
+                            .disabled(self.discover_loading)
+                            .on_click(cx.listener(|this, _, _, cx| this.shuffle_discover(cx))),
+                    )
+                    .child(widgets::caption("What well-known players wear now, from Mojang.", cx)),
+            )
+            .when_some(self.discover_error.clone(), |r, e| {
+                r.child(widgets::caption(format!("Couldn't look them up: {e}"), cx))
+            })
+            .child(h_flex().gap_2().flex_wrap().children(tiles))
     }
 
     fn recent_skins(&self, _: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
