@@ -47,6 +47,8 @@ pub struct SyncPanel {
     history: Entity<crate::configs::HistoryPanel>,
     /// Start / stop / restart through the server's panel, beside the header.
     control: Entity<crate::server_control::ServerControl>,
+    /// Inside an instance, whose header already shows the pack.
+    in_instance: bool,
     server: Option<PathBuf>,
     diff: Option<Result<Vec<DiffEntry>, String>>,
     note: Option<Annotation>,
@@ -111,6 +113,7 @@ impl SyncPanel {
             configs,
             history,
             control,
+            in_instance: false,
             server: None,
             diff: None,
             note: None,
@@ -128,6 +131,10 @@ impl SyncPanel {
             _task: None,
             _subscriptions: subs,
         }
+    }
+
+    pub fn set_in_instance(&mut self, on: bool) {
+        self.in_instance = on;
     }
 
     pub fn set_peek(&mut self, peek: Entity<crate::browse::BrowseView>) {
@@ -258,6 +265,10 @@ impl SyncPanel {
     /// starting and doesn't answer pings yet).
     fn online(&self, cx: &App) -> bool {
         let Some(r) = self.server.as_ref() else { return false };
+        // The panel's state this view polls is the freshest.
+        if let Some(up) = self.control.read(cx).running() {
+            return up;
+        }
         let store = self.store.read(cx);
         store.status(r).is_some_and(|s| matches!(s, Status::Online { .. }))
             || store.panel_stats(r).is_some_and(|p| p.running || p.starting)
@@ -359,11 +370,8 @@ impl SyncPanel {
             .read(cx)
             .configured(cx)
             .then(|| self.control.update(cx, |c, cx| c.controls(cx)));
-        let stop_where = if controls.is_some() {
-            "stop it here".to_string()
-        } else {
-            "stop it in Crafty/MCSS".to_string()
-        };
+        let stop_where = if controls.is_some() { "stop it here" } else { "stop it in Crafty/MCSS" };
+        let in_instance = self.in_instance;
         let store = self.store.read(cx);
         let theme = cx.theme();
         let icon = inst
@@ -372,52 +380,56 @@ impl SyncPanel {
             .and_then(|u| store.image(u))
             .map(Path::to_path_buf);
         let online = self.online(cx);
-        let server_nf = self.server_nf.clone();
         let pack_nf = inst.loader.strip_prefix("neoforge-").map(str::to_string);
-        let loader_line: Option<AnyElement> = match (&pack_nf, &server_nf) {
-            (Some(p), Some(sv)) if p != sv => Some(
-                h_flex()
-                    .gap_1p5()
-                    .text_sm()
-                    .text_color(theme.warning)
-                    .child(Icon::new(IconName::TriangleAlert).small())
-                    .child(format!("Server NeoForge {sv}, pack {p}"))
-                    .into_any_element(),
-            ),
-            (Some(p), Some(_)) => {
-                Some(widgets::caption(format!("NeoForge {p} on both"), cx).into_any_element())
-            }
+        let nf_mismatch = match (&pack_nf, &self.server_nf) {
+            (Some(p), Some(sv)) if p != sv => Some(format!("Server NeoForge {sv}, pack {p}")),
             _ => None,
         };
-        let note = self.note.as_ref().and_then(|a| match (a.server_pack_jars, &a.note) {
-            (Some(n), _) => Some(format!(
-                "Server pack read: {n} mods. {} pack mods the author keeps off servers default to skip.",
-                a.flagged
+        // One line of facts: loader, then what the server pack said.
+        let mut facts = Vec::new();
+        if nf_mismatch.is_none()
+            && let (Some(p), Some(_)) = (&pack_nf, &self.server_nf)
+        {
+            facts.push(format!("NeoForge {p} on both"));
+        }
+        match self.note.as_ref().map(|a| (a.server_pack_jars, &a.note, a.flagged)) {
+            Some((Some(n), _, f)) => facts.push(format!(
+                "server pack lists {n} mods · {f} the author keeps off servers are skipped by default"
             )),
-            (None, Some(note)) => Some(format!("{note} {} mods flagged.", a.flagged)),
-            (None, None) => None,
+            Some((None, Some(note), f)) => facts.push(format!("{note} {f} mods flagged.")),
+            _ => {}
+        }
+        let facts = (!facts.is_empty()).then(|| {
+            let mut t = facts.join(" · ");
+            if let Some(c) = t.get(0..1) {
+                t.replace_range(0..1, &c.to_uppercase());
+            }
+            t
         });
+        let title = h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_2()
+            .text_lg()
+            .font_semibold()
+            .when(!in_instance, |r| {
+                r.child(div().truncate().child(inst.name.clone())).child(
+                    Icon::new(IconName::ArrowRight)
+                        .small()
+                        .text_color(theme.muted_foreground),
+                )
+            })
+            .when(in_instance, |r| {
+                r.child(Icon::new(IconName::Server).text_color(theme.muted_foreground))
+            })
+            .child(div().truncate().child(server.name.clone()));
         v_flex()
-            .gap_3()
+            .gap_2()
             .child(
                 h_flex()
                     .gap_3()
-                    .child(widgets::thumb(icon.as_deref(), rems(2.5), cx))
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_2()
-                            .text_lg()
-                            .font_semibold()
-                            .child(div().truncate().child(inst.name.clone()))
-                            .child(
-                                Icon::new(IconName::ArrowRight)
-                                    .small()
-                                    .text_color(theme.muted_foreground),
-                            )
-                            .child(div().truncate().child(server.name.clone())),
-                    )
+                    .when(!in_instance, |r| r.child(widgets::thumb(icon.as_deref(), rems(2.5), cx)))
+                    .child(title)
                     .children(controls)
                     .child(
                         Button::new("update-server")
@@ -439,8 +451,17 @@ impl SyncPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
                     ),
             )
-            .children(loader_line)
-            .when_some(note, |r, n| r.child(widgets::caption(n, cx)))
+            .when_some(nf_mismatch, |r, t| {
+                r.child(
+                    h_flex()
+                        .gap_1p5()
+                        .text_sm()
+                        .text_color(theme.warning)
+                        .child(Icon::new(IconName::TriangleAlert).small())
+                        .child(t),
+                )
+            })
+            .when_some(facts, |r, t| r.child(widgets::caption(t, cx)))
             .when(online, |r| {
                 r.child(
                     h_flex()

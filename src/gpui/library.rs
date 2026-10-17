@@ -260,7 +260,11 @@ impl LibraryView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search instances"));
         let addons = cx.new(|cx| AddonsView::new(store.clone(), window, cx));
-        let server = cx.new(|cx| SyncPanel::new(store.clone(), window, cx));
+        let server = cx.new(|cx| {
+            let mut p = SyncPanel::new(store.clone(), window, cx);
+            p.set_in_instance(true);
+            p
+        });
         let worlds = cx.new(|cx| WorldsView::new(store.clone(), window, cx));
         let datapacks = cx.new(|cx| crate::datapacks::DatapacksView::new(store.clone(), window, cx));
         let shots = cx.new(|cx| ScreenshotsView::new(store.clone(), window, cx));

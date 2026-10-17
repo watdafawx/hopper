@@ -549,6 +549,14 @@ impl ServerControl {
             .into_any_element()
     }
 
+    /// Up or starting, by the panel's last poll; None before one came back.
+    pub fn running(&self) -> Option<bool> {
+        match &self.stats {
+            Some(Ok(s)) if self.id.is_some() => Some(s.running || s.starting),
+            _ => None,
+        }
+    }
+
     /// Live numbers for the Overview: (label, value).
     pub fn live(&self) -> Vec<(&'static str, String)> {
         let Some(Ok(s)) = &self.stats else {
