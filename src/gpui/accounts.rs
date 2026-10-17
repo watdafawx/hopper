@@ -62,7 +62,8 @@ enum Op {
     Profile,
     NameInfo,
     Available(String),
-    SkinUrl(Variant, String),
+    /// The worn skin (its texture URL) again, with other arms.
+    Rearm(Variant, String),
     Upload(Variant, Vec<u8>),
     Reset,
     Cape(Option<String>),
@@ -122,7 +123,13 @@ fn live_run(op: Op) -> anyhow::Result<Done> {
         Op::Profile => Done::Profile(api.profile()?, None),
         Op::NameInfo => Done::NameInfo(api.name_change()?),
         Op::Available(n) => Done::Available(n.clone(), api.name_available(&n)?),
-        Op::SkinUrl(v, url) => Done::Profile(api.set_skin_url(v, &url)?, None),
+        // Mojang refuses its own texture URLs as a skin URL (403), so the
+        // PNG goes back up as a file with the new arms.
+        Op::Rearm(v, url) => {
+            let path = hopper::imgcache::fetch(&url).context("Couldn't download your current skin")?;
+            let png = std::fs::read(path)?;
+            Done::Profile(api.upload_skin(v, &png)?, None)
+        }
         Op::Upload(v, png) => Done::Profile(api.upload_skin(v, &png)?, None),
         Op::Reset => Done::Profile(api.reset_skin()?, None),
         Op::Cape(Some(id)) => Done::Profile(api.show_cape(&id)?, None),
@@ -391,7 +398,7 @@ fn mock_run(op: Op) -> anyhow::Result<Done> {
             };
             return Ok(Done::Available(n, s));
         }
-        Op::SkinUrl(v, url) => {
+        Op::Rearm(v, url) => {
             // The mock can't download; a local texture keeps its picture.
             let local = std::path::Path::new(&url).is_file();
             let url = if local {
@@ -937,7 +944,7 @@ impl AccountsView {
         }
         self.change(
             "Changing the arms",
-            Op::SkinUrl(v, skin.url),
+            Op::Rearm(v, skin.url),
             format!("Your skin now has {} arms.", v.label().to_lowercase()),
             window,
             cx,

@@ -259,7 +259,10 @@ fn error_sentence(status: u16, body: &Value, doing: &str) -> String {
         (403, _) if doing.contains("name") => {
             "Mojang doesn't allow a name change yet (one every 30 days)".to_string()
         }
-        (403, _) => "Mojang refused it for this account".to_string(),
+        (403, _) if !message.is_empty() => {
+            format!("Mojang refused it (403: {})", message.trim_end_matches('.'))
+        }
+        (403, _) => "Mojang refused it for this account (403)".to_string(),
         (404, _) => "this account doesn't own Minecraft: Java Edition".to_string(),
         (429, _) => "Mojang is rate limiting; wait a minute and try again".to_string(),
         (400, _) if !message.is_empty() => format!("Mojang said: {}", message.trim_end_matches('.')),
@@ -313,6 +316,7 @@ impl Api {
         let text = r.body_mut().read_to_string().unwrap_or_default();
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if !(200..300).contains(&status) {
+            log::warn!("Mojang API, {doing}: {status} {}", text.chars().take(500).collect::<String>());
             bail!(error_sentence(status, &v, doing));
         }
         Ok(v)
@@ -637,6 +641,8 @@ mod tests {
         assert_eq!(e, "Couldn't upload your skin: Mojang is rate limiting; wait a minute and try again.");
         let e = error_sentence(403, &Value::Null, "change your name");
         assert!(e.contains("30 days"));
+        let e = error_sentence(403, &json!({"errorMessage":"Forbidden."}), "change your skin");
+        assert_eq!(e, "Couldn't change your skin: Mojang refused it (403: Forbidden).");
         let e = error_sentence(400, &json!({"errorMessage":"Invalid skin."}), "upload your skin");
         assert_eq!(e, "Couldn't upload your skin: Mojang said: Invalid skin.");
         assert!(error_sentence(503, &Value::Null, "x").ends_with("try again later."));

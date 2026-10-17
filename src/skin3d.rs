@@ -490,7 +490,6 @@ fn pose_rig(pose: Pose, t: f32) -> Rig {
         r.l_leg[0] = (p + PI).cos() * 1.4 * amount;
         r.r_arm[0] += (p + PI).cos() * amount;
         r.l_arm[0] += p.cos() * amount;
-        r.lift = (p * 2.0).cos().abs() * amount * 0.6;
         r.cape = cape + (p * 2.0).sin() * 0.08;
     };
     match pose {
@@ -549,7 +548,7 @@ fn pose_rig(pose: Pose, t: f32) -> Rig {
             r.l_leg[0] = -0.08;
             r.wings = [0.35 + (t * 1.5).sin() * 0.04, -1.45 + (t * 1.5).sin() * 0.05];
             r.cape = 1.2;
-            r.lift = 4. + (t * 0.9).sin() * 1.5;
+            r.lift = 4.;
             r.center = [0., 15., 0.];
             r.fit = 0.62;
         }
@@ -1400,6 +1399,10 @@ mod tests {
         c.drag(0.0, 10_000.0);
         assert_eq!(c.pitch, Camera::MAX_PITCH);
         assert!((yaw_delta(0.1, TAU - 0.1) + 0.2).abs() < 1e-4);
+        // Walking and running swing the limbs; the body stays level.
+        for pose in [Pose::Walk, Pose::Run, Pose::CrouchWalk] {
+            assert!((0..50).all(|i| rig(pose, i as f32 * 0.07).lift == 0.0), "{pose:?}");
+        }
         assert_eq!(Pose::default(), Pose::Walk);
         assert_eq!(Pose::Cycle.at(0.5), Pose::Walk);
         assert_eq!(Pose::Cycle.at(4.5), Pose::Idle);
