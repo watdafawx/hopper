@@ -748,6 +748,68 @@ pub fn sides_of(paths: &[std::path::PathBuf]) -> HashMap<String, String> {
         .collect()
 }
 
+/// Sides for CurseForge mods whose jar Modrinth doesn't have: the Modrinth
+/// project with the same slug, when its title also matches the mod's name
+/// (a shared slug alone can be a different mod). Takes (slug, name) pairs;
+/// returns slug -> "client" | "server" | "both". Cached on disk, misses too.
+pub fn sides_by_slug(mods: &[(String, String)]) -> HashMap<String, String> {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+    let file = directories::ProjectDirs::from("", "", "Hopper")
+        .map(|d| d.cache_dir().join("mrslugsides.json"));
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = g.get_or_insert_with(|| {
+        file.as_ref()
+            .and_then(|f| std::fs::read(f).ok())
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    });
+    let key = |slug: &str, name: &str| format!("{slug}|{name}");
+    let missing: Vec<&(String, String)> = mods
+        .iter()
+        .filter(|(s, n)| !s.is_empty() && !cache.contains_key(&key(s, n)))
+        .collect();
+    let slugs: Vec<String> = missing.iter().map(|(s, _)| s.clone()).collect();
+    if !slugs.is_empty()
+        && let Ok(found) = projects(&slugs)
+    {
+        for (slug, name) in &missing {
+            let side = found
+                .iter()
+                .find(|p| p.slug.eq_ignore_ascii_case(slug) && same_title(&p.title, name))
+                .map_or("", |p| env(&p.client_side, &p.server_side));
+            cache.insert(key(slug, name), side.to_string());
+        }
+        if let Some(f) = &file
+            && let Ok(b) = serde_json::to_vec(&*cache)
+        {
+            let _ = std::fs::write(f, b);
+        }
+    }
+    mods.iter()
+        .filter_map(|(s, n)| {
+            cache
+                .get(&key(s, n))
+                .filter(|v| !v.is_empty())
+                .map(|v| (s.clone(), v.clone()))
+        })
+        .collect()
+}
+
+/// "Just Enough Items (JEI)" ~ "Just Enough Items": equal or one leads the
+/// other, ignoring case and punctuation.
+fn same_title(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let (a, b) = (norm(a), norm(b));
+    let (short, long) = if a.len() <= b.len() { (&a, &b) } else { (&b, &a) };
+    short.len() >= 4 && long.starts_with(short.as_str()) || (!a.is_empty() && a == b)
+}
+
 pub fn sha1(bytes: &[u8]) -> String {
     sha1_smol::Sha1::from(bytes).digest().to_string()
 }
@@ -952,6 +1014,14 @@ fn real_modrinth_end_to_end() {
 #[cfg(test)]
 mod side_tests {
     use super::*;
+
+    #[test]
+    fn titles_match_loosely() {
+        assert!(same_title("Just Enough Items (JEI)", "Just Enough Items"));
+        assert!(same_title("AppleSkin", "appleskin"));
+        assert!(!same_title("JEI", "Just Enough Items"));
+        assert!(!same_title("Waystones", "Fabric Waystones Port"));
+    }
 
     #[test]
     #[ignore = "network, reads the real pack"]

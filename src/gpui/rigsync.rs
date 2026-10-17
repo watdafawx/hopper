@@ -986,7 +986,7 @@ impl SyncPanel {
                             .xsmall()
                             .label("Send anyway")
                             .checked(anyway.contains(&pid))
-                            .tooltip("Always send this pack mod to the server")
+                            .tooltip("Always send this mod to the server")
                             .on_change(cx.listener(move |this, v: &bool, _, cx| {
                                 let on = *v;
                                 this.store.update(cx, |s, cx| {

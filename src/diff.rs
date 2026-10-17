@@ -117,7 +117,7 @@ fn skip_reason(m: &ModInfo) -> Option<String> {
         return Some(r.clone());
     }
     if m.side == "client" {
-        return Some("Client-only (the mod or Modrinth says so)".into());
+        return Some("Client-only (the mod, CurseForge or Modrinth says so)".into());
     }
     let f = m.file_name.to_lowercase();
     KNOWN_CLIENT_ONLY

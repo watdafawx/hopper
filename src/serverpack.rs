@@ -72,6 +72,13 @@ pub fn jar_stem(file_name: &str) -> String {
     parts[..end].join("-")
 }
 
+/// "jei" from "https://www.curseforge.com/minecraft/mc-mods/jei".
+fn cf_slug(page: &str) -> Option<&str> {
+    let rest = page.split_once("curseforge.com/minecraft/")?.1;
+    let slug = rest.split('/').nth(1)?.split(['?', '#']).next()?;
+    (!slug.is_empty()).then_some(slug)
+}
+
 /// What [`annotate`] found out, for the UI.
 #[derive(Clone, Debug, Default)]
 pub struct Annotation {
@@ -86,7 +93,9 @@ pub struct Annotation {
 /// Fills CurseForge identity from the instance and marks the pack mods the
 /// author keeps off servers. Authoritative signal: the pack's own server pack.
 /// Fallback: the mod's "Client"-only tag on CurseForge. Mods the user added
-/// are never flagged; `sync_anyway` holds project ids the user overrode.
+/// are flagged only when their jar is silent and CurseForge's tags (or the
+/// same mod on Modrinth) say client-only; `sync_anyway` holds project ids the
+/// user overrode.
 pub fn annotate(
     mods: &mut [crate::model::ModInfo],
     inst: &crate::instances::Instance,
@@ -125,14 +134,51 @@ pub fn annotate(
         })
         .map(|m| inst.mods_dir().join(&m.file_name))
         .collect();
+    // Sides from the authors' tags (Modrinth's, CurseForge's), sometimes
+    // wrong, so for a tracked mod a client-only verdict is a won't-sync the
+    // user can override rather than a hard side.
+    let mut guessed: HashMap<String, (String, &str)> = HashMap::new();
     let sides = crate::modrinth::sides_of(&unknown);
     for m in mods.iter_mut() {
         if m.side.is_empty()
             && let Some(s) = sides.get(&m.file_name)
         {
-            m.side = s.clone();
+            if inst.addon_by_file(&m.file_name).is_some() {
+                guessed.insert(m.file_name.clone(), (s.clone(), "Client-only on Modrinth"));
+            } else {
+                m.side = s.clone();
+            }
         }
     }
+
+    // Still unknown: the Client/Server tags on the CurseForge file, then the
+    // same mod on Modrinth by slug (its jar may only be on CurseForge).
+    let unknown_added = |m: &crate::model::ModInfo| {
+        inst.addon_by_file(&m.file_name)
+            .filter(|a| !a.from_pack && m.side.is_empty() && !guessed.contains_key(&m.file_name))
+    };
+    let mut more: Vec<(String, (String, &str))> = Vec::new();
+    let mut by_slug: Vec<(String, String)> = Vec::new();
+    for m in mods.iter() {
+        let Some(a) = unknown_added(m) else { continue };
+        if !a.env.is_empty() {
+            more.push((m.file_name.clone(), (a.env.clone(), "Tagged client-only on CurseForge")));
+        } else if let Some(slug) = cf_slug(&a.page) {
+            by_slug.push((slug.to_string(), a.name.clone()));
+        }
+    }
+    if !by_slug.is_empty() {
+        let sides = crate::modrinth::sides_by_slug(&by_slug);
+        for m in mods.iter() {
+            if let Some(a) = unknown_added(m)
+                && a.env.is_empty()
+                && let Some(s) = cf_slug(&a.page).and_then(|slug| sides.get(slug))
+            {
+                more.push((m.file_name.clone(), (s.clone(), "Client-only on Modrinth")));
+            }
+        }
+    }
+    guessed.extend(more);
 
     for m in mods.iter_mut() {
         let Some(a) = inst.addon_by_file(&m.file_name) else {
@@ -143,6 +189,16 @@ pub fn annotate(
         m.from_pack = a.from_pack;
         if !a.name.is_empty() {
             m.mod_name = a.name.clone();
+        }
+        if let Some((side, why)) = guessed.remove(&m.file_name) {
+            // Overridden: no side, so nothing holds it back.
+            let anyway = side == "client" && sync_anyway.contains(&a.project_id);
+            if side == "client" && !anyway {
+                m.wont_sync = Some(why.into());
+            }
+            if !anyway {
+                m.side = side;
+            }
         }
         if !a.from_pack || sync_anyway.contains(&a.project_id) {
             continue;
@@ -353,6 +409,14 @@ fn parse_central_directory(cd: &[u8]) -> anyhow::Result<Vec<String>> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn slug_from_page() {
+        assert_eq!(cf_slug("https://www.curseforge.com/minecraft/mc-mods/jei"), Some("jei"));
+        assert_eq!(cf_slug("https://www.curseforge.com/minecraft/mc-mods/jei/files?x=1"), Some("jei"));
+        assert_eq!(cf_slug("https://modrinth.com/mod/jei"), None);
+        assert_eq!(cf_slug(""), None);
+    }
 
     #[test]
     fn stems() {
