@@ -108,7 +108,7 @@ impl SkinViewer {
             cape: None,
             elytra: false,
             default_elytra: None,
-            pose: Pose::Idle,
+            pose: Pose::default(),
             backdrop: Backdrop::Day,
             paused: false,
             cam: Camera::default(),
@@ -382,7 +382,7 @@ impl Render for SkinViewer {
         }
         let easing = self.ease(now);
         let textures = self.scene_textures();
-        let animating = textures.is_some() && (!self.paused || easing);
+        let animating = textures.is_some() && (!self.paused && self.pose.animated() || easing);
         if (animating && !cx.reduce_motion() || easing) && self.tick.is_none() {
             // A little early: the redraw then waits for the display's next
             // refresh, which lands it close to the frame rate.

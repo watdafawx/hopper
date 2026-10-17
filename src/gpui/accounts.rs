@@ -12,6 +12,7 @@ use anyhow::{Context as _, bail};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
@@ -32,6 +33,25 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
+
+/// The account list's width limits, in rem: narrower than `LIST_COLLAPSE`
+/// when let go collapses it to a rail of faces `LIST_RAIL` wide.
+const LIST_MIN: f32 = 12.0;
+const LIST_MAX: f32 = 26.0;
+const LIST_COLLAPSE: f32 = 9.0;
+const LIST_RAIL: f32 = 3.75;
+
+/// Dragging the account list's edge.
+struct ListResize;
+
+/// What a drag shows under the pointer: nothing.
+struct Blank;
+
+impl Render for Blank {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 /// The id the view uses for the old single sign-in before it is copied.
 const LEGACY: &str = "legacy";
@@ -537,6 +557,8 @@ pub struct AccountsView {
     /// Which arms the default skins show.
     default_slim: bool,
     viewer: Entity<SkinViewer>,
+    /// The account list's width while its edge is dragged, in rem.
+    drag_width: Option<f32>,
     show_url: bool,
     name_input: Entity<InputState>,
     url_input: Entity<InputState>,
@@ -591,6 +613,7 @@ impl AccountsView {
             defaults: Load::Loading,
             default_slim: false,
             viewer,
+            drag_width: None,
             show_url: false,
             name_input,
             url_input,
@@ -1082,6 +1105,135 @@ fn section_title(text: &'static str, cx: &App) -> Div {
 }
 
 impl AccountsView {
+    fn set_list_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| {
+            s.update_settings(|st| st.accounts_sidebar_collapsed = collapsed, cx)
+        });
+    }
+
+    /// The list's edge was let go: collapse below the threshold, else keep
+    /// the new width.
+    fn end_list_resize(&mut self, cx: &mut Context<Self>) {
+        let Some(w) = self.drag_width.take() else { return };
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| {
+                    if w < LIST_COLLAPSE {
+                        st.accounts_sidebar_collapsed = true;
+                    } else {
+                        st.accounts_sidebar_collapsed = false;
+                        st.accounts_sidebar_width = w.clamp(LIST_MIN, LIST_MAX);
+                    }
+                },
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
+    /// The account list, or a rail of faces when collapsed. Drag its edge to
+    /// resize; below the minimum it collapses.
+    fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let settings = self.store.read(cx).settings();
+        let (collapsed, width) = match self.drag_width {
+            Some(w) if w < LIST_COLLAPSE => (true, LIST_RAIL),
+            Some(w) => (false, w.clamp(LIST_MIN, LIST_MAX)),
+            None if settings.accounts_sidebar_collapsed => (true, LIST_RAIL),
+            None => (false, settings.accounts_sidebar_width.clamp(LIST_MIN, LIST_MAX)),
+        };
+        let inner = if collapsed {
+            self.account_rail(cx).into_any_element()
+        } else {
+            self.account_list(cx).into_any_element()
+        };
+        let theme = cx.theme();
+        let (handle_bg, active) = (theme.primary, self.drag_width.is_some());
+        div()
+            .relative()
+            .flex_none()
+            .h_full()
+            .w(rems(width))
+            .border_r_1()
+            .border_color(theme.border)
+            .child(div().size_full().overflow_hidden().child(inner))
+            .child(
+                div()
+                    .id("accounts-resize")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(rems(-0.25))
+                    .w(rems(0.5))
+                    .cursor_col_resize()
+                    .when(active, |d| d.bg(handle_bg.opacity(0.5)))
+                    .hover(move |s| s.bg(handle_bg.opacity(0.35)))
+                    .on_drag(ListResize, |_, _, _, cx| cx.new(|_| Blank)),
+            )
+            .into_any_element()
+    }
+
+    /// The collapsed list: faces to switch with, and Add account.
+    fn account_rail(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let store = self.store.read(cx);
+        let accounts = store.accounts().clone();
+        let busy = self.busy.is_some();
+        let mut list: Vec<Saved> = accounts.list.clone();
+        list.sort_by(|a, b| {
+            let act = |s: &Saved| accounts.active.as_deref() == Some(s.id.as_str());
+            act(b).cmp(&act(a)).then(b.last_used.cmp(&a.last_used))
+        });
+        let faces: Vec<AnyElement> = list
+            .into_iter()
+            .map(|a| {
+                let active = accounts.active.as_deref() == Some(a.id.as_str());
+                let name: SharedString = if active {
+                    format!("{} (active)", a.name).into()
+                } else {
+                    format!("Switch to {}", a.name).into()
+                };
+                let id = a.id.clone();
+                div()
+                    .id(SharedString::from(format!("rail:{}", a.id)))
+                    .p_0p5()
+                    .rounded(theme.radius)
+                    .border_2()
+                    .border_color(if active { theme.primary } else { theme.primary.opacity(0.) })
+                    .when(!active && !busy, |d| {
+                        d.cursor_pointer()
+                            .hover(|s| s.bg(theme.list_hover))
+                            .on_click(cx.listener(move |this, _, window, cx| this.switch_to(id.clone(), window, cx)))
+                    })
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx))
+                    .child(head(store, &a, rems(2.), cx))
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .w_full()
+            .items_center()
+            .gap_1p5()
+            .pr_1()
+            .child(
+                Button::new("expand-accounts")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::PanelLeftOpen)
+                    .tooltip("Show the account list")
+                    .on_click(cx.listener(|this, _, _, cx| this.set_list_collapsed(false, cx))),
+            )
+            .children(faces)
+            .child(
+                Button::new("add-account-rail")
+                    .small()
+                    .ghost()
+                    .icon(IconName::UserPlus)
+                    .tooltip("Add account")
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, window, cx| this.add_account(window, cx))),
+            )
+    }
+
     fn account_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let store = self.store.read(cx);
@@ -1160,13 +1312,23 @@ impl AccountsView {
             })
             .collect();
         v_flex()
-            .w(rems(17.))
-            .flex_none()
+            .w_full()
             .gap_1()
             .pr_4()
-            .border_r_1()
-            .border_color(theme.border)
-            .child(section_title("Microsoft accounts", cx).px_2().pb_1())
+            .child(
+                h_flex()
+                    .pl_2()
+                    .pb_1()
+                    .child(section_title("Microsoft accounts", cx).flex_1().truncate())
+                    .child(
+                        Button::new("collapse-accounts")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::PanelLeftClose)
+                            .tooltip("Show only faces")
+                            .on_click(cx.listener(|this, _, _, cx| this.set_list_collapsed(true, cx))),
+                    ),
+            )
             .children(rows)
             .when(legacy, |r| {
                 r.child(
@@ -1362,16 +1524,30 @@ impl AccountsView {
             .child(div().h(rems(25.)).child(self.viewer.clone()))
             .child(bar);
 
-        let pose_ix = Pose::ALL.iter().position(|p| *p == pose).unwrap_or(0);
         let viewer = self.viewer.clone();
-        let mut poses = TabBar::new("pose").segmented().xsmall().selected_index(pose_ix);
-        for p in Pose::ALL {
-            poses = poses.child(Tab::new().label(p.label()));
-        }
-        let poses = poses.on_click(move |ix: &usize, _, cx| {
-            let p = Pose::ALL[*ix];
-            viewer.update(cx, |v, cx| v.set_pose(p, cx));
-        });
+        let rem = window.rem_size();
+        let poses = Button::new("pose")
+            .small()
+            .outline()
+            .w(rems(13.))
+            .icon(IconName::PersonStanding)
+            .label(pose.label())
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                menu = menu.min_w(rems(13.).to_pixels(rem)).max_h(rems(22.).to_pixels(rem)).scrollable(true);
+                for p in Pose::ALL {
+                    if p == Pose::Cycle || p == Pose::TPose {
+                        menu = menu.separator();
+                    }
+                    let viewer = viewer.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(p.label())
+                            .checked(p == pose)
+                            .on_click(move |_, _, cx| viewer.update(cx, |v, cx| v.set_pose(p, cx))),
+                    );
+                }
+                menu
+            });
 
         // The worn skin beside the previewed one.
         let compare = self.pending.as_ref().map(|pend| {
@@ -1410,7 +1586,7 @@ impl AccountsView {
             .flex_1()
             .min_w_0()
             .gap_4()
-            .child(v_flex().gap_1p5().child(section_title("Pose", cx)).child(poses))
+            .child(v_flex().gap_1p5().child(section_title("Animation", cx)).child(poses))
             .child(
                 v_flex()
                     .gap_1p5()
@@ -1956,7 +2132,7 @@ impl Render for AccountsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let height = (window.viewport_size().height * 0.78).min(rems(38.).to_pixels(window.rem_size()));
-        let list = self.account_list(cx);
+        let list = self.sidebar(cx);
         let right: AnyElement = if self.for_id.is_none() {
             self.empty_state(cx)
         } else {
@@ -2029,8 +2205,15 @@ impl Render for AccountsView {
             }
         };
         h_flex()
+            .id("accounts-body")
             .h(height)
             .items_start()
+            .on_drag_move(cx.listener(|this, e: &DragMoveEvent<ListResize>, window, cx| {
+                let x = e.event.position.x - e.bounds.left();
+                this.drag_width = Some(x / window.rem_size());
+                cx.notify();
+            }))
+            .on_drop(cx.listener(|this, _: &ListResize, _, cx| this.end_list_resize(cx)))
             .child(list)
             .child(v_flex().h_full().flex_1().min_w_0().pl_5().child(right))
     }

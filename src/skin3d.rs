@@ -5,33 +5,112 @@
 //! only has to show one image per frame.
 
 use image::RgbaImage;
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 // ---- what to draw -------------------------------------------------------------
 
 /// How the player stands or moves.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Pose {
-    /// Standing, breathing and looking around.
-    #[default]
+    /// Standing, breathing and glancing around.
     Idle,
+    #[default]
     Walk,
     Run,
+    Sneak,
+    CrouchWalk,
+    Jump,
+    Swim,
+    /// Flying with spread elytra wings.
+    Glide,
     Wave,
+    Dance,
+    LookAround,
+    Attack,
+    Bow,
     Sit,
+    Sleep,
+    /// Arms straight out, still: for checking a skin.
+    TPose,
+    /// Every other pose in turn.
+    Cycle,
 }
 
 impl Pose {
-    pub const ALL: [Pose; 5] = [Pose::Idle, Pose::Walk, Pose::Run, Pose::Wave, Pose::Sit];
+    pub const ALL: [Pose; 17] = [
+        Pose::Idle,
+        Pose::Walk,
+        Pose::Run,
+        Pose::Sneak,
+        Pose::CrouchWalk,
+        Pose::Jump,
+        Pose::Swim,
+        Pose::Glide,
+        Pose::Wave,
+        Pose::Dance,
+        Pose::LookAround,
+        Pose::Attack,
+        Pose::Bow,
+        Pose::Sit,
+        Pose::Sleep,
+        Pose::TPose,
+        Pose::Cycle,
+    ];
+
+    /// The poses "Cycle all" goes through, and how long each lasts.
+    const CYCLE: [Pose; 15] = [
+        Pose::Walk,
+        Pose::Idle,
+        Pose::Run,
+        Pose::Sneak,
+        Pose::CrouchWalk,
+        Pose::Jump,
+        Pose::Swim,
+        Pose::Glide,
+        Pose::Wave,
+        Pose::Dance,
+        Pose::LookAround,
+        Pose::Attack,
+        Pose::Bow,
+        Pose::Sit,
+        Pose::Sleep,
+    ];
+    const CYCLE_SECS: f32 = 4.0;
 
     pub fn label(self) -> &'static str {
         match self {
             Pose::Idle => "Idle",
             Pose::Walk => "Walk",
             Pose::Run => "Run",
+            Pose::Sneak => "Sneak",
+            Pose::CrouchWalk => "Crouch walk",
+            Pose::Jump => "Jump",
+            Pose::Swim => "Swim",
+            Pose::Glide => "Elytra glide",
             Pose::Wave => "Wave",
+            Pose::Dance => "Dance",
+            Pose::LookAround => "Look around",
+            Pose::Attack => "Attack",
+            Pose::Bow => "Draw a bow",
             Pose::Sit => "Sit",
+            Pose::Sleep => "Sleep",
+            Pose::TPose => "T-pose",
+            Pose::Cycle => "Cycle all",
         }
+    }
+
+    /// Whether it moves at all (a T-pose stands still).
+    pub fn animated(self) -> bool {
+        self != Pose::TPose
+    }
+
+    /// The pose shown at `t` seconds: itself, or the current one of a cycle.
+    pub fn at(self, t: f32) -> Pose {
+        if self != Pose::Cycle {
+            return self;
+        }
+        let n = Self::CYCLE.len();
+        Self::CYCLE[(t / Self::CYCLE_SECS) as usize % n]
     }
 }
 
@@ -284,27 +363,123 @@ impl Cuboid {
     }
 }
 
-/// Joint angles (Minecraft's x, y, z model angles) for one moment.
-#[derive(Clone, Copy, Default)]
+/// One moment of a pose: joint angles (Minecraft's x, y, z model angles)
+/// and offsets (model units, y up, front +z).
+#[derive(Clone, Copy)]
 struct Rig {
     head: V3,
+    body: V3,
     r_arm: V3,
     l_arm: V3,
     r_leg: V3,
     l_leg: V3,
+    head_off: V3,
+    body_off: V3,
+    arm_off: V3,
+    leg_off: V3,
     /// The cape's swing back from the body.
     cape: f32,
-    /// How far the whole player moves up.
+    /// Elytra wings: tilt back (x) and spread (z, negative opens the left wing).
+    wings: [f32; 2],
+    /// The whole player turned (x, y, z in radians, about `root_pivot`)...
+    root: V3,
+    root_pivot: V3,
+    /// ...and moved up.
     lift: f32,
+    /// Where the camera looks.
+    center: V3,
+    /// Zoom that fits the pose in view (lying poses are longer than tall).
+    fit: f32,
 }
 
+impl Default for Rig {
+    fn default() -> Self {
+        Rig {
+            head: [0.; 3],
+            body: [0.; 3],
+            r_arm: [0.; 3],
+            l_arm: [0.; 3],
+            r_leg: [0.; 3],
+            l_leg: [0.; 3],
+            head_off: [0.; 3],
+            body_off: [0.; 3],
+            arm_off: [0.; 3],
+            leg_off: [0.; 3],
+            cape: 0.1,
+            wings: [0.261_799_4, -0.261_799_4],
+            root: [0.; 3],
+            root_pivot: [0., 12., 0.],
+            lift: 0.,
+            center: [0., 16., 0.],
+            fit: 1.,
+        }
+    }
+}
+
+impl Rig {
+    /// Between `self` (k = 0) and `o` (k = 1).
+    fn mix(&self, o: &Rig, k: f32) -> Rig {
+        let v = |a: V3, b: V3| add(a, scale(sub(b, a), k));
+        let f = |a: f32, b: f32| a + (b - a) * k;
+        Rig {
+            head: v(self.head, o.head),
+            body: v(self.body, o.body),
+            r_arm: v(self.r_arm, o.r_arm),
+            l_arm: v(self.l_arm, o.l_arm),
+            r_leg: v(self.r_leg, o.r_leg),
+            l_leg: v(self.l_leg, o.l_leg),
+            head_off: v(self.head_off, o.head_off),
+            body_off: v(self.body_off, o.body_off),
+            arm_off: v(self.arm_off, o.arm_off),
+            leg_off: v(self.leg_off, o.leg_off),
+            cape: f(self.cape, o.cape),
+            wings: [f(self.wings[0], o.wings[0]), f(self.wings[1], o.wings[1])],
+            root: v(self.root, o.root),
+            root_pivot: v(self.root_pivot, o.root_pivot),
+            lift: f(self.lift, o.lift),
+            center: v(self.center, o.center),
+            fit: f(self.fit, o.fit),
+        }
+    }
+}
+
+/// A pose at `t` seconds; a cycle blends into the next pose.
 fn rig(pose: Pose, t: f32) -> Rig {
+    if pose != Pose::Cycle {
+        return pose_rig(pose, t);
+    }
+    let now = pose_rig(pose.at(t), t);
+    // The last half second of each pose eases into the next.
+    let into = (t % Pose::CYCLE_SECS) - (Pose::CYCLE_SECS - 0.5);
+    if into <= 0.0 {
+        return now;
+    }
+    let next = pose_rig(pose.at(t + 0.5), t);
+    let k = into / 0.5;
+    now.mix(&next, k * k * (3.0 - 2.0 * k))
+}
+
+/// The game's sneaking stance: body bent forward, head and arms lowered,
+/// legs back.
+fn sneak(r: &mut Rig) {
+    r.body[0] = 0.5;
+    r.r_arm[0] += 0.4;
+    r.l_arm[0] += 0.4;
+    r.head_off = [0., -4.2, 0.];
+    r.body_off = [0., -3.2, 0.];
+    r.arm_off = [0., -3.2, 0.];
+    r.leg_off = [0., -0.2, -4.];
+    r.cape = 0.55;
+    r.center = [0., 14., 0.];
+}
+
+fn pose_rig(pose: Pose, t: f32) -> Rig {
     let tick = t * 20.0;
     let mut r = Rig {
         cape: 0.1 + (t * 1.3).sin() * 0.03,
         ..Rig::default()
     };
-    // The game's idle arm sway, which plays under every pose.
+    // The game's idle arm sway, which plays under most poses.
     let sway_z = (tick * 0.09).cos() * 0.05 + 0.05;
     let sway_x = (tick * 0.067).sin() * 0.05;
     r.r_arm = [sway_x, 0., sway_z];
@@ -319,7 +494,7 @@ fn rig(pose: Pose, t: f32) -> Rig {
         r.cape = cape + (p * 2.0).sin() * 0.08;
     };
     match pose {
-        Pose::Idle => {
+        Pose::Idle | Pose::Cycle => {
             r.head = [(t * 0.37).sin() * 0.06, (t * 0.5).sin() * 0.3, 0.];
         }
         Pose::Walk => walk(&mut r, 0.9, 0.45, 0.35),
@@ -327,9 +502,100 @@ fn rig(pose: Pose, t: f32) -> Rig {
             walk(&mut r, 1.4, 0.85, 0.8);
             r.head[0] = 0.1;
         }
+        Pose::Sneak => {
+            sneak(&mut r);
+            r.head = [0.1, (t * 0.6).sin() * 0.25, 0.];
+        }
+        Pose::CrouchWalk => {
+            walk(&mut r, 0.6, 0.35, 0.0);
+            let cape = r.cape;
+            sneak(&mut r);
+            r.cape = cape + 0.5;
+            r.lift = 0.;
+        }
+        Pose::Jump => {
+            // A hop a second: up and down on a parabola, arms out at the top.
+            let p = (t % 1.0) / 1.0;
+            let h = 4.0 * p * (1.0 - p);
+            r.lift = h * 7.0;
+            r.r_arm = [-0.3 * h, 0., 0.35 * h + sway_z];
+            r.l_arm = [-0.3 * h, 0., -0.35 * h - sway_z];
+            r.r_leg[0] = -0.35 * h;
+            r.l_leg[0] = 0.25 * h;
+            r.cape = 0.15 + (1.0 - h) * 0.5;
+            r.center = [0., 19., 0.];
+        }
+        Pose::Swim => {
+            // Face down, crawl strokes, kicking legs, looking ahead.
+            let p = t * TAU * 0.5;
+            r.root = [1.35, 0., 0.];
+            r.lift = 2.;
+            r.head = [-1.1, 0., 0.];
+            r.r_arm = [-(p.rem_euclid(TAU)), 0., 0.1];
+            r.l_arm = [-((p + PI).rem_euclid(TAU)), 0., -0.1];
+            r.r_leg[0] = (p * 2.0).sin() * 0.35;
+            r.l_leg[0] = -(p * 2.0).sin() * 0.35;
+            r.cape = 0.25 + (p * 2.0).sin() * 0.05;
+            r.center = [0., 13., 0.];
+            r.fit = 0.7;
+        }
+        Pose::Glide => {
+            // The game's fall-flying pose: level, wings spread, arms back.
+            r.root = [1.25, 0., (t * 0.9).sin() * 0.12];
+            r.head = [-1.0, 0., 0.];
+            r.r_arm = [0.15, 0., 0.25];
+            r.l_arm = [0.15, 0., -0.25];
+            r.r_leg[0] = 0.08;
+            r.l_leg[0] = -0.08;
+            r.wings = [0.35 + (t * 1.5).sin() * 0.04, -1.45 + (t * 1.5).sin() * 0.05];
+            r.cape = 1.2;
+            r.lift = 4. + (t * 0.9).sin() * 1.5;
+            r.center = [0., 15., 0.];
+            r.fit = 0.62;
+        }
         Pose::Wave => {
             r.head = [-0.05, 0.15, (t * 3.5).sin() * 0.06];
             r.r_arm = [-0.2, 0., 2.55 + (t * 7.0).sin() * 0.32];
+        }
+        Pose::Dance => {
+            let p = t * TAU * 1.0;
+            r.root = [0., p.sin() * 0.25, (p * 2.0).sin() * 0.06];
+            r.lift = (p * 2.0).sin().abs() * 1.2;
+            r.r_arm = [-0.3, 0., 2.3 + (p * 2.0).sin() * 0.5];
+            r.l_arm = [-0.3, 0., -2.3 + (p * 2.0 + PI).sin() * 0.5];
+            r.r_leg = [(p * 2.0).sin().max(0.) * -0.6, 0., 0.08];
+            r.l_leg = [(p * 2.0 + PI).sin().max(0.) * -0.6, 0., -0.08];
+            r.head = [(p * 2.0).sin() * 0.15, 0., (p).sin() * 0.12];
+            r.cape = 0.25 + (p * 2.0).sin().abs() * 0.2;
+        }
+        Pose::LookAround => {
+            // Turn to one side, hold, to the other, hold, and up now and then.
+            let s = (t * 0.7).sin();
+            let held = s.signum() * s.abs().powf(0.4);
+            r.head = [-0.25 * (t * 0.45).sin().max(0.) + 0.1 * (t * 1.1).sin(), held * 0.95, 0.];
+        }
+        Pose::Attack => {
+            // A swing every 0.9 s, like the game's attack.
+            let p = (t % 0.9) / 0.35;
+            if p < 1.0 {
+                let s = (p * PI).sin();
+                let sq = p.sqrt();
+                r.root = [0., -(sq * TAU).sin() * 0.2, 0.];
+                r.r_arm = [-0.4 - s * 1.6 + (sq * PI).sin() * -0.3, -(sq * TAU).sin() * 0.25, sway_z - s * 0.4];
+            } else {
+                r.r_arm[0] -= 0.3;
+            }
+            r.head = [0.1, 0., 0.];
+        }
+        Pose::Bow => {
+            // Both arms up to aim; the drawing arm pulls back and lets go.
+            let p = (t % 2.0) / 2.0;
+            let draw = (p / 0.7).min(1.0);
+            let head_y = 0.1;
+            r.head = [-0.05, head_y, 0.];
+            r.r_arm = [-FRAC_PI_2 - 0.05, -0.1 + head_y - 0.4 * draw, 0.];
+            r.l_arm = [-FRAC_PI_2 - 0.05, 0.1 + head_y + 0.4, 0.];
+            r.cape = 0.12;
         }
         Pose::Sit => {
             r.r_leg = [-1.4137, PI / 10.0, 0.07];
@@ -339,6 +605,24 @@ fn rig(pose: Pose, t: f32) -> Rig {
             r.head = [(t * 0.37).sin() * 0.05, (t * 0.5).sin() * 0.25, 0.];
             r.lift = -10.0;
             r.cape = 0.05;
+            r.center = [0., 11., 0.];
+        }
+        Pose::Sleep => {
+            // On the back, breathing slowly.
+            let b = (t * 1.2).sin() * 0.03;
+            r.root = [-FRAC_PI_2, 0., 0.];
+            r.root_pivot = [0., 2., 0.];
+            r.r_arm = [b, 0., 0.03];
+            r.l_arm = [b, 0., -0.03];
+            r.head = [0., 0.25, 0.];
+            r.cape = 0.;
+            r.lift = 2.;
+            r.center = [0., 5., -11.];
+        }
+        Pose::TPose => {
+            r.r_arm = [0., 0., FRAC_PI_2];
+            r.l_arm = [0., 0., -FRAC_PI_2];
+            r.cape = 0.1;
         }
     }
     r
@@ -365,9 +649,14 @@ fn build(scene: &Scene) -> Vec<Quad> {
     let ts = tex_scale(skin);
     let legacy = is_legacy(skin);
     let r = rig(scene.pose, scene.time);
-    let lift = [0., r.lift, 0.];
+    // The whole player's turn about its pivot, then the lift.
+    let root_m = M3::rx(r.root[0]).mul(M3::ry(r.root[1])).mul(M3::rz(r.root[2]));
+    let root = |xf: Xf| Xf {
+        m: root_m.mul(xf.m),
+        t: add(add(root_m.apply(sub(xf.t, r.root_pivot)), r.root_pivot), [0., r.lift, 0.]),
+    };
     let mut out = Vec::with_capacity(96);
-    let part = |pivot: V3, angles: V3| Xf::at(add(pivot, lift), M3::mc(angles));
+    let part = |pivot: V3, off: V3, angles: V3| root(Xf::at(add(pivot, off), M3::mc(angles)));
     let boxes = |out: &mut Vec<Quad>, xf: Xf, base: (f32, f32), over: Option<(f32, f32)>, size: V3, from: V3, inflate: f32, mirror: bool| {
         Cuboid { tex: TexId::Skin, ts, uv: base, size, from, inflate: 0., mirror, solid: true }.emit(xf, out);
         if let Some(o) = over {
@@ -379,7 +668,7 @@ fn build(scene: &Scene) -> Vec<Quad> {
     let hat = !(legacy && hat_is_solid(skin));
     boxes(
         &mut out,
-        part([0., 24., 0.], r.head),
+        part([0., 24., 0.], r.head_off, r.head),
         (0., 0.),
         hat.then_some((32., 0.)),
         [8., 8., 8.],
@@ -388,9 +677,10 @@ fn build(scene: &Scene) -> Vec<Quad> {
         false,
     );
     // Body and jacket.
+    let body = part([0., 24., 0.], r.body_off, r.body);
     boxes(
         &mut out,
-        part([0., 24., 0.], [0.; 3]),
+        body,
         (16., 16.),
         (!legacy).then_some((16., 32.)),
         [8., 12., 4.],
@@ -404,7 +694,7 @@ fn build(scene: &Scene) -> Vec<Quad> {
     let left_from = [-1., -10., -2.];
     boxes(
         &mut out,
-        part([-5., 22., 0.], r.r_arm),
+        part([-5., 22., 0.], r.arm_off, r.r_arm),
         (40., 16.),
         (!legacy).then_some((40., 32.)),
         [aw, 12., 4.],
@@ -415,7 +705,7 @@ fn build(scene: &Scene) -> Vec<Quad> {
     let (l_uv, l_over) = if legacy { ((40., 16.), None) } else { ((32., 48.), Some((48., 48.))) };
     boxes(
         &mut out,
-        part([5., 22., 0.], r.l_arm),
+        part([5., 22., 0.], r.arm_off, r.l_arm),
         l_uv,
         l_over,
         [aw, 12., 4.],
@@ -426,7 +716,7 @@ fn build(scene: &Scene) -> Vec<Quad> {
     // Legs.
     boxes(
         &mut out,
-        part([-1.9, 12., 0.], r.r_leg),
+        part([-1.9, 12., 0.], r.leg_off, r.r_leg),
         (0., 16.),
         (!legacy).then_some((0., 32.)),
         [4., 12., 4.],
@@ -437,7 +727,7 @@ fn build(scene: &Scene) -> Vec<Quad> {
     let (l_uv, l_over) = if legacy { ((0., 16.), None) } else { ((16., 48.), Some((0., 48.))) };
     boxes(
         &mut out,
-        part([1.9, 12., 0.], r.l_leg),
+        part([1.9, 12., 0.], r.leg_off, r.l_leg),
         l_uv,
         l_over,
         [4., 12., 4.],
@@ -446,13 +736,16 @@ fn build(scene: &Scene) -> Vec<Quad> {
         legacy,
     );
 
+    // Cape and elytra hang from the body, so they follow its lean.
+    let on_body = |pivot: V3, m: M3| Xf {
+        m: body.m.mul(m),
+        t: add(body.m.apply(pivot), body.t),
+    };
     if let Some(e) = scene.elytra {
         let ts = tex_scale(e);
-        // Closed wings hanging from the shoulders, splayed 15° out.
-        let a = 0.261_799_4;
+        let [wx, wz] = r.wings;
         for left in [true, false] {
-            let (px, z, from_x) = if left { (5., -a, -10.) } else { (-5., a, 0.) };
-            let xf = Xf::at(add([px, 24., -2.], lift), M3::mc([a, 0., z]));
+            let (px, z, from_x) = if left { (5., wz, -10.) } else { (-5., -wz, 0.) };
             Cuboid {
                 tex: TexId::Elytra,
                 ts,
@@ -463,12 +756,11 @@ fn build(scene: &Scene) -> Vec<Quad> {
                 mirror: !left,
                 solid: false,
             }
-            .emit(xf, &mut out);
+            .emit(on_body([px, 0., -2.], M3::mc([wx, 0., z])), &mut out);
         }
     } else if let Some(c) = scene.cape {
-        // Hung from the back of the shoulders and turned to face away, so
-        // its outside (the texture's front) shows from behind.
-        let xf = Xf::at(add([0., 24., -2.], lift), M3::rx(r.cape).mul(M3::ry(PI)));
+        // Turned to face away, so its outside (the texture's front) shows
+        // from behind.
         Cuboid {
             tex: TexId::Cape,
             ts: tex_scale(c),
@@ -479,7 +771,7 @@ fn build(scene: &Scene) -> Vec<Quad> {
             mirror: false,
             solid: false,
         }
-        .emit(xf, &mut out);
+        .emit(on_body([0., 0., -2.], M3::rx(r.cape).mul(M3::ry(PI))), &mut out);
     }
     out
 }
@@ -667,11 +959,11 @@ impl Renderer {
 fn draw_model(scene: &Scene, cam: &Camera, t: &mut Target) {
     let quads = build(scene);
     let r = rig(scene.pose, scene.time);
-    let center = [0., 16. + r.lift.min(0.) * 0.5, 0.];
+    let center = r.center;
     let rot = M3::rx(cam.pitch).mul(M3::ry(-cam.yaw));
     let (w, h) = (t.w as f32, t.h as f32);
     // Fit 36 units tall (or 26 wide) at zoom 1.
-    let f = (0.9 * h / 36.0).min(0.9 * w / 26.0) * DIST * cam.zoom;
+    let f = (0.9 * h / 36.0).min(0.9 * w / 26.0) * DIST * cam.zoom * r.fit;
     let light = norm(LIGHT);
     let textures = |id: TexId| -> Option<Sampler> {
         let img = match id {
@@ -1054,24 +1346,15 @@ mod tests {
         };
         let cape = sample_cape([20, 160, 40]);
         let wings = std::env::var_os("HOPPER_SKIN3D_ELYTRA").map(|p| image::open(p).unwrap().to_rgba8());
-        for (i, (pose, yaw, bd)) in [
-            (Pose::Idle, 0.5, Backdrop::Day),
-            (Pose::Walk, -0.6, Backdrop::Night),
-            (Pose::Wave, 0.3, Backdrop::None),
-            (Pose::Sit, 0.8, Backdrop::Day),
-            (Pose::Idle, PI, Backdrop::Day),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (i, pose) in Pose::ALL.into_iter().enumerate() {
             let mut s = scene(&skin, Some(&cape));
             s.pose = pose;
-            s.time = 0.4;
-            if i == 4 {
+            s.time = 0.45;
+            if pose == Pose::Glide {
                 s.elytra = Some(wings.as_ref().unwrap_or(&cape));
             }
-            let cam = Camera { yaw, ..Camera::default() };
-            picture(&s, &cam, 300, 500, bd).save(dir.join(format!("{i}-{}.png", pose.label()))).unwrap();
+            let cam = Camera { yaw: 0.9, ..Camera::default() };
+            picture(&s, &cam, 200, 320, Backdrop::Day).save(dir.join(format!("{i:02}-{}.png", pose.label()))).unwrap();
         }
     }
 
@@ -1117,6 +1400,15 @@ mod tests {
         c.drag(0.0, 10_000.0);
         assert_eq!(c.pitch, Camera::MAX_PITCH);
         assert!((yaw_delta(0.1, TAU - 0.1) + 0.2).abs() < 1e-4);
+        assert_eq!(Pose::default(), Pose::Walk);
+        assert_eq!(Pose::Cycle.at(0.5), Pose::Walk);
+        assert_eq!(Pose::Cycle.at(4.5), Pose::Idle);
+        assert_eq!(Pose::Run.at(99.0), Pose::Run);
+        // Blending into the next pose stays finite all the way round.
+        for i in 0..400 {
+            let r = rig(Pose::Cycle, i as f32 * 0.17);
+            assert!(r.r_arm.iter().chain(&r.root).chain(&r.center).all(|v| v.is_finite()));
+        }
         assert!(!has_elytra_art(&sample_cape([1, 2, 3])));
         let mut c = sample_cape([1, 2, 3]);
         c.put_pixel(30, 5, image::Rgba([9, 9, 9, 255]));

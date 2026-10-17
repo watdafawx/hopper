@@ -67,6 +67,10 @@ pub struct Settings {
     pub sidebar_collapsed: bool,
     /// Width of the GPUI instance list, in rem.
     pub sidebar_width: f32,
+    /// The Accounts dialog shows its account list as a rail of faces.
+    pub accounts_sidebar_collapsed: bool,
+    /// Width of the Accounts dialog's account list, in rem.
+    pub accounts_sidebar_width: f32,
     /// Width of the GPUI project page panel (Browse and the Library peek), in rem.
     pub browse_panel_width: f32,
     /// The instance picked last, to open on it again.
@@ -254,6 +258,8 @@ impl Default for Settings {
             mods_server_column: true,
             sidebar_collapsed: false,
             sidebar_width: 20.0,
+            accounts_sidebar_collapsed: false,
+            accounts_sidebar_width: 17.0,
             browse_panel_width: 32.0,
             last_instance: String::new(),
             zoom: 100,
