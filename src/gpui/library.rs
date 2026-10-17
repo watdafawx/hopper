@@ -417,6 +417,24 @@ impl LibraryView {
         cx.notify();
     }
 
+    /// Opens a project's page docked beside an instance, on the Mods tab
+    /// unless the tab shown already has the panel.
+    pub fn peek(&mut self, root: PathBuf, project: u64, cx: &mut Context<Self>) {
+        if self.selected.as_ref() != Some(&root) {
+            self.select(root.clone(), cx);
+        }
+        if self.tab.class().is_none() && !matches!(self.tab, InstTab::Server | InstTab::Datapacks) {
+            self.set_tab(InstTab::Mods, cx);
+        }
+        let peek = self.addons.read(cx).peek().clone();
+        peek.update(cx, |p, cx| {
+            // Not a toggle: the same project stays open.
+            p.peek_project(root.clone(), None, cx);
+            p.peek_project(root, Some(project), cx);
+        });
+        cx.notify();
+    }
+
     fn set_tab(&mut self, tab: InstTab, cx: &mut Context<Self>) {
         if tab != self.tab {
             self.tab_from = self.tab;

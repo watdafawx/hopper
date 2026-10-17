@@ -70,10 +70,100 @@ pub fn description(id: u64) -> anyhow::Result<Vec<Block>> {
     ))
 }
 
+/// A project page link on CurseForge or Modrinth, read from its URL.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProjectLink {
+    /// CurseForge: a class (None when the URL doesn't say) and a slug.
+    Cf(Option<u32>, String),
+    /// CurseForge, by number.
+    CfId(u64),
+    /// Modrinth: a slug or id.
+    Mr(String),
+}
+
+/// Reads a project page link ("curseforge.com/minecraft/mc-mods/jei",
+/// "modrinth.com/mod/sodium"); None for any other URL.
+pub fn project_link(url: &str) -> Option<ProjectLink> {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let rest = rest.split(['?', '#']).next()?;
+    let (host, path) = rest.split_once('/')?;
+    let host = host.to_ascii_lowercase();
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if host == "curseforge.com" || host.ends_with(".curseforge.com") {
+        return match segs.as_slice() {
+            ["minecraft", class, slug, ..] => {
+                let class = match *class {
+                    "mc-mods" => cf::CLASS_MODS,
+                    "modpacks" => cf::CLASS_MODPACKS,
+                    "texture-packs" => cf::CLASS_RESOURCE_PACKS,
+                    "shaders" => cf::CLASS_SHADERS,
+                    "data-packs" => cf::CLASS_DATAPACKS,
+                    "worlds" => cf::CLASS_WORLDS,
+                    _ => return None,
+                };
+                Some(ProjectLink::Cf(Some(class), slug.to_string()))
+            }
+            ["projects", p, ..] => Some(match p.parse() {
+                Ok(id) => ProjectLink::CfId(id),
+                Err(_) => ProjectLink::Cf(None, p.to_string()),
+            }),
+            _ => None,
+        };
+    }
+    if host == "modrinth.com" || host == "www.modrinth.com" {
+        return match segs.as_slice() {
+            [
+                "mod" | "modpack" | "resourcepack" | "shader" | "datapack" | "plugin" | "project",
+                slug,
+                ..,
+            ] => Some(ProjectLink::Mr(slug.to_string())),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// The project a page link points at, as an id `get_mod` takes.
+pub fn project_from_link(link: &ProjectLink) -> anyhow::Result<u64> {
+    match link {
+        ProjectLink::CfId(id) => Ok(*id),
+        ProjectLink::Cf(class, slug) => cf::by_slug(*class, slug)?
+            .map(|m| m.id)
+            .ok_or_else(|| anyhow::anyhow!("no CurseForge project \"{slug}\"")),
+        ProjectLink::Mr(slug) => Ok(modrinth::num_id(&modrinth::project(slug)?.id)),
+    }
+}
+
 pub fn search(s: &cf::Search, modrinth: bool) -> anyhow::Result<(Vec<cf::Mod>, cf::Pagination)> {
     if modrinth {
         modrinth::search(s)
     } else {
         cf::search(s)
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn reads_project_links() {
+        assert_eq!(
+            project_link("https://www.curseforge.com/minecraft/mc-mods/emi-quickindex"),
+            Some(ProjectLink::Cf(Some(cf::CLASS_MODS), "emi-quickindex".into()))
+        );
+        assert_eq!(
+            project_link("https://www.curseforge.com/minecraft/shaders/complementary/files?x=1"),
+            Some(ProjectLink::Cf(Some(cf::CLASS_SHADERS), "complementary".into()))
+        );
+        assert_eq!(project_link("https://curseforge.com/projects/238222"), Some(ProjectLink::CfId(238222)));
+        assert_eq!(
+            project_link("https://modrinth.com/mod/sodium#versions"),
+            Some(ProjectLink::Mr("sodium".into()))
+        );
+        assert_eq!(project_link("https://www.curseforge.com/minecraft/search?x"), None);
+        assert_eq!(project_link("https://www.curseforge.com/linkout?remoteUrl=x"), None);
+        assert_eq!(project_link("https://github.com/x/y"), None);
+        assert_eq!(project_link("https://modrinth.com/user/jellysquid"), None);
     }
 }

@@ -208,6 +208,11 @@ impl AppView {
                 }
                 // The Performance tab listens for its own instance.
                 StoreEvent::SessionSaved(_) => {}
+                StoreEvent::Peek { root, project } => {
+                    let (root, project) = (root.clone(), *project);
+                    this.library.update(cx, |l, cx| l.peek(root, project, cx));
+                    this.go(Page::Library, cx);
+                }
                 StoreEvent::Link(url) => {
                     window.activate_window();
                     let url = url.clone();

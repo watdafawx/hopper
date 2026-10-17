@@ -588,6 +588,19 @@ pub fn author_mods(author_id: u64) -> anyhow::Result<Vec<Mod>> {
         .collect())
 }
 
+/// The project with this page slug (in `class`, when known).
+pub fn by_slug(class: Option<u32>, slug: &str) -> anyhow::Result<Option<Mod>> {
+    let mut q = vec![("gameId", MINECRAFT.to_string()), ("slug", slug.to_string())];
+    if let Some(c) = class {
+        q.push(("classId", c.to_string()));
+    }
+    let page: Page<Mod> = get("/v1/mods/search", &q)?;
+    let mut hits: Vec<Mod> = page.data.into_iter().filter(|m| m.slug == slug).collect();
+    // Without a class, a mod beats a pack or world of the same slug.
+    hits.sort_by_key(|m| m.class_id != Some(CLASS_MODS));
+    Ok(hits.into_iter().next())
+}
+
 pub fn get_mod(id: u64) -> anyhow::Result<Mod> {
     Ok(get::<Data<Mod>>(&format!("/v1/mods/{id}"), &[])?.data)
 }

@@ -118,14 +118,19 @@ impl VersionsView {
         window.close_dialog(cx);
     }
 
-    fn changelog(id: ElementId, md: SharedString, cx: &App) -> AnyElement {
+    fn changelog(&self, id: ElementId, md: SharedString, cx: &App) -> AnyElement {
         if md.trim().is_empty() {
             return widgets::caption("No changelog for this version.", cx)
                 .italic()
                 .into_any_element();
         }
+        let (store, root) = (self.store.clone(), self.root.clone());
         // The list around it scrolls; the text must not catch the wheel.
-        TextView::markdown(id, md).selectable(true).scrollable(false).into_any_element()
+        TextView::markdown(id, md)
+            .selectable(true)
+            .scrollable(false)
+            .on_link_click(move |url, _, window, cx| open_link(&store, &root, url, window, cx))
+            .into_any_element()
     }
 }
 
@@ -251,7 +256,7 @@ impl Render for VersionsView {
                                 .child(widgets::caption(hopper::time::relative(&e.date), cx).text_xs())
                                 .children(action),
                         )
-                        .child(Self::changelog(
+                        .child(self.changelog(
                             ElementId::Name(format!("cl:{}", e.name).into()),
                             md.clone(),
                             cx,
@@ -268,7 +273,7 @@ impl Render for VersionsView {
                             .child(Spinner::new().xsmall())
                             .child(widgets::caption("Loading the changelog", cx))
                             .into_any_element(),
-                        Some(Ok(md)) => Self::changelog(
+                        Some(Ok(md)) => self.changelog(
                             ElementId::Name(format!("other-cl:{}", f.id).into()),
                             md.clone(),
                             cx,
@@ -376,6 +381,35 @@ impl Render for VersionsView {
                     .child(body),
             )
     }
+}
+
+/// A link in a changelog: a CurseForge or Modrinth project opens its page
+/// beside the instance; anything else (or one that can't be found) opens in
+/// the browser.
+fn open_link(store: &Entity<Store>, root: &Path, url: &str, window: &mut Window, cx: &mut App) {
+    let Some(link) = hopper::source::project_link(url) else {
+        cx.open_url(url);
+        return;
+    };
+    let (store, root, url) = (store.clone(), root.to_path_buf(), url.to_string());
+    window
+        .spawn(cx, async move |cx| {
+            let r = cx
+                .background_spawn(async move { hopper::source::project_from_link(&link) })
+                .await;
+            cx.update(|window, cx| match r {
+                Ok(project) => {
+                    window.close_dialog(cx);
+                    store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+                }
+                Err(e) => {
+                    log::warn!("changelog link {url}: {e:#}");
+                    cx.open_url(&url);
+                }
+            })
+            .ok();
+        })
+        .detach();
 }
 
 fn shown_len(entries: &[(ChangelogEntry, SharedString)]) -> usize {

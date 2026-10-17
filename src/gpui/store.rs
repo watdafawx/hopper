@@ -90,6 +90,8 @@ pub enum StoreEvent {
     Schedule(String, bool),
     /// A play session of this instance was saved.
     SessionSaved(PathBuf),
+    /// Show a project's page beside an instance (a link in a changelog).
+    Peek { root: PathBuf, project: u64 },
 }
 
 impl EventEmitter<StoreEvent> for Store {}
