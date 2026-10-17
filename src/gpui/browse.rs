@@ -299,14 +299,7 @@ impl BrowseView {
     ) {
         // Back to the same instance's Add content soon after leaving:
         // carry on where the list was, and look for anything new.
-        let resume = !self.bookmarked
-            && self.error.is_none()
-            && !self.results.is_empty()
-            && self.class == class
-            && self.target.as_deref() == Some(root.as_path())
-            && self.dest == dest
-            && self.left.is_some_and(|t| t.elapsed() < RESUME_FOR);
-        if resume {
+        if self.class == class && self.dest == dest && self.can_resume(Some(&root)) {
             self.check_new(cx);
             return;
         }
@@ -320,6 +313,31 @@ impl BrowseView {
         self.dest = dest;
         self.want_global(cx);
         self.run_search(false, cx);
+    }
+
+    /// Whether Browse still holds a list for `root` (the instance picked in
+    /// the Library) from a visit that ended less than [`RESUME_FOR`] ago.
+    fn can_resume(&self, root: Option<&Path>) -> bool {
+        !self.bookmarked
+            && self.error.is_none()
+            && !self.results.is_empty()
+            && self.target.as_deref() == root
+            && self.left.is_some_and(|t| t.elapsed() < RESUME_FOR)
+    }
+
+    /// Back to Browse from the nav: where it was left when that was soon
+    /// enough and for the same instance (checking for new entries), else
+    /// a fresh Browse.
+    pub fn resume_or_reset(&mut self, root: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.can_resume(root.as_deref()) {
+            self.check_new(cx);
+            return;
+        }
+        if self.target != root {
+            // Installs go into the instance picked now (see `shown`).
+            self.target = None;
+        }
+        self.reset(window, cx);
     }
 
     /// Another page took Browse's place.

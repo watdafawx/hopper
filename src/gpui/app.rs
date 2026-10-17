@@ -546,10 +546,17 @@ impl AppView {
         self.go(Page::Library, cx);
     }
 
-    /// A page picked from the nav (or its shortcut): Browse starts fresh.
+    /// A page picked from the nav (or its shortcut). Browse picks up where
+    /// it was left, for the same instance within a while; clicked again
+    /// while showing, it starts fresh.
     pub(crate) fn nav(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         if page == Page::Browse {
-            self.browse.update(cx, |b, cx| b.reset(window, cx));
+            if self.page == Page::Browse {
+                self.browse.update(cx, |b, cx| b.reset(window, cx));
+            } else {
+                let root = self.library.read(cx).drop_target(cx).0;
+                self.browse.update(cx, |b, cx| b.resume_or_reset(root, window, cx));
+            }
         }
         self.go(page, cx);
     }
