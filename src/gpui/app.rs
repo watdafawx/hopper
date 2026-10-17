@@ -555,6 +555,9 @@ impl AppView {
     }
 
     pub(crate) fn go(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page == Page::Browse && page != Page::Browse {
+            self.browse.update(cx, |b, _| b.hidden());
+        }
         self.page = page;
         if page == Page::Browse {
             let fallback = self.library.read(cx).drop_target(cx).0;

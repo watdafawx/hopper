@@ -70,6 +70,10 @@ struct Detail {
 /// shows the project sooner.
 const PENDING_LINGER: Duration = Duration::from_secs(4);
 
+/// How long Browse keeps its place (results, scroll, open project) for a
+/// return to the same instance's Add content, after the page was left.
+const RESUME_FOR: Duration = Duration::from_secs(15 * 60);
+
 /// (instance root, resource packs rather than data packs, mod count).
 type TargetsKey = (PathBuf, bool, usize);
 
@@ -109,6 +113,17 @@ pub struct BrowseView {
     error: Option<String>,
     /// Bumped per search, so a slow answer to an old one is dropped.
     generation: u64,
+    /// Bumped per new query (not per page), so a check for new entries
+    /// is dropped once the query changed.
+    query_gen: u64,
+    /// The results list's scroll position, kept while Browse is hidden.
+    scroll: ScrollHandle,
+    /// When Browse was last left for another page.
+    left: Option<Instant>,
+    /// Entries that turned up on page one since the list was loaded,
+    /// found on a return to it; shown on a click of the "new" chip.
+    fresh: Vec<cf::Mod>,
+    _check: Option<Task<()>>,
     selected: Option<cf::Mod>,
     detail: HashMap<u64, Load<Detail>>,
     deps: HashMap<u64, Vec<(cf::Mod, u32)>>,
@@ -203,6 +218,11 @@ impl BrowseView {
             loading: false,
             error: None,
             generation: 0,
+            query_gen: 0,
+            scroll: ScrollHandle::new(),
+            left: None,
+            fresh: Vec::new(),
+            _check: None,
             selected: None,
             detail: HashMap::new(),
             deps: HashMap::new(),
@@ -277,6 +297,19 @@ impl BrowseView {
         dest: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        // Back to the same instance's Add content soon after leaving:
+        // carry on where the list was, and look for anything new.
+        let resume = !self.bookmarked
+            && self.error.is_none()
+            && !self.results.is_empty()
+            && self.class == class
+            && self.target.as_deref() == Some(root.as_path())
+            && self.dest == dest
+            && self.left.is_some_and(|t| t.elapsed() < RESUME_FOR);
+        if resume {
+            self.check_new(cx);
+            return;
+        }
         self.class = class;
         self.category = None;
         if class == cf::CLASS_WORLDS {
@@ -287,6 +320,58 @@ impl BrowseView {
         self.dest = dest;
         self.want_global(cx);
         self.run_search(false, cx);
+    }
+
+    /// Another page took Browse's place.
+    pub fn hidden(&mut self) {
+        self.left = Some(Instant::now());
+    }
+
+    /// Asks for page one of the current query again and keeps what the
+    /// list doesn't have yet: added at once when the list is at its top,
+    /// else behind the "new" chip so the list doesn't move.
+    fn check_new(&mut self, cx: &mut Context<Self>) {
+        let query_gen = self.query_gen;
+        let s = self.search_params();
+        let modrinth = self.modrinth;
+        self._check = Some(cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { hopper::source::search(&s, modrinth) })
+                .await;
+            this.update(cx, |this, cx| {
+                let Ok((mods, page)) = r else { return };
+                if this.query_gen != query_gen || this.bookmarked {
+                    return;
+                }                let new: Vec<cf::Mod> = mods
+                    .into_iter()
+                    .filter(|m| !this.results.iter().any(|r| r.id == m.id))
+                    .collect();
+                this.total = page.total_count;
+                if new.is_empty() {
+                    return;
+                }
+                let urls: Vec<String> = new
+                    .iter()
+                    .filter_map(|m| m.icon().map(str::to_string))
+                    .collect();
+                this.store
+                    .update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
+                this.fresh = new;
+                if this.scroll.offset().y >= px(-1.) {
+                    this.show_fresh();
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Puts the new entries at the top of the list and scrolls there.
+    fn show_fresh(&mut self) {
+        let fresh = std::mem::take(&mut self.fresh);
+        self.results.retain(|r| !fresh.iter().any(|m| m.id == r.id));
+        self.results.splice(0..0, fresh);
+        self.scroll.set_offset(point(px(0.), px(0.)));
     }
 
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -514,18 +599,16 @@ impl BrowseView {
         self.generation += 1;
         self.loading = true;
         let generation = self.generation;
+        if !append {
+            // A new query starts at the top, with nothing "new" pending.
+            self.query_gen += 1;
+            self.fresh.clear();
+            self._check = None;
+            self.scroll.set_offset(point(px(0.), px(0.)));
+        }
         let s = cf::Search {
-            class_id: self.class,
-            text: self.text.clone(),
-            game_version: self.game_version.clone(),
-            loader: if matches!(self.class, cf::CLASS_MODS | cf::CLASS_MODPACKS) {
-                self.loader
-            } else {
-                Loader::Any
-            },
-            category: self.category,
-            sort: self.sort,
             index: if append { self.results.len() as u32 } else { 0 },
+            ..self.search_params()
         };
         let modrinth = self.modrinth;
         self._search = Some(cx.spawn(async move |this, cx| {
@@ -544,6 +627,11 @@ impl BrowseView {
                             .filter_map(|m| m.icon().map(str::to_string))
                             .collect();
                         if append {
+                            // Skip any the "new" check already put on top.
+                            let mods: Vec<cf::Mod> = mods
+                                .into_iter()
+                                .filter(|m| !this.results.iter().any(|r| r.id == m.id))
+                                .collect();
                             this.results.extend(mods);
                         } else {
                             this.results = mods;
@@ -566,6 +654,23 @@ impl BrowseView {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// The search the filters describe, from its first result.
+    fn search_params(&self) -> cf::Search {
+        cf::Search {
+            class_id: self.class,
+            text: self.text.clone(),
+            game_version: self.game_version.clone(),
+            loader: if matches!(self.class, cf::CLASS_MODS | cf::CLASS_MODPACKS) {
+                self.loader
+            } else {
+                Loader::Any
+            },
+            category: self.category,
+            sort: self.sort,
+            index: 0,
+        }
     }
 
     /// Looks up which Modrinth packs in the results have server files, in
@@ -1811,49 +1916,80 @@ impl BrowseView {
                     }),
             )
             .child(
-                v_flex()
-                    .id("browse-results")
+                div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .px_6()
-                    .pb_6()
-                    .gap_2()
-                    .children(cards)
-                    // The next page loads once the list's end nears the view.
-                    .when(more, |r| {
-                        let view = cx.entity().downgrade();
+                    .child(self.result_list(cards, more, saved.is_none(), cx))
+                    .vertical_scrollbar(&self.scroll)
+                    .when(!self.fresh.is_empty() && saved.is_none(), |r| {
+                        let n = self.fresh.len();
                         r.child(
-                            canvas(
-                                move |bounds, window, cx| {
-                                    if bounds.top() < window.viewport_size().height + px(800.) {
-                                        cx.defer(move |cx| {
-                                            view.update(cx, |this, cx| {
-                                                if !this.loading {
-                                                    this.run_search(true, cx);
-                                                }
-                                            })
-                                            .ok();
-                                        });
-                                    }
-                                },
-                                |_, _, _, _| {},
-                            )
-                            .w_full()
-                            .h(px(1.)),
+                            h_flex().absolute().top_2().left_0().right_0().justify_center().child(
+                                // Occluded, so the click doesn't also open the card below.
+                                div().occlude().child(
+                                    Button::new("browse-fresh")
+                                        .small()
+                                        .primary()
+                                        .icon(IconName::ArrowUp)
+                                        .label(if n == 1 { "1 new result".to_string() } else { format!("{n} new results") })
+                                        .tooltip("Back to the top, with the new ones")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_fresh();
+                                            cx.notify();
+                                        })),
+                                ),
+                            ),
                         )
-                    })
-                    .when(saved.is_none() && self.loading && !self.results.is_empty(), |r| {
-                        r.child(
-                            h_flex()
-                                .justify_center()
-                                .gap_2()
-                                .py_3()
-                                .child(Spinner::new().small())
-                                .child(widgets::caption("Loading more", cx)),
-                        )
-                    })
-                    .overflow_y_scrollbar(),
+                    }),
             )
+    }
+
+    /// The result cards, scrolled by [`Self::scroll`] so the place is kept
+    /// while Browse is hidden.
+    fn result_list(&self, cards: Vec<AnyElement>, more: bool, searching: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        v_flex()
+            .id("browse-results")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .px_6()
+            .pb_6()
+            .gap_2()
+            .children(cards)
+            // The next page loads once the list's end nears the view.
+            .when(more, |r| {
+                let view = cx.entity().downgrade();
+                r.child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            if bounds.top() < window.viewport_size().height + px(800.) {
+                                cx.defer(move |cx| {
+                                    view.update(cx, |this, cx| {
+                                        if !this.loading {
+                                            this.run_search(true, cx);
+                                        }
+                                    })
+                                    .ok();
+                                });
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .w_full()
+                    .h(px(1.)),
+                )
+            })
+            .when(searching && self.loading && !self.results.is_empty(), |r| {
+                r.child(
+                    h_flex()
+                        .justify_center()
+                        .gap_2()
+                        .py_3()
+                        .child(Spinner::new().small())
+                        .child(widgets::caption("Loading more", cx)),
+                )
+            })
     }
 
     // ---- detail --------------------------------------------------------
