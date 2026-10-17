@@ -1694,7 +1694,29 @@ impl LibraryView {
             .text_sm()
             .text_color(theme.muted_foreground)
             .child(fact(IconName::Box, format!("Minecraft {}", inst.game_version)))
-            .child(fact(IconName::Blocks, store::loader_label(&inst.loader)))
+            .child({
+                let f = fact(IconName::Blocks, store::loader_label(&inst.loader));
+                if inst.loader.is_empty() {
+                    f.into_any_element()
+                } else {
+                    // Opens the loader's builds and changelog in Settings.
+                    let root = inst.root.clone();
+                    let fg = theme.foreground;
+                    f.id("hero-loader")
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(fg))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Loader versions and changelog")
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_tab(InstTab::Settings, cx);
+                            let root = root.clone();
+                            this.settings.update(cx, |s, cx| s.show_loader_log(root, cx));
+                        }))
+                        .into_any_element()
+                }
+            })
             .when_some(inst.pack.as_ref().filter(|p| !p.version.is_empty()), |r, p| {
                 let v = if p.version.starts_with(|c: char| c.is_ascii_digit()) {
                     format!("v{}", p.version)

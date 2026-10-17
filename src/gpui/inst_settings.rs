@@ -31,6 +31,9 @@ pub struct InstanceSettings {
     root: Option<PathBuf>,
     /// An instance to load on the next frame (loading needs the window).
     pending: Option<PathBuf>,
+    /// Open the loader's changelog once this instance and its loader
+    /// builds are in.
+    log_wanted: Option<PathBuf>,
     name: Entity<InputState>,
     width: Entity<InputState>,
     height: Entity<InputState>,
@@ -71,6 +74,7 @@ impl InstanceSettings {
             store,
             root: None,
             pending: None,
+            log_wanted: None,
             name,
             width,
             height,
@@ -103,6 +107,16 @@ impl InstanceSettings {
     /// Shows an instance's settings (dropping unsaved edits).
     pub fn show_for(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.pending = Some(root);
+        cx.notify();
+    }
+
+    /// Shows an instance's settings with its loader's builds and changelog
+    /// open on top.
+    pub fn show_loader_log(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if self.root.as_ref() != Some(&root) {
+            self.pending = Some(root.clone());
+        }
+        self.log_wanted = Some(root);
         cx.notify();
     }
 
@@ -456,6 +470,15 @@ impl Render for InstanceSettings {
         let Some(root) = self.root.clone() else {
             return div().into_any_element();
         };
+        // Waits for the loader builds (a failed fetch leaves none to wait for).
+        if self.pending.is_none()
+            && self.log_wanted.as_ref() == Some(&root)
+            && self.loaders.get(&self.game_version).is_none_or(|v| !v.is_empty())
+        {
+            self.log_wanted = None;
+            let form = cx.entity();
+            window.defer(cx, move |window, cx| open_loader_log(form, window, cx));
+        }
         let rem = window.rem_size();
         let view = cx.entity();
         let dirty = self.dirty(cx);
