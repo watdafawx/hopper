@@ -193,6 +193,33 @@ impl Mod {
         out
     }
 
+    /// "client", "server" or "both": Modrinth's side support, else the
+    /// "Client"/"Server" environment tags on CurseForge's newest files.
+    pub fn side(&self) -> Option<&'static str> {
+        if self.modrinth.is_some() {
+            return self.side;
+        }
+        let tags = |f: &File| {
+            let has = |t: &str| f.game_versions.iter().any(|v| v.eq_ignore_ascii_case(t));
+            (has("Client"), has("Server"))
+        };
+        // The main file speaks for the project; otherwise any newest file.
+        let (client, server) = match self.latest_files.iter().find(|f| f.id == self.main_file_id) {
+            Some(f) if tags(f) != (false, false) => tags(f),
+            _ => self
+                .latest_files
+                .iter()
+                .map(tags)
+                .fold((false, false), |a, b| (a.0 || b.0, a.1 || b.1)),
+        };
+        match (client, server) {
+            (true, true) => Some("both"),
+            (true, false) => Some("client"),
+            (false, true) => Some("server"),
+            _ => None,
+        }
+    }
+
     /// Loader names with a file, in Hopper's usual order.
     pub fn loaders(&self) -> Vec<&'static str> {
         let mut out: Vec<&'static str> = if self.modrinth.is_some() {
@@ -1101,6 +1128,27 @@ pub fn fetch_range(url: &str, start: u64, end: u64) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn side_from_environment_tags() {
+        let file = |id: u64, tags: &[&str]| File {
+            id,
+            game_versions: tags.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        };
+        let m = |main: u64, files: Vec<File>| Mod {
+            main_file_id: main,
+            latest_files: files,
+            ..Default::default()
+        };
+        assert_eq!(m(1, vec![file(1, &["1.21.1", "NeoForge", "Client", "Server"])]).side(), Some("both"));
+        assert_eq!(m(1, vec![file(1, &["1.21.1", "Client"])]).side(), Some("client"));
+        // The main file wins over older ones.
+        assert_eq!(m(2, vec![file(1, &["Client"]), file(2, &["Server"])]).side(), Some("server"));
+        // An untagged main file falls back to the rest.
+        assert_eq!(m(2, vec![file(1, &["Client"]), file(2, &["1.20.1"])]).side(), Some("client"));
+        assert_eq!(m(1, vec![file(1, &["1.20.1", "Forge"])]).side(), None);
+    }
 
     #[test]
     fn fingerprint_ignores_whitespace() {

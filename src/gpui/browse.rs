@@ -2773,7 +2773,7 @@ fn facts(m: &cf::Mod, cx: &App) -> Option<Div> {
     let theme = cx.theme();
     let versions = m.game_versions();
     let loaders = m.loaders();
-    let side = match m.side {
+    let side = match m.side() {
         Some("client") => Some("Client"),
         Some("server") => Some("Server"),
         Some("both") => Some("Client & server"),
