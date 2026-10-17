@@ -631,11 +631,16 @@ impl Store {
             Msg::Javas(j) => self.javas = Some(j),
             Msg::SelfUpdate(u) => self.self_update = Some(u),
             // A manual check or an install may have started meanwhile.
-            Msg::SelfUpdateRecheck(u) => {
-                if matches!(self.self_update, None | Some(SelfUpdate::UpToDate | SelfUpdate::Failed(_))) {
-                    self.self_update = Some(u);
+            Msg::SelfUpdateRecheck(u) => match (&self.self_update, &u) {
+                (None | Some(SelfUpdate::UpToDate | SelfUpdate::Failed(_)), _) => self.self_update = Some(u),
+                // A newer release than the one already offered.
+                (Some(SelfUpdate::Available(old)), SelfUpdate::Available(new))
+                    if hopper::selfupdate::is_newer(&new.version, &old.version) =>
+                {
+                    self.self_update = Some(u)
                 }
-            }
+                _ => {}
+            },
             Msg::PackUpdates(u) => self.pack_updates = u.into_iter().collect(),
             Msg::PackPage(id, r) => {
                 let page = match r {
@@ -1668,12 +1673,13 @@ impl Store {
     }
 
     /// The quiet background check: skipped while a check or install is
-    /// under way or an update is already found; a failure (offline, rate
-    /// limit) leaves the last state alone rather than showing an error.
+    /// under way; a found update is checked again, so a release cut since
+    /// replaces it. A failure (offline, rate limit) leaves the last state
+    /// alone rather than showing an error.
     fn recheck_self_update(&mut self) {
         if matches!(
             self.self_update,
-            Some(SelfUpdate::Checking | SelfUpdate::Available(_) | SelfUpdate::Installing(_) | SelfUpdate::Ready(_))
+            Some(SelfUpdate::Checking | SelfUpdate::Installing(_) | SelfUpdate::Ready(_))
         ) {
             return;
         }
@@ -1703,7 +1709,14 @@ impl Store {
         };
         self.self_update = Some(SelfUpdate::Installing(r.version.clone()));
         let tx = self.tx.clone();
+        let repo = self.update_repo();
         self.spawn_job(format!("Updating Hopper to {}", r.version), move |job| {
+            // Straight to the newest release, even one cut after the
+            // update was found, rather than one version at a time.
+            let r = match hopper::selfupdate::check(&repo) {
+                Ok(Some(latest)) if hopper::selfupdate::is_newer(&latest.version, &r.version) => latest,
+                _ => r,
+            };
             match hopper::selfupdate::install(&r, job) {
                 Ok(_) => Ok(Msg::SelfUpdate(SelfUpdate::Ready(r.version.clone()))),
                 Err(e) => {
