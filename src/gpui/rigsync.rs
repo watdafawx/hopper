@@ -45,6 +45,8 @@ pub struct SyncPanel {
     section: Section,
     configs: Entity<crate::configs::ConfigsPanel>,
     history: Entity<crate::configs::HistoryPanel>,
+    /// Start / stop / restart through the server's panel, beside the header.
+    control: Entity<crate::server_control::ServerControl>,
     server: Option<PathBuf>,
     diff: Option<Result<Vec<DiffEntry>, String>>,
     note: Option<Annotation>,
@@ -90,6 +92,10 @@ impl SyncPanel {
         let seen_rev = 0;
         let configs = cx.new(|cx| crate::configs::ConfigsPanel::new(store.clone(), window, cx));
         let history = cx.new(|cx| crate::configs::HistoryPanel::new(window, cx));
+        let control =
+            cx.new(|cx| crate::server_control::ServerControl::new(store.clone(), window, cx));
+        let mut subs = subs;
+        subs.push(cx.observe(&control, |_, _, cx| cx.notify()));
         Self {
             store,
             // `--section configs|history` for scripted runs.
@@ -104,6 +110,7 @@ impl SyncPanel {
             },
             configs,
             history,
+            control,
             server: None,
             diff: None,
             note: None,
@@ -146,7 +153,8 @@ impl SyncPanel {
     pub fn show(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let r2 = root.clone();
         self.configs.update(cx, |c, cx| c.show(r2.clone(), cx));
-        self.history.update(cx, |h, cx| h.show(r2, cx));
+        self.history.update(cx, |h, cx| h.show(r2.clone(), cx));
+        self.control.update(cx, |c, cx| c.show(r2, cx));
         let moved = self.server.as_ref() != Some(&root);
         if moved {
             self.server = Some(root);
@@ -345,6 +353,17 @@ impl SyncPanel {
         inst: &Instance,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        // Quick start / stop when a panel is set up; Servers sets one up.
+        let controls = self
+            .control
+            .read(cx)
+            .configured(cx)
+            .then(|| self.control.update(cx, |c, cx| c.controls(cx)));
+        let stop_where = if controls.is_some() {
+            "stop it here".to_string()
+        } else {
+            "stop it in Crafty/MCSS".to_string()
+        };
         let store = self.store.read(cx);
         let theme = cx.theme();
         let icon = inst
@@ -399,6 +418,7 @@ impl SyncPanel {
                             )
                             .child(div().truncate().child(server.name.clone())),
                     )
+                    .children(controls)
                     .child(
                         Button::new("update-server")
                             .primary()
@@ -428,7 +448,7 @@ impl SyncPanel {
                         .text_sm()
                         .text_color(theme.warning)
                         .child(Icon::new(IconName::TriangleAlert).small())
-                        .child("Server is online. Mods load at startup, so stop it in Crafty/MCSS before syncing."),
+                        .child(format!("Server is online. Mods load at startup, so {stop_where} before syncing.")),
                 )
             })
     }
