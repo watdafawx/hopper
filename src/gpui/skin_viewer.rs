@@ -400,6 +400,8 @@ impl Render for SkinViewer {
         let (slim, pose, time, cam, backdrop) = (self.slim, self.pose, self.time, self.cam, self.backdrop);
         let dragging = self.drag.is_some();
         let frames = self.frames.clone();
+        // The card's corners, inside its 1 px border: the sky is clipped to them.
+        let corner = (theme.radius_lg - px(1.)).max(px(0.));
         let view = cx.entity().downgrade();
         let picture = textures.map(|(skin, cape, elytra)| {
             canvas(
@@ -457,7 +459,7 @@ impl Render for SkinViewer {
                     }
                     if let Some(img) = f.image.clone() {
                         window
-                            .paint_image(bounds, bounds, Corners::default(), img, 0, false)
+                            .paint_image(bounds, bounds, Corners::all(corner), img, 0, false)
                             .ok();
                     }
                     if dragging {

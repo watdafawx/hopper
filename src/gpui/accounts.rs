@@ -12,7 +12,6 @@ use anyhow::{Context as _, bail};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
@@ -1600,30 +1599,67 @@ impl AccountsView {
             .child(div().h(rems(25.)).child(self.viewer.clone()))
             .child(bar);
 
-        let viewer = self.viewer.clone();
-        let rem = window.rem_size();
-        let poses = Button::new("pose")
-            .small()
-            .outline()
-            .w(rems(13.))
-            .icon(IconName::PersonStanding)
-            .label(pose.label())
-            .dropdown_caret(true)
-            .dropdown_menu(move |mut menu, _, _| {
-                menu = menu.min_w(rems(13.).to_pixels(rem)).max_h(rems(22.).to_pixels(rem)).scrollable(true);
-                for p in Pose::ALL {
-                    if p == Pose::Cycle || p == Pose::TPose {
-                        menu = menu.separator();
-                    }
-                    let viewer = viewer.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(p.label())
-                            .checked(p == pose)
-                            .on_click(move |_, _, cx| viewer.update(cx, |v, cx| v.set_pose(p, cx))),
-                    );
-                }
-                menu
+        // The poses as chips in groups; one click switches.
+        let pose_icon = |p: Pose| match p {
+            Pose::Walk => IconName::Footprints,
+            Pose::Run => IconName::Zap,
+            Pose::Sneak => IconName::EyeOff,
+            Pose::CrouchWalk => IconName::ChevronsDown,
+            Pose::Swim => IconName::WavesHorizontal,
+            Pose::Jump => IconName::ArrowBigUp,
+            Pose::Glide => IconName::Feather,
+            Pose::Wave => IconName::Hand,
+            Pose::Attack => IconName::Sword,
+            Pose::Bow => IconName::Target,
+            Pose::Dance => IconName::Music,
+            Pose::Sit => IconName::Armchair,
+            Pose::Sleep => IconName::Bed,
+            Pose::Idle => IconName::User,
+            Pose::TPose => IconName::PersonStanding,
+            Pose::LookAround => IconName::Eye,
+            Pose::Cycle => IconName::Repeat,
+        };
+        let poses = v_flex().gap_1p5().children(Pose::GROUPS.iter().map(|(group, list)| {
+            let chips = list.iter().map(|&p| {
+                let on = p == pose;
+                let viewer = self.viewer.clone();
+                h_flex()
+                    .id(SharedString::from(format!("pose:{}", p.label())))
+                    .gap_1()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .text_xs()
+                    .map(|d| {
+                        if on {
+                            d.bg(theme.primary)
+                                .border_color(theme.primary)
+                                .text_color(theme.primary_foreground)
+                        } else {
+                            d.border_color(theme.border)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.list_hover))
+                        }
+                    })
+                    .child(Icon::new(pose_icon(p)).xsmall())
+                    .child(p.label())
+                    .on_click(move |_, _, cx| viewer.update(cx, |v, cx| v.set_pose(p, cx)))
             });
+            h_flex()
+                .gap_1()
+                .items_start()
+                .child(
+                    div()
+                        .w(rems(4.25))
+                        .flex_none()
+                        .pt_0p5()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(*group),
+                )
+                .child(h_flex().flex_1().min_w_0().gap_1().flex_wrap().children(chips))
+        }));
 
         // The worn skin beside the previewed one.
         let compare = self.pending.as_ref().map(|pend| {

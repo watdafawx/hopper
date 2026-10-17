@@ -90,14 +90,24 @@ impl Pose {
             Pose::Wave => "Wave",
             Pose::Dance => "Dance",
             Pose::LookAround => "Look around",
-            Pose::Attack => "Attack",
-            Pose::Bow => "Draw a bow",
+            Pose::Attack => "Swing",
+            Pose::Bow => "Bow draw",
             Pose::Sit => "Sit",
             Pose::Sleep => "Sleep",
             Pose::TPose => "T-pose",
             Pose::Cycle => "Cycle all",
         }
     }
+
+    /// The poses by kind, as the picker groups them.
+    pub const GROUPS: [(&'static str, &'static [Pose]); 3] = [
+        (
+            "Movement",
+            &[Pose::Walk, Pose::Run, Pose::Sneak, Pose::CrouchWalk, Pose::Swim, Pose::Jump, Pose::Glide],
+        ),
+        ("Actions", &[Pose::Wave, Pose::Attack, Pose::Bow, Pose::Dance, Pose::Sit, Pose::Sleep]),
+        ("Showcase", &[Pose::Idle, Pose::TPose, Pose::LookAround, Pose::Cycle]),
+    ];
 
     /// Whether it moves at all (a T-pose stands still).
     pub fn animated(self) -> bool {
@@ -1404,6 +1414,9 @@ mod tests {
             assert!((0..50).all(|i| rig(pose, i as f32 * 0.07).lift == 0.0), "{pose:?}");
         }
         assert_eq!(Pose::default(), Pose::Walk);
+        let grouped: Vec<Pose> = Pose::GROUPS.iter().flat_map(|g| g.1.iter().copied()).collect();
+        assert_eq!(grouped.len(), Pose::ALL.len());
+        assert!(Pose::ALL.iter().all(|p| grouped.contains(p)), "every pose in a group");
         assert_eq!(Pose::Cycle.at(0.5), Pose::Walk);
         assert_eq!(Pose::Cycle.at(4.5), Pose::Idle);
         assert_eq!(Pose::Run.at(99.0), Pose::Run);
