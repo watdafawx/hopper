@@ -48,6 +48,8 @@ pub enum Msg {
     /// Projects updated, and download pages to fetch.
     Updated(PathBuf, Vec<u64>, Vec<String>),
     Running(HashMap<PathBuf, Running>),
+    /// Categories looked up for installed projects, by [`hopper::modmeta::key`].
+    Categories(HashMap<String, Vec<String>>),
     Image {
         url: String,
         path: Option<PathBuf>,
@@ -132,6 +134,10 @@ pub struct Store {
     running: HashMap<PathBuf, Running>,
     jobs: Jobs,
     images: HashMap<String, Image>,
+    /// Installed projects' categories (`None` until the disk cache is read);
+    /// keys being fetched are in `cats_pending`.
+    cats: Option<HashMap<String, Vec<String>>>,
+    cats_pending: std::collections::HashSet<String>,
     updates: HashMap<PathBuf, Updates>,
     /// When each instance's update check last started.
     updates_at: HashMap<PathBuf, Instant>,
@@ -233,6 +239,8 @@ impl Store {
             running: HashMap::new(),
             jobs: Jobs::new(wake.clone()),
             images: HashMap::new(),
+            cats: None,
+            cats_pending: Default::default(),
             updates: HashMap::new(),
             updates_at: HashMap::new(),
             servers: Vec::new(),
@@ -610,6 +618,12 @@ impl Store {
                     }
                 }
             }
+            Msg::Categories(found) => {
+                for k in found.keys() {
+                    self.cats_pending.remove(k);
+                }
+                self.cats.get_or_insert_default().extend(found);
+            }
             Msg::Image { url, path } => {
                 self.images
                     .insert(url, path.map_or(Image::Failed, Image::Ready));
@@ -853,6 +867,34 @@ impl Store {
             Some(Image::Ready(p)) => Some(p),
             _ => None,
         }
+    }
+
+    /// A project's categories, once known.
+    pub fn categories(&self, a: &instances::Addon) -> &[String] {
+        hopper::modmeta::key(a)
+            .and_then(|k| self.cats.as_ref()?.get(&k))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Looks up the categories of these addons that aren't known yet.
+    pub fn want_categories<'a>(&mut self, addons: impl IntoIterator<Item = &'a instances::Addon>) {
+        let known = self.cats.get_or_insert_with(hopper::modmeta::load);
+        let mut keys: Vec<String> = addons
+            .into_iter()
+            .filter_map(hopper::modmeta::key)
+            .filter(|k| !known.contains_key(k) && !self.cats_pending.contains(k))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        if keys.is_empty() {
+            return;
+        }
+        self.cats_pending.extend(keys.iter().cloned());
+        self.spawn(move || {
+            let found = hopper::modmeta::fetch(&keys);
+            hopper::modmeta::save(&found);
+            Msg::Categories(found)
+        });
     }
 
     /// Starts caching `url` unless it is cached or on its way.

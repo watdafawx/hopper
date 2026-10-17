@@ -86,6 +86,64 @@ pub fn caption(text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// What a mod's badge row says. Anything empty or false is left out.
+#[derive(Clone, Copy, Default)]
+pub struct ModTags<'a> {
+    pub in_use: bool,
+    pub new: bool,
+    /// Added on top of the pack.
+    pub added: bool,
+    /// "client" | "server" | "both" | "".
+    pub env: &'a str,
+    pub categories: &'a [String],
+    pub modrinth: bool,
+}
+
+/// Categories shown before the rest fold into "+n".
+const MOD_TAG_CATEGORIES: usize = 2;
+
+/// A mod's badges on one line, the same everywhere a mod is listed: new,
+/// added, where it runs, its categories and where it came from.
+pub fn mod_tags(t: ModTags, cx: &App) -> Div {
+    use gpui_kit::component::tag::Tag;
+    let tag = |t: Tag, text: SharedString| t.outline().xsmall().flex_none().child(text);
+    let env = match t.env {
+        "client" => Some(tag(Tag::warning(), "Client only".into())),
+        "server" => Some(tag(Tag::info(), "Server only".into())),
+        "both" => Some(tag(Tag::secondary(), "Client + server".into())),
+        _ => None,
+    };
+    let more = t.categories.len().saturating_sub(MOD_TAG_CATEGORIES);
+    h_flex_row()
+        .gap_1()
+        .min_w_0()
+        .overflow_hidden()
+        .when(t.in_use, |r| r.child(tag(Tag::info(), "In use".into())))
+        .when(t.new, |r| r.child(tag(Tag::success(), "New".into())))
+        .when(t.added, |r| r.child(tag(Tag::warning(), "Added".into())))
+        .children(env)
+        .children(
+            t.categories
+                .iter()
+                .take(MOD_TAG_CATEGORIES)
+                .map(|c| Tag::secondary().xsmall().flex_none().child(c.clone())),
+        )
+        .when(more > 0, |r| {
+            r.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("+{more}")),
+            )
+        })
+        .when(t.modrinth, |r| r.child(tag(Tag::secondary(), "Modrinth".into())))
+}
+
+fn h_flex_row() -> Div {
+    div().flex().flex_row().items_center()
+}
+
 /// Whether the theme shows the desktop through the window (glass themes
 /// have a see-through page color).
 pub fn glass(cx: &App) -> bool {

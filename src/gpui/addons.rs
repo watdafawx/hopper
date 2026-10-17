@@ -14,7 +14,6 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
     v_flex,
@@ -615,6 +614,7 @@ impl AddonsView {
             for a in inst.addons.iter().filter(|a| in_class(a, class)) {
                 s.want_image(&a.icon);
             }
+            s.want_categories(inst.addons.iter().filter(|a| in_class(a, class)));
         });
     }
 
@@ -1795,15 +1795,19 @@ impl AddonsView {
         let side = crate::side_card::side_of(&a.env);
         let card = self.side_card(a, cx);
 
+        let tags = widgets::mod_tags(
+            widgets::ModTags {
+                in_use: flags.in_use,
+                new: flags.new,
+                added: flags.added,
+                env: &a.env,
+                categories: store.categories(a),
+                modrinth: !a.mr_project.is_empty(),
+            },
+            cx,
+        );
         let name_line = h_flex()
             .gap_1p5()
-            .when(flags.in_use, |r| {
-                r.child(Tag::info().outline().xsmall().child("In use"))
-            })
-            .when(flags.added, |r| {
-                r.child(Tag::warning().outline().xsmall().child("Added"))
-            })
-            .when(flags.new, |r| r.child(Tag::success().outline().xsmall().child("New")))
             .child({
                 let pid = a.project_id;
                 div()
@@ -1824,9 +1828,6 @@ impl AddonsView {
                             }))
                     })
                     .child(a.name.clone())
-            })
-            .when(!a.mr_project.is_empty(), |r| {
-                r.child(Tag::secondary().outline().xsmall().child("Modrinth"))
             })
             .when(a.locked, |r| {
                 r.child(
@@ -1949,13 +1950,14 @@ impl AddonsView {
                     .gap_0p5()
                     .when(dim, |d| d.opacity(0.55))
                     .child(name_line)
-                    .child({
+                    .child(h_flex().gap_2().min_w_0().child(tags).child({
                         // File name and version chip. Click either to pick
                         // another version.
                         let (pid, upd) = (a.project_id, update.map(|u| u.file.clone()));
                         let primary = theme.primary;
                         let chip = h_flex()
-                            .flex_shrink(1.)
+                            .flex_none()
+                            .max_w(rems(16.))
                             .min_w_0()
                             .overflow_hidden()
                             .gap_1()
@@ -2005,13 +2007,13 @@ impl AddonsView {
                             .id(id("file"))
                             .min_w_0()
                             .gap_2()
+                            .children(chip)
                             .child(
                                 widgets::caption(a.file_name.clone(), cx)
                                     .text_xs()
                                     .min_w_0()
                                     .group_hover("file", move |s| s.text_color(primary)),
                             )
-                            .children(chip)
                             .when(pid != 0, |d| {
                                 d.cursor_pointer()
                                     .group("file")
@@ -2033,7 +2035,7 @@ impl AddonsView {
                                         this.versions(pid, upd.clone(), window, cx)
                                     }))
                             })
-                    }),
+                    })),
             )
             .child(action)
             // Room for the project panel.

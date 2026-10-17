@@ -243,12 +243,19 @@ impl SyncPanel {
                 this.server_nf = server_nf;
                 match diff {
                     Ok((d, note)) => {
+                        let inst = this.pair(cx).map(|(_, i)| i);
                         this.store.update(cx, |s, _| {
                             for m in d.iter().filter_map(|e| e.client.as_ref()) {
                                 s.want_image(&m.icon);
                             }
+                            if let Some(i) = &inst {
+                                s.want_categories(&i.addons);
+                            }
                         });
-                        this.selected = rigsync::default_selection(&d);
+                        // Nothing is picked for you; picks that still exist
+                        // survive a rescan.
+                        let keys: HashSet<String> = d.iter().map(row_key).collect();
+                        this.selected.retain(|k| keys.contains(k));
                         this.note = Some(note);
                         this.diff = Some(Ok(d));
                     }
@@ -297,15 +304,13 @@ impl SyncPanel {
         cx.notify();
     }
 
-    fn selected_rows(&self) -> Vec<DiffEntry> {
-        match &self.diff {
-            Some(Ok(d)) => d
-                .iter()
-                .filter(|e| self.selected.contains(&row_key(e)))
-                .cloned()
-                .collect(),
-            _ => Vec::new(),
-        }
+    /// Picked rows the filters show: a pick the filters hide does nothing.
+    fn selected_rows(&self, cx: &App) -> Vec<DiffEntry> {
+        self.visible(cx)
+            .into_iter()
+            .filter(|e| self.selected.contains(&row_key(e)))
+            .cloned()
+            .collect()
     }
 
     fn confirm_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -651,7 +656,7 @@ impl SyncPanel {
     }
 
     fn actions(&self, diff: &[DiffEntry], cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let picked = self.selected_rows();
+        let picked = self.selected_rows(cx);
         let Some((server, inst)) = self.pair_header(cx) else {
             return div().into_any_element();
         };
@@ -677,7 +682,7 @@ impl SyncPanel {
             .filter(|d| matches!(d.status, DiffStatus::ClientNewer | DiffStatus::ServerNewer))
             .map(row_key)
             .collect();
-        let n_sel = self.selected.len();
+        let n_sel = picked.len();
         h_flex()
             .gap_2()
             .flex_wrap()
@@ -734,7 +739,7 @@ impl SyncPanel {
                     .disabled(n_sel == 0)
                     .on_click(cx.listener(|this, _, _, cx| {
                         let keys: Vec<String> = this
-                            .selected_rows()
+                            .selected_rows(cx)
                             .iter()
                             .filter_map(rigsync::blacklist_key)
                             .collect();
@@ -788,6 +793,7 @@ impl SyncPanel {
         &self,
         id: ElementId,
         m: Option<&ModInfo>,
+        tags: Option<&RowTags>,
         show_file: bool,
         empty: &'static str,
         cx: &mut Context<Self>,
@@ -853,14 +859,33 @@ impl SyncPanel {
                                 )
                             }),
                     )
-                    .when(show_file, |c| {
-                        c.child(
-                            widgets::caption(m.file_name.clone(), cx)
-                                .text_xs()
-                                .truncate()
-                                .opacity(0.75),
-                        )
-                    }),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .min_w_0()
+                            .when_some(tags, |r, t| {
+                                r.child(widgets::mod_tags(
+                                    widgets::ModTags {
+                                        new: t.new,
+                                        added: t.added,
+                                        env: &t.env,
+                                        categories: &t.categories,
+                                        modrinth: t.modrinth,
+                                        ..Default::default()
+                                    },
+                                    cx,
+                                ))
+                            })
+                            .when(show_file, |c| {
+                                c.child(
+                                    widgets::caption(m.file_name.clone(), cx)
+                                        .text_xs()
+                                        .min_w_0()
+                                        .truncate()
+                                        .opacity(0.75),
+                                )
+                            }),
+                    ),
             )
             .into_any_element()
     }
@@ -908,13 +933,39 @@ impl SyncPanel {
                 .collect()
         };
         let pair = self.pair_header(cx);
+        let tags: Vec<(Option<RowTags>, Option<RowTags>)> = {
+            let store = self.store.read(cx);
+            let inst = self
+                .server
+                .as_ref()
+                .and_then(|r| store.server(r))
+                .and_then(|s| store.paired(s));
+            let now = hopper::time::parse_iso(&hopper::time::now_iso()).unwrap_or(0);
+            rows.iter()
+                .map(|d| {
+                    let side = |m: &ModInfo| RowTags::of(m, inst, store, now);
+                    let server = d.server.as_ref().map(|m| RowTags {
+                        new: false,
+                        added: false,
+                        ..side(m)
+                    });
+                    (d.client.as_ref().map(side), server)
+                })
+                .collect()
+        };
         rows.iter()
-            .map(|d| {
+            .zip(tags)
+            .map(|(d, (client_tags, server_tags))| {
                 let key = row_key(d);
                 let wont = is_wont(d);
                 let picked = self.selected.contains(&key);
                 let tip = if wont {
-                    d.skip_reason.clone().unwrap_or_default()
+                    let why = d
+                        .skip_reason
+                        .clone()
+                        .or_else(|| d.client.as_ref().and_then(|c| c.wont_sync.clone()))
+                        .unwrap_or_default();
+                    format!("Kept off the server: {why}. Click to copy it to the server anyway, this once.")
                 } else {
                     rigsync::explain(d)
                 };
@@ -935,11 +986,7 @@ impl SyncPanel {
                 .outline()
                 .xsmall()
                 .child(label);
-                let act = if wont {
-                    None
-                } else {
-                    rigsync::row_action(d.status)
-                };
+                let act = rigsync::row_action(d.status);
                 let id = |p: &str| ElementId::Name(format!("{p}:{key}").into());
                 let delta = match (&d.client, &d.server) {
                     (Some(c), Some(s))
@@ -1022,8 +1069,14 @@ impl SyncPanel {
                         .as_ref()
                         .zip(d.server.as_ref())
                         .is_some_and(|(c, s)| c.file_name.eq_ignore_ascii_case(&s.file_name));
-                let client =
-                    self.side_card(id("client"), d.client.as_ref(), true, "Not in the pack", cx);
+                let client = self.side_card(
+                    id("client"),
+                    d.client.as_ref(),
+                    client_tags.as_ref(),
+                    true,
+                    "Not in the pack",
+                    cx,
+                );
                 let server = if same_file {
                     let ok = cx.theme().success;
                     Self::note_cell(Icon::new(IconName::Check).small().text_color(ok), "Same file", cx)
@@ -1036,6 +1089,7 @@ impl SyncPanel {
                     self.side_card(
                         id("server"),
                         server_card.as_ref(),
+                        server_tags.as_ref(),
                         file_differs,
                         if wont { "Kept off the server" } else { "Not on the server" },
                         cx,
@@ -1089,6 +1143,36 @@ impl SyncPanel {
                     .into_any_element()
             })
             .collect()
+    }
+}
+
+/// What one side of a row shows as badges, read from the pack's addon.
+#[derive(Clone, Default)]
+struct RowTags {
+    env: String,
+    categories: Vec<String>,
+    new: bool,
+    added: bool,
+    modrinth: bool,
+}
+
+impl RowTags {
+    fn of(m: &ModInfo, inst: Option<&Instance>, store: &Store, now: i64) -> Self {
+        let a = inst.and_then(|i| i.addon_by_file(&m.file_name));
+        RowTags {
+            // The jar's own word first, then the site's tags.
+            env: if m.side.is_empty() {
+                a.map(|a| a.env.clone()).unwrap_or_default()
+            } else {
+                m.side.clone()
+            },
+            categories: a.map(|a| store.categories(a).to_vec()).unwrap_or_default(),
+            new: a
+                .and_then(|a| hopper::time::parse_iso(&a.date_added))
+                .is_some_and(|t| now - t < 3 * 86_400),
+            added: inst.is_some_and(|i| i.pack.is_some()) && a.is_some_and(|a| !a.from_pack),
+            modrinth: a.is_some_and(|a| !a.mr_project.is_empty()),
+        }
     }
 }
 

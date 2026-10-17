@@ -93,8 +93,8 @@ pub fn row_key(d: &DiffEntry) -> String {
 
 pub fn status_label(s: DiffStatus) -> &'static str {
     match s {
-        DiffStatus::OnlyClient => "Client only",
-        DiffStatus::OnlyServer => "Server only",
+        DiffStatus::OnlyClient => "Not on server",
+        DiffStatus::OnlyServer => "Not in pack",
         DiffStatus::ServerStale => "Old on server",
         DiffStatus::ClientNewer => "Update",
         DiffStatus::ServerNewer => "Downgrade",
@@ -106,8 +106,8 @@ pub fn status_label(s: DiffStatus) -> &'static str {
 pub fn explain(d: &DiffEntry) -> String {
     let v = |m: &Option<ModInfo>| m.as_ref().map_or("?".to_string(), |m| m.version.clone());
     match d.status {
-        DiffStatus::OnlyClient => "On the client only. Pushing copies it to the server.".into(),
-        DiffStatus::OnlyServer => "On the server only. Click the chip to pull it down to the client, or select it and Remove.".into(),
+        DiffStatus::OnlyClient => "In the pack but not on the server. Click to copy it to the server.".into(),
+        DiffStatus::OnlyServer => "On the server but not in the pack. Click to copy it down to the pack, or select it and Remove.".into(),
         DiffStatus::ServerStale => "An older copy left on the server; the client has this mod under a newer file. Click the chip to remove the leftover.".into(),
         DiffStatus::ClientNewer | DiffStatus::ServerNewer => format!(
             "Client is v{}, server is v{}. Pushing copies the client's file over and removes the server's old one.",
@@ -146,9 +146,9 @@ impl StatusFilter {
     pub fn label(self) -> &'static str {
         match self {
             StatusFilter::All => "All",
-            StatusFilter::Client => "Client",
+            StatusFilter::Client => "Not on server",
             StatusFilter::Updates => "Updates",
-            StatusFilter::Server => "Server",
+            StatusFilter::Server => "Not in pack",
             StatusFilter::InSync => "In sync",
         }
     }
@@ -228,14 +228,6 @@ impl Filters {
             });
         self.status.matches(d.status) && ok_env && ok_source && ok_wont && ok_text
     }
-}
-
-/// What Hopper would sync by default: every row not marked skip.
-pub fn default_selection(diff: &[DiffEntry]) -> HashSet<String> {
-    diff.iter()
-        .filter(|d| d.action != DiffAction::Skip)
-        .map(row_key)
-        .collect()
 }
 
 /// The key a blacklist entry uses for a row's mod.
