@@ -10,7 +10,7 @@ packs, and keeps your Minecraft servers in step with them.
 
 ## Why Hopper
 
-Hopper started as a tool just for me. The CurseForge app was painfully slow with big packs and missing the small things that make modded Minecraft pleasant: seeing what an update actually changes, keeping a server's mods in line with the pack. So I wrote my own. Every feature since came from something I needed while playing and running servers, and it grew from there.
+Hopper started as a tool just for me. The CurseForge app was painfully slow, and everyday things took far too many clicks. To see what a mod update changes, you open the mod's page, go to Files, find the newest version and click its changelog icon, one mod at a time. A pack you've added your own mods to won't update until you turn off "Allow content management". And nothing kept my server's mods in line with the pack. So I wrote my own: in Hopper, every changelog since your version is one click from the mod list, and packs update with your own mods kept. Every feature since came from something I needed while playing and running servers, and it grew from there.
 
 ### Built with AI help
 
