@@ -1740,7 +1740,7 @@ impl Store {
         });
     }
 
-    fn update_repo(&self) -> String {
+    pub fn update_repo(&self) -> String {
         Some(self.settings.update_repo.trim().to_string())
             .filter(|r| !r.is_empty())
             .unwrap_or_else(|| hopper::settings::DEFAULT_UPDATE_REPO.to_string())
@@ -1761,6 +1761,30 @@ impl Store {
                 Ok(Some(latest)) if hopper::selfupdate::is_newer(&latest.version, &r.version) => latest,
                 _ => r,
             };
+            match hopper::selfupdate::install(&r, job) {
+                Ok(_) => Ok(Msg::SelfUpdate(SelfUpdate::Ready(r.version.clone()))),
+                Err(e) => {
+                    let _ = tx.send(Msg::SelfUpdate(SelfUpdate::Failed(format!("{e:#}"))));
+                    Err(e)
+                }
+            }
+        });
+    }
+
+    /// Installs one chosen release, older or newer: it runs from the next
+    /// start, like an update.
+    pub fn install_hopper_version(&mut self, r: hopper::selfupdate::Release) {
+        if matches!(self.self_update, Some(SelfUpdate::Installing(_))) {
+            return;
+        }
+        self.self_update = Some(SelfUpdate::Installing(r.version.clone()));
+        let tx = self.tx.clone();
+        let verb = if hopper::selfupdate::is_newer(&r.version, hopper::selfupdate::CURRENT) {
+            "Updating"
+        } else {
+            "Rolling back"
+        };
+        self.spawn_job(format!("{verb} Hopper to {}", r.version), move |job| {
             match hopper::selfupdate::install(&r, job) {
                 Ok(_) => Ok(Msg::SelfUpdate(SelfUpdate::Ready(r.version.clone()))),
                 Err(e) => {

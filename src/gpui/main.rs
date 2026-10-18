@@ -16,6 +16,7 @@ mod dialogs;
 mod fetch_window;
 mod crash_help;
 mod host_dialog;
+mod hopper_versions;
 mod inst_settings;
 mod java_form;
 mod launchers_list;

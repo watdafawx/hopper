@@ -127,6 +127,10 @@ pub struct Settings {
     /// [`Settings::default`] (no settings file yet) starts at false.
     #[serde(default = "yes")]
     pub setup_done: bool,
+    /// Settings this build doesn't know (saved by a newer Hopper), kept as
+    /// they are so going back a version and forward again loses none.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 fn yes() -> bool {
@@ -284,6 +288,7 @@ impl Default for Settings {
             delete_permanently: true,
             // A new user: Hopper shows its setup on the first start.
             setup_done: false,
+            unknown: serde_json::Map::new(),
         }
     }
 }
@@ -458,6 +463,15 @@ mod tests {
             std_root.join("Instances").to_string_lossy()
         );
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn keeps_settings_from_a_newer_hopper() {
+        let s: Settings = serde_json::from_str(r#"{"theme_name":"X","from_the_future":{"a":1}}"#).unwrap();
+        assert_eq!(s.theme_name, "X");
+        let back = serde_json::to_value(&s).unwrap();
+        assert_eq!(back["from_the_future"]["a"], 1);
+        assert!(back.get("unknown").is_none());
     }
 
     #[test]

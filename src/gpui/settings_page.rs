@@ -1426,7 +1426,18 @@ impl SettingsPage {
                     .child(pill)
                     .when_some(line, |c, l| c.child(widgets::caption(l, cx).text_xs())),
             )
-            .child(whats_new);
+            .child(whats_new)
+            .child(
+                Button::new("hopper-versions")
+                    .small()
+                    .ghost()
+                    .icon(IconName::RotateCcw)
+                    .label("Other versions")
+                    .tooltip("Pick any release, including older ones to roll back to")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        crate::hopper_versions::open(this.store.clone(), window, cx)
+                    })),
+            );
 
         // Install: here, or where it is.
         let install = if hopper::setup::running_installed() {

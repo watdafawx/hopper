@@ -723,34 +723,70 @@ impl AppView {
             }));
     }
 
-    /// "Update to x" or "Restart to update" in the title bar.
-    fn update_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The version beside the logo. It opens Hopper's versions (update or
+    /// roll back), and lights up when an update is out or installed.
+    fn version_chip(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::store::SelfUpdate;
-        match self.store.read(cx).self_update()? {
-            SelfUpdate::Available(r) => Some(
-                Button::new("title-update")
-                    .xsmall()
-                    .primary()
-                    .icon(IconName::Download)
-                    .label(format!("Update to {}", r.version))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.store.update(cx, |s, cx| {
-                            s.install_self_update();
-                            cx.notify();
-                        })
-                    }))
-                    .into_any_element(),
+        let theme = cx.theme();
+        let (muted, hover) = (theme.muted_foreground, theme.list_hover);
+        let state = self.store.read(cx).self_update().cloned();
+        // (text, colour, icon, tooltip); no colour is the plain chip.
+        let (text, color, icon, tip): (String, Option<Hsla>, Option<IconName>, String) = match &state {
+            Some(SelfUpdate::Available(r)) => (
+                format!("{} available", r.version),
+                Some(theme.primary),
+                Some(IconName::ArrowUp),
+                format!("Hopper {} is out: see what's new and update", r.version),
             ),
-            SelfUpdate::Ready(_) => Some(
-                Button::new("title-restart")
-                    .xsmall()
-                    .primary()
-                    .label("Restart to update")
-                    .on_click(|_, _, cx| crate::settings_page::restart(cx))
-                    .into_any_element(),
+            Some(SelfUpdate::Installing(v)) => (
+                format!("Installing {v}…"),
+                Some(theme.info),
+                Some(IconName::Download),
+                "Downloading the new Hopper".into(),
             ),
-            _ => None,
-        }
+            Some(SelfUpdate::Ready(v)) => (
+                format!("Restart for {v}"),
+                Some(theme.success),
+                Some(IconName::RotateCcw),
+                format!("Hopper {v} is installed: restart to use it"),
+            ),
+            _ => (
+                format!("v{}", hopper::selfupdate::CURRENT),
+                None,
+                None,
+                "Hopper versions: update or roll back".into(),
+            ),
+        };
+        let ready = matches!(state, Some(SelfUpdate::Ready(_)));
+        h_flex()
+            .id("version")
+            .gap_1()
+            .px_2()
+            .h(rems(1.375))
+            .rounded_full()
+            .text_xs()
+            .cursor_pointer()
+            .map(|c| match color {
+                Some(color) => c
+                    .font_semibold()
+                    .text_color(color)
+                    .bg(color.opacity(0.12))
+                    .border_1()
+                    .border_color(color.opacity(0.3))
+                    .hover(move |s| s.bg(color.opacity(0.2))),
+                None => c.text_color(muted).hover(move |s| s.bg(hover)),
+            })
+            .children(icon.map(|i| Icon::new(i).xsmall()))
+            .child(text)
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if ready {
+                    crate::settings_page::restart(cx);
+                } else {
+                    crate::hopper_versions::open(this.store.clone(), window, cx);
+                }
+            }))
+            .into_any_element()
     }
 
     fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -780,15 +816,15 @@ impl AppView {
         // (name, face, tooltip) of who plays, or None for a sign-in button.
         // Only accounts signed in to Hopper itself; otherwise "Sign in".
         const TIP: &str = "Accounts, skin, cape and name";
-        let who: Option<Option<(String, AnyElement, &'static str)>> = Some(if let Some(a) = store.accounts().active() {
+        let who: Option<(String, AnyElement, &'static str)> = if let Some(a) = store.accounts().active() {
             Some((a.name.clone(), crate::accounts::head(store, a, rems(1.25), cx), TIP))
         } else if store.legacy_login() {
             let name = store.settings().signed_in_as.clone().unwrap_or_else(|| "Signed in".into());
             Some((name, widgets::thumb(None, rems(1.25), cx), TIP))
         } else {
             None
-        });
-        let account: Option<AnyElement> = who.map(|w| match w {
+        };
+        let account: AnyElement = match who {
             Some((name, face, tip)) => chip("account", name, face, tip, cx),
             None => Button::new("title-sign-in")
                 .xsmall()
@@ -798,22 +834,27 @@ impl AppView {
                     crate::dialogs::open_sign_in(this.store.clone(), window, cx)
                 }))
                 .into_any_element(),
-        });
+        };
+        // A thin upright line between groups of the bar.
+        let sep = |cx: &App| div().flex_none().w_px().h(rems(1.125)).bg(cx.theme().foreground.opacity(0.16));
+        let version = self.version_chip(cx);
         // Settings sits apart from the page tabs, at the trailing edge.
         let selected = Page::ALL.iter().position(|p| *p == self.page);
         TitleBar::new().child(
             h_flex()
                 .flex_1()
                 .pr_2()
-                .gap_4()
+                .gap_3()
                 .child(
                     h_flex()
                         .gap_2()
                         .child(widgets::logo().size_5())
-                        .child(div().text_sm().font_semibold().child("Hopper")),
+                        .child(div().text_sm().font_semibold().child("Hopper"))
+                        // Interactive parts occlude the bar's drag area: otherwise Windows
+                        // reads a press on them as a window drag and the click never comes.
+                        .child(div().occlude().child(version)),
                 )
-                // Interactive parts occlude the bar's drag area: otherwise Windows
-                // reads a press on them as a window drag and the click never comes.
+                .child(sep(cx))
                 .child(h_flex().gap_1().occlude().children(Page::ALL.iter().enumerate().map(|(ix, p)| {
                     // Icon and label share one pill; the page you're on is
                     // tinted with the accent.
@@ -845,60 +886,66 @@ impl AppView {
                 .child(div().flex_1())
                 .child(
                     h_flex()
-                        .gap_4()
+                        .gap_2()
                         .items_center()
                         .occlude()
-                .when(hopper::cf::api_key().is_none(), |r| {
-                    r.child(
-                        div()
-                            .id("no-key")
-                            .text_xs()
-                            .text_color(cx.theme().warning)
-                            .tooltip(|w, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(
-                                    "Add your CurseForge API key in Settings → CurseForge & Modrinth.",
+                        // What's going on: a missing key, then background tasks.
+                        .when(hopper::cf::api_key().is_none(), |r| {
+                            r.child(
+                                div()
+                                    .id("no-key")
+                                    .text_xs()
+                                    .text_color(cx.theme().warning)
+                                    .tooltip(|w, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            "Add your CurseForge API key in Settings → CurseForge & Modrinth.",
+                                        )
+                                        .build(w, cx)
+                                    })
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_settings_at("cf-key", cx)))
+                                    .child("No CurseForge key"),
+                            )
+                        })
+                        .child(self.tasks.clone())
+                        .child(sep(cx))
+                        // Tools: search, re-read, settings.
+                        .child(
+                            h_flex()
+                                .gap_0p5()
+                                .child(
+                                    Button::new("open-palette")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Search)
+                                        .label("Ctrl K")
+                                        .tooltip("Search or run a command (Ctrl+K)")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_palette(&CommandPalette, window, cx)
+                                        })),
                                 )
-                                .build(w, cx)
-                            })
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.open_settings_at("cf-key", cx)))
-                            .child("No CurseForge key"),
-                    )
-                })
-                .children(self.update_button(cx))
-                // One place on every page, beside the account.
-                .child(self.tasks.clone())
-                .children(account)
-                .child(
-                    Button::new("open-palette")
-                        .ghost()
-                        .small()
-                        .icon(IconName::Search)
-                        .label("Ctrl K")
-                        .tooltip("Search or run a command (Ctrl+K)")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_palette(&CommandPalette, window, cx)
-                        })),
-                )
-                .child(
-                    Button::new("refresh")
-                        .ghost()
-                        .small()
-                        .icon(IconName::RefreshCw)
-                        .tooltip("Re-read instances and servers from disk (F5)")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.refresh(&Refresh, window, cx)
-                        })),
-                )
-                .child(
-                    Button::new("open-settings")
-                        .ghost()
-                        .small()
-                        .icon(IconName::Settings)
-                        .selected(self.page == Page::Settings)
-                        .tooltip("Settings")
-                        .on_click(cx.listener(|this, _, _, cx| this.go(Page::Settings, cx))),
-                ),
+                                .child(
+                                    Button::new("refresh")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::RefreshCw)
+                                        .tooltip("Re-read instances and servers from disk (F5)")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.refresh(&Refresh, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("open-settings")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Settings)
+                                        .selected(self.page == Page::Settings)
+                                        .tooltip("Settings (Ctrl+,)")
+                                        .on_click(cx.listener(|this, _, _, cx| this.go(Page::Settings, cx))),
+                                ),
+                        )
+                        .child(sep(cx))
+                        .child(account),
                 ),
         )
     }

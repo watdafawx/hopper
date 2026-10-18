@@ -1,6 +1,6 @@
 //! Hopper updating itself from a GitHub repository's releases: the latest
 //! release whose tag is newer than this build, with a Windows exe (or a zip
-//! holding one) attached.
+//! holding one) attached, or any earlier release to go back to.
 
 use anyhow::{Context as _, bail};
 use serde::Deserialize;
@@ -9,12 +9,14 @@ use std::path::{Path, PathBuf};
 /// This build's version.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
-/// A newer Hopper, ready to download.
+/// A Hopper release, ready to download.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
     pub version: String,
     pub name: String,
     pub notes: String,
+    /// When it was published, as GitHub gives it (2026-10-18T09:08:51Z).
+    pub published: String,
     pub url: String,
     pub size: u64,
     /// The download is a zip with hopper.exe inside.
@@ -32,6 +34,8 @@ struct GhRelease {
     draft: bool,
     #[serde(default)]
     prerelease: bool,
+    #[serde(default)]
+    published_at: Option<String>,
     #[serde(default)]
     assets: Vec<GhAsset>,
 }
@@ -79,8 +83,9 @@ fn pick(assets: &[GhAsset]) -> Option<(&GhAsset, bool)> {
         .or_else(|| assets.iter().filter(named).find(|a| ext(a, ".zip")).map(|a| (a, true)))
 }
 
-fn parse_release(r: GhRelease) -> Option<Release> {
-    if r.draft || r.prerelease || !is_newer(&r.tag_name, CURRENT) {
+/// A published release with something to install.
+fn installable(r: GhRelease) -> Option<Release> {
+    if r.draft || r.prerelease {
         return None;
     }
     let (asset, zipped) = pick(&r.assets)?;
@@ -88,27 +93,77 @@ fn parse_release(r: GhRelease) -> Option<Release> {
         version: r.tag_name.trim_start_matches(['v', 'V']).to_string(),
         name: r.name.unwrap_or_else(|| r.tag_name.clone()),
         notes: r.body.unwrap_or_default(),
+        published: r.published_at.unwrap_or_default(),
         url: asset.browser_download_url.clone(),
         size: asset.size,
         zipped,
     })
 }
 
-/// The newest release of `repo` ("owner/name") if it is newer than this
-/// build and has something to install.
-pub fn check(repo: &str) -> anyhow::Result<Option<Release>> {
+fn parse_release(r: GhRelease) -> Option<Release> {
+    installable(r).filter(|r| is_newer(&r.version, CURRENT))
+}
+
+fn api(repo: &str, path: &str) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
     let repo = repo.trim().trim_matches('/');
     if repo.split('/').filter(|p| !p.is_empty()).count() != 2 {
         bail!("Set the repository as owner/name.");
     }
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let mut resp = crate::cf::agent()
+    let url = format!("https://api.github.com/repos/{repo}/{path}");
+    crate::cf::agent()
         .get(&url)
         .header("Accept", "application/vnd.github+json")
         .call()
-        .with_context(|| format!("checking {repo} for a new Hopper"))?;
-    let r: GhRelease = resp.body_mut().read_json().context("reading the release")?;
+        .with_context(|| format!("reading Hopper's releases from {repo}"))
+}
+
+/// The newest release of `repo` ("owner/name") if it is newer than this
+/// build and has something to install.
+pub fn check(repo: &str) -> anyhow::Result<Option<Release>> {
+    let r: GhRelease = api(repo, "releases/latest")?
+        .body_mut()
+        .read_json()
+        .context("reading the release")?;
     Ok(parse_release(r))
+}
+
+/// Every release of `repo` that can be installed, newest first.
+pub fn list(repo: &str) -> anyhow::Result<Vec<Release>> {
+    let all: Vec<GhRelease> = api(repo, "releases?per_page=100")?
+        .body_mut()
+        .read_json()
+        .context("reading the releases")?;
+    Ok(sorted(all.into_iter().filter_map(installable).collect()))
+}
+
+fn sorted(mut v: Vec<Release>) -> Vec<Release> {
+    v.sort_by(|a, b| {
+        if is_newer(&a.version, &b.version) {
+            std::cmp::Ordering::Less
+        } else if is_newer(&b.version, &a.version) {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    });
+    v
+}
+
+/// The releases a move to `target` leaves out of `releases` (newest
+/// first): the ones after it, up to the newest.
+pub fn after<'a>(releases: &'a [Release], target: &str) -> Vec<&'a Release> {
+    releases.iter().filter(|r| is_newer(&r.version, target)).collect()
+}
+
+/// A release's notes as shown in Hopper: GitHub's "Full Changelog" link
+/// line dropped, the rest kept as Markdown.
+pub fn clean_notes(body: &str) -> String {
+    body.lines()
+        .filter(|l| !l.trim_start().starts_with("**Full Changelog**"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 /// The running exe and where the old one waits to be removed.
@@ -263,11 +318,40 @@ mod tests {
             body: None,
             draft,
             prerelease: false,
+            published_at: None,
             assets: vec![asset("hopper.exe")],
         };
         assert!(parse_release(r("v99.0.0", false)).is_some());
         assert!(parse_release(r("v99.0.0", true)).is_none());
         assert!(parse_release(r("v0.0.1", false)).is_none());
+    }
+
+    fn rel(v: &str) -> Release {
+        Release {
+            version: v.into(),
+            name: v.into(),
+            notes: String::new(),
+            published: String::new(),
+            url: String::new(),
+            size: 0,
+            zipped: false,
+        }
+    }
+
+    #[test]
+    fn lists_newest_first_and_what_a_rollback_drops() {
+        let v = sorted(vec![rel("0.8.9"), rel("0.8.20"), rel("0.8.10")]);
+        let names: Vec<_> = v.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(names, ["0.8.20", "0.8.10", "0.8.9"]);
+        let lost: Vec<_> = after(&v, "0.8.9").iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(lost, ["0.8.20", "0.8.10"]);
+        assert!(after(&v, "0.8.20").is_empty());
+    }
+
+    #[test]
+    fn notes_drop_the_compare_link() {
+        let body = "Fixed a thing.\n\n- Commit\n\n**Full Changelog**: https://x/compare/a...b\n";
+        assert_eq!(clean_notes(body), "Fixed a thing.\n\n- Commit");
     }
 
     #[test]
