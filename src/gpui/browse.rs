@@ -2063,7 +2063,7 @@ impl BrowseView {
                     .child(div().text_xl().font_semibold().child(m.name.clone()))
                     .child(self.author_link(m, "detail-author".into(), cx))
                     .child(stats(m, true, cx).flex_wrap().pt_0p5())
-                    .children(facts(m, cx))
+                    .children(facts(m, target, cx))
                     .child(
                         h_flex()
                             .pt_1()
@@ -2769,11 +2769,29 @@ fn stats(m: &cf::Mod, full: bool, cx: &App) -> Div {
 
 /// Game versions, loaders, environment and license as small tags, with the
 /// project id in a tooltip-free caption. `None` when nothing is known.
-fn facts(m: &cf::Mod, cx: &App) -> Option<Div> {
+fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
     let theme = cx.theme();
     let versions = m.game_versions();
     let loaders = m.loaders();
-    let side = match m.side() {
+    // For an instance: the installed file's tags, else the newest file for
+    // its version and loader. Authors tag each build separately.
+    let installed = target
+        .and_then(|i| i.addons.iter().find(|a| a.project_id == m.id && m.modrinth.is_none()))
+        .map(|a| a.env.as_str())
+        .filter(|e| !e.is_empty());
+    let env = match (installed, target) {
+        (Some(e), _) => Some(match e {
+            "client" => "client",
+            "server" => "server",
+            _ => "both",
+        }),
+        (None, Some(i)) => {
+            let loader = hopper::install::loader_of(i);
+            m.side_for(&i.game_version,(loader != Loader::Any).then(|| loader.name()))
+        }
+        (None, None) => m.side(),
+    };
+    let side = match env {
         Some("client") => Some("Client"),
         Some("server") => Some("Server"),
         Some("both") => Some("Client & server"),

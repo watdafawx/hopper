@@ -220,6 +220,27 @@ impl Mod {
         }
     }
 
+    /// [`Self::side`] for one Minecraft version and loader ("NeoForge"): the
+    /// newest such file's tags, since authors tag each build on its own.
+    /// Falls back to [`Self::side`] when no file matches or it's untagged.
+    pub fn side_for(&self, game_version: &str, loader: Option<&str>) -> Option<&'static str> {
+        if self.modrinth.is_some() || game_version.is_empty() {
+            return self.side();
+        }
+        let has = |f: &File, t: &str| f.game_versions.iter().any(|v| v.eq_ignore_ascii_case(t));
+        let newest = self
+            .latest_files
+            .iter()
+            .filter(|f| has(f, game_version) && loader.is_none_or(|l| has(f, l)))
+            .max_by(|a, b| a.file_date.cmp(&b.file_date).then(a.id.cmp(&b.id)));
+        match newest.map(|f| (has(f, "Client"), has(f, "Server"))) {
+            Some((true, true)) => Some("both"),
+            Some((true, false)) => Some("client"),
+            Some((false, true)) => Some("server"),
+            _ => self.side(),
+        }
+    }
+
     /// Loader names with a file, in Hopper's usual order.
     pub fn loaders(&self) -> Vec<&'static str> {
         let mut out: Vec<&'static str> = if self.modrinth.is_some() {
@@ -1148,6 +1169,17 @@ mod tests {
         // An untagged main file falls back to the rest.
         assert_eq!(m(2, vec![file(1, &["Client"]), file(2, &["1.20.1"])]).side(), Some("client"));
         assert_eq!(m(1, vec![file(1, &["1.20.1", "Forge"])]).side(), None);
+
+        // Per version: Advancement Plaques tags its 1.21.1 builds for both
+        // sides and its newest (main) build client-only.
+        let mut old = file(1, &["1.21.1", "NeoForge", "Client", "Server"]);
+        old.file_date = "2025-01-01".into();
+        let mut new = file(2, &["26.3", "Forge", "Client"]);
+        new.file_date = "2026-09-22".into();
+        let plaques = m(2, vec![old, new]);
+        assert_eq!(plaques.side(), Some("client"));
+        assert_eq!(plaques.side_for("1.21.1", Some("NeoForge")), Some("both"));
+        assert_eq!(plaques.side_for("1.21.1", Some("Fabric")), Some("client"));
     }
 
     #[test]
