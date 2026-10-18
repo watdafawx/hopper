@@ -473,3 +473,82 @@ pub fn open(
             .child(view.clone())
     });
 }
+
+/// One version's changelog, from a project's Files list.
+struct FileLog {
+    store: Entity<Store>,
+    /// The instance its links open beside; none opens them in the browser.
+    root: Option<PathBuf>,
+    file: cf::File,
+    md: Option<Result<SharedString, String>>,
+}
+
+impl Render for FileLog {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let h = (window.viewport_size().height - window.rem_size() * 8.)
+            .clamp(window.rem_size() * 10., window.rem_size() * 32.);
+        let body: AnyElement = match &self.md {
+            None => h_flex()
+                .gap_2()
+                .child(Spinner::new().small())
+                .child(widgets::caption("Loading the changelog", cx))
+                .into_any_element(),
+            Some(Err(e)) => div().text_sm().text_color(cx.theme().danger).child(e.clone()).into_any_element(),
+            Some(Ok(md)) if md.trim().is_empty() => widgets::caption("No changelog for this version.", cx)
+                .italic()
+                .into_any_element(),
+            Some(Ok(md)) => {
+                let (store, root) = (self.store.clone(), self.root.clone());
+                TextView::markdown("file-log", md.clone())
+                    .selectable(true)
+                    .scrollable(false)
+                    .on_link_click(move |url, _, window, cx| match &root {
+                        Some(root) => open_link(&store, root, url, window, cx),
+                        None => cx.open_url(url),
+                    })
+                    .into_any_element()
+            }
+        };
+        v_flex()
+            .h(h)
+            .gap_3()
+            .child(
+                v_flex()
+                    .child(div().font_semibold().truncate().child(self.file.display_name.clone()))
+                    .child(widgets::caption(self.file.release_name(), cx).text_xs()),
+            )
+            .child(div().id("file-log-scroll").flex_1().min_h_0().overflow_y_scrollbar().child(body))
+    }
+}
+
+/// Opens one version's changelog.
+pub fn open_file(store: Entity<Store>, root: Option<PathBuf>, file: cf::File, window: &mut Window, cx: &mut App) {
+    let view = cx.new(|cx| {
+        let f = file.clone();
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { hopper::source::changelog(&f) })
+                .await
+                .map(|b| SharedString::from(hopper::richtext::to_markdown(&b)))
+                .map_err(|e| format!("{e:#}"));
+            this.update(cx, |this: &mut FileLog, cx| {
+                this.md = Some(r);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        FileLog {
+            store,
+            root,
+            file,
+            md: None,
+        }
+    });
+    window.open_dialog(cx, move |dialog, window, _| {
+        dialog
+            .title("Changelog")
+            .w(rems(46.).to_pixels(window.rem_size()))
+            .child(view.clone())
+    });
+}

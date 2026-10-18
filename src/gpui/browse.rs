@@ -1669,8 +1669,10 @@ impl BrowseView {
                 .into_any_element()
         } else if let Some((root, listed)) = update {
             let m1 = m.clone();
-            install_button(
-                Button::new(id("update")).small().primary().icon(IconName::Download),
+            let (store, log_root, pid) = (self.store.clone(), root.clone(), m.id);
+            let log_file = listed.as_ref().map(|u| u.file.clone());
+            let lead = install_button(
+                widgets::split_lead(Button::new(id("update")).small().primary().icon(IconName::Download)),
                 "Update",
                 pending,
                 hold,
@@ -1688,7 +1690,19 @@ impl BrowseView {
                     // file over the old one.
                     None => this.install(m1.clone(), None, w, cx),
                 }
-            }))
+            }));
+            widgets::split(
+                lead,
+                id("changes"),
+                widgets::Tint::Primary,
+                gpui_kit::component::Size::Small,
+                "What changed",
+                move |_, window, cx| {
+                    cx.stop_propagation();
+                    crate::versions::open(store.clone(), log_root.clone(), pid, false, log_file.clone(), window, cx)
+                },
+                cx,
+            )
             .into_any_element()
         } else if let Some(src) = installed {
             let site = matches!(src, "Modrinth" | "CurseForge");
@@ -2172,16 +2186,30 @@ impl BrowseView {
                             .collect::<Vec<_>>()
                             .join(", ");
                         let (m1, f1) = (m.clone(), f.clone());
+                        let (store, log_root, log_file) =
+                            (self.store.clone(), target.as_ref().map(|t| t.root.clone()), f.clone());
+                        let log_id = ElementId::Name(format!("log:{}", f.id).into());
+                        let open_log = move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            crate::versions::open_file(store.clone(), log_root.clone(), log_file.clone(), window, cx)
+                        };
                         let action: AnyElement = if installed_file == Some(f.id) {
-                            Tag::success()
-                                .xsmall()
-                                .child("Installed")
-                                .into_any_element()
+                            widgets::split(
+                                widgets::split_lead(Tag::success().xsmall().h_5().child("Installed")),
+                                log_id,
+                                widgets::Tint::Success,
+                                gpui_kit::component::Size::XSmall,
+                                "Changelog",
+                                open_log,
+                                cx,
+                            )
+                            .into_any_element()
                         } else {
-                            install_button(
-                                Button::new(ElementId::Name(format!("file:{}", f.id).into()))
-                                    .xsmall()
-                                    .outline(),
+                            let lead = install_button(
+                                widgets::split_lead(
+                                    Button::new(ElementId::Name(format!("file:{}", f.id).into()))
+                                        .xsmall()
+                                        .outline(),
+                                ),
                                 if installed_file.is_some() { "Switch" } else { "Install" },
                                 pending,
                                 hold,
@@ -2190,7 +2218,8 @@ impl BrowseView {
                             .when(locked, |b| b.tooltip("Locked: unlock it in the Mods tab to switch versions"))
                                 .on_click(cx.listener(move |this, _, w, cx| {
                                     this.install(m1.clone(), Some(f1.clone()), w, cx)
-                                }))
+                                }));
+                            widgets::split(lead, log_id, widgets::Tint::Outline, gpui_kit::component::Size::XSmall, "Changelog", open_log, cx)
                                 .into_any_element()
                         };
                         // A pack version's own server zip.

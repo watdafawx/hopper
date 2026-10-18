@@ -2,7 +2,8 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, v_flex};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::Path;
@@ -75,6 +76,62 @@ pub fn slide_in(id: impl Into<ElementId>, container: Div) -> AnyElement {
             |el, t| el.opacity(t).left(rems(1.5 * (1.0 - t))),
         )
         .into_any_element()
+}
+
+/// What a split button's changelog half sits beside: it takes that
+/// button's color for its icon and border.
+#[derive(Clone, Copy)]
+pub enum Tint {
+    Primary,
+    Outline,
+    Success,
+}
+
+/// The action half of a split button: square on the right, so the
+/// changelog half joins it.
+pub fn split_lead<E: Styled>(lead: E) -> E {
+    lead.rounded_tr(px(0.)).rounded_br(px(0.))
+}
+
+/// A split button: the action, and a neutral changelog half on its right
+/// whose icon and border pick up the action's color.
+pub fn split(
+    lead: impl IntoElement,
+    id: impl Into<ElementId>,
+    tint: Tint,
+    size: gpui_kit::component::Size,
+    tip: impl Into<SharedString>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    let color = match tint {
+        Tint::Primary => theme.primary,
+        Tint::Outline => theme.muted_foreground,
+        Tint::Success => theme.success,
+    };
+    let border = match tint {
+        Tint::Outline => theme.border,
+        _ => color.opacity(0.45),
+    };
+    let tail = Button::new(id)
+        .icon(Icon::new(IconName::ScrollText))
+        .custom(
+            gpui_kit::component::button::ButtonCustomVariant::new(cx)
+                .color(theme.secondary)
+                .foreground(color)
+                .hover(theme.secondary_hover)
+                .active(theme.secondary_active),
+        )
+        .with_size(size)
+        .border_1()
+        .border_l_0()
+        .border_color(border)
+        .rounded_tl(px(0.))
+        .rounded_bl(px(0.))
+        .tooltip(tip)
+        .on_click(on_click);
+    h_flex().flex_none().items_center().child(lead).child(tail)
 }
 
 /// A muted, small caption line.

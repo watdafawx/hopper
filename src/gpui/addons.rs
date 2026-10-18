@@ -1847,10 +1847,9 @@ impl AddonsView {
         let action = col_action().when_some(update.cloned(), |c, u| {
             let tip = format!("{}  →  {}", u.from, u.file.file_name);
             let (pid, file) = (u.project_id, u.file.clone());
-            c.child(
-                h_flex()
-                    .gap_1()
-                    .child(
+            let view = cx.entity();
+            c.child(widgets::split(
+                widgets::split_lead(
                         Button::new(id("update"))
                             .small()
                             .outline()
@@ -1866,18 +1865,14 @@ impl AddonsView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.run_updates(vec![u.clone()], cx)
                             })),
-                    )
-                    .child(
-                        Button::new(id("changes"))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::ScrollText)
-                            .tooltip("What changed")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.versions(pid, Some(file.clone()), window, cx)
-                            })),
-                    ),
-            )
+                ),
+                id("changes"),
+                widgets::Tint::Outline,
+                gpui_kit::component::Size::Small,
+                "What changed",
+                move |_, window, cx| view.update(cx, |this, cx| this.versions(pid, Some(file.clone()), window, cx)),
+                cx,
+            ))
         });
 
         let view = cx.entity();

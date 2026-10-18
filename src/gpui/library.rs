@@ -1402,8 +1402,8 @@ impl LibraryView {
             let (r1, r2, f1, f2) = (root.clone(), root.clone(), f.clone(), f.clone());
             h_flex()
                 .gap_1()
-                .child(
-                    Button::new("update-pack")
+                .child(widgets::split(
+                    widgets::split_lead(Button::new("update-pack")
                         .primary()
                         .icon(IconName::Download)
                         .label(format!("Update pack to {}", f.display_name))
@@ -1417,31 +1417,24 @@ impl LibraryView {
                                 window,
                                 cx,
                             )
-                        })),
-                )
-                .child(
-                    Button::new("pack-changes")
-                        .ghost()
-                        .icon(IconName::ScrollText)
-                        .tooltip("What changed in the pack")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let pid = this
-                                .store
+                        }))),
+                    "pack-changes",
+                    widgets::Tint::Primary,
+                    gpui_kit::component::Size::Medium,
+                    "What changed in the pack",
+                    {
+                        let store = self.store.clone();
+                        move |_, window, cx| {
+                            let pid = store
                                 .read(cx)
                                 .instance(&r2)
                                 .and_then(|i| i.pack.as_ref().map(|p| p.project_id))
                                 .unwrap_or(0);
-                            crate::versions::open(
-                                this.store.clone(),
-                                r2.clone(),
-                                pid,
-                                true,
-                                Some(f2.clone()),
-                                window,
-                                cx,
-                            )
-                        })),
-                )
+                            crate::versions::open(store.clone(), r2.clone(), pid, true, Some(f2.clone()), window, cx)
+                        }
+                    },
+                    cx,
+                ))
         });
         let has_pack = inst.pack.is_some();
         let sync_to = store
