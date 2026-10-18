@@ -450,10 +450,18 @@ pub fn description_view(
             .filter_map(|k| Some((k.clone(), s.anim(k)?.frame_now())))
             .collect(),
     );
-    // The viewer shows the full-size originals.
+    // The viewer shows the full-size originals, video posters aside.
+    let posters: Vec<&str> = segments
+        .iter()
+        .filter_map(|s| match s {
+            Segment::Video(v) => v.thumb.as_deref(),
+            _ => None,
+        })
+        .collect();
     let gallery: Arc<Vec<(String, String)>> = Arc::new(
         images
             .iter()
+            .filter(|k| !posters.contains(&k.as_str()))
             .map(|k| (hopper::imgcache::split_width(k).0.to_string(), String::new()))
             .collect(),
     );
@@ -528,6 +536,83 @@ pub fn description_view(
                         })
                 }))
                 .into_any_element(),
+            Segment::Video(v) => video_tile(
+                ElementId::NamedInteger(format!("{id}:video").into(), i as u64),
+                v,
+                v.thumb.as_ref().and_then(|t| cached.get(t).cloned()),
+                cx,
+            ),
         }))
+        .into_any_element()
+}
+
+/// A description's video: its poster (or a plain panel naming the site) at
+/// 16:9 with a play button; a click plays it.
+fn video_tile(
+    id: ElementId,
+    v: &hopper::richtext::Video,
+    poster: Option<Arc<Path>>,
+    cx: &App,
+) -> AnyElement {
+    use gpui_kit::assets::IconName;
+    let theme = cx.theme();
+    let video = v.clone();
+    let site = v.site();
+    div()
+        .id(id)
+        .relative()
+        .my_2()
+        .w_full()
+        .max_w(px(640.))
+        .aspect_ratio(16. / 9.)
+        .rounded(theme.radius)
+        .overflow_hidden()
+        .bg(theme.muted)
+        .cursor_pointer()
+        .on_click(move |_, _, cx| crate::video::play(&video, cx))
+        .when_some(poster, |d, p| {
+            d.child(
+                img(ImageSource::Resource(Resource::Path(p)))
+                    .absolute()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+        })
+        .child(
+            v_flex()
+                .absolute()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    div()
+                        .size(px(64.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui_kit::black().opacity(0.6))
+                        .border_2()
+                        .border_color(gpui_kit::white().opacity(0.85))
+                        .child(
+                            Icon::new(IconName::Play)
+                                .size(px(28.))
+                                .text_color(gpui_kit::white()),
+                        ),
+                )
+                .when(v.thumb.is_none(), |d| {
+                    d.child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(match site {
+                                "video" => "Video".to_string(),
+                                s => format!("{s} video"),
+                            }),
+                    )
+                }),
+        )
+        .hover(|s| s.opacity(0.9))
         .into_any_element()
 }

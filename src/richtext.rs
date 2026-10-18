@@ -1,8 +1,9 @@
 //! Renders the HTML CurseForge uses for descriptions and changelogs as
 //! formatted text: headings, paragraphs, nested bullets and numbered lists,
 //! bold, italics, code and code blocks, links, images, tables, rules and
-//! YouTube embeds (as a thumbnail linking to the video). Scripts, styles and
-//! other iframes are dropped.
+//! videos (YouTube, Vimeo and Streamable embeds, links to them standing alone
+//! in a paragraph, and `.mp4`/`.webm` files). Scripts, styles and other
+//! iframes are dropped.
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Span {
@@ -38,6 +39,125 @@ pub enum Kind {
     Code,
     /// A table row, one span list per cell. `spans` stays empty.
     Row(Vec<Vec<Span>>),
+    /// A video. `spans` stays empty.
+    Video(Video),
+}
+
+/// A video in a description: a YouTube, Vimeo or Streamable one, or a
+/// video file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Video {
+    /// Its page (or the file), for the browser.
+    pub url: String,
+    /// The player page to embed; `None` for a video file.
+    pub embed: Option<String>,
+    /// A poster image URL, when one is known.
+    pub thumb: Option<String>,
+}
+
+impl Video {
+    /// The site it plays on, for labels.
+    pub fn site(&self) -> &'static str {
+        if self.url.contains("youtube.com/") {
+            "YouTube"
+        } else if self.url.contains("vimeo.com/") {
+            "Vimeo"
+        } else if self.url.contains("streamable.com/") {
+            "Streamable"
+        } else {
+            "video"
+        }
+    }
+}
+
+/// `u` as a video, when it is one: a YouTube page, short link or embed, a
+/// Vimeo or Streamable page or player, or a `.mp4`/`.webm` file.
+pub fn video_of(u: &str) -> Option<Video> {
+    let u = u.trim();
+    let rest = u
+        .strip_prefix("https://")
+        .or_else(|| u.strip_prefix("http://"))
+        .or_else(|| u.strip_prefix("//"))?;
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = host.to_ascii_lowercase();
+    let host = host
+        .strip_prefix("www.")
+        .or_else(|| host.strip_prefix("m."))
+        .unwrap_or(&host);
+    let id_of = |s: &str| -> Option<String> {
+        let id: String = s
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            .collect();
+        (!id.is_empty()).then_some(id)
+    };
+    let youtube = |id: String| Video {
+        url: format!("https://www.youtube.com/watch?v={id}"),
+        embed: Some(format!("https://www.youtube.com/embed/{id}")),
+        thumb: Some(format!("https://img.youtube.com/vi/{id}/hqdefault.jpg")),
+    };
+    match host {
+        "youtube.com" | "youtube-nocookie.com" | "music.youtube.com" => {
+            if let Some(p) = path
+                .strip_prefix("embed/")
+                .or_else(|| path.strip_prefix("shorts/"))
+                .or_else(|| path.strip_prefix("live/"))
+                .or_else(|| path.strip_prefix("v/"))
+            {
+                return id_of(p).map(youtube);
+            }
+            let query = path.strip_prefix("watch")?.split_once('?')?.1;
+            let v = query.split('&').find_map(|kv| kv.strip_prefix("v="))?;
+            id_of(v).map(youtube)
+        }
+        "youtu.be" => id_of(path).map(youtube),
+        "vimeo.com" | "player.vimeo.com" => {
+            let p = path.strip_prefix("video/").unwrap_or(path);
+            let id: String = p.chars().take_while(char::is_ascii_digit).collect();
+            if id.is_empty() {
+                return None;
+            }
+            // Unlisted videos carry a hash: vimeo.com/ID/HASH or ?h=HASH.
+            let hash = p[id.len()..]
+                .strip_prefix('/')
+                .and_then(id_of)
+                .or_else(|| {
+                    let q = p.split_once('?')?.1;
+                    q.split('&').find_map(|kv| kv.strip_prefix("h=")).and_then(id_of)
+                });
+            Some(Video {
+                url: match &hash {
+                    Some(h) => format!("https://vimeo.com/{id}/{h}"),
+                    None => format!("https://vimeo.com/{id}"),
+                },
+                embed: Some(match &hash {
+                    Some(h) => format!("https://player.vimeo.com/video/{id}?h={h}"),
+                    None => format!("https://player.vimeo.com/video/{id}"),
+                }),
+                thumb: None,
+            })
+        }
+        "streamable.com" => {
+            let p = path
+                .strip_prefix("e/")
+                .or_else(|| path.strip_prefix("o/"))
+                .unwrap_or(path);
+            let id = id_of(p)?;
+            Some(Video {
+                url: format!("https://streamable.com/{id}"),
+                embed: Some(format!("https://streamable.com/e/{id}")),
+                thumb: None,
+            })
+        }
+        _ => {
+            let file = path.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+            (file.ends_with(".mp4") || file.ends_with(".webm")).then(|| Video {
+                url: format!("https://{rest}"),
+                embed: None,
+                thumb: None,
+            })
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,7 +173,7 @@ fn spans_empty(spans: &[Span]) -> bool {
 impl Block {
     fn is_empty(&self) -> bool {
         match &self.kind {
-            Kind::Rule => false,
+            Kind::Rule | Kind::Video(_) => false,
             Kind::Row(cells) => cells.iter().all(|c| spans_empty(c)),
             _ => spans_empty(&self.spans),
         }
@@ -73,6 +193,8 @@ struct Parser {
     /// Open lists, innermost last: `true` for a numbered one.
     lists: Vec<bool>,
     skip: u32,
+    /// Inside `<video>`: its poster, and whether a source was taken yet.
+    video: Option<(Option<String>, bool)>,
 }
 
 impl Parser {
@@ -192,6 +314,18 @@ impl Parser {
         });
     }
 
+    /// A video block, ending the current block.
+    fn video(&mut self, v: Video) {
+        if self.skip > 0 {
+            return;
+        }
+        self.flush();
+        self.blocks.push(Block {
+            kind: Kind::Video(v),
+            spans: Vec::new(),
+        });
+    }
+
     fn tag(&mut self, tag: &str) {
         let closing = tag.starts_with('/');
         let body = tag.trim_start_matches('/');
@@ -204,27 +338,29 @@ impl Parser {
             ("script" | "style", false) => self.skip += 1,
             ("script" | "style", true) => self.skip = self.skip.saturating_sub(1),
             ("iframe", false) => {
-                self.skip += 1;
-                if let Some(id) = attr(body, "src").as_deref().and_then(youtube_id) {
-                    // CurseForge's video embeds: the poster, then a link.
-                    let saved = self.link.take();
-                    self.flush();
-                    self.skip -= 1;
-                    self.link = Some(format!("https://www.youtube.com/watch?v={id}"));
-                    self.start(Kind::Para);
-                    self.image(
-                        format!("https://img.youtube.com/vi/{id}/mqdefault.jpg"),
-                        "Video".into(),
-                        None,
-                    );
-                    self.start(Kind::Para);
-                    self.text("▶ Watch on YouTube");
-                    self.flush();
-                    self.skip += 1;
-                    self.link = saved;
+                if let Some(v) = attr(body, "src").as_deref().and_then(video_of) {
+                    self.video(v);
                 }
+                self.skip += 1;
             }
             ("iframe", true) => self.skip = self.skip.saturating_sub(1),
+            ("video", false) => {
+                let poster = attr(body, "poster").and_then(|s| abs_url(&s));
+                let src = attr(body, "src").and_then(|s| abs_url(&s));
+                self.video = Some((poster.clone(), src.is_some()));
+                if let Some(url) = src {
+                    self.video(Video { url, embed: None, thumb: poster });
+                }
+            }
+            ("source", _) => {
+                if let Some((poster, false)) = self.video.clone()
+                    && let Some(url) = attr(body, "src").and_then(|s| abs_url(&s))
+                {
+                    self.video = Some((poster.clone(), true));
+                    self.video(Video { url, embed: None, thumb: poster });
+                }
+            }
+            ("video", true) => self.video = None,
             ("br", _) => {
                 // A line break inside a list item, heading or cell stays in it.
                 if self
@@ -346,19 +482,6 @@ impl Parser {
             _ => {}
         }
     }
-}
-
-/// The video id of a YouTube embed URL.
-fn youtube_id(src: &str) -> Option<String> {
-    let rest = src
-        .split_once("youtube.com/embed/")
-        .or_else(|| src.split_once("youtube-nocookie.com/embed/"))
-        .map(|(_, r)| r)?;
-    let id: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-        .collect();
-    (!id.is_empty()).then_some(id)
 }
 
 /// `font-size: 20px` in a style attribute, in pixels (pt scaled).
@@ -490,6 +613,16 @@ pub fn parse(html: &str) -> Vec<Block> {
     while p.blocks.first().is_some_and(|b| b.kind == Kind::Rule) {
         p.blocks.remove(0);
     }
+    // A paragraph holding only a link to a video (a URL, a titled link or a
+    // linked image) is that video.
+    for b in &mut p.blocks {
+        if let Some(v) = lone_video(b) {
+            *b = Block {
+                kind: Kind::Video(v),
+                spans: Vec::new(),
+            };
+        }
+    }
     // Plain-text changelogs: turn "- item" / "* item" lines into bullets.
     for b in &mut p.blocks {
         if b.kind == Kind::Para
@@ -508,6 +641,35 @@ pub fn parse(html: &str) -> Vec<Block> {
     p.blocks
 }
 
+/// The video a paragraph of nothing but one link to it stands for. A linked
+/// image becomes the poster of a video that has none.
+fn lone_video(b: &Block) -> Option<Video> {
+    if b.kind != Kind::Para {
+        return None;
+    }
+    let mut spans = b
+        .spans
+        .iter()
+        .filter(|s| s.image.is_some() || !s.text.trim().is_empty());
+    let s = spans.next()?;
+    if spans.next().is_some() {
+        return None;
+    }
+    let target = match &s.link {
+        Some(l) => l.clone(),
+        None if s.image.is_none() => match bare_urls(s.text.trim()).as_slice() {
+            [(u, true)] => u.to_string(),
+            _ => return None,
+        },
+        None => return None,
+    };
+    let mut v = video_of(&target)?;
+    if v.thumb.is_none() {
+        v.thumb = s.image.clone();
+    }
+    Some(v)
+}
+
 /// Every image key ([`Span::image_key`]) in `blocks`, in order, each once.
 pub fn images(blocks: &[Block]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -523,6 +685,10 @@ pub fn images(blocks: &[Block]) -> Vec<String> {
     for b in blocks {
         match &b.kind {
             Kind::Row(cells) => cells.iter().for_each(|c| add(c)),
+            Kind::Video(Video { thumb: Some(t), .. }) => add(&[Span {
+                image: Some(t.clone()),
+                ..Default::default()
+            }]),
             _ => add(&b.spans),
         }
     }
@@ -863,12 +1029,13 @@ pub struct Badge {
     pub width: Option<u32>,
 }
 
-/// A piece of a description: Markdown, or a paragraph made only of images
-/// (badge rows), which Markdown views stack instead of lining up.
+/// A piece of a description: Markdown, a paragraph made only of images
+/// (badge rows), which Markdown views stack instead of lining up, or a video.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Segment {
     Markdown(String),
     Badges(Vec<Badge>),
+    Video(Video),
 }
 
 /// The badges of a paragraph holding two or more images and nothing else
@@ -894,8 +1061,8 @@ fn badge_row(b: &Block) -> Option<Vec<Badge>> {
     (out.len() >= 2).then_some(out)
 }
 
-/// Blocks as [`Segment`]s: rows of badges on their own, everything between
-/// them as [`to_markdown`] makes it.
+/// Blocks as [`Segment`]s: rows of badges and videos on their own,
+/// everything between them as [`to_markdown`] makes it.
 pub fn to_segments(blocks: &[Block]) -> Vec<Segment> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -906,9 +1073,13 @@ pub fn to_segments(blocks: &[Block]) -> Vec<Segment> {
         }
     };
     for (i, b) in blocks.iter().enumerate() {
-        if let Some(row) = badge_row(b) {
+        let seg = match &b.kind {
+            Kind::Video(v) => Some(Segment::Video(v.clone())),
+            _ => badge_row(b).map(Segment::Badges),
+        };
+        if let Some(seg) = seg {
             flush(&mut out, &blocks[start..i]);
-            out.push(Segment::Badges(row));
+            out.push(seg);
             start = i + 1;
         }
     }
@@ -1022,6 +1193,20 @@ pub fn to_markdown(blocks: &[Block]) -> String {
         }
         match &b.kind {
             Kind::Rule => out.push_str("---\n\n"),
+            Kind::Video(v) => {
+                // The poster linking to the video, then a link that says so.
+                if out.ends_with('\n') && !out.ends_with("\n\n") {
+                    out.push('\n');
+                }
+                if let Some(t) = &v.thumb {
+                    out.push_str(&format!("[![Video]({})]({})\n\n", url(t), url(&v.url)));
+                }
+                let label = match v.site() {
+                    "video" => "▶ Watch the video".to_string(),
+                    s => format!("▶ Watch on {s}"),
+                };
+                out.push_str(&format!("[{label}]({})\n\n", url(&v.url)));
+            }
             Kind::Heading(level) => {
                 if out.ends_with('\n') && !out.ends_with("\n\n") {
                     out.push('\n');
@@ -1156,29 +1341,103 @@ mod tests {
         assert_eq!(b[0].spans[0].text, "Banner");
         assert_eq!(b[1].spans[0].link.as_deref(), Some("https://patreon.com/me"));
         assert_eq!(
-            b[2].spans[0].image.as_deref(),
-            Some("https://img.youtube.com/vi/zjnh7Rygd4M/mqdefault.jpg")
+            b[2].kind,
+            Kind::Video(Video {
+                url: "https://www.youtube.com/watch?v=zjnh7Rygd4M".into(),
+                embed: Some("https://www.youtube.com/embed/zjnh7Rygd4M".into()),
+                thumb: Some("https://img.youtube.com/vi/zjnh7Rygd4M/hqdefault.jpg".into()),
+            })
         );
-        assert_eq!(
-            b[2].spans[0].link.as_deref(),
-            Some("https://www.youtube.com/watch?v=zjnh7Rygd4M")
-        );
-        assert_eq!(text(&b[3]), "▶ Watch on YouTube");
-        assert_eq!(b[4].spans.len(), 3, "{:?}", b[4]);
-        assert_eq!(b[4].spans[1].text, "image");
+        assert_eq!(b[3].spans.len(), 3, "{:?}", b[3]);
+        assert_eq!(b[3].spans[1].text, "image");
         assert_eq!(b[0].spans[0].width, Some(1315));
         assert_eq!(
             images(&b),
             vec![
                 "https://cdn/x.png#w=1315",
                 "https://i.imgur.com/p.png",
-                "https://img.youtube.com/vi/zjnh7Rygd4M/mqdefault.jpg",
+                "https://img.youtube.com/vi/zjnh7Rygd4M/hqdefault.jpg",
                 "https://cdn/i.png"
             ]
         );
         let md = to_markdown(&b);
         assert!(md.contains("[![Banner](<https://cdn/x.png#w=1315>)](<https://cdn/x.png>)"), "{md}");
         assert!(md.contains("[![Patreon](<https://i.imgur.com/p.png>)](<https://patreon.com/me>)"), "{md}");
+        assert!(md.contains("[![Video](<https://img.youtube.com/vi/zjnh7Rygd4M/hqdefault.jpg>)](<https://www.youtube.com/watch?v=zjnh7Rygd4M>)\n\n[▶ Watch on YouTube](<https://www.youtube.com/watch?v=zjnh7Rygd4M>)"), "{md}");
+    }
+
+    #[test]
+    fn video_urls() {
+        let yt = |u| video_of(u).map(|v| v.url);
+        let watch = Some("https://www.youtube.com/watch?v=abc_-1".to_string());
+        assert_eq!(yt("https://youtu.be/abc_-1?t=3"), watch);
+        assert_eq!(yt("https://m.youtube.com/watch?feature=x&v=abc_-1"), watch);
+        assert_eq!(yt("https://www.youtube.com/shorts/abc_-1"), watch);
+        assert_eq!(yt("//www.youtube-nocookie.com/embed/abc_-1?rel=0"), watch);
+        assert_eq!(yt("https://www.youtube.com/channel/abc"), None);
+        let v = video_of("https://player.vimeo.com/video/76979871?h=8272103f6e&title=0").unwrap();
+        assert_eq!(v.url, "https://vimeo.com/76979871/8272103f6e");
+        assert_eq!(v.embed.as_deref(), Some("https://player.vimeo.com/video/76979871?h=8272103f6e"));
+        assert_eq!(v.site(), "Vimeo");
+        assert_eq!(video_of("https://vimeo.com/76979871").unwrap().embed.as_deref(), Some("https://player.vimeo.com/video/76979871"));
+        assert_eq!(video_of("https://vimeo.com/about"), None);
+        let s = video_of("https://streamable.com/e/xyz12").unwrap();
+        assert_eq!((s.url.as_str(), s.embed.as_deref()), ("https://streamable.com/xyz12", Some("https://streamable.com/e/xyz12")));
+        let f = video_of("https://cdn.x/clip.WebM?v=2").unwrap();
+        assert_eq!((f.url.as_str(), f.embed, f.thumb), ("https://cdn.x/clip.WebM?v=2", None, None));
+        assert_eq!(video_of("https://cdn.x/clip.mp4.png"), None);
+    }
+
+    #[test]
+    fn videos_become_their_own_segments() {
+        let b = parse(
+            r#"<p>Intro</p>
+<iframe src="https://player.vimeo.com/video/123" width="640"></iframe>
+<p><iframe src="https://streamable.com/e/abc"></iframe></p>
+<p><a href="https://youtu.be/QQ">Trailer</a></p>
+<p>See <a href="https://youtu.be/QQ">this</a> too</p>
+<p><a href="https://vimeo.com/9"><img src="https://img/poster.png"></a></p>
+<p>https://cdn.x/a.mp4</p>
+<video controls poster="https://img/p.jpg"><source src="https://cdn.x/b.webm"><source src="https://cdn.x/b.mp4"></video>
+<iframe src="https://example.com/widget"></iframe><p>End</p>"#,
+        );
+        let segs = to_segments(&b);
+        let videos: Vec<&Video> = segs
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Video(v) => Some(v),
+                _ => None,
+            })
+            .collect();
+        let urls: Vec<&str> = videos.iter().map(|v| v.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://vimeo.com/123",
+                "https://streamable.com/abc",
+                "https://www.youtube.com/watch?v=QQ",
+                "https://vimeo.com/9",
+                "https://cdn.x/a.mp4",
+                "https://cdn.x/b.webm"
+            ]
+        );
+        // A linked image is the poster of a video without one.
+        assert_eq!(videos[3].thumb.as_deref(), Some("https://img/poster.png"));
+        assert_eq!(videos[5].thumb.as_deref(), Some("https://img/p.jpg"));
+        // A video link inside a sentence stays a link; other iframes vanish.
+        let text: String = segs
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Markdown(m) => Some(m.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        assert_eq!(text, "Intro|See [this](<https://youtu.be/QQ>) too|End");
+        // Markdown descriptions: a lone link on its own line.
+        let m = parse_markdown("Look:\n\nhttps://www.youtube.com/watch?v=QQ\n\n[![x](https://img/t.png)](https://streamable.com/zz)");
+        assert!(matches!(&m[1].kind, Kind::Video(v) if v.url.ends_with("v=QQ")), "{m:?}");
+        assert!(matches!(&m[2].kind, Kind::Video(v) if v.thumb.as_deref() == Some("https://img/t.png")), "{m:?}");
     }
 
     #[test]

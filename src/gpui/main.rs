@@ -42,6 +42,7 @@ mod theme;
 mod tasks;
 mod tray;
 mod versions;
+mod video;
 mod whats_new;
 mod widgets;
 
