@@ -651,17 +651,18 @@ impl SyncPanel {
                     })),
             )
             .child(div().flex_1())
-            .child(
-                Button::new("sel-clear")
-                    .xsmall()
-                    .ghost()
-                    .label("Clear selection")
-                    .disabled(n_sel == 0)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.selected.clear();
-                        cx.notify();
-                    })),
-            )
+            .when(n_sel > 0, |r| {
+                r.child(
+                    Button::new("sel-clear")
+                        .xsmall()
+                        .ghost()
+                        .label("Clear selection")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.selected.clear();
+                            cx.notify();
+                        })),
+                )
+            })
     }
 
     /// A card per group with its count; a click opens the group and
@@ -1213,7 +1214,12 @@ impl SyncPanel {
                     widgets::ModTags {
                         new: tags.new,
                         added: tags.added,
-                        env: &tags.env,
+                        // The line under the name already says client-only.
+                        env: if why.as_deref().is_some_and(|w| w.to_lowercase().contains("client-only")) {
+                            ""
+                        } else {
+                            &tags.env
+                        },
                         categories: &tags.categories,
                         modrinth: tags.modrinth,
                         ..Default::default()

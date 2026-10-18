@@ -439,8 +439,7 @@ impl ServersView {
         };
         let mut info = DescriptionList::horizontal()
             .columns(2)
-            .label_width(rems(8.))
-            .item("Status", status_text(status, pstats.as_ref()), 1);
+            .label_width(rems(8.));
         for (label, value) in live {
             info = info.item(label, value, 1);
         }
@@ -552,11 +551,14 @@ impl ServersView {
                                         h_flex()
                                             .gap_1p5()
                                             .flex_wrap()
-                                            .child(widgets::pill(
-                                                status_text(status, pstats.as_ref()),
-                                                status_color(status, pstats.as_ref(), cx),
-                                                true,
-                                            ))
+                                            // A panel shows its state beside Start.
+                                            .when(!configured, |r| {
+                                                r.child(widgets::pill(
+                                                    status_text(status, pstats.as_ref()),
+                                                    status_color(status, pstats.as_ref(), cx),
+                                                    true,
+                                                ))
+                                            })
                                             .child(widgets::pill(
                                                 manager,
                                                 cx.theme().muted_foreground,
@@ -776,6 +778,8 @@ impl Render for ServersView {
 pub struct SyncPage {
     store: Entity<Store>,
     panel: Entity<SyncPanel>,
+    /// The first paired server was opened on its own, once.
+    auto_picked: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -786,6 +790,7 @@ impl SyncPage {
         Self {
             store,
             panel,
+            auto_picked: false,
             _subscriptions: subs,
         }
     }
@@ -800,6 +805,20 @@ impl Render for SyncPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         let picked = self.panel.read(cx).server().map(|p| p.to_path_buf());
+        // Nothing picked yet: open the first server that has a pack.
+        if picked.is_none() && !self.auto_picked {
+            let store = self.store.read(cx);
+            let first = store
+                .servers()
+                .iter()
+                .find(|s| store.paired(s).is_some())
+                .map(|s| s.root.clone());
+            if let Some(root) = first {
+                self.auto_picked = true;
+                let view = view.clone();
+                window.defer(cx, move |_, cx| view.update(cx, |v, cx| v.compare(root, cx)));
+            }
+        }
         let list = server_list(
             "sync-list",
             &self.store,

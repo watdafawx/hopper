@@ -1694,14 +1694,28 @@ impl BrowseView {
                             cx.emit(BrowseEvent::OpenInstance(m2.clone()))
                         })),
                 )
-                .child(
-                    install_button(Button::new(id("again")).small().ghost(), "Install again", pending, hold)
-                        .on_click(
-                            cx.listener(move |this, _, w, cx| {
-                                this.install(m1.clone(), None, w, cx)
-                            }),
-                        ),
-                )
+                .child({
+                    // Rarely needed: kept out of the row, behind a menu.
+                    let view = cx.entity();
+                    let busy = pending || hold.is_some();
+                    Button::new(id("pack-more"))
+                        .small()
+                        .ghost()
+                        .icon(IconName::Ellipsis)
+                        .tooltip("More")
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .dropdown_menu(move |menu, _, _| {
+                            let (view, m1) = (view.clone(), m1.clone());
+                            menu.item(
+                                PopupMenuItem::new("Install again")
+                                    .icon(IconName::Download)
+                                    .disabled(busy)
+                                    .on_click(move |_, window, cx| {
+                                        view.update(cx, |this, cx| this.install(m1.clone(), None, window, cx))
+                                    }),
+                            )
+                        })
+                })
                 .into_any_element()
         } else if let Some((root, listed)) = update {
             let m1 = m.clone();
