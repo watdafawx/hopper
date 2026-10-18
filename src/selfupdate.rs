@@ -179,22 +179,43 @@ fn paths() -> anyhow::Result<(PathBuf, PathBuf)> {
 pub fn install(r: &Release, job: &crate::jobs::Job) -> anyhow::Result<PathBuf> {
     let (exe, old) = paths()?;
     job.detail(format!("Downloading Hopper {}", r.version));
-    let bytes = crate::cf::download_agent()
-        .get(&r.url)
-        .call()
-        .context("downloading the update")?
-        .body_mut()
-        .with_config()
-        .limit(512 << 20)
-        .read_to_vec()
-        .context("downloading the update")?;
+    // To a file first, so the task shows how far along it is (and can be
+    // cancelled); a cut connection is retried once.
+    let tmp = std::env::temp_dir().join(format!("hopper-{}.download", r.version));
+    let started = std::time::Instant::now();
+    let mut shown = started;
+    let mb = |b: u64| b as f64 / 1_048_576.0;
+    let expect = crate::cf::Expect { len: r.size, ..Default::default() };
+    let got = crate::cf::download_checked(&r.url, &tmp, &expect, Some(job), |n| {
+        if r.size > 0 {
+            job.progress(n as usize, r.size as usize);
+        }
+        // A few times a second is plenty for the words.
+        if shown.elapsed().as_millis() >= 250 {
+            shown = std::time::Instant::now();
+            let speed = mb(n) / started.elapsed().as_secs_f64().max(0.1);
+            job.detail(if r.size > 0 {
+                format!("Downloading Hopper {} · {:.1} of {:.1} MB · {speed:.1} MB/s", r.version, mb(n), mb(r.size))
+            } else {
+                format!("Downloading Hopper {} · {:.1} MB · {speed:.1} MB/s", r.version, mb(n))
+            });
+        }
+    });
+    let bytes = got.and_then(|_| std::fs::read(&tmp).context("reading the download"));
+    let _ = std::fs::remove_file(&tmp);
+    let bytes = bytes.context("downloading the update")?;
+    job.progress(0, 0);
     if r.size != 0 && bytes.len() as u64 != r.size {
         bail!("The download was cut short ({} of {} bytes).", bytes.len(), r.size);
+    }
+    if r.zipped {
+        job.detail(format!("Unpacking Hopper {}", r.version));
     }
     let new_exe = if r.zipped { exe_from_zip(&bytes)? } else { bytes };
     if new_exe.get(..2) != Some(b"MZ") {
         bail!("The download isn't a Windows program.");
     }
+    job.detail(format!("Installing Hopper {}", r.version));
     swap(&exe, &old, &new_exe)?;
     job.detail(format!("Hopper {} is ready: restart to use it", r.version));
     Ok(exe)
