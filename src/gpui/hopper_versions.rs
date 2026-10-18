@@ -37,6 +37,14 @@ impl HopperVersions {
                 .await
                 .map_err(|e| format!("{e:#}"));
             this.update(cx, |this, cx| {
+                // The list doubles as an update check: the title bar and
+                // Settings show what it found.
+                if let Ok(list) = &r {
+                    this.store.update(cx, |s, cx| {
+                        s.saw_releases(list.first());
+                        cx.notify();
+                    });
+                }
                 // An update on offer opens on the newest release.
                 if let Ok(list) = &r
                     && let Some(newest) = list.first()

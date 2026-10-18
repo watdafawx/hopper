@@ -1771,6 +1771,21 @@ impl Store {
         });
     }
 
+    /// What a fresh read of every release says about updates: the newest,
+    /// if newer than this build, is on offer; otherwise this is up to date.
+    /// Leaves an install under way (or done) alone.
+    pub fn saw_releases(&mut self, newest: Option<&hopper::selfupdate::Release>) {
+        if matches!(self.self_update, Some(SelfUpdate::Installing(_) | SelfUpdate::Ready(_))) {
+            return;
+        }
+        self.self_update = Some(match newest {
+            Some(r) if hopper::selfupdate::is_newer(&r.version, hopper::selfupdate::CURRENT) => {
+                SelfUpdate::Available(r.clone())
+            }
+            _ => SelfUpdate::UpToDate,
+        });
+    }
+
     /// Installs one chosen release, older or newer: it runs from the next
     /// start, like an update.
     pub fn install_hopper_version(&mut self, r: hopper::selfupdate::Release) {
