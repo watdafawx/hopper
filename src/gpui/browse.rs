@@ -60,9 +60,9 @@ enum Load<T> {
 
 /// A project's description (`richtext::to_segments`) and its files.
 struct Detail {
-    segments: Vec<hopper::richtext::Segment>,
+    segments: Rc<Vec<hopper::richtext::Segment>>,
     /// Every image the description shows, in order (cached by the store).
-    images: Vec<String>,
+    images: Rc<Vec<String>>,
     files: Vec<cf::File>,
 }
 
@@ -150,8 +150,11 @@ pub struct BrowseView {
     link_file: Option<cf::File>,
     /// Description, Files or Dependencies in the project panel.
     detail_tab: usize,
-    /// A redraw is set for the description's next GIF frame.
-    anim_due: bool,
+    /// The open project's description, a view of its own so its GIFs
+    /// redraw it alone.
+    desc: Entity<DescView>,
+    /// The filter and results columns (made on first draw, see [`Part`]).
+    parts: Option<(Entity<Part>, Entity<Part>)>,
     /// Open the first result when it arrives (`--detail`, for scripted runs).
     open_first: bool,
     /// Only the project panel, docked beside an instance's mod list.
@@ -191,9 +194,8 @@ impl BrowseView {
     fn build(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let modrinth = store.read(cx).settings().browse_modrinth;
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder(modrinth)));
+        let desc = cx.new(|cx| DescView::new(store.clone(), window, cx));
         let subs = vec![
-            // Paused GIFs pick up again when the window is focused.
-            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             cx.observe(&store, |this, _, cx| {
                 this.check_pending(cx);
                 cx.notify()
@@ -250,7 +252,8 @@ impl BrowseView {
             bookmarked: false,
             server_files: HashMap::new(),
             detail_tab: 0,
-            anim_due: false,
+            desc,
+            parts: None,
             _debounce: None,
             _search: None,
             _subscriptions: subs,
@@ -976,8 +979,8 @@ impl BrowseView {
                         this.detail.insert(
                             id,
                             Load::Ready(Detail {
-                                segments,
-                                images,
+                                segments: Rc::new(segments),
+                                images: Rc::new(images),
                                 files,
                             }),
                         );
@@ -2455,13 +2458,7 @@ impl BrowseView {
                         1 => c.child(files),
                         2 if n_deps == 0 => c.child(widgets::caption("No dependencies.", cx)),
                         2 => c.child(dep_rows),
-                        _ => c.child(widgets::description_view(
-                            ElementId::Name(format!("desc:{}", m.id).into()),
-                            &d.segments,
-                            &d.images,
-                            &self.store,
-                            cx,
-                        )),
+                        _ => c.child(self.desc.clone()),
                     })
                     .into_any_element()
             }
@@ -3109,27 +3106,89 @@ fn placeholder(modrinth: bool) -> &'static str {
     }
 }
 
-impl BrowseView {
-    /// Sets a redraw for when a GIF in the open description changes frame:
-    /// only while the Description tab shows in a focused window. GPUI's own
-    /// GIFs redraw every display frame; these, at the GIF's pace.
+/// A column of the Browse page (the filters, the results) as a view of
+/// its own, drawn from the Browse view's state and redrawn whenever that
+/// changes. A redraw that leaves Browse alone (a GIF in the description
+/// moving on) reuses it instead of building every card again, which was
+/// most of what such a redraw cost.
+struct Part {
+    browse: WeakEntity<BrowseView>,
+    draw: DrawPart,
+}
+
+type DrawPart = fn(&mut BrowseView, Option<&Instance>, &mut Window, &mut Context<BrowseView>) -> AnyElement;
+
+impl Part {
+    /// The part, redrawn whenever `browse` changes.
+    fn new(browse: &Entity<BrowseView>, draw: DrawPart, cx: &mut App) -> Entity<Self> {
+        cx.new(|cx| {
+            cx.observe(browse, |_, _, cx| cx.notify()).detach();
+            Part { browse: browse.downgrade(), draw }
+        })
+    }
+}
+
+impl Render for Part {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let draw = self.draw;
+        let part = self
+            .browse
+            .update(cx, |b, cx| {
+                let target = b.target(cx);
+                draw(b, target.as_ref(), window, cx)
+            })
+            .unwrap_or_else(|_| div().into_any_element());
+        // A cached view is laid out on its own: this row gives the column
+        // the flex parent it sizes itself by.
+        h_flex().size_full().child(part)
+    }
+}
+
+/// A project description (see `widgets::description_view`) whose GIFs play:
+/// it redraws itself when one changes frame, only while it is drawn in a
+/// focused window. GPUI's own GIFs redraw every display frame; these, at
+/// the GIF's pace, and without redrawing the page around them.
+pub struct DescView {
+    store: Entity<Store>,
+    /// The project shown, its description and the description's images.
+    shown: Option<(u64, Rc<Vec<hopper::richtext::Segment>>, Rc<Vec<String>>)>,
+    /// A redraw is set for the next GIF frame.
+    anim_due: bool,
+    _focus: Subscription,
+}
+
+impl DescView {
+    fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self {
+            store,
+            shown: None,
+            anim_due: false,
+            // Paused GIFs pick up again when the window is focused.
+            _focus: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+        }
+    }
+
+    /// Sets what to show; called as the page draws, so the view draws it
+    /// straight after without being told.
+    fn show(&mut self, id: u64, segments: Rc<Vec<hopper::richtext::Segment>>, images: Rc<Vec<String>>) {
+        self.shown = Some((id, segments, images));
+    }
+
     fn anim_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Frames replaced last draw are off screen now.
         // (This window's: `cx.drop_image` would reach into it mid-draw.)
         for f in self.store.read(cx).take_shown_frames() {
             window.drop_image(f).ok();
         }
-        if self.anim_due || self.detail_tab != 0 || !window.is_window_active() {
+        if self.anim_due || !window.is_window_active() {
             return;
         }
-        let Some(m) = self.selected.as_ref() else { return };
-        let Some(Load::Ready(d)) = self.detail.get(&m.id) else { return };
-        let Some(wait) = widgets::description_wait(&d.images, self.store.read(cx)) else {
+        let Some((_, _, images)) = &self.shown else { return };
+        let Some(wait) = widgets::description_wait(images, self.store.read(cx)) else {
             return;
         };
-        // At most 25 redraws a second, however many GIFs are out of step:
-        // a frame shown a little late beats a whole-page redraw for each.
-        let wait = wait.max(std::time::Duration::from_millis(40));
+        // At most 25 redraws a second, however many GIFs are out of step.
+        let wait = wait.max(Duration::from_millis(40));
         self.anim_due = true;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
@@ -3143,9 +3202,24 @@ impl BrowseView {
     }
 }
 
-impl Render for BrowseView {
+impl Render for DescView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.anim_tick(window, cx);
+        match &self.shown {
+            Some((id, segments, images)) => widgets::description_view(
+                ElementId::Name(format!("desc:{id}").into()),
+                segments,
+                images,
+                &self.store,
+                cx,
+            ),
+            None => div().into_any_element(),
+        }
+    }
+}
+
+impl Render for BrowseView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.peek {
             let target = self.target(cx);
             return self.panel(target.as_ref(), window, cx).unwrap_or_else(|| div().into_any_element());
@@ -3155,10 +3229,19 @@ impl Render for BrowseView {
                 this.search.update(cx, |s, cx| s.set_value(q, window, cx))
             });
         }
-        // One copy of the target instance per frame, shared by every part.
+        let view = cx.entity();
+        let (filters, results) = self
+            .parts
+            .get_or_insert_with(|| {
+                (
+                    Part::new(&view, |b, t, w, cx| b.filters(t, w, cx).into_any_element(), cx),
+                    Part::new(&view, |b, t, _, cx| b.results(t, cx).into_any_element(), cx),
+                )
+            })
+            .clone();
+        let filters = AnyView::from(filters).cached(StyleRefinement::default().w_64().flex_none().h_full());
+        let results = AnyView::from(results).cached(StyleRefinement::default().flex_1().min_w_0().h_full());
         let target = self.target(cx);
-        let filters = self.filters(target.as_ref(), window, cx);
-        let results = self.results(target.as_ref(), cx);
         let detail = self.panel(target.as_ref(), window, cx);
         h_flex()
             .size_full()
@@ -3282,6 +3365,10 @@ impl BrowseView {
             return Some(frame(ElementId::Name(format!("author:{name}").into()), body));
         }
         if let Some(m) = self.selected.clone() {
+            if let (0, Some(Load::Ready(d))) = (self.detail_tab, self.detail.get(&m.id)) {
+                let (id, segments, images) = (m.id, d.segments.clone(), d.images.clone());
+                self.desc.update(cx, |v, _| v.show(id, segments, images));
+            }
             let body = self.detail(&m, target, cx);
             return Some(frame(ElementId::Name(format!("detail:{}", m.id).into()), body));
         }

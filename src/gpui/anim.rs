@@ -229,7 +229,9 @@ fn stream(path: PathBuf, max: u32) -> anyhow::Result<Option<Clip>> {
 }
 
 /// A decoded frame kept LZ4-compressed: BGRA pixels, size, and how long
-/// it shows (ms).
+/// it shows (ms). The pixels are stored XORed with the frame before, which
+/// is mostly zeros (most of a GIF stays put from frame to frame) and packs
+/// several times smaller, so long clips fit the cache too.
 struct Packed {
     bytes: Vec<u8>,
     w: u32,
@@ -238,22 +240,35 @@ struct Packed {
 }
 
 impl Packed {
-    fn pack(img: &RenderImage, ms: u64) -> Option<Self> {
+    /// Packs `img` against `prev`, the pixels of the frame packed before it
+    /// (empty for the first), which become `img`'s.
+    fn pack(img: &RenderImage, ms: u64, prev: &mut Vec<u8>) -> Option<Self> {
         let size = img.size(0);
         let raw = img.as_bytes(0)?;
-        Some(Packed {
-            bytes: lz4_flex::compress_prepend_size(raw),
-            w: size.width.0 as u32,
-            h: size.height.0 as u32,
-            ms,
-        })
+        if prev.len() != raw.len() {
+            *prev = vec![0; raw.len()];
+        }
+        xor(prev, raw);
+        let bytes = lz4_flex::compress_prepend_size(prev);
+        prev.copy_from_slice(raw);
+        Some(Packed { bytes, w: size.width.0 as u32, h: size.height.0 as u32, ms })
     }
 
-    fn unpack(&self) -> Option<(Arc<RenderImage>, u64)> {
-        let raw = lz4_flex::decompress_size_prepended(&self.bytes).ok()?;
+    /// Unpacks against `prev`, the pixels of the frame unpacked before it
+    /// (empty for the first), which become this frame's.
+    fn unpack(&self, prev: &mut Vec<u8>) -> Option<(Arc<RenderImage>, u64)> {
+        let mut raw = lz4_flex::decompress_size_prepended(&self.bytes).ok()?;
+        if prev.len() == raw.len() {
+            xor(&mut raw, prev);
+        }
+        prev.clone_from(&raw);
         let buf = image::RgbaImage::from_raw(self.w, self.h, raw)?;
         Some((Arc::new(RenderImage::new(vec![image::Frame::new(buf)])), self.ms))
     }
+}
+
+fn xor(into: &mut [u8], with: &[u8]) {
+    into.iter_mut().zip(with).for_each(|(a, b)| *a ^= b);
 }
 
 /// Sends the frames of `path` round and round until the clip is dropped
@@ -267,8 +282,9 @@ fn decode_loop(path: &Path, max: u32, tx: &SyncSender<(Arc<RenderImage>, u64)>) 
     let mut packed: Option<Vec<Packed>> = Some(Vec::new());
     loop {
         if let Some(frames) = packed.as_ref().filter(|p| !p.is_empty()) {
+            let mut prev = Vec::new();
             for f in frames {
-                let Some(frame) = f.unpack() else { return };
+                let Some(frame) = f.unpack(&mut prev) else { return };
                 if tx.send(frame).is_err() {
                     return;
                 }
@@ -278,12 +294,13 @@ fn decode_loop(path: &Path, max: u32, tx: &SyncSender<(Arc<RenderImage>, u64)>) 
         let Ok(Some(all)) = frames(path, max) else { return };
         let mut sent = 0;
         let mut kept = 0usize;
+        let mut prev = Vec::new();
         for f in all {
             let Ok(frame) = f.inspect_err(|e| log::debug!("gif {}: {e:#}", path.display())) else {
                 break;
             };
             if let Some(p) = packed.as_mut() {
-                match Packed::pack(&frame.0, frame.1) {
+                match Packed::pack(&frame.0, frame.1, &mut prev) {
                     Some(pk) if kept + pk.bytes.len() <= STREAM_CACHE => {
                         kept += pk.bytes.len();
                         p.push(pk);
@@ -363,6 +380,28 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         s.frame_now();
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn packed_frames_unpack_to_the_same_pixels() {
+        let frame = |seed: u8| {
+            let buf = image::RgbaImage::from_fn(5, 3, |x, y| {
+                image::Rgba([seed, x as u8 * seed, y as u8, if x == 2 { seed } else { 255 }])
+            });
+            RenderImage::new(vec![image::Frame::new(buf)])
+        };
+        let frames = [frame(1), frame(7), frame(7), frame(200)];
+        let mut prev = Vec::new();
+        let packed: Vec<Packed> = frames.iter().map(|f| Packed::pack(f, 50, &mut prev).unwrap()).collect();
+        // Twice round, as a looping clip unpacks them.
+        for _ in 0..2 {
+            let mut prev = Vec::new();
+            for (f, p) in frames.iter().zip(&packed) {
+                let (img, ms) = p.unpack(&mut prev).unwrap();
+                assert_eq!(img.as_bytes(0), f.as_bytes(0));
+                assert_eq!(ms, 50);
+            }
+        }
     }
 
     #[test]

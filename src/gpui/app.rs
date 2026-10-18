@@ -1135,6 +1135,9 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Cached: a page re-renders only when it (or what it reads) changes,
         // not on every frame of a dialog or spinner animating above it.
+        // Browse caches its own columns instead: GPUI redraws everything
+        // inside a cached view that redraws, so its cached columns would
+        // never be reused when a GIF in its description moves on.
         let page: AnyView = match self.page {
             Page::Library => self.library.clone().into(),
             Page::Browse => self.browse.clone().into(),
@@ -1142,7 +1145,10 @@ impl Render for AppView {
             Page::Sync => self.sync.clone().into(),
             Page::Settings => self.settings.clone().into(),
         };
-        let page = page.cached(StyleRefinement::default().size_full());
+        let page = match self.page {
+            Page::Browse => page.into_any_element(),
+            _ => page.cached(StyleRefinement::default().size_full()).into_any_element(),
+        };
         let title = self.title_bar(cx);
         let overlay = self.tasks.update(cx, |t, cx| t.overlay(window, cx));
         let theme = cx.theme();
