@@ -3114,6 +3114,11 @@ impl BrowseView {
     /// only while the Description tab shows in a focused window. GPUI's own
     /// GIFs redraw every display frame; these, at the GIF's pace.
     fn anim_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Frames replaced last draw are off screen now.
+        // (This window's: `cx.drop_image` would reach into it mid-draw.)
+        for f in self.store.read(cx).take_shown_frames() {
+            window.drop_image(f).ok();
+        }
         if self.anim_due || self.detail_tab != 0 || !window.is_window_active() {
             return;
         }
@@ -3122,6 +3127,9 @@ impl BrowseView {
         let Some(wait) = widgets::description_wait(&d.images, self.store.read(cx)) else {
             return;
         };
+        // At most 25 redraws a second, however many GIFs are out of step:
+        // a frame shown a little late beats a whole-page redraw for each.
+        let wait = wait.max(std::time::Duration::from_millis(40));
         self.anim_due = true;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;

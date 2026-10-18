@@ -82,6 +82,9 @@ pub fn cached(url: &str) -> Option<PathBuf> {
     path_for(url).filter(|p| p.is_file())
 }
 
+/// The most of an animated image that is downloaded; the rest is cut off.
+const ANIMATED_MAX: u64 = 64 << 20;
+
 /// Downloads `url` into the cache (blocking) and returns the file.
 pub fn fetch(url: &str) -> anyhow::Result<PathBuf> {
     let path = path_for(url).ok_or_else(|| anyhow::anyhow!("no cache folder"))?;
@@ -89,13 +92,20 @@ pub fn fetch(url: &str) -> anyhow::Result<PathBuf> {
         return Ok(path);
     }
     anyhow::ensure!(url.starts_with("http"), "{} is missing", path.display());
-    let bytes = crate::cf::agent()
-        .get(url)
-        .call()?
-        .body_mut()
-        .with_config()
-        .limit(16 << 20)
-        .read_to_vec()?;
+    // Big GIFs take longer than API calls are given.
+    let animated = maybe_animated(&path);
+    let agent = if animated { crate::cf::download_agent() } else { crate::cf::agent() };
+    let resp = agent.get(url).call()?;
+    let bytes = if animated {
+        // Description GIFs run to 100+ MB. A cut-off one still decodes:
+        // its first stretch plays, rather than nothing showing.
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        resp.into_body().into_reader().take(ANIMATED_MAX).read_to_end(&mut bytes)?;
+        bytes
+    } else {
+        resp.into_body().with_config().limit(16 << 20).read_to_vec()?
+    };
     write_atomic(&path, &bytes)?;
     Ok(path)
 }

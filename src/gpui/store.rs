@@ -675,7 +675,7 @@ impl Store {
                     let Some(old) = self.anims_ready.pop_front() else { break };
                     if let Some(Anim::Ready(c)) = self.anims.remove(&old) {
                         for f in c.frames() {
-                            cx.drop_image(f.clone(), None);
+                            cx.drop_image(f, None);
                         }
                     }
                 }
@@ -956,6 +956,19 @@ impl Store {
             Some(Anim::Ready(c)) => Some(c),
             _ => None,
         }
+    }
+
+    /// Frames streamed clips have moved past, whose GPU copies can go
+    /// (`window.drop_image`).
+    pub fn take_shown_frames(&self) -> Vec<Arc<gpui_kit::RenderImage>> {
+        self.anims
+            .values()
+            .filter_map(|a| match a {
+                Anim::Ready(c) => Some(c.take_shown()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
     }
 
     /// Like [`Self::want_image`], and if it's an animated GIF or WebP also

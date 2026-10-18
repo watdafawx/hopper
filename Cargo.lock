@@ -3474,6 +3474,7 @@ dependencies = [
  "image",
  "keyring",
  "log",
+ "lz4_flex",
  "raw-window-handle",
  "regex",
  "rusqlite",
@@ -4365,6 +4366,12 @@ dependencies = [
  "lyon_path",
  "num-traits",
 ]
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 
 [[package]]
 name = "mac"
