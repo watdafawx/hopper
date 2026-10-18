@@ -10,7 +10,6 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
     v_flex,
@@ -20,18 +19,14 @@ use gpui_kit::*;
 use hopper::crashscan::ServerCrash;
 use hopper::instances::Instance;
 use hopper::model::{DiffEntry, DiffStatus, ModInfo};
-use hopper::rigsync::{
-    self, EnvFilter, Filters, Ops, SourceFilter, StatusFilter, is_wont, row_key,
-};
+use hopper::rigsync::{self, EnvFilter, Filters, Group, Ops, RowAct, SourceFilter, row_key};
 use hopper::server::{ServerInfo, Status};
 use hopper::serverpack::Annotation;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-const ROW_H: f32 = 3.75;
-/// The Status column's width, in rem.
-const STATUS_W: f32 = 13.;
+const ROW_H: f32 = 3.5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -59,6 +54,10 @@ pub struct SyncPanel {
     filters: Filters,
     search: Entity<InputState>,
     selected: HashSet<String>,
+    /// Groups showing their rows.
+    open: HashSet<Group>,
+    /// The list as drawn, rebuilt each frame from the comparison.
+    items: Vec<Item>,
     running: bool,
     result: Option<Result<String, Vec<String>>>,
     allow_online: bool,
@@ -122,6 +121,8 @@ impl SyncPanel {
             filters: Filters::default(),
             search,
             selected: HashSet::new(),
+            open: [Group::Add, Group::Update, Group::ServerOnly, Group::KeptOff].into(),
+            items: Vec::new(),
             running: false,
             result: None,
             allow_online: false,
@@ -398,9 +399,7 @@ impl SyncPanel {
             facts.push(format!("NeoForge {p} on both"));
         }
         match self.note.as_ref().map(|a| (a.server_pack_jars, &a.note, a.flagged)) {
-            Some((Some(n), _, f)) => facts.push(format!(
-                "server pack lists {n} mods · {f} the author keeps off servers are skipped by default"
-            )),
+            Some((Some(n), _, _)) => facts.push(format!("the pack's server pack lists {n} mods")),
             Some((None, Some(note), f)) => facts.push(format!("{note} {f} mods flagged.")),
             _ => {}
         }
@@ -559,165 +558,193 @@ impl SyncPanel {
         )
     }
 
-    fn chip(on: bool, label: &'static str, id: &'static str) -> Button {
-        let b = Button::new(id).xsmall().label(label);
-        if on { b.primary() } else { b.ghost() }
+    fn group_color(g: Group, cx: &App) -> Hsla {
+        let theme = cx.theme();
+        match g {
+            Group::Add => theme.primary,
+            Group::Update => theme.info,
+            Group::ServerOnly => theme.danger,
+            Group::KeptOff => theme.warning,
+            Group::InSync => theme.success,
+        }
     }
 
-    fn toolbar(&self, diff: &[DiffEntry], cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let count = |f: &dyn Fn(&DiffEntry) -> bool| diff.iter().filter(|d| f(d)).count();
-        let status_ix = StatusFilter::ALL
+    fn group_icon(g: Group) -> IconName {
+        match g {
+            Group::Add => IconName::Plus,
+            Group::Update => IconName::ArrowUp,
+            Group::ServerOnly => IconName::Server,
+            Group::KeptOff => IconName::ShieldCheck,
+            Group::InSync => IconName::Check,
+        }
+    }
+
+    /// Search, which side a mod runs on, and pack or added.
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        const ENVS: [(EnvFilter, &str); 4] = [
+            (EnvFilter::Any, "Any side"),
+            (EnvFilter::Client, "Client only"),
+            (EnvFilter::Both, "Client + server"),
+            (EnvFilter::Server, "Server only"),
+        ];
+        const SOURCES: [(SourceFilter, &str); 2] =
+            [(SourceFilter::Any, "Pack + added"), (SourceFilter::Added, "Added by me")];
+        let env_ix = ENVS.iter().position(|(e, _)| *e == self.filters.env).unwrap_or(0);
+        let src_ix = SOURCES
             .iter()
-            .position(|s| *s == self.filters.status)
+            .position(|(s, _)| *s == self.filters.source)
             .unwrap_or(0);
-        let wont = count(&is_wont);
-        let f = &self.filters;
-        let env = |e: EnvFilter, label: &'static str, id: &'static str| {
-            Self::chip(f.env == e, label, id).on_click(cx.listener(move |this, _, _, cx| {
-                this.filters.env = e;
-                cx.notify();
-            }))
-        };
-        let source = |s: SourceFilter, label: &'static str, id: &'static str| {
-            Self::chip(f.source == s, label, id).on_click(cx.listener(move |this, _, _, cx| {
-                this.filters.source = s;
-                cx.notify();
-            }))
-        };
-        v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(
-                        div().w_56().child(
-                            Input::new(&self.search)
-                                .small()
-                                .prefix(Icon::new(IconName::Search).small())
-                                .cleanable(true),
-                        ),
-                    )
-                    .child(
-                        TabBar::new("sync-status")
-                            .segmented()
-                            .small()
-                            .selected_index(status_ix)
-                            .children(StatusFilter::ALL.iter().map(|s| {
-                                let n = count(&|d| s.matches(d.status));
-                                Tab::new().label(format!("{} {n}", s.label()))
-                            }))
-                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                this.filters.status = StatusFilter::ALL[*ix];
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .flex_wrap()
-                    .child(env(EnvFilter::Any, "Any side", "env-any"))
-                    .child(env(EnvFilter::Client, "Client only", "env-client"))
-                    .child(env(EnvFilter::Server, "Server only", "env-server"))
-                    .child(env(EnvFilter::Both, "Both", "env-both"))
-                    .child(div().w_px().h_4().mx_2().bg(cx.theme().border))
-                    .child(source(SourceFilter::Any, "Any source", "src-any"))
-                    .child(source(SourceFilter::Pack, "Pack", "src-pack"))
-                    .child(source(SourceFilter::Added, "Added", "src-added"))
-                    .when(wont > 0, |r| {
-                        let (only, hide) = (f.wont_only, f.hide_wont);
-                        r.child(div().w_px().h_4().mx_2().bg(cx.theme().border))
-                            .child(
-                                Button::new("wont-only")
-                                    .xsmall()
-                                    .label(format!("Won't sync {wont}"))
-                                    .map(|b| if only { b.danger() } else { b.ghost() })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.filters.wont_only = !this.filters.wont_only;
-                                        if this.filters.wont_only {
-                                            this.filters.hide_wont = false;
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(!only, |r| {
-                                r.child(
-                                    Checkbox::new("hide-wont")
-                                        .label("Hide them")
-                                        .checked(hide)
-                                        .on_change(cx.listener(|this, v: &bool, _, cx| {
-                                            this.filters.hide_wont = *v;
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                    }),
-            )
-    }
-
-    fn actions(&self, diff: &[DiffEntry], cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let picked = self.selected_rows(cx);
-        let Some((server, inst)) = self.pair_header(cx) else {
-            return div().into_any_element();
-        };
-        let push = rigsync::push(&picked, &inst, &server);
-        let pull = rigsync::pull(&picked, &inst, &server);
-        let remove = rigsync::remove(&picked, &server);
-        let online = self.online(cx);
-        let blocked = self.running || (online && !self.allow_online);
-        let n = push.len() + pull.len();
-        let label = match (push.is_empty(), pull.is_empty()) {
-            (false, false) => format!("Push and pull ({n})"),
-            (true, false) => format!("Pull to client ({n})"),
-            _ => format!("Push to server ({n})"),
-        };
-        let n_remove = remove.len();
-        let client_only: Vec<String> = diff
-            .iter()
-            .filter(|d| d.status == DiffStatus::OnlyClient && !is_wont(d))
-            .map(row_key)
-            .collect();
-        let mismatched: Vec<String> = diff
-            .iter()
-            .filter(|d| matches!(d.status, DiffStatus::ClientNewer | DiffStatus::ServerNewer))
-            .map(row_key)
-            .collect();
-        let n_sel = picked.len();
+        let n_sel = self.selected_rows(cx).len();
         h_flex()
-            .gap_2()
+            .gap_3()
             .flex_wrap()
             .child(
-                Button::new("sel-client")
-                    .xsmall()
-                    .ghost()
-                    .label("Select client-only")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected.extend(client_only.iter().cloned());
+                div().w_56().child(
+                    Input::new(&self.search)
+                        .small()
+                        .prefix(Icon::new(IconName::Search).small())
+                        .cleanable(true),
+                ),
+            )
+            .child(
+                TabBar::new("sync-env")
+                    .segmented()
+                    .small()
+                    .selected_index(env_ix)
+                    .children(ENVS.iter().map(|(_, l)| Tab::new().label(*l)))
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        this.filters.env = ENVS[*ix].0;
                         cx.notify();
                     })),
             )
             .child(
-                Button::new("sel-mismatch")
-                    .xsmall()
-                    .ghost()
-                    .label("Select mismatches")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected.extend(mismatched.iter().cloned());
+                TabBar::new("sync-source")
+                    .segmented()
+                    .small()
+                    .selected_index(src_ix)
+                    .children(SOURCES.iter().map(|(_, l)| Tab::new().label(*l)))
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        this.filters.source = SOURCES[*ix].0;
                         cx.notify();
                     })),
             )
+            .child(div().flex_1())
             .child(
                 Button::new("sel-clear")
                     .xsmall()
                     .ghost()
-                    .label("Clear")
+                    .label("Clear selection")
                     .disabled(n_sel == 0)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.selected.clear();
                         cx.notify();
                     })),
             )
-            .child(div().flex_1())
+    }
+
+    /// A card per group with its count; a click opens the group and
+    /// scrolls to it.
+    fn summary(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        // The rows the filters show, so a card matches its group's count.
+        let groups: Vec<Group> = self.visible(cx).into_iter().map(Group::of).collect();
+        h_flex().gap_2().children(Group::ALL.map(|g| {
+            let n = groups.iter().filter(|x| **x == g).count();
+            let color = Self::group_color(g, cx);
+            div()
+                .id(ElementId::Name(format!("card-{g:?}").into()))
+                .flex_1()
+                .min_w_0()
+                .px_3()
+                .py_2()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.list_hover))
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(if n == 0 { theme.muted_foreground } else { color })
+                        .child(n.to_string()),
+                )
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::new(Self::group_icon(g)).xsmall())
+                        .child(g.short()),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open.insert(g);
+                    this.build_items(cx);
+                    if let Some(ix) = this
+                        .items
+                        .iter()
+                        .position(|i| matches!(i, Item::Header(h, _) if *h == g))
+                    {
+                        this.scroll.scroll_to_item(ix, ScrollStrategy::Top);
+                    }
+                    cx.notify();
+                }))
+        }))
+    }
+
+    /// What Apply will do, and the buttons for the picked rows.
+    fn footer(&self, server: &ServerInfo, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let picked = self.selected_rows(cx);
+        let Some((srv, inst)) = self.pair_header(cx) else {
+            return div().into_any_element();
+        };
+        let ops = rigsync::apply_ops(&picked, &inst, &srv);
+        let count = |g: Group, s: Option<DiffStatus>| {
+            picked
+                .iter()
+                .filter(|d| Group::of(d) == g && s.is_none_or(|s| d.status == s))
+                .count()
+        };
+        let parts: Vec<String> = [
+            ("add", count(Group::Add, None)),
+            ("update", count(Group::Update, None)),
+            ("remove", count(Group::ServerOnly, None)),
+        ]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(w, n)| format!("{w} {n}"))
+        .collect();
+        let online = self.online(cx);
+        let blocked = self.running || (online && !self.allow_online);
+        let n_sel = picked.len();
+        let theme = cx.theme();
+        let text = if parts.is_empty() {
+            "Nothing selected. Tick mods, or use Select all on a group.".to_string()
+        } else {
+            format!("Apply will {} on {}", parts.join(", "), server.name)
+        };
+        h_flex()
+            .gap_3()
+            .px_4()
+            .py_2p5()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .child(Icon::new(IconName::ListChecks).small().text_color(theme.muted_foreground))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .truncate()
+                    .text_color(if parts.is_empty() {
+                        theme.muted_foreground
+                    } else {
+                        theme.foreground
+                    })
+                    .child(text),
+            )
             .when(self.running, |r| r.child(Spinner::new().small()))
             .when(online, |r| {
                 r.child(
@@ -750,165 +777,22 @@ impl SyncPanel {
                     })),
             )
             .child(
-                Button::new("remove-server")
-                    .small()
-                    .outline()
-                    .with_variant(ButtonVariant::Danger)
-                    .label(format!("Remove ({n_remove})"))
-                    .tooltip("Delete the selected server-only mods (kept in .hopper-backups)")
-                    .disabled(n_remove == 0 || blocked)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.run(
-                            Ops {
-                                up: remove.clone(),
-                                down: Vec::new(),
-                            },
-                            cx,
-                        )
-                    })),
-            )
-            .child(
-                Button::new("push")
+                Button::new("apply")
                     .small()
                     .primary()
-                    .icon(IconName::ArrowLeftRight)
-                    .label(label)
-                    .disabled(n == 0 || blocked)
+                    .icon(IconName::Upload)
+                    .label("Apply to server")
+                    .tooltip("Replaced and removed jars are kept in .hopper-backups")
+                    .disabled(ops.is_empty() || blocked)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.run(
-                            Ops {
-                                up: push.clone(),
-                                down: pull.clone(),
-                            },
-                            cx,
-                        )
+                        let ops = Ops {
+                            up: ops.up.clone(),
+                            down: ops.down.clone(),
+                        };
+                        this.selected.clear();
+                        this.run(ops, cx)
                     })),
             )
-            .into_any_element()
-    }
-
-    /// One side of a row: the mod (icon and name open its page), or a
-    /// muted note where there is none.
-    fn side_card(
-        &self,
-        id: ElementId,
-        m: Option<&ModInfo>,
-        tags: Option<&RowTags>,
-        show_file: bool,
-        empty: &'static str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(m) = m else {
-            return Self::note_cell(Icon::new(IconName::Minus).small(), empty, cx);
-        };
-        let icon = self.store.read(cx).image(&m.icon).map(Path::to_path_buf);
-        let pid = m.project_id;
-        let linked = pid != 0 && self.peek.is_some();
-        // The icon and name open the mod's page (when Hopper knows its
-        // project); the rest of the row still selects it.
-        let link = |el: Stateful<Div>, cx: &mut Context<Self>| {
-            el.when(linked, |d| {
-                d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.open_peek(pid, cx);
-                }))
-            })
-        };
-        let thumb = link(
-            div()
-                .id(ElementId::NamedChild(std::sync::Arc::new(id.clone()), "thumb".into()))
-                .flex_none()
-                .when(linked, |d| d.hover(|s| s.opacity(0.8)))
-                .child(widgets::thumb(icon.as_deref(), rems(2.), cx)),
-            cx,
-        );
-        let primary = cx.theme().primary;
-        let name = link(
-            div()
-                .id(ElementId::NamedChild(std::sync::Arc::new(id), "name".into()))
-                .min_w_0()
-                .text_sm()
-                .font_medium()
-                .truncate()
-                .when(linked, |d| {
-                    d.hover(move |s| s.text_color(primary)).tooltip(|w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Details").build(w, cx)
-                    })
-                })
-                .child(m.mod_name.clone()),
-            cx,
-        );
-        h_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_3()
-            .child(thumb)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(name)
-                            .when(!m.version.is_empty(), |r| {
-                                r.child(
-                                    widgets::caption(m.version.clone(), cx)
-                                        .text_xs()
-                                        .flex_none(),
-                                )
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .min_w_0()
-                            .when_some(tags, |r, t| {
-                                r.child(widgets::mod_tags(
-                                    widgets::ModTags {
-                                        new: t.new,
-                                        added: t.added,
-                                        env: &t.env,
-                                        categories: &t.categories,
-                                        modrinth: t.modrinth,
-                                        ..Default::default()
-                                    },
-                                    cx,
-                                ))
-                            })
-                            .when(show_file, |c| {
-                                c.child(
-                                    widgets::caption(m.file_name.clone(), cx)
-                                        .text_xs()
-                                        .min_w_0()
-                                        .truncate()
-                                        .opacity(0.75),
-                                )
-                            }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// A side with no mod to show: an icon where the thumbnail goes, and a note.
-    fn note_cell(icon: Icon, text: &'static str, cx: &App) -> AnyElement {
-        let theme = cx.theme();
-        h_flex()
-            .flex_1()
-            .min_w_0()
-            .gap_3()
-            .text_sm()
-            .text_color(theme.muted_foreground)
-            .child(
-                div()
-                    .size(rems(2.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon),
-            )
-            .child(text)
             .into_any_element()
     }
 
@@ -923,17 +807,49 @@ impl SyncPanel {
             .collect()
     }
 
-    fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let anyway = self.store.read(cx).settings().sync_anyway.clone();
-        let rows: Vec<DiffEntry> = {
-            let all = self.visible(cx);
-            all[range.start.min(all.len())..range.end.min(all.len())]
-                .iter()
-                .map(|d| (*d).clone())
-                .collect()
+    /// The list: each group's header, then its rows when it's open.
+    fn build_items(&mut self, cx: &App) {
+        let Some(Ok(diff)) = &self.diff else {
+            self.items.clear();
+            return;
         };
-        let pair = self.pair_header(cx);
-        let tags: Vec<(Option<RowTags>, Option<RowTags>)> = {
+        let blacklist = &self.store.read(cx).settings().sync_blacklist;
+        let mut by_group: Vec<(Group, Vec<usize>)> = Group::ALL.map(|g| (g, Vec::new())).into();
+        for (i, d) in diff.iter().enumerate() {
+            if self.filters.passes(d, blacklist) {
+                let g = Group::of(d);
+                if let Some((_, v)) = by_group.iter_mut().find(|(x, _)| *x == g) {
+                    v.push(i);
+                }
+            }
+        }
+        let mut items = Vec::new();
+        for (g, rows) in by_group {
+            if rows.is_empty() {
+                continue;
+            }
+            items.push(Item::Header(g, rows.len()));
+            if self.open.contains(&g) {
+                items.extend(rows.into_iter().map(Item::Row));
+            }
+        }
+        self.items = items;
+    }
+
+    fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(Ok(diff)) = &self.diff else {
+            return Vec::new();
+        };
+        let items: Vec<Item> = self.items[range.start.min(self.items.len())..range.end.min(self.items.len())].to_vec();
+        let rows: Vec<(Item, Option<DiffEntry>)> = items
+            .iter()
+            .map(|i| match i {
+                Item::Row(ix) => (*i, diff.get(*ix).cloned()),
+                Item::Header(..) => (*i, None),
+            })
+            .collect();
+        // Badges come from the pack's addons: read them all before drawing.
+        let tags: Vec<Option<RowTags>> = {
             let store = self.store.read(cx);
             let inst = self
                 .server
@@ -942,96 +858,198 @@ impl SyncPanel {
                 .and_then(|s| store.paired(s));
             let now = hopper::time::parse_iso(&hopper::time::now_iso()).unwrap_or(0);
             rows.iter()
-                .map(|d| {
-                    let side = |m: &ModInfo| RowTags::of(m, inst, store, now);
-                    let server = d.server.as_ref().map(|m| RowTags {
-                        new: false,
-                        added: false,
-                        ..side(m)
-                    });
-                    (d.client.as_ref().map(side), server)
+                .map(|(_, d)| {
+                    let d = d.as_ref()?;
+                    let m = d.client.as_ref().or(d.server.as_ref())?;
+                    let mut t = RowTags::of(m, inst, store, now);
+                    if d.client.is_none() {
+                        (t.new, t.added) = (false, false);
+                    }
+                    Some(t)
                 })
                 .collect()
         };
-        rows.iter()
+        rows.into_iter()
             .zip(tags)
-            .map(|(d, (client_tags, server_tags))| {
-                let key = row_key(d);
-                let wont = is_wont(d);
-                let picked = self.selected.contains(&key);
-                let tip = if wont {
-                    let why = d
-                        .skip_reason
-                        .clone()
-                        .or_else(|| d.client.as_ref().and_then(|c| c.wont_sync.clone()))
-                        .unwrap_or_default();
-                    format!("Kept off the server: {why}. Click to copy it to the server anyway, this once.")
-                } else {
-                    rigsync::explain(d)
-                };
-                let label = if wont {
-                    "Won't sync"
-                } else {
-                    rigsync::status_label(d.status)
-                };
-                let tag = match (wont, d.status) {
-                    (true, _) => Tag::secondary(),
-                    (_, DiffStatus::OnlyClient) => Tag::warning(),
-                    (_, DiffStatus::OnlyServer) => Tag::info(),
-                    (_, DiffStatus::ServerStale) => Tag::danger(),
-                    (_, DiffStatus::ClientNewer) => Tag::primary(),
-                    (_, DiffStatus::ServerNewer) => Tag::warning(),
-                    (_, DiffStatus::Same) => Tag::success(),
+            .map(|((item, d), tags)| match (item, d) {
+                (Item::Header(g, n), _) => self.group_header(g, n, cx),
+                (Item::Row(_), Some(d)) => self.row(&d, tags.unwrap_or_default(), cx),
+                _ => div().into_any_element(),
+            })
+            .collect()
+    }
+
+    fn group_header(&self, g: Group, n: usize, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.open.contains(&g);
+        let keys: Vec<String> = if g.pickable() {
+            self.visible(cx)
+                .into_iter()
+                .filter(|d| Group::of(d) == g)
+                .map(row_key)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let all = !keys.is_empty() && keys.iter().all(|k| self.selected.contains(k));
+        let color = Self::group_color(g, cx);
+        let theme = cx.theme();
+        h_flex()
+            .id(ElementId::Name(format!("group-{g:?}").into()))
+            .h(rems(ROW_H))
+            .w_full()
+            .items_end()
+            .pb_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded(theme.radius_lg)
+                    .bg(theme.secondary)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.list_hover))
+                    .child(
+                        Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                            .small()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(div().size_2().rounded_full().bg(color))
+                    .child(div().text_sm().font_semibold().child(g.title()))
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(n.to_string()))
+                    .child(
+                        widgets::caption(format!("· {}", g.hint()), cx)
+                            .text_xs()
+                            .flex_1()
+                            .min_w_0(),
+                    )
+                    .when(!keys.is_empty(), |r| {
+                        r.child(
+                            div()
+                                .id(ElementId::Name(format!("all-{g:?}").into()))
+                                .on_click(|_, _, cx| cx.stop_propagation())
+                                .child(
+                                    Checkbox::new(ElementId::Name(format!("pick-all-{g:?}").into()))
+                                        .label("Select all")
+                                        .checked(all)
+                                        .on_change(cx.listener(move |this, v: &bool, _, cx| {
+                                            for k in &keys {
+                                                if *v {
+                                                    this.selected.insert(k.clone());
+                                                } else {
+                                                    this.selected.remove(k);
+                                                }
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.open.remove(&g) {
+                    this.open.insert(g);
                 }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn row(&self, d: &DiffEntry, tags: RowTags, cx: &mut Context<Self>) -> AnyElement {
+        let g = Group::of(d);
+        let key = row_key(d);
+        let id = |p: &str| ElementId::Name(format!("{p}:{key}").into());
+        let Some(m) = d.client.as_ref().or(d.server.as_ref()).cloned() else {
+            return div().into_any_element();
+        };
+        let picked = g.pickable() && self.selected.contains(&key);
+        let online = self.online(cx);
+        let blocked = self.running || (online && !self.allow_online);
+        let anyway = self.store.read(cx).settings().sync_anyway.clone();
+        let pair = self.pair_header(cx);
+        let icon = self.store.read(cx).image(&m.icon).map(Path::to_path_buf);
+        let pid = d
+            .client
+            .as_ref()
+            .map(|c| c.project_id)
+            .filter(|p| *p != 0)
+            .unwrap_or(m.project_id);
+        let linked = pid != 0 && self.peek.is_some();
+        // The line under the name: why it's kept off, else the file.
+        let why = match g {
+            Group::KeptOff => d
+                .skip_reason
+                .clone()
+                .or_else(|| d.client.as_ref().and_then(|c| c.wont_sync.clone())),
+            Group::ServerOnly if d.status == DiffStatus::ServerStale => {
+                Some("An older copy left behind; the pack has this mod under a newer file".into())
+            }
+            Group::Update if d.status == DiffStatus::ServerNewer => {
+                Some("The server has a newer version than the pack".into())
+            }
+            _ => None,
+        };
+        let version = match (g, &d.client, &d.server) {
+            (Group::Update, Some(c), Some(s)) => format!("{} → {}", s.version, c.version),
+            _ => m.version.clone(),
+        };
+        // One action per row, named for what it does.
+        let act = |label: &'static str, icon: IconName, a: RowAct, danger: bool| {
+            let (d2, pair2) = (d.clone(), pair.clone());
+            Button::new(id(label))
+                .small()
                 .outline()
-                .xsmall()
-                .child(label);
-                let act = rigsync::row_action(d.status);
-                let id = |p: &str| ElementId::Name(format!("{p}:{key}").into());
-                let delta = match (&d.client, &d.server) {
-                    (Some(c), Some(s))
-                        if matches!(
-                            d.status,
-                            DiffStatus::ClientNewer | DiffStatus::ServerNewer
-                        ) =>
-                    {
-                        Some(format!("{} → {}", s.version, c.version))
+                .icon(icon)
+                .label(label)
+                .when(danger, |b| b.with_variant(ButtonVariant::Danger))
+                .disabled(blocked)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    if let Some((s, i)) = &pair2 {
+                        this.run(rigsync::chip_ops(a, &d2, i, s), cx);
                     }
-                    _ => None,
-                };
-                let chip = {
+                }))
+        };
+        let theme = cx.theme().clone();
+        let action: AnyElement = match g {
+            Group::Add => act("Add", IconName::Plus, RowAct::Push, false).into_any_element(),
+            Group::Update => act(
+                if d.status == DiffStatus::ServerNewer { "Replace" } else { "Update" },
+                IconName::ArrowUp,
+                RowAct::Push,
+                false,
+            )
+            .into_any_element(),
+            Group::ServerOnly => h_flex()
+                .gap_1()
+                .when(d.status == DiffStatus::OnlyServer, |r| {
                     let (d2, pair2) = (d.clone(), pair.clone());
-                    div()
-                        .id(id("chip"))
-                        .flex_none()
-                        .when(act.is_some() && !self.running, |c| {
-                            c.cursor_pointer().hover(|s| s.opacity(0.8))
-                        })
-                        .tooltip(move |w, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)
-                        })
-                        .child(tag)
-                        .when_some(act.filter(|_| !self.running), |c, a| {
-                            c.on_click(cx.listener(move |this, _, _, cx| {
+                    r.child(
+                        Button::new(id("pull"))
+                            .small()
+                            .ghost()
+                            .icon(IconName::Download)
+                            .tooltip("Copy it into the pack")
+                            .disabled(self.running)
+                            .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 if let Some((s, i)) = &pair2 {
-                                    this.run(rigsync::chip_ops(a, &d2, i, s), cx);
+                                    this.run(rigsync::chip_ops(RowAct::Pull, &d2, i, s), cx);
                                 }
-                            }))
-                        })
-                };
-                let anyway_box = d
-                    .client
-                    .as_ref()
-                    .filter(|c| {
-                        c.project_id != 0
-                            && (c.wont_sync.is_some() || anyway.contains(&c.project_id))
-                    })
-                    .map(|c| {
-                        let pid = c.project_id;
-                        Checkbox::new(id("anyway"))
-                            .xsmall()
-                            .label("Send anyway")
+                            })),
+                    )
+                })
+                .child(act("Remove", IconName::Trash, RowAct::Remove, true))
+                .into_any_element(),
+            Group::KeptOff => h_flex()
+                .gap_3()
+                .child(act("Send once", IconName::Upload, RowAct::Push, false).tooltip(
+                    "Copy it to the server this time; the next comparison still keeps it off",
+                ))
+                .when(pid != 0, |r| {
+                    r.child(
+                        Checkbox::new(id("always"))
+                            .label("Always")
                             .checked(anyway.contains(&pid))
                             .tooltip("Always send this mod to the server")
                             .on_change(cx.listener(move |this, v: &bool, _, cx| {
@@ -1049,101 +1067,137 @@ impl SyncPanel {
                                     )
                                 });
                                 this.rescan(cx);
-                            }))
-                    });
-                let server_card = d.server.as_ref().map(|m| {
-                    let mut m = m.clone();
-                    if let Some(c) = &d.client {
-                        if m.icon.is_empty() {
-                            m.icon = c.icon.clone();
-                        }
-                        if m.project_id == 0 {
-                            m.project_id = c.project_id;
-                        }
-                    }
-                    m
-                });
-                // The same jar on both sides: say so rather than repeat it.
-                let same_file = d.status == DiffStatus::Same
-                    && d.client
-                        .as_ref()
-                        .zip(d.server.as_ref())
-                        .is_some_and(|(c, s)| c.file_name.eq_ignore_ascii_case(&s.file_name));
-                let client = self.side_card(
-                    id("client"),
-                    d.client.as_ref(),
-                    client_tags.as_ref(),
-                    true,
-                    "Not in the pack",
-                    cx,
-                );
-                let server = if same_file {
-                    let ok = cx.theme().success;
-                    Self::note_cell(Icon::new(IconName::Check).small().text_color(ok), "Same file", cx)
+                            })),
+                    )
+                })
+                .into_any_element(),
+            Group::InSync => widgets::caption(
+                if d.client.as_ref().zip(d.server.as_ref()).is_some_and(|(c, s)| {
+                    c.file_name.eq_ignore_ascii_case(&s.file_name)
+                }) {
+                    "Same file"
                 } else {
-                    let file_differs = d
-                        .client
-                        .as_ref()
-                        .zip(server_card.as_ref())
-                        .is_none_or(|(c, s)| !c.file_name.eq_ignore_ascii_case(&s.file_name));
-                    self.side_card(
-                        id("server"),
-                        server_card.as_ref(),
-                        server_tags.as_ref(),
-                        file_differs,
-                        if wont { "Kept off the server" } else { "Not on the server" },
-                        cx,
-                    )
-                };
-                let theme = cx.theme();
-                let k2 = key.clone();
-                h_flex()
-                    .id(id("sync-row"))
-                    .w_full()
-                    .h(rems(ROW_H))
-                    .px_3()
-                    .gap_4()
-                    .border_b_1()
-                    .border_color(theme.border.opacity(0.5))
-                    .cursor_pointer()
-                    .when(picked, |r| r.bg(theme.primary.opacity(0.06)))
-                    .hover(|s| s.bg(theme.list_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.selected.remove(&k2) {
-                            this.selected.insert(k2.clone());
-                        }
-                        cx.notify();
-                    }))
-                    .child(
-                        div().w_6().flex_none().child(
-                            Checkbox::new(id("pick"))
-                                .checked(picked)
-                                .on_change(cx.listener(move |this, v: &bool, _, cx| {
-                                    if *v {
-                                        this.selected.insert(key.clone());
-                                    } else {
-                                        this.selected.remove(&key);
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .child(client)
-                    .child(
-                        v_flex()
-                            .w(rems(STATUS_W))
-                            .flex_none()
-                            .gap_1()
-                            .child(h_flex().gap_2().child(chip).when_some(delta, |r, t| {
-                                r.child(widgets::caption(t, cx).text_xs().min_w_0().truncate())
-                            }))
-                            .children(anyway_box),
-                    )
-                    .child(server)
-                    .into_any_element()
+                    "Same version"
+                },
+                cx,
+            )
+            .text_xs()
+            .into_any_element(),
+        };
+        let link = |el: Stateful<Div>, cx: &mut Context<Self>| {
+            el.when(linked, |d| {
+                d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_peek(pid, cx);
+                }))
             })
-            .collect()
+        };
+        let primary = theme.primary;
+        let thumb = link(
+            div()
+                .id(id("thumb"))
+                .flex_none()
+                .when(linked, |d| d.hover(|s| s.opacity(0.8)))
+                .child(widgets::thumb(icon.as_deref(), rems(2.), cx)),
+            cx,
+        );
+        let name = link(
+            div()
+                .id(id("name"))
+                .min_w_0()
+                .text_sm()
+                .font_medium()
+                .truncate()
+                .when(linked, |d| {
+                    d.hover(move |s| s.text_color(primary)).tooltip(|w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Details").build(w, cx)
+                    })
+                })
+                .child(m.mod_name.clone()),
+            cx,
+        );
+        let sub = why.clone().unwrap_or_else(|| m.file_name.clone());
+        let k2 = key.clone();
+        let pickable = g.pickable();
+        h_flex()
+            .id(id("sync-row"))
+            .w_full()
+            .h(rems(ROW_H))
+            .px_3()
+            .gap_3()
+            .border_b_1()
+            .border_color(theme.border.opacity(0.4))
+            .when(picked, |r| r.bg(theme.primary.opacity(0.06)))
+            .hover(|s| s.bg(theme.list_hover))
+            .when(pickable, |r| {
+                r.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.selected.remove(&k2) {
+                        this.selected.insert(k2.clone());
+                    }
+                    cx.notify();
+                }))
+            })
+            .child(div().w_6().flex_none().when(pickable, |c| {
+                let pick_id = id("pick");
+                let key = key.clone();
+                c.child(
+                    Checkbox::new(pick_id)
+                        .checked(picked)
+                        .on_change(cx.listener(move |this, v: &bool, _, cx| {
+                            if *v {
+                                this.selected.insert(key.clone());
+                            } else {
+                                this.selected.remove(&key);
+                            }
+                            cx.notify();
+                        })),
+                )
+            }))
+            .child(thumb)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(name)
+                    .child(
+                        widgets::caption(sub, cx)
+                            .text_xs()
+                            .truncate()
+                            .when(why.is_none(), |c| c.opacity(0.75)),
+                    ),
+            )
+            .child(
+                div().flex_1().min_w_0().child(widgets::mod_tags(
+                    widgets::ModTags {
+                        new: tags.new,
+                        added: tags.added,
+                        env: &tags.env,
+                        categories: &tags.categories,
+                        modrinth: tags.modrinth,
+                        ..Default::default()
+                    },
+                    cx,
+                )),
+            )
+            .child(
+                widgets::caption(version, cx)
+                    .w(rems(10.))
+                    .flex_none()
+                    .text_xs()
+                    .truncate(),
+            )
+            .child(h_flex().w(rems(14.)).flex_none().justify_end().child(action))
+            .into_any_element()
     }
+}
+
+/// One line of the changeset list.
+#[derive(Clone, Copy)]
+enum Item {
+    /// A group's header and how many rows it has.
+    Header(Group, usize),
+    /// An index into the comparison.
+    Row(usize),
 }
 
 /// What one side of a row shows as badges, read from the pack's addon.
@@ -1223,6 +1277,7 @@ impl Render for SyncPanel {
                 this.section = [Section::Mods, Section::Configs, Section::History][*ix];
                 cx.notify();
             }));
+        self.build_items(cx);
         let body: AnyElement = match (self.section, &self.diff) {
             (Section::Configs, _) => self.configs.clone().into_any_element(),
             (Section::History, _) => self.history.clone().into_any_element(),
@@ -1237,12 +1292,11 @@ impl Render for SyncPanel {
                 .text_color(cx.theme().danger)
                 .child(e.clone())
                 .into_any_element(),
-            Some(Ok(diff)) => {
-                let shown: Vec<String> = self.visible(cx).into_iter().map(row_key).collect();
-                let count = shown.len();
-                let all_picked = count > 0 && shown.iter().all(|k| self.selected.contains(k));
-                let toolbar = self.toolbar(diff, cx);
-                let actions = self.actions(diff, cx);
+            Some(Ok(_)) => {
+                let count = self.items.len();
+                let toolbar = self.toolbar(cx);
+                let summary = self.summary(cx);
+                let footer = self.footer(&server, cx);
                 let theme = cx.theme();
                 let result: Option<AnyElement> = self.result.as_ref().map(|r| match r {
                     Ok(line) => h_flex()
@@ -1262,39 +1316,8 @@ impl Render for SyncPanel {
                     .flex_1()
                     .min_h_0()
                     .gap_3()
+                    .child(summary)
                     .child(toolbar)
-                    .child(actions)
-                    .child(
-                        h_flex()
-                            .px_3()
-                            .pb_2()
-                            .gap_4()
-                            .border_b_1()
-                            .border_color(theme.border)
-                            .text_xs()
-                            .font_medium()
-                            .text_color(theme.muted_foreground)
-                            .child(
-                                div().w_6().flex_none().child(
-                                    Checkbox::new("pick-all")
-                                        .checked(all_picked)
-                                        .tooltip("Select every row shown")
-                                        .on_change(cx.listener(move |this, v: &bool, _, cx| {
-                                            for k in &shown {
-                                                if *v {
-                                                    this.selected.insert(k.clone());
-                                                } else {
-                                                    this.selected.remove(k);
-                                                }
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                            )
-                            .child(div().flex_1().pl(rems(2.75)).child("In the pack"))
-                            .child(div().w(rems(STATUS_W)).flex_none().child("Status"))
-                            .child(div().flex_1().pl(rems(2.75)).child("On the server")),
-                    )
                     .child(
                         div()
                             .flex_1()
@@ -1313,13 +1336,7 @@ impl Render for SyncPanel {
                             )
                             .vertical_scrollbar(&self.scroll),
                     )
-                    .child(
-                        widgets::caption(
-                            "Click a row to select it · a mod's name or icon opens its page · a status does just that row",
-                            cx,
-                        )
-                        .text_xs(),
-                    )
+                    .child(footer)
                     .children(result)
                     .into_any_element()
             }

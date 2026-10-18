@@ -124,6 +124,88 @@ pub fn is_wont(d: &DiffEntry) -> bool {
         || (d.status == DiffStatus::OnlyClient && d.skip_reason.is_some())
 }
 
+/// Where a row goes in the changeset: what would happen on the server.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Group {
+    /// In the pack, missing on the server.
+    Add,
+    /// The server has another build.
+    Update,
+    /// Only the server has it (or an old copy left behind).
+    ServerOnly,
+    /// Missing on the server on purpose: client-only or left out.
+    KeptOff,
+    /// Same on both.
+    InSync,
+}
+
+impl Group {
+    pub const ALL: [Group; 5] = [
+        Group::Add,
+        Group::Update,
+        Group::ServerOnly,
+        Group::KeptOff,
+        Group::InSync,
+    ];
+
+    pub fn of(d: &DiffEntry) -> Group {
+        match d.status {
+            DiffStatus::OnlyClient if is_wont(d) => Group::KeptOff,
+            DiffStatus::OnlyClient => Group::Add,
+            DiffStatus::ClientNewer | DiffStatus::ServerNewer => Group::Update,
+            DiffStatus::OnlyServer | DiffStatus::ServerStale => Group::ServerOnly,
+            DiffStatus::Same => Group::InSync,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Group::Add => "Will be added",
+            Group::Update => "Updates",
+            Group::ServerOnly => "Only on the server",
+            Group::KeptOff => "Kept off the server",
+            Group::InSync => "In sync",
+        }
+    }
+
+    /// The summary card's wording, after its count.
+    pub fn short(self) -> &'static str {
+        match self {
+            Group::Add => "to add",
+            Group::Update => "updates",
+            Group::ServerOnly => "only on server",
+            Group::KeptOff => "kept off",
+            Group::InSync => "in sync",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Group::Add => "In the pack, not on the server",
+            Group::Update => "The server has another version",
+            Group::ServerOnly => "Not in the pack",
+            Group::KeptOff => "Client-only, or left out by the pack author",
+            Group::InSync => "Same file on both",
+        }
+    }
+
+    /// Whether its rows can be picked for Apply.
+    pub fn pickable(self) -> bool {
+        matches!(self, Group::Add | Group::Update | Group::ServerOnly)
+    }
+}
+
+/// What Apply does with picked rows: copy adds and updates up, delete
+/// server-only files (kept in .hopper-backups).
+pub fn apply_ops(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Ops {
+    let mut up = push(rows, inst, server);
+    up.extend(remove(rows, server));
+    Ops {
+        up,
+        down: Vec::new(),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum StatusFilter {
     #[default]
@@ -436,6 +518,21 @@ mod tests {
         assert!(f.passes(&d, &none));
         let black: HashSet<String> = ["a".to_string()].into();
         assert!(!f.passes(&d, &black));
+    }
+
+    #[test]
+    fn groups_say_what_happens_on_the_server() {
+        assert_eq!(Group::of(&entry(DiffStatus::OnlyClient, "both", false)), Group::Add);
+        let mut kept = entry(DiffStatus::OnlyClient, "client", false);
+        kept.skip_reason = Some("Client-only".into());
+        assert_eq!(Group::of(&kept), Group::KeptOff);
+        // Already on the server: a won't-sync claim doesn't move it.
+        let mut on = entry(DiffStatus::Same, "both", true);
+        on.client.as_mut().unwrap().wont_sync = Some("left out".into());
+        assert_eq!(Group::of(&on), Group::InSync);
+        assert_eq!(Group::of(&entry(DiffStatus::ServerNewer, "both", false)), Group::Update);
+        assert_eq!(Group::of(&entry(DiffStatus::ServerStale, "both", false)), Group::ServerOnly);
+        assert!(Group::Add.pickable() && !Group::KeptOff.pickable());
     }
 
     #[test]
