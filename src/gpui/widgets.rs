@@ -1,6 +1,6 @@
 //! Small presentational pieces shared by the screens.
 
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -547,7 +547,8 @@ pub fn description_view(
 }
 
 /// A description's video: its poster (or a plain panel naming the site) at
-/// 16:9 with a play button; a click plays it.
+/// 16:9 with a play button; a click plays it right there, in a player
+/// window kept over the tile (`crate::video`), with a bar below to stop it.
 fn video_tile(
     id: ElementId,
     v: &hopper::richtext::Video,
@@ -558,6 +559,78 @@ fn video_tile(
     let theme = cx.theme();
     let video = v.clone();
     let site = v.site();
+    if crate::video::playing(&v.url) {
+        let url = v.url.clone();
+        let keep_id = ElementId::Name(format!("{id}:keep").into());
+        let page = v.url.clone();
+        return v_flex()
+            .id(id.clone())
+            .my_2()
+            .w_full()
+            .max_w(px(640.))
+            .gap_1()
+            .child(
+                div()
+                    .w_full()
+                    .aspect_ratio(16. / 9.)
+                    .rounded(theme.radius)
+                    .overflow_hidden()
+                    .bg(gpui_kit::black())
+                    .child(
+                        canvas(
+                            move |bounds, window, cx| {
+                                window.use_keyed_state(keep_id, cx, {
+                                    let url = url.clone();
+                                    |_, _| crate::video::TileKeep(url)
+                                });
+                                let mask = window.content_mask().bounds;
+                                let visible = bounds.intersect(&mask);
+                                crate::video::place(&url, bounds, visible, window.scale_factor());
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .size_full(),
+                    ),
+            )
+            .child(
+                gpui_kit::component::h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(match site {
+                                "video" => "Playing".to_string(),
+                                s => format!("Playing from {s}"),
+                            }),
+                    )
+                    .child(
+                        Button::new(ElementId::Name(format!("{id}:browser").into()))
+                            .ghost()
+                            .small()
+                            .icon(IconName::ExternalLink)
+                            .label("Open in browser")
+                            .on_click(move |_, _, cx| {
+                                crate::video::stop();
+                                cx.open_url(&page);
+                            }),
+                    )
+                    .child(
+                        Button::new(ElementId::Name(format!("{id}:stop").into()))
+                            .ghost()
+                            .small()
+                            .icon(IconName::X)
+                            .label("Close")
+                            .on_click(|_, window, _| {
+                                crate::video::stop();
+                                window.refresh();
+                            }),
+                    ),
+            )
+            .into_any_element();
+    }
     div()
         .id(id)
         .relative()
@@ -569,7 +642,7 @@ fn video_tile(
         .overflow_hidden()
         .bg(theme.muted)
         .cursor_pointer()
-        .on_click(move |_, _, cx| crate::video::play(&video, cx))
+        .on_click(move |_, window, cx| crate::video::play(&video, window, cx))
         .when_some(poster, |d, p| {
             d.child(
                 img(ImageSource::Resource(Resource::Path(p)))

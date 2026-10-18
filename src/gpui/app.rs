@@ -1062,6 +1062,16 @@ impl Render for AppView {
             )))
             .children(overlay)
             .children(self.palette.as_ref().map(|p| p.view()))
+            // A playing video's window hides under the palette and dialogs.
+            .child({
+                let covered = self.palette.is_some();
+                canvas(
+                    move |_, window, cx| crate::video::frame(covered, window, cx),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_0()
+            })
     }
 }
 
