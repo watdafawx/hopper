@@ -892,16 +892,18 @@ impl AppView {
                 }))
                 .into_any_element(),
         };
-        // A thin upright line between groups of the bar.
-        let sep = |cx: &App| div().flex_none().w_px().h(rems(1.125)).bg(cx.theme().foreground.opacity(0.16));
         let version = self.version_chip(cx);
         // Settings sits apart from the page tabs, at the trailing edge.
         let selected = Page::ALL.iter().position(|p| *p == self.page);
-        TitleBar::new().child(
+        let theme = cx.theme();
+        // The tabs sit in a recessed track, the tools in an outlined one.
+        let track = if theme.mode.is_dark() { hsla(0., 0., 0., 0.28) } else { theme.foreground.opacity(0.05) };
+        let (line, radius) = (theme.border, px(10.));
+        TitleBar::new().h(px(42.)).child(
             h_flex()
                 .flex_1()
                 .pr_2()
-                .gap_3()
+                .gap_3p5()
                 .child(
                     h_flex()
                         .gap_2()
@@ -911,35 +913,47 @@ impl AppView {
                         // reads a press on them as a window drag and the click never comes.
                         .child(div().occlude().child(version)),
                 )
-                .child(sep(cx))
-                .child(h_flex().gap_1().occlude().children(Page::ALL.iter().enumerate().map(|(ix, p)| {
-                    // Icon and label share one pill; the page you're on is
-                    // tinted with the accent.
-                    let page = *p;
-                    let active = selected == Some(ix);
-                    let theme = cx.theme();
-                    let (accent, hover, muted, fg) =
-                        (theme.primary, theme.list_hover, theme.muted_foreground, theme.foreground);
+                .child(
                     h_flex()
-                        .id(SharedString::from(format!("nav:{}", p.label())))
-                        .gap_1p5()
-                        .px_3()
-                        .py_1()
-                        .rounded_full()
-                        .text_sm()
-                        .cursor_pointer()
-                        .map(|r| {
-                            if active {
-                                r.bg(accent.opacity(0.16)).text_color(accent).font_semibold()
-                            } else {
-                                r.text_color(muted)
-                                    .hover(move |s| s.bg(hover).text_color(fg))
-                            }
-                        })
-                        .child(Icon::new(p.icon()).small())
-                        .child(p.label())
-                        .on_click(cx.listener(move |this, _, window, cx| this.nav(page, window, cx)))
-                })))
+                        .gap_0p5()
+                        .p(px(3.))
+                        .rounded(radius)
+                        .bg(track)
+                        .border_1()
+                        .border_color(line)
+                        .occlude()
+                        .children(Page::ALL.iter().enumerate().map(|(ix, p)| {
+                            // The page you're on is a raised tile with its
+                            // icon in the accent colour.
+                            let page = *p;
+                            let active = selected == Some(ix);
+                            let theme = cx.theme();
+                            let (accent, muted, fg) = (theme.primary, theme.muted_foreground, theme.foreground);
+                            let raised = if theme.mode.is_dark() { fg.opacity(0.09) } else { theme.background };
+                            h_flex()
+                                .id(SharedString::from(format!("nav:{}", p.label())))
+                                .gap_1p5()
+                                .px_3()
+                                .py(px(3.))
+                                .rounded(px(7.))
+                                .text_sm()
+                                .cursor_pointer()
+                                .map(|r| {
+                                    if active {
+                                        r.bg(raised)
+                                            .text_color(fg)
+                                            .font_semibold()
+                                            .shadow(vec![BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.35))
+                                                .blur_radius(px(3.))])
+                                    } else {
+                                        r.text_color(muted).hover(move |s| s.text_color(fg))
+                                    }
+                                })
+                                .child(Icon::new(p.icon()).small().when(active, |i| i.text_color(accent)))
+                                .child(p.label())
+                                .on_click(cx.listener(move |this, _, window, cx| this.nav(page, window, cx)))
+                        })),
+                )
                 .child(div().flex_1())
                 .child(
                     h_flex()
@@ -965,11 +979,14 @@ impl AppView {
                             )
                         })
                         .child(self.tasks.clone())
-                        .child(sep(cx))
                         // Tools: search, re-read, settings.
                         .child(
                             h_flex()
                                 .gap_0p5()
+                                .p(px(2.))
+                                .rounded(px(9.))
+                                .border_1()
+                                .border_color(line)
                                 .child(
                                     Button::new("open-palette")
                                         .ghost()
@@ -1001,7 +1018,6 @@ impl AppView {
                                         .on_click(cx.listener(|this, _, _, cx| this.go(Page::Settings, cx))),
                                 ),
                         )
-                        .child(sep(cx))
                         .child(account),
                 ),
         )
