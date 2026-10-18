@@ -150,6 +150,8 @@ pub struct BrowseView {
     link_file: Option<cf::File>,
     /// Description, Files or Dependencies in the project panel.
     detail_tab: usize,
+    /// A redraw is set for the description's next GIF frame.
+    anim_due: bool,
     /// Open the first result when it arrives (`--detail`, for scripted runs).
     open_first: bool,
     /// Only the project panel, docked beside an instance's mod list.
@@ -190,6 +192,8 @@ impl BrowseView {
         let modrinth = store.read(cx).settings().browse_modrinth;
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder(modrinth)));
         let subs = vec![
+            // Paused GIFs pick up again when the window is focused.
+            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             cx.observe(&store, |this, _, cx| {
                 this.check_pending(cx);
                 cx.notify()
@@ -246,6 +250,7 @@ impl BrowseView {
             bookmarked: false,
             server_files: HashMap::new(),
             detail_tab: 0,
+            anim_due: false,
             _debounce: None,
             _search: None,
             _subscriptions: subs,
@@ -912,10 +917,12 @@ impl BrowseView {
                         let urls: Vec<String> = deps
                             .iter()
                             .filter_map(|(d, _)| d.icon().map(str::to_string))
-                            .chain(images.iter().cloned())
                             .collect();
-                        this.store
-                            .update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
+                        // The description's GIFs play (see `anim_tick`).
+                        this.store.update(cx, |s, _| {
+                            urls.iter().for_each(|u| s.want_image(u));
+                            images.iter().for_each(|u| s.want_anim(u));
+                        });
                         this.deps.insert(id, deps);
                         this.detail.insert(
                             id,
@@ -2914,8 +2921,35 @@ fn placeholder(modrinth: bool) -> &'static str {
     }
 }
 
+impl BrowseView {
+    /// Sets a redraw for when a GIF in the open description changes frame:
+    /// only while the Description tab shows in a focused window. GPUI's own
+    /// GIFs redraw every display frame; these, at the GIF's pace.
+    fn anim_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.anim_due || self.detail_tab != 0 || !window.is_window_active() {
+            return;
+        }
+        let Some(m) = self.selected.as_ref() else { return };
+        let Some(Load::Ready(d)) = self.detail.get(&m.id) else { return };
+        let Some(wait) = widgets::description_wait(&d.images, self.store.read(cx)) else {
+            return;
+        };
+        self.anim_due = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                this.anim_due = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
 impl Render for BrowseView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.anim_tick(window, cx);
         if self.peek {
             let target = self.target(cx);
             return self.panel(target.as_ref(), window, cx).unwrap_or_else(|| div().into_any_element());

@@ -54,6 +54,11 @@ pub enum Msg {
         url: String,
         path: Option<PathBuf>,
     },
+    /// An animated image decoded for playback (`None`: show the still).
+    Anim {
+        key: String,
+        clip: Option<Arc<crate::anim::Clip>>,
+    },
     Updates {
         root: PathBuf,
         result: Result<Vec<Update>, String>,
@@ -128,12 +133,28 @@ enum Image {
     Failed,
 }
 
+/// An image key wanted animated (see [`Store::want_anim`]).
+enum Anim {
+    /// Waiting for the image itself to be cached.
+    Waiting,
+    Decoding,
+    Ready(Arc<crate::anim::Clip>),
+    /// One frame, too big, or failed: the still is shown.
+    Still,
+}
+
+/// Decoded clips kept at once; the oldest goes (and frees its GPU copies).
+const ANIMS_KEPT: usize = 12;
+
 pub struct Store {
     settings: Settings,
     instances: Vec<Instance>,
     running: HashMap<PathBuf, Running>,
     jobs: Jobs,
     images: HashMap<String, Image>,
+    anims: HashMap<String, Anim>,
+    /// Ready clips' keys, oldest first.
+    anims_ready: std::collections::VecDeque<String>,
     /// Installed projects' categories (`None` until the disk cache is read);
     /// keys being fetched are in `cats_pending`.
     cats: Option<HashMap<String, Vec<String>>>,
@@ -239,6 +260,8 @@ impl Store {
             running: HashMap::new(),
             jobs: Jobs::new(wake.clone()),
             images: HashMap::new(),
+            anims: HashMap::new(),
+            anims_ready: Default::default(),
             cats: None,
             cats_pending: Default::default(),
             updates: HashMap::new(),
@@ -625,8 +648,32 @@ impl Store {
                 self.cats.get_or_insert_default().extend(found);
             }
             Msg::Image { url, path } => {
+                let ok = path.is_some();
                 self.images
-                    .insert(url, path.map_or(Image::Failed, Image::Ready));
+                    .insert(url.clone(), path.map_or(Image::Failed, Image::Ready));
+                if matches!(self.anims.get(&url), Some(Anim::Waiting)) {
+                    if ok {
+                        self.decode_anim(url);
+                    } else {
+                        self.anims.insert(url, Anim::Still);
+                    }
+                }
+            }
+            Msg::Anim { key, clip } => {
+                let Some(clip) = clip else {
+                    self.anims.insert(key, Anim::Still);
+                    return;
+                };
+                self.anims.insert(key.clone(), Anim::Ready(clip));
+                self.anims_ready.push_back(key);
+                while self.anims_ready.len() > ANIMS_KEPT {
+                    let Some(old) = self.anims_ready.pop_front() else { break };
+                    if let Some(Anim::Ready(c)) = self.anims.remove(&old) {
+                        for f in c.frames() {
+                            cx.drop_image(f.clone(), None);
+                        }
+                    }
+                }
             }
             Msg::Updates { root, result } => {
                 self.updates.insert(
@@ -894,6 +941,54 @@ impl Store {
             let found = hopper::modmeta::fetch(&keys);
             hopper::modmeta::save(&found);
             Msg::Categories(found)
+        });
+    }
+
+    /// The playable frames of image key `key`, once decoded (see
+    /// [`Self::want_anim`]).
+    pub fn anim(&self, key: &str) -> Option<&Arc<crate::anim::Clip>> {
+        match self.anims.get(key) {
+            Some(Anim::Ready(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Like [`Self::want_image`], and if it's an animated GIF or WebP also
+    /// decodes its frames to play (others show a still, see the workers).
+    pub fn want_anim(&mut self, key: &str) {
+        if key.is_empty() || self.anims.contains_key(key) {
+            return;
+        }
+        let base = hopper::imgcache::split_width(key).0;
+        let animated = hopper::imgcache::path_for(base)
+            .is_some_and(|p| hopper::imgcache::maybe_animated(&p));
+        if !animated {
+            self.anims.insert(key.to_string(), Anim::Still);
+            return self.want_image(key);
+        }
+        self.anims.insert(key.to_string(), Anim::Waiting);
+        match self.images.get(key) {
+            Some(Image::Ready(_)) => self.decode_anim(key.to_string()),
+            Some(Image::Failed) => {
+                self.anims.insert(key.to_string(), Anim::Still);
+            }
+            _ => self.want_image(key),
+        }
+    }
+
+    /// Decodes the cached original of `key` on a thread.
+    fn decode_anim(&mut self, key: String) {
+        self.anims.insert(key.clone(), Anim::Decoding);
+        self.spawn(move || {
+            let (base, width) = hopper::imgcache::split_width(&key);
+            let clip = hopper::imgcache::cached(base)
+                .ok_or_else(|| anyhow::anyhow!("not cached"))
+                .and_then(|p| crate::anim::decode(&p, width))
+                .inspect_err(|e| log::debug!("animating {key}: {e:#}"))
+                .ok()
+                .flatten()
+                .map(Arc::new);
+            Msg::Anim { key, clip }
         });
     }
 

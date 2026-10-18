@@ -414,9 +414,16 @@ fn image_size(path: &Path) -> Option<(u32, u32)> {
         .or_insert_with(|| image::image_dimensions(path).ok())
 }
 
+/// How long until an animated image of this description (one the store
+/// decoded, see `Store::want_anim`) shows its next frame: when the page
+/// showing it should redraw.
+pub fn description_wait(images: &[String], store: &crate::store::Store) -> Option<std::time::Duration> {
+    images.iter().filter_map(|k| store.anim(k)).map(|c| c.wait_now()).min()
+}
+
 /// A project description (from `richtext::to_segments`) with its images
-/// served from the store's cache (stills of animated ones, scaled to the
-/// width the page gave them) and opened in Hopper's image viewer on click;
+/// served from the store's cache (stills of animated ones, unless the store
+/// decoded them to play, scaled to the width the page gave them) and opened in Hopper's image viewer on click;
 /// other links open in the browser. Rows of badges sit side by side,
 /// wrapping. `images` are the description's image keys, as
 /// `richtext::images` lists them. It does not scroll by itself, so it can
@@ -434,6 +441,13 @@ pub fn description_view(
         images
             .iter()
             .filter_map(|u| Some((u.clone(), Arc::from(s.image(u)?))))
+            .collect(),
+    );
+    // Each draw shows the frame for now; the page redraws on the next one.
+    let frames: Arc<std::collections::HashMap<String, Arc<RenderImage>>> = Arc::new(
+        images
+            .iter()
+            .filter_map(|k| Some((k.clone(), s.anim(k)?.frame_now())))
             .collect(),
     );
     // The viewer shows the full-size originals.
@@ -461,6 +475,7 @@ pub fn description_view(
             // GPUI Base's own view: the component wrapper has no image hook.
             Segment::Markdown(md) => {
                 let cached = cached.clone();
+                let frames = frames.clone();
                 let open = open.clone();
                 gpui_kit::base::TextView::markdown(
                     ElementId::Name(format!("{id}:{i}").into()),
@@ -468,9 +483,14 @@ pub fn description_view(
                 )
                 .scrollable(false)
                 .selectable(true)
-                .image_source(move |uri| match cached.get(uri.as_ref()) {
-                    Some(p) => ImageSource::Resource(Resource::Path(p.clone())),
-                    None => ImageSource::Image(blank_image()),
+                .image_source(move |uri| {
+                    if let Some(f) = frames.get(uri.as_ref()) {
+                        return ImageSource::Render(f.clone());
+                    }
+                    match cached.get(uri.as_ref()) {
+                        Some(p) => ImageSource::Resource(Resource::Path(p.clone())),
+                        None => ImageSource::Image(blank_image()),
+                    }
                 })
                 .on_link_click(move |url, _, window, cx| open(url.as_ref(), window, cx))
                 .into_any_element()
@@ -488,6 +508,7 @@ pub fn description_view(
                         _ => 20.,
                     };
                     let target = b.link.clone().unwrap_or_else(|| b.url.clone());
+                    let frame = frames.get(&b.key).cloned();
                     let open = open.clone();
                     div()
                         .id(ElementId::NamedInteger(format!("{id}:{i}").into(), j as u64))
@@ -499,11 +520,11 @@ pub fn description_view(
                         .hover(|s| s.opacity(0.85))
                         .on_click(move |_, window, cx| open(&target, window, cx))
                         .when_some(path, |d, p| {
-                            d.child(
-                                img(ImageSource::Resource(Resource::Path(p)))
-                                    .size_full()
-                                    .object_fit(ObjectFit::Contain),
-                            )
+                            let src = match frame {
+                                Some(f) => ImageSource::Render(f),
+                                None => ImageSource::Resource(Resource::Path(p)),
+                            };
+                            d.child(img(src).size_full().object_fit(ObjectFit::Contain))
                         })
                 }))
                 .into_any_element(),

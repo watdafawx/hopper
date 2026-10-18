@@ -7,6 +7,7 @@ mod addons;
 mod addons_extra;
 mod backups_view;
 mod image_viewer;
+mod anim;
 mod app;
 mod browse;
 mod configs;
