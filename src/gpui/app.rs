@@ -225,6 +225,21 @@ impl AppView {
                 }
                 // The Performance tab listens for its own instance.
                 StoreEvent::SessionSaved(_) => {}
+                StoreEvent::ShowServer { root, compare } => {
+                    let root = root.clone();
+                    if *compare {
+                        this.sync.update(cx, |p, cx| p.compare(root, cx));
+                        this.go(Page::Sync, cx);
+                    } else {
+                        this.servers.update(cx, |s, cx| s.pick(root, cx));
+                        this.go(Page::Servers, cx);
+                    }
+                }
+                StoreEvent::ShowInstance(root) => {
+                    let root = root.clone();
+                    this.library.update(cx, |l, cx| l.open(root, cx));
+                    this.go(Page::Library, cx);
+                }
                 StoreEvent::Peek { root, project } => {
                     let (root, project) = (root.clone(), *project);
                     this.library.update(cx, |l, cx| l.peek(root, project, cx));

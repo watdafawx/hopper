@@ -99,6 +99,11 @@ pub enum StoreEvent {
     SessionSaved(PathBuf),
     /// Show a project's page beside an instance (a link in a changelog).
     Peek { root: PathBuf, project: u64 },
+    /// Open a server's page (`compare`: its Server sync instead), from a
+    /// menu that isn't on that page.
+    ShowServer { root: PathBuf, compare: bool },
+    /// Open an instance in the Library.
+    ShowInstance(PathBuf),
 }
 
 impl EventEmitter<StoreEvent> for Store {}

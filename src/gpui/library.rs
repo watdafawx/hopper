@@ -12,7 +12,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tag::Tag;
@@ -775,6 +775,7 @@ impl LibraryView {
 
     fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let roots: Vec<PathBuf> = self.ordered(cx).into_iter().flat_map(|(_, l)| l).collect();
+        let view = cx.entity();
         let store = self.store.read(cx);
         let theme = cx.theme();
         let items: Vec<AnyElement> = roots
@@ -809,6 +810,10 @@ impl LibraryView {
                             gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx)
                         })
                         .on_click(cx.listener(move |this, _, _, cx| this.select(r.clone(), cx)))
+                        .context_menu({
+                            let (view, root) = (view.clone(), root.clone());
+                            move |menu, _, cx| instance_menu(menu, &view, &root, false, cx)
+                        })
                         .child(widgets::thumb(icon.as_deref(), rems(2.5), cx))
                         .when(playing, |d| {
                             d.child(
@@ -1092,16 +1097,7 @@ impl LibraryView {
 
         let select_root = root.to_path_buf();
         let menu_root = root.to_path_buf();
-        let groups = store.groups();
-        let group_now = store
-            .settings()
-            .groups
-            .get(root.to_string_lossy().as_ref())
-            .cloned();
-        let name_for_menu = inst.name.clone();
         let menu_view = cx.entity();
-        // Another launcher's instance: deleting it here would break it there.
-        let launcher = hopper::launchers::Kind::from_key(&inst.source).map(|k| k.name());
         h_flex()
             .id(id("row", root))
             .group(group)
@@ -1170,137 +1166,7 @@ impl LibraryView {
                             }),
                     ),
             )
-            .context_menu(move |menu, _, _| {
-                let (groups, group_now, name_for_menu) =
-                    (groups.clone(), group_now.clone(), name_for_menu.clone());
-                let (v1, v3, v4) = (menu_view.clone(), menu_view.clone(), menu_view.clone());
-                let (vb, rb) = (menu_view.clone(), menu_root.clone());
-                let (r1, r2, r3, r4) = (
-                    menu_root.clone(),
-                    menu_root.clone(),
-                    menu_root.clone(),
-                    menu_root.clone(),
-                );
-                menu.item(
-                    PopupMenuItem::new("Play")
-                        .icon(IconName::Play)
-                        .disabled(playing)
-                        .on_click(move |_, window, cx| {
-                            v1.update(cx, |this, cx| this.play(&r1, window, cx))
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Open folder")
-                        .icon(IconName::FolderOpen)
-                        .on_click(move |_, _, _| store::open_path(&r2)),
-                )
-                .item(
-                    PopupMenuItem::new("Change icon…")
-                        .icon(IconName::Image)
-                        .on_click({
-                            let (v, r) = (vb.clone(), rb.clone());
-                            move |_, _, cx| {
-                                let store = v.read(cx).store.clone();
-                                change_icon(store, r.clone(), cx)
-                            }
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Create desktop shortcut")
-                        .icon(IconName::ExternalLink)
-                        .on_click(move |_, window, cx| {
-                            if let Err(e) = hopper::shortcut::desktop_shortcut(&name_for_menu) {
-                                window.push_notification(
-                                    gpui_kit::component::notification::Notification::error(
-                                        format!("{e:#}"),
-                                    ),
-                                    cx,
-                                );
-                            } else {
-                                window.push_notification(
-                                    gpui_kit::component::notification::Notification::success(
-                                        "Shortcut created on the desktop.",
-                                    ),
-                                    cx,
-                                );
-                            }
-                        }),
-                )
-                .separator()
-                .item(PopupMenuItem::new("Settings").icon(IconName::SlidersHorizontal).on_click({
-                    let (v, r) = (vb.clone(), rb.clone());
-                    move |_, _, cx| {
-                        v.update(cx, |this, cx| {
-                            this.select(r.clone(), cx);
-                            this.set_tab(InstTab::Settings, cx);
-                        })
-                    }
-                }))
-                .item(PopupMenuItem::new("Export…").icon(IconName::Upload).on_click({
-                    let (v, r) = (vb.clone(), rb.clone());
-                    move |_, window, cx| {
-                        let store = v.read(cx).store.clone();
-                        crate::dialogs::open_export(store, r.clone(), window, cx)
-                    }
-                }))
-                .item(PopupMenuItem::new("Backups…").icon(IconName::Archive).on_click({
-                    let (v, r) = (vb.clone(), rb.clone());
-                    move |_, window, cx| {
-                        let store = v.read(cx).store.clone();
-                        crate::backups_view::open(store, r.clone(), window, cx)
-                    }
-                }))
-                .separator()
-                .label("Group")
-                .map(|m| {
-                    groups.iter().cloned().fold(m, |m, g| {
-                        let (v, r, g2) = (vb.clone(), rb.clone(), g.clone());
-                        m.item(
-                            PopupMenuItem::new(g.clone())
-                                .checked(group_now.as_deref() == Some(g.as_str()))
-                                .on_click(move |_, _, cx| {
-                                    let store = v.read(cx).store.clone();
-                                    store.update(cx, |s, cx| s.set_group(&r, Some(g2.clone()), cx));
-                                }),
-                        )
-                    })
-                })
-                .item(PopupMenuItem::new("New group…").icon(IconName::Plus).on_click({
-                    let (v, r) = (vb.clone(), rb.clone());
-                    move |_, window, cx| {
-                        let store = v.read(cx).store.clone();
-                        new_group_dialog(store, r.clone(), window, cx)
-                    }
-                }))
-                .when(group_now.is_some(), |m| {
-                    let (v, r) = (vb.clone(), rb.clone());
-                    m.item(PopupMenuItem::new("Remove from group").on_click(move |_, _, cx| {
-                        let store = v.read(cx).store.clone();
-                        store.update(cx, |s, cx| s.set_group(&r, None, cx));
-                    }))
-                })
-                .separator()
-                .item(
-                    PopupMenuItem::new(if launcher.is_some() { "Copy into Hopper" } else { "Duplicate" })
-                        .icon(IconName::Copy)
-                        .on_click(move |_, _, cx| {
-                            v3.update(cx, |this, cx| this.duplicate(&r3, cx))
-                        }),
-                )
-                .separator()
-                .item(
-                    PopupMenuItem::new(match launcher {
-                        Some(l) => format!("Delete it in {l}"),
-                        None => "Delete…".to_string(),
-                    })
-                        .icon(IconName::Trash)
-                        .disabled(playing || launcher.is_some())
-                        .on_click(move |_, window, cx| {
-                            let store = v4.read(cx).store.clone();
-                            crate::dialogs::confirm_delete(store, r4.clone(), window, cx)
-                        }),
-                )
-            })
+            .context_menu(move |menu, _, cx| instance_menu(menu, &menu_view, &menu_root, false, cx))
             .into_any_element()
     }
 
@@ -1457,7 +1323,6 @@ impl LibraryView {
             .as_deref()
             .and_then(|u| store.image(u))
             .map(Path::to_path_buf);
-        let launcher = hopper::launchers::Kind::from_key(&inst.source).map(|k| k.name());
         let root = inst.root.clone();
         let (r_play, r_folder, r_more) = (root.clone(), root.clone(), root.clone());
         // Running or being changed by a job: hold off other changes.
@@ -1501,7 +1366,6 @@ impl LibraryView {
                     cx,
                 ))
         });
-        let has_pack = inst.pack.is_some();
         let sync_to = store
             .server_of(&inst.root)
             .map(|s| {
@@ -1525,11 +1389,6 @@ impl LibraryView {
                         cx.emit(LibraryEvent::Compare(server.clone()))
                     }))
             });
-        let server_pack = inst
-            .pack
-            .as_ref()
-            .filter(|p| p.server_pack_file_id != 0)
-            .map(|p| (p.project_id, p.server_pack_file_id, p.name.clone()));
         let view = cx.entity();
 
         let play = if playing {
@@ -1574,119 +1433,7 @@ impl LibraryView {
                                     .outline()
                                     .icon(IconName::Ellipsis)
                                     .tooltip("More")
-                                    .dropdown_menu(move |menu, _, _| {
-                                        let (v1, v2) = (view.clone(), view.clone());
-                                        let (r1, r2) = (r_more.clone(), r_more.clone());
-                                        let (v3, v4, v5) = (view.clone(), view.clone(), view.clone());
-                                        let (r3, r4) = (r_more.clone(), r_more.clone());
-                                        let v6 = view.clone();
-                                        let r6 = r_more.clone();
-                                        let (v7, r7) = (view.clone(), r_more.clone());
-                                        menu.when(has_pack, |m| {
-                                            m.item(
-                                                PopupMenuItem::new("Pack versions")
-                                                    .icon(IconName::Clock)
-                                                    .on_click(move |_, window, cx| {
-                                                        let store = v6.read(cx).store.clone();
-                                                        let s = store.read(cx);
-                                                        let (pid, upd) = s
-                                                            .instance(&r6)
-                                                            .map(|i| {
-                                                                (
-                                                                    i.pack.as_ref().map_or(0, |p| p.project_id),
-                                                                    s.pack_update(i).cloned(),
-                                                                )
-                                                            })
-                                                            .unwrap_or_default();
-                                                        crate::versions::open(
-                                                            store, r6.clone(), pid, true, upd, window, cx,
-                                                        )
-                                                    }),
-                                            )
-                                        })
-                                        .item(
-                                            PopupMenuItem::new("Export…")
-                                                .icon(IconName::Upload)
-                                                .on_click(move |_, window, cx| {
-                                                    let store = v3.read(cx).store.clone();
-                                                    crate::dialogs::open_export(store, r3.clone(), window, cx)
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("Share code…")
-                                                .icon(IconName::Share2)
-                                                .on_click({
-                                                    let (v, r) = (v4.clone(), r4.clone());
-                                                    move |_, window, cx| {
-                                                        let store = v.read(cx).store.clone();
-                                                        crate::dialogs::open_share(store, r.clone(), window, cx)
-                                                    }
-                                                }),
-                                        )
-                                        .when(server_pack.is_some(), |m| {
-                                            let (pid, fid, name) = server_pack.clone().unwrap_or_default();
-                                            m.item(
-                                                PopupMenuItem::new("Download server pack…")
-                                                    .icon(IconName::Server)
-                                                    .on_click(move |_, _, cx| {
-                                                        let store = v5.read(cx).store.clone();
-                                                        crate::dialogs::save_server_pack(store, pid, fid, name.clone(), cx)
-                                                    }),
-                                            )
-                                        })
-                                        .item(
-                                            // A pack with a server pack builds from it.
-                                            PopupMenuItem::new(if server_pack.is_some() {
-                                                "Host a server from its server pack…"
-                                            } else {
-                                                "Host a server on this PC…"
-                                            })
-                                                .icon(IconName::Server)
-                                                .on_click({
-                                                    let (v, r) = (v1.clone(), r1.clone());
-                                                    move |_, window, cx| {
-                                                        let store = v.read(cx).store.clone();
-                                                        crate::host_dialog::open(store, Some(r.clone()), window, cx)
-                                                    }
-                                                }),
-                                        )
-                                        .separator()
-                                        .item(PopupMenuItem::new(if launcher.is_some() { "Copy into Hopper" } else { "Duplicate" }).icon(IconName::Copy).on_click(
-                                            move |_, _, cx| {
-                                                v1.update(cx, |this, cx| this.duplicate(&r1, cx))
-                                            },
-                                        ))
-                                        .item(
-                                            PopupMenuItem::new("Repair")
-                                                .icon(IconName::Wrench)
-                                                .on_click(move |_, _, cx| {
-                                                    v2.update(cx, |this, cx| this.repair(&r2, cx))
-                                                }),
-                                        )
-                                        .item(
-                                            PopupMenuItem::new("Backups…")
-                                                .icon(IconName::Archive)
-                                                .on_click(move |_, window, cx| {
-                                                    let store = v7.read(cx).store.clone();
-                                                    crate::backups_view::open(store, r7.clone(), window, cx)
-                                                }),
-                                        )
-                                        .separator()
-                                        .item(
-                                            PopupMenuItem::new(match launcher {
-                                                // Deleting here would break it in its launcher.
-                                                Some(l) => format!("Delete it in {l}"),
-                                                None => "Delete…".to_string(),
-                                            })
-                                                .icon(IconName::Trash)
-                                                .disabled(playing || launcher.is_some())
-                                                .on_click(move |_, window, cx| {
-                                                    let store = v4.read(cx).store.clone();
-                                                    crate::dialogs::confirm_delete(store, r4.clone(), window, cx)
-                                                }),
-                                        )
-
-                                    }),
+                                    .dropdown_menu(move |menu, _, cx| instance_menu(menu, &view, &r_more, true, cx)),
                             );
         self.hero(inst, icon, playing, actions, play_big, cx)
     }
@@ -2362,4 +2109,172 @@ impl Render for LibraryView {
             .child(div().flex_1().min_w_0().h_full().child(self.detail(cx)))
             .children(peek)
     }
+}
+
+/// An instance's menu, the same wherever it opens: right-click in the list
+/// or on its icon in the rail, and the header's ⋯ (`header`: Play and the
+/// folder have their own buttons there). Read when it opens, so it is
+/// never stale.
+fn instance_menu(
+    menu: PopupMenu,
+    view: &Entity<LibraryView>,
+    root: &Path,
+    header: bool,
+    cx: &App,
+) -> PopupMenu {
+    let store = view.read(cx).store.clone();
+    let s = store.read(cx);
+    let Some(inst) = s.instance(root) else { return menu };
+    let playing = s.running(root).is_some();
+    // Another launcher's instance: deleting it here would break it there.
+    let launcher = hopper::launchers::Kind::from_key(&inst.source).map(|k| k.name());
+    let pack = inst.pack.as_ref().map(|p| (p.project_id, s.pack_update(inst).cloned()));
+    let server_pack = inst
+        .pack
+        .as_ref()
+        .filter(|p| p.server_pack_file_id != 0)
+        .map(|p| (p.project_id, p.server_pack_file_id, p.name.clone()));
+    let groups = s.groups();
+    let group_now = s.settings().groups.get(root.to_string_lossy().as_ref()).cloned();
+    let name = inst.name.clone();
+    let (v, r) = (view.clone(), root.to_path_buf());
+    // Each item takes its own copies.
+    let vr = || (v.clone(), r.clone());
+    let st = || store.clone();
+
+    menu.when(!header, |m| {
+        let (v1, r1) = vr();
+        let r2 = r.clone();
+        m.item(
+            PopupMenuItem::new("Play")
+                .icon(IconName::Play)
+                .disabled(playing)
+                .on_click(move |_, window, cx| v1.update(cx, |this, cx| this.play(&r1, window, cx))),
+        )
+        .item(
+            PopupMenuItem::new("Open folder")
+                .icon(IconName::FolderOpen)
+                .on_click(move |_, _, _| store::open_path(&r2)),
+        )
+    })
+    .item({
+        let (v, r) = vr();
+        PopupMenuItem::new("Settings").icon(IconName::SlidersHorizontal).on_click(move |_, _, cx| {
+            v.update(cx, |this, cx| {
+                this.select(r.clone(), cx);
+                this.set_tab(InstTab::Settings, cx);
+            })
+        })
+    })
+    .separator()
+    .when_some(pack, |m, (pid, upd)| {
+        let (s, r) = (st(), r.clone());
+        m.item(PopupMenuItem::new("Pack versions").icon(IconName::Clock).on_click(move |_, window, cx| {
+            crate::versions::open(s.clone(), r.clone(), pid, true, upd.clone(), window, cx)
+        }))
+    })
+    .item({
+        let (s, r) = (st(), r.clone());
+        PopupMenuItem::new("Export…")
+            .icon(IconName::Upload)
+            .on_click(move |_, window, cx| crate::dialogs::open_export(s.clone(), r.clone(), window, cx))
+    })
+    .item({
+        let (s, r) = (st(), r.clone());
+        PopupMenuItem::new("Share code…")
+            .icon(IconName::Share2)
+            .on_click(move |_, window, cx| crate::dialogs::open_share(s.clone(), r.clone(), window, cx))
+    })
+    .when_some(server_pack.clone(), |m, (pid, fid, name)| {
+        let s = st();
+        m.item(PopupMenuItem::new("Download server pack…").icon(IconName::Server).on_click(
+            move |_, _, cx| crate::dialogs::save_server_pack(s.clone(), pid, fid, name.clone(), cx),
+        ))
+    })
+    .item({
+        let (s, r) = (st(), r.clone());
+        // A pack with a server pack builds from it.
+        PopupMenuItem::new(if server_pack.is_some() {
+            "Host a server from its server pack…"
+        } else {
+            "Host a server on this PC…"
+        })
+        .icon(IconName::Server)
+        .on_click(move |_, window, cx| crate::host_dialog::open(s.clone(), Some(r.clone()), window, cx))
+    })
+    .separator()
+    .item({
+        let (s, r) = (st(), r.clone());
+        PopupMenuItem::new("Change icon…")
+            .icon(IconName::Image)
+            .on_click(move |_, _, cx| change_icon(s.clone(), r.clone(), cx))
+    })
+    .item(
+        PopupMenuItem::new("Create desktop shortcut")
+            .icon(IconName::ExternalLink)
+            .on_click(move |_, window, cx| {
+                let n = match hopper::shortcut::desktop_shortcut(&name) {
+                    Ok(_) => gpui_kit::component::notification::Notification::success(
+                        "Shortcut created on the desktop.",
+                    ),
+                    Err(e) => gpui_kit::component::notification::Notification::error(format!("{e:#}")),
+                };
+                window.push_notification(n, cx);
+            }),
+    )
+    .separator()
+    .label("Group")
+    .map(|m| {
+        groups.iter().cloned().fold(m, |m, g| {
+            let (s, r, g2) = (st(), r.clone(), g.clone());
+            m.item(
+                PopupMenuItem::new(g.clone())
+                    .checked(group_now.as_deref() == Some(g.as_str()))
+                    .on_click(move |_, _, cx| s.update(cx, |s, cx| s.set_group(&r, Some(g2.clone()), cx))),
+            )
+        })
+    })
+    .item({
+        let (s, r) = (st(), r.clone());
+        PopupMenuItem::new("New group…")
+            .icon(IconName::Plus)
+            .on_click(move |_, window, cx| new_group_dialog(s.clone(), r.clone(), window, cx))
+    })
+    .when(group_now.is_some(), |m| {
+        let (s, r) = (st(), r.clone());
+        m.item(
+            PopupMenuItem::new("Remove from group")
+                .on_click(move |_, _, cx| s.update(cx, |s, cx| s.set_group(&r, None, cx))),
+        )
+    })
+    .separator()
+    .item({
+        let (v, r) = vr();
+        PopupMenuItem::new(if launcher.is_some() { "Copy into Hopper" } else { "Duplicate" })
+            .icon(IconName::Copy)
+            .on_click(move |_, _, cx| v.update(cx, |this, cx| this.duplicate(&r, cx)))
+    })
+    .item({
+        let (v, r) = vr();
+        PopupMenuItem::new("Repair")
+            .icon(IconName::Wrench)
+            .on_click(move |_, _, cx| v.update(cx, |this, cx| this.repair(&r, cx)))
+    })
+    .item({
+        let (s, r) = (st(), r.clone());
+        PopupMenuItem::new("Backups…")
+            .icon(IconName::Archive)
+            .on_click(move |_, window, cx| crate::backups_view::open(s.clone(), r.clone(), window, cx))
+    })
+    .separator()
+    .item({
+        let (s, r) = (st(), r.clone());
+        PopupMenuItem::new(match launcher {
+            Some(l) => format!("Delete it in {l}"),
+            None => "Delete…".to_string(),
+        })
+        .icon(IconName::Trash)
+        .disabled(playing || launcher.is_some())
+        .on_click(move |_, window, cx| crate::dialogs::confirm_delete(s.clone(), r.clone(), window, cx))
+    })
 }

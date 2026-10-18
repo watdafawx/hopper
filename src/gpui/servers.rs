@@ -10,6 +10,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::description_list::DescriptionList;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -147,6 +148,43 @@ fn server_list(
             })
             .when(!active, |r| r.hover(|s| s.bg(theme.list_hover).border_color(theme.border)))
             .on_click(move |_, w, cx| pick(root.clone(), w, cx))
+            .context_menu({
+                let (store, root) = (store.clone(), srv.root.clone());
+                let pack = s.paired(srv).map(|i| i.root.clone());
+                move |menu, _, _| {
+                    let go = |compare: bool| {
+                        let (store, root) = (store.clone(), root.clone());
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            store.update(cx, |_, cx| {
+                                cx.emit(crate::store::StoreEvent::ShowServer { root: root.clone(), compare })
+                            })
+                        }
+                    };
+                    let r = root.clone();
+                    menu.item(PopupMenuItem::new("Open").icon(IconName::Server).on_click(go(false)))
+                        .when(pack.is_some(), |m| {
+                            let (store, pack) = (store.clone(), pack.clone().unwrap_or_default());
+                            m.item(
+                                PopupMenuItem::new("Compare with pack")
+                                    .icon(IconName::ArrowLeftRight)
+                                    .on_click(go(true)),
+                            )
+                            .item(PopupMenuItem::new("Open its pack").icon(IconName::Package).on_click(
+                                move |_, _, cx| {
+                                    store.update(cx, |_, cx| {
+                                        cx.emit(crate::store::StoreEvent::ShowInstance(pack.clone()))
+                                    })
+                                },
+                            ))
+                        })
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("Open folder")
+                                .icon(IconName::FolderOpen)
+                                .on_click(move |_, _, _| crate::store::open_path(&r)),
+                        )
+                }
+            })
             .child(
                 h_flex()
                     .gap_2()
