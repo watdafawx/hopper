@@ -43,6 +43,8 @@ mod tasks;
 mod tray;
 mod versions;
 mod video;
+#[cfg(windows)]
+mod video_window;
 mod whats_new;
 mod widgets;
 
@@ -61,6 +63,11 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|a| a == "--fetch") && args.len() > 2 {
         std::process::exit(fetch_window::run(args[2].clone().into(), args[3..].to_vec()));
+    }
+    // The window that plays a description's video: `--video URL`.
+    #[cfg(windows)]
+    if args.get(1).is_some_and(|a| a == "--video") && args.len() > 2 {
+        std::process::exit(video_window::run(&args[2]));
     }
     // A curseforge:// link while Hopper is already open: hand it over.
     if let Some(url) = std::env::args().skip(1).find(|a| hopper::links::is_link(a))
