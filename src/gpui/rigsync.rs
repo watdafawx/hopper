@@ -435,16 +435,38 @@ impl SyncPanel {
                     .when(!in_instance, |r| r.child(widgets::thumb(icon.as_deref(), rems(2.5), cx)))
                     .child(title)
                     .children(controls)
-                    .child(
-                        Button::new("update-server")
+                    .child({
+                        let lead = Button::new("update-server")
                             .primary()
                             .small()
                             .icon(IconName::ServerCog)
                             .label("Update server to match pack")
                             .tooltip("Installs the pack's NeoForge on the server if needed, then syncs mods. The server must be stopped.")
                             .disabled(online || self.running)
-                            .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx))),
-                    )
+                            .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)));
+                        match inst.pack.as_ref().map(|p| p.project_id) {
+                            Some(pid) => {
+                                let (store, root) = (self.store.clone(), inst.root.clone());
+                                widgets::split(
+                                    widgets::split_lead(lead),
+                                    "update-server-notes",
+                                    widgets::Tint::Primary,
+                                    gpui_kit::component::Size::Small,
+                                    "Pack versions and changelogs",
+                                    move |_, window, cx| {
+                                        let upd = store
+                                            .read(cx)
+                                            .instance(&root)
+                                            .and_then(|i| store.read(cx).pack_update(i).cloned());
+                                        crate::versions::open(store.clone(), root.clone(), pid, true, upd, window, cx)
+                                    },
+                                    cx,
+                                )
+                                .into_any_element()
+                            }
+                            None => lead.into_any_element(),
+                        }
+                    })
                     .child(
                         Button::new("rescan")
                             .ghost()
@@ -1013,13 +1035,33 @@ impl SyncPanel {
         let theme = cx.theme().clone();
         let action: AnyElement = match g {
             Group::Add => act("Add", IconName::Plus, RowAct::Push, false).into_any_element(),
-            Group::Update => act(
-                if d.status == DiffStatus::ServerNewer { "Replace" } else { "Update" },
-                IconName::ArrowUp,
-                RowAct::Push,
-                false,
-            )
-            .into_any_element(),
+            Group::Update => {
+                let lead = act(
+                    if d.status == DiffStatus::ServerNewer { "Replace" } else { "Update" },
+                    IconName::ArrowUp,
+                    RowAct::Push,
+                    false,
+                );
+                match pair.as_ref().filter(|_| pid != 0 && d.client.is_some()) {
+                    Some((_, inst)) => {
+                        let (store, root) = (self.store.clone(), inst.root.clone());
+                        widgets::split(
+                            widgets::split_lead(lead),
+                            id("changes"),
+                            widgets::Tint::Outline,
+                            gpui_kit::component::Size::Small,
+                            "What changed",
+                            move |_, window, cx| {
+                                cx.stop_propagation();
+                                crate::versions::open(store.clone(), root.clone(), pid, false, None, window, cx)
+                            },
+                            cx,
+                        )
+                        .into_any_element()
+                    }
+                    None => lead.into_any_element(),
+                }
+            }
             Group::ServerOnly => h_flex()
                 .gap_1()
                 .when(d.status == DiffStatus::OnlyServer, |r| {

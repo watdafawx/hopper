@@ -758,59 +758,56 @@ impl AppView {
             ),
         };
         let ready = matches!(state, Some(SelfUpdate::Ready(_)));
-        // An update on offer: one pill in two halves. The version opens
-        // Hopper's versions; the solid half updates, and Hopper restarts
-        // into it as soon as nothing is running.
+        // An update on offer: a split pill. The solid half updates, and
+        // Hopper restarts into it as soon as nothing is running; the
+        // changelog half opens Hopper's versions on the new release.
         if let Some(SelfUpdate::Available(r)) = &state {
             let (accent, on_accent) = (theme.primary, theme.primary_foreground);
+            let (tail_bg, tail_hover) = (theme.secondary, theme.secondary_hover);
             let tip_go = format!("Download Hopper {} and restart into it", r.version);
+            let tip_notes = format!("What's new in {}", r.version);
             return h_flex()
                 .h(rems(1.375))
                 .rounded_full()
                 .overflow_hidden()
                 .border_1()
-                .border_color(accent.opacity(0.35))
+                .border_color(accent.opacity(0.45))
                 .text_xs()
                 .font_semibold()
-                .child(
-                    h_flex()
-                        .id("version")
-                        .h_full()
-                        .gap_1()
-                        .pl_2()
-                        .pr_1p5()
-                        .rounded_l_full()
-                        .cursor_pointer()
-                        .text_color(accent)
-                        .bg(accent.opacity(0.12))
-                        .hover(move |s| s.bg(accent.opacity(0.2)))
-                        .child(Icon::new(IconName::ArrowUp).xsmall())
-                        .child(r.version.clone())
-                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            crate::hopper_versions::open(this.store.clone(), window, cx)
-                        })),
-                )
                 .child(
                     h_flex()
                         .id("version-update")
                         .h_full()
                         .gap_1()
-                        .pl_1p5()
+                        .pl_2()
                         .pr_2()
-                        .rounded_r_full()
                         .cursor_pointer()
                         .text_color(on_accent)
                         .bg(accent)
                         .hover(move |s| s.bg(accent.opacity(0.85)))
                         .child(Icon::new(IconName::RotateCcw).xsmall())
-                        .child("Update & restart")
+                        .child(format!("Update to {}", r.version))
                         .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip_go.clone()).build(w, cx))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.store.update(cx, |s, cx| {
                                 s.install_self_update();
                                 cx.notify();
                             })
+                        })),
+                )
+                .child(
+                    h_flex()
+                        .id("version")
+                        .h_full()
+                        .px_1p5()
+                        .cursor_pointer()
+                        .text_color(accent)
+                        .bg(tail_bg)
+                        .hover(move |s| s.bg(tail_hover))
+                        .child(Icon::new(IconName::ScrollText).xsmall())
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip_notes.clone()).build(w, cx))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            crate::hopper_versions::open(this.store.clone(), window, cx)
                         })),
                 )
                 .into_any_element();

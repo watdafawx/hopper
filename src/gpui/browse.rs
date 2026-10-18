@@ -1646,9 +1646,45 @@ impl BrowseView {
 
         let action: AnyElement = if let Some(root) = have_pack {
             let (m1, m2) = (m.clone(), root);
+            // A newer pack version: update it here, with its changelog.
+            let pack_update = store
+                .instance(&m2)
+                .and_then(|i| store.pack_update(i))
+                .cloned()
+                .map(|f| {
+                    let (s1, s2, r1, r2, f1, pid) =
+                        (self.store.clone(), self.store.clone(), m2.clone(), m2.clone(), f.clone(), m.id);
+                    widgets::split(
+                        widgets::split_lead(
+                            Button::new(id("pack-update"))
+                                .small()
+                                .primary()
+                                .icon(IconName::Download)
+                                .label("Update")
+                                .tooltip(format!("Update the pack to {}", f.display_name))
+                                .disabled(hold.is_some())
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    crate::pack_update::open(s1.clone(), r1.clone(), f1.clone(), window, cx)
+                                }),
+                        ),
+                        id("pack-changes"),
+                        widgets::Tint::Primary,
+                        gpui_kit::component::Size::Small,
+                        "What changed in the pack",
+                        move |_, window, cx| {
+                            cx.stop_propagation();
+                            crate::versions::open(s2.clone(), r2.clone(), pid, true, Some(f.clone()), window, cx)
+                        },
+                        cx,
+                    )
+                });
             h_flex()
                 .gap_2()
-                .child(Tag::success().outline().small().child("Installed"))
+                .map(|r| match pack_update {
+                    Some(u) => r.child(u),
+                    None => r.child(Tag::success().outline().small().child("Installed")),
+                })
                 .child(
                     Button::new(id("open"))
                         .small()

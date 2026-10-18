@@ -1374,20 +1374,31 @@ impl SettingsPage {
             Some(SelfUpdate::Available(r)) => (
                 widgets::pill(format!("{} is out", r.version), theme.primary, true),
                 None,
-                Some(
-                    Button::new("self-update")
-                        .small()
-                        .primary()
-                        .icon(IconName::Download)
-                        .label(format!("Update to {}", r.version))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.store.update(cx, |s, cx| {
-                                s.install_self_update();
-                                cx.notify();
-                            })
-                        }))
-                        .into_any_element(),
-                ),
+                Some({
+                    let store = self.store.clone();
+                    widgets::split(
+                        widgets::split_lead(
+                            Button::new("self-update")
+                                .small()
+                                .primary()
+                                .icon(IconName::Download)
+                                .label(format!("Update to {}", r.version))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.store.update(cx, |s, cx| {
+                                        s.install_self_update();
+                                        cx.notify();
+                                    })
+                                })),
+                        ),
+                        "self-update-notes",
+                        widgets::Tint::Primary,
+                        gpui_kit::component::Size::Small,
+                        format!("What's new in {}", r.version),
+                        move |_, window, cx| crate::hopper_versions::open(store.clone(), window, cx),
+                        cx,
+                    )
+                    .into_any_element()
+                }),
             ),
             Some(SelfUpdate::Installing(v)) => (widgets::pill(format!("Installing {v}…"), theme.info, true), None, None),
             Some(SelfUpdate::Ready(v)) => (
