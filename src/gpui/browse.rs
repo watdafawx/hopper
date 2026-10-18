@@ -464,6 +464,28 @@ impl BrowseView {
         .detach();
     }
 
+    /// Shows only `category` of `class`, with no search: a click on a
+    /// project's category.
+    fn filter_category(&mut self, class: u32, category: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.class = class;
+        self.category = Some(category);
+        self.text.clear();
+        self.search.update(cx, |s, cx| s.set_value("", window, cx));
+        self.refilter(cx);
+    }
+
+    /// Category links for `m`'s stats; none in a panel beside the Library,
+    /// which has no filters.
+    fn on_category(&self, m: &cf::Mod, cx: &Context<Self>) -> Option<OnCategory> {
+        if self.peek {
+            return None;
+        }
+        let (view, class) = (cx.entity(), m.class_id.unwrap_or(self.class));
+        Some(Rc::new(move |id, window, cx| {
+            view.update(cx, |this, cx| this.filter_category(class, id, window, cx))
+        }))
+    }
+
     /// The project whose panel is open.
     pub fn selected_id(&self) -> Option<u64> {
         self.selected.as_ref().map(|m| m.id)
@@ -1881,7 +1903,7 @@ impl BrowseView {
                             }),
                     )
                     .child(div().text_sm().truncate().child(m.summary.clone()))
-                    .child(stats(m, false, cx).pt_0p5()),
+                    .child(stats(m, false, self.on_category(m, cx), cx).pt_0p5()),
             )
             .child(
                 h_flex()
@@ -2192,7 +2214,7 @@ impl BrowseView {
                     .gap_1()
                     .child(div().text_xl().font_semibold().child(m.name.clone()))
                     .child(self.author_link(m, "detail-author".into(), cx))
-                    .child(stats(m, true, cx).flex_wrap().pt_0p5())
+                    .child(stats(m, true, self.on_category(m, cx), cx).flex_wrap().pt_0p5())
                     .children(facts(m, target, cx))
                     .child(
                         h_flex()
@@ -2874,12 +2896,39 @@ fn stat(icon: IconName, text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// What a click on a category does: filters Browse by it.
+type OnCategory = Rc<dyn Fn(u64, &mut Window, &mut App)>;
+
 /// Downloads, last update and categories; `full` adds when it came out
-/// and words for each.
-fn stats(m: &cf::Mod, full: bool, cx: &App) -> Div {
+/// and words for each. With `on_cat`, each category is a link.
+fn stats(m: &cf::Mod, full: bool, on_cat: Option<OnCategory>, cx: &App) -> Div {
     let updated = hopper::time::relative(&m.date_modified);
     let created = hopper::time::relative(&m.date_created);
-    let cats: Vec<&str> = m.categories.iter().take(3).map(|c| c.name.as_str()).collect();
+    let cats: Vec<(u64, &str)> = m.categories.iter().take(3).map(|c| (c.id, c.name.as_str())).collect();
+    let (muted, fg) = (cx.theme().muted_foreground, cx.theme().foreground);
+    let n = cats.len();
+    let names = cats.into_iter().enumerate().map(|(i, (id, name))| {
+        let text = if i + 1 < n { format!("{name},") } else { name.to_string() };
+        match &on_cat {
+            Some(f) => {
+                let f = f.clone();
+                div()
+                    .id(ElementId::Name(format!("cat:{}:{id}", m.id).into()))
+                    .flex_none()
+                    .cursor_pointer()
+                    .hover(move |s| s.text_color(fg).underline())
+                    .child(text)
+                    .on_click(move |_, window, cx| {
+                        // Not a click on the card: it doesn't open.
+                        cx.stop_propagation();
+                        f(id, window, cx)
+                    })
+                    .into_any_element()
+            }
+            None => div().flex_none().child(text).into_any_element(),
+        }
+    });
+    let cats: Vec<AnyElement> = names.collect();
     let tip = |label: &str, v: String| if full { format!("{label} {v}") } else { v };
     h_flex()
         .gap_3()
@@ -2905,9 +2954,10 @@ fn stats(m: &cf::Mod, full: bool, cx: &App) -> Div {
                 h_flex()
                     .gap_1()
                     .min_w_0()
-                    .text_color(cx.theme().muted_foreground)
+                    .overflow_hidden()
+                    .text_color(muted)
                     .child(Icon::new(IconName::Tag).xsmall().flex_none())
-                    .child(div().truncate().child(cats.join(", "))),
+                    .children(cats),
             )
         })
 }
