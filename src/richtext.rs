@@ -241,13 +241,8 @@ impl Parser {
                 if self.in_row() {
                     self.text(" ");
                 } else {
+                    // CurseForge spoilers (`<div class="spoiler">`) show their body inline.
                     self.start(Kind::Para);
-                    if name == "div" && attr(body, "class").is_some_and(|c| c.contains("spoiler")) {
-                        self.bold += 1;
-                        self.text("Spoiler");
-                        self.bold -= 1;
-                        self.start(Kind::Para);
-                    }
                 }
             }
             ("p" | "div" | "blockquote" | "center", true) => {
