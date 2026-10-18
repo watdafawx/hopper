@@ -52,12 +52,14 @@ pub fn file(project: u64, file: u64) -> anyhow::Result<cf::File> {
     )?)?))
 }
 
-/// A file's changelog, parsed. Modrinth's comes with the version.
+/// A file's changelog, parsed. Modrinth's comes with the version. One
+/// that's only a GitHub link shows what it links to.
 pub fn changelog(f: &cf::File) -> anyhow::Result<Vec<Block>> {
-    match &f.modrinth {
-        Some(m) => Ok(richtext::parse_markdown(&m.changelog)),
-        None => Ok(richtext::parse(&cf::changelog(f.mod_id, f.id)?)),
-    }
+    let blocks = match &f.modrinth {
+        Some(m) => richtext::parse_markdown(&m.changelog),
+        None => richtext::parse(&cf::changelog(f.mod_id, f.id)?),
+    };
+    Ok(crate::extlog::expand(blocks, f))
 }
 
 /// A project's description, parsed.

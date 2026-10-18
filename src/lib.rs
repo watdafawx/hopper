@@ -15,6 +15,7 @@ pub mod crashscan;
 pub mod deps;
 pub mod diff;
 pub mod env;
+pub mod extlog;
 pub mod folderrules;
 pub mod fuzzy;
 pub mod game;

@@ -435,6 +435,7 @@ impl AppView {
         // Dialogs need the window's root, which exists after this view.
         if let Some(d) = value("--dialog") {
             let want = value("--instance").unwrap_or_default().to_lowercase();
+            let m = value("--mod").unwrap_or_default().to_lowercase();
             cx.defer_in(window, move |this, window, cx| match d.as_str() {
                 "new" => crate::dialogs::open_create(this.store.clone(), window, cx),
                 // After the server comparison has had time to finish.
@@ -459,6 +460,21 @@ impl AppView {
                     });
                     if let Some((root, pid, upd)) = pick {
                         crate::versions::open(this.store.clone(), root, pid, true, upd, window, cx);
+                    }
+                }
+                // `--dialog mod-versions --instance "TNP" --mod "excessive"`.
+                "mod-versions" => {
+                    let s = this.store.read(cx);
+                    let pick = s
+                        .instances()
+                        .iter()
+                        .find(|i| i.name.to_lowercase().contains(&want))
+                        .and_then(|i| {
+                            let a = i.addons.iter().find(|a| a.name.to_lowercase().contains(&m))?;
+                            Some((i.root.clone(), a.project_id))
+                        });
+                    if let Some((root, pid)) = pick {
+                        crate::versions::open(this.store.clone(), root, pid, false, None, window, cx);
                     }
                 }
                 "export" => {

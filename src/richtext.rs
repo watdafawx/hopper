@@ -921,6 +921,45 @@ pub fn to_segments(blocks: &[Block]) -> Vec<Segment> {
     out
 }
 
+/// `text` split into runs of plain text and bare `http(s)://` URLs (true).
+/// A URL ends at whitespace; trailing punctuation, and a `)` it didn't open,
+/// stay text.
+pub fn bare_urls(text: &str) -> Vec<(&str, bool)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("http://").into_iter().chain(rest.find("https://")).min() {
+        let tail = &rest[start..];
+        let mut end = tail.find(|c: char| c.is_whitespace() || c == '<' || c == '"').unwrap_or(tail.len());
+        loop {
+            let u = &tail[..end];
+            let trim = match u.chars().last() {
+                Some('.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*') => true,
+                Some(')') => u.matches('(').count() < u.matches(')').count(),
+                _ => false,
+            };
+            if !trim {
+                break;
+            }
+            end -= 1;
+        }
+        let scheme = if tail.starts_with("https://") { 8 } else { 7 };
+        if end <= scheme {
+            out.push((&rest[..start + scheme], false));
+            rest = &rest[start + scheme..];
+            continue;
+        }
+        if start > 0 {
+            out.push((&rest[..start], false));
+        }
+        out.push((&tail[..end], true));
+        rest = &tail[end..];
+    }
+    if !rest.is_empty() {
+        out.push((rest, false));
+    }
+    out
+}
+
 /// Blocks as Markdown, for UIs that render Markdown themselves. An image
 /// without a link of its own links to itself, so a click can open it.
 pub fn to_markdown(blocks: &[Block]) -> String {
@@ -953,6 +992,16 @@ pub fn to_markdown(blocks: &[Block]) -> String {
         let (core, trail) = rest.split_at(rest.trim_end().len());
         let mut t = if s.code {
             format!("`{}`", core.replace('`', "'"))
+        } else if s.link.is_none() {
+            // A bare URL becomes a link of its own; escaped, its `#` or `_`
+            // would end up in the address.
+            bare_urls(core)
+                .into_iter()
+                .map(|(part, is_url)| match is_url {
+                    true => format!("[{}]({})", escape(part), url(part)),
+                    false => escape(part),
+                })
+                .collect()
         } else {
             escape(core)
         };
@@ -979,6 +1028,9 @@ pub fn to_markdown(blocks: &[Block]) -> String {
         match &b.kind {
             Kind::Rule => out.push_str("---\n\n"),
             Kind::Heading(level) => {
+                if out.ends_with('\n') && !out.ends_with("\n\n") {
+                    out.push('\n');
+                }
                 out.push_str(&"#".repeat((*level).clamp(1, 6) as usize));
                 out.push(' ');
                 out.push_str(&line(&b.spans));
@@ -1244,5 +1296,19 @@ let x = 1;
         assert_eq!(abs_url("#top"), None);
         assert_eq!(abs_url("javascript:void(0)"), None);
         assert_eq!(font_px("color:#fff; font-size: 14pt"), Some(18));
+    }
+
+    #[test]
+    fn bare_urls_become_links() {
+        let md = to_markdown(&parse("<p>https://github.com/a/b/blob/master/CHANGELOG.md#1110</p>"));
+        assert_eq!(
+            md,
+            r"[https://github.com/a/b/blob/master/CHANGELOG.md\#1110](<https://github.com/a/b/blob/master/CHANGELOG.md#1110>)"
+        );
+        assert_eq!(
+            bare_urls("see (https://x.io/a_(b)), ok."),
+            [("see (", false), ("https://x.io/a_(b)", true), ("), ok.", false)]
+        );
+        assert_eq!(bare_urls("just https:// text"), [("just https://", false), (" text", false)]);
     }
 }
