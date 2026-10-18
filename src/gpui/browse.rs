@@ -6,7 +6,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
@@ -462,6 +462,33 @@ impl BrowseView {
             .ok();
         })
         .detach();
+    }
+
+    /// The project whose panel is open.
+    pub fn selected_id(&self) -> Option<u64> {
+        self.selected.as_ref().map(|m| m.id)
+    }
+
+    /// Where Browse is, for back and forward: the type shown and the
+    /// project open.
+    pub(crate) fn nav_loc(&self) -> (u32, Option<&cf::Mod>) {
+        (self.class, self.selected.as_ref())
+    }
+
+    /// Goes back (or forward) to a place `nav_loc` gave.
+    pub(crate) fn nav_restore(&mut self, class: u32, project: Option<cf::Mod>, cx: &mut Context<Self>) {
+        if class != self.class {
+            self.browse_class(class, cx);
+        }
+        match project {
+            Some(m) if self.selected_id() != Some(m.id) => self.open_detail(m, cx),
+            Some(_) => {}
+            None => {
+                self.selected = None;
+                self.author = None;
+            }
+        }
+        cx.notify();
     }
 
     /// Whether the project panel is open.
@@ -1864,6 +1891,38 @@ impl BrowseView {
                     .child(action)
                     .child(self.bookmark_button(m, id("bookmark"), cx)),
             )
+            .context_menu({
+                let (view, m) = (cx.entity(), m.clone());
+                let saved = hopper::bookmarks::with(|b| b.has(&m));
+                let site = if m.modrinth.is_some() { "Modrinth" } else { "CurseForge" };
+                move |menu, _, _| {
+                    let (v1, v2, m1, m2) = (view.clone(), view.clone(), m.clone(), m.clone());
+                    let (url1, url2) = (m.page(), m.page());
+                    menu.item(
+                        PopupMenuItem::new("Open").icon(IconName::PanelRight).on_click(move |_, _, cx| {
+                            v1.update(cx, |this, cx| this.open_detail(m1.clone(), cx))
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new(if saved { "Remove bookmark" } else { "Bookmark" })
+                            .icon(if saved { IconName::BookmarkCheck } else { IconName::Bookmark })
+                            .on_click(move |_, window, cx| {
+                                v2.update(cx, |this, cx| this.toggle_bookmark(&m2, window, cx))
+                            }),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(format!("Open on {site}"))
+                            .icon(IconName::ExternalLink)
+                            .on_click(move |_, _, cx| cx.open_url(&url1)),
+                    )
+                    .item(
+                        PopupMenuItem::new("Copy link").icon(IconName::Copy).on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(url2.clone()))
+                        }),
+                    )
+                }
+            })
             .into_any_element()
     }
 

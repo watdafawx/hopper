@@ -85,13 +85,20 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
             move_to(at(x, y), window, cx);
             done()
         }
-        Command::Click { x, y, double } => {
+        Command::Click { x, y, double, button } => {
+            let button = match button.as_str() {
+                "right" => MouseButton::Right,
+                "middle" => MouseButton::Middle,
+                "back" => MouseButton::Navigate(NavigationDirection::Back),
+                "forward" => MouseButton::Navigate(NavigationDirection::Forward),
+                _ => MouseButton::Left,
+            };
             let position = at(x, y);
             move_to(position, window, cx);
             for click_count in 1..=if double { 2 } else { 1 } {
                 window.dispatch_event(
                     PlatformInput::MouseDown(MouseDownEvent {
-                        button: MouseButton::Left,
+                        button,
                         position,
                         click_count,
                         ..Default::default()
@@ -100,7 +107,7 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
                 );
                 window.dispatch_event(
                     PlatformInput::MouseUp(MouseUpEvent {
-                        button: MouseButton::Left,
+                        button,
                         position,
                         click_count,
                         ..Default::default()

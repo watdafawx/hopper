@@ -515,6 +515,11 @@ impl SettingsPage {
         }
     }
 
+    /// The category shown, for back and forward.
+    pub(crate) fn category(&self) -> Category {
+        self.category
+    }
+
     /// Shows a category (from the palette, Ctrl+, or another page).
     pub fn show(&mut self, category: Category, cx: &mut Context<Self>) {
         if self.category != category {

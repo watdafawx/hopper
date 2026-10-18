@@ -21,7 +21,7 @@ use hopper::panel::PanelStats;
 use hopper::server::{Manager, ServerInfo, Status};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// A small round status light: the panel's state when there is one, else
@@ -317,6 +317,22 @@ impl ServersView {
         {
             self.pick(r, cx);
         }
+    }
+
+    /// Where the Servers page is, for back and forward.
+    pub(crate) fn nav_loc(&self) -> (Option<PathBuf>, usize) {
+        (self.picked.clone(), self.tab)
+    }
+
+    /// Goes back (or forward) to a place `nav_loc` gave.
+    pub(crate) fn nav_restore(&mut self, root: Option<PathBuf>, tab: usize, cx: &mut Context<Self>) {
+        if let Some(r) = root
+            && self.picked.as_ref() != Some(&r)
+        {
+            self.pick(r, cx);
+        }
+        self.tab = tab;
+        cx.notify();
     }
 
     pub(crate) fn pick(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -798,6 +814,11 @@ impl SyncPage {
     pub fn compare(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.panel.update(cx, |p, cx| p.show(root, cx));
         cx.notify();
+    }
+
+    /// The server compared, for back and forward.
+    pub(crate) fn nav_loc(&self, cx: &App) -> Option<PathBuf> {
+        self.panel.read(cx).server().map(Path::to_path_buf)
     }
 }
 

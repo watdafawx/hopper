@@ -37,7 +37,7 @@ const HERO: f32 = 13.0;
 const HERO_TALL: f32 = 17.5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum InstTab {
+pub(crate) enum InstTab {
     Overview,
     Mods,
     ResourcePacks,
@@ -429,10 +429,46 @@ impl LibraryView {
         let peek = self.addons.read(cx).peek().clone();
         peek.update(cx, |p, cx| {
             // Not a toggle: the same project stays open.
-            p.peek_project(root.clone(), None, cx);
-            p.peek_project(root, Some(project), cx);
+            if p.selected_id() != Some(project) {
+                p.peek_project(root, Some(project), cx);
+            }
         });
         cx.notify();
+    }
+
+    /// Where the Library is, for back and forward: the instance, its tab
+    /// and the project open beside it.
+    pub(crate) fn nav_loc(&self, cx: &App) -> (Option<PathBuf>, InstTab, Option<u64>) {
+        let peek = self.addons.read(cx).peek().read(cx).selected_id();
+        (self.selected.clone(), self.tab, peek)
+    }
+
+    /// The project panel beside the instance, watched for back and forward.
+    pub(crate) fn peek_view(&self, cx: &App) -> Entity<crate::browse::BrowseView> {
+        self.addons.read(cx).peek().clone()
+    }
+
+    /// Goes back (or forward) to a place `nav_loc` gave.
+    pub(crate) fn nav_restore(
+        &mut self,
+        inst: Option<PathBuf>,
+        tab: InstTab,
+        peek: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(r) = inst
+            && self.selected.as_ref() != Some(&r)
+        {
+            self.select(r, cx);
+        }
+        self.set_tab(tab, cx);
+        let Some(root) = self.selected.clone() else { return };
+        let view = self.addons.read(cx).peek().clone();
+        view.update(cx, |p, cx| {
+            if p.selected_id() != peek {
+                p.peek_project(root, peek, cx);
+            }
+        });
     }
 
     fn set_tab(&mut self, tab: InstTab, cx: &mut Context<Self>) {
@@ -1064,6 +1100,8 @@ impl LibraryView {
             .cloned();
         let name_for_menu = inst.name.clone();
         let menu_view = cx.entity();
+        // Another launcher's instance: deleting it here would break it there.
+        let launcher = hopper::launchers::Kind::from_key(&inst.source).map(|k| k.name());
         h_flex()
             .id(id("row", root))
             .group(group)
@@ -1189,6 +1227,30 @@ impl LibraryView {
                         }),
                 )
                 .separator()
+                .item(PopupMenuItem::new("Settings").icon(IconName::SlidersHorizontal).on_click({
+                    let (v, r) = (vb.clone(), rb.clone());
+                    move |_, _, cx| {
+                        v.update(cx, |this, cx| {
+                            this.select(r.clone(), cx);
+                            this.set_tab(InstTab::Settings, cx);
+                        })
+                    }
+                }))
+                .item(PopupMenuItem::new("Export…").icon(IconName::Upload).on_click({
+                    let (v, r) = (vb.clone(), rb.clone());
+                    move |_, window, cx| {
+                        let store = v.read(cx).store.clone();
+                        crate::dialogs::open_export(store, r.clone(), window, cx)
+                    }
+                }))
+                .item(PopupMenuItem::new("Backups…").icon(IconName::Archive).on_click({
+                    let (v, r) = (vb.clone(), rb.clone());
+                    move |_, window, cx| {
+                        let store = v.read(cx).store.clone();
+                        crate::backups_view::open(store, r.clone(), window, cx)
+                    }
+                }))
+                .separator()
                 .label("Group")
                 .map(|m| {
                     groups.iter().cloned().fold(m, |m, g| {
@@ -1219,7 +1281,7 @@ impl LibraryView {
                 })
                 .separator()
                 .item(
-                    PopupMenuItem::new("Duplicate")
+                    PopupMenuItem::new(if launcher.is_some() { "Copy into Hopper" } else { "Duplicate" })
                         .icon(IconName::Copy)
                         .on_click(move |_, _, cx| {
                             v3.update(cx, |this, cx| this.duplicate(&r3, cx))
@@ -1227,9 +1289,12 @@ impl LibraryView {
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new("Delete…")
+                    PopupMenuItem::new(match launcher {
+                        Some(l) => format!("Delete it in {l}"),
+                        None => "Delete…".to_string(),
+                    })
                         .icon(IconName::Trash)
-                        .disabled(playing)
+                        .disabled(playing || launcher.is_some())
                         .on_click(move |_, window, cx| {
                             let store = v4.read(cx).store.clone();
                             crate::dialogs::confirm_delete(store, r4.clone(), window, cx)

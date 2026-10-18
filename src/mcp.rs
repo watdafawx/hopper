@@ -22,6 +22,8 @@ pub enum Command {
         x: f32,
         y: f32,
         double: bool,
+        /// "left" (the default), "right", "middle", "back" or "forward".
+        button: String,
     },
     /// Move the pointer there (hover cards, tooltips).
     Hover {
@@ -78,9 +80,10 @@ fn tools() -> Value {
         },
         {
             "name": "click",
-            "description": "Left-click at screenshot pixel coordinates.",
+            "description": "Click at screenshot pixel coordinates; button is left (default), right, middle, back or forward.",
             "inputSchema": { "type": "object", "required": ["x", "y"], "properties": {
-                "x": { "type": "number" }, "y": { "type": "number" }, "double": { "type": "boolean" }
+                "x": { "type": "number" }, "y": { "type": "number" }, "double": { "type": "boolean" },
+                "button": { "type": "string" }
             } }
         },
         {
@@ -133,6 +136,7 @@ fn command_for(name: &str, args: &Value) -> Result<Command, String> {
             x: num("x")?,
             y: num("y")?,
             double: args["double"].as_bool().unwrap_or(false),
+            button: args["button"].as_str().unwrap_or("left").to_string(),
         },
         "drag" => Command::Drag {
             from: (num("x0")?, num("y0")?),

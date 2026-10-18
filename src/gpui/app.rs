@@ -31,7 +31,10 @@ gpui_kit::actions!(
         PrevInstance,
         NextInstance,
         CommandPalette,
-        OpenSettings
+        OpenSettings,
+        GoBack,
+        GoForward,
+        ClosePanel
     ]
 );
 
@@ -73,6 +76,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-k", CommandPalette, None),
         KeyBinding::new("ctrl-p", CommandPalette, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
+        KeyBinding::new("alt-left", GoBack, None),
+        KeyBinding::new("alt-right", GoForward, None),
+        // Inputs, dialogs and the palette take Esc first.
+        KeyBinding::new("escape", ClosePanel, None),
     ]);
 }
 
@@ -129,6 +136,8 @@ pub struct AppView {
     told_crashes: std::collections::HashSet<std::path::PathBuf>,
     /// The Ctrl+K command palette, while open.
     pub(crate) palette: Option<crate::palette::Open>,
+    /// Back and forward.
+    history: crate::nav::History,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -141,7 +150,15 @@ impl AppView {
         let sync = cx.new(|cx| SyncPage::new(store.clone(), window, cx));
         let settings = cx.new(|cx| SettingsPage::new(store.clone(), window, cx));
         let tasks = cx.new(|cx| crate::tasks::TasksButton::new(store.clone(), cx));
+        let peek = library.read(cx).peek_view(cx);
         let subs = vec![
+            // Each page notifies when it moves: back and forward note it.
+            cx.observe(&library, |this, _, cx| this.track(cx)),
+            cx.observe(&peek, |this, _, cx| this.track(cx)),
+            cx.observe(&browse, |this, _, cx| this.track(cx)),
+            cx.observe(&servers, |this, _, cx| this.track(cx)),
+            cx.observe(&sync, |this, _, cx| this.track(cx)),
+            cx.observe(&settings, |this, _, cx| this.track(cx)),
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.observe(&tasks, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, |this, _, event, window, cx| match event {
@@ -291,6 +308,7 @@ impl AppView {
             told_jobs: Default::default(),
             told_crashes: Default::default(),
             palette: None,
+            history: Default::default(),
             _auto_restart: None,
             _subscriptions: subs,
         };
@@ -591,6 +609,83 @@ impl AppView {
             let fallback = self.library.read(cx).drop_target(cx).0;
             self.browse.update(cx, |b, cx| b.shown(fallback, cx));
         }
+        self.track(cx);
+        cx.notify();
+    }
+
+    /// Notes where the app is, for back and forward.
+    fn track(&mut self, cx: &mut Context<Self>) {
+        use crate::nav::Loc;
+        let loc = match self.page {
+            Page::Library => {
+                let (i, t, p) = self.library.read(cx).nav_loc(cx);
+                Loc::Library(i, t, p)
+            }
+            Page::Browse => {
+                let (class, m) = self.browse.read(cx).nav_loc();
+                if let Some(m) = m {
+                    self.history.remember(m);
+                }
+                Loc::Browse(class, m.map(|m| m.id))
+            }
+            Page::Servers => {
+                let (r, t) = self.servers.read(cx).nav_loc();
+                Loc::Servers(r, t)
+            }
+            Page::Sync => Loc::Sync(self.sync.read(cx).nav_loc(cx)),
+            Page::Settings => Loc::Settings(self.settings.read(cx).category()),
+        };
+        self.history.saw(loc);
+    }
+
+    /// Esc: closes the project panel open beside a list.
+    fn close_panel(&mut self, cx: &mut Context<Self>) {
+        match self.page {
+            Page::Library => {
+                let (i, t, p) = self.library.read(cx).nav_loc(cx);
+                if p.is_some() {
+                    self.library.update(cx, |l, cx| l.nav_restore(i, t, None, cx));
+                    return;
+                }
+            }
+            Page::Browse if self.browse.read(cx).is_open() => {
+                let class = self.browse.read(cx).nav_loc().0;
+                self.browse.update(cx, |b, cx| b.nav_restore(class, None, cx));
+                return;
+            }
+            _ => {}
+        }
+        cx.propagate();
+    }
+
+    /// One step back (or forward) through the places visited.
+    fn step(&mut self, back: bool, cx: &mut Context<Self>) {
+        use crate::nav::Loc;
+        let Some(loc) = self.history.step(back) else { return };
+        if self.page != loc.page() {
+            if self.page == Page::Browse {
+                self.browse.update(cx, |b, _| b.hidden());
+            }
+            self.page = loc.page();
+            if self.page == Page::Browse {
+                let fallback = self.library.read(cx).drop_target(cx).0;
+                self.browse.update(cx, |b, cx| b.shown(fallback, cx));
+            }
+        }
+        match loc {
+            Loc::Library(i, t, p) => self.library.update(cx, |l, cx| l.nav_restore(i, t, p, cx)),
+            Loc::Browse(class, id) => {
+                let m = id.and_then(|id| self.history.project(id));
+                if id.is_none() || m.is_some() {
+                    self.browse.update(cx, |b, cx| b.nav_restore(class, m, cx));
+                }
+            }
+            Loc::Servers(r, t) => self.servers.update(cx, |s, cx| s.nav_restore(r, t, cx)),
+            Loc::Sync(Some(r)) => self.sync.update(cx, |s, cx| s.compare(r, cx)),
+            Loc::Sync(None) => {}
+            Loc::Settings(c) => self.settings.update(cx, |s, cx| s.show(c, cx)),
+        }
+        self.track(cx);
         cx.notify();
     }
 
@@ -1048,6 +1143,18 @@ impl Render for AppView {
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(|this, _: &GoLibrary, _, cx| this.go(Page::Library, cx)))
+            .on_action(cx.listener(|this, _: &GoBack, _, cx| this.step(true, cx)))
+            .on_action(cx.listener(|this, _: &ClosePanel, _, cx| this.close_panel(cx)))
+            .on_action(cx.listener(|this, _: &GoForward, _, cx| this.step(false, cx)))
+            // The mouse's back and forward buttons.
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, _, cx| this.step(true, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _, _, cx| this.step(false, cx)),
+            )
             .on_action(cx.listener(|this, _: &GoBrowse, window, cx| {
                 this.nav(Page::Browse, window, cx)
             }))
