@@ -739,7 +739,7 @@ impl AppView {
                 format!("Hopper {} is out: see what's new and update", r.version),
             ),
             Some(SelfUpdate::Installing(v)) => (
-                format!("Installing {v}…"),
+                format!("Downloading {v}…"),
                 Some(theme.info),
                 Some(IconName::Download),
                 "Downloading the new Hopper".into(),
@@ -758,6 +758,63 @@ impl AppView {
             ),
         };
         let ready = matches!(state, Some(SelfUpdate::Ready(_)));
+        // An update on offer: one pill in two halves. The version opens
+        // Hopper's versions; the solid half updates, and Hopper restarts
+        // into it as soon as nothing is running.
+        if let Some(SelfUpdate::Available(r)) = &state {
+            let (accent, on_accent) = (theme.primary, theme.primary_foreground);
+            let tip_go = format!("Download Hopper {} and restart into it", r.version);
+            return h_flex()
+                .h(rems(1.375))
+                .rounded_full()
+                .overflow_hidden()
+                .border_1()
+                .border_color(accent.opacity(0.35))
+                .text_xs()
+                .font_semibold()
+                .child(
+                    h_flex()
+                        .id("version")
+                        .h_full()
+                        .gap_1()
+                        .pl_2()
+                        .pr_1p5()
+                        .rounded_l_full()
+                        .cursor_pointer()
+                        .text_color(accent)
+                        .bg(accent.opacity(0.12))
+                        .hover(move |s| s.bg(accent.opacity(0.2)))
+                        .child(Icon::new(IconName::ArrowUp).xsmall())
+                        .child(r.version.clone())
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            crate::hopper_versions::open(this.store.clone(), window, cx)
+                        })),
+                )
+                .child(
+                    h_flex()
+                        .id("version-update")
+                        .h_full()
+                        .gap_1()
+                        .pl_1p5()
+                        .pr_2()
+                        .rounded_r_full()
+                        .cursor_pointer()
+                        .text_color(on_accent)
+                        .bg(accent)
+                        .hover(move |s| s.bg(accent.opacity(0.85)))
+                        .child(Icon::new(IconName::RotateCcw).xsmall())
+                        .child("Update & restart")
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip_go.clone()).build(w, cx))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.store.update(cx, |s, cx| {
+                                s.install_self_update();
+                                cx.notify();
+                            })
+                        })),
+                )
+                .into_any_element();
+        }
         h_flex()
             .id("version")
             .gap_1()
