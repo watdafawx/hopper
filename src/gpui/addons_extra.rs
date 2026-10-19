@@ -31,9 +31,13 @@ pub struct GlobalPacks {
     pub dirs: Vec<(&'static str, &'static str)>,
     /// `None` shows the instance's own packs.
     pub picked: Option<&'static str>,
-    pub packs: Vec<PackFile>,
+    /// Each folder's packs, read in the background (a big Paxi folder
+    /// takes a few hundred ms of zip reading), so switching tabs is instant.
+    pub packs: std::collections::HashMap<&'static str, Vec<PackFile>>,
     /// How many packs each of `dirs` holds.
     pub counts: Vec<usize>,
+    /// The instance `packs` was read for.
+    pub root: Option<PathBuf>,
 }
 
 /// Hopper's own working files in an instance folder (backups, staging,
@@ -71,7 +75,7 @@ pub struct MissingDeps {
 
 impl AddonsView {
     /// Reads which global pack folders an instance has.
-    pub(crate) fn load_globals(&mut self, inst: &Instance) {
+    pub(crate) fn load_globals(&mut self, inst: &Instance, cx: &mut Context<Self>) {
         let dirs = hopper::instance_ops::global_resourcepack_dirs(inst);
         let picked = self
             .globals
@@ -81,15 +85,55 @@ impl AddonsView {
             .iter()
             .map(|(d, _)| datapacks(&inst.root.join(d)).len())
             .collect();
-        self.globals = GlobalPacks {
-            dirs,
-            picked,
-            packs: Vec::new(),
-            counts,
+        // Same instance: the old lists stay up until the new ones are read.
+        let packs = if self.globals.root.as_ref() == Some(&inst.root) {
+            std::mem::take(&mut self.globals.packs)
+        } else {
+            Default::default()
         };
-        if let Some(p) = picked {
-            self.globals.packs = pack_files(&inst.root.join(p));
+        self.globals = GlobalPacks {
+            dirs: dirs.clone(),
+            picked,
+            packs,
+            counts,
+            root: Some(inst.root.clone()),
+        };
+        if dirs.is_empty() || self.class != cf::CLASS_RESOURCE_PACKS {
+            return;
         }
+        let root = inst.root.clone();
+        cx.spawn(async move |this, cx| {
+            let r2 = root.clone();
+            let read = cx
+                .background_spawn(async move {
+                    dirs.iter()
+                        .map(|(d, _)| (*d, pack_files(&r2.join(d))))
+                        .collect::<std::collections::HashMap<_, _>>()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.globals.root.as_ref() != Some(&root) {
+                    return;
+                }
+                for (i, (d, _)) in this.globals.dirs.iter().enumerate() {
+                    if let (Some(v), Some(n)) = (read.get(d), this.globals.counts.get_mut(i)) {
+                        *n = v.len();
+                    }
+                }
+                this.globals.packs = read;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The packs of the global folder shown.
+    fn picked_packs(&self) -> &[PackFile] {
+        self.globals
+            .picked
+            .and_then(|p| self.globals.packs.get(p))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Looks for missing required mods when the mods folder changed.
@@ -132,7 +176,7 @@ impl AddonsView {
     }
 
     /// "This instance | Paxi (12) | …" above Resource packs.
-    pub(crate) fn pack_tabs(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn pack_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.class != cf::CLASS_RESOURCE_PACKS || self.globals.dirs.is_empty() {
             return None;
         }
@@ -142,7 +186,6 @@ impl AddonsView {
             .and_then(|p| self.globals.dirs.iter().position(|(d, _)| *d == p))
             .map_or(0, |i| i + 1);
         let dirs = self.globals.dirs.clone();
-        let root = inst.root.clone();
         Some(
             h_flex()
                 .px_6()
@@ -158,9 +201,6 @@ impl AddonsView {
                         .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                             let picked = ix.checked_sub(1).and_then(|i| dirs.get(i)).map(|(d, _)| *d);
                             this.globals.picked = picked;
-                            this.globals.packs = picked
-                                .map(|p| pack_files(&root.join(p)))
-                                .unwrap_or_default();
                             cx.notify();
                         })),
                 )
@@ -176,10 +216,12 @@ impl AddonsView {
         let rel = self.globals.picked?;
         let dir = inst.root.join(rel);
         let theme = cx.theme();
-        let n = self.globals.packs.len();
+        let packs = self.picked_packs();
+        let loading = !self.globals.packs.contains_key(rel);
+        let n = packs.len();
         let d2 = dir.clone();
         let root = inst.root.clone();
-        let rows = self.globals.packs.iter().map(|p| {
+        let rows = packs.iter().map(|p| {
             let (p1, p2, root) = (p.path.clone(), p.path.clone(), root.clone());
             let icon = p.icon.clone();
             h_flex()
@@ -238,12 +280,15 @@ impl AddonsView {
                             if let Err(e) = hopper::sync::backup_into(&root, &p2) {
                                 window.push_notification(Notification::error(format!("{e:#}")), cx);
                             }
-                            if let Some(rel) = this.globals.picked {
-                                this.globals.packs = pack_files(&root.join(rel));
+                            if let Some(rel) = this.globals.picked
+                                && let Some(v) = this.globals.packs.get_mut(rel)
+                            {
+                                v.retain(|p| p.path.exists());
+                                let len = v.len();
                                 if let Some(i) = this.globals.dirs.iter().position(|(d, _)| *d == rel)
                                     && let Some(n) = this.globals.counts.get_mut(i)
                                 {
-                                    *n = this.globals.packs.len();
+                                    *n = len;
                                 }
                             }
                             cx.notify();
@@ -260,7 +305,11 @@ impl AddonsView {
                         .px_6()
                         .gap_2()
                         .child(widgets::caption(
-                            format!("{n} packs in {rel}: the mod loads them for every world, always on, in its load order."),
+                            if loading {
+                                format!("Reading the packs in {rel}…")
+                            } else {
+                                format!("{n} packs in {rel}: the mod loads them for every world, always on, in its load order.")
+                            },
                             cx,
                         ))
                         .child(div().flex_1())

@@ -473,7 +473,7 @@ impl AddonsView {
         let started = std::time::Instant::now();
         let class = self.class;
         let updates = self.updates(&inst, cx);
-        self.load_globals(&inst);
+        self.load_globals(&inst, cx);
         let active_rp = if class == cf::CLASS_RESOURCE_PACKS {
             hopper::instance_ops::active_resourcepacks(&inst)
         } else {
@@ -2297,7 +2297,7 @@ impl Render for AddonsView {
         let Some(inst) = self.table.inst.clone() else {
             return div().into_any_element();
         };
-        let tabs = self.pack_tabs(&inst, cx);
+        let tabs = self.pack_tabs(cx);
         if let Some(global) = self.global_packs(&inst, cx) {
             return v_flex()
                 .size_full()
