@@ -613,6 +613,7 @@ pub fn parse(html: &str) -> Vec<Block> {
     while p.blocks.first().is_some_and(|b| b.kind == Kind::Rule) {
         p.blocks.remove(0);
     }
+    p.blocks = p.blocks.into_iter().flat_map(split_images).collect();
     // A paragraph holding only a link to a video (a URL, a titled link or a
     // linked image) is that video.
     for b in &mut p.blocks {
@@ -639,6 +640,66 @@ pub fn parse(html: &str) -> Vec<Block> {
         }
     }
     p.blocks
+}
+
+/// The widest image that stays in the line of text around it: an icon.
+const INLINE_IMAGE_MAX: u32 = 48;
+
+/// A paragraph or heading mixing text and images, split so each run of
+/// images is a paragraph of its own. A browser wraps a big image onto its
+/// own line ("Ibel<img>A lady who…" in Blackey's Boss Battle); in a line of
+/// text the image would shrink to the text's height. Images the page gave
+/// a small width stay inline.
+fn split_images(b: Block) -> Vec<Block> {
+    if !matches!(b.kind, Kind::Para | Kind::Heading(_)) {
+        return vec![b];
+    }
+    let big = |s: &Span| s.image.is_some() && s.width.is_none_or(|w| w > INLINE_IMAGE_MAX);
+    let has_text = b.spans.iter().any(|s| s.image.is_none() && !s.text.trim().is_empty());
+    if !has_text || !b.spans.iter().any(big) {
+        return vec![b];
+    }
+    let mut out: Vec<Block> = Vec::new();
+    // Whitespace between two images stays with them.
+    let mut cur: Option<(bool, Vec<Span>)> = None;
+    let push = |out: &mut Vec<Block>, (images, spans): (bool, Vec<Span>)| {
+        let kind = if images { Kind::Para } else { b.kind.clone() };
+        let mut block = Block { kind, spans };
+        if !images {
+            // Text loses the space that sat against the image.
+            if let Some(f) = block.spans.first_mut() {
+                f.text = f.text.trim_start().to_string();
+            }
+            if let Some(l) = block.spans.last_mut() {
+                l.text = l.text.trim_end().to_string();
+            }
+        }
+        if !block.is_empty() {
+            out.push(block);
+        }
+    };
+    for s in b.spans.iter().cloned() {
+        let images = if big(&s) {
+            true
+        } else if s.image.is_none() && s.text.trim().is_empty() {
+            cur.as_ref().is_some_and(|c| c.0)
+        } else {
+            false
+        };
+        match &mut cur {
+            Some((kind, spans)) if *kind == images => spans.push(s),
+            _ => {
+                if let Some(c) = cur.take() {
+                    push(&mut out, c);
+                }
+                cur = Some((images, vec![s]));
+            }
+        }
+    }
+    if let Some(c) = cur {
+        push(&mut out, c);
+    }
+    out
 }
 
 /// The video a paragraph of nothing but one link to it stands for. A linked
@@ -1334,7 +1395,7 @@ mod tests {
             r#"<p><img src="https://cdn/x.png" alt="Banner" width="1315"></p>
 <p><a href="/linkout?remoteUrl=https%253a%252f%252fpatreon.com%252fme" rel="nofollow"><img src="https://i.imgur.com/p.png" alt="Patreon"></a></p>
 <p><span><iframe src="https://www.youtube.com/embed/zjnh7Rygd4M" width="560"></iframe></span></p>
-<p>Text with <img src="https://cdn/i.png"> inline</p>"#,
+<p>Text with <img src="https://cdn/i.png" width="16"> inline</p>"#,
         );
         assert_eq!(b[0].kind, Kind::Para);
         assert_eq!(b[0].spans[0].image.as_deref(), Some("https://cdn/x.png"));
@@ -1357,13 +1418,42 @@ mod tests {
                 "https://cdn/x.png#w=1315",
                 "https://i.imgur.com/p.png",
                 "https://img.youtube.com/vi/zjnh7Rygd4M/hqdefault.jpg",
-                "https://cdn/i.png"
+                "https://cdn/i.png#w=16"
             ]
         );
         let md = to_markdown(&b);
         assert!(md.contains("[![Banner](<https://cdn/x.png#w=1315>)](<https://cdn/x.png>)"), "{md}");
         assert!(md.contains("[![Patreon](<https://i.imgur.com/p.png>)](<https://patreon.com/me>)"), "{md}");
         assert!(md.contains("[![Video](<https://img.youtube.com/vi/zjnh7Rygd4M/hqdefault.jpg>)](<https://www.youtube.com/watch?v=zjnh7Rygd4M>)\n\n[▶ Watch on YouTube](<https://www.youtube.com/watch?v=zjnh7Rygd4M>)"), "{md}");
+    }
+
+    #[test]
+    fn big_images_in_text_get_their_own_line() {
+        // Blackey's Boss Battle: a bold name, the boss's picture, its blurb.
+        let b = parse(
+            r#"<div class="spoiler"><hr><strong>Ibel<img src="https://cdn/a.png"></strong>A lady who sips tea.<br><hr><p><strong>Blastray &amp; Dashblaze<img src="https://cdn/b.png"> <img src="https://cdn/c.png"></strong>Siblings.</p><h3>Head Chef <img src="https://cdn/d.png"></h3></div>"#,
+        );
+        let kinds: Vec<(&Kind, String, usize)> = b
+            .iter()
+            .map(|x| (&x.kind, text(x), x.spans.iter().filter(|s| s.image.is_some()).count()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (&Kind::Para, "Ibel".into(), 0),
+                (&Kind::Para, "image".into(), 1),
+                (&Kind::Para, "A lady who sips tea.".into(), 0),
+                (&Kind::Rule, String::new(), 0),
+                (&Kind::Para, "Blastray & Dashblaze".into(), 0),
+                (&Kind::Para, "image image".into(), 2),
+                (&Kind::Para, "Siblings.".into(), 0),
+                (&Kind::Heading(3), "Head Chef".into(), 0),
+                (&Kind::Para, "image".into(), 1),
+            ]
+        );
+        assert!(b[0].spans[0].bold);
+        // The pair sits side by side.
+        assert!(matches!(&to_segments(&b)[..], [_, Segment::Badges(x), ..] if x.len() == 2));
     }
 
     #[test]
@@ -1520,15 +1610,17 @@ let x = 1;
         );
         assert_eq!(b[0].spans[0].image.as_deref(), Some("https://img/b.png"));
         assert_eq!(b[0].spans[0].link.as_deref(), Some("https://site"));
-        assert_eq!(b[0].spans[2].image.as_deref(), Some("https://img/s.png"));
-        assert_eq!(b[1].kind, Kind::Numbered(0));
-        assert_eq!(b[3].kind, Kind::Code);
-        assert_eq!(text(&b[3]), "let x = 1;\n");
-        let Kind::Row(r) = &b[5].kind else { panic!("{:?}", b[5]) };
+        // Text between big images puts each on its own line.
+        assert_eq!(text(&b[1]), "and");
+        assert_eq!(b[2].spans[0].image.as_deref(), Some("https://img/s.png"));
+        assert_eq!(b[3].kind, Kind::Numbered(0));
+        assert_eq!(b[5].kind, Kind::Code);
+        assert_eq!(text(&b[5]), "let x = 1;\n");
+        let Kind::Row(r) = &b[7].kind else { panic!("{:?}", b[7]) };
         assert_eq!(r[0][0].text, "a|b");
         assert!(r[0][0].code);
-        assert_eq!(b[6].spans[0].image.as_deref(), Some("https://img/h.png"));
-        assert_eq!(b[6].spans[0].width, Some(200));
+        assert_eq!(b[8].spans[0].image.as_deref(), Some("https://img/h.png"));
+        assert_eq!(b[8].spans[0].width, Some(200));
     }
 
     #[test]
