@@ -891,6 +891,9 @@ impl AppView {
                         .gap_1()
                         .pl_2()
                         .pr_2()
+                        // overflow_hidden clips to a rectangle, not the
+                        // pill, so each half rounds its own outer corners.
+                        .rounded_l_full()
                         .cursor_pointer()
                         .text_color(on_accent)
                         .bg(accent)
@@ -910,6 +913,7 @@ impl AppView {
                         .id("version")
                         .h_full()
                         .px_1p5()
+                        .rounded_r_full()
                         .cursor_pointer()
                         .text_color(accent)
                         .bg(tail_bg)
