@@ -62,6 +62,8 @@ pub enum Msg {
     Updates {
         root: PathBuf,
         result: Result<Vec<Update>, String>,
+        /// The list before this check, to keep what it found.
+        prev: Vec<Update>,
     },
     Status {
         key: PathBuf,
@@ -680,7 +682,30 @@ impl Store {
                     }
                 }
             }
-            Msg::Updates { root, result } => {
+            Msg::Updates { root, result, prev } => {
+                let result = result.map(|mut u| {
+                    // CurseForge answers from cached copies of a project, and
+                    // a stale copy hides a fresh file: what an earlier check
+                    // (or `note_update`) found stays listed until installed,
+                    // and the newer of two offers wins.
+                    if let Some(inst) = self.instance(&root) {
+                        for o in &prev {
+                            let current = inst
+                                .addons
+                                .iter()
+                                .any(|a| a.project_id == o.project_id && !a.locked && a.file_id < o.file.id);
+                            if !current {
+                                continue;
+                            }
+                            match u.iter_mut().find(|n| n.project_id == o.project_id) {
+                                Some(n) if n.file.id < o.file.id => *n = o.clone(),
+                                Some(_) => {}
+                                None => u.push(o.clone()),
+                            }
+                        }
+                    }
+                    u
+                });
                 self.updates.insert(
                     root,
                     match result {
@@ -1437,6 +1462,10 @@ impl Store {
             return;
         };
         self.updates_at.insert(root.to_path_buf(), Instant::now());
+        let prev = match self.updates.get(root) {
+            Some(Updates::Ready(v)) => v.clone(),
+            _ => Vec::new(),
+        };
         // A stale list stays up while the new one loads, so the update
         // buttons don't blink out.
         if force || !matches!(self.updates.get(root), Some(Updates::Ready(_))) {
@@ -1446,7 +1475,42 @@ impl Store {
         self.spawn(move || Msg::Updates {
             result: install::check_updates(&inst).map_err(|e| format!("{e:#}")),
             root,
+            prev,
         });
+    }
+
+    /// A newer file seen in the project's file list that the update list
+    /// missed: CurseForge often answers the check from a stale cached copy
+    /// of the project that lacks a fresh file. Joins the list so the mod
+    /// shows as an update, and later checks keep it until it's installed.
+    pub fn note_update(&mut self, root: &Path, files: &[hopper::cf::File], project_id: u64) -> bool {
+        let Some(inst) = self.instance(root) else { return false };
+        let Some(a) = inst.addons.iter().find(|a| a.project_id == project_id && !a.locked) else {
+            return false;
+        };
+        let max = inst.settings.release_channel.max(a.release_type).max(1);
+        let Some(f) = files
+            .iter()
+            .filter(|f| f.id > a.file_id && f.release_type <= max)
+            .max_by_key(|f| f.id)
+        else {
+            return false;
+        };
+        let new = Update {
+            project_id,
+            name: a.name.clone(),
+            from: a.file_name.clone(),
+            file: f.clone(),
+        };
+        let Some(Updates::Ready(list)) = self.updates.get_mut(root) else {
+            return false;
+        };
+        if list.iter().any(|u| u.project_id == project_id && u.file.id >= new.file.id) {
+            return false;
+        }
+        list.retain(|u| u.project_id != project_id);
+        list.push(new);
+        true
     }
 
     pub fn run_updates(&self, root: &Path, updates: Vec<Update>) {

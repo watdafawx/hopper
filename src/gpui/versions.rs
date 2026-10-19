@@ -56,6 +56,14 @@ impl VersionsView {
                     Ok((entries, mut all)) => {
                         // Server packs are separate downloads, not versions.
                         all.retain(|f| f.is_server_pack != Some(true));
+                        if !pack {
+                            let (root, files) = (this.root.clone(), all.clone());
+                            this.store.update(cx, |s, cx| {
+                                if s.note_update(&root, &files, pid) {
+                                    cx.notify();
+                                }
+                            });
+                        }
                         this.all = all;
                         Ok(entries
                             .into_iter()
