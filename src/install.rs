@@ -256,6 +256,9 @@ pub struct Plan {
     /// Required mods the instance already has: name, and whether it is on
     /// (an off one is turned back on).
     pub kept: Vec<(String, bool)>,
+    /// Installed entries that stand in for a dependency from the other
+    /// site (CurseForge's Pipez for Modrinth's), by project id.
+    pub same: Vec<u64>,
 }
 
 impl Plan {
@@ -304,6 +307,15 @@ pub fn plan(inst: &Instance, m: &cf::Mod, file: &cf::File, job: Option<&Job>) ->
                 job.detail(format!("Resolving dependency {dep}"));
             }
             let dm = crate::source::get_mod(dep)?;
+            // Already here from the other site: installing it again would
+            // swap the entry (and its history) for a new one.
+            if let Some(a) = crate::browse::installed_addon(inst, &dm) {
+                if is_mod(&pm) {
+                    out.kept.push((a.name.clone(), a.enabled));
+                    out.same.push(a.project_id);
+                }
+                continue;
+            }
             if !is_mod(&pm) && is_mod(&dm) {
                 out.suggest.push(format!("{} suggests the mod {}", pm.name, dm.name));
                 continue;
@@ -347,7 +359,7 @@ pub fn install(
 ) -> anyhow::Result<Vec<String>> {
     let mut added = Vec::new();
     let is_mod = |m: &cf::Mod| m.class_id.unwrap_or(cf::CLASS_MODS) == cf::CLASS_MODS;
-    let Plan { steps: plan, suggest, notes, .. } = self::plan(inst, m, file, Some(job))?;
+    let Plan { steps: plan, suggest, notes, same, .. } = self::plan(inst, m, file, Some(job))?;
     for n in notes {
         job.note(n);
     }
@@ -374,6 +386,7 @@ pub fn install(
                 .map(|d| d.mod_id)
                 .collect(),
         })
+        .chain(same)
         .collect();
     let off: Vec<usize> = (0..inst.addons.len())
         .filter(|&i| !inst.addons[i].enabled && need.contains(&inst.addons[i].project_id))

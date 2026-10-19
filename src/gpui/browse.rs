@@ -1309,6 +1309,43 @@ impl BrowseView {
 
     // ---- filters -------------------------------------------------------
 
+    /// CurseForge | Modrinth, the picked one in its site's color.
+    fn source_switch(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let (muted, fg, hover, track, radius) =
+            (theme.muted_foreground, theme.foreground, theme.list_hover, theme.muted, theme.radius);
+        let side = |modrinth: bool, label: &'static str| {
+            let on = self.modrinth == modrinth;
+            let color = site_color(modrinth);
+            h_flex()
+                .id(if modrinth { "source-mr" } else { "source-cf" })
+                .flex_1()
+                .h_8()
+                .justify_center()
+                .gap_1p5()
+                .rounded(radius)
+                .text_sm()
+                .cursor_pointer()
+                .child(div().size_2().rounded_full().bg(if on { gpui_kit::white() } else { color }))
+                .child(label)
+                .map(|d| {
+                    if on {
+                        d.bg(color).text_color(gpui_kit::white()).font_semibold()
+                    } else {
+                        d.text_color(muted).hover(move |s| s.bg(hover).text_color(fg))
+                    }
+                })
+                .on_click(cx.listener(move |this, _, window, cx| this.set_source(modrinth, window, cx)))
+        };
+        h_flex()
+            .p_0p5()
+            .gap_0p5()
+            .rounded(radius * 1.5)
+            .bg(track)
+            .child(side(false, "CurseForge"))
+            .child(side(true, "Modrinth"))
+    }
+
     fn section(title: &'static str, cx: &App) -> Div {
         v_flex().gap_1p5().child(
             div()
@@ -1577,17 +1614,7 @@ impl BrowseView {
             .px_4()
             .py_4()
             .gap_5()
-            .child(
-                TabBar::new("source")
-                    .segmented()
-                    .small()
-                    .selected_index(usize::from(self.modrinth))
-                    .child(Tab::new().label("CurseForge"))
-                    .child(Tab::new().label("Modrinth"))
-                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
-                        this.set_source(*ix == 1, window, cx)
-                    })),
-            )
+            .child(self.source_switch(cx))
             .child(Self::section("TYPE", cx).child(classes))
             // A modpack installs as its own new instance.
             .when(self.class != cf::CLASS_MODPACKS || self.bookmarked, |r| {
@@ -2051,8 +2078,18 @@ impl BrowseView {
                 "No bookmarks yet: click the bookmark beside a project's Install to save it here.".to_string()
             }
             Some(list) => format!("{} bookmarked", list.len()),
-            None => format!("{} results", self.total),
+            None => format!(
+                "{} results on {}",
+                self.total,
+                if self.modrinth { "Modrinth" } else { "CurseForge" }
+            ),
         };
+        // Browsing the other site than the target's pack: what's installed
+        // from here doesn't come from where the pack's mods do.
+        let off_site = target
+            .filter(|_| !self.bookmarked && !is_pack)
+            .and_then(|t| t.pack.as_ref().map(|p| (t.name.clone(), hopper::modrinth::is_mr(p.project_id))))
+            .filter(|(_, pack_mr)| *pack_mr != self.modrinth);
         let some_need_target = match &saved {
             Some(list) => list.iter().any(|m| !hopper::browse::is_modpack(m, self.class)),
             None => !is_pack,
@@ -2075,6 +2112,9 @@ impl BrowseView {
             .flex_1()
             .min_w_0()
             .h_full()
+            // A hint of the site's color, so it's clear where results come
+            // from (the saved list mixes both).
+            .when(!self.bookmarked, |r| r.bg(site_color(self.modrinth).opacity(0.035)))
             .child(
                 v_flex()
                     .px_6()
@@ -2094,6 +2134,38 @@ impl BrowseView {
                     )
                     .when_some(self.error.clone(), |r, e| {
                         r.child(div().text_sm().text_color(theme.danger).child(e))
+                    })
+                    .when_some(off_site, |r, (name, pack_mr)| {
+                        let (here, home) = if self.modrinth {
+                            ("Modrinth", "CurseForge")
+                        } else {
+                            ("CurseForge", "Modrinth")
+                        };
+                        r.child(
+                            h_flex()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .rounded(theme.radius_lg)
+                                .border_1()
+                                .border_color(theme.warning.opacity(0.4))
+                                .bg(theme.warning.opacity(0.08))
+                                .text_sm()
+                                .text_color(theme.warning)
+                                .child(Icon::new(IconName::TriangleAlert).small().flex_none())
+                                .child(div().flex_1().min_w_0().child(format!(
+                                    "You're browsing {here}. {name} is a {home} pack: mods installed from here (and what they need) come from {here}."
+                                )))
+                                .child(
+                                    Button::new("browse-switch-site")
+                                        .small()
+                                        .outline()
+                                        .label(format!("Switch to {home}"))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.set_source(pack_mr, window, cx)
+                                        })),
+                                ),
+                        )
                     })
                     .when(!self.modrinth && cf::api_key().is_none(), |r| {
                         r.child(
@@ -3136,6 +3208,15 @@ struct Blank;
 impl Render for Blank {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
+    }
+}
+
+/// CurseForge's orange or Modrinth's green.
+fn site_color(modrinth: bool) -> Hsla {
+    if modrinth {
+        hsla(145. / 360., 0.78, 0.48, 1.)
+    } else {
+        hsla(14. / 360., 0.87, 0.58, 1.)
     }
 }
 

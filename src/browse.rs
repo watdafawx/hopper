@@ -151,6 +151,18 @@ pub fn dependencies(f: &cf::File) -> Vec<(cf::Mod, u32)> {
 /// How `m` is installed in `inst`: the same project, or the same mod from the
 /// other site (matched by slug or name). Returns the source it came from.
 pub fn installed_as(inst: &Instance, m: &cf::Mod) -> Option<&'static str> {
+    installed_addon(inst, m).map(|a| {
+        if a.mr_project.is_empty() {
+            "CurseForge"
+        } else {
+            "Modrinth"
+        }
+    })
+}
+
+/// The entry that has `m` in `inst`: the same project, or the same mod from
+/// the other site (matched by slug or name).
+pub fn installed_addon<'a>(inst: &'a Instance, m: &cf::Mod) -> Option<&'a crate::instances::Addon> {
     let norm = |s: &str| {
         s.chars()
             .filter(|c| c.is_alphanumeric())
@@ -165,20 +177,11 @@ pub fn installed_as(inst: &Instance, m: &cf::Mod) -> Option<&'static str> {
             .to_lowercase()
     };
     let (name, mslug) = (norm(&m.name), m.slug.to_lowercase());
-    inst.addons
-        .iter()
-        .find(|a| {
-            a.project_id == m.id
-                || (!mslug.is_empty() && slug(&a.page) == mslug)
-                || norm(&a.name) == name
-        })
-        .map(|a| {
-            if a.mr_project.is_empty() {
-                "CurseForge"
-            } else {
-                "Modrinth"
-            }
-        })
+    inst.addons.iter().find(|a| a.project_id == m.id).or_else(|| {
+        inst.addons
+            .iter()
+            .find(|a| (!mslug.is_empty() && slug(&a.page) == mslug) || norm(&a.name) == name)
+    })
 }
 
 /// A modpack's official server files: what a dedicated server runs.
