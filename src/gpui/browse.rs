@@ -1739,9 +1739,8 @@ impl BrowseView {
                         (self.store.clone(), self.store.clone(), m2.clone(), m2.clone(), f.clone(), m.id);
                     widgets::split(
                         widgets::split_lead(
-                            Button::new(id("pack-update"))
+                            site_primary(Button::new(id("pack-update")), m.modrinth.is_some(), cx)
                                 .small()
-                                .primary()
                                 .icon(IconName::Download)
                                 .label("Update")
                                 .tooltip(format!("Update the pack to {}", f.display_name))
@@ -1752,7 +1751,7 @@ impl BrowseView {
                                 }),
                         ),
                         id("pack-changes"),
-                        widgets::Tint::Primary,
+                        site_tint(m.modrinth.is_some()),
                         gpui_kit::component::Size::Small,
                         "What changed in the pack",
                         move |_, window, cx| {
@@ -1805,7 +1804,7 @@ impl BrowseView {
             let (store, log_root, pid) = (self.store.clone(), root.clone(), m.id);
             let log_file = listed.as_ref().map(|u| u.file.clone());
             let lead = install_button(
-                widgets::split_lead(Button::new(id("update")).small().primary().icon(IconName::Download)),
+                widgets::split_lead(site_primary(Button::new(id("update")), m.modrinth.is_some(), cx).small().icon(IconName::Download)),
                 "Update",
                 pending,
                 hold,
@@ -1831,7 +1830,7 @@ impl BrowseView {
             widgets::split(
                 lead,
                 id("changes"),
-                widgets::Tint::Primary,
+                site_tint(m.modrinth.is_some()),
                 gpui_kit::component::Size::Small,
                 "What changed",
                 move |_, window, cx| {
@@ -1888,7 +1887,7 @@ impl BrowseView {
                 })
                 .child(
                     install_button(
-                        Button::new(id("install")).small().primary().icon(IconName::Download),
+                        site_primary(Button::new(id("install")), m.modrinth.is_some(), cx).small().icon(IconName::Download),
                         "Install",
                         pending,
                         hold,
@@ -1914,8 +1913,9 @@ impl BrowseView {
             .rounded(theme.radius_lg)
             .border_1()
             .cursor_pointer()
-            .when(picked, |r| {
-                r.border_color(theme.primary).bg(theme.list_active)
+            .when(picked, |r| match m.modrinth {
+                Some(_) => r.border_color(theme.success).bg(theme.success.opacity(0.08)),
+                None => r.border_color(theme.primary).bg(theme.list_active),
             })
             .when(!picked, |r| {
                 r.border_color(theme.border)
@@ -2114,7 +2114,13 @@ impl BrowseView {
             .h_full()
             // A hint of the site's color, so it's clear where results come
             // from (the saved list mixes both).
-            .when(!self.bookmarked, |r| r.bg(site_color(self.modrinth).opacity(0.035)))
+            .when(!self.bookmarked, |r| {
+                r.bg(linear_gradient(
+                    180.,
+                    linear_color_stop(site_color(self.modrinth).opacity(0.07), 0.),
+                    linear_color_stop(site_color(self.modrinth).opacity(0.), 0.55),
+                ))
+            })
             .child(
                 v_flex()
                     .px_6()
@@ -2196,9 +2202,8 @@ impl BrowseView {
                             h_flex().absolute().top_2().left_0().right_0().justify_center().child(
                                 // Occluded, so the click doesn't also open the card below.
                                 div().occlude().child(
-                                    Button::new("browse-fresh")
+                                    site_primary(Button::new("browse-fresh"), self.modrinth, cx)
                                         .small()
-                                        .primary()
                                         .icon(IconName::ArrowUp)
                                         .label(if n == 1 { "1 new result".to_string() } else { format!("{n} new results") })
                                         .tooltip("Back to the top, with the new ones")
@@ -2829,7 +2834,7 @@ impl BrowseView {
             )
             .child(
                 install_button(
-                    Button::new("panel-install").primary().icon(IconName::Download),
+                    site_primary(Button::new("panel-install"), m.modrinth.is_some(), cx).icon(IconName::Download),
                     "Install",
                     pending,
                     hold,
@@ -2966,7 +2971,7 @@ impl BrowseView {
                         .gap_3()
                         .child(
                             install_button(
-                                Button::new("link-install").primary().small().icon(IconName::Download),
+                                site_primary(Button::new("link-install"), m.modrinth.is_some(), cx).small().icon(IconName::Download),
                                 if pack { "Install as a new instance" } else { "Install this file" },
                                 pending,
                                 hold,
@@ -3209,6 +3214,17 @@ impl Render for Blank {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
     }
+}
+
+/// A filled button in the site's color: the theme's primary for
+/// CurseForge, its green for Modrinth.
+fn site_primary(b: Button, modrinth: bool, _cx: &App) -> Button {
+    if modrinth { b.success() } else { b.primary() }
+}
+
+/// A split button's changelog half to go with [`site_primary`].
+fn site_tint(modrinth: bool) -> widgets::Tint {
+    if modrinth { widgets::Tint::Success } else { widgets::Tint::Primary }
 }
 
 /// CurseForge's orange or Modrinth's green.
