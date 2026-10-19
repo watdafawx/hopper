@@ -1693,6 +1693,10 @@ impl BrowseView {
                         .is_some_and(|b| b > a.file_id));
             newer.then(|| (t.root.clone(), listed))
         });
+        // Installed here but turned off: updates keep it off.
+        let off = target
+            .filter(|_| tracked && installed.is_some())
+            .is_some_and(|t| t.addons.iter().any(|a| a.project_id == m.id && !a.enabled));
         let id = |p: &str| ElementId::Name(format!("{p}:{}", m.id).into());
         let (pending, hold) = self.install_state(m.id, is_pack, cx);
 
@@ -1779,7 +1783,11 @@ impl BrowseView {
                 pending,
                 hold,
             )
-            .tooltip("A newer file is out; replaces the installed one")
+            .tooltip(if off {
+                "A newer file is out; replaces the installed one, which stays disabled"
+            } else {
+                "A newer file is out; replaces the installed one"
+            })
             .on_click(cx.listener(move |this, _, w, cx| {
                 // Not a click on the card: the page stays as it is.
                 cx.stop_propagation();
@@ -1913,6 +1921,21 @@ impl BrowseView {
                     .flex_none()
                     .gap_1()
                     .children(self.server_badge(m, id("server"), false, cx))
+                    .when(off, |r| {
+                        let tip: SharedString = match target {
+                            Some(t) => format!("Disabled in {}. Updating keeps it disabled.", t.name),
+                            None => "Disabled. Updating keeps it disabled.".to_string(),
+                        }
+                        .into();
+                        r.child(
+                            widgets::pill("Disabled", theme.warning, false)
+                                .id(id("off"))
+                                .mr_1()
+                                .tooltip(move |w, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)
+                                }),
+                        )
+                    })
                     .child(action)
                     .child(self.bookmark_button(m, id("bookmark"), cx)),
             )
@@ -2486,6 +2509,24 @@ impl BrowseView {
                 )
             })
             .children(banner)
+            // Turned off in the instance: updating or switching keeps it off.
+            .children(
+                target
+                    .as_ref()
+                    .filter(|t| t.addons.iter().any(|a| a.project_id == m.id && !a.enabled))
+                    .map(|t| {
+                        h_flex()
+                            .gap_2()
+                            .text_sm()
+                            .text_color(theme.warning)
+                            .items_start()
+                            .child(Icon::new(IconName::Info).small().flex_none())
+                            .child(div().flex_1().min_w_0().child(format!(
+                                "Disabled in {}. Updating or switching versions keeps it disabled; turn it on in the Mods tab.",
+                                t.name
+                            )))
+                    }),
+            )
             .when(m.allow_mod_distribution == Some(false), |r| {
                 r.child(
                     h_flex()
