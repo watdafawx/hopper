@@ -1935,9 +1935,7 @@ impl BrowseView {
                             .child(self.author_link(m, id("author"), cx))
                             // The saved list mixes both sites.
                             .when(self.bookmarked, |r| {
-                                r.child(Tag::secondary().outline().xsmall().child(
-                                    if m.modrinth.is_some() { "Modrinth" } else { "CurseForge" },
-                                ))
+                                r.child(widgets::site_tag(m.modrinth.is_some()))
                             }),
                     )
                     .child(div().text_sm().truncate().child(m.summary.clone()))
@@ -2073,17 +2071,22 @@ impl BrowseView {
             .unwrap_or_default();
         let saved = self.bookmarked.then(|| self.bookmark_results());
         let is_pack = self.class == cf::CLASS_MODPACKS;
-        let mut note = match &saved {
+        let note = match &saved {
             Some(list) if list.is_empty() && self.text.is_empty() => {
                 "No bookmarks yet: click the bookmark beside a project's Install to save it here.".to_string()
             }
             Some(list) => format!("{} bookmarked", list.len()),
-            None => format!(
-                "{} results on {}",
-                self.total,
-                if self.modrinth { "Modrinth" } else { "CurseForge" }
-            ),
+            None => format!("{} results on ", self.total),
         };
+        // The site's name, in its color, after "results on".
+        let site_name = saved.is_none().then(|| {
+            div()
+                .flex_none()
+                .text_sm()
+                .text_color(site_color(self.modrinth))
+                .child(if self.modrinth { "Modrinth" } else { "CurseForge" })
+        });
+        let mut tail = String::new();
         // Browsing the other site than the target's pack: what's installed
         // from here doesn't come from where the pack's mods do.
         let off_site = target
@@ -2095,7 +2098,7 @@ impl BrowseView {
             None => !is_pack,
         };
         if some_need_target && target.is_none() {
-            note.push_str(" · pick an instance on the left to install");
+            tail.push_str(" · pick an instance on the left to install");
         }
         let cards: Vec<AnyElement> = saved
             .as_ref()
@@ -2135,7 +2138,13 @@ impl BrowseView {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(widgets::caption(note, cx))
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .child(widgets::caption(note, cx).flex_none().whitespace_nowrap())
+                                    .children(site_name)
+                                    .when(!tail.is_empty(), |r| r.child(widgets::caption(tail, cx))),
+                            )
                             .when(self.loading && saved.is_none(), |r| r.child(Spinner::new().xsmall())),
                     )
                     .when_some(self.error.clone(), |r, e| {
@@ -2328,6 +2337,7 @@ impl BrowseView {
                                 Button::new("site")
                                     .small()
                                     .outline()
+                                    .text_color(site_color(m.modrinth.is_some()))
                                     .icon(IconName::ExternalLink)
                                     .label(format!("Open on {site}"))
                                     .on_click(move |_, _, cx| cx.open_url(&page)),
@@ -2687,6 +2697,7 @@ impl BrowseView {
                             Button::new("author-site")
                                 .small()
                                 .outline()
+                                .text_color(site_color(a.of.modrinth.is_some()))
                                 .icon(IconName::ExternalLink)
                                 .label(format!("Open on {site}"))
                                 .on_click(move |_, _, cx| cx.open_url(&u)),
@@ -3004,13 +3015,22 @@ fn install_button(b: Button, label: &'static str, pending: bool, hold: Option<&'
         .when_some(hold.filter(|_| !pending), |b, why| b.tooltip(why))
 }
 
-/// An icon and a muted value, for a project's stats.
+/// An icon and a value, for a project's stats, colored by what it counts
+/// so a glance finds the downloads (blue), last update (green) or age
+/// (yellow) without reading a row of gray.
 fn stat(icon: IconName, text: impl Into<SharedString>, cx: &App) -> Div {
+    let theme = cx.theme();
+    let color = match icon {
+        IconName::Download => theme.info,
+        IconName::RefreshCw => theme.success,
+        IconName::Clock => theme.warning,
+        _ => theme.muted_foreground,
+    };
     h_flex()
         .gap_1()
         .flex_none()
-        .text_color(cx.theme().muted_foreground)
-        .child(Icon::new(icon).xsmall())
+        .text_color(color.opacity(0.9))
+        .child(Icon::new(icon).xsmall().text_color(color))
         .child(text.into())
 }
 
@@ -3119,16 +3139,18 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
     let all: String = versions.join(", ");
     let tag = |t: String| Tag::secondary().xsmall().child(t);
     let group = |icon: IconName, tags: Vec<Tag>| {
+        // Versions blue, loaders yellow, sides green; the rest muted.
+        let color = match icon {
+            IconName::Box => theme.info,
+            IconName::Blocks => theme.warning,
+            IconName::Monitor => theme.success,
+            _ => theme.muted_foreground,
+        };
         h_flex()
             .gap_1()
             .items_center()
             .flex_wrap()
-            .child(
-                Icon::new(icon)
-                    .xsmall()
-                    .text_color(theme.muted_foreground)
-                    .flex_none(),
-            )
+            .child(Icon::new(icon).xsmall().text_color(color).flex_none())
             .children(tags)
     };
     let mut row = h_flex().gap_3().pt_1().flex_wrap().text_xs();
@@ -3230,14 +3252,7 @@ fn site_tint(modrinth: bool) -> widgets::Tint {
     if modrinth { widgets::Tint::Success } else { widgets::Tint::Primary }
 }
 
-/// CurseForge's orange or Modrinth's green.
-fn site_color(modrinth: bool) -> Hsla {
-    if modrinth {
-        hsla(145. / 360., 0.78, 0.48, 1.)
-    } else {
-        hsla(14. / 360., 0.87, 0.58, 1.)
-    }
-}
+use widgets::site_color;
 
 fn placeholder(modrinth: bool) -> &'static str {
     if modrinth {

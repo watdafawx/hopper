@@ -443,7 +443,7 @@ impl DatapacksView {
         } else {
             p.description.clone()
         };
-        let site = project.as_ref().map(|m| if m.modrinth.is_some() { "Modrinth" } else { "CurseForge" });
+        let site = project.as_ref().map(|m| m.modrinth.is_some());
         let pid = project.as_ref().map(|m| m.id);
         h_flex()
             .id(id("dp"))
@@ -486,7 +486,7 @@ impl DatapacksView {
                                     .child(title),
                             )
                             .when_some(site, |r, site| {
-                                r.child(widgets::caption(site, cx).text_xs().flex_none())
+                                r.child(widgets::site_tag(site))
                             })
                             .when(from_modpack, |r| {
                                 r.child(widgets::caption("from the modpack", cx).text_xs().flex_none())

@@ -199,7 +199,25 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
                     .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(rest.clone()).build(w, cx)),
             )
         })
-        .when(t.modrinth, |r| r.child(tag(Tag::secondary(), "Modrinth".into())))
+        .when(t.modrinth, |r| r.child(site_tag(true)))
+}
+
+/// CurseForge's orange or Modrinth's green, wherever a site is named.
+pub fn site_color(modrinth: bool) -> Hsla {
+    if modrinth {
+        hsla(145. / 360., 0.78, 0.48, 1.)
+    } else {
+        hsla(14. / 360., 0.87, 0.58, 1.)
+    }
+}
+
+/// A small tag naming a site, in its color.
+pub fn site_tag(modrinth: bool) -> gpui_kit::component::tag::Tag {
+    let c = site_color(modrinth);
+    gpui_kit::component::tag::Tag::custom(c.opacity(0.12), c, c.opacity(0.4))
+        .xsmall()
+        .flex_none()
+        .child(if modrinth { "Modrinth" } else { "CurseForge" })
 }
 
 fn h_flex_row() -> Div {
@@ -433,6 +451,7 @@ pub fn pack_page(
                     Button::new("pack-site")
                         .small()
                         .outline()
+                        .text_color(site_color(m.modrinth.is_some()))
                         .icon(IconName::ExternalLink)
                         .label(format!("Open on {site}"))
                         .on_click(move |_, _, cx| cx.open_url(&url)),

@@ -125,6 +125,7 @@ impl Render for CrashHelp {
                     .ghost()
                     .icon(IconName::ExternalLink)
                     .label("Modrinth")
+                    .text_color(crate::widgets::site_color(true))
                     .on_click(|_, _, cx| cx.open_url(MODRINTH)),
             )
             .child(
@@ -133,6 +134,7 @@ impl Render for CrashHelp {
                     .ghost()
                     .icon(IconName::ExternalLink)
                     .label("CurseForge")
+                    .text_color(crate::widgets::site_color(false))
                     .on_click(|_, _, cx| cx.open_url(CURSEFORGE)),
             );
         callout(color, cx)

@@ -1492,22 +1492,27 @@ impl LibraryView {
         if let Some(k) = hopper::launchers::Kind::from_key(&inst.source) {
             pills.push(widgets::pill(k.name(), theme.accent_foreground, false));
         }
-        pills.push(widgets::pill(
-            match &inst.pack {
-                Some(p) if hopper::modrinth::is_mr(p.project_id) => "Modrinth",
-                Some(_) => "CurseForge",
-                None => "Custom",
-            },
-            theme.muted_foreground,
-            false,
-        ));
+        pills.push(match &inst.pack {
+            Some(p) => {
+                let mr = hopper::modrinth::is_mr(p.project_id);
+                widgets::pill(if mr { "Modrinth" } else { "CurseForge" }, widgets::site_color(mr), false)
+            }
+            None => widgets::pill("Custom", theme.muted_foreground, false),
+        });
 
         // Minecraft, loader, pack version.
+        // Each in its own color (Minecraft green, loader yellow, version
+        // blue), as Browse colors a project's facts.
         let fact = |icon: IconName, text: String| {
+            let color = match icon {
+                IconName::Box => theme.success,
+                IconName::Blocks => theme.warning,
+                _ => theme.info,
+            };
             h_flex()
                 .flex_none()
                 .gap_1p5()
-                .child(Icon::new(icon).xsmall().text_color(theme.muted_foreground.opacity(0.8)))
+                .child(Icon::new(icon).xsmall().text_color(color))
                 .child(text)
         };
         let facts = h_flex()
@@ -1515,7 +1520,7 @@ impl LibraryView {
             .min_w_0()
             .overflow_hidden()
             .text_sm()
-            .text_color(theme.muted_foreground)
+            .text_color(theme.foreground.opacity(0.8))
             .child(fact(IconName::Box, format!("Minecraft {}", inst.game_version)))
             .child({
                 let f = fact(IconName::Blocks, store::loader_label(&inst.loader));
