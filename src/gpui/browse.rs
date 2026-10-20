@@ -2539,7 +2539,11 @@ impl BrowseView {
                                     )
                                     .child(
                                         widgets::caption(
-                                            format!("{} · {versions}", f.release_name()),
+                                            // When it came out, as the stats say it ("2 days ago", a date).
+                                            match hopper::time::relative(&f.file_date) {
+                                                d if d.is_empty() => format!("{} · {versions}", f.release_name()),
+                                                d => format!("{} · {versions} · {d}", f.release_name()),
+                                            },
                                             cx,
                                         )
                                         .text_xs(),
