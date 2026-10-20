@@ -126,6 +126,7 @@ impl TasksButton {
         let theme = cx.theme().clone();
         let store = self.store.clone();
         let jobs = store.read(cx).jobs().snapshot();
+        let me = cx.entity();
         let view = window.viewport_size();
         let gap = px(8.);
         let lines = jobs.len() + jobs.iter().map(|j| j.notes.len()).sum::<usize>();
@@ -139,9 +140,25 @@ impl TasksButton {
             } else {
                 Icon::new(IconName::CircleCheck).small().text_color(theme.success).into_any_element()
             };
+            // A finished comparison opens its review on click.
+            let review = j.done && j.error.is_none() && crate::pack_update::has_review(id);
+            let (store_r, me) = (store.clone(), me.clone());
             v_flex()
+                .id(ElementId::Name(format!("task-row-{id}").into()))
                 .gap_1()
                 .py_1p5()
+                .when(review, |r| {
+                    r.cursor_pointer()
+                        .rounded(theme.radius)
+                        .hover(|s| s.bg(theme.list_hover))
+                        .on_click(move |_, window, cx| {
+                            me.update(cx, |t, cx| {
+                                t.open = false;
+                                cx.notify();
+                            });
+                            crate::pack_update::reopen(store_r.clone(), id, window, cx)
+                        })
+                })
                 .child(
                     h_flex()
                         .gap_3()

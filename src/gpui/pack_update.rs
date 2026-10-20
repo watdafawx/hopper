@@ -28,6 +28,24 @@ enum Group {
     Files(FileAction),
 }
 
+/// Finished comparisons by the job that made them: (instance, pack file,
+/// result), so the task list can reopen a review whose dialog was closed.
+type Review = (PathBuf, cf::File, Result<UpdatePlan, String>);
+static REVIEWS: std::sync::Mutex<Option<HashMap<u64, Review>>> = std::sync::Mutex::new(None);
+
+/// Whether job `id` left a review to open.
+pub fn has_review(id: u64) -> bool {
+    REVIEWS.lock().ok().and_then(|g| g.as_ref().map(|m| m.contains_key(&id))).unwrap_or(false)
+}
+
+/// Opens the review job `id` made, without comparing again.
+pub fn reopen(store: Entity<Store>, id: u64, window: &mut Window, cx: &mut App) {
+    let review = REVIEWS.lock().ok().and_then(|g| g.as_ref().and_then(|m| m.get(&id).cloned()));
+    if let Some((root, file, plan)) = review {
+        show(store, root, file, Some(plan), window, cx);
+    }
+}
+
 pub struct UpdatePreview {
     store: Entity<Store>,
     root: PathBuf,
@@ -59,8 +77,14 @@ impl UpdatePreview {
                 .background_spawn(async move {
                     let r = hopper::packdiff::plan(&inst, &file, &job);
                     job.finish(&r.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e:#}")));
-                    if r.is_ok() {
-                        job.detail("Ready to review");
+                    if let Ok(p) = &r {
+                        // Kept even if the dialog closes meanwhile: the
+                        // task reopens it.
+                        if let Ok(mut g) = REVIEWS.lock() {
+                            g.get_or_insert_with(HashMap::new)
+                                .insert(job.id(), (inst.root.clone(), file.clone(), Ok(p.clone())));
+                        }
+                        job.detail("Ready to review: click to open");
                     }
                     r.map_err(|e| format!("{e:#}"))
                 })
@@ -108,6 +132,11 @@ impl UpdatePreview {
         let overrides = plan.decisions(&v.take);
         let (store, root, file) = (v.store.clone(), v.root.clone(), plan.file.clone());
         let backup = v.backup_worlds;
+        if let Ok(mut g) = REVIEWS.lock()
+            && let Some(m) = g.as_mut()
+        {
+            m.retain(|_, (r, _, _)| *r != root);
+        }
         store.update(cx, |s, cx| {
             s.update_pack(&root, file, Some(overrides), backup);
             cx.notify();
@@ -489,6 +518,18 @@ impl Render for UpdatePreview {
 
 /// Previews updating an instance's modpack to `file`, then updates it.
 pub fn open(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut Window, cx: &mut App) {
+    show(store, root, file, None, window, cx)
+}
+
+/// The preview dialog, comparing first unless `plan` is already known.
+fn show(
+    store: Entity<Store>,
+    root: PathBuf,
+    file: cf::File,
+    plan: Option<Result<UpdatePlan, String>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let Some(inst) = store.read(cx).instance(&root).cloned() else {
         return;
     };
@@ -520,7 +561,18 @@ pub fn open(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut Wi
             mc_change,
             backup_worlds,
         };
-        v.plan(file, cx);
+        match plan {
+            Some(r) => {
+                if let Ok(p) = &r {
+                    v.take = p.default_take();
+                    if p.count(FileAction::Conflict) > 0 {
+                        v.open.insert(Group::Files(FileAction::Conflict));
+                    }
+                }
+                v.plan = Some(r);
+            }
+            None => v.plan(file, cx),
+        }
         v
     });
     let title = format!("Update {}", inst.name);

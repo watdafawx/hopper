@@ -170,6 +170,11 @@ impl Jobs {
 }
 
 impl Job {
+    /// The job's id, as [`JobState::id`] lists it.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Asks this job to stop (see [`Jobs::cancel`]).
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
