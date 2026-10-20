@@ -3244,7 +3244,7 @@ impl Render for Blank {
 /// A filled button in the site's color: the theme's primary for
 /// CurseForge, its green for Modrinth.
 fn site_primary(b: Button, modrinth: bool, _cx: &App) -> Button {
-    if modrinth { b.success() } else { b.primary() }
+    widgets::site_button(b, modrinth)
 }
 
 /// A split button's changelog half to go with [`site_primary`].

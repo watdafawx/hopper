@@ -1039,10 +1039,21 @@ fn squash(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
+/// A pack file found on CurseForge or Modrinth.
+#[derive(Clone, Debug)]
+pub struct PackMatch {
+    pub project: cf::Mod,
+    /// The file it is: known when found by its hash; else looked for by
+    /// name among the project's files (see [`loose_pack_versions`]).
+    pub file: Option<cf::File>,
+}
+
 /// Packs found on CurseForge or Modrinth: zips by file hash (CurseForge's
 /// fingerprint, Modrinth's sha1), then the rest (folders, repacked zips)
-/// by a search for their name that must match a project's name or slug.
-pub fn identify_packs(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, cf::Mod> {
+/// by a search for their name that must match a project's name or slug,
+/// among projects of `class` (or mods: some data packs are published as
+/// mods, for Modrinth's datapack loader).
+pub fn identify_packs(paths: &[PathBuf], class: u32) -> std::collections::HashMap<PathBuf, PackMatch> {
     use std::collections::HashMap;
     let mut by_fp: HashMap<u32, Vec<PathBuf>> = HashMap::new();
     let mut by_sha: HashMap<String, Vec<PathBuf>> = HashMap::new();
@@ -1051,15 +1062,15 @@ pub fn identify_packs(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, c
         by_fp.entry(cf::fingerprint(&bytes)).or_default().push(p.clone());
         by_sha.entry(crate::modrinth::sha1(&bytes)).or_default().push(p.clone());
     }
-    // Path → (CurseForge id) or (Modrinth id).
-    let mut cf_ids: HashMap<PathBuf, u64> = HashMap::new();
-    let mut mr_ids: HashMap<PathBuf, String> = HashMap::new();
+    // Path → (CurseForge id, file) or (Modrinth id, file).
+    let mut cf_ids: HashMap<PathBuf, (u64, cf::File)> = HashMap::new();
+    let mut mr_ids: HashMap<PathBuf, (String, cf::File)> = HashMap::new();
     if !by_fp.is_empty()
         && let Ok(matches) = cf::match_fingerprints(&by_fp.keys().copied().collect::<Vec<_>>())
     {
         for m in matches {
             for p in by_fp.get(&(m.file.file_fingerprint as u32)).into_iter().flatten() {
-                cf_ids.insert(p.clone(), m.id);
+                cf_ids.insert(p.clone(), (m.id, m.file.clone()));
             }
         }
     }
@@ -1070,33 +1081,34 @@ pub fn identify_packs(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, c
         for (sha, v) in versions {
             for p in by_sha.get(&sha).into_iter().flatten() {
                 if !cf_ids.contains_key(p) {
-                    mr_ids.insert(p.clone(), v.project_id.clone());
+                    mr_ids.insert(p.clone(), (v.project_id.clone(), crate::modrinth::version_to_file(&v)));
                 }
             }
         }
     }
-    let mut out: HashMap<PathBuf, cf::Mod> = HashMap::new();
-    let mut ids: Vec<u64> = cf_ids.values().copied().collect();
+    let mut out: HashMap<PathBuf, PackMatch> = HashMap::new();
+    let mut ids: Vec<u64> = cf_ids.values().map(|(id, _)| *id).collect();
     ids.sort_unstable();
     ids.dedup();
     if !ids.is_empty()
         && let Ok(mods) = cf::get_mods(&ids)
     {
-        for (p, id) in &cf_ids {
+        for (p, (id, f)) in &cf_ids {
             if let Some(m) = mods.iter().find(|m| m.id == *id) {
-                out.insert(p.clone(), m.clone());
+                out.insert(p.clone(), PackMatch { project: m.clone(), file: Some(f.clone()) });
             }
         }
     }
-    let mut ids: Vec<String> = mr_ids.values().cloned().collect();
+    let mut ids: Vec<String> = mr_ids.values().map(|(id, _)| id.clone()).collect();
     ids.sort_unstable();
     ids.dedup();
     if !ids.is_empty()
         && let Ok(projects) = crate::modrinth::projects(&ids)
     {
-        for (p, id) in &mr_ids {
+        for (p, (id, f)) in &mr_ids {
             if let Some(pr) = projects.iter().find(|pr| pr.id == *id) {
-                out.insert(p.clone(), crate::modrinth::project_to_mod(pr, ""));
+                let project = crate::modrinth::project_to_mod(pr, "");
+                out.insert(p.clone(), PackMatch { project, file: Some(f.clone()) });
             }
         }
     }
@@ -1109,8 +1121,7 @@ pub fn identify_packs(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, c
             continue;
         }
         let same = |m: &cf::Mod| squash(&m.name) == want || squash(&m.slug) == want;
-        // Some data packs are published as mods (Modrinth's datapack loader).
-        let hit = [cf::CLASS_DATAPACKS, cf::CLASS_MODS].into_iter().find_map(|class_id| {
+        let hit = [class, cf::CLASS_MODS].into_iter().find_map(|class_id| {
             let s = cf::Search {
                 class_id,
                 text: name.clone(),
@@ -1126,10 +1137,73 @@ pub fn identify_packs(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, c
                 })
         });
         if let Some(m) = hit {
-            out.insert(p.clone(), m);
+            out.insert(p.clone(), PackMatch { project: m, file: None });
         }
     }
     out
+}
+
+/// A found pack's installed file and the newer one for the instance's
+/// Minecraft version, when there is one. A pack found by name is matched
+/// to a file of its project by file name; one that matches none has no
+/// known version, so nothing is offered for it.
+#[derive(Clone, Debug, Default)]
+pub struct PackVersion {
+    pub installed: Option<cf::File>,
+    pub update: Option<cf::File>,
+}
+
+/// [`PackVersion`]s of found packs (path → match), read eight at a time.
+pub fn loose_pack_versions(
+    inst: &Instance,
+    found: &[(PathBuf, PackMatch)],
+) -> std::collections::HashMap<PathBuf, PackVersion> {
+    let chunk = found.len().div_ceil(8).max(1);
+    std::thread::scope(|s| {
+        let parts: Vec<_> = found
+            .chunks(chunk)
+            .map(|part| {
+                s.spawn(move || {
+                    part.iter()
+                        .map(|(path, m)| (path.clone(), pack_version(inst, path, m)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    })
+}
+
+fn pack_version(inst: &Instance, path: &Path, m: &PackMatch) -> PackVersion {
+    let files = crate::source::files(m.project.id, &inst.game_version, crate::cf::Loader::Any).unwrap_or_default();
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let installed = m.file.clone().or_else(|| files.iter().find(|f| f.file_name == name).cloned());
+    let best = files.iter().find(|f| f.release_type == 1).or(files.first());
+    let update = match (&installed, best) {
+        (Some(i), Some(b)) if b.id != i.id && b.file_date > i.file_date => Some(b.clone()),
+        _ => None,
+    };
+    PackVersion { installed, update }
+}
+
+/// Replaces a pack with `file` of its project in the same folder; the old
+/// one goes to the instance's backups.
+pub fn update_pack(root: &Path, old: &Path, m: &cf::Mod, file: &cf::File, job: &Job) -> anyhow::Result<PathBuf> {
+    let dir = old.parent().context("the pack has no folder")?;
+    let new = install_datapack(dir, m, file, job)?;
+    if new != old {
+        crate::sync::backup_into(root, old)?;
+    }
+    Ok(new)
+}
+
+/// The version to show for a pack file: "3.1.0" of "Abibliophobia-3.1.0.zip".
+pub fn pack_version_label(file_name: &str) -> String {
+    let stem = file_name
+        .strip_suffix(".zip")
+        .or_else(|| file_name.strip_suffix(".jar"))
+        .unwrap_or(file_name);
+    crate::scan::short_version(&format!("{stem}.jar"))
 }
 
 #[cfg(test)]

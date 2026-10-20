@@ -211,6 +211,11 @@ pub fn site_color(modrinth: bool) -> Hsla {
     }
 }
 
+/// A filled button in a site's color: green for Modrinth, else the theme's.
+pub fn site_button(b: Button, modrinth: bool) -> Button {
+    if modrinth { b.success() } else { b.primary() }
+}
+
 /// A small tag naming a site, in its color.
 pub fn site_tag(modrinth: bool) -> gpui_kit::component::tag::Tag {
     let c = site_color(modrinth);

@@ -18,22 +18,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::instance_ops::{self, PackFile};
 use hopper::cf;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::SystemTime;
 
-/// Packs looked up on CurseForge and Modrinth, by (path, size, modified),
-/// kept for the session: `None` when neither site has it.
-static FOUND: Mutex<Option<HashMap<(PathBuf, u64, i64), Option<cf::Mod>>>> = Mutex::new(None);
-
-fn found_key(p: &PackFile) -> (PathBuf, u64, i64) {
-    (p.path.clone(), p.size, p.modified)
-}
-
-fn found(p: &PackFile) -> Option<Option<cf::Mod>> {
-    FOUND.lock().ok()?.as_ref()?.get(&found_key(p)).cloned()
-}
+use crate::pack_lookup::{self, found};
 
 /// Paxi's optional packs, offered when a world is made rather than loaded
 /// into every world.
@@ -224,35 +212,34 @@ impl DatapacksView {
     /// Looks up the shown packs not looked up yet on CurseForge and
     /// Modrinth, then fetches the found ones' icons.
     fn identify(&mut self, cx: &mut Context<Self>) {
-        let want: Vec<PackFile> = self.packs.iter().filter(|p| found(p).is_none()).cloned().collect();
         let urls: Vec<String> = self
             .packs
             .iter()
             .filter_map(|p| found(p).flatten())
-            .filter_map(|m| m.icon().map(str::to_string))
+            .filter_map(|f| f.project.icon().map(str::to_string))
             .chain(self.modpack.as_ref().map(|(i, _)| i.clone()))
             .collect();
         self.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
+        let want: Vec<PackFile> = self.packs.iter().filter(|p| found(p).is_none()).cloned().collect();
+        let Some(inst) = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).cloned() else {
+            return;
+        };
         if want.is_empty() {
             return;
         }
         cx.spawn(async move |this, cx| {
-            let paths: Vec<PathBuf> = want.iter().map(|p| p.path.clone()).collect();
-            let hits = cx
-                .background_spawn(async move { instance_ops::identify_packs(&paths) })
+            let want2 = want.clone();
+            let urls = cx
+                .background_spawn(async move { pack_lookup::look_up(&want2, cf::CLASS_DATAPACKS) })
                 .await;
-            if let Ok(mut g) = FOUND.lock() {
-                let map = g.get_or_insert_with(HashMap::new);
-                for p in &want {
-                    map.insert(found_key(p), hits.get(&p.path).cloned());
-                }
-            }
             this.update(cx, |this, cx| {
-                let urls: Vec<String> = hits.values().filter_map(|m| m.icon().map(str::to_string)).collect();
                 this.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
                 cx.notify();
             })
             .ok();
+            if cx.background_spawn(async move { pack_lookup::check_versions(&want, &inst) }).await {
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }
         })
         .detach();
     }
@@ -415,7 +402,8 @@ impl DatapacksView {
             })
             .collect();
         let view = cx.entity();
-        let project = found(p).flatten();
+        let hit = found(p).flatten();
+        let project = hit.as_ref().map(|f| f.project.clone());
         let store = self.store.read(cx);
         // A site's icon, else the pack's own pack.png, else the modpack's
         // for a pack that names it ("TNP Data").
@@ -492,9 +480,16 @@ impl DatapacksView {
                                 r.child(widgets::caption("from the modpack", cx).text_xs().flex_none())
                             }),
                     )
-                    .when(!blurb.is_empty(), |c| {
-                        c.child(widgets::caption(blurb, cx).text_xs().truncate())
-                    }),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .min_w_0()
+                            .children(hit.as_ref().and_then(|f| pack_lookup::version_tag(f, p, cx)))
+                            .when(!blurb.is_empty(), |c| {
+                                let one = blurb.split_whitespace().collect::<Vec<_>>().join(" ");
+                                c.child(widgets::caption(one, cx).text_xs().truncate())
+                            }),
+                    ),
             )
             .child(
                 widgets::caption(
@@ -512,6 +507,9 @@ impl DatapacksView {
                 .text_xs()
                 .flex_none(),
             )
+            .children(hit.as_ref().zip(self.root.clone()).and_then(|(f, root)| {
+                pack_lookup::update_button(id("dp-update"), &self.store, root, p, f)
+            }))
             .when_some(pid, |r, pid| {
                 r.child(
                     Button::new(id("dp-page"))

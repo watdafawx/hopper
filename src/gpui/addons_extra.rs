@@ -102,6 +102,7 @@ impl AddonsView {
             return;
         }
         let root = inst.root.clone();
+        let inst = inst.clone();
         cx.spawn(async move |this, cx| {
             let r2 = root.clone();
             let read = cx
@@ -124,6 +125,22 @@ impl AddonsView {
                 cx.notify();
             })
             .ok();
+            // Then which projects they are, their versions and updates.
+            let all: Vec<PackFile> = this
+                .update(cx, |this, _| this.globals.packs.values().flatten().cloned().collect())
+                .unwrap_or_default();
+            let all2 = all.clone();
+            let urls = cx
+                .background_spawn(async move { crate::pack_lookup::look_up(&all2, cf::CLASS_RESOURCE_PACKS) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
+                cx.notify();
+            })
+            .ok();
+            if cx.background_spawn(async move { crate::pack_lookup::check_versions(&all, &inst) }).await {
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }
         })
         .detach();
     }
@@ -221,9 +238,19 @@ impl AddonsView {
         let n = packs.len();
         let d2 = dir.clone();
         let root = inst.root.clone();
+        let store = self.store.read(cx);
         let rows = packs.iter().map(|p| {
             let (p1, p2, root) = (p.path.clone(), p.path.clone(), root.clone());
-            let icon = p.icon.clone();
+            let hit = crate::pack_lookup::found(p).flatten();
+            let pid = hit.as_ref().map(|f| f.project.id);
+            // The project's icon, else the pack's own pack.png.
+            let icon = hit
+                .as_ref()
+                .and_then(|f| f.project.icon())
+                .and_then(|u| store.image(u))
+                .map(|p| p.to_path_buf())
+                .or_else(|| p.icon.clone());
+            let gid = |k: &str| ElementId::Name(format!("{k}:{}", p.path.display()).into());
             h_flex()
                 .id(ElementId::Name(format!("gp:{}", p.path.display()).into()))
                 .h(rems(3.5))
@@ -245,10 +272,36 @@ impl AddonsView {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(div().text_sm().font_medium().truncate().child(p.name.clone()))
-                        .when(!p.description.is_empty(), |c| {
-                            c.child(widgets::caption(p.description.clone(), cx).text_xs())
-                        }),
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .id(gid("gp-name"))
+                                        .text_sm()
+                                        .font_medium()
+                                        .truncate()
+                                        .when_some(pid, |d, pid| {
+                                            d.cursor_pointer()
+                                                .hover(|s| s.text_color(theme.primary))
+                                                .on_click(cx.listener(move |this, _, _, cx| this.open_peek(pid, cx)))
+                                        })
+                                        .child(hit.as_ref().map_or_else(|| p.name.clone(), |f| f.project.name.clone())),
+                                )
+                                .children(hit.as_ref().map(|f| widgets::site_tag(f.project.modrinth.is_some()))),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .min_w_0()
+                                .children(hit.as_ref().and_then(|f| crate::pack_lookup::version_tag(f, p, cx)))
+                                // One line: a pack.mcmeta's description may run to several.
+                                .when(!p.description.is_empty(), |c| {
+                                    let one = p.description.split_whitespace().collect::<Vec<_>>().join(" ");
+                                    c.child(widgets::caption(one, cx).text_xs().truncate())
+                                }),
+                        ),
                 )
                 .child(
                     widgets::caption(
@@ -262,6 +315,19 @@ impl AddonsView {
                     .text_xs()
                     .flex_none(),
                 )
+                .children(hit.as_ref().and_then(|f| {
+                    crate::pack_lookup::update_button(gid("gp-update"), &self.store, root.clone(), p, f)
+                }))
+                .when_some(pid, |r, pid| {
+                    r.child(
+                        Button::new(gid("gp-page"))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Info)
+                            .tooltip("Details")
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_peek(pid, cx))),
+                    )
+                })
                 .child(
                     Button::new(ElementId::Name(format!("gp-open:{}", p.path.display()).into()))
                         .ghost()

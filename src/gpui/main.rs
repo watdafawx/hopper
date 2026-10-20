@@ -25,6 +25,7 @@ mod library;
 mod logs;
 mod mcp;
 mod nav;
+mod pack_lookup;
 mod pack_update;
 mod palette;
 mod peers;
