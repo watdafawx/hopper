@@ -1,6 +1,6 @@
 [package]
 name = "hopper"
-version = "0.8.49"
+version = "0.8.50"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
