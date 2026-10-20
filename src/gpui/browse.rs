@@ -1561,19 +1561,6 @@ impl BrowseView {
                 });
             })
         };
-        let sorts: Vec<(String, bool)> = SortField::ALL
-            .iter()
-            .map(|s| (s.name().to_string(), *s == self.sort))
-            .collect();
-        let pick_sort = {
-            let view = view.clone();
-            Rc::new(move |ix: usize, _: &mut Window, cx: &mut App| {
-                view.update(cx, |this, cx| {
-                    this.sort = SortField::ALL[ix];
-                    this.refilter(cx);
-                });
-            })
-        };
 
         let cats = self
             .categories
@@ -1660,16 +1647,7 @@ impl BrowseView {
                     )))
                 },
             )
-            .when(!self.bookmarked, |r| {
-                r.child(Self::section("SORT BY", cx).child(widgets::picker(
-                    "sort",
-                    self.sort.name().into(),
-                    sorts,
-                    rem,
-                    pick_sort,
-                )))
-                .child(Self::section("CATEGORY", cx).child(categories))
-            })
+            .when(!self.bookmarked, |r| r.child(Self::section("CATEGORY", cx).child(categories)))
             .overflow_y_scrollbar()
     }
 
@@ -2118,6 +2096,7 @@ impl BrowseView {
             && !self.loading
             && !self.results.is_empty()
             && (self.results.len() as u32) < self.total.min(10_000);
+        let sort_bar = saved.is_none().then(|| self.sort_bar(cx));
         let theme = cx.theme();
         v_flex()
             .flex_1()
@@ -2146,7 +2125,8 @@ impl BrowseView {
                                     .children(site_name)
                                     .when(!tail.is_empty(), |r| r.child(widgets::caption(tail, cx))),
                             )
-                            .when(self.loading && saved.is_none(), |r| r.child(Spinner::new().xsmall())),
+                            .when(self.loading && saved.is_none(), |r| r.child(Spinner::new().xsmall()))
+                            .when_some(sort_bar, |r, b| r.child(div().flex_1()).child(b)),
                     )
                     .when_some(self.error.clone(), |r, e| {
                         r.child(div().text_sm().text_color(theme.danger).child(e))
@@ -2273,6 +2253,67 @@ impl BrowseView {
                         .child(widgets::caption("Loading more", cx)),
                 )
             })
+    }
+
+    /// The sorts as a row of icons right of the results count: the picked
+    /// one in the site's color with its name, the rest named on hover.
+    fn sort_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let (muted, fg, hover, track, radius) =
+            (theme.muted_foreground, theme.foreground, theme.list_hover, theme.muted, theme.radius);
+        let color = site_color(self.modrinth);
+        let buttons: Vec<AnyElement> = SortField::ALL
+            .iter()
+            .map(|&f| {
+                let on = f == self.sort;
+                let icon = match f {
+                    SortField::Popularity => IconName::Flame,
+                    SortField::Featured => IconName::Star,
+                    SortField::TotalDownloads => IconName::Download,
+                    SortField::LastUpdated => IconName::RefreshCw,
+                    SortField::Released => IconName::Sparkles,
+                    SortField::Name => IconName::ArrowDownAZ,
+                };
+                let name = f.name();
+                h_flex()
+                    .id(ElementId::Name(format!("sort-{name}").into()))
+                    .h_7()
+                    .px_2()
+                    .gap_1p5()
+                    .rounded(radius)
+                    .text_sm()
+                    .cursor_pointer()
+                    .child(Icon::new(icon).small())
+                    .map(|d| {
+                        if on {
+                            d.bg(color.opacity(0.15)).text_color(color).font_medium().child(name)
+                        } else {
+                            d.text_color(muted)
+                                .hover(move |s| s.bg(hover).text_color(fg))
+                                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(name).build(w, cx))
+                        }
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.sort != f {
+                            this.sort = f;
+                            this.refilter(cx);
+                        }
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        h_flex()
+            .flex_none()
+            .gap_2()
+            .child(div().text_xs().font_semibold().text_color(muted).child("SORT"))
+            .child(
+                h_flex()
+                    .p_0p5()
+                    .gap_0p5()
+                    .rounded(radius * 1.5)
+                    .bg(track)
+                    .children(buttons),
+            )
     }
 
     // ---- detail --------------------------------------------------------
