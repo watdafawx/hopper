@@ -101,6 +101,8 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
                         button,
                         position,
                         click_count,
+                        // Held through `modifiers`, as for a Shift+click.
+                        modifiers: window.modifiers(),
                         ..Default::default()
                     }),
                     cx,
@@ -110,6 +112,8 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
                         button,
                         position,
                         click_count,
+                        // Held through `modifiers`, as for a Shift+click.
+                        modifiers: window.modifiers(),
                         ..Default::default()
                     }),
                     cx,
@@ -187,6 +191,16 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
             window.dispatch_keystroke(k, cx);
             done()
         }
+        Command::Modifiers { shift, ctrl, alt } => {
+            window.dispatch_event(
+                PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+                    modifiers: Modifiers { shift, control: ctrl, alt, ..Default::default() },
+                    ..Default::default()
+                }),
+                cx,
+            );
+            done()
+        }
     }
 }
 
@@ -194,6 +208,7 @@ fn move_to(position: Point<Pixels>, window: &mut Window, cx: &mut App) {
     window.dispatch_event(
         PlatformInput::MouseMove(MouseMoveEvent {
             position,
+            modifiers: window.modifiers(),
             ..Default::default()
         }),
         cx,

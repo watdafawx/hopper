@@ -41,6 +41,8 @@ pub enum Command {
     },
     Type(String),
     Key(String),
+    /// Holds (or lets go of) modifier keys, as for a Shift+click.
+    Modifiers { shift: bool, ctrl: bool, alt: bool },
 }
 
 pub type Reply = Result<Vec<Value>, String>;
@@ -117,6 +119,11 @@ fn tools() -> Value {
             "name": "key",
             "description": "Press a key: Enter, Escape, Tab, Backspace, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, PageUp, PageDown, Home, End, Delete.",
             "inputSchema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } }
+        },
+        {
+            "name": "modifiers",
+            "description": "Hold modifier keys until the next call (all false lets go): Shift, Ctrl, Alt.",
+            "inputSchema": { "type": "object", "properties": { "shift": { "type": "boolean" }, "ctrl": { "type": "boolean" }, "alt": { "type": "boolean" } } }
         }
     ])
 }
@@ -153,6 +160,11 @@ fn command_for(name: &str, args: &Value) -> Result<Command, String> {
         },
         "type" => Command::Type(args["text"].as_str().ok_or("missing 'text'")?.to_string()),
         "key" => Command::Key(args["name"].as_str().ok_or("missing 'name'")?.to_string()),
+        "modifiers" => Command::Modifiers {
+            shift: args["shift"].as_bool().unwrap_or(false),
+            ctrl: args["ctrl"].as_bool().unwrap_or(false),
+            alt: args["alt"].as_bool().unwrap_or(false),
+        },
         other => return Err(format!("unknown tool {other}")),
     })
 }
