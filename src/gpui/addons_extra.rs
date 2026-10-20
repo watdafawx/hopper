@@ -21,7 +21,8 @@ use gpui_kit::*;
 use hopper::cf;
 use hopper::deps::Missing;
 use hopper::instance_ops::PackFile;
-use hopper::instances::Instance;
+use hopper::install::Update;
+use hopper::instances::{Addon, Instance};
 use std::path::PathBuf;
 
 /// Global resource pack folders and the one shown.
@@ -122,7 +123,7 @@ impl AddonsView {
                     }
                 }
                 this.globals.packs = read;
-                cx.notify();
+                this.apply_global(cx);
             })
             .ok();
             // Then which projects they are, their versions and updates.
@@ -135,11 +136,11 @@ impl AddonsView {
                 .await;
             this.update(cx, |this, cx| {
                 this.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
-                cx.notify();
+                this.apply_global(cx);
             })
             .ok();
             if cx.background_spawn(async move { crate::pack_lookup::check_versions(&all, &inst) }).await {
-                this.update(cx, |_, cx| cx.notify()).ok();
+                this.update(cx, |this, cx| this.apply_global(cx)).ok();
             }
         })
         .detach();
@@ -218,202 +219,170 @@ impl AddonsView {
                         .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                             let picked = ix.checked_sub(1).and_then(|i| dirs.get(i)).map(|(d, _)| *d);
                             this.globals.picked = picked;
-                            cx.notify();
+                            this.selected.clear();
+                            this.resync(cx);
                         })),
                 )
                 .into_any_element(),
         )
     }
 
-    /// A global folder's packs, shown instead of the table.
-    pub(crate) fn global_packs(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.class != cf::CLASS_RESOURCE_PACKS {
-            return None;
-        }
-        let rel = self.globals.picked?;
-        let dir = inst.root.join(rel);
-        let theme = cx.theme();
-        let packs = self.picked_packs();
-        let loading = !self.globals.packs.contains_key(rel);
-        let n = packs.len();
-        let d2 = dir.clone();
-        let root = inst.root.clone();
-        let store = self.store.read(cx);
-        let rows = packs.iter().map(|p| {
-            let (p1, p2, root) = (p.path.clone(), p.path.clone(), root.clone());
+    /// The global folder picked (Paxi's), when Resource packs shows one.
+    pub(crate) fn global_dir(&self) -> Option<PathBuf> {
+        let rel = self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS)?;
+        Some(self.root.as_ref()?.join(rel))
+    }
+
+    /// With a global folder picked, the table shows its packs instead of
+    /// the instance's: each as a row like an installed pack, from what
+    /// the lookup found (project, author, version, update).
+    pub(crate) fn apply_global(&mut self, cx: &mut Context<Self>) {
+        let Some(rel) = self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS) else {
+            return;
+        };
+        let Some(real) = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)) else {
+            return;
+        };
+        let mut inst = real.clone_header();
+        let mut updates = std::collections::HashMap::new();
+        for p in self.globals.packs.get(rel).into_iter().flatten() {
+            let file = p.path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let enabled = !file.ends_with(".disabled");
+            let file_name = file.trim_end_matches(".disabled").to_string();
             let hit = crate::pack_lookup::found(p).flatten();
-            let pid = hit.as_ref().map(|f| f.project.id);
-            // The project's icon, else the pack's own pack.png.
-            let icon = hit
-                .as_ref()
-                .and_then(|f| f.project.icon())
-                .and_then(|u| store.image(u))
-                .map(|p| p.to_path_buf())
-                .or_else(|| p.icon.clone());
-            let gid = |k: &str| ElementId::Name(format!("{k}:{}", p.path.display()).into());
-            h_flex()
-                .id(ElementId::Name(format!("gp:{}", p.path.display()).into()))
-                .h(rems(3.5))
-                .px_3()
-                .gap_3()
-                .rounded(theme.radius)
-                .hover(|s| s.bg(theme.list_hover))
-                .child(match icon {
-                    Some(i) => div()
-                        .size_10()
-                        .flex_none()
-                        .rounded(theme.radius)
-                        .overflow_hidden()
-                        .child(img(i).size_full())
-                        .into_any_element(),
-                    None => widgets::thumb(None, rems(2.5), cx),
-                })
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .id(gid("gp-name"))
-                                        .text_sm()
-                                        .font_medium()
-                                        .truncate()
-                                        .when_some(pid, |d, pid| {
-                                            d.cursor_pointer()
-                                                .hover(|s| s.text_color(theme.primary))
-                                                .on_click(cx.listener(move |this, _, _, cx| this.open_peek(pid, cx)))
-                                        })
-                                        .child(hit.as_ref().map_or_else(|| p.name.clone(), |f| f.project.name.clone())),
-                                )
-                                .children(hit.as_ref().map(|f| widgets::site_tag(f.project.modrinth.is_some()))),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .min_w_0()
-                                .children(hit.as_ref().and_then(|f| crate::pack_lookup::version_tag(f, p, cx)))
-                                // One line: a pack.mcmeta's description may run to several.
-                                .when(!p.description.is_empty(), |c| {
-                                    let one = p.description.split_whitespace().collect::<Vec<_>>().join(" ");
-                                    c.child(widgets::caption(one, cx).text_xs().truncate())
-                                }),
-                        ),
-                )
-                .child(
-                    widgets::caption(
-                        format!(
-                            "{} · {:.1} MB",
-                            hopper::time::relative_secs(p.modified),
-                            p.size as f64 / 1_048_576.0
-                        ),
-                        cx,
-                    )
-                    .text_xs()
-                    .flex_none(),
-                )
-                .children(hit.as_ref().and_then(|f| {
-                    crate::pack_lookup::update_button(gid("gp-update"), &self.store, root.clone(), p, f)
-                }))
-                .when_some(pid, |r, pid| {
-                    r.child(
-                        Button::new(gid("gp-page"))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Info)
-                            .tooltip("Details")
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_peek(pid, cx))),
-                    )
-                })
-                .child(
-                    Button::new(ElementId::Name(format!("gp-open:{}", p.path.display()).into()))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::FolderOpen)
-                        .tooltip("Open")
-                        .on_click(move |_, _, _| open_path(&p1)),
-                )
-                .child(
-                    Button::new(ElementId::Name(format!("gp-rm:{}", p.path.display()).into()))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Trash)
-                        .tooltip("Move to .hopper-backups")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if let Err(e) = hopper::sync::backup_into(&root, &p2) {
-                                window.push_notification(Notification::error(format!("{e:#}")), cx);
-                            }
-                            if let Some(rel) = this.globals.picked
-                                && let Some(v) = this.globals.packs.get_mut(rel)
-                            {
-                                v.retain(|p| p.path.exists());
-                                let len = v.len();
-                                if let Some(i) = this.globals.dirs.iter().position(|(d, _)| *d == rel)
-                                    && let Some(n) = this.globals.counts.get_mut(i)
-                                {
-                                    *n = len;
-                                }
-                            }
-                            cx.notify();
-                        })),
-                )
-        });
-        let inst_root = inst.root.clone();
+            let mut a = Addon {
+                file_name: file_name.clone(),
+                name: p.name.trim_end_matches(".disabled").to_string(),
+                icon: p.icon.as_ref().map(|i| i.display().to_string()).unwrap_or_default(),
+                enabled,
+                from_pack: true,
+                class_id: cf::CLASS_RESOURCE_PACKS,
+                date_added: hopper::time::iso_from_secs(p.modified),
+                ..Default::default()
+            };
+            if let Some(f) = &hit {
+                let m = &f.project;
+                a.project_id = m.id;
+                a.name = m.name.clone();
+                a.author = m.authors.first().map(|x| x.name.clone()).unwrap_or_default();
+                a.icon = m.icon().map(str::to_string).unwrap_or(a.icon);
+                a.page = m.page();
+                a.mr_project = m.modrinth.as_ref().map(|_| m.slug.clone()).unwrap_or_default();
+                if let Some(i) = &f.version.installed {
+                    a.file_id = i.id;
+                    a.file_date = i.file_date.clone();
+                }
+                if let Some(u) = &f.version.update {
+                    updates.insert(
+                        m.id,
+                        Update { project_id: m.id, name: m.name.clone(), from: file_name.clone(), file: u.clone() },
+                    );
+                }
+            }
+            inst.addons.push(a);
+        }
+        self.table.inst = Some(std::rc::Rc::new(inst));
+        self.table.updates = std::rc::Rc::new(updates);
+        self.table.active_rp = Default::default();
+        self.table.rows_for = None;
+        self.ensure_rows();
+        self.want_images(cx);
+        cx.notify();
+    }
+
+    /// The path of `file` (as listed, without ".disabled") in the global
+    /// folder, as it is on disk now.
+    pub(crate) fn global_path(dir: &std::path::Path, file: &str) -> PathBuf {
+        let on = dir.join(file);
+        if on.exists() { on } else { dir.join(format!("{file}.disabled")) }
+    }
+
+    /// Switches packs in the global folder on or off: Paxi skips files
+    /// ending in ".disabled".
+    pub(crate) fn toggle_global(&mut self, dir: PathBuf, files: Vec<String>, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        for f in &files {
+            let from = Self::global_path(&dir, f);
+            let to = if on { dir.join(f) } else { dir.join(format!("{f}.disabled")) };
+            if from != to
+                && let Err(e) = std::fs::rename(&from, &to)
+            {
+                window.push_notification(Notification::error(format!("{f}: {e}")), cx);
+            }
+        }
+        self.reload_globals(cx);
+    }
+
+    /// Moves packs out of the global folder into the instance's backups.
+    pub(crate) fn remove_global(&mut self, dir: PathBuf, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let mut moved = 0;
+        for f in &files {
+            match hopper::sync::backup_into(&root, &Self::global_path(&dir, f)) {
+                Ok(_) => moved += 1,
+                Err(e) => window.push_notification(Notification::error(format!("{f}: {e:#}")), cx),
+            }
+        }
+        if moved > 0 {
+            let what = if moved == 1 { files[0].clone() } else { format!("{moved} packs") };
+            window.push_notification(Notification::success(format!("Moved {what} to .hopper-backups")), cx);
+        }
+        self.reload_globals(cx);
+    }
+
+    /// Updates packs in the global folder in place (the old file goes to
+    /// backups).
+    pub(crate) fn update_global(&mut self, dir: PathBuf, updates: Vec<Update>, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let Some(inst) = self.table.inst.clone() else { return };
+        for u in updates {
+            let Some(a) = inst.addons.iter().find(|a| a.project_id == u.project_id) else { continue };
+            let p = PackFile { path: Self::global_path(&dir, &a.file_name), ..Default::default() };
+            let project = cf::Mod { id: a.project_id, name: a.name.clone(), ..Default::default() };
+            let found = crate::pack_lookup::Found {
+                project,
+                version: hopper::instance_ops::PackVersion { installed: None, update: Some(u.file.clone()) },
+            };
+            crate::pack_lookup::update(&self.store, root.clone(), &p, &found, cx);
+        }
+    }
+
+    /// Reads the global folders again (after a change made here).
+    fn reload_globals(&mut self, cx: &mut Context<Self>) {
+        if let Some(inst) = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).cloned() {
+            self.load_globals(&inst, cx);
+        }
+    }
+
+    /// Above the table while a global folder is picked: what the folder
+    /// does, and Open folder.
+    pub(crate) fn global_header(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rel = self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS)?;
+        let dir = self.root.as_ref()?.join(rel);
+        let loading = !self.globals.packs.contains_key(rel);
+        let n = self.picked_packs().len();
         Some(
-            v_flex()
-                .size_full()
-                .gap_3()
+            h_flex()
+                .px_6()
+                .gap_2()
+                .child(widgets::caption(
+                    if loading {
+                        format!("Reading the packs in {rel}…")
+                    } else {
+                        format!("{n} packs in {rel}: the mod loads them for every world, in its load order. Switched off, a pack is skipped.")
+                    },
+                    cx,
+                ))
+                .child(div().flex_1())
                 .child(
-                    h_flex()
-                        .px_6()
-                        .gap_2()
-                        .child(widgets::caption(
-                            if loading {
-                                format!("Reading the packs in {rel}…")
-                            } else {
-                                format!("{n} packs in {rel}: the mod loads them for every world, always on, in its load order.")
-                            },
-                            cx,
-                        ))
-                        .child(div().flex_1())
-                        .child(
-                            Button::new("gp-add")
-                                .primary()
-                                .small()
-                                .icon(IconName::Plus)
-                                .label("Add resource packs")
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.emit(AddonsEvent::AddTo {
-                                        root: inst_root.clone(),
-                                        class: cf::CLASS_RESOURCE_PACKS,
-                                        dest: rel.to_string(),
-                                    })
-                                })),
-                        )
-                        .child(
-                            Button::new("gp-folder")
-                                .outline()
-                                .small()
-                                .icon(IconName::FolderOpen)
-                                .label("Open folder")
-                                .on_click(move |_, _, _| {
-                                    let _ = std::fs::create_dir_all(&d2);
-                                    open_path(&d2)
-                                }),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .id("global-packs")
-                        .flex_1()
-                        .min_h_0()
-                        .px_6()
-                        .pb_4()
-                        .children(rows)
-                        .overflow_y_scrollbar(),
+                    Button::new("gp-folder")
+                        .outline()
+                        .small()
+                        .icon(IconName::FolderOpen)
+                        .label("Open folder")
+                        .on_click(move |_, _, _| {
+                            let _ = std::fs::create_dir_all(&dir);
+                            open_path(&dir)
+                        }),
                 )
                 .into_any_element(),
         )

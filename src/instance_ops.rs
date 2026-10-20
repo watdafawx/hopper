@@ -503,9 +503,10 @@ pub fn datapacks(dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            p.is_dir()
-                || p.extension()
-                    .is_some_and(|x| x.eq_ignore_ascii_case("zip") || x.eq_ignore_ascii_case("jar"))
+            // Switched off (Paxi skips "x.zip.disabled") still counts.
+            let n = p.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+            let n = n.trim_end_matches(".disabled");
+            p.is_dir() || n.ends_with(".zip") || n.ends_with(".jar")
         })
         .collect();
     out.sort();
@@ -595,7 +596,7 @@ pub fn global_pack_projects(inst: &Instance) -> std::collections::HashMap<u64, &
 }
 
 /// A resource or data pack on disk, with what its pack.mcmeta says.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PackFile {
     pub path: PathBuf,
     /// File name with Minecraft's § formatting codes removed.
@@ -1052,8 +1053,10 @@ pub struct PackMatch {
 /// fingerprint, Modrinth's sha1), then the rest (folders, repacked zips)
 /// by a search for their name that must match a project's name or slug,
 /// among projects of `class` (or mods: some data packs are published as
-/// mods, for Modrinth's datapack loader).
-pub fn identify_packs(paths: &[PathBuf], class: u32) -> std::collections::HashMap<PathBuf, PackMatch> {
+/// mods, for Modrinth's datapack loader). The flag is false when a site
+/// didn't answer, so packs not found may be there after all.
+pub fn identify_packs(paths: &[PathBuf], class: u32) -> (std::collections::HashMap<PathBuf, PackMatch>, bool) {
+    let mut answered = true;
     use std::collections::HashMap;
     let mut by_fp: HashMap<u32, Vec<PathBuf>> = HashMap::new();
     let mut by_sha: HashMap<String, Vec<PathBuf>> = HashMap::new();
@@ -1065,19 +1068,24 @@ pub fn identify_packs(paths: &[PathBuf], class: u32) -> std::collections::HashMa
     // Path → (CurseForge id, file) or (Modrinth id, file).
     let mut cf_ids: HashMap<PathBuf, (u64, cf::File)> = HashMap::new();
     let mut mr_ids: HashMap<PathBuf, (String, cf::File)> = HashMap::new();
-    if !by_fp.is_empty()
-        && let Ok(matches) = cf::match_fingerprints(&by_fp.keys().copied().collect::<Vec<_>>())
-    {
-        for m in matches {
-            for p in by_fp.get(&(m.file.file_fingerprint as u32)).into_iter().flatten() {
-                cf_ids.insert(p.clone(), (m.id, m.file.clone()));
+    if !by_fp.is_empty() {
+        match cf::match_fingerprints(&by_fp.keys().copied().collect::<Vec<_>>()) {
+            Ok(matches) => {
+                for m in matches {
+                    for p in by_fp.get(&(m.file.file_fingerprint as u32)).into_iter().flatten() {
+                        cf_ids.insert(p.clone(), (m.id, m.file.clone()));
+                    }
+                }
             }
+            Err(_) => answered = false,
         }
     }
-    if !by_sha.is_empty()
-        && let Ok(versions) =
-            crate::modrinth::versions_by_sha1(&by_sha.keys().cloned().collect::<Vec<_>>())
-    {
+    let by_sha_result = (!by_sha.is_empty())
+        .then(|| crate::modrinth::versions_by_sha1(&by_sha.keys().cloned().collect::<Vec<_>>()));
+    if matches!(by_sha_result, Some(Err(_))) {
+        answered = false;
+    }
+    if let Some(Ok(versions)) = by_sha_result {
         for (sha, v) in versions {
             for p in by_sha.get(&sha).into_iter().flatten() {
                 if !cf_ids.contains_key(p) {
@@ -1140,7 +1148,7 @@ pub fn identify_packs(paths: &[PathBuf], class: u32) -> std::collections::HashMa
             out.insert(p.clone(), PackMatch { project: m, file: None });
         }
     }
-    out
+    (out, answered)
 }
 
 /// A found pack's installed file and the newer one for the instance's

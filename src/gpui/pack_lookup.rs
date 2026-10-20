@@ -71,7 +71,7 @@ pub fn look_up(packs: &[PackFile], class: u32) -> Vec<String> {
         return Vec::new();
     }
     let paths: Vec<PathBuf> = want.iter().map(|p| p.path.clone()).collect();
-    let hits = instance_ops::identify_packs(&paths, class);
+    let (hits, answered) = instance_ops::identify_packs(&paths, class);
     let mut icons = Vec::new();
     if let (Ok(mut g), Ok(mut u)) = (FOUND.lock(), UNCHECKED.lock()) {
         let (map, unchecked) = (g.get_or_insert_with(HashMap::new), u.get_or_insert_with(HashMap::new));
@@ -81,7 +81,11 @@ pub fn look_up(packs: &[PackFile], class: u32) -> Vec<String> {
                 unchecked.insert(key(p), m.clone());
                 Found { project: m.project.clone(), version: PackVersion::default() }
             });
-            map.insert(key(p), hit);
+            // A miss is remembered only when both sites answered; else the
+            // pack is looked up again next time it's shown.
+            if hit.is_some() || answered {
+                map.insert(key(p), hit);
+            }
         }
     }
     icons

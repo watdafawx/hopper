@@ -47,7 +47,7 @@ enum SortCol {
 
 /// One line of the table.
 #[derive(Clone)]
-enum Row {
+pub(crate) enum Row {
     /// Index into `Instance::addons`.
     Addon(usize),
     /// "N jars not from CurseForge".
@@ -110,25 +110,25 @@ const ROW_H: f32 = 3.5;
 /// store redraws every 50 ms while jobs run, and scrolling redraws every
 /// frame, so nothing here may read files or clone the instance per frame.
 #[derive(Default)]
-struct Table {
+pub(crate) struct Table {
     /// Fingerprint of the store state it was built from.
-    sig: Option<u64>,
-    inst: Option<Rc<Instance>>,
+    pub(crate) sig: Option<u64>,
+    pub(crate) inst: Option<Rc<Instance>>,
     /// Pending updates of this tab's class, by project.
-    updates: Rc<HashMap<u64, Update>>,
+    pub(crate) updates: Rc<HashMap<u64, Update>>,
     /// Lower-case resource pack files switched on in game.
-    active_rp: Rc<HashSet<String>>,
+    pub(crate) active_rp: Rc<HashSet<String>>,
     /// The shader pack on in game, as options say it.
-    shader: Option<String>,
-    has_shader_loader: bool,
+    pub(crate) shader: Option<String>,
+    pub(crate) has_shader_loader: bool,
     /// The filtered, sorted rows, and the filters they are for.
-    rows: Rc<Vec<Row>>,
-    rows_for: Option<RowsKey>,
+    pub(crate) rows: Rc<Vec<Row>>,
+    pub(crate) rows_for: Option<RowsKey>,
 }
 
 /// The view's filters and sort, as the rows were built for them.
 #[derive(Clone, PartialEq)]
-struct RowsKey {
+pub(crate) struct RowsKey {
     query: String,
     show: Show,
     added_only: bool,
@@ -416,11 +416,11 @@ pub struct AddonsView {
     added_only: bool,
     updates_first: bool,
     sort: (SortCol, bool),
-    selected: HashSet<String>,
+    pub(crate) selected: HashSet<String>,
     /// Jars in the mods folder Hopper doesn't track, by folder mtime.
     loose: (Option<(PathBuf, std::time::SystemTime)>, Vec<String>),
     /// What the table shows, built when it changes rather than per frame.
-    table: Table,
+    pub(crate) table: Table,
     scroll: UniformListScrollHandle,
     /// A mod's project page, docked on the right.
     peek: Entity<crate::browse::BrowseView>,
@@ -571,6 +571,7 @@ impl AddonsView {
         );
         self.want_images(cx);
         self.want_marks(cx);
+        self.apply_global(cx);
     }
 
     /// Reads the folders again and rebuilds the table.
@@ -597,7 +598,7 @@ impl AddonsView {
     }
 
     /// Re-filters and re-sorts the rows when a filter changed (in memory).
-    fn ensure_rows(&mut self) {
+    pub(crate) fn ensure_rows(&mut self) {
         let key = self.rows_key();
         if self.table.rows_for.as_ref() == Some(&key) {
             return;
@@ -667,7 +668,7 @@ impl AddonsView {
         }
     }
 
-    fn want_images(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn want_images(&mut self, cx: &mut Context<Self>) {
         let (Some(inst), class) = (self.table.inst.clone(), self.class) else {
             return;
         };
@@ -827,6 +828,9 @@ impl AddonsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(dir) = self.global_dir() {
+            return self.toggle_global(dir, files, on, window, cx);
+        }
         let Some(root) = self.root.clone() else { return };
         let (related, mode) = {
             let s = self.store.read(cx);
@@ -984,6 +988,9 @@ impl AddonsView {
     }
 
     fn ask_remove(&mut self, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dir) = self.global_dir() {
+            return self.remove_global(dir, files, window, cx);
+        }
         let what = self.describe(&files, cx);
         let warnings = self.dependents(&files, cx);
         // Libraries nothing else needs once these go: offered, ticked.
@@ -1289,6 +1296,9 @@ impl AddonsView {
     }
 
     fn run_updates(&mut self, updates: Vec<Update>, cx: &mut Context<Self>) {
+        if let Some(dir) = self.global_dir() {
+            return self.update_global(dir, updates, cx);
+        }
         let Some(root) = &self.root else { return };
         let store = self.store.read(cx);
         // A running update job queues these; any other job holds the
@@ -1391,11 +1401,18 @@ impl AddonsView {
                     .icon(IconName::Plus)
                     .label("Add content")
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(root) = this.root.clone() {
-                            cx.emit(AddonsEvent::AddContent {
+                        let Some(root) = this.root.clone() else { return };
+                        // With Paxi's folder shown, what's added goes there.
+                        match this.globals.picked.filter(|_| this.class == cf::CLASS_RESOURCE_PACKS) {
+                            Some(rel) => cx.emit(AddonsEvent::AddTo {
                                 root,
                                 class: this.class,
-                            });
+                                dest: rel.to_string(),
+                            }),
+                            None => cx.emit(AddonsEvent::AddContent {
+                                root,
+                                class: this.class,
+                            }),
                         }
                     })),
             )
@@ -1889,7 +1906,11 @@ impl AddonsView {
             .and_then(|r| store.edit_hold_reason(r));
         // `Some(true)` downloading now, `Some(false)` queued.
         let updating = self.root.as_ref().and_then(|r| store.update_state(r, a.project_id));
-        let icon = store.image(&a.icon).map(Path::to_path_buf);
+        // A Paxi pack no site knows shows its own pack.png.
+        let global = self.global_dir().is_some();
+        let icon = store.image(&a.icon).map(Path::to_path_buf).or_else(|| {
+            (global && !a.icon.starts_with("http")).then(|| PathBuf::from(&a.icon)).filter(|p| p.is_file())
+        });
         let file = a.file_name.clone();
         let picked = self.selected.contains(&file);
         let dim = !a.enabled;
@@ -2110,7 +2131,11 @@ impl AddonsView {
                                     ),
                             ),
                             None => {
-                                let v = hopper::scan::short_version(&a.file_name);
+                                let v = if global {
+                                    hopper::instance_ops::pack_version_label(&a.file_name)
+                                } else {
+                                    hopper::scan::short_version(&a.file_name)
+                                };
                                 (!v.is_empty()).then(|| {
                                     chip.bg(theme.muted)
                                         .text_color(theme.muted_foreground)
@@ -2260,12 +2285,12 @@ impl AddonsView {
                 )
                 .when(!page.is_empty(), |m| {
                     m.item(
-                        PopupMenuItem::new("Open on CurseForge")
+                        PopupMenuItem::new(if mr { "Open on Modrinth" } else { "Open on CurseForge" })
                             .icon(IconName::ExternalLink)
                             .on_click(move |_, _, cx| cx.open_url(&page)),
                     )
                 })
-                .when(has_project, |m| {
+                .when(has_project && !global, |m| {
                     m.item(
                         PopupMenuItem::new(if mr {
                             "Switch to CurseForge"
@@ -2282,7 +2307,7 @@ impl AddonsView {
                         }),
                     )
                 })
-                .item(
+                .when(!global, |m| m.item(
                     PopupMenuItem::new(if locked {
                         "Allow updates"
                     } else {
@@ -2298,7 +2323,7 @@ impl AddonsView {
                             this.set_locks(vec![f3.clone()], !locked, window, cx)
                         })
                     }),
-                )
+                ))
                 .item(
                     PopupMenuItem::new(if on { "Disable" } else { "Enable" }).on_click(
                         move |_, window, cx| {
@@ -2325,12 +2350,20 @@ impl AddonsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.global_dir().is_some() {
+            return self.open_peek(pid, cx);
+        }
         if let Some(root) = self.root.clone() {
             crate::versions::open(self.store.clone(), root, pid, false, update, window, cx);
         }
     }
 
     fn show_in_folder(&self, file: &str, cx: &App) {
+        if let Some(dir) = self.global_dir() {
+            let path = Self::global_path(&dir, file);
+            let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+            return;
+        }
         let Some(root) = &self.root else { return };
         if let Some(inst) = self.store.read(cx).instance(root)
             && let Some(a) = inst.addon_by_file(file)
@@ -2421,14 +2454,7 @@ impl Render for AddonsView {
             return div().into_any_element();
         };
         let tabs = self.pack_tabs(cx);
-        if let Some(global) = self.global_packs(&inst, cx) {
-            return v_flex()
-                .size_full()
-                .gap_3()
-                .children(tabs)
-                .child(global)
-                .into_any_element();
-        }
+        let global_head = self.global_header(cx);
         let missing = self.missing_banner(&inst, cx);
         let dups = self.duplicate_banner(&inst, cx);
         let shaders = self.shader_notes(&inst, cx);
@@ -2488,6 +2514,7 @@ impl Render for AddonsView {
         let list = v_flex()
             .gap_3()
             .children(tabs)
+            .children(global_head)
             .child(toolbar)
             .children(dups)
             .children(missing)
