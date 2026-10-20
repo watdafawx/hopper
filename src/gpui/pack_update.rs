@@ -470,14 +470,20 @@ impl Render for UpdatePreview {
                 },
                 cx,
             ))
-            .child(
+            // Loaded, the list fills the window-tall dialog and scrolls;
+            // before that the "comparing" line sizes itself (a flex child
+            // with no height to share collapses to nothing).
+            .child(if loaded {
                 div()
                     .id("update-preview")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .child(body),
-            )
+                    .child(body)
+                    .into_any_element()
+            } else {
+                body
+            })
     }
 }
 
