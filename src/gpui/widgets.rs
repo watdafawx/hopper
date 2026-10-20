@@ -366,11 +366,52 @@ pub fn picker(
     rem: Pixels,
     on_pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
 ) -> impl IntoElement {
+    picker_with(id, label, None, items.into_iter().map(|(l, c)| (l, c, None)).collect(), rem, on_pick)
+}
+
+/// What a [`picker_with`] entry shows before its name: a single-color
+/// logo (asset path and color) or a picture file.
+#[derive(Clone)]
+pub enum PickIcon {
+    Svg(&'static str, Hsla),
+    Image(std::path::PathBuf),
+}
+
+impl PickIcon {
+    fn icon(&self) -> Option<Icon> {
+        match self {
+            PickIcon::Svg(path, color) => Some(Icon::new(IconName::Box).path(*path).text_color(*color)),
+            PickIcon::Image(_) => None,
+        }
+    }
+}
+
+/// [`picker`] with an icon or picture beside each entry, and the picked
+/// one's logo on the button.
+pub fn picker_with(
+    id: &'static str,
+    label: String,
+    lead: Option<PickIcon>,
+    items: Vec<(String, bool, Option<PickIcon>)>,
+    rem: Pixels,
+    on_pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+) -> impl IntoElement {
     Button::new(id)
         .outline()
         .small()
         .w_full()
-        .label(label)
+        // Logo and name as one child, so the caret's spacing keeps them
+        // together on the left.
+        .map(|b| match lead.and_then(|l| l.icon()) {
+            Some(i) => b.child(
+                h_flex()
+                    .min_w_0()
+                    .gap_1p5()
+                    .child(i.small().flex_none())
+                    .child(div().min_w_0().truncate().child(label)),
+            ),
+            None => b.label(label),
+        })
         .dropdown_caret(true)
         .dropdown_menu(move |menu: PopupMenu, _, _| {
             let mut menu = menu
@@ -381,13 +422,22 @@ pub fn picker(
             if items.is_empty() {
                 menu = menu.item(PopupMenuItem::new("Loading versions…").disabled(true));
             }
-            for (ix, (l, checked)) in items.iter().enumerate() {
+            for (ix, (l, checked, icon)) in items.iter().enumerate() {
                 let f = on_pick.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(l.clone())
-                        .checked(*checked)
-                        .on_click(move |_, w, cx| f(ix, w, cx)),
-                );
+                let item = match icon {
+                    Some(PickIcon::Image(path)) => {
+                        let (path, l) = (path.clone(), l.clone());
+                        PopupMenuItem::element(move |_, _| {
+                            h_flex()
+                                .gap_2()
+                                .child(img(path.clone()).size(rems(1.25)).rounded_sm().flex_none())
+                                .child(l.clone())
+                        })
+                    }
+                    Some(i) => PopupMenuItem::new(l.clone()).when_some(i.icon(), |it, i| it.icon(i)),
+                    None => PopupMenuItem::new(l.clone()),
+                };
+                menu = menu.item(item.checked(*checked).on_click(move |_, w, cx| f(ix, w, cx)));
             }
             menu
         })

@@ -9,6 +9,7 @@ mod backups_view;
 mod image_viewer;
 mod anim;
 mod app;
+mod brand;
 mod browse;
 mod configs;
 mod content;
@@ -81,7 +82,7 @@ fn main() {
         return;
     }
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
+        .with_assets(brand::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
             gpui_kit::component::set_locale("en");

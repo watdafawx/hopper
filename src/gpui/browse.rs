@@ -1326,7 +1326,7 @@ impl BrowseView {
                 .rounded(radius)
                 .text_sm()
                 .cursor_pointer()
-                .child(div().size_2().rounded_full().bg(if on { gpui_kit::white() } else { color }))
+                .child(crate::brand::site_icon(modrinth).small().text_color(if on { gpui_kit::white() } else { color }))
                 .child(label)
                 .map(|d| {
                     if on {
@@ -1364,13 +1364,18 @@ impl BrowseView {
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let rem = window.rem_size();
-        let instances: Vec<(PathBuf, String)> = self
-            .store
-            .read(cx)
-            .instances()
-            .iter()
-            .map(|i| (i.root.clone(), i.name.clone()))
-            .collect();
+        // Each instance with its icon, for the Install into list.
+        let instances: Vec<(PathBuf, String, Option<PathBuf>)> = {
+            let store = self.store.read(cx);
+            store
+                .instances()
+                .iter()
+                .map(|i| {
+                    let icon = i.icon.as_deref().and_then(|u| store.image(u)).map(Path::to_path_buf);
+                    (i.root.clone(), i.name.clone(), icon)
+                })
+                .collect()
+        };
         let classes = v_flex()
             .gap_0p5()
             .children(CLASSES.iter().map(|(id, icon, name)| {
@@ -1442,9 +1447,9 @@ impl BrowseView {
                 });
             })
         };
-        let target_items: Vec<(String, bool)> = instances
+        let target_items: Vec<(String, bool, Option<widgets::PickIcon>)> = instances
             .iter()
-            .map(|(r, n)| (n.clone(), self.target.as_ref() == Some(r)))
+            .map(|(r, n, icon)| (n.clone(), self.target.as_ref() == Some(r), icon.clone().map(widgets::PickIcon::Image)))
             .collect();
 
         let dest_picker = target.and_then(|inst| {
@@ -1543,9 +1548,9 @@ impl BrowseView {
                 });
             })
         };
-        let loaders: Vec<(String, bool)> = Loader::ALL
+        let loaders: Vec<(String, bool, Option<widgets::PickIcon>)> = Loader::ALL
             .iter()
-            .map(|l| (l.name().to_string(), *l == self.loader))
+            .map(|l| (l.name().to_string(), *l == self.loader, crate::brand::loader(l.name())))
             .collect();
         let pick_loader = {
             let view = view.clone();
@@ -1619,11 +1624,12 @@ impl BrowseView {
             .child(Self::section("TYPE", cx).child(classes))
             // A modpack installs as its own new instance.
             .when(self.class != cf::CLASS_MODPACKS || self.bookmarked, |r| {
-                r.child(Self::section("INSTALL INTO", cx).child(widgets::picker(
+                r.child(Self::section("INSTALL INTO", cx).child(widgets::picker_with(
                     "target",
                     target
                         .as_ref()
                         .map_or("Pick an instance".into(), |t| t.name.clone()),
+                    None,
                     target_items,
                     rem,
                     pick_target,
@@ -1644,9 +1650,10 @@ impl BrowseView {
             .when(
                 !self.bookmarked && matches!(self.class, cf::CLASS_MODS | cf::CLASS_MODPACKS),
                 |r| {
-                    r.child(Self::section("LOADER", cx).child(widgets::picker(
+                    r.child(Self::section("LOADER", cx).child(widgets::picker_with(
                         "loader",
                         self.loader.name().into(),
+                        crate::brand::loader(self.loader.name()),
                         loaders,
                         rem,
                         pick_loader,
