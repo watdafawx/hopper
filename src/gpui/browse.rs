@@ -1608,7 +1608,8 @@ impl BrowseView {
             .w_64()
             .flex_none()
             .h_full()
-            .bg(theme.sidebar)
+            // Lets the page's site color through (see `render`).
+            .bg(theme.sidebar.opacity(0.6))
             .border_r_1()
             .border_color(theme.sidebar_border)
             .px_4()
@@ -2117,13 +2118,6 @@ impl BrowseView {
             .h_full()
             // A hint of the site's color, so it's clear where results come
             // from (the saved list mixes both).
-            .when(!self.bookmarked, |r| {
-                r.bg(linear_gradient(
-                    180.,
-                    linear_color_stop(site_color(self.modrinth).opacity(0.07), 0.),
-                    linear_color_stop(site_color(self.modrinth).opacity(0.), 0.55),
-                ))
-            })
             .child(
                 v_flex()
                     .px_6()
@@ -3413,6 +3407,16 @@ impl Render for BrowseView {
         h_flex()
             .size_full()
             .items_stretch()
+            // The site's color fades in from the top across the whole page,
+            // under the filters and the project panel too, which let it
+            // show through.
+            .when(!self.bookmarked, |r| {
+                r.bg(linear_gradient(
+                    180.,
+                    linear_color_stop(site_color(self.modrinth).opacity(0.07), 0.),
+                    linear_color_stop(site_color(self.modrinth).opacity(0.), 0.55),
+                ))
+            })
             .on_drop(cx.listener(|this, _: &PanelResize, _, cx| this.end_resize(cx)))
             .child(filters)
             .child(results)
@@ -3507,7 +3511,8 @@ impl BrowseView {
                 .h_full()
                 .border_l_1()
                 .border_color(theme.border)
-                .bg(theme.sidebar)
+                // In Browse, the page's site color shows through.
+                .bg(if peek { theme.sidebar } else { theme.sidebar.opacity(0.6) })
                 .on_drag_move(drag_move)
                 .on_drop(drop)
                 .child(widgets::slide_in(id, div().size_full().child(body)))
