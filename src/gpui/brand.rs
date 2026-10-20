@@ -50,3 +50,19 @@ pub fn loader(name: &str) -> Option<crate::widgets::PickIcon> {
     };
     Some(crate::widgets::PickIcon::Svg(path, color))
 }
+
+/// Screenshots of getting a CurseForge API key (the account and key
+/// blanked out): the console's API keys link, then its copy button.
+pub fn cf_key_steps() -> [std::sync::Arc<Image>; 2] {
+    use std::sync::{Arc, OnceLock};
+    static STEPS: OnceLock<[Arc<Image>; 2]> = OnceLock::new();
+    STEPS
+        .get_or_init(|| {
+            let png = |b: &[u8]| Arc::new(Image::from_bytes(ImageFormat::Png, b.to_vec()));
+            [
+                png(include_bytes!("../../assets/cfkey/step1.png")),
+                png(include_bytes!("../../assets/cfkey/step2.png")),
+            ]
+        })
+        .clone()
+}

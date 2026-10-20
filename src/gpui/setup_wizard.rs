@@ -435,7 +435,7 @@ impl SetupWizard {
         let step = |n: &'static str, text: AnyElement| {
             h_flex()
                 .gap_2p5()
-                .items_center()
+                .items_start()
                 .child(
                     div()
                         .flex_none()
@@ -451,6 +451,25 @@ impl SetupWizard {
                         .child(n),
                 )
                 .child(div().flex_1().min_w_0().child(text))
+        };
+        // A step's words over a screenshot of where to click.
+        let shots = crate::brand::cf_key_steps();
+        // Sized from each picture's shape: an image sized by width alone
+        // lays out at its own pixel height.
+        let shot = |text: &'static str, image: std::sync::Arc<Image>, aspect: f32, border: Hsla| {
+            const W: f32 = 26.;
+            v_flex()
+                .gap_1p5()
+                .child(text)
+                .child(
+                    img(image)
+                        .w(rems(W))
+                        .h(rems(W / aspect))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(border),
+                )
+                .into_any_element()
         };
         let how = v_flex()
             .text_sm()
@@ -477,8 +496,9 @@ impl SetupWizard {
                     .child("and sign in.")
                     .into_any_element(),
             ))
-            .child(step("2", div().child("Go to API keys, and create or copy your key.").into_any_element()))
-            .child(step("3", div().child("Paste it here, then Test.").into_any_element()));
+            .child(step("2", shot("Click API keys on the left.", shots[0].clone(), 1100. / 420., theme.border)))
+            .child(step("3", shot("Copy your key with the copy button beside it.", shots[1].clone(), 1450. / 420., theme.border)))
+            .child(step("4", div().child("Paste it here, then Test.").into_any_element()));
         let field = h_flex()
             .gap_2()
             .child(div().flex_1().min_w_0().child(Input::new(&self.cf_key).mask_toggle()))
