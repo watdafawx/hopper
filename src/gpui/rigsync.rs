@@ -1212,6 +1212,7 @@ impl SyncPanel {
             .child(
                 div().flex_1().min_w_0().child(widgets::mod_tags(
                     widgets::ModTags {
+                        key: &m.file_name,
                         new: tags.new,
                         added: tags.added,
                         // The line under the name already says client-only.

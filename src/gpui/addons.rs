@@ -1797,6 +1797,7 @@ impl AddonsView {
 
         let tags = widgets::mod_tags(
             widgets::ModTags {
+                key: &file,
                 in_use: flags.in_use,
                 new: flags.new,
                 added: flags.added,

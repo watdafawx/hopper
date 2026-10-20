@@ -146,6 +146,8 @@ pub fn caption(text: impl Into<SharedString>, cx: &App) -> Div {
 /// What a mod's badge row says. Anything empty or false is left out.
 #[derive(Clone, Copy, Default)]
 pub struct ModTags<'a> {
+    /// Unique among the rows (a file name): ids the "+n" chip's tooltip.
+    pub key: &'a str,
     pub in_use: bool,
     pub new: bool,
     /// Added on top of the pack.
@@ -186,12 +188,15 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
                 .map(|c| Tag::secondary().xsmall().flex_none().child(c.clone())),
         )
         .when(more > 0, |r| {
+            let rest: SharedString = t.categories[MOD_TAG_CATEGORIES..].join(", ").into();
             r.child(
                 div()
+                    .id(ElementId::Name(format!("more-tags:{}", t.key).into()))
                     .flex_none()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("+{more}")),
+                    .child(format!("+{more}"))
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(rest.clone()).build(w, cx)),
             )
         })
         .when(t.modrinth, |r| r.child(tag(Tag::secondary(), "Modrinth".into())))
