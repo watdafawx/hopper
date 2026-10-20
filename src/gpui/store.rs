@@ -158,6 +158,10 @@ pub struct Store {
     instances: Vec<Instance>,
     running: HashMap<PathBuf, Running>,
     jobs: Jobs,
+    /// Notified when only a running job's detail or progress moved, which
+    /// the tasks button shows: observing the store would redraw whole pages
+    /// up to 20 times a second through a download.
+    job_ticks: Entity<JobTicks>,
     images: HashMap<String, Image>,
     anims: HashMap<String, Anim>,
     /// Ready clips' keys, oldest first.
@@ -242,6 +246,11 @@ impl Store {
             let dirty = dirty.clone();
             Arc::new(move || dirty.store(true, Ordering::Relaxed))
         };
+        let ticked = Arc::new(AtomicBool::new(false));
+        let tick: hopper::waker::Waker = {
+            let ticked = ticked.clone();
+            Arc::new(move || ticked.store(true, Ordering::Relaxed))
+        };
         let watched = Arc::new(Mutex::new(Vec::new()));
         {
             let (watched, tx, wake) = (watched.clone(), tx.clone(), wake.clone());
@@ -265,7 +274,8 @@ impl Store {
             settings,
             instances: Vec::new(),
             running: HashMap::new(),
-            jobs: Jobs::new(wake.clone()),
+            jobs: Jobs::with_ticker(wake.clone(), tick),
+            job_ticks: cx.new(|_| JobTicks),
             images: HashMap::new(),
             anims: HashMap::new(),
             anims_ready: Default::default(),
@@ -302,7 +312,7 @@ impl Store {
             watched,
             tx,
             wake,
-            _poll: Self::poll(rx, dirty, cx),
+            _poll: Self::poll(rx, dirty, ticked, cx),
         };
         store.refresh();
         store.reload_accounts();
@@ -525,7 +535,7 @@ impl Store {
     }
 
     /// Drains worker messages and redraws when anything changed.
-    fn poll(rx: Receiver<Msg>, dirty: Arc<AtomicBool>, cx: &mut Context<Self>) -> Task<()> {
+    fn poll(rx: Receiver<Msg>, dirty: Arc<AtomicBool>, ticked: Arc<AtomicBool>, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -533,8 +543,15 @@ impl Store {
                     .await;
                 let msgs: Vec<Msg> = rx.try_iter().collect();
                 if msgs.is_empty() && !dirty.swap(false, Ordering::Relaxed) {
+                    if ticked.swap(false, Ordering::Relaxed) {
+                        let alive = this.update(cx, |s, cx| s.job_ticks.update(cx, |_, cx| cx.notify()));
+                        if alive.is_err() {
+                            break;
+                        }
+                    }
                     continue;
                 }
+                ticked.store(false, Ordering::Relaxed);
                 let alive = this.update(cx, |store, cx| {
                     for m in msgs {
                         store.handle(m, cx);
@@ -936,6 +953,12 @@ impl Store {
 
     pub fn jobs(&self) -> &Jobs {
         &self.jobs
+    }
+
+    /// See [`Store::job_ticks`](Self#structfield.job_ticks): observe it to
+    /// follow running jobs' progress.
+    pub fn job_ticks(&self) -> &Entity<JobTicks> {
+        &self.job_ticks
     }
 
     /// The local file for an image URL once it is cached.
@@ -2493,3 +2516,6 @@ fn hosted_meta(opts: &hopper::hosting::CreateOptions) -> hopper::hosting::Hosted
         },
     }
 }
+
+/// Notified as running jobs' detail and progress move (see `Store::job_ticks`).
+pub struct JobTicks;

@@ -31,12 +31,16 @@ pub struct TasksButton {
     started: bool,
     /// Files in the air: (job id, where they took off).
     flights: Vec<(u64, Point<Pixels>)>,
-    _sub: Subscription,
+    _subs: [Subscription; 2],
 }
 
 impl TasksButton {
     pub fn new(store: Entity<Store>, cx: &mut Context<Self>) -> Self {
-        let sub = cx.observe(&store, |_, _, cx| cx.notify());
+        let ticks = store.read(cx).job_ticks().clone();
+        let subs = [
+            cx.observe(&store, |_, _, cx| cx.notify()),
+            cx.observe(&ticks, |_, _, cx| cx.notify()),
+        ];
         Self {
             store,
             open: false,
@@ -45,7 +49,7 @@ impl TasksButton {
             seen: HashSet::new(),
             started: false,
             flights: Vec::new(),
-            _sub: sub,
+            _subs: subs,
         }
     }
 

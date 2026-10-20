@@ -24,6 +24,9 @@ pub struct JobState {
 pub struct Jobs {
     inner: Arc<Mutex<(u64, Vec<JobState>)>>,
     waker: Option<crate::waker::Waker>,
+    /// Wakes the UI for a running job's detail or progress only, which
+    /// just the tasks list shows: pages needn't redraw for it.
+    ticker: Option<crate::waker::Waker>,
     /// Cancel flags of jobs still listed, by id.
     cancels: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
 }
@@ -41,7 +44,16 @@ impl Jobs {
         Self {
             inner: Default::default(),
             waker: Some(waker),
+            ticker: None,
             cancels: Default::default(),
+        }
+    }
+
+    /// Like [`Jobs::new`], with detail and progress waking `ticker` instead.
+    pub fn with_ticker(waker: crate::waker::Waker, ticker: crate::waker::Waker) -> Self {
+        Self {
+            ticker: Some(ticker),
+            ..Self::new(waker)
         }
     }
 
@@ -130,6 +142,20 @@ impl Jobs {
     }
 
     fn update(&self, id: u64, f: impl FnOnce(&mut JobState)) {
+        self.change(id, f);
+        self.repaint();
+    }
+
+    /// An update only the tasks list shows.
+    fn tick(&self, id: u64, f: impl FnOnce(&mut JobState)) {
+        self.change(id, f);
+        match &self.ticker {
+            Some(t) => t(),
+            None => self.repaint(),
+        }
+    }
+
+    fn change(&self, id: u64, f: impl FnOnce(&mut JobState)) {
         if let Some(j) = self
             .inner
             .lock()
@@ -140,7 +166,6 @@ impl Jobs {
         {
             f(j);
         }
-        self.repaint();
     }
 }
 
@@ -164,7 +189,7 @@ impl Job {
 
     pub fn detail(&self, d: impl Into<String>) {
         let d = d.into();
-        self.jobs.update(self.id, |j| j.detail = d);
+        self.jobs.tick(self.id, |j| j.detail = d);
     }
 
     pub fn progress(&self, done: usize, total: usize) {
@@ -173,7 +198,7 @@ impl Job {
         } else {
             Some(done as f32 / total as f32)
         };
-        self.jobs.update(self.id, |j| j.progress = p);
+        self.jobs.tick(self.id, |j| j.progress = p);
     }
 
     /// Asks for a Windows notification when it finishes fine too.
@@ -219,6 +244,27 @@ mod tests {
         // The running job can still be cancelled.
         jobs.cancel(running_id(&jobs));
         assert!(running.is_cancelled());
+    }
+
+    #[test]
+    fn progress_wakes_the_ticker_and_the_rest_wake_the_page() {
+        use std::sync::atomic::AtomicUsize;
+        let (woke, ticked) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (w, t) = (woke.clone(), ticked.clone());
+        let jobs = Jobs::with_ticker(
+            Arc::new(move || {
+                w.fetch_add(1, Ordering::Relaxed);
+            }),
+            Arc::new(move || {
+                t.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let job = jobs.start("download");
+        job.progress(1, 4);
+        job.detail("1 of 4");
+        job.finish(&anyhow::Ok(()));
+        assert_eq!((woke.load(Ordering::Relaxed), ticked.load(Ordering::Relaxed)), (2, 2));
+        assert_eq!(jobs.snapshot()[0].detail, "1 of 4");
     }
 
     fn running_id(jobs: &Jobs) -> u64 {

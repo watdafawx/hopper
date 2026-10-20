@@ -154,7 +154,7 @@ pub struct BrowseView {
     /// redraw it alone.
     desc: Entity<DescView>,
     /// The filter and results columns (made on first draw, see [`Part`]).
-    parts: Option<(Entity<Part>, Entity<Part>)>,
+    parts: Option<(Entity<Part>, Entity<Part>, Entity<Part>)>,
     /// Open the first result when it arrives (`--detail`, for scripted runs).
     open_first: bool,
     /// Only the project panel, docked beside an instance's mod list.
@@ -2992,11 +2992,14 @@ impl BrowseView {
     }
 }
 
-/// An install button: "Installing…" with a spinner while its install runs,
-/// and off with the reason while the instance can't be changed.
+/// An install button: "Installing…" with an hourglass while its install
+/// runs, and off with the reason while the instance can't be changed.
+/// Not a spinner: an animation redraws the whole column it sits in (every
+/// card, or the panel and its description) each frame, which dropped
+/// frames through every install. The tasks button shows it's moving.
 fn install_button(b: Button, label: &'static str, pending: bool, hold: Option<&'static str>) -> Button {
     b.label(if pending { "Installing…" } else { label })
-        .loading(pending)
+        .when(pending, |b| b.icon(IconName::Hourglass))
         .disabled(pending || hold.is_some())
         .when_some(hold.filter(|_| !pending), |b, why| b.tooltip(why))
 }
@@ -3368,19 +3371,30 @@ impl Render for BrowseView {
             });
         }
         let view = cx.entity();
-        let (filters, results) = self
+        let (filters, results, panel) = self
             .parts
             .get_or_insert_with(|| {
                 (
                     Part::new(&view, |b, t, w, cx| b.filters(t, w, cx).into_any_element(), cx),
                     Part::new(&view, |b, t, _, cx| b.results(t, cx).into_any_element(), cx),
+                    Part::new(
+                        &view,
+                        |b, t, w, cx| b.panel(t, w, cx).unwrap_or_else(|| div().into_any_element()),
+                        cx,
+                    ),
                 )
             })
             .clone();
         let filters = AnyView::from(filters).cached(StyleRefinement::default().w_64().flex_none().h_full());
         let results = AnyView::from(results).cached(StyleRefinement::default().flex_1().min_w_0().h_full());
-        let target = self.target(cx);
-        let detail = self.panel(target.as_ref(), window, cx);
+        // The panel too, so a redraw from above (a file flying into the
+        // tasks button) doesn't rebuild the project and its description
+        // every frame. Outside a peek it's open only with a project or an
+        // author picked.
+        let detail = (self.selected.is_some() || self.author.is_some()).then(|| {
+            let w = self.panel_width(window, cx);
+            AnyView::from(panel).cached(StyleRefinement::default().w(rems(w)).flex_none().h_full())
+        });
         h_flex()
             .size_full()
             .items_stretch()
