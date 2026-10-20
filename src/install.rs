@@ -670,7 +670,13 @@ pub fn check_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
             })
         })
         .collect();
-    out.extend(modrinth_updates(inst)?);
+    // Modrinth failing (a timeout, say) leaves CurseForge's updates up
+    // rather than none; with none to show, its error shows instead.
+    match modrinth_updates(inst) {
+        Ok(mr) => out.extend(mr),
+        Err(e) if !out.is_empty() => log::warn!("Modrinth updates for {}: {e:#}", inst.name),
+        Err(e) => return Err(e),
+    }
     Ok(out)
 }
 
@@ -702,7 +708,9 @@ fn modrinth_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
         return Ok(Vec::new());
     }
     let hashes: Vec<String> = mr.iter().map(|a| a.mr_sha1.clone()).collect();
-    let latest = crate::modrinth::latest_by_sha1(&hashes, &inst.game_version, loader_of(inst))?;
+    // One retry: a connection that times out once usually goes through.
+    let latest = crate::modrinth::latest_by_sha1(&hashes, &inst.game_version, loader_of(inst))
+        .or_else(|_| crate::modrinth::latest_by_sha1(&hashes, &inst.game_version, loader_of(inst)))?;
     let channel = inst.settings.release_channel;
     Ok(mr
         .into_iter()
