@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 /// Ids every loader provides itself.
 const BUILTIN: &[&str] = &[
@@ -181,20 +182,36 @@ fn inspect(zip: &mut zip::ZipArchive<impl Read + std::io::Seek>, depth: u8) -> J
     info
 }
 
-fn jar(path: &Path) -> Option<JarInfo> {
+/// Each jar read so far, by path, with the size and modified time it had:
+/// the Mods tab's scan fills it, so a later check (what removing a mod
+/// breaks) reads only jars that changed instead of the whole pack again.
+type JarCache = HashMap<PathBuf, (u64, Option<std::time::SystemTime>, Arc<JarInfo>)>;
+static JARS: LazyLock<Mutex<JarCache>> = LazyLock::new(Default::default);
+
+fn jar(path: &Path) -> Option<Arc<JarInfo>> {
+    let meta = std::fs::metadata(path).ok()?;
+    let stamp = (meta.len(), meta.modified().ok());
+    let cache = || JARS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((len, at, info)) = cache().get(path)
+        && (*len, *at) == stamp
+    {
+        return Some(info.clone());
+    }
     let mut z = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
-    Some(inspect(&mut z, 0))
+    let info = Arc::new(inspect(&mut z, 0));
+    cache().insert(path.to_path_buf(), (stamp.0, stamp.1, info.clone()));
+    Some(info)
 }
 
 /// The mod ids a jar provides (nested jars included).
 pub fn provides(path: &Path) -> Vec<String> {
-    jar(path).map(|j| j.provides).unwrap_or_default()
+    jar(path).map(|j| j.provides.clone()).unwrap_or_default()
 }
 
 /// The mod ids a jar itself is, without the ones nested inside it, and
 /// its display name (empty when it has none).
 pub fn own_ids(path: &Path) -> (Vec<String>, String) {
-    jar(path).map(|j| (j.own, j.name)).unwrap_or_default()
+    jar(path).map(|j| (j.own.clone(), j.name.clone())).unwrap_or_default()
 }
 
 /// Required mod ids no enabled jar in `mods_dir` provides.
@@ -217,7 +234,7 @@ pub fn missing_without(mods_dir: &Path, without: &[String]) -> Vec<Missing> {
     let is = |p: &Path, ext: &str| p.to_string_lossy().to_lowercase().ends_with(ext);
     let enabled: Vec<&PathBuf> = entries.iter().filter(|p| is(p, ".jar")).collect();
     let disabled: Vec<&PathBuf> = entries.iter().filter(|p| is(p, ".jar.disabled")).collect();
-    let read_all = |list: &[&PathBuf]| -> Vec<(PathBuf, JarInfo)> {
+    let read_all = |list: &[&PathBuf]| -> Vec<(PathBuf, Arc<JarInfo>)> {
         let chunk = list.len().div_ceil(8).max(1);
         std::thread::scope(|s| {
             let parts: Vec<_> = list

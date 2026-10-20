@@ -1716,7 +1716,8 @@ impl Store {
     }
 
     /// Deletes files (to the Recycle Bin) without keeping a backup.
-    pub fn delete_files(&mut self, root: &Path, files: &[String]) -> Result<(), String> {
+    /// Deletes files to the Recycle Bin, or for good with `permanent`.
+    pub fn delete_files(&mut self, root: &Path, files: &[String], permanent: bool) -> Result<(), String> {
         let inst = self
             .instances
             .iter_mut()
@@ -1730,9 +1731,11 @@ impl Store {
             .map(|a| a.project_id)
             .collect();
         for f in files {
-            match inst.addons.iter().position(|a| &a.file_name == f) {
-                Some(i) => install::delete(inst, i),
-                None => install::delete_loose_file(inst, f),
+            match (inst.addons.iter().position(|a| &a.file_name == f), permanent) {
+                (Some(i), false) => install::delete(inst, i),
+                (Some(i), true) => install::purge(inst, i),
+                (None, false) => install::delete_loose_file(inst, f),
+                (None, true) => install::purge_loose_file(inst, f),
             }
             .map_err(|e| format!("{e:#}"))?;
         }

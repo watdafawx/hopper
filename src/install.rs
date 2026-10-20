@@ -537,6 +537,33 @@ pub fn delete(inst: &mut Instance, idx: usize) -> anyhow::Result<()> {
     inst.save()
 }
 
+/// Deletes an installed file at once, skipping the Recycle Bin (Shift with
+/// Delete). One the game holds open leaves for the Recycle Bin once it
+/// lets go, as a locked file can't be removed now.
+pub fn purge(inst: &mut Instance, idx: usize) -> anyhow::Result<()> {
+    let a = inst.addons.get(idx).context("no such mod")?.clone();
+    purge_path(&inst.root, &inst.addon_path(&a))?;
+    inst.addons.remove(idx);
+    inst.save()
+}
+
+/// [`purge`] for a jar Hopper does not track.
+pub fn purge_loose_file(inst: &Instance, file_name: &str) -> anyhow::Result<()> {
+    purge_path(&inst.root, &inst.mods_dir().join(file_name))
+}
+
+fn purge_path(root: &std::path::Path, path: &std::path::Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let r = if path.is_dir() { fs::remove_dir_all(path) } else { fs::remove_file(path) }
+        .with_context(|| format!("deleting {}", path.display()));
+    match r {
+        Err(e) if crate::locked::is_locked(&e) => crate::locked::queue(root, path, true),
+        r => r,
+    }
+}
+
 /// [`delete`] for a jar Hopper does not track.
 pub fn delete_loose_file(inst: &Instance, file_name: &str) -> anyhow::Result<()> {
     move_out(&inst.root, &inst.mods_dir().join(file_name), true)

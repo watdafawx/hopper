@@ -223,15 +223,76 @@ struct Removed {
 }
 
 /// A dialog's text: a line, then each warning with a triangle.
-fn warning_list(intro: &'static str, warnings: &[String], cx: &App) -> Div {
+/// Opens a project in the Library's panel, from inside a dialog.
+type Peek = Rc<dyn Fn(u64, &mut Window, &mut App)>;
+
+/// A mod's name that opens it in the panel beside the page (when it's a
+/// project), leaving the dialog open.
+fn peek_link(id: impl Into<ElementId>, name: String, pid: u64, peek: &Peek, cx: &App) -> AnyElement {
+    if pid == 0 {
+        return div().flex_none().child(name).into_any_element();
+    }
+    let (peek, fg) = (peek.clone(), cx.theme().foreground);
+    div()
+        .id(id.into())
+        .flex_none()
+        .cursor_pointer()
+        .underline()
+        .hover(move |s| s.text_color(fg))
+        .child(name)
+        .on_click(move |_, window, cx| peek(pid, window, cx))
+        .into_any_element()
+}
+
+/// Mods' names in a wrapping row, each opening its project: the first
+/// `cap`, then "and n more" with the rest in a tooltip.
+fn peek_links(key: &str, lead: String, mods: &[(String, u64)], cap: usize, peek: &Peek, cx: &App) -> Div {
+    let n = mods.len();
+    let rest: SharedString = mods.iter().skip(cap).map(|(m, _)| m.as_str()).collect::<Vec<_>>().join(", ").into();
+    h_flex()
+        .flex_wrap()
+        .gap_x_1()
+        .min_w_0()
+        .children(lead.split(' ').map(|w| div().flex_none().child(w.to_string())))
+        .children(mods.iter().take(cap).enumerate().map(|(i, (name, pid))| {
+            let comma = i + 1 < n.min(cap) || n > cap;
+            h_flex()
+                .flex_none()
+                .child(peek_link(ElementId::Name(format!("{key}:{i}").into()), name.clone(), *pid, peek, cx))
+                .when(comma, |r| r.child(","))
+        }))
+        .when(n > cap, |r| {
+            r.child(
+                div()
+                    .id(ElementId::Name(format!("{key}:more").into()))
+                    .flex_none()
+                    .child(format!("and {} more", n - cap))
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(rest.clone()).build(w, cx)),
+            )
+        })
+}
+
+/// The intro, then "X is required by A, B" for each mod being removed that
+/// others need, wrapping so a long list stays inside the dialog.
+fn warning_list(intro: &'static str, warnings: &[Dependent], peek: &Peek, cx: &App) -> Div {
     let color = cx.theme().warning;
-    v_flex().gap_2().child(intro).children(warnings.iter().map(|w| {
+    v_flex().gap_2().child(intro).children(warnings.iter().enumerate().map(|(i, d)| {
         h_flex()
+            .items_start()
             .gap_2()
             .text_color(color)
-            .child(Icon::new(IconName::TriangleAlert).small())
-            .child(w.clone())
+            .child(div().flex_none().pt_0p5().child(Icon::new(IconName::TriangleAlert).small()))
+            .child(
+                peek_links(&format!("req{i}"), format!("{} is required by", d.name), &d.by, 12, peek, cx)
+                    .flex_1(),
+            )
     }))
+}
+
+/// A mod being removed and the enabled mods that need it.
+struct Dependent {
+    name: String,
+    by: Vec<(String, u64)>,
 }
 
 /// What removing some jars would leave other mods without.
@@ -264,17 +325,17 @@ impl Breaks {
         Self { lost, provides }
     }
 
-    /// "X needs y" for what removing `gone` breaks (mods being removed too
-    /// don't count).
-    fn after(&self, gone: &[String]) -> Vec<String> {
-        let mut out: Vec<String> = self
+    /// (the mod, its jar, the id it needs) for what removing `gone` breaks
+    /// (mods being removed too don't count).
+    fn after(&self, gone: &[String]) -> Vec<(String, String, String)> {
+        let mut out: Vec<(String, String, String)> = self
             .lost
             .iter()
             .filter(|(_, jar, _)| !gone.contains(jar))
             .filter(|(_, _, id)| {
                 gone.iter().any(|g| self.provides.get(g).is_some_and(|p| p.contains(id)))
             })
-            .map(|(name, _, id)| format!("{name} needs {id}"))
+            .cloned()
             .collect();
         out.dedup();
         out
@@ -722,9 +783,8 @@ impl AddonsView {
         }
     }
 
-    /// "X is required by A, B." for each of `files` that enabled mods
-    /// outside `files` need.
-    fn dependents(&self, files: &[String], cx: &App) -> Vec<String> {
+    /// Each of `files` that enabled mods outside `files` need, with them.
+    fn dependents(&self, files: &[String], cx: &App) -> Vec<Dependent> {
         let Some(root) = &self.root else { return Vec::new() };
         let Some(inst) = self.store.read(cx).instance(root) else {
             return Vec::new();
@@ -733,8 +793,13 @@ impl AddonsView {
             .iter()
             .filter_map(|f| inst.addon_by_file(f))
             .filter_map(|a| {
-                let by = inst.required_by(a.project_id, files);
-                (!by.is_empty()).then(|| format!("{} is required by {}.", a.name, by.join(", ")))
+                let by: Vec<(String, u64)> = inst
+                    .addons
+                    .iter()
+                    .filter(|b| b.enabled && b.requires.contains(&a.project_id) && !files.contains(&b.file_name))
+                    .map(|b| (b.name.clone(), b.project_id))
+                    .collect();
+                (!by.is_empty()).then(|| Dependent { name: a.name.clone(), by })
             })
             .collect()
     }
@@ -969,6 +1034,25 @@ impl AddonsView {
             .detach();
         }
         let view = cx.entity();
+        // Each jar's project, so a mod named in the dialog opens in the panel.
+        let pids: Rc<HashMap<String, u64>> = Rc::new(
+            self.root
+                .as_ref()
+                .and_then(|r| self.store.read(cx).instance(r))
+                .map(|i| i.addons.iter().map(|a| (a.file_name.clone(), a.project_id)).collect())
+                .unwrap_or_default(),
+        );
+        // Focus inside the dialog's body, so Shift going down or up reaches
+        // its listener (they're called along the focused element's path).
+        let body_focus = cx.focus_handle();
+        let peek: Peek = {
+            let view = view.clone();
+            Rc::new(move |pid, window, cx| {
+                view.update(cx, |v, cx| v.open_peek(pid, cx));
+                window.refresh();
+            })
+        };
+        let focus_later = body_focus.clone();
         window.open_dialog(cx, move |dialog, window, cx| {
             let with = {
                 let (files, picked) = (files.clone(), picked.clone());
@@ -978,6 +1062,10 @@ impl AddonsView {
             };
             let (files, view, w2) = (with(), view.clone(), what.clone());
             let (f2, v2, w3) = (with(), view.clone(), what.clone());
+            // Shift turns Delete into deleting for good.
+            let shift = window.modifiers().shift;
+            // With a mod open in the panel, the page isn't dimmed so it reads.
+            let peeking = view.read(cx).peek().read(cx).is_open();
             let libs = (!orphans.is_empty()).then(|| {
                 v_flex()
                     .gap_1p5()
@@ -990,27 +1078,48 @@ impl AddonsView {
                     .children(orphans.iter().enumerate().map(|(i, (file, name))| {
                         let (p, file) = (picked.clone(), file.clone());
                         let on = picked.borrow().contains(&file);
-                        gpui_kit::component::checkbox::Checkbox::new(("orphan", i))
-                            .label(name.clone())
-                            .checked(on)
-                            .on_click(move |v: &bool, window, _| {
-                                if *v {
-                                    p.borrow_mut().insert(file.clone());
-                                } else {
-                                    p.borrow_mut().remove(&file);
-                                }
-                                window.refresh();
+                        let pid = pids.get(&file).copied().unwrap_or(0);
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                gpui_kit::component::checkbox::Checkbox::new(("orphan", i))
+                                    .label(name.clone())
+                                    .checked(on)
+                                    .on_click(move |v: &bool, window, _| {
+                                        if *v {
+                                            p.borrow_mut().insert(file.clone());
+                                        } else {
+                                            p.borrow_mut().remove(&file);
+                                        }
+                                        window.refresh();
+                                    }),
+                            )
+                            .when(pid != 0, |r| {
+                                let peek = peek.clone();
+                                r.child(
+                                    Button::new(("orphan-peek", i))
+                                        .icon(IconName::PanelRight)
+                                        .xsmall()
+                                        .ghost()
+                                        .tooltip("Show in the panel")
+                                        .on_click(move |_, window, cx| peek(pid, window, cx)),
+                                )
                             })
                     }))
             });
             dialog
                 .title(format!("Remove {what}?"))
                 .w(rems(30.).to_pixels(window.rem_size()))
-                .child(warning_list(
-                    "Move to backups keeps a copy in .hopper-backups in the instance folder, with Undo. Delete sends the files to the Recycle Bin.",
-                    &warnings,
-                    cx,
-                ))
+                .overlay(!peeking)
+                .child(
+                    // Redraws as Shift goes down or up, for the Delete button.
+                    div().track_focus(&body_focus).on_modifiers_changed(|_, window, _| window.refresh()).child(warning_list(
+                        "Move to backups keeps a copy in .hopper-backups in the instance folder, with Undo. Delete sends the files to the Recycle Bin; hold Shift to delete them for good.",
+                        &warnings,
+                        &peek,
+                        cx,
+                    )),
+                )
                 .children(libs)
                 .child(match &*breaks.borrow() {
                     None => h_flex()
@@ -1043,7 +1152,15 @@ impl AddonsView {
                                         .child(Icon::new(IconName::TriangleAlert).small())
                                         .child("The game won't start without these:"),
                                 )
-                                .children(hits.iter().take(12).map(|h| div().text_sm().child(h.clone())))
+                                .children(hits.iter().take(12).enumerate().map(|(i, (name, jar, id))| {
+                                    let pid = pids.get(jar).copied().unwrap_or(0);
+                                    h_flex()
+                                        .flex_wrap()
+                                        .gap_1()
+                                        .text_sm()
+                                        .child(peek_link(("hit", i), name.clone(), pid, &peek, cx))
+                                        .child(format!("needs {id}"))
+                                }))
                                 .when(hits.len() > 12, |c| {
                                     c.child(widgets::caption(format!("and {} more", hits.len() - 12), cx).text_xs())
                                 })
@@ -1056,12 +1173,13 @@ impl AddonsView {
                         .child(DialogClose::new().child(Button::new("remove-cancel").ghost().label("Cancel")))
                         .child(
                             Button::new("remove-delete")
-                                .outline()
-                                .danger()
+                                .when(shift, |b| b.danger())
+                                .when(!shift, |b| b.outline().danger())
                                 .icon(IconName::Trash)
-                                .label("Delete")
+                                .label(if shift { "Delete permanently" } else { "Delete" })
                                 .on_click(move |_, window, cx| {
-                                    v2.update(cx, |v, cx| v.delete(f2.clone(), w3.clone(), window, cx));
+                                    let permanent = window.modifiers().shift;
+                                    v2.update(cx, |v, cx| v.delete(f2.clone(), w3.clone(), permanent, window, cx));
                                     window.close_dialog(cx);
                                 }),
                         )
@@ -1074,17 +1192,21 @@ impl AddonsView {
                     true
                 })
         });
+        window.defer(cx, move |window, cx| window.focus(&focus_later, cx));
     }
 
-    /// Deletes files (to the Recycle Bin), no backup kept.
-    fn delete(&mut self, files: Vec<String>, what: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Deletes files (to the Recycle Bin, or for good with `permanent`),
+    /// no backup kept.
+    fn delete(&mut self, files: Vec<String>, what: String, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
         let r = self.store.update(cx, |s, cx| {
-            let r = s.delete_files(&root, &files);
+            let r = s.delete_files(&root, &files, permanent);
             cx.notify();
             r
         });
         let n = match r {
+            Ok(()) if permanent && files.len() == 1 => Notification::success(format!("Deleted {what} for good")),
+            Ok(()) if permanent => Notification::success(format!("Deleted {} files for good", files.len())),
             Ok(()) if files.len() == 1 => Notification::success(format!("Deleted {what} (it's in the Recycle Bin)")),
             Ok(()) => Notification::success(format!("Deleted {} files (they're in the Recycle Bin)", files.len())),
             Err(e) => Notification::error(e),
