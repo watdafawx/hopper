@@ -424,6 +424,12 @@ pub struct AddonsView {
     scroll: UniformListScrollHandle,
     /// A mod's project page, docked on the right.
     peek: Entity<crate::browse::BrowseView>,
+    /// A data pack folder shown instead of the instance's content
+    /// (instance-relative), and its packs once read.
+    pub(crate) folder: Option<String>,
+    pub(crate) folder_packs: Option<Vec<hopper::instance_ops::PackFile>>,
+    /// Other data pack folders a pack can move to: (label, relative path).
+    pub(crate) move_targets: Vec<(String, String)>,
     /// Whether the Author column fits; set each frame from the window.
     author_fits: bool,
     _subscriptions: Vec<Subscription>,
@@ -431,8 +437,18 @@ pub struct AddonsView {
 
 impl AddonsView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let peek = cx.new(|cx| crate::browse::BrowseView::peek(store.clone(), window, cx));
+        Self::with_peek(store, peek, window, cx)
+    }
+
+    /// A table that opens projects in `peek` (another table's panel).
+    pub fn with_peek(
+        store: Entity<Store>,
+        peek: Entity<crate::browse::BrowseView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let subs = vec![
             cx.observe(&peek, |_, _, cx| cx.notify()),
             cx.observe(&store, |this, _, cx| {
@@ -454,6 +470,9 @@ impl AddonsView {
             root: None,
             class: cf::CLASS_MODS,
             globals: Default::default(),
+            folder: None,
+            folder_packs: None,
+            move_targets: Vec::new(),
             marks: None,
             missing: Default::default(),
             search,
@@ -1403,11 +1422,15 @@ impl AddonsView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let Some(root) = this.root.clone() else { return };
                         // With Paxi's folder shown, what's added goes there.
-                        match this.globals.picked.filter(|_| this.class == cf::CLASS_RESOURCE_PACKS) {
+                        let rel = this
+                            .folder
+                            .clone()
+                            .or_else(|| this.globals.picked.filter(|_| this.class == cf::CLASS_RESOURCE_PACKS).map(str::to_string));
+                        match rel {
                             Some(rel) => cx.emit(AddonsEvent::AddTo {
                                 root,
                                 class: this.class,
-                                dest: rel.to_string(),
+                                dest: rel,
                             }),
                             None => cx.emit(AddonsEvent::AddContent {
                                 root,
@@ -1430,7 +1453,7 @@ impl AddonsView {
                         cx.notify();
                     })),
             )
-            .when(inst.pack.is_some(), |r| {
+            .when(inst.pack.is_some() && self.global_dir().is_none(), |r| {
                 r.child(
                     Checkbox::new("added-only")
                         .label(format!("Added by me ({n_added})"))
@@ -2020,6 +2043,7 @@ impl AddonsView {
         });
 
         let view = cx.entity();
+        let move_targets = if global { self.move_targets.clone() } else { Vec::new() };
         let (pid_menu, update_file) = (a.project_id, update.map(|u| u.file.clone()));
         let (page, locked, mr, has_project) = (
             a.page.clone(),
@@ -2255,7 +2279,20 @@ impl AddonsView {
                 let (f1, f2, f3, f4, f5) = (f.clone(), f.clone(), f.clone(), f.clone(), f.clone());
                 let page = page.clone();
                 let (v6, v7) = (view.clone(), view.clone());
+                let moves: Vec<(String, String, Entity<Self>, String)> = move_targets
+                    .iter()
+                    .map(|(label, rel)| (label.clone(), rel.clone(), view.clone(), f.clone()))
+                    .collect();
                 let upd = update_file.clone();
+                let menu = moves.into_iter().fold(menu, |m, (label, rel, v, file)| {
+                    m.item(
+                        PopupMenuItem::new(format!("Move to {label}"))
+                            .icon(IconName::ArrowRightLeft)
+                            .on_click(move |_, window, cx| {
+                                v.update(cx, |this, cx| this.move_global(file.clone(), rel.clone(), window, cx))
+                            }),
+                    )
+                });
                 menu.when(has_project, |m| {
                     m.item(
                         PopupMenuItem::new("Open in Browse")

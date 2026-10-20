@@ -23,8 +23,6 @@ pub enum ContentEvent {
     Browse { class: u32, dest: Option<String> },
     /// Search Browse by name.
     Find { text: String },
-    /// Show a project's panel beside the tab.
-    Peek { project: u64 },
 }
 
 /// "1 world", "3 worlds".

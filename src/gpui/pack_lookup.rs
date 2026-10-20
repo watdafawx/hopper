@@ -4,7 +4,6 @@
 //! tabs share it.
 
 use crate::store::{Msg, Store};
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::cf;
 use hopper::instance_ops::{self, PackFile, PackMatch, PackVersion};
@@ -20,29 +19,6 @@ pub struct Found {
     pub version: PackVersion,
 }
 
-impl Found {
-    /// "3.1.0", or "3.1.0 → 3.2.0" with an update; empty when unknown.
-    pub fn label(&self, p: &PackFile) -> (String, Option<String>) {
-        let name = |f: &cf::File| instance_ops::pack_version_label(&f.file_name);
-        let have = self
-            .version
-            .installed
-            .as_ref()
-            .map(name)
-            .unwrap_or_else(|| instance_ops::pack_version_label(&p.path.file_name().unwrap_or_default().to_string_lossy()));
-        match &self.version.update {
-            Some(u) => {
-                let (from, to) = hopper::install::version_change(
-                    &self.version.installed.as_ref().map_or(String::new(), |f| f.file_name.clone()),
-                    &u.file_name,
-                );
-                let strip = |s: String| s.trim_end_matches(".zip").to_string();
-                (strip(from), Some(strip(to)))
-            }
-            None => (have, None),
-        }
-    }
-}
 
 type Key = (PathBuf, u64, i64);
 
@@ -126,46 +102,4 @@ pub fn update(store: &Entity<Store>, root: PathBuf, p: &PackFile, f: &Found, cx:
         job.detail(format!("Now {}", new.file_name().unwrap_or_default().to_string_lossy()));
         Ok(Msg::InstanceChanged(root))
     });
-}
-
-/// The version a found pack is, with "→ newer" in the update color when
-/// there is one, for the line under its name.
-pub fn version_tag(f: &Found, p: &PackFile, cx: &App) -> Option<AnyElement> {
-    use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex};
-    let (have, to) = f.label(p);
-    if have.is_empty() && to.is_none() {
-        return None;
-    }
-    let theme = cx.theme();
-    Some(
-        h_flex()
-            .flex_none()
-            .gap_1()
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .child(have)
-            .when_some(to, |r, to| {
-                r.child(Icon::new(gpui_kit::assets::IconName::ArrowRight).xsmall().text_color(theme.warning))
-                    .child(div().text_color(theme.warning).font_weight(FontWeight::SEMIBOLD).child(to))
-            })
-            .into_any_element(),
-    )
-}
-
-/// An Update button for a found pack with a newer file.
-pub fn update_button(id: ElementId, store: &Entity<Store>, root: PathBuf, p: &PackFile, f: &Found) -> Option<AnyElement> {
-    use gpui_kit::component::Sizable as _;
-    use gpui_kit::component::button::Button;
-    let new = f.version.update.as_ref()?;
-    let tip = format!("Update to {}", new.display_name);
-    let (store, p, f) = (store.clone(), p.clone(), f.clone());
-    Some(
-        crate::widgets::site_button(Button::new(id), f.project.modrinth.is_some())
-            .xsmall()
-            .icon(gpui_kit::assets::IconName::Download)
-            .label("Update")
-            .tooltip(tip)
-            .on_click(move |_, _, cx| update(&store, root.clone(), &p, &f, cx))
-            .into_any_element(),
-    )
 }

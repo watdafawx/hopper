@@ -229,15 +229,82 @@ impl AddonsView {
 
     /// The global folder picked (Paxi's), when Resource packs shows one.
     pub(crate) fn global_dir(&self) -> Option<PathBuf> {
+        if let Some(rel) = self.folder.as_ref().filter(|_| self.class == cf::CLASS_DATAPACKS) {
+            return Some(self.root.as_ref()?.join(rel));
+        }
         let rel = self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS)?;
         Some(self.root.as_ref()?.join(rel))
+    }
+
+    /// Shows the data packs of `rel` (a Paxi or world folder) in the table.
+    pub fn show_folder(
+        &mut self,
+        root: PathBuf,
+        rel: String,
+        move_targets: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_targets = move_targets;
+        if self.folder.as_ref() != Some(&rel) || self.root.as_ref() != Some(&root) {
+            self.folder_packs = None;
+            self.selected.clear();
+        }
+        self.folder = Some(rel);
+        self.show_for(root, cf::CLASS_DATAPACKS, cx);
+        self.read_folder(cx);
+    }
+
+    /// Reads the data pack folder shown, then which projects its packs
+    /// are, then their versions, filling the table at each step.
+    fn read_folder(&mut self, cx: &mut Context<Self>) {
+        let (Some(dir), Some(inst)) = (
+            self.global_dir(),
+            self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).map(|i| i.clone_header()),
+        ) else {
+            return;
+        };
+        let rel = self.folder.clone();
+        cx.spawn(async move |this, cx| {
+            let packs = cx.background_spawn(async move { pack_files(&dir) }).await;
+            let still = |this: &AddonsView| this.folder == rel;
+            let ok = this
+                .update(cx, |this, cx| {
+                    if still(this) {
+                        this.folder_packs = Some(packs.clone());
+                        this.apply_global(cx);
+                    }
+                    still(this)
+                })
+                .unwrap_or(false);
+            if !ok {
+                return;
+            }
+            let p2 = packs.clone();
+            let urls = cx
+                .background_spawn(async move { crate::pack_lookup::look_up(&p2, cf::CLASS_DATAPACKS) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
+                this.apply_global(cx);
+            })
+            .ok();
+            if cx.background_spawn(async move { crate::pack_lookup::check_versions(&packs, &inst) }).await {
+                this.update(cx, |this, cx| this.apply_global(cx)).ok();
+            }
+        })
+        .detach();
     }
 
     /// With a global folder picked, the table shows its packs instead of
     /// the instance's: each as a row like an installed pack, from what
     /// the lookup found (project, author, version, update).
     pub(crate) fn apply_global(&mut self, cx: &mut Context<Self>) {
-        let Some(rel) = self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS) else {
+        let class = self.class;
+        let packs: Vec<PackFile> = if class == cf::CLASS_DATAPACKS && self.folder.is_some() {
+            self.folder_packs.clone().unwrap_or_default()
+        } else if let Some(rel) = self.globals.picked.filter(|_| class == cf::CLASS_RESOURCE_PACKS) {
+            self.globals.packs.get(rel).cloned().unwrap_or_default()
+        } else {
             return;
         };
         let Some(real) = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)) else {
@@ -245,7 +312,7 @@ impl AddonsView {
         };
         let mut inst = real.clone_header();
         let mut updates = std::collections::HashMap::new();
-        for p in self.globals.packs.get(rel).into_iter().flatten() {
+        for p in &packs {
             let file = p.path.file_name().unwrap_or_default().to_string_lossy().to_string();
             let enabled = !file.ends_with(".disabled");
             let file_name = file.trim_end_matches(".disabled").to_string();
@@ -256,7 +323,7 @@ impl AddonsView {
                 icon: p.icon.as_ref().map(|i| i.display().to_string()).unwrap_or_default(),
                 enabled,
                 from_pack: true,
-                class_id: cf::CLASS_RESOURCE_PACKS,
+                class_id: class,
                 date_added: hopper::time::iso_from_secs(p.modified),
                 ..Default::default()
             };
@@ -346,8 +413,31 @@ impl AddonsView {
         }
     }
 
+    /// Moves a data pack (on or off) into another data pack folder.
+    pub(crate) fn move_global(&mut self, file: String, rel: String, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(dir), Some(root)) = (self.global_dir(), self.root.clone()) else { return };
+        let from = Self::global_path(&dir, &file);
+        let to_dir = root.join(&rel);
+        let dest = to_dir.join(from.file_name().unwrap_or_default());
+        let r = if dest.exists() {
+            Err(anyhow::anyhow!("{file} is already in {rel}"))
+        } else {
+            std::fs::create_dir_all(&to_dir).and_then(|_| std::fs::rename(&from, &dest)).map_err(Into::into)
+        };
+        match r {
+            Ok(()) => window.push_notification(Notification::success(format!("Moved {file} to {rel}")), cx),
+            Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+        }
+        // The Data packs tab's folder counts read the store's change.
+        self.store.update(cx, |_, cx| cx.notify());
+        self.reload_globals(cx);
+    }
+
     /// Reads the global folders again (after a change made here).
     fn reload_globals(&mut self, cx: &mut Context<Self>) {
+        if self.folder.is_some() && self.class == cf::CLASS_DATAPACKS {
+            return self.read_folder(cx);
+        }
         if let Some(inst) = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).cloned() {
             self.load_globals(&inst, cx);
         }

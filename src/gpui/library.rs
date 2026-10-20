@@ -257,6 +257,31 @@ impl LibraryView {
         &self.addons
     }
 
+    /// What either table asks of the Library.
+    fn addons_event(event: &AddonsEvent, cx: &mut Context<Self>) {
+        match event {
+            AddonsEvent::AddContent { root, class } => cx.emit(LibraryEvent::Browse {
+                root: root.clone(),
+                class: *class,
+                dest: None,
+            }),
+            AddonsEvent::AddTo { root, class, dest } => cx.emit(LibraryEvent::Browse {
+                root: root.clone(),
+                class: *class,
+                dest: Some(dest.clone()),
+            }),
+            AddonsEvent::Find { root, text } => cx.emit(LibraryEvent::Find {
+                root: root.clone(),
+                text: text.clone(),
+            }),
+            AddonsEvent::OpenProject { root, project } => cx.emit(LibraryEvent::OpenProject {
+                root: root.clone(),
+                project: *project,
+            }),
+            AddonsEvent::Compare(server) => cx.emit(LibraryEvent::Compare(server.clone())),
+        }
+    }
+
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search instances"));
         let addons = cx.new(|cx| AddonsView::new(store.clone(), window, cx));
@@ -266,37 +291,21 @@ impl LibraryView {
             p
         });
         let worlds = cx.new(|cx| WorldsView::new(store.clone(), window, cx));
-        let datapacks = cx.new(|cx| crate::datapacks::DatapacksView::new(store.clone(), window, cx));
+        // Data packs' table opens projects in the same panel as the others.
+        let peek = addons.read(cx).peek().clone();
+        let dp_table = cx.new(|cx| AddonsView::with_peek(store.clone(), peek.clone(), window, cx));
+        let datapacks =
+            cx.new(|cx| crate::datapacks::DatapacksView::new(store.clone(), dp_table.clone(), window, cx));
         let shots = cx.new(|cx| ScreenshotsView::new(store.clone(), window, cx));
         let settings = cx.new(|cx| InstanceSettings::new(store.clone(), window, cx));
         let logs = cx.new(|cx| LogsView::new(store.clone(), window, cx));
         let perf = cx.new(|cx| crate::perf_view::PerfView::new(store.clone(), window, cx));
         let peers = cx.new(|cx| PeersView::new(store.clone(), window, cx));
-        let peek = addons.read(cx).peek().clone();
         server.update(cx, |s, _| s.set_peek(peek.clone()));
         let subs = vec![
             cx.observe(&peek, |_, _, cx| cx.notify()),
-            cx.subscribe(&addons, |_, _, event, cx| match event {
-                AddonsEvent::AddContent { root, class } => cx.emit(LibraryEvent::Browse {
-                    root: root.clone(),
-                    class: *class,
-                    dest: None,
-                }),
-                AddonsEvent::AddTo { root, class, dest } => cx.emit(LibraryEvent::Browse {
-                    root: root.clone(),
-                    class: *class,
-                    dest: Some(dest.clone()),
-                }),
-                AddonsEvent::Find { root, text } => cx.emit(LibraryEvent::Find {
-                    root: root.clone(),
-                    text: text.clone(),
-                }),
-                AddonsEvent::OpenProject { root, project } => cx.emit(LibraryEvent::OpenProject {
-                    root: root.clone(),
-                    project: *project,
-                }),
-                AddonsEvent::Compare(server) => cx.emit(LibraryEvent::Compare(server.clone())),
-            }),
+            cx.subscribe(&dp_table, |_, _, event, cx| Self::addons_event(event, cx)),
+            cx.subscribe(&addons, |_, _, event, cx| Self::addons_event(event, cx)),
             cx.subscribe(&worlds, |this, _, event, cx| this.content_event(event, cx)),
             cx.subscribe(&datapacks, |this, _, event, cx| this.content_event(event, cx)),
             cx.observe(&store, |this, _, cx| {
@@ -494,11 +503,6 @@ impl LibraryView {
                 root,
                 text: text.clone(),
             }),
-            ContentEvent::Peek { project } => {
-                let peek = self.addons.read(cx).peek().clone();
-                peek.update(cx, |p, cx| p.peek_project(root, Some(*project), cx));
-                cx.notify();
-            }
         }
     }
 

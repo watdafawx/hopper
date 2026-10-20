@@ -8,11 +8,9 @@ use crate::store::{Store, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -43,6 +41,9 @@ struct Source {
 
 pub struct DatapacksView {
     store: Entity<Store>,
+    /// The picked folder's packs, in the same table as Mods and Resource
+    /// packs (switch, update, author, remove).
+    table: Entity<crate::addons::AddonsView>,
     root: Option<PathBuf>,
     sources: Vec<Source>,
     /// `rel` of the folder shown.
@@ -67,7 +68,12 @@ fn mtime(p: &std::path::Path) -> Option<SystemTime> {
 }
 
 impl DatapacksView {
-    pub fn new(store: Entity<Store>, _: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<Store>,
+        table: Entity<crate::addons::AddonsView>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subs = vec![cx.observe(&store, |this, _, cx| {
             // Installs from Browse and dropped files land while the tab is
             // open: re-read when a folder changed.
@@ -79,6 +85,7 @@ impl DatapacksView {
         })];
         Self {
             store,
+            table,
             root: None,
             sources: Vec::new(),
             picked: None,
@@ -188,6 +195,19 @@ impl DatapacksView {
     }
 
     fn read_packs(&mut self, cx: &mut Context<Self>) {
+        // The table reads the folder too, for its rows.
+        if let (Some(root), Some(rel)) = (self.root.clone(), self.picked.clone()) {
+            let others: Vec<(String, String)> = self
+                .sources
+                .iter()
+                .filter(|s| s.rel != rel)
+                .map(|s| {
+                    let label = if s.global { format!("{} (every world)", s.name) } else { format!("world {}", s.name) };
+                    (label, s.rel.clone())
+                })
+                .collect();
+            self.table.update(cx, |t, cx| t.show_folder(root, rel, others, cx));
+        }
         self.serial += 1;
         let (Some(root), Some(rel)) = (self.root.clone(), self.picked.clone()) else {
             self.packs.clear();
@@ -251,37 +271,6 @@ impl DatapacksView {
             self.read_packs(cx);
             cx.notify();
         }
-    }
-
-    fn remove(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
-        if let Err(e) = hopper::sync::backup_into(&root, &path) {
-            window.push_notification(Notification::error(format!("{e:#}")), cx);
-        }
-        self.reload(cx);
-    }
-
-    /// Moves a pack to another folder (a world's into Paxi, say).
-    fn move_to(&mut self, path: PathBuf, rel: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
-        let dir = root.join(&rel);
-        let name = path.file_name().unwrap_or_default().to_owned();
-        let dest = dir.join(&name);
-        let r = if dest.exists() {
-            Err(anyhow::anyhow!("{} is already in {rel}", name.to_string_lossy()))
-        } else {
-            std::fs::create_dir_all(&dir)
-                .and_then(|_| std::fs::rename(&path, &dest))
-                .map_err(Into::into)
-        };
-        match r {
-            Ok(()) => window.push_notification(
-                Notification::success(format!("Moved {} to {rel}", name.to_string_lossy())),
-                cx,
-            ),
-            Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
-        }
-        self.reload(cx);
     }
 
     fn source_row(&self, s: &Source, cx: &mut Context<Self>) -> AnyElement {
@@ -384,188 +373,6 @@ impl DatapacksView {
             .into_any_element()
     }
 
-    fn pack_row(&self, p: &PackFile, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let (p1, p2, p3) = (p.path.clone(), p.path.clone(), p.path.clone());
-        let id = |k: &str| ElementId::Name(format!("{k}:{}", p.path.display()).into());
-        let others: Vec<(String, String)> = self
-            .sources
-            .iter()
-            .filter(|s| Some(&s.rel) != self.picked.as_ref())
-            .map(|s| {
-                let label = if s.global {
-                    format!("{} (every world)", s.name)
-                } else {
-                    format!("World: {}", s.name)
-                };
-                (label, s.rel.clone())
-            })
-            .collect();
-        let view = cx.entity();
-        let hit = found(p).flatten();
-        let project = hit.as_ref().map(|f| f.project.clone());
-        let store = self.store.read(cx);
-        // A site's icon, else the pack's own pack.png, else the modpack's
-        // for a pack that names it ("TNP Data").
-        let from_modpack = project.is_none()
-            && self.modpack.as_ref().is_some_and(|(_, w)| {
-                let text = format!("{} {}", p.name, p.description).to_lowercase();
-                text.split(|c: char| !c.is_alphanumeric()).any(|t| t == w)
-            });
-        let icon = project
-            .as_ref()
-            .and_then(|m| m.icon())
-            .and_then(|u| store.image(u))
-            .map(|p| p.to_path_buf())
-            .or_else(|| p.icon.clone())
-            .or_else(|| {
-                self.modpack
-                    .as_ref()
-                    .filter(|_| from_modpack)
-                    .and_then(|(u, _)| store.image(u))
-                    .map(|p| p.to_path_buf())
-            });
-        let title = project.as_ref().map_or_else(|| p.name.clone(), |m| m.name.clone());
-        let blurb = if p.description.is_empty() {
-            project.as_ref().map(|m| m.summary.clone()).unwrap_or_default()
-        } else {
-            p.description.clone()
-        };
-        let site = project.as_ref().map(|m| m.modrinth.is_some());
-        let pid = project.as_ref().map(|m| m.id);
-        h_flex()
-            .id(id("dp"))
-            .h(rems(3.5))
-            .px_3()
-            .gap_3()
-            .rounded(theme.radius)
-            .hover(|s| s.bg(theme.list_hover))
-            .child(match icon {
-                Some(i) => div()
-                    .size_10()
-                    .flex_none()
-                    .rounded(theme.radius)
-                    .overflow_hidden()
-                    .child(img(i).size_full())
-                    .into_any_element(),
-                None => widgets::thumb(None, rems(2.5), cx),
-            })
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .id(id("dp-name"))
-                                    .text_sm()
-                                    .font_medium()
-                                    .truncate()
-                                    .when_some(pid, |d, pid| {
-                                        d.cursor_pointer()
-                                            .hover(|s| s.text_color(theme.primary))
-                                            .on_click(cx.listener(move |_, _, _, cx| {
-                                                cx.emit(ContentEvent::Peek { project: pid })
-                                            }))
-                                    })
-                                    .child(title),
-                            )
-                            .when_some(site, |r, site| {
-                                r.child(widgets::site_tag(site))
-                            })
-                            .when(from_modpack, |r| {
-                                r.child(widgets::caption("from the modpack", cx).text_xs().flex_none())
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .min_w_0()
-                            .children(hit.as_ref().and_then(|f| pack_lookup::version_tag(f, p, cx)))
-                            .when(!blurb.is_empty(), |c| {
-                                let one = blurb.split_whitespace().collect::<Vec<_>>().join(" ");
-                                c.child(widgets::caption(one, cx).text_xs().truncate())
-                            }),
-                    ),
-            )
-            .child(
-                widgets::caption(
-                    if p.path.is_dir() {
-                        format!("{} · folder", hopper::time::relative_secs(p.modified))
-                    } else {
-                        format!(
-                            "{} · {}",
-                            hopper::time::relative_secs(p.modified),
-                            instance_ops::human_bytes(p.size)
-                        )
-                    },
-                    cx,
-                )
-                .text_xs()
-                .flex_none(),
-            )
-            .children(hit.as_ref().zip(self.root.clone()).and_then(|(f, root)| {
-                pack_lookup::update_button(id("dp-update"), &self.store, root, p, f)
-            }))
-            .when_some(pid, |r, pid| {
-                r.child(
-                    Button::new(id("dp-page"))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Info)
-                        .tooltip("Details")
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(ContentEvent::Peek { project: pid })
-                        })),
-                )
-            })
-            .child(
-                Button::new(id("dp-open"))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::FolderOpen)
-                    .tooltip("Open")
-                    .on_click(move |_, _, _| open_path(&p1)),
-            )
-            .when(!others.is_empty(), |r| {
-                r.child(
-                    Button::new(id("dp-move"))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::ArrowRightLeft)
-                        .tooltip("Move to…")
-                        .dropdown_menu(move |mut menu, _, _| {
-                            menu = menu.label("Move to");
-                            for (label, rel) in &others {
-                                let (v, path, rel) = (view.clone(), p2.clone(), rel.clone());
-                                menu = menu.item(PopupMenuItem::new(label.clone()).on_click(
-                                    move |_, window, cx| {
-                                        v.update(cx, |this, cx| {
-                                            this.move_to(path.clone(), rel.clone(), window, cx)
-                                        })
-                                    },
-                                ));
-                            }
-                            menu
-                        }),
-                )
-            })
-            .child(
-                Button::new(id("dp-rm"))
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Trash)
-                    .tooltip("Move to .hopper-backups")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.remove(p3.clone(), window, cx)
-                    })),
-            )
-            .into_any_element()
-    }
-
     /// The picked folder: what it does, its packs, Add and Open.
     fn body(&self, cx: &mut Context<Self>) -> AnyElement {
         let (Some(root), Some(src)) = (
@@ -587,9 +394,7 @@ impl DatapacksView {
             "Loaded into this world only"
         };
         let dir = root.join(&src.rel);
-        let rel = src.rel.clone();
-        let rows: Vec<AnyElement> = self.packs.clone().iter().map(|p| self.pack_row(p, cx)).collect();
-        let empty = rows.is_empty() && src.count == 0;
+        let empty = self.packs.is_empty() && src.count == 0;
         v_flex()
             .flex_1()
             .min_w_0()
@@ -605,6 +410,25 @@ impl DatapacksView {
                             .child(widgets::caption(format!("{what} · {}", src.rel), cx).text_xs().truncate()),
                     )
                     .child(
+                        Button::new("dp-folder")
+                            .outline()
+                            .small()
+                            .icon(IconName::FolderOpen)
+                            .label("Open folder")
+                            .on_click(move |_, _, _| {
+                                let _ = std::fs::create_dir_all(&dir);
+                                open_path(&dir)
+                            }),
+                    ),
+            )
+            .child(if empty {
+                let rel = src.rel.clone();
+                v_flex()
+                    .py_10()
+                    .gap_3()
+                    .items_center()
+                    .child(widgets::caption("No data packs here. Add some, or drop .zip files on the window.", cx))
+                    .child(
                         Button::new("dp-add")
                             .primary()
                             .small()
@@ -617,34 +441,10 @@ impl DatapacksView {
                                 })
                             })),
                     )
-                    .child(
-                        Button::new("dp-folder")
-                            .outline()
-                            .small()
-                            .icon(IconName::FolderOpen)
-                            .label("Open folder")
-                            .on_click(move |_, _, _| {
-                                let _ = std::fs::create_dir_all(&dir);
-                                open_path(&dir)
-                            }),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .id("dp-packs")
-                    .flex_1()
-                    .min_h_0()
-                    .children(rows)
-                    .when(empty, |c| {
-                        c.child(
-                            div().py_10().flex().justify_center().child(widgets::caption(
-                                "No data packs here. Add some, or drop .zip files on the window.",
-                                cx,
-                            )),
-                        )
-                    })
-                    .overflow_y_scrollbar(),
-            )
+                    .into_any_element()
+            } else {
+                div().flex_1().min_h_0().child(self.table.clone()).into_any_element()
+            })
             .into_any_element()
     }
 }
