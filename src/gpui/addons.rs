@@ -2081,10 +2081,16 @@ impl AddonsView {
                             .loading(updating == Some(true))
                             .tooltip(if from_web && updating.is_none() {
                                 "The author only allows downloads from CurseForge's website: Hopper's download window is getting it, and adds it when it arrives".to_string()
+                            } else if let Some(h) = hold {
+                                h.to_string()
+                            } else if dim {
+                                // Updating keeps it off (see install::apply_updates).
+                                format!("{tip}
+It stays disabled after updating: turn it on in the On column.")
                             } else {
-                                hold.map(String::from).unwrap_or(tip)
+                                tip
                             })
-                            .disabled(dim || hold.is_some() || updating.is_some() || from_web)
+                            .disabled(hold.is_some() || updating.is_some() || from_web)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.run_updates(vec![u.clone()], cx)
                             })),
