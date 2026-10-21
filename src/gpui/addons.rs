@@ -402,6 +402,8 @@ pub struct AddonsView {
     focus: FocusHandle,
     /// The row the keys act on.
     cursor: Option<usize>,
+    /// Where a Shift+click range starts: the row last clicked without Shift.
+    anchor: Option<usize>,
     pub(crate) store: Entity<Store>,
     pub(crate) root: Option<PathBuf>,
     pub(crate) class: u32,
@@ -466,6 +468,7 @@ impl AddonsView {
         Self {
             focus: cx.focus_handle(),
             cursor: None,
+            anchor: None,
             store,
             root: None,
             class: cf::CLASS_MODS,
@@ -1750,12 +1753,24 @@ impl AddonsView {
                 let el = self.render_row(row, &inst, &updates, &active_rp, &active_shader, now, cx);
                 div()
                     .relative()
-                    // A click puts the keys on this row.
+                    // A click puts the keys on this row; with Ctrl it also
+                    // picks or unpicks it, with Shift it picks every row
+                    // from the last one clicked, like a file explorer.
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _, window, cx| {
+                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                             this.cursor = Some(ix);
                             window.focus(&this.focus, cx);
+                            if e.modifiers.shift {
+                                this.select_range(this.anchor.unwrap_or(ix), ix, e.modifiers.control);
+                                cx.notify();
+                            } else {
+                                this.anchor = Some(ix);
+                                if e.modifiers.control {
+                                    this.toggle_row(ix);
+                                    cx.notify();
+                                }
+                            }
                         }),
                     )
                     .child(el)
@@ -1865,6 +1880,38 @@ impl AddonsView {
             }
     }
 
+    /// The file of row `ix`, when it's an addon or loose jar.
+    fn row_file(&self, ix: usize) -> Option<String> {
+        let inst = self.table.inst.as_ref()?;
+        match self.table.rows.get(ix)? {
+            Row::Addon(i) => Some(inst.addons.get(*i)?.file_name.clone()),
+            Row::Loose(name) => Some(name.clone()),
+            Row::LooseHeader(_) => None,
+        }
+    }
+
+    /// Picks row `ix`, or unpicks it if picked (Ctrl+click).
+    fn toggle_row(&mut self, ix: usize) {
+        if let Some(f) = self.row_file(ix)
+            && !self.selected.remove(&f)
+        {
+            self.selected.insert(f);
+        }
+    }
+
+    /// Picks rows `a` to `b` (Shift+click); without `add` (Ctrl) the rows
+    /// picked before are let go first.
+    fn select_range(&mut self, a: usize, b: usize, add: bool) {
+        if !add {
+            self.selected.clear();
+        }
+        for ix in a.min(b)..=a.max(b) {
+            if let Some(f) = self.row_file(ix) {
+                self.selected.insert(f);
+            }
+        }
+    }
+
     /// Moves the key cursor to `ix` (clamped) and scrolls it into view.
     fn move_cursor(&mut self, ix: isize, cx: &mut Context<Self>) {
         let n = self.row_count(cx);
@@ -1929,6 +1976,10 @@ impl AddonsView {
             .and_then(|r| store.edit_hold_reason(r));
         // `Some(true)` downloading now, `Some(false)` queued.
         let updating = self.root.as_ref().and_then(|r| store.update_state(r, a.project_id));
+        // Its new file is with the download window (the author allows
+        // downloads from CurseForge's website only).
+        let from_web = a.project_id != 0
+            && self.root.as_ref().is_some_and(|r| store.pending(r).iter().any(|p| p.project_id == a.project_id));
         // A Paxi pack no site knows shows its own pack.png.
         let global = self.global_dir().is_some();
         let icon = store.image(&a.icon).map(Path::to_path_buf).or_else(|| {
@@ -2024,11 +2075,16 @@ impl AddonsView {
                             .label(match updating {
                                 Some(true) => "Updating",
                                 Some(false) => "Queued",
+                                None if from_web => "From website",
                                 None => "Update",
                             })
                             .loading(updating == Some(true))
-                            .tooltip(hold.map(String::from).unwrap_or(tip))
-                            .disabled(dim || hold.is_some() || updating.is_some())
+                            .tooltip(if from_web && updating.is_none() {
+                                "The author only allows downloads from CurseForge's website: Hopper's download window is getting it, and adds it when it arrives".to_string()
+                            } else {
+                                hold.map(String::from).unwrap_or(tip)
+                            })
+                            .disabled(dim || hold.is_some() || updating.is_some() || from_web)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.run_updates(vec![u.clone()], cx)
                             })),
