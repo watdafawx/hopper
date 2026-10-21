@@ -25,6 +25,7 @@ mod launchers_list;
 mod library;
 mod logs;
 mod mcp;
+mod mcp_data;
 mod nav;
 mod pack_lookup;
 mod pack_update;

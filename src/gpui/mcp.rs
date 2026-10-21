@@ -9,38 +9,103 @@ use serde_json::{Value, json};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-/// Starts the server when Hopper runs with `--mcp` (or `HOPPER_MCP=1`).
-pub fn start(window: &mut Window, cx: &mut Context<AppView>) {
-    let wanted =
-        std::env::args().any(|a| a == "--mcp") || std::env::var_os("HOPPER_MCP").is_some();
-    if !wanted {
-        return;
-    }
-    // HOPPER_MCP_PORT runs a second copy beside one already listening.
-    let port = std::env::var("HOPPER_MCP_PORT")
+/// The server running now (its port), and the last start's outcome for
+/// Settings: the port it listens on, or why it couldn't.
+static RUNNING: std::sync::Mutex<Option<(u16, mcp::Server)>> = std::sync::Mutex::new(None);
+static RX: std::sync::Mutex<Option<Receiver<Request>>> = std::sync::Mutex::new(None);
+static STATUS: std::sync::Mutex<Option<Result<u16, String>>> = std::sync::Mutex::new(None);
+
+/// `Some(Ok(port))` while the server runs, `Some(Err(why))` when it
+/// couldn't start, `None` while it's off.
+pub fn status() -> Option<Result<u16, String>> {
+    STATUS.lock().ok()?.clone()
+}
+
+/// The port Settings asks for (`HOPPER_MCP_PORT` wins, for a second copy).
+pub fn port_of(s: &hopper::settings::Settings) -> u16 {
+    std::env::var("HOPPER_MCP_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(mcp::DEFAULT_PORT);
-    let rx: Receiver<Request> = match mcp::start(port, || {}) {
-        Ok(rx) => rx,
-        Err(e) => {
-            log::error!("{e:#}");
-            return;
+        .or_else(|| s.mcp_port.trim().parse().ok())
+        .unwrap_or(mcp::DEFAULT_PORT)
+}
+
+/// Starts, moves or stops the server to match (on, port), and sets which
+/// tools it offers.
+fn apply(on: bool, port: u16, changes: bool, window: bool) {
+    mcp::set_access(changes, window);
+    let Ok(mut running) = RUNNING.lock() else { return };
+    if running.as_ref().is_some_and(|(p, _)| *p == port) && on {
+        return;
+    }
+    if let Some((_, server)) = running.take() {
+        server.stop();
+    }
+    if let Ok(mut rx) = RX.lock() {
+        *rx = None;
+    }
+    let status = if on {
+        match mcp::start(port, || {}) {
+            Ok((rx, server)) => {
+                *running = Some((port, server));
+                if let Ok(mut slot) = RX.lock() {
+                    *slot = Some(rx);
+                }
+                Some(Ok(port))
+            }
+            Err(e) => {
+                log::error!("MCP: {e:#}");
+                Some(Err(format!("{e:#}")))
+            }
         }
+    } else {
+        None
     };
+    if let Ok(mut s) = STATUS.lock() {
+        *s = status;
+    }
+}
+
+/// Runs the MCP server while Settings has it on (or Hopper started with
+/// `--mcp`, or `HOPPER_MCP=1`, which also allows window control), and
+/// answers its requests on the UI thread.
+pub fn start(window: &mut Window, cx: &mut Context<AppView>) {
+    let dev = std::env::args().any(|a| a == "--mcp") || std::env::var_os("HOPPER_MCP").is_some();
     cx.spawn_in(window, async move |this, cx| {
+        let mut applied: Option<(bool, u16, bool, bool)> = None;
         loop {
             cx.background_executor()
                 .timer(Duration::from_millis(30))
                 .await;
-            let requests: Vec<Request> = rx.try_iter().collect();
-            if requests.is_empty() {
-                continue;
+            // Settings changes take effect within a tick.
+            let Ok(want) = this.update(cx, |this, cx| {
+                let s = this.store.read(cx).settings();
+                (s.mcp_enabled || dev, port_of(s), s.mcp_changes, s.mcp_window || dev)
+            }) else {
+                return;
+            };
+            if applied != Some(want) {
+                apply(want.0, want.1, want.2, want.3);
+                applied = Some(want);
+                // Settings shows whether it started.
+                let _ = this.update(cx, |this, cx| this.store.update(cx, |_, cx| cx.notify()));
             }
+            let requests: Vec<Request> = RX
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|rx| rx.try_iter().collect()))
+                .unwrap_or_default();
             for (cmd, reply) in requests {
                 // Input goes through the window, outside any view's update,
                 // since handlers update the views themselves.
                 let r = match cmd {
+                    Command::Data(name, args) => {
+                        let ok = this.update(cx, |this, cx| crate::mcp_data::answer(this, &name, args, reply, cx));
+                        if ok.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     Command::State | Command::Navigate(_) => {
                         this.update_in(cx, |this, window, cx| answer(this, cmd, window, cx))
                     }
@@ -80,7 +145,7 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
                 text(format!("{w}x{h} px, {scale} px per point")),
             ])
         }
-        Command::State | Command::Navigate(_) => Err("not an input command".into()),
+        Command::State | Command::Navigate(_) | Command::Data(..) => Err("not an input command".into()),
         Command::Hover { x, y } => {
             move_to(at(x, y), window, cx);
             done()

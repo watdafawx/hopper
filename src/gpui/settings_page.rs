@@ -108,7 +108,7 @@ impl Category {
             Category::Content => "The CurseForge API key, and where Browse looks first.",
             Category::Appearance => "Theme and size.",
             Category::Updates => "Hopper's version, its updates, and installing it.",
-            Category::Advanced => "The notification-area icon, website links and Hopper's own files.",
+            Category::Advanced => "AI assistants (MCP), the notification-area icon, website links and Hopper's own files.",
         }
     }
 
@@ -210,6 +210,11 @@ const ENTRIES: &[Entry] = &[
     e(C::Updates, "setup", "Setup", "The steps Hopper shows on its first start: install, CurseForge key, instances, servers and theme.", "wizard first run onboarding welcome"),
     e(C::Advanced, "tray-icon", "Notification-area icon", "Hopper's icon by the clock, with notifications for what finishes while it's in the background. From the next start.", "tray notifications background"),
     e(C::Advanced, "links", "Website links", "Open curseforge.com's Install buttons in Hopper. Turning this off gives them back to the CurseForge app.", "curseforge protocol handler url install button"),
+    e(C::Advanced, "mcp", "AI assistants (MCP)", "Lets AI assistants such as Claude read your instances, mods, logs and crash reports, and look things up on CurseForge and Modrinth. Only programs on this PC can connect.", "mcp ai claude assistant agent model context protocol chatgpt"),
+    e(C::Advanced, "mcp-port", "Port", "Where assistants connect, on this PC only.", "mcp port"),
+    e(C::Advanced, "mcp-changes", "Let assistants change instances", "Install mods, switch them on or off and update them. Each change runs as a task you can see.", "mcp install update enable disable"),
+    e(C::Advanced, "mcp-window", "Let assistants see and use the window", "Screenshots, clicks and typing in Hopper, for debugging Hopper itself.", "mcp screenshot click debug"),
+    e(C::Advanced, "mcp-connect", "Connect an assistant", "Copies what to paste into your assistant's settings.", "mcp claude desktop code config json"),
     e(C::Advanced, "data-folder", "Hopper's data folder", "Settings, the palette's recent picks and other files Hopper keeps.", "appdata settings.json files"),
 ];
 
@@ -252,10 +257,11 @@ enum Text {
     Host,
     PanelUrl,
     UpdateRepo,
+    McpPort,
 }
 
 impl Text {
-    const ALL: [Text; 7] = [
+    const ALL: [Text; 8] = [
         Text::Instances,
         Text::Launcher,
         Text::ServerPacks,
@@ -263,6 +269,7 @@ impl Text {
         Text::Host,
         Text::PanelUrl,
         Text::UpdateRepo,
+        Text::McpPort,
     ];
 
     fn saved(self, s: &hopper::settings::Settings) -> &str {
@@ -274,6 +281,7 @@ impl Text {
             Text::Host => &s.server_host,
             Text::PanelUrl => &s.panel_url,
             Text::UpdateRepo => &s.update_repo,
+            Text::McpPort => &s.mcp_port,
         }
     }
 
@@ -286,6 +294,7 @@ impl Text {
             Text::Host => s.server_host = v,
             Text::PanelUrl => s.panel_url = v,
             Text::UpdateRepo => s.update_repo = v,
+            Text::McpPort => s.mcp_port = v,
         }
     }
 
@@ -312,6 +321,11 @@ impl Text {
             Text::UpdateRepo if v.split('/').filter(|p| !p.trim().is_empty()).count() != 2 => {
                 Some("Use owner/name, like watdafawx/hopper.")
             }
+            Text::McpPort => match v.parse::<u16>() {
+                Ok(47802) => Some("47802 is Hopper's link handler; pick another."),
+                Ok(p) if p >= 1024 => None,
+                _ => Some("Use a number from 1024 to 65535."),
+            },
             _ => None,
         }
     }
@@ -375,6 +389,7 @@ impl SettingsPage {
             let placeholder = match t {
                 Text::PanelUrl => "https://myserver:8443",
                 Text::UpdateRepo => hopper::settings::DEFAULT_UPDATE_REPO,
+                Text::McpPort => "47801",
                 Text::Host => "myserver",
                 _ => "",
             };
@@ -1583,7 +1598,73 @@ impl SettingsPage {
                 }
             }));
         let data = directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().to_path_buf());
-        vec![Block::card(
+        let port = crate::mcp::port_of(s);
+        let url = format!("http://127.0.0.1:{port}/mcp");
+        let status: Option<AnyElement> = s.mcp_enabled.then(|| {
+            let theme = cx.theme();
+            match crate::mcp::status() {
+                Some(Ok(p)) => status_line(IconName::CircleCheck, format!("Running on http://127.0.0.1:{p}/mcp"), theme.success),
+                Some(Err(e)) => status_line(IconName::CircleX, format!("Couldn't start: {e}"), theme.danger),
+                None => status_line(IconName::Clock, "Starting…".to_string(), theme.muted_foreground),
+            }
+        });
+        let json_cfg = format!(
+            "{{\n  \"mcpServers\": {{\n    \"hopper\": {{ \"type\": \"http\", \"url\": \"{url}\" }}\n  }}\n}}"
+        );
+        let claude_code = format!("claude mcp add --transport http hopper {url}");
+        let mut mcp_rows = vec![Row::new("mcp")
+            .control(self.switch("mcp", s.mcp_enabled, |st, v| st.mcp_enabled = v, cx))
+            .note(status)];
+        if s.mcp_enabled {
+            mcp_rows.push(
+                Row::new("mcp-port")
+                    .control(div().w(rems(8.)).child(Input::new(&self.texts[&Text::McpPort]).small()))
+                    .note(self.note(Text::McpPort, cx)),
+            );
+            mcp_rows.push(Row::new("mcp-changes").control(self.switch(
+                "mcp-changes",
+                s.mcp_changes,
+                |st, v| st.mcp_changes = v,
+                cx,
+            )));
+            mcp_rows.push(Row::new("mcp-window").control(self.switch(
+                "mcp-window",
+                s.mcp_window,
+                |st, v| st.mcp_window = v,
+                cx,
+            )));
+            mcp_rows.push(
+                Row::new("mcp-connect").control(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("mcp-copy-json")
+                                .small()
+                                .outline()
+                                .icon(IconName::Copy)
+                                .label("Copy JSON")
+                                .tooltip("For Claude Desktop's claude_desktop_config.json, Cursor, and most MCP clients")
+                                .on_click(move |_, window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(json_cfg.clone()));
+                                    window.push_notification(Notification::success("Copied the MCP settings"), cx);
+                                }),
+                        )
+                        .child(
+                            Button::new("mcp-copy-claude")
+                                .small()
+                                .outline()
+                                .icon(IconName::SquareTerminal)
+                                .label("Copy Claude Code command")
+                                .tooltip(claude_code.clone())
+                                .on_click(move |_, window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(claude_code.clone()));
+                                    window.push_notification(Notification::success("Copied: run it in a terminal"), cx);
+                                }),
+                        ),
+                ),
+            );
+        }
+        vec![Block::card(Some("AI assistants"), mcp_rows), Block::card(
             None,
             vec![
                 Row::new("tray-icon").control(self.switch("tray-icon", s.tray_icon, |st, v| st.tray_icon = v, cx)),

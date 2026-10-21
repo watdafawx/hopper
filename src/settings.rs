@@ -108,6 +108,14 @@ pub struct Settings {
     pub seen_version: String,
     /// Hopper's icon in the notification area, with its notifications.
     pub tray_icon: bool,
+    /// The MCP server AI assistants connect to (Settings > Advanced).
+    pub mcp_enabled: bool,
+    /// Its port on 127.0.0.1; empty for 47801.
+    pub mcp_port: String,
+    /// Its tools that change instances: install, switch on or off, update.
+    pub mcp_changes: bool,
+    /// Its tools that see and drive the window: screenshot, click, type.
+    pub mcp_window: bool,
     /// Where servers Hopper hosts on this PC live.
     pub hosted_root: String,
     /// The instance page opens on Mods instead of Overview.
@@ -281,6 +289,10 @@ impl Default for Settings {
             update_repo: DEFAULT_UPDATE_REPO.into(),
             seen_version: String::new(),
             tray_icon: true,
+            mcp_enabled: false,
+            mcp_port: String::new(),
+            mcp_changes: false,
+            mcp_window: false,
             hosted_root: default_hosted_root(),
             launcher_dirs: Vec::new(),
             instance_opens_mods: false,
