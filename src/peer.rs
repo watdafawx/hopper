@@ -36,7 +36,7 @@ fn now() -> u64 {
 }
 
 fn data_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "Hopper")
+    crate::paths::dirs()
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(std::env::temp_dir)
 }
@@ -235,7 +235,7 @@ pub struct Manifest {
 static HASHES: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 fn hash_cache_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.cache_dir().join("peerhash.json"))
+    crate::paths::dirs().map(|d| d.cache_dir().join("peerhash.json"))
 }
 
 fn file_sha1(path: &Path, size: u64, mtime: u64) -> Option<String> {

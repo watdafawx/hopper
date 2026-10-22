@@ -500,7 +500,7 @@ fn issue_links(md: &str, repo: &str) -> String {
 }
 
 fn cache_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.cache_dir().join("changelog-links"))
+    crate::paths::dirs().map(|d| d.cache_dir().join("changelog-links"))
 }
 
 /// GitHub's REST API, as JSON.

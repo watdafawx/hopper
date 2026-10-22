@@ -215,7 +215,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Advanced, "mcp-changes", "Let assistants change instances", "Install mods, switch them on or off and update them. Each change runs as a task you can see.", "mcp install update enable disable"),
     e(C::Advanced, "mcp-window", "Let assistants see and use the window", "Screenshots, clicks and typing in Hopper, for debugging Hopper itself.", "mcp screenshot click debug"),
     e(C::Advanced, "mcp-connect", "Connect an assistant", "Copies what to paste into your assistant's settings.", "mcp claude desktop code config json"),
-    e(C::Advanced, "data-folder", "Hopper's data folder", "Settings, the palette's recent picks and other files Hopper keeps.", "appdata settings.json files"),
+    e(C::Advanced, "data-folder", "Hopper's folder", "Settings, accounts, downloads and caches Hopper keeps. New copies of Hopper keep them in a Hopper Data folder next to hopper.exe.", "appdata settings.json files data folder portable move drive"),
 ];
 
 fn entry(id: &str) -> &'static Entry {
@@ -1597,7 +1597,9 @@ impl SettingsPage {
                     Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
                 }
             }));
-        let data = directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().to_path_buf());
+        let data = hopper::paths::dirs().map(|d| d.root().unwrap_or(d.data_dir()).to_path_buf());
+        let can_move = hopper::paths::dirs().is_some_and(|d| d.root().is_none()) && !hopper::paths::dev_build();
+        let store_mv = self.store.clone();
         let port = crate::mcp::port_of(s);
         let url = format!("http://127.0.0.1:{port}/mcp");
         let status: Option<AnyElement> = s.mcp_enabled.then(|| {
@@ -1672,6 +1674,13 @@ impl SettingsPage {
                 Row::new("data-folder")
                     .when_some(data.clone(), |r, d| r.desc(d.display().to_string()))
                     .control(
+                      h_flex().gap_2().when(can_move, |r| r.child(
+                        Button::new("data-move")
+                            .small()
+                            .outline()
+                            .label("Move next to hopper.exe")
+                            .on_click(move |_, window, cx| crate::data_move::offer(store_mv.clone(), true, window, cx)),
+                      )).child(
                         Button::new("data-folder")
                             .small()
                             .outline()
@@ -1683,7 +1692,7 @@ impl SettingsPage {
                                     crate::store::open_path(d);
                                 }
                             }),
-                    ),
+                      )),
             ],
         )]
     }

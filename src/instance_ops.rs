@@ -317,7 +317,7 @@ fn fetch(m: &cf::Mod, f: &cf::File, job: &Job) -> anyhow::Result<PathBuf> {
             f.manual_url(m)
         )
     })?;
-    let dir = std::env::temp_dir().join("hopper-downloads");
+    let dir = crate::paths::temp_dir().join("hopper-downloads");
     fs::create_dir_all(&dir)?;
     let dest = dir.join(&f.file_name);
     let total = f.file_length;
@@ -642,7 +642,7 @@ fn mcmeta_description(v: &serde_json::Value) -> String {
 /// Packs in a folder with their names, descriptions and icons.
 pub fn pack_files(dir: &Path) -> Vec<PackFile> {
     use std::io::Read;
-    let cache = std::env::temp_dir().join("hopper-packicons");
+    let cache = crate::paths::temp_dir().join("hopper-packicons");
     let _ = fs::create_dir_all(&cache);
     let mut out: Vec<PackFile> = datapacks(dir)
         .into_iter()

@@ -44,7 +44,7 @@ pub struct Accounts {
 
 impl Accounts {
     pub fn path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("accounts.json"))
+        crate::paths::dirs().map(|d| d.data_dir().join("accounts.json"))
     }
 
     pub fn load() -> Self {

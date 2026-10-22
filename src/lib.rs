@@ -46,6 +46,7 @@ pub mod modpack;
 pub mod modrinth;
 pub mod packdiff;
 pub mod panel;
+pub mod paths;
 pub mod msauth;
 pub mod peer;
 pub mod perf;

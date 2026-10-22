@@ -14,7 +14,8 @@ use hopper::selfupdate::{CURRENT, is_newer};
 
 /// Shows What's new after an update, once per version. A first start
 /// (or one before this existed) only notes the version.
-pub fn on_start(app: &AppView, window: &mut Window, cx: &mut Context<AppView>) {
+/// Whether it opened.
+pub fn on_start(app: &AppView, window: &mut Window, cx: &mut Context<AppView>) -> bool {
     let store = app.store.clone();
     let (seen, setup) = {
         let s = store.read(cx).settings();
@@ -27,23 +28,24 @@ pub fn on_start(app: &AppView, window: &mut Window, cx: &mut Context<AppView>) {
         None => None,
     });
     if preview.is_none() && !seen.is_empty() && !is_newer(CURRENT, &seen) {
-        return;
+        return false;
     }
     store.update(cx, |s, cx| s.update_settings(|st| st.seen_version = CURRENT.to_string(), cx));
     let entries = if let Some(n) = preview {
         hopper::changelog::all().into_iter().take(n).collect()
     } else if seen.is_empty() || setup {
-        return;
+        return false;
     } else {
         hopper::changelog::since(&seen)
     };
     if entries.is_empty() {
-        return;
+        return false;
     }
     let repo = store.read(cx).settings().update_repo.clone();
     cx.defer_in(window, move |_, window, cx| {
         open(entries, format!("Hopper {CURRENT}: what's new"), repo, window, cx)
     });
+    true
 }
 
 /// The notes of `entries` (newest first) as a dialog.

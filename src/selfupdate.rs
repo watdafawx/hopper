@@ -181,7 +181,7 @@ pub fn install(r: &Release, job: &crate::jobs::Job) -> anyhow::Result<PathBuf> {
     job.detail(format!("Downloading Hopper {}", r.version));
     // To a file first, so the task shows how far along it is (and can be
     // cancelled); a cut connection is retried once.
-    let tmp = std::env::temp_dir().join(format!("hopper-{}.download", r.version));
+    let tmp = crate::paths::temp_dir().join(format!("hopper-{}.download", r.version));
     let started = std::time::Instant::now();
     let mut shown = started;
     let mb = |b: u64| b as f64 / 1_048_576.0;

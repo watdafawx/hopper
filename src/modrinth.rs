@@ -667,7 +667,7 @@ pub fn sides_of(paths: &[std::path::PathBuf]) -> HashMap<String, String> {
         hashes: HashMap<String, String>,
     }
     static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
-    let file = directories::ProjectDirs::from("", "", "Hopper")
+    let file = crate::paths::dirs()
         .map(|d| d.cache_dir().join("mrsides2.json"));
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = g.get_or_insert_with(|| {
@@ -755,7 +755,7 @@ pub fn sides_of(paths: &[std::path::PathBuf]) -> HashMap<String, String> {
 pub fn sides_by_slug(mods: &[(String, String)]) -> HashMap<String, String> {
     use std::sync::Mutex;
     static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
-    let file = directories::ProjectDirs::from("", "", "Hopper")
+    let file = crate::paths::dirs()
         .map(|d| d.cache_dir().join("mrslugsides.json"));
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = g.get_or_insert_with(|| {

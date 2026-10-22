@@ -88,7 +88,7 @@ pub fn ensure_loader(inst: &Instance, launcher_dir: &Path, job: &Job) -> anyhow:
     } else {
         bail!("Don't know how to install loader {}", inst.loader);
     };
-    let installer = std::env::temp_dir().join(format!("hopper-{id}-installer.jar"));
+    let installer = crate::paths::temp_dir().join(format!("hopper-{id}-installer.jar"));
     job.detail(format!("Downloading the {} installer", inst.loader));
     cf::download(&installer_url, &installer, |_| {})?;
 

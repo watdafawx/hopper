@@ -139,7 +139,7 @@ pub fn run(url: &str, owner: Option<isize>) -> i32 {
         });
     }
     // Its own profile: the --fetch window's cookies stay apart.
-    let data = directories::ProjectDirs::from("", "", "Hopper")
+    let data = hopper::paths::dirs()
         .map(|d| d.data_dir().join("webview-video"));
     let mut context = WebContext::new(data);
     let webview = WebViewBuilder::new_with_web_context(&mut context)

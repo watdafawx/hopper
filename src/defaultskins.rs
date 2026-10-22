@@ -43,7 +43,7 @@ pub struct Defaults {
 }
 
 fn cache() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.cache_dir().join("default-skins"))
+    crate::paths::dirs().map(|d| d.cache_dir().join("default-skins"))
 }
 
 fn file(dir: &Path, name: &str, slim: bool) -> PathBuf {

@@ -224,7 +224,7 @@ pub fn annotate(
 static MEM: Mutex<Option<HashMap<u64, ServerPackSet>>> = Mutex::new(None);
 
 fn cache_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.cache_dir().join("serverpacks.json"))
+    crate::paths::dirs().map(|d| d.cache_dir().join("serverpacks.json"))
 }
 
 fn with_cache<T>(f: impl FnOnce(&mut HashMap<u64, ServerPackSet>) -> T) -> T {

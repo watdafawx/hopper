@@ -55,7 +55,7 @@ pub fn run(dir: PathBuf, urls: Vec<String>) -> i32 {
     let current = Rc::new(Cell::new(0usize));
     let started = Rc::new(Cell::new(false));
     // Cookies (Cloudflare's clearance) kept between runs, not next to the exe.
-    let data = directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("webview"));
+    let data = hopper::paths::dirs().map(|d| d.data_dir().join("webview"));
     let mut context = WebContext::new(data);
     let webview = WebViewBuilder::new_with_web_context(&mut context)
         .with_url(&urls[0])

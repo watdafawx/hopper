@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 fn dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.cache_dir().join("images"))
+    crate::paths::dirs().map(|d| d.cache_dir().join("images"))
 }
 
 /// Where `url` is (or will be) cached. Local paths and `file://` URLs map to

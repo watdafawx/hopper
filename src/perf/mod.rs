@@ -108,7 +108,7 @@ impl Session {
 
 /// Hopper's `sessions` folder.
 pub fn sessions_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("sessions"))
+    crate::paths::dirs().map(|d| d.data_dir().join("sessions"))
 }
 
 /// The folder an instance's sessions go in.

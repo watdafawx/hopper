@@ -27,7 +27,7 @@ pub struct History {
 impl History {
     /// Hopper's own history folder.
     pub fn open() -> Option<Self> {
-        directories::ProjectDirs::from("", "", "Hopper")
+        crate::paths::dirs()
             .map(|d| Self::at(d.data_dir().join("skins")))
     }
 

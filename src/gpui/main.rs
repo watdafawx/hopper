@@ -6,6 +6,7 @@ mod accounts;
 mod addons;
 mod addons_extra;
 mod backups_view;
+mod data_move;
 mod image_viewer;
 mod anim;
 mod app;

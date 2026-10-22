@@ -41,7 +41,7 @@ static CACHE: Mutex<Option<HashMap<String, ModInfo>>> = Mutex::new(None);
 const SCAN_THREADS: usize = 16;
 
 fn cache_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.cache_dir().join("scan-cache.json"))
+    crate::paths::dirs().map(|d| d.cache_dir().join("scan-cache.json"))
 }
 
 fn cache_key(m: &ModInfo) -> String {

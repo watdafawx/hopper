@@ -24,7 +24,7 @@ const STAGING_DIR: &str = ".hopper-staging";
 pub const PENDING_FILE: &str = ".hopper-pending.json";
 
 fn cache_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "Hopper")
+    crate::paths::dirs()
         .map(|d| d.cache_dir().join("packs"))
         .unwrap_or_else(|| std::env::temp_dir().join("hopper-packs"))
 }
@@ -248,7 +248,7 @@ pub fn user_downloads() -> Option<PathBuf> {
 /// Where Hopper's own download window saves website-only files, for the
 /// download watcher to put in place like files from Downloads.
 pub fn fetch_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("fetched"))
+    crate::paths::dirs().map(|d| d.data_dir().join("fetched"))
 }
 
 /// The folders pending files can land in: Hopper's download window's, then

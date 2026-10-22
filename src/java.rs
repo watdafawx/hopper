@@ -147,7 +147,7 @@ fn path_starts_with(p: &Path, dir: &Path) -> bool {
 
 /// Where Hopper keeps the runtimes it downloads: `<data dir>/java`.
 pub fn hopper_runtimes_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("java"))
+    crate::paths::dirs().map(|d| d.data_dir().join("java"))
 }
 
 /// Whether a PE executable is 64-bit (x64 or ARM64), from its header.

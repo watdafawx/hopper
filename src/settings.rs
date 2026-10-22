@@ -135,6 +135,8 @@ pub struct Settings {
     /// [`Settings::default`] (no settings file yet) starts at false.
     #[serde(default = "yes")]
     pub setup_done: bool,
+    /// "Don't ask again" on moving Hopper's files next to its exe.
+    pub data_move_declined: bool,
     /// Settings this build doesn't know (saved by a newer Hopper), kept as
     /// they are so going back a version and forward again loses none.
     #[serde(flatten)]
@@ -239,7 +241,16 @@ fn detected() -> &'static DetectedFolders {
             .map(PathBuf::from)
             .unwrap_or_default();
         let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
-        detect_folders(&home, appdata.as_deref())
+        let mut d = detect_folders(&home, appdata.as_deref());
+        // No CurseForge folders to share: a new user's instances and game
+        // files go in Hopper's own folder, next to its exe.
+        if !Path::new(&d.instances_root).is_dir()
+            && let Some(root) = crate::paths::dirs().and_then(|d| d.root())
+        {
+            d.instances_root = root.join("instances").to_string_lossy().into_owned();
+            d.launcher_dir = root.join("minecraft").to_string_lossy().into_owned();
+        }
+        d
     })
 }
 
@@ -300,6 +311,7 @@ impl Default for Settings {
             delete_permanently: true,
             // A new user: Hopper shows its setup on the first start.
             setup_done: false,
+            data_move_declined: false,
             unknown: serde_json::Map::new(),
         }
     }
@@ -307,7 +319,7 @@ impl Default for Settings {
 
 impl Settings {
     fn path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("settings.json"))
+        crate::paths::dirs().map(|d| d.data_dir().join("settings.json"))
     }
 
     /// The saved settings, or `None` when there are none yet.
@@ -570,6 +582,9 @@ mod tests {
 
 /// `%USERPROFILE%\Hopper Servers`.
 pub fn default_hosted_root() -> String {
+    if let Some(root) = crate::paths::dirs().and_then(|d| d.root()) {
+        return root.join("servers").to_string_lossy().into_owned();
+    }
     directories::UserDirs::new()
         .map(|u| u.home_dir().join("Hopper Servers").to_string_lossy().into_owned())
         .unwrap_or_default()

@@ -19,7 +19,7 @@ pub fn key(a: &Addon) -> Option<String> {
 }
 
 fn file() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.cache_dir().join("modcats.json"))
+    crate::paths::dirs().map(|d| d.cache_dir().join("modcats.json"))
 }
 
 /// Everything fetched so far.

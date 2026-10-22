@@ -330,7 +330,11 @@ impl AppView {
         view.apply_args(window, cx);
         view._auto_restart = Some(Self::auto_restart(window, cx));
         crate::setup_wizard::on_start(&view, window, cx);
-        crate::whats_new::on_start(&view, window, cx);
+        // One dialog at a time: the move offer waits for a start without
+        // release notes.
+        if !crate::whats_new::on_start(&view, window, cx) {
+            crate::data_move::on_start(&view, window, cx);
+        }
         // settings.json that didn't parse was kept aside: say so.
         if let Some(e) = hopper::settings::Settings::load_error() {
             cx.defer_in(window, move |_, window, cx| {

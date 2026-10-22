@@ -156,7 +156,7 @@ static SHARED: Mutex<Option<Bookmarks>> = Mutex::new(None);
 pub fn with<T>(f: impl FnOnce(&mut Bookmarks) -> T) -> T {
     let mut g = SHARED.lock().unwrap_or_else(|e| e.into_inner());
     let b = g.get_or_insert_with(|| {
-        let path = directories::ProjectDirs::from("", "", "Hopper")
+        let path = crate::paths::dirs()
             .map(|d| d.data_dir().join("bookmarks.json"))
             .unwrap_or_else(|| PathBuf::from("bookmarks.json"));
         Bookmarks::at(path)

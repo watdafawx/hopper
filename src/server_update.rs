@@ -132,7 +132,7 @@ pub fn install_neoforge_server(
         .map(|n| server_root.join(n).exists())
         .collect();
 
-    let installer = std::env::temp_dir().join(format!("hopper-neoforge-{version}-installer.jar"));
+    let installer = crate::paths::temp_dir().join(format!("hopper-neoforge-{version}-installer.jar"));
     job.detail(format!("Downloading the NeoForge {version} installer"));
     crate::cf::download(
         &format!(

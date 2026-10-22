@@ -48,7 +48,7 @@ const KEEP: usize = 1000;
 static LOG: Mutex<Option<Log>> = Mutex::new(None);
 
 fn path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("history.json"))
+    crate::paths::dirs().map(|d| d.data_dir().join("history.json"))
 }
 
 fn read<R>(f: impl FnOnce(&Log) -> R) -> R {

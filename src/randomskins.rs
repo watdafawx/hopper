@@ -51,7 +51,7 @@ struct Cache {
 const KEEP_SECS: i64 = 7 * 86_400;
 
 fn cache_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.cache_dir().join("random-skins.json"))
+    crate::paths::dirs().map(|d| d.cache_dir().join("random-skins.json"))
 }
 
 fn load() -> Cache {

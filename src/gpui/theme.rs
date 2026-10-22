@@ -151,7 +151,7 @@ pub fn is_glass(name: &str) -> bool {
 
 /// Where theme files go: gpui-component theme JSON, one or more per file.
 pub fn custom_dir() -> Option<std::path::PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("themes"))
+    hopper::paths::dirs().map(|d| d.data_dir().join("themes"))
 }
 
 thread_local! {

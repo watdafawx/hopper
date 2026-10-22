@@ -164,7 +164,7 @@ static HASHES: LazyLock<Mutex<HashCache>> = LazyLock::new(|| {
 });
 
 fn hash_cache_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.cache_dir().join("cfghash.json"))
+    crate::paths::dirs().map(|d| d.cache_dir().join("cfghash.json"))
 }
 
 fn save_hashes() {

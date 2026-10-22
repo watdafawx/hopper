@@ -314,7 +314,7 @@ pub fn install_quilt(
         .and_then(|i| i["url"].as_str())
         .context("Quilt's installer list is empty")?
         .to_string();
-    let jar = std::env::temp_dir().join(format!("hopper-quilt-installer-{}.jar", std::process::id()));
+    let jar = crate::paths::temp_dir().join(format!("hopper-quilt-installer-{}.jar", std::process::id()));
     job.detail("Downloading the Quilt installer");
     download(&url, &jar, None, job)?;
     let dir = format!("--install-dir={}", root.display());
@@ -338,7 +338,7 @@ pub fn install_quilt(
 /// under libraries; older versions a runnable forge jar in the folder.
 pub fn install_forge(root: &Path, mc: &str, version: &str, java: &Path, job: &Job) -> anyhow::Result<LaunchTarget> {
     let full = format!("{mc}-{version}");
-    let installer = std::env::temp_dir().join(format!("hopper-forge-{full}-installer.jar"));
+    let installer = crate::paths::temp_dir().join(format!("hopper-forge-{full}-installer.jar"));
     job.detail(format!("Downloading the Forge {version} installer"));
     download(
         &format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{full}/forge-{full}-installer.jar"),

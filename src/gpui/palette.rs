@@ -326,7 +326,7 @@ fn build(app: &AppView, cx: &App) -> (Vec<Item>, Option<SharedString>) {
 // ---- recent picks ---------------------------------------------------------------
 
 fn recent_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("palette_recent.json"))
+    hopper::paths::dirs().map(|d| d.data_dir().join("palette_recent.json"))
 }
 
 fn load_recent() -> Vec<String> {

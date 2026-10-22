@@ -232,7 +232,7 @@ pub fn match_server<'a>(
 
 /// Where earlier builds kept the key, moved into Credential Manager once.
 fn old_token_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "Hopper").map(|d| d.data_dir().join("panel-token"))
+    crate::paths::dirs().map(|d| d.data_dir().join("panel-token"))
 }
 
 /// The panel's API key, when one is saved (HOPPER_PANEL_TOKEN wins).
