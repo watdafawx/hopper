@@ -55,18 +55,13 @@ const KNOWN_CLIENT_ONLY: &[&str] = &[
     "freecam",
     "itemzoom",
     "immersivehotbar",
-    "emi",
-    "jei",
     "inventoryprofiles",
     "libipn",
     "appleskin",
     "chat_heads",
     "controlling",
-    "crafting_on_a_stick",
-    "toolbelt",
     "trashslot",
     "distraction_free",
-    "betterp2p",
     "advancementplaques",
     "tipthescales",
     "drippyloadingscreen",
@@ -86,7 +81,6 @@ const KNOWN_CLIENT_ONLY: &[&str] = &[
     "catalogue",
     "equipmentcompare",
     "simplelootviewer",
-    "findme",
     "enchdesc",
     "extrasounds",
     "immersiveui",
@@ -94,7 +88,6 @@ const KNOWN_CLIENT_ONLY: &[&str] = &[
     "moremousetweaks",
     "configured",
     "chest_item",
-    "toomanyrecipeviewers",
     "configureddefaults",
     "biomemusic",
     "dynamic-fps",
@@ -309,7 +302,9 @@ mod tests {
     #[test]
     fn list_matches_whole_words_only() {
         let skip = |f: &str, id: &str| compute_diff(&[jar(f, id, "1")], &[])[0].action;
-        assert_eq!(skip("emi-1.1.18+1.21.1+neoforge.jar", "emi"), DiffAction::Skip);
+        assert_eq!(skip("sodium-neoforge-0.8.13+mc1.21.1.jar", "sodium"), DiffAction::Skip);
+        assert_eq!(skip("emi-1.1.18+1.21.1+neoforge.jar", "emi"), DiffAction::CopyToServer);
+        assert_eq!(skip("toomanyrecipeviewers-0.9.2+mc.21.1.jar", "toomanyrecipeviewers"), DiffAction::CopyToServer);
         assert_eq!(skip("dynamic-fps-3.9+minecraft-1.21.0-neoforge.jar", "dynamic_fps"), DiffAction::Skip);
         assert_eq!(skip("Particular-1.21.1-NeoForge-1.2.jar", "particular"), DiffAction::Skip);
         assert_eq!(skip("alchemistry-1.21.1-3.0.jar", "alchemistry"), DiffAction::CopyToServer);
@@ -319,7 +314,7 @@ mod tests {
 
     #[test]
     fn a_known_side_beats_the_list() {
-        let mut a = jar("emi-1.1.jar", "emi", "1.1");
+        let mut a = jar("sodium-0.6.jar", "sodium", "0.6");
         a.side = "both".into();
         let d = compute_diff(&[a], &[]);
         assert_eq!(d[0].action, DiffAction::CopyToServer);
