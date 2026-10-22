@@ -43,6 +43,8 @@ pub struct JavaForm {
     fallback_memory: Option<u32>,
     /// The generator panel is open.
     generator: bool,
+    /// The arguments shown one by one, each explained on hover or click.
+    show_flags: bool,
     /// The flag whose explanation shows (clicked).
     explained: Option<String>,
     /// The saved presets show as a list to rename, update or delete.
@@ -108,6 +110,7 @@ impl JavaForm {
             game_version: None,
             fallback_memory,
             generator: false,
+            show_flags: false,
             explained: None,
             managing: false,
             naming: None,
@@ -602,7 +605,9 @@ impl JavaForm {
 
         // Every flag in use, each explained on hover or click.
         let tokens = jvm_args::split(&self.args_text);
-        let flags = (!tokens.is_empty()).then(|| {
+        let n_flags = tokens.len();
+        // The text box already shows them: one by one only on request.
+        let flags = (self.show_flags && !tokens.is_empty()).then(|| {
             h_flex()
                 .max_w(rems(40.))
                 .flex_wrap()
@@ -678,6 +683,20 @@ impl JavaForm {
                                 cx.notify();
                             })),
                     )
+                    .when(n_flags > 0, |r| {
+                        r.child(
+                            Button::new("explain-flags")
+                                .small()
+                                .ghost()
+                                .icon(if self.show_flags { IconName::ChevronDown } else { IconName::ChevronRight })
+                                .label(format!("Explain each ({n_flags})"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_flags = !this.show_flags;
+                                    this.explained = None;
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(
                         widgets::caption(
                             "The memory slider sets -Xms (left) and -Xmx (right).",

@@ -63,7 +63,8 @@ pub fn parse_iso(s: &str) -> Option<i64> {
     Some(secs)
 }
 
-/// "Today", "Yesterday", "3 days ago", else "27/09/2026" (as CurseForge shows it).
+/// "Today", "Yesterday", "3 days ago", "2 weeks ago", "5 months ago",
+/// "2 years ago". [`date`] gives the exact day (for a tooltip).
 pub fn relative(s: &str) -> String {
     match parse_iso(s) {
         // CurseForge writes 0001-01-01 for "never".
@@ -80,10 +81,12 @@ pub fn relative_secs(t: i64) -> String {
         i64::MIN..=0 => "Today".into(),
         1 => "Yesterday".into(),
         2..=6 => format!("{days} days ago"),
-        _ => {
-            let (y, m, d) = civil_from_days(t.div_euclid(86_400));
-            format!("{d:02}/{m:02}/{y}")
-        }
+        7..=13 => "1 week ago".into(),
+        14..=29 => format!("{} weeks ago", days / 7),
+        30..=59 => "1 month ago".into(),
+        60..=364 => format!("{} months ago", days / 30),
+        365..=729 => "1 year ago".into(),
+        _ => format!("{} years ago", days / 365),
     }
 }
 
@@ -107,9 +110,17 @@ mod tests {
         assert_eq!(civil_from_days(days_from_civil(2026, 9, 27)), (2026, 9, 27));
         assert_eq!(parse_iso("1970-01-02T00:00:00Z"), Some(86_400));
         assert_eq!(relative(&now_iso()), "Today");
-        assert_eq!(relative("2026-09-27T10:00:00Z").len(), 10);
+        assert!(relative("2020-09-27T10:00:00Z").ends_with("years ago"));
         assert!(now_iso().ends_with('Z'));
         assert_eq!(relative("0001-01-01T00:00:00"), "");
         assert_eq!(date(days_from_civil(2026, 9, 27) * 86_400 + 5), "27/09/2026");
+    }
+}
+
+/// The exact day of an ISO time, "27/09/2026" (empty when unknown).
+pub fn date_of(s: &str) -> String {
+    match parse_iso(s) {
+        Some(t) if t >= 946_684_800 => date(t),
+        _ => String::new(),
     }
 }

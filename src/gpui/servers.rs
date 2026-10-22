@@ -107,7 +107,8 @@ fn server_list(
         let root = srv.root.clone();
         let pick = on_pick.clone();
         let paired = s.paired(srv).map(|i| i.name.clone());
-        let pairing = with_pairing.then(|| {
+        // Not paired yet: pick its pack right here.
+        let pairing = (with_pairing || paired.is_none()).then(|| {
             let items: Vec<(String, bool)> = instances
                 .iter()
                 .map(|(_, n)| (n.clone(), paired.as_deref() == Some(n.as_str())))
@@ -213,9 +214,9 @@ fn server_list(
                         r.child(widgets::pill(text, color, live))
                     }),
             )
-            .when(!with_pairing, |r| {
+            .when(!with_pairing && paired.is_some(), |r| {
                 r.child(
-                    widgets::caption(paired.clone().unwrap_or("No pack paired".into()), cx)
+                    widgets::caption(paired.clone().unwrap_or_default(), cx)
                         .text_xs()
                         .pl_4(),
                 )

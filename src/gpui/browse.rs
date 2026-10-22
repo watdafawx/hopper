@@ -1973,12 +1973,12 @@ impl BrowseView {
                     .children(self.server_badge(m, id("server"), false, cx))
                     .when(off, |r| {
                         let tip: SharedString = match target {
-                            Some(t) => format!("Disabled in {}. Updating keeps it disabled.", t.name),
+                            Some(t) => format!("Off in {}. Updating keeps it off.", t.name),
                             None => "Disabled. Updating keeps it disabled.".to_string(),
                         }
                         .into();
                         r.child(
-                            widgets::pill("Disabled", theme.warning, false)
+                            widgets::pill("Off", theme.warning, false)
                                 .id(id("off"))
                                 .mr_1()
                                 .tooltip(move |w, cx| {
@@ -2696,7 +2696,7 @@ impl BrowseView {
                             .items_start()
                             .child(Icon::new(IconName::Info).small().flex_none())
                             .child(div().flex_1().min_w_0().child(format!(
-                                "Disabled in {}. Updating or switching versions keeps it disabled; turn it on in the Mods tab.",
+                                "Off in {}. Updating or switching versions keeps it off; turn it on in the Mods tab.",
                                 t.name
                             )))
                     }),

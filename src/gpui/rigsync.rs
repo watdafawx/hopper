@@ -457,7 +457,7 @@ impl SyncPanel {
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (store, server, inst) = (store.clone(), server.clone(), inst.clone());
             alert
-                .title(format!("Update {name} to match the pack?"))
+                .title(format!("Copy this instance's mods to {name}?"))
                 .description(body.clone())
                 .confirm()
                 .ok_text("Update server")
@@ -568,8 +568,8 @@ impl SyncPanel {
                                     .outline()
                                     .small()
                                     .icon(IconName::Package)
-                                    .label("Server pack update")
-                                    .tooltip("Update the server from the pack's server pack. Shows what changes in mods and config files first, like a pack update.")
+                                    .label("Update from server pack")
+                                    .tooltip("Uses the pack author's official server pack: its mods and config files. Shows what changes first, like a pack update.")
                                     .disabled(online || self.running)
                                     .on_click(cx.listener(move |this, _, w, cx| {
                                         crate::pack_update::open_server(
@@ -588,8 +588,8 @@ impl SyncPanel {
                             .primary()
                             .small()
                             .icon(IconName::ServerCog)
-                            .label("Update server to match pack")
-                            .tooltip("Installs the pack's NeoForge on the server if needed, then syncs mods. The server must be stopped.")
+                            .label("Copy my mods to server")
+                            .tooltip("Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. The server must be stopped.")
                             .disabled(online || self.running)
                             .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)));
                         match inst.pack.as_ref().map(|p| p.project_id) {
@@ -794,7 +794,7 @@ impl SyncPanel {
             (EnvFilter::Server, "Server only"),
         ];
         const SOURCES: [(SourceFilter, &str); 2] =
-            [(SourceFilter::Any, "Pack + added"), (SourceFilter::Added, "Added by me")];
+            [(SourceFilter::Any, "Pack + yours"), (SourceFilter::Added, "Only yours")];
         let env_ix = ENVS.iter().position(|(e, _)| *e == self.filters.env).unwrap_or(0);
         let src_ix = SOURCES
             .iter()
@@ -1271,7 +1271,8 @@ impl SyncPanel {
                             .small()
                             .ghost()
                             .icon(IconName::Download)
-                            .tooltip("Copy it into the pack")
+                            .label("Copy to pack")
+                            .tooltip("Copy this jar from the server into this instance")
                             .disabled(self.running)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();

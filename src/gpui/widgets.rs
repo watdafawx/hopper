@@ -179,7 +179,7 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         .overflow_hidden()
         .when(t.in_use, |r| r.child(tag(Tag::info(), "In use".into())))
         .when(t.new, |r| r.child(tag(Tag::success(), "New".into())))
-        .when(t.added, |r| r.child(tag(Tag::warning(), "Added".into())))
+        .when(t.added, |r| r.child(tag(Tag::warning(), "Yours".into())))
         .children(env)
         .children(
             t.categories

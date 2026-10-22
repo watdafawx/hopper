@@ -626,7 +626,16 @@ pub struct Update {
 impl Update {
     /// The installed and offered versions, read from the two file names.
     pub fn versions(&self) -> (String, String) {
-        version_change(&self.from, &self.file.file_name)
+        let (old, new) = version_change(&self.from, &self.file.file_name);
+        // File names that don't say a version ("Pack.zip" both times):
+        // the new file's date tells them apart.
+        if old == new {
+            let when = crate::time::date_of(&self.file.file_date);
+            if !when.is_empty() {
+                return ("yours".into(), when);
+            }
+        }
+        (old, new)
     }
 }
 
@@ -1496,5 +1505,23 @@ mod duplicate_tests {
         inst.addons.clear();
         assert!(super::duplicates(&inst).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod versions_tests {
+    #[test]
+    fn same_name_falls_back_to_the_date() {
+        let u = super::Update {
+            from: "Bare Bones x Mods.zip".into(),
+            file: crate::cf::File {
+                file_name: "Bare Bones x Mods.zip".into(),
+                file_date: "2026-10-13T10:00:00Z".into(),
+                ..Default::default()
+            },
+            project_id: 0,
+            name: String::new(),
+        };
+        assert_eq!(u.versions(), ("yours".to_string(), "13/10/2026".to_string()));
     }
 }

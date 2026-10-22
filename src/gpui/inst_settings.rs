@@ -11,7 +11,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -685,31 +685,44 @@ impl Render for InstanceSettings {
                         ),
                 ),
             );
-        v_flex()
-            .id("instance-settings")
-            .size_full()
+        // The Save bar stays in view under the scrolling form.
+        let theme = cx.theme();
+        let save_bar = h_flex()
+            .flex_none()
             .px_6()
-            .pb_6()
+            .py_2p5()
             .gap_3()
-            .child(top)
-            .child(self.java.clone())
-            .child(bottom)
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(theme.background)
             .child(
-                h_flex()
-                    .pt_3()
-                    .gap_3()
-                    .child(
-                        Button::new("save-settings")
-                            .primary()
-                            .label("Save")
-                            .disabled(!dirty)
-                            .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
-                    )
-                    .when(dirty, |r| {
-                        r.child(widgets::caption("Unsaved changes", cx).font_medium())
-                    }),
+                Button::new("save-settings")
+                    .primary()
+                    .label("Save")
+                    .disabled(!dirty)
+                    .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
             )
-            .overflow_y_scrollbar()
+            .child(if dirty {
+                widgets::caption("Unsaved changes", cx).font_medium()
+            } else {
+                widgets::caption("All saved", cx)
+            });
+        v_flex()
+            .size_full()
+            .child(
+                v_flex()
+                    .id("instance-settings")
+                    .flex_1()
+                    .min_h_0()
+                    .px_6()
+                    .pb_6()
+                    .gap_3()
+                    .child(top)
+                    .child(self.java.clone())
+                    .child(bottom)
+                    .overflow_y_scrollbar(),
+            )
+            .child(save_bar)
             .into_any_element()
     }
 }

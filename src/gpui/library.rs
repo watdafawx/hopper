@@ -1383,15 +1383,14 @@ impl LibraryView {
                 });
                 (s.root.clone(), s.name.clone(), state.unwrap_or_default())
             })
-            .map(|(server, name, state)| {
+            .map(|(_server, name, state)| {
+                // Same place as the Server tab: open it.
                 Button::new("sync-to")
                     .outline()
-                    .icon(IconName::ArrowLeftRight)
-                    .label(format!("Sync to {name}"))
-                    .tooltip(format!("{state}Compare with the paired rig server"))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(LibraryEvent::Compare(server.clone()))
-                    }))
+                    .icon(IconName::Server)
+                    .label(name)
+                    .tooltip(format!("{state}Its mods compared with this instance's (the Server tab)"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_tab(InstTab::Server, cx)))
             });
         let view = cx.entity();
 

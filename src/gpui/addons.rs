@@ -1675,7 +1675,7 @@ impl AddonsView {
                     .selected_index(show_ix)
                     .child(Tab::new().label("All"))
                     .child(Tab::new().label(format!("Updates {n_up}")))
-                    .child(Tab::new().label(format!("Disabled {n_off}")))
+                    .child(Tab::new().label(format!("Off {n_off}")))
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
                         this.show = [Show::All, Show::Updates, Show::Disabled][*ix];
                         cx.notify();
@@ -1684,7 +1684,7 @@ impl AddonsView {
             .when(inst.pack.is_some() && self.global_dir().is_none(), |r| {
                 r.child(
                     Checkbox::new("added-only")
-                        .label(format!("Added by me ({n_added})"))
+                        .label(format!("Only yours ({n_added})"))
                         .tooltip("Only what you added on top of the modpack")
                         .checked(self.added_only)
                         .on_change(cx.listener(|this, v: &bool, _, cx| {
@@ -2569,18 +2569,23 @@ It stays disabled after updating: turn it on in the On column.")
                     Switch::new(id("on"))
                         .small()
                         .checked(on)
-                        .tooltip(if on { "Disable" } else { "Enable" })
+                        .tooltip(if on { "Turn off" } else { "Turn on" })
                         .on_change(cx.listener(move |this, v: &bool, w, cx| {
                             this.toggle(vec![f_on.clone()], *v, w, cx)
                         })),
                 ),
             )
-            .child(
+            .child({
+                let exact = hopper::time::date_of(&a.date_added);
                 col_date()
+                    .id(id("added"))
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child(hopper::time::relative(&a.date_added)),
-            )
+                    .when(!exact.is_empty(), |d| {
+                        d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(exact.clone()).build(w, cx))
+                    })
+                    .child(hopper::time::relative(&a.date_added))
+            })
             .child(
                 col_trash().child(
                     Button::new(id("rm"))
