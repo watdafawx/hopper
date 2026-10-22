@@ -7,6 +7,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -51,6 +52,12 @@ pub struct SyncPanel {
     /// The NeoForge version the server's run.bat starts, read with each
     /// comparison (run.bat may sit on a network share: not per frame).
     server_nf: Option<String>,
+    /// NeoForge builds for the pack's Minecraft version, newest first, for
+    /// the loader picker: (Minecraft version, builds).
+    nf_versions: Option<(String, Result<Vec<String>, String>)>,
+    nf_loading: bool,
+    /// The sidebar's pick: only this group's rows.
+    only: Option<Group>,
     filters: Filters,
     search: Entity<InputState>,
     selected: HashSet<String>,
@@ -133,6 +140,9 @@ impl SyncPanel {
             note: None,
             crash: None,
             server_nf: None,
+            nf_versions: None,
+            nf_loading: false,
+            only: None,
             filters: Filters::default(),
             search,
             selected: HashSet::new(),
@@ -195,6 +205,7 @@ impl SyncPanel {
             self.result = None;
             self.diff = None;
             self.server_nf = None;
+            self.only = None;
         }
         // Same server mid-sync: the sync rescans when it ends.
         if moved || !self.running {
@@ -264,6 +275,7 @@ impl SyncPanel {
                 this.comparing = false;
                 this.crash = crash;
                 this.server_nf = server_nf;
+                this.want_nf_versions(cx);
                 if this.holding() {
                     this.diff_next = Some(diff.map(|(d, n)| (d, Some(n))).map_or_else(|e| (Err(e), None), |(d, n)| (Ok(d), n)));
                     cx.notify();
@@ -482,6 +494,503 @@ impl SyncPanel {
                     true
                 })
         });
+    }
+
+    /// Lists the NeoForge builds for the pack's Minecraft version, once,
+    /// when the server runs NeoForge.
+    fn want_nf_versions(&mut self, cx: &mut Context<Self>) {
+        if self.nf_loading || self.server_nf.is_none() {
+            return;
+        }
+        let Some((_, inst)) = self.pair_header(cx) else { return };
+        if self.nf_versions.as_ref().is_some_and(|(mc, _)| *mc == inst.game_version) {
+            return;
+        }
+        self.nf_loading = true;
+        let mc = inst.game_version.clone();
+        cx.spawn(async move |this, cx| {
+            let mc2 = mc.clone();
+            let list = cx
+                .background_spawn(async move {
+                    hopper::cf::loader_versions(&mc2)
+                        .map(|v| {
+                            v.into_iter()
+                                .filter_map(|l| l.name.strip_prefix("neoforge-").map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                        .map_err(|e| format!("{e:#}"))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.nf_loading = false;
+                this.nf_versions = Some((mc, list));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks, then installs NeoForge `want` on the server (mods untouched).
+    fn set_loader(&mut self, want: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((server, _)) = self.pair_header(cx) else { return };
+        let have = self.server_nf.clone().unwrap_or_default();
+        if have == want {
+            return;
+        }
+        let store = self.store.clone();
+        let name = server.name.clone();
+        let older = hopper::scan::compare_versions(&want, &have) == std::cmp::Ordering::Less;
+        let body = format!(
+            "Installs NeoForge {want} in {} and points run.bat at it{}. Mods aren't touched. The old run.bat is kept in .hopper-backups.",
+            server.root.display(),
+            if older { " (an older build than the server has now)" } else { "" },
+        );
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (store, server, want) = (store.clone(), server.clone(), want.clone());
+            alert
+                .title(format!("Switch {name} to NeoForge {want}?"))
+                .description(body.clone())
+                .confirm()
+                .ok_text("Switch loader")
+                .on_ok(move |_, _, cx| {
+                    let s = store.read(cx);
+                    let host = s.settings().server_host.clone();
+                    let java = hopper::launch::installer_java(Path::new(&s.settings().launcher_dir));
+                    let panel = hopper::panel::from_settings(s.settings());
+                    let (server, want) = (server.clone(), want.clone());
+                    s.spawn_job(format!("NeoForge {want} on {}", server.name), move |job| {
+                        let r = hopper::server_update::set_server_neoforge(
+                            &server, &want, &host, &java, panel.as_deref(), job,
+                        )?;
+                        job.detail(r);
+                        Ok(Msg::ServersChanged)
+                    });
+                    true
+                })
+        });
+    }
+
+    /// The loader picker's menu: the pack's build, the newest, the one on the
+    /// server now, then every build for the pack's Minecraft version.
+    fn loader_menu(view: &Entity<Self>, menu: PopupMenu, cx: &App) -> PopupMenu {
+        let this = view.read(cx);
+        let Some((_, inst)) = this.pair_header(cx) else { return menu };
+        let pack = inst.loader.strip_prefix("neoforge-").map(str::to_string);
+        let have = this.server_nf.clone();
+        let list = this.nf_versions.as_ref().map(|(_, l)| l.clone());
+        let pick = |v: String, label: String| {
+            let view = view.clone();
+            let current = have.as_deref() == Some(v.as_str());
+            PopupMenuItem::new(label)
+                .checked(current)
+                .disabled(current)
+                .on_click(move |_, window, cx| {
+                    let v = v.clone();
+                    view.update(cx, |this, cx| this.set_loader(v, window, cx))
+                })
+        };
+        let mut menu = menu.scrollable(true).max_h(px(440.)).label("Suggested");
+        if let Some(p) = &pack {
+            menu = menu.item(pick(p.clone(), format!("{p}  ·  the pack's")));
+        }
+        let latest = list.as_ref().and_then(|l| l.as_ref().ok()).and_then(|l| l.first().cloned());
+        if let Some(l) = latest.clone().filter(|l| Some(l) != pack.as_ref()) {
+            menu = menu.item(pick(l.clone(), format!("{l}  ·  newest")));
+        }
+        if let Some(h) = have.clone().filter(|h| Some(h) != pack.as_ref() && Some(h) != latest.as_ref()) {
+            menu = menu.item(pick(h.clone(), format!("{h}  ·  on the server now")));
+        }
+        menu = menu.separator().label(format!("All for Minecraft {}", inst.game_version));
+        match list {
+            None => menu.item(PopupMenuItem::new("Loading versions…").disabled(true)),
+            Some(Err(e)) => menu.item(PopupMenuItem::new(e).disabled(true)),
+            Some(Ok(l)) => l.into_iter().take(80).fold(menu, |m, v| m.item(pick(v.clone(), v))),
+        }
+    }
+
+    /// The Server tab's left column: the server and its controls, whether
+    /// the mods match, the loader, which group to show, and the big actions.
+    fn sidebar(&self, server: &ServerInfo, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
+        let controls = self
+            .control
+            .read(cx)
+            .configured(cx)
+            .then(|| self.control.update(cx, |c, cx| c.controls(cx)));
+        let online = self.online(cx);
+        let counts: Vec<(Group, usize)> = {
+            let groups: Vec<Group> = self.counted(cx).into_iter().map(Group::of).collect();
+            Group::ALL.map(|g| (g, groups.iter().filter(|x| **x == g).count())).into()
+        };
+        let n = |g: Group| counts.iter().find(|(x, _)| *x == g).map_or(0, |(_, n)| *n);
+        // Whether the mods match goes by the whole comparison, not the search.
+        let all: Vec<(Group, usize)> = {
+            let blacklist = &self.store.read(cx).settings().sync_blacklist;
+            let unfiltered = Filters::default();
+            let groups: Vec<Group> = match &self.diff {
+                Some(Ok(d)) => d.iter().filter(|d| unfiltered.passes(d, blacklist)).map(Group::of).collect(),
+                _ => Vec::new(),
+            };
+            Group::ALL.map(|g| (g, groups.iter().filter(|x| **x == g).count())).into()
+        };
+        let n_all = |g: Group| all.iter().find(|(x, _)| *x == g).map_or(0, |(_, n)| *n);
+        let to_change = n_all(Group::Add) + n_all(Group::Update) + n_all(Group::ServerOnly);
+        let scanned = matches!(self.diff, Some(Ok(_)));
+        let view = cx.entity();
+        let theme = cx.theme().clone();
+        let card = || {
+            v_flex()
+                .gap_2()
+                .p_3()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.secondary.opacity(0.5))
+        };
+        let heading = |t: &'static str| {
+            div()
+                .text_xs()
+                .font_semibold()
+                .text_color(theme.muted_foreground)
+                .child(t.to_uppercase())
+        };
+
+        // The server, its state and controls.
+        let pack_line = match self.note.as_ref().map(|a| (a.server_pack_jars, &a.note)) {
+            Some((Some(n), _)) => Some(format!("The pack's server pack lists {n} mods")),
+            Some((None, Some(note))) => Some(note.clone()),
+            _ => None,
+        };
+        let server_card = card()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Icon::new(IconName::Server).small().text_color(theme.muted_foreground))
+                    .child(div().flex_1().min_w_0().font_semibold().truncate().child(server.name.clone()))
+                    .child(
+                        Button::new("rescan")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::RefreshCw)
+                            .tooltip("Compare again")
+                            .loading(self.comparing)
+                            .disabled(self.running || self.comparing)
+                            .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
+                    ),
+            )
+            .children(controls)
+            .when_some(pack_line, |c, t| c.child(widgets::caption(t, cx).text_xs()));
+
+        // Whether the mods match, with the split as a bar.
+        let total: usize = counts.iter().map(|(_, n)| n).sum();
+        let total_all: usize = all.iter().map(|(_, n)| n).sum();
+        let bar = h_flex()
+            .h_1p5()
+            .w_full()
+            .rounded_full()
+            .overflow_hidden()
+            .bg(theme.muted)
+            .children(all.iter().filter(|(_, n)| *n > 0).map(|(g, k)| {
+                div()
+                    .h_full()
+                    .w(relative(*k as f32 / total_all.max(1) as f32))
+                    .bg(Self::group_color(*g, cx))
+            }));
+        let status = if !scanned {
+            card()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(Spinner::new().small())
+                        .child(widgets::caption("Comparing mod folders", cx)),
+                )
+                .into_any_element()
+        } else {
+            let (color, icon, title, sub) = if to_change == 0 {
+                (
+                    theme.success,
+                    IconName::Check,
+                    "Mods match".to_string(),
+                    "Nothing to add, update or remove".to_string(),
+                )
+            } else {
+                let parts: Vec<String> = [Group::Add, Group::Update, Group::ServerOnly]
+                    .into_iter()
+                    .filter(|g| n_all(*g) > 0)
+                    .map(|g| count_words(g, n_all(g)))
+                    .collect();
+                (
+                    theme.primary,
+                    IconName::ArrowLeftRight,
+                    format!("{to_change} to sync"),
+                    parts.join(" · "),
+                )
+            };
+            card()
+                .border_color(color.opacity(0.35))
+                .bg(color.opacity(0.07))
+                .child(
+                    h_flex()
+                        .gap_2p5()
+                        .child(
+                            div()
+                                .flex_none()
+                                .size_8()
+                                .rounded_full()
+                                .bg(color.opacity(0.16))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(Icon::new(icon).small().text_color(color)),
+                        )
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .child(div().font_semibold().child(title))
+                                .child(widgets::caption(sub, cx).text_xs()),
+                        ),
+                )
+                .child(bar)
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .flex_wrap()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .children(all.iter().filter(|(_, n)| *n > 0).map(|(g, k)| {
+                            h_flex()
+                                .gap_1p5()
+                                .child(div().size_2().rounded_full().bg(Self::group_color(*g, cx)))
+                                .child(count_words(*g, *k))
+                        })),
+                )
+                .when(online, |c| {
+                    c.child(
+                        h_flex()
+                            .gap_1p5()
+                            .text_xs()
+                            .text_color(theme.warning)
+                            .child(Icon::new(IconName::TriangleAlert).xsmall())
+                            .child("Running: stop it before syncing"),
+                    )
+                })
+                .into_any_element()
+        };
+
+        // The loader: a fix when it differs from the pack, else a quiet line.
+        let pack_nf = inst.loader.strip_prefix("neoforge-").map(str::to_string);
+        let blocked = online || self.running;
+        let why_blocked = if online { "Stop the server first" } else { "Wait for the sync to finish" };
+        let picker = |b: Button| {
+            let view = view.clone();
+            b.disabled(blocked)
+                .when(blocked, |b| b.tooltip(why_blocked))
+                .dropdown_menu(move |menu, _, cx| Self::loader_menu(&view, menu, cx))
+                .into_any_element()
+        };
+        let loader = match (&pack_nf, &self.server_nf) {
+            (Some(p), Some(sv)) if p != sv => {
+                let p2 = p.clone();
+                let kv = |k: &'static str, v: String, c: Hsla| {
+                    h_flex()
+                        .text_xs()
+                        .child(div().flex_1().text_color(theme.muted_foreground).child(k))
+                        .child(div().text_color(c).child(v))
+                };
+                Some(
+                    card()
+                        .border_color(theme.warning.opacity(0.45))
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(theme.warning)
+                                .child(Icon::new(IconName::TriangleAlert).xsmall())
+                                .child("LOADER DIFFERS"),
+                        )
+                        .child(kv("Server", format!("NeoForge {sv}"), theme.foreground))
+                        .child(kv("Pack", format!("NeoForge {p}"), theme.primary))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .child(
+                                    widgets::split_lead(
+                                        Button::new("nf-match")
+                                            .primary()
+                                            .small()
+                                            .flex_1()
+                                            .icon(IconName::RefreshCw)
+                                            .label(format!("Match pack · {p}"))
+                                            .disabled(blocked)
+                                            .tooltip(if blocked {
+                                                why_blocked.to_string()
+                                            } else {
+                                                format!("Install NeoForge {p} on the server. Mods aren't touched.")
+                                            })
+                                            .on_click(cx.listener(move |this, _, w, cx| {
+                                                this.set_loader(p2.clone(), w, cx)
+                                            })),
+                                    ),
+                                )
+                                .child(picker(
+                                    Button::new("nf-pick")
+                                        .primary()
+                                        .small()
+                                        .icon(IconName::ChevronDown)
+                                        .rounded_tl(px(0.))
+                                        .rounded_bl(px(0.))
+                                        .border_l_1()
+                                        .border_color(black().opacity(0.2)),
+                                )),
+                        )
+                        .into_any_element(),
+                )
+            }
+            (_, Some(sv)) => Some(
+                card()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_sm()
+                            .child(Icon::new(IconName::CircleCheck).small().text_color(theme.success))
+                            .child(
+                                div().flex_1().min_w_0().truncate().child(if pack_nf.is_some() {
+                                    format!("NeoForge {sv}, same as the pack")
+                                } else {
+                                    format!("Server on NeoForge {sv}")
+                                }),
+                            )
+                            .child(picker(
+                                Button::new("nf-change").ghost().xsmall().label("Change").icon(IconName::ChevronDown),
+                            )),
+                    )
+                    .into_any_element(),
+            ),
+            _ => None,
+        };
+
+        // Which group the list shows.
+        let row = |key: &'static str, icon: IconName, color: Hsla, label: &'static str, count: usize, on: bool, pick: Option<Group>| {
+            let dim = count == 0 && pick.is_some();
+            h_flex()
+                .id(key)
+                .gap_2()
+                .px_2()
+                .py_1p5()
+                .rounded(theme.radius)
+                .text_sm()
+                .cursor_pointer()
+                .when(on, |r| r.bg(theme.list_active))
+                .when(!on, |r| r.hover(|s| s.bg(theme.list_hover)))
+                .when(dim, |r| r.opacity(0.45))
+                .child(Icon::new(icon).small().text_color(color))
+                .child(div().flex_1().text_color(if on { theme.foreground } else { theme.muted_foreground }).child(label))
+                .child(
+                    div()
+                        .font_semibold()
+                        .text_color(if count == 0 { theme.muted_foreground } else { color })
+                        .child(count.to_string()),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.only = if this.only == pick { None } else { pick };
+                    if let Some(g) = pick {
+                        this.open.insert(g);
+                    }
+                    this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    cx.notify();
+                }))
+        };
+        let label = |g: Group| match g {
+            Group::Add => "To add",
+            Group::Update => "Updates",
+            Group::ServerOnly => "Only on server",
+            Group::KeptOff => "Kept off",
+            Group::InSync => "In sync",
+        };
+        let ids = |g: Group| match g {
+            Group::Add => "show-add",
+            Group::Update => "show-update",
+            Group::ServerOnly => "show-only-server",
+            Group::KeptOff => "show-kept-off",
+            Group::InSync => "show-in-sync",
+        };
+        let mut rows: Vec<AnyElement> = vec![
+            row("show-all", IconName::List, theme.foreground, "Everything", total, self.only.is_none(), None)
+                .into_any_element(),
+        ];
+        for g in Group::ALL {
+            let k = n(g);
+            let actionable = matches!(g, Group::Add | Group::Update | Group::ServerOnly);
+            if k == 0 && actionable && to_change == 0 {
+                continue;
+            }
+            rows.push(
+                row(ids(g), Self::group_icon(g), Self::group_color(g, cx), label(g), k, self.only == Some(g), Some(g))
+                    .into_any_element(),
+            );
+        }
+        if scanned && to_change == 0 {
+            rows.push(
+                h_flex()
+                    .gap_2()
+                    .px_2()
+                    .py_1p5()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(Icon::new(IconName::CircleCheck).xsmall())
+                    .child("Nothing to add, update or remove")
+                    .into_any_element(),
+            );
+        }
+        let show = card().gap_0p5().child(div().pb_1().child(heading("Show"))).children(rows);
+
+        // The big actions, last.
+        let cf_pack = inst
+            .pack
+            .as_ref()
+            .is_some_and(|p| p.project_id != 0 && !hopper::modrinth::is_mr(p.project_id));
+        let pack_btn = cf_pack.then(|| {
+            let (server, inst) = (server.clone(), inst.clone());
+            Button::new("server-pack-update")
+                .outline()
+                .small()
+                .w_full()
+                .icon(IconName::Package)
+                .label("Update from server pack")
+                .tooltip("Uses the pack author's official server pack: its mods and config files. Shows what changes first, like a pack update.")
+                .disabled(online || self.running)
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    crate::pack_update::open_server(this.store.clone(), server.clone(), inst.clone(), w, cx)
+                }))
+        });
+        let copy = Button::new("update-server")
+            .small()
+            .w_full()
+            .icon(IconName::ServerCog)
+            .label("Copy my mods to server")
+            .map(|b| if to_change > 0 { b.primary() } else { b.ghost() })
+            .tooltip("Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. The server must be stopped.")
+            .disabled(online || self.running)
+            .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)));
+
+        v_flex()
+            .id("sync-side")
+            .w(rems(18.))
+            .flex_none()
+            .h_full()
+            .gap_3()
+            .p_4()
+            .border_r_1()
+            .border_color(theme.border)
+            .overflow_y_scroll()
+            .child(server_card)
+            .child(status)
+            .children(loader)
+            .child(show)
+            .child(div().flex_1())
+            .child(v_flex().gap_1p5().children(pack_btn).child(copy))
+            .into_any_element()
     }
 
     // ---- rendering -----------------------------------------------------
@@ -1005,6 +1514,15 @@ impl SyncPanel {
 
     /// The rows the filters let through.
     fn visible(&self, cx: &App) -> Vec<&DiffEntry> {
+        self.counted(cx)
+            .into_iter()
+            .filter(|d| self.only.is_none_or(|g| Group::of(d) == g))
+            .collect()
+    }
+
+    /// The rows the search and side filters let through, whatever group the
+    /// sidebar picked: what its counts count.
+    fn counted(&self, cx: &App) -> Vec<&DiffEntry> {
         let Some(Ok(diff)) = &self.diff else {
             return Vec::new();
         };
@@ -1023,7 +1541,7 @@ impl SyncPanel {
         let blacklist = &self.store.read(cx).settings().sync_blacklist;
         let mut by_group: Vec<(Group, Vec<usize>)> = Group::ALL.map(|g| (g, Vec::new())).into();
         for (i, d) in diff.iter().enumerate() {
-            if self.filters.passes(d, blacklist) {
+            if self.filters.passes(d, blacklist) && self.only.is_none_or(|g| Group::of(d) == g) {
                 let g = Group::of(d);
                 if let Some((_, v)) = by_group.iter_mut().find(|(x, _)| *x == g) {
                     v.push(i);
@@ -1453,6 +1971,14 @@ impl SyncPanel {
     }
 }
 
+/// "1 update", "3 to add", "120 kept off".
+fn count_words(g: Group, n: usize) -> String {
+    match g {
+        Group::Update if n == 1 => "1 update".into(),
+        _ => format!("{n} {}", g.short()),
+    }
+}
+
 /// One line of the changeset list.
 #[derive(Clone, Copy)]
 enum Item {
@@ -1522,7 +2048,9 @@ impl Render for SyncPanel {
                 ))
                 .into_any_element();
         };
-        let header = self.header(&server, &inst, cx);
+        let side = self.in_instance;
+        let header = (!side).then(|| self.header(&server, &inst, cx));
+        let sidebar = side.then(|| self.sidebar(&server, &inst, cx));
         let crash = self.crash_banner(cx);
         let section_ix = match self.section {
             Section::Mods => 0,
@@ -1557,8 +2085,9 @@ impl Render for SyncPanel {
             Some(Ok(_)) => {
                 let count = self.items.len();
                 let toolbar = self.toolbar(cx);
-                let summary = self.summary(cx);
-                let footer = self.footer(&server, cx);
+                let summary = (!side).then(|| self.summary(cx));
+                // Beside the sidebar, the apply bar shows once something is picked.
+                let footer = (!side || !self.selected_rows(cx).is_empty()).then(|| self.footer(&server, cx));
                 let theme = cx.theme();
                 let result: Option<AnyElement> = self.result.as_ref().map(|r| match r {
                     Ok(line) => h_flex()
@@ -1578,7 +2107,7 @@ impl Render for SyncPanel {
                     .flex_1()
                     .min_h_0()
                     .gap_3()
-                    .child(summary)
+                    .children(summary)
                     .child(toolbar)
                     .child(
                         div()
@@ -1600,18 +2129,38 @@ impl Render for SyncPanel {
                             )
                             .vertical_scrollbar(&self.scroll),
                     )
-                    .child(footer)
+                    .children(footer)
                     .children(result)
                     .into_any_element()
             }
             },
         };
+        if let Some(sidebar) = sidebar {
+            return h_flex()
+                .size_full()
+                .items_stretch()
+                .child(sidebar)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .px_5()
+                        .pt_2()
+                        .pb_4()
+                        .gap_3()
+                        .child(sections)
+                        .children(crash)
+                        .child(v_flex().flex_1().min_h_0().child(body)),
+                )
+                .into_any_element();
+        }
         v_flex()
             .size_full()
             .px_6()
             .py_5()
             .gap_4()
-            .child(header)
+            .children(header)
             .children(crash)
             .child(sections)
             .child(v_flex().flex_1().min_h_0().child(body))

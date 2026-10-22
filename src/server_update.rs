@@ -225,6 +225,38 @@ pub fn point_panel(
     }
 }
 
+/// Switches `server` to NeoForge `want` (any version, older or newer):
+/// installs it, points run.bat at it, and the panel's launch command too.
+/// Mods are left alone. Refuses while the server answers a ping.
+pub fn set_server_neoforge(
+    server: &ServerInfo,
+    want: &str,
+    host: &str,
+    java: &Path,
+    panel: Option<&dyn crate::panel::ServerPanel>,
+    job: &Job,
+) -> anyhow::Result<String> {
+    if matches!(server::ping(host, server.port()), Status::Online { .. }) {
+        bail!("{} is running. Stop it first.", server.name);
+    }
+    let have = server_neoforge(&server.root)
+        .ok_or_else(|| anyhow::anyhow!("run.bat doesn't name a NeoForge version"))?;
+    let mut parts = Vec::new();
+    if have != want {
+        install_neoforge_server(&server.root, want, java, job)?;
+        rewrite_run_scripts(&server.root, &have, want)?;
+        parts.push(format!("NeoForge {have} » {want}"));
+    }
+    if let Some(p) = panel.and_then(|p| point_panel(server, want, p, job)) {
+        parts.push(p);
+    }
+    Ok(if parts.is_empty() {
+        format!("Already on NeoForge {want}")
+    } else {
+        parts.join(" · ")
+    })
+}
+
 /// Brings `server` up to `inst`: loader first, then mods with the usual
 /// skip rules. Refuses while the server answers a ping. A `panel` that keeps
 /// its own launch command (Crafty's Server Execution Command) is pointed at

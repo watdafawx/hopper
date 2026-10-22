@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server Tab Layouts</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@0.453.0/dist/umd/lucide.min.js"></script>
+<style>
+/* Matches the dark theme in the current screenshot */
+:root{
+  --bg:#141418; --base:#1a1a1f; --surface:#212127; --raise:#28282f; --line:#2f2f37; --line2:#3a3a44;
+  --text:#ececf1; --subtle:#a3a3ad; --muted:#6f6f7a;
+  --acc:#f97316; --acc-dim:#f9731622; --green:#22c55e; --green-dim:#22c55e1f; --gold:#eab308; --gold-dim:#eab3081f;
+  --blue:#60a5fa; --blue-dim:#60a5fa1f; --red:#ef4444; --red-dim:#ef44441f;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.45 Inter,system-ui,sans-serif;padding:20px 16px 64px}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+[data-lucide]{width:14px;height:14px;stroke-width:2;flex:none}
+.mono{font-family:"JetBrains Mono",monospace}
+.page{max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+h1{font-size:20px;font-weight:700}
+.lede{color:var(--subtle);max-width:980px}
+.switch{display:flex;gap:6px;flex-wrap:wrap;position:sticky;top:0;z-index:20;background:#141418ee;padding:10px 0;backdrop-filter:blur(6px)}
+.switch button{padding:7px 14px;border-radius:999px;border:1px solid var(--line2);color:var(--subtle);font-weight:500}
+.switch button.on{background:var(--acc);border-color:var(--acc);color:#1a1a1f;font-weight:600}
+.pitch{color:var(--subtle);font-size:13px;max-width:1100px}
+.pitch b{color:var(--text)}
+.variant{display:none;flex-direction:column;gap:12px}
+.variant.on{display:flex}
+
+/* window chrome (tab strip only, the hero above is unchanged) */
+.win{background:var(--base);border:1px solid var(--line);border-radius:10px;overflow:hidden;height:780px;display:flex;flex-direction:column;box-shadow:0 30px 80px #0009}
+.tabs{display:flex;gap:22px;padding:0 20px;border-bottom:1px solid var(--line);color:var(--subtle);font-weight:500;flex:none;overflow:hidden}
+.tabs span{padding:12px 0;display:flex;gap:6px;align-items:center;white-space:nowrap}
+.tabs span.on{color:var(--text);box-shadow:inset 0 -2px var(--acc)}
+.tabs .n{font-size:11px;background:var(--raise);padding:0 6px;border-radius:99px;color:var(--subtle)}
+.body{flex:1;min-height:0;display:flex}
+
+/* shared bits */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:6px;border:1px solid var(--line2);font-size:12.5px;font-weight:500;white-space:nowrap;background:var(--surface)}
+.btn:hover{background:var(--raise)}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#1a1a1f;font-weight:600}
+.btn.go{background:var(--green);border-color:var(--green);color:#0b1a10;font-weight:600}
+.btn.ghost{background:none;border-color:transparent;color:var(--subtle)}
+.btn.sm{padding:3px 8px;font-size:12px}
+.btn.icon{padding:5px 6px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:1px 8px;border-radius:99px;border:1px solid var(--line2);color:var(--subtle);white-space:nowrap}
+.chip.stopped{color:var(--subtle)}
+.chip.run{color:var(--green);border-color:#22c55e55;background:var(--green-dim)}
+.dot{width:7px;height:7px;border-radius:50%;flex:none}
+.sp{flex:1}
+.row{display:flex;align-items:center;gap:8px}
+.search{display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--line2);border-radius:6px;padding:4px 8px;color:var(--muted);min-width:200px}
+.seg{display:flex;background:var(--surface);border:1px solid var(--line);border-radius:7px;padding:2px}
+.seg button{padding:3px 9px;border-radius:5px;color:var(--subtle);font-size:12px;white-space:nowrap}
+.seg button.on{background:var(--raise);color:var(--text)}
+
+/* loader mismatch control */
+.loader{display:flex;align-items:center;gap:8px;padding:6px 6px 6px 10px;border-radius:8px;background:var(--gold-dim);border:1px solid #eab30855;position:relative}
+.loader .t{color:var(--gold);display:flex;align-items:center;gap:6px;white-space:nowrap}
+.loader .t b{color:var(--text);font-weight:600}
+.loader.ok{background:var(--green-dim);border-color:#22c55e44}
+.loader.ok .t{color:var(--green)}
+.split{display:inline-flex}
+.split .btn:first-child{border-radius:6px 0 0 6px}
+.split .btn:last-child{border-radius:0 6px 6px 0;border-left:1px solid #0003;padding:5px 6px}
+.pop{position:absolute;top:calc(100% + 6px);right:0;width:300px;background:var(--surface);border:1px solid var(--line2);border-radius:9px;box-shadow:0 18px 50px #000a;z-index:5;padding:6px}
+.pop h4{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:6px 8px 4px;font-weight:600}
+.pop .opt{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px}
+.pop .opt:hover,.pop .opt.hl{background:var(--raise)}
+.pop .opt .v{font-family:"JetBrains Mono",monospace;font-size:12px}
+.pop .opt .tag{font-size:10.5px;padding:0 6px;border-radius:99px}
+.tag.pack{background:var(--acc-dim);color:var(--acc)}
+.tag.cur{background:var(--raise);color:var(--subtle)}
+.tag.new{background:var(--blue-dim);color:var(--blue)}
+.pop .foot{border-top:1px solid var(--line);margin-top:4px;padding:8px 8px 4px;color:var(--muted);font-size:11.5px;display:flex;gap:6px;align-items:center}
+
+/* mod rows */
+.list{overflow:auto;flex:1;min-height:0}
+.grp{display:flex;align-items:center;gap:8px;padding:7px 12px;position:sticky;top:0;background:var(--base);border-bottom:1px solid var(--line);z-index:2;font-weight:600}
+.grp .c{color:var(--muted);font-weight:500}
+.grp .why{color:var(--muted);font-weight:400;font-size:12px}
+.m{display:grid;grid-template-columns:18px 26px minmax(0,1fr) 110px 120px 84px;gap:10px;align-items:center;padding:5px 12px;border-bottom:1px solid #ffffff08}
+.m:hover{background:#ffffff06}
+.m .ic{width:26px;height:26px;border-radius:5px}
+.m .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m .nm small{color:var(--muted);margin-left:6px;font-family:"JetBrains Mono",monospace;font-size:11px}
+.m .side{font-size:11.5px;color:var(--subtle)}
+.m .st{font-size:11.5px;display:flex;align-items:center;gap:5px}
+.cb{width:14px;height:14px;border:1.5px solid var(--line2);border-radius:3px}
+.cb.on{background:var(--acc);border-color:var(--acc)}
+.selbar{display:flex;align-items:center;gap:10px;padding:8px 12px;border-top:1px solid var(--line);background:var(--surface);flex:none}
+
+/* A: sidebar + list */
+.side-pane{width:300px;flex:none;border-right:1px solid var(--line);padding:16px;display:flex;flex-direction:column;gap:14px;overflow:auto}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:12px}
+.card h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:12.5px}
+.kv dt{color:var(--muted)}
+.kv dd{text-align:right}
+.filt{display:flex;flex-direction:column;gap:2px}
+.filt button{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;text-align:left;color:var(--subtle)}
+.filt button.on{background:var(--raise);color:var(--text)}
+.filt button .n{margin-left:auto;font-variant-numeric:tabular-nums;font-weight:600}
+.main-pane{flex:1;min-width:0;display:flex;flex-direction:column}
+.toolbar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+
+/* B: header strip */
+.strip{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.strip h2{font-size:15px;font-weight:600;display:flex;gap:8px;align-items:center}
+.counts{display:flex;gap:4px;padding:8px 16px;border-bottom:1px solid var(--line);align-items:center;flex-wrap:wrap}
+.cnt{display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:7px;border:1px solid transparent;color:var(--subtle)}
+.cnt b{font-size:15px;font-variant-numeric:tabular-nums}
+.cnt.on{border-color:var(--line2);background:var(--surface);color:var(--text)}
+.cnt.zero{opacity:.45}
+.bar{height:6px;border-radius:99px;overflow:hidden;display:flex;width:220px;background:var(--raise)}
+
+/* C: diff columns */
+.diffhead{display:grid;grid-template-columns:1fr 46px 1fr;border-bottom:1px solid var(--line);flex:none}
+.diffhead > div{padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.diffhead h3{font-size:13px;display:flex;align-items:center;gap:8px}
+.diffhead .mid{display:grid;place-items:center;color:var(--muted);padding:0}
+.d{display:grid;grid-template-columns:1fr 46px 1fr;border-bottom:1px solid #ffffff08}
+.d > div{padding:5px 16px;display:flex;align-items:center;gap:8px;min-width:0}
+.d .mid{justify-content:center;padding:0}
+.d .ghost{color:var(--muted);font-style:italic}
+.d .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.d .ver{margin-left:auto;font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--muted)}
+.d.add{background:#22c55e0a}
+.d.upd{background:#60a5fa0a}
+.d.only{background:#ef44440a}
+
+/* D: empty-state / all-good */
+.hero-ok{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:40px 16px;text-align:center}
+.hero-ok .big{width:54px;height:54px;border-radius:50%;background:var(--green-dim);display:grid;place-items:center;color:var(--green)}
+.hero-ok .big [data-lucide]{width:26px;height:26px}
+.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:0 16px 16px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:12px;display:flex;flex-direction:column;gap:6px}
+.tile h4{font-size:12px;color:var(--muted);font-weight:500;display:flex;gap:6px;align-items:center}
+
+/* instance header */
+.ih{position:relative;display:flex;align-items:center;gap:20px;padding:20px 24px;flex:none;overflow:hidden;border-bottom:1px solid var(--line)}
+.ih > *{position:relative}
+.ih-bg{position:absolute!important;inset:0;background:radial-gradient(120% 140% at 85% 0%,#5a4a3a66,transparent 60%),linear-gradient(90deg,#1a1a1f 30%,#2a241f 70%,#3a3028);opacity:.9}
+.ih-icon{width:104px;height:104px;border-radius:12px;flex:none;background:linear-gradient(160deg,#7a1e12,#1d1410);border:2px solid #ffffff22;box-shadow:0 10px 30px #0008;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:800;line-height:1;color:#fff;text-shadow:0 2px #000}
+.ih-icon span{font-size:24px;color:#fbbf24}
+.ih-icon small{font-size:9px;margin:3px 0;letter-spacing:.04em}
+.ih-icon b{font-size:26px}
+.ih-main{display:flex;flex-direction:column;gap:8px;min-width:0}
+.ih-title{font-size:26px;font-weight:700;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.15}
+.ih-meta{display:flex;gap:16px;color:var(--subtle);flex-wrap:wrap}
+.ih-meta span{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.ih-meta .sep{width:1px;height:14px;background:var(--line2)}
+.ih-right{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:14px}
+.ih-stats{display:flex;background:#0006;border:1px solid #ffffff14;border-radius:10px;backdrop-filter:blur(6px)}
+.ih-stats div{display:flex;flex-direction:column;padding:8px 16px;min-width:92px}
+.ih-stats div+div{border-left:1px solid #ffffff14}
+.ih-stats b{font-size:16px;font-variant-numeric:tabular-nums}
+.ih-stats small{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.ih-btn{padding:7px 12px;font-size:13px;background:#0005;border-color:#ffffff1f;backdrop-filter:blur(6px)}
+.ih-btn.icon{padding:7px 8px}
+.ih.compact{padding:14px 20px;gap:14px}
+.ih.compact .ih-icon{width:52px;height:52px;border-radius:9px}
+.ih.compact .ih-icon span{font-size:13px}.ih.compact .ih-icon small{font-size:5px;margin:1px 0}.ih.compact .ih-icon b{font-size:13px}
+.ih.compact .ih-title{font-size:19px}
+.ih.compact .ih-main{gap:5px}
+.ih.compact .ih-meta{gap:12px;font-size:12.5px}
+.ih.old{padding:28px 36px;gap:28px}
+
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.note{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.note h3{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--subtle);margin-bottom:6px}
+.note ul{padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.note b{color:var(--acc)}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Server tab: denser layouts</h1>
+  <p class="lede">Today: 5 big stat cards (3 are zero), two collapsed groups, then ~350px of nothing above the selection bar. Every variant below keeps the same data but shows mod rows on first view, folds the counts into filters, and gives the loader warning its own fix button with a version picker.</p>
+
+  <div class="switch" id="sw">
+    <button data-v="a" class="on">A · Sidebar + list</button>
+    <button data-v="b">B · One header strip</button>
+    <button data-v="c">C · Side-by-side diff</button>
+    <button data-v="d">D · "All good" state</button>
+    <button data-v="f">A + all good</button>
+    <button data-v="e">Loader control close-up</button>
+  </div>
+
+  <!-- ============ A ============ -->
+  <section class="variant on" id="v-a">
+    <p class="pitch"><b>Server info and counts move to a 300px left column; mods fill the rest.</b> Counts become a filter list (click "Kept off" to see those 117). Zero rows go dim instead of taking a whole card. The loader warning sits in the server card with "Match pack" + a version picker.</p>
+    <div class="win">
+      <div class="tabs" data-tabs></div>
+      <div class="body">
+        <aside class="side-pane">
+          <div class="card">
+            <div class="row" style="margin-bottom:10px">
+              <i data-lucide="server"></i><b style="font-size:14px">TNP-LL8</b><span class="sp"></span><span class="chip stopped"><span class="dot" style="background:var(--muted)"></span>Stopped</span>
+            </div>
+            <div class="row" style="margin-bottom:12px">
+              <button class="btn go" style="flex:1;justify-content:center"><i data-lucide="play"></i>Start</button>
+              <button class="btn icon"><i data-lucide="terminal"></i></button>
+              <button class="btn icon"><i data-lucide="folder"></i></button>
+              <button class="btn icon"><i data-lucide="ellipsis"></i></button>
+            </div>
+            <dl class="kv">
+              <dt>Host</dt><dd>rig · 192.168.50.3</dd>
+              <dt>Pack</dt><dd>809 mods (server pack)</dd>
+              <dt>Last sync</dt><dd>2 days ago</dd>
+            </dl>
+          </div>
+
+          <div class="card" style="border-color:#eab30855">
+            <h3 style="color:var(--gold)"><i data-lucide="triangle-alert"></i>Loader mismatch</h3>
+            <div class="kv" style="margin-bottom:10px">
+              <dt>Server</dt><dd class="mono">NeoForge 21.1.259</dd>
+              <dt>Pack</dt><dd class="mono" style="color:var(--acc)">NeoForge 21.1.264</dd>
+            </div>
+            <div class="split" style="width:100%">
+              <button class="btn pri" style="flex:1;justify-content:center"><i data-lucide="refresh-cw"></i>Match pack · 21.1.264</button>
+              <button class="btn pri"><i data-lucide="chevron-down"></i></button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Show</h3>
+            <div class="filt">
+              <button><i data-lucide="list"></i>Everything<span class="n">1065</span></button>
+              <button class="zero" style="opacity:.45"><i data-lucide="plus" style="color:var(--green)"></i>To add<span class="n">0</span></button>
+              <button style="opacity:.45"><i data-lucide="arrow-up" style="color:var(--blue)"></i>Updates<span class="n">0</span></button>
+              <button style="opacity:.45"><i data-lucide="server" style="color:var(--red)"></i>Only on server<span class="n">0</span></button>
+              <button class="on"><i data-lucide="shield-off" style="color:var(--gold)"></i>Kept off<span class="n" style="color:var(--gold)">117</span></button>
+              <button><i data-lucide="check" style="color:var(--green)"></i>In sync<span class="n" style="color:var(--green)">948</span></button>
+            </div>
+          </div>
+
+          <div class="row" style="flex-direction:column;align-items:stretch;gap:6px">
+            <button class="btn" style="justify-content:center"><i data-lucide="package"></i>Update from server pack</button>
+            <button class="btn" style="justify-content:center;color:var(--acc);border-color:#f9731666"><i data-lucide="copy"></i>Copy my mods to server</button>
+          </div>
+        </aside>
+        <div class="main-pane">
+          <div class="toolbar">
+            <div class="seg"><button class="on"><i data-lucide="puzzle"></i> Mods</button><button>Configs</button><button>History</button></div>
+            <div class="search"><i data-lucide="search"></i>Search 117 mods</div>
+            <span class="sp"></span>
+            <div class="seg"><button class="on">Any side</button><button>Client</button><button>Both</button><button>Server</button></div>
+            <div class="seg"><button class="on">Pack + yours</button><button>Yours</button></div>
+          </div>
+          <div class="list" data-list="kept"></div>
+          <div class="selbar"><span class="cb on"></span><b>3 selected</b><span style="color:var(--muted)">· 2 client-only, 1 left out by author</span><span class="sp"></span><button class="btn sm ghost">Hide</button><button class="btn sm pri"><i data-lucide="upload"></i>Add to server</button></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ B ============ -->
+  <section class="variant" id="v-b">
+    <p class="pitch"><b>Everything above the list collapses into two thin rows (~90px instead of ~300px).</b> Row 1: server name, state, loader control, actions. Row 2: counts as clickable tabs with a stacked bar showing the split. List shows every group expanded; selection bar only appears when something is ticked.</p>
+    <div class="win">
+      <div class="tabs" data-tabs></div>
+      <div class="body" style="flex-direction:column">
+        <div class="strip">
+          <h2><i data-lucide="server"></i>TNP-LL8</h2>
+          <span class="chip stopped"><span class="dot" style="background:var(--muted)"></span>Stopped</span>
+          <div class="loader">
+            <span class="t"><i data-lucide="triangle-alert"></i>Server <b class="mono">NeoForge 21.1.259</b> · pack <b class="mono">21.1.264</b></span>
+            <div class="split"><button class="btn sm pri">Match pack</button><button class="btn sm pri"><i data-lucide="chevron-down"></i></button></div>
+          </div>
+          <span class="sp"></span>
+          <button class="btn go"><i data-lucide="play"></i>Start</button>
+          <button class="btn"><i data-lucide="package"></i>Update from pack</button>
+          <button class="btn" style="color:var(--acc);border-color:#f9731666"><i data-lucide="copy"></i>Copy my mods</button>
+          <button class="btn icon"><i data-lucide="ellipsis"></i></button>
+        </div>
+        <div class="counts">
+          <button class="cnt on"><b>1065</b>all</button>
+          <button class="cnt zero"><i data-lucide="plus"></i><b>0</b>to add</button>
+          <button class="cnt zero"><i data-lucide="arrow-up"></i><b>0</b>updates</button>
+          <button class="cnt zero"><i data-lucide="server"></i><b>0</b>only on server</button>
+          <button class="cnt"><i data-lucide="shield-off" style="color:var(--gold)"></i><b style="color:var(--gold)">117</b>kept off</button>
+          <button class="cnt"><i data-lucide="check" style="color:var(--green)"></i><b style="color:var(--green)">948</b>in sync</button>
+          <span class="sp"></span>
+          <div class="bar"><i style="width:11%;background:var(--gold)"></i><i style="width:89%;background:var(--green)"></i></div>
+        </div>
+        <div class="toolbar">
+          <div class="seg"><button class="on">Mods</button><button>Configs</button><button>History</button></div>
+          <div class="search"><i data-lucide="search"></i>Search mods</div>
+          <span class="sp"></span>
+          <div class="seg"><button class="on">Any side</button><button>Client</button><button>Both</button><button>Server</button></div>
+          <div class="seg"><button class="on">Pack + yours</button><button>Yours</button></div>
+        </div>
+        <div class="list" data-list="both"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ C ============ -->
+  <section class="variant" id="v-c">
+    <p class="pitch"><b>Client vs server as two columns, like a diff.</b> Each side has its own header with loader version, so the mismatch reads as a normal diff line with a fix button between them. Good when there are differences; with 0 differences it falls back to D.</p>
+    <div class="win">
+      <div class="tabs" data-tabs></div>
+      <div class="body" style="flex-direction:column">
+        <div class="diffhead">
+          <div>
+            <h3><i data-lucide="monitor"></i>Your instance<span class="sp"></span><span class="chip run"><span class="dot" style="background:var(--green)"></span>Running · 6m</span></h3>
+            <div class="row" style="color:var(--subtle)"><span class="mono">NeoForge 21.1.264</span><span>·</span><span>1115 mods</span></div>
+          </div>
+          <div class="mid"><i data-lucide="arrow-right-left"></i></div>
+          <div>
+            <h3><i data-lucide="server"></i>TNP-LL8 on rig<span class="sp"></span><span class="chip stopped">Stopped</span><button class="btn sm go"><i data-lucide="play"></i>Start</button><button class="btn sm icon"><i data-lucide="ellipsis"></i></button></h3>
+            <div class="row" style="color:var(--subtle)"><span class="mono" style="color:var(--gold)">NeoForge 21.1.259</span>
+              <div class="split"><button class="btn sm pri"><i data-lucide="arrow-left-right"></i>Set to 21.1.264</button><button class="btn sm pri"><i data-lucide="chevron-down"></i></button></div>
+              <span>·</span><span>948 mods</span></div>
+          </div>
+        </div>
+        <div class="toolbar">
+          <div class="seg"><button class="on">Differences 120</button><button>Kept off 117</button><button>In sync 948</button></div>
+          <div class="search"><i data-lucide="search"></i>Search mods</div>
+          <span class="sp"></span>
+          <button class="btn sm" style="color:var(--acc);border-color:#f9731666"><i data-lucide="copy"></i>Apply all →</button>
+        </div>
+        <div class="list" data-list="diff"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ D ============ -->
+  <section class="variant" id="v-d">
+    <p class="pitch"><b>When nothing needs doing (your screenshot: 0 / 0 / 0), say so big and move the rest down.</b> No stat cards at all. Three small tiles for things you might still want. Kept off / in sync stay one click away.</p>
+    <div class="win">
+      <div class="tabs" data-tabs></div>
+      <div class="body" style="flex-direction:column">
+        <div class="strip">
+          <h2><i data-lucide="server"></i>TNP-LL8</h2>
+          <span class="chip stopped"><span class="dot" style="background:var(--muted)"></span>Stopped</span>
+          <span class="sp"></span>
+          <button class="btn go"><i data-lucide="play"></i>Start</button>
+          <button class="btn icon"><i data-lucide="ellipsis"></i></button>
+        </div>
+        <div class="hero-ok">
+          <div class="big"><i data-lucide="check"></i></div>
+          <div style="font-size:17px;font-weight:600">Server mods match your instance</div>
+          <div style="color:var(--subtle)">948 in sync · 117 kept off on purpose (client-only or left out by the pack)</div>
+          <div class="loader" style="margin-top:6px">
+            <span class="t"><i data-lucide="triangle-alert"></i>But the loader differs: server <b class="mono">21.1.259</b>, pack <b class="mono">21.1.264</b></span>
+            <div class="split"><button class="btn sm pri">Match pack</button><button class="btn sm pri"><i data-lucide="chevron-down"></i></button></div>
+          </div>
+        </div>
+        <div class="tiles">
+          <div class="tile"><h4><i data-lucide="shield-off"></i>Kept off</h4><b style="font-size:20px;color:var(--gold)">117</b><button class="btn sm" style="align-self:start">Review</button></div>
+          <div class="tile"><h4><i data-lucide="package"></i>Server pack</h4><span>809 mods · v1.77.0</span><button class="btn sm" style="align-self:start">Update from server pack</button></div>
+          <div class="tile"><h4><i data-lucide="history"></i>Last sync</h4><span>2 days ago · 4 mods copied</span><button class="btn sm" style="align-self:start">History</button></div>
+        </div>
+        <div class="toolbar" style="border-top:1px solid var(--line)">
+          <div class="seg"><button class="on">Kept off 117</button><button>In sync 948</button><button>Configs</button></div>
+          <div class="search"><i data-lucide="search"></i>Search mods</div>
+        </div>
+        <div class="list" data-list="kept"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ A + all good ============ -->
+  <section class="variant" id="v-f">
+    <p class="pitch"><b>Layout A when nothing needs doing, with the instance header redone.</b> Header drops from ~250px to ~150px (banner) or ~76px (compact). Chips move next to the title, stats stop floating at the far right, and actions get one consistent size.</p>
+    <div class="row">
+      <span style="color:var(--muted);font-size:12px">Header:</span>
+      <div class="seg" id="hsw"><button data-h="banner" class="on">Banner</button><button data-h="compact">Compact</button><button data-h="old">Today (for compare)</button></div>
+    </div>
+    <div class="win" style="height:960px">
+      <div class="ih" data-h="banner">
+        <div class="ih-bg"></div>
+        <div class="ih-icon"><span>TNP</span><small>LIMITLESS</small><b>8</b></div>
+        <div class="ih-main">
+          <div class="row" style="gap:6px;flex-wrap:wrap">
+            <span class="chip run"><span class="dot" style="background:var(--green)"></span>Running · 6m</span>
+            <span class="chip" style="color:var(--blue);border-color:#60a5fa55;background:var(--blue-dim)"><i data-lucide="arrow-up"></i>1 mod update</span>
+            <span class="chip" style="color:var(--acc);border-color:#f9731655;background:var(--acc-dim)">CurseForge</span>
+          </div>
+          <h2 class="ih-title">TNP Limitless 8 - LL8</h2>
+          <div class="ih-meta"><span><i data-lucide="box"></i>Minecraft 1.21.1</span><span><i data-lucide="blocks"></i>NeoForge 21.1.264</span><span><i data-lucide="tag"></i>v1.77.0</span></div>
+        </div>
+        <div class="ih-right">
+          <div class="ih-stats"><div><b>711h 52m</b><small>played</small></div><div><b>1115</b><small>mods</small></div><div><b>5.2 GB</b><small>size</small></div></div>
+          <div class="row">
+            <button class="btn ih-btn" style="background:var(--red);border-color:var(--red);color:#fff;font-weight:600"><i data-lucide="square"></i>Stop</button>
+            <button class="btn ih-btn"><i data-lucide="server"></i>TNP-LL8</button>
+            <button class="btn ih-btn"><i data-lucide="folder"></i>Folder</button>
+            <button class="btn ih-btn icon"><i data-lucide="ellipsis"></i></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ih compact" data-h="compact" style="display:none">
+        <div class="ih-bg"></div>
+        <div class="ih-icon"><span>TNP</span><small>LIMITLESS</small><b>8</b></div>
+        <div class="ih-main">
+          <div class="row" style="gap:10px">
+            <h2 class="ih-title">TNP Limitless 8 - LL8</h2>
+            <span class="chip run"><span class="dot" style="background:var(--green)"></span>Running · 6m</span>
+            <span class="chip" style="color:var(--blue);border-color:#60a5fa55;background:var(--blue-dim)"><i data-lucide="arrow-up"></i>1 update</span>
+          </div>
+          <div class="ih-meta"><span><i data-lucide="box"></i>1.21.1</span><span><i data-lucide="blocks"></i>NeoForge 21.1.264</span><span><i data-lucide="tag"></i>v1.77.0</span><span style="color:var(--acc)">CurseForge</span><span class="sep"></span><span><i data-lucide="clock"></i>711h 52m</span><span><i data-lucide="puzzle"></i>1115 mods</span><span><i data-lucide="hard-drive"></i>5.2 GB</span></div>
+        </div>
+        <div class="row" style="margin-left:auto;position:relative">
+          <button class="btn ih-btn" style="background:var(--red);border-color:var(--red);color:#fff;font-weight:600"><i data-lucide="square"></i>Stop</button>
+          <button class="btn ih-btn"><i data-lucide="server"></i>TNP-LL8</button>
+          <button class="btn ih-btn icon"><i data-lucide="folder"></i></button>
+          <button class="btn ih-btn icon"><i data-lucide="ellipsis"></i></button>
+        </div>
+      </div>
+
+      <div class="ih old" data-h="old" style="display:none">
+        <div class="ih-bg"></div>
+        <div class="ih-icon" style="width:140px;height:140px"><span>TNP</span><small>LIMITLESS</small><b>8</b></div>
+        <div class="ih-main" style="gap:10px">
+          <div class="row" style="gap:6px"><span class="chip run">● Running · 6m</span><span class="chip" style="color:var(--blue)">1 mod update</span><span class="chip" style="color:var(--acc)">CurseForge</span></div>
+          <h2 class="ih-title" style="font-size:34px">TNP Limitless 8 - LL8</h2>
+          <div class="ih-meta"><span>Minecraft 1.21.1</span><span>NeoForge 21.1.264</span><span>v1.77.0</span></div>
+          <div class="row"><button class="btn" style="background:var(--red);color:#fff">Stop</button><button class="btn">TNP-LL8</button><button class="btn">Folder</button><button class="btn">…</button></div>
+        </div>
+        <div class="row" style="margin-left:auto;align-self:center;position:relative">
+          <div class="tile"><b style="font-size:18px">711h 52m</b><small style="color:var(--muted)">PLAYED</small></div>
+          <div class="tile"><b style="font-size:18px">1115</b><small style="color:var(--muted)">MODS</small></div>
+          <div class="tile"><b style="font-size:18px">5.2 GB</b><small style="color:var(--muted)">SIZE</small></div>
+        </div>
+      </div>
+      <div class="tabs" data-tabs></div>
+      <div class="body">
+        <aside class="side-pane">
+          <div class="card">
+            <div class="row" style="margin-bottom:10px">
+              <i data-lucide="server"></i><b style="font-size:14px">TNP-LL8</b><span class="sp"></span><span class="chip stopped"><span class="dot" style="background:var(--muted)"></span>Stopped</span>
+            </div>
+            <div class="row">
+              <button class="btn go" style="flex:1;justify-content:center"><i data-lucide="play"></i>Start</button>
+              <button class="btn icon"><i data-lucide="terminal"></i></button>
+              <button class="btn icon"><i data-lucide="folder"></i></button>
+              <button class="btn icon"><i data-lucide="ellipsis"></i></button>
+            </div>
+          </div>
+
+          <div class="card" style="border-color:#22c55e44;background:linear-gradient(180deg,#22c55e14,var(--surface))">
+            <div class="row" style="gap:10px;margin-bottom:10px">
+              <div style="width:34px;height:34px;border-radius:50%;background:var(--green-dim);display:grid;place-items:center;color:var(--green)"><i data-lucide="check" style="width:18px;height:18px"></i></div>
+              <div><b style="font-size:14px">Mods match</b><div style="color:var(--subtle);font-size:12px">Synced 2 days ago</div></div>
+            </div>
+            <div class="bar" style="width:100%;margin-bottom:8px"><i style="width:89%;background:var(--green)"></i><i style="width:11%;background:var(--gold)"></i></div>
+            <div class="row" style="font-size:12px;color:var(--subtle)">
+              <span class="dot" style="background:var(--green)"></span>948 in sync<span class="sp"></span><span class="dot" style="background:var(--gold)"></span>117 kept off
+            </div>
+          </div>
+
+          <div class="card" style="border-color:#eab30855">
+            <h3 style="color:var(--gold)"><i data-lucide="triangle-alert"></i>Loader differs</h3>
+            <div class="kv" style="margin-bottom:10px">
+              <dt>Server</dt><dd class="mono">NeoForge 21.1.259</dd>
+              <dt>Pack</dt><dd class="mono" style="color:var(--acc)">NeoForge 21.1.264</dd>
+            </div>
+            <div class="split" style="width:100%">
+              <button class="btn pri" style="flex:1;justify-content:center"><i data-lucide="refresh-cw"></i>Match pack · 21.1.264</button>
+              <button class="btn pri"><i data-lucide="chevron-down"></i></button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Show</h3>
+            <div class="filt">
+              <button class="on"><i data-lucide="check" style="color:var(--green)"></i>In sync<span class="n" style="color:var(--green)">948</span></button>
+              <button><i data-lucide="shield-off" style="color:var(--gold)"></i>Kept off<span class="n" style="color:var(--gold)">117</span></button>
+              <div class="row" style="padding:6px 8px;color:var(--muted);font-size:12px"><i data-lucide="circle-check"></i>Nothing to add, update or remove</div>
+            </div>
+          </div>
+
+          <div class="row" style="flex-direction:column;align-items:stretch;gap:6px;margin-top:auto">
+            <button class="btn" style="justify-content:center"><i data-lucide="package"></i>Update from server pack</button>
+            <button class="btn ghost" style="justify-content:center"><i data-lucide="copy"></i>Copy my mods to server</button>
+          </div>
+        </aside>
+        <div class="main-pane">
+          <div class="toolbar">
+            <div class="seg"><button class="on"><i data-lucide="puzzle"></i> Mods</button><button>Configs</button><button>History</button></div>
+            <div class="search"><i data-lucide="search"></i>Search 948 mods</div>
+            <span class="sp"></span>
+            <div class="seg"><button class="on">Any side</button><button>Client</button><button>Both</button><button>Server</button></div>
+            <div class="seg"><button class="on">Pack + yours</button><button>Yours</button></div>
+          </div>
+          <div class="list" data-list="sync"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Loader close-up ============ -->
+  <section class="variant" id="v-e">
+    <p class="pitch"><b>Split button: main half does the common fix, arrow opens any version.</b> Picking a version downloads the NeoForge installer for it and runs <span class="mono">--installServer</span> into the server folder (server must be stopped; button says so if it isn't).</p>
+    <div class="win" style="height:auto;padding:24px;gap:28px;background:var(--base)">
+      <div>
+        <div style="color:var(--muted);font-size:12px;margin-bottom:8px">Mismatch, picker open</div>
+        <div class="row"><div class="loader">
+          <span class="t"><i data-lucide="triangle-alert"></i>Server <b class="mono">NeoForge 21.1.259</b> · pack <b class="mono">21.1.264</b></span>
+          <div class="split"><button class="btn sm pri"><i data-lucide="refresh-cw"></i>Match pack</button><button class="btn sm pri"><i data-lucide="chevron-down"></i></button></div>
+          <div class="pop">
+            <div class="search" style="margin:4px 4px 6px;min-width:0"><i data-lucide="search"></i>Filter versions</div>
+            <h4>Suggested</h4>
+            <div class="opt hl"><i data-lucide="package" style="color:var(--acc)"></i><span class="v">21.1.264</span><span class="tag pack">pack</span><span class="sp"></span><i data-lucide="check" style="color:var(--acc)"></i></div>
+            <div class="opt"><i data-lucide="sparkles" style="color:var(--blue)"></i><span class="v">21.1.272</span><span class="tag new">latest</span></div>
+            <div class="opt"><i data-lucide="server" style="color:var(--muted)"></i><span class="v">21.1.259</span><span class="tag cur">on server now</span></div>
+            <h4>All for 1.21.1</h4>
+            <div class="opt"><span style="width:14px"></span><span class="v">21.1.271</span></div>
+            <div class="opt"><span style="width:14px"></span><span class="v">21.1.270</span><span class="sp"></span><span style="color:var(--muted);font-size:11px">beta</span></div>
+            <div class="opt"><span style="width:14px"></span><span class="v">21.1.268</span></div>
+            <div class="opt" style="color:var(--muted)"><span style="width:14px"></span>show 40 more…</div>
+            <div class="foot"><i data-lucide="info"></i>Old loader jar kept as backup. Undo from History.</div>
+          </div>
+        </div></div>
+      </div>
+      <div style="margin-top:330px;display:flex;flex-direction:column;gap:14px">
+        <div style="color:var(--muted);font-size:12px">Other states</div>
+        <div class="row"><div class="loader" style="background:var(--surface);border-color:var(--line2)">
+          <span class="t" style="color:var(--subtle)"><i data-lucide="loader-circle"></i>Installing <b class="mono">NeoForge 21.1.264</b>… 62%</span>
+          <button class="btn sm ghost">Cancel</button></div></div>
+        <div class="row"><div class="loader" style="background:var(--red-dim);border-color:#ef444455">
+          <span class="t" style="color:var(--red)"><i data-lucide="octagon-alert"></i>Stop the server to change the loader</span>
+          <button class="btn sm"><i data-lucide="square"></i>Stop and change</button></div></div>
+        <div class="row"><div class="loader ok">
+          <span class="t"><i data-lucide="check"></i>Server on <b class="mono">NeoForge 21.1.264</b>, same as pack</span>
+          <button class="btn sm ghost">Change<i data-lucide="chevron-down"></i></button></div></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="notes">
+    <div class="note"><h3>Common to all</h3><ul>
+      <li>Zero counts shrink or dim, never a full card</li>
+      <li>Mod rows visible without expanding anything</li>
+      <li>Selection bar shows only when something is ticked</li>
+      <li>Mod rows keep icon + click-to-peek</li></ul></div>
+    <div class="note"><h3>Pick</h3><ul>
+      <li><b>B</b> is the smallest change from today</li>
+      <li><b>A</b> best on wide windows</li>
+      <li><b>D</b> pairs with A or B for the "nothing to do" case</li></ul></div>
+  </div>
+</div>
+
+<script>
+const tabs = ['layout-grid:Overview','puzzle:Mods:1115','feather:Resource packs:13','sun:Shaders:20','database:Data packs','globe:Worlds','image:Screenshots','server:Server','users:Peers','sliders-horizontal:Settings','bug:Logs & crashes','activity:Performance'];
+document.querySelectorAll('[data-tabs]').forEach(el=>{
+  el.innerHTML = tabs.map(t=>{const [i,n,c]=t.split(':');return `<span class="${n==='Server'?'on':''}"><i data-lucide="${i}"></i>${n}${c?`<span class="n">${c}</span>`:''}</span>`}).join('');
+});
+const hues=[18,200,140,280,40,330,90,170,250,10];
+const kept=[['Sodium Extra','client','client-only'],['Iris Shaders','client','client-only'],['Mouse Tweaks','client','client-only'],['JEI Waypoints','client','left out by author'],['Ambient Sounds','client','client-only'],['Controlling','client','client-only'],['Not Enough Animations','client','client-only'],['Entity Model Features','client','client-only'],['Fancy Menu','client','client-only'],['Xaero\'s Minimap','client','left out by author'],['Chat Heads','client','client-only'],['BetterF3','client','client-only'],['Shulker Box Tooltip','client','client-only'],['Sound Physics Remastered','client','client-only']];
+const sync=[['Applied Energistics 2','both','19.2.4'],['Mekanism','both','10.7.9'],['Create','both','6.0.4'],['Ars Nouveau','both','5.4.1'],['Botania','both','1.21.1-447'],['Thermal Expansion','both','12.0.2'],['FTB Quests','both','2101.1.6'],['Pipez','both','1.2.19'],['Sophisticated Backpacks','both','3.23.4'],['Waystones','both','21.1.8']];
+const ic=(n,i)=>`<div class="ic" style="background:linear-gradient(135deg,hsl(${hues[i%10]} 60% 45%),hsl(${hues[i%10]} 40% 22%))"></div>`;
+const keptRows=(sel)=>kept.map(([n,s,why],i)=>`<div class="m"><span class="cb ${sel&&i<3?'on':''}"></span>${ic(n,i)}<span class="nm">${n}<small>${(i*7%9)+1}.${i%4}.${i}</small></span><span class="side">Client only</span><span class="st" style="color:var(--gold)"><i data-lucide="shield-off"></i>${why}</span><button class="btn sm ghost">Add anyway</button></div>`).join('');
+const syncRows=()=>sync.map(([n,s,v],i)=>`<div class="m"><span class="cb"></span>${ic(n,i+3)}<span class="nm">${n}<small>${v}</small></span><span class="side">Client + server</span><span class="st" style="color:var(--green)"><i data-lucide="check"></i>same file</span><span></span></div>`).join('');
+const L={
+  sync:()=>`<div class="grp"><span class="dot" style="background:var(--green)"></span>In sync<span class="c">948</span><span class="why">· same file on both</span></div>`+syncRows()+syncRows().replace(/hsl\((\d+)/g,(m,h)=>`hsl(${(+h+60)%360}`),
+  kept:()=>`<div class="grp"><span class="dot" style="background:var(--gold)"></span>Kept off the server<span class="c">117</span><span class="why">· client-only, or left out by the pack author</span><span class="sp"></span><button class="btn sm ghost">Select all</button></div>`+keptRows(true),
+  both:()=>`<div class="grp"><i data-lucide="chevron-down"></i><span class="dot" style="background:var(--gold)"></span>Kept off the server<span class="c">117</span><span class="why">· client-only, or left out by the pack author</span><span class="sp"></span><button class="btn sm ghost">Select all</button></div>`+keptRows(false).split('</div><div class="m">').slice(0,6).join('</div><div class="m">')+`</div><div class="m" style="color:var(--muted);grid-template-columns:1fr"><span style="padding-left:54px">+ 111 more</span></div>`
+    +`<div class="grp"><i data-lucide="chevron-down"></i><span class="dot" style="background:var(--green)"></span>In sync<span class="c">948</span><span class="why">· same file on both</span></div>`+syncRows(),
+  diff:()=>{
+    const r=(cls,l,mid,rt)=>`<div class="d ${cls}"><div>${l}</div><div class="mid">${mid}</div><div>${rt}</div></div>`;
+    const m=(n,i,v)=>`${ic(n,i)}<span class="nm">${n}</span><span class="ver">${v}</span>`;
+    let h=`<div class="grp"><span class="dot" style="background:var(--blue)"></span>Different version<span class="c">2</span></div>`;
+    h+=r('upd',m('Mekanism',1,'10.7.9'),'<i data-lucide="arrow-right" style="color:var(--blue)"></i>',m('Mekanism',1,'10.7.7')+'<button class="btn sm">Update</button>');
+    h+=r('upd',m('Create',2,'6.0.4'),'<i data-lucide="arrow-right" style="color:var(--blue)"></i>',m('Create',2,'6.0.2')+'<button class="btn sm">Update</button>');
+    h+=`<div class="grp"><span class="dot" style="background:var(--green)"></span>Missing on server<span class="c">1</span></div>`;
+    h+=r('add',m('Pipez',7,'1.2.19'),'<i data-lucide="arrow-right" style="color:var(--green)"></i>','<span class="ghost">not installed</span><span class="sp"></span><button class="btn sm">Add</button>');
+    h+=`<div class="grp"><span class="dot" style="background:var(--gold)"></span>Kept off on purpose<span class="c">117</span><span class="why">· shown dim, nothing to do</span></div>`;
+    kept.slice(0,8).forEach(([n],i)=>{h+=r('" style="opacity:.55',m(n,i,'client'),'<i data-lucide="minus" style="color:var(--muted)"></i>','<span class="ghost">client-only</span>')});
+    return h;
+  }
+};
+document.querySelectorAll('[data-list]').forEach(el=>el.innerHTML=L[el.dataset.list]());
+document.getElementById('sw').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  document.querySelectorAll('#sw button').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('.variant').forEach(v=>v.classList.toggle('on',v.id==='v-'+b.dataset.v));
+});
+document.getElementById('hsw').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  document.querySelectorAll('#hsw button').forEach(x=>x.classList.toggle('on',x===b));
+  document.querySelectorAll('#v-f .ih').forEach(h=>h.style.display=h.dataset.h===b.dataset.h?'flex':'none');
+});
+lucide.createIcons();
+</script>
+</body>
+</html>

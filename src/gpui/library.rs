@@ -32,8 +32,9 @@ use std::time::{Duration, Instant};
 /// How long the tab underline and the hero's height take to move.
 const MOTION: Duration = Duration::from_millis(300);
 
-/// Hero heights in rem: on most tabs, and the taller one on Overview.
-const HERO: f32 = 13.0;
+/// Hero heights in rem: the compact strip on most tabs, and the taller
+/// banner on Overview.
+const HERO: f32 = 5.5;
 const HERO_TALL: f32 = 17.5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1418,8 +1419,10 @@ impl LibraryView {
         // First in the row on every tab, so it never moves.
         let play_small = Some(widgets::glow(play.min_w_24(), play_color, cx));
         let play_big: Option<Div> = None;
+        let compact = self.tab != InstTab::Overview;
         let actions = h_flex()
-                            .flex_wrap()
+                            .when(!compact, |r| r.flex_wrap())
+                            .when(compact, |r| r.flex_none().flex_nowrap())
                             .gap_2()
                             .children(play_small)
                             .children(pack_update)
@@ -1428,7 +1431,8 @@ impl LibraryView {
                                 Button::new("folder")
                                     .outline()
                                     .icon(IconName::FolderOpen)
-                                    .label("Folder")
+                                    .when(!compact, |b| b.label("Folder"))
+                                    .when(compact, |b| b.tooltip("Open folder"))
                                     .on_click(move |_, _, _| store::open_path(&r_folder)),
                             )
                             .child(
@@ -1594,7 +1598,7 @@ impl LibraryView {
         };
 
         // The art: large, rounded, lifted off the backdrop.
-        let (art_to, art_from) = if overview { (9.5, 7.5) } else { (7.5, 9.5) };
+        let (art_to, art_from) = if overview { (9.5, 3.5) } else { (3.5, 9.5) };
         let (h_to, h_from) = if overview { (HERO_TALL, HERO) } else { (HERO, HERO_TALL) };
         let grow = self.moving() && (self.tab_from == InstTab::Overview) != overview;
         let art = div()
@@ -1628,7 +1632,65 @@ impl LibraryView {
             art.size(rems(art_to)).into_any_element()
         };
 
-        let content = h_flex()
+        // Off Overview: one strip. Title and pills on a line, then the facts
+        // with the figures after them, actions on the right.
+        let content = if !overview {
+            let mods = inst.addons.iter().filter(|a| in_class(a, cf::CLASS_MODS)).count();
+            let played = store::played(inst.play_seconds).unwrap_or_else(|| {
+                inst.last_played
+                    .as_deref()
+                    .map(hopper::time::relative)
+                    .filter(|s| !s.is_empty())
+                    .map_or_else(|| "Never played".into(), |t| format!("Played {t}"))
+            });
+            let size = match self.sizes.get(&inst.root) {
+                Some(Some(n)) => Some(hopper::instance_ops::human_bytes(*n)),
+                _ => None,
+            };
+            let figure = |icon: IconName, text: String| {
+                h_flex()
+                    .flex_none()
+                    .gap_1p5()
+                    .child(Icon::new(icon).xsmall().text_color(theme.muted_foreground))
+                    .child(text)
+            };
+            let facts = facts
+                .child(div().flex_none().w_px().h_3p5().bg(theme.foreground.opacity(0.18)))
+                .child(figure(IconName::Clock, played))
+                .child(figure(IconName::Puzzle, format!("{mods} mods")))
+                .when_some(size, |r, s| r.child(figure(IconName::HardDrive, s)));
+            h_flex()
+                .absolute()
+                .inset_0()
+                .items_center()
+                .gap_4()
+                .px_6()
+                .child(art)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .gap_2p5()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(rems(1.3))
+                                        .font_weight(FontWeight::EXTRA_BOLD)
+                                        .line_height(relative(1.2))
+                                        .truncate()
+                                        .child(inst.name.clone()),
+                                )
+                                .children(pills),
+                        )
+                        .child(facts),
+                )
+                .child(actions)
+        } else {
+            h_flex()
             .absolute()
             .inset_0()
             .items_end()
@@ -1654,7 +1716,8 @@ impl LibraryView {
                     .child(actions.pt_2()),
             )
             .child(tiles)
-            .children(play_big);
+            .children(play_big)
+        };
 
         // The backdrop: the art blurred and stretched, faded into the page
         // (or, on glass, into a tint that keeps text readable).
