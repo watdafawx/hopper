@@ -99,6 +99,9 @@ impl EventEmitter<BrowseEvent> for BrowseView {}
 
 pub struct BrowseView {
     store: Entity<Store>,
+    /// Redraws a few times a second while installs run, for the Install
+    /// buttons' progress (not every frame: see `install_button`).
+    install_tick: Option<Task<()>>,
     modrinth: bool,
     class: u32,
     search: Entity<InputState>,
@@ -210,6 +213,7 @@ impl BrowseView {
             }),
         ];
         Self {
+            install_tick: None,
             store,
             modrinth,
             class: cf::CLASS_MODPACKS,
@@ -1116,7 +1120,7 @@ impl BrowseView {
     ) {
         let browsing = m.class_id.unwrap_or(self.class);
         let pack = hopper::browse::is_modpack(&m, browsing);
-        let (pending, hold) = self.install_state(m.id, pack, cx);
+        let (pending, hold, _) = self.install_state(m.id, pack, cx);
         if pending || hold.is_some() {
             return;
         }
@@ -1189,19 +1193,50 @@ impl BrowseView {
             job,
             ended: None,
         });
+        if self.install_tick.is_none() {
+            self.install_tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                    let more = this
+                        .update(cx, |this, cx| {
+                            let more = this.pending.iter().any(|p| p.ended.is_none());
+                            if more {
+                                cx.notify();
+                            } else {
+                                this.install_tick = None;
+                            }
+                            more
+                        })
+                        .unwrap_or(false);
+                    if !more {
+                        break;
+                    }
+                }
+            }));
+        }
         cx.notify();
     }
 
     /// Whether an install of `project` into the current target (or as a new
     /// instance, for a modpack) is under way, and why one can't start now.
-    fn install_state(&self, project: u64, pack: bool, cx: &App) -> (bool, Option<&'static str>) {
+    /// (installing now, why it can't, how far the install is).
+    fn install_state(&self, project: u64, pack: bool, cx: &App) -> (bool, Option<&'static str>, Option<f32>) {
         let into = if pack { None } else { self.target.as_ref() };
+        let p = self
+            .pending
+            .iter()
+            .find(|p| p.project == project && p.target.as_ref() == into && p.ended.is_none());
         let pending = self
             .pending
             .iter()
             .any(|p| p.project == project && p.target.as_ref() == into);
+        let progress = p
+            .and_then(|p| p.job)
+            .and_then(|j| self.store.read(cx).job_state(j))
+            .filter(|j| !j.done)
+            .and_then(|j| j.progress);
         let hold = into.and_then(|r| self.store.read(cx).edit_hold_reason(r));
-        (pending, hold)
+        (pending, hold, progress)
     }
 
     /// Lets go of installs that ended: at once when they failed or the
@@ -1711,7 +1746,7 @@ impl BrowseView {
             .filter(|_| tracked && installed.is_some())
             .is_some_and(|t| t.addons.iter().any(|a| a.project_id == m.id && !a.enabled));
         let id = |p: &str| ElementId::Name(format!("{p}:{}", m.id).into());
-        let (pending, hold) = self.install_state(m.id, is_pack, cx);
+        let (pending, hold, progress) = self.install_state(m.id, is_pack, cx);
 
         let action: AnyElement = if let Some(root) = have_pack {
             let (m1, m2) = (m.clone(), root);
@@ -1793,7 +1828,9 @@ impl BrowseView {
                 widgets::split_lead(site_primary(Button::new(id("update")), m.modrinth.is_some(), cx).small().icon(IconName::Download)),
                 "Update",
                 pending,
+                progress,
                 hold,
+                cx,
             )
             .tooltip(if off {
                 "A newer file is out; replaces the installed one, which stays disabled"
@@ -1876,7 +1913,9 @@ impl BrowseView {
                         site_primary(Button::new(id("install")), m.modrinth.is_some(), cx).small().icon(IconName::Download),
                         "Install",
                         pending,
+                        progress,
                         hold,
+                        cx,
                     )
                     .when(!is_pack && target.is_none(), |b| b.disabled(true))
                     .when(!extra.is_empty() && hold.is_none(), |b| b.tooltip(tip))
@@ -2456,7 +2495,7 @@ impl BrowseView {
                 let locked = installed.is_some_and(|a| a.locked);
                 let is_pack = hopper::browse::is_modpack(m, self.class);
                 let can = is_pack || target.is_some();
-                let (pending, hold) = self.install_state(m.id, is_pack, cx);
+                let (pending, hold, progress) = self.install_state(m.id, is_pack, cx);
                 let files = v_flex()
                     .gap_0p5()
                     .children(d.files.iter().take(40).map(|f| {
@@ -2498,7 +2537,9 @@ impl BrowseView {
                                 ),
                                 if installed_file.is_some() { "Switch" } else { "Install" },
                                 pending,
+                                progress,
                                 hold,
+                                cx,
                             )
                             .when(!can || locked, |b| b.disabled(true))
                             .when(locked, |b| b.tooltip("Locked: unlock it in the Mods tab to switch versions"))
@@ -2842,7 +2883,7 @@ impl BrowseView {
         }
         let store = self.store.read(cx);
         let theme = cx.theme();
-        let (pending, hold) = self.install_state(m.id, false, cx);
+        let (pending, hold, progress) = self.install_state(m.id, false, cx);
         let size = |b: u64| hopper::instance_ops::human_bytes(b);
 
         let summary: AnyElement = match plan {
@@ -2894,7 +2935,9 @@ impl BrowseView {
                     site_primary(Button::new("panel-install"), m.modrinth.is_some(), cx).icon(IconName::Download),
                     "Install",
                     pending,
+                    progress,
                     hold,
+                    cx,
                 )
                 .on_click(cx.listener(move |this, _, w, cx| this.install(m1.clone(), None, w, cx))),
             );
@@ -3008,7 +3051,7 @@ impl BrowseView {
                 .any(|a| a.file_id == f.id && a.project_id == m.id)
         });
         let ready = pack || target.is_some();
-        let (pending, hold) = self.install_state(m.id, pack, cx);
+        let (pending, hold, progress) = self.install_state(m.id, pack, cx);
         let theme = cx.theme();
         let m2 = m.clone();
         Some(
@@ -3031,7 +3074,9 @@ impl BrowseView {
                                 site_primary(Button::new("link-install"), m.modrinth.is_some(), cx).small().icon(IconName::Download),
                                 if pack { "Install as a new instance" } else { "Install this file" },
                                 pending,
+                                progress,
                                 hold,
+                                cx,
                             )
                             .when(!ready, |b| b.disabled(true))
                                 .on_click(cx.listener(move |this, _, w, cx| {
@@ -3054,9 +3099,23 @@ impl BrowseView {
 /// Not a spinner: an animation redraws the whole column it sits in (every
 /// card, or the panel and its description) each frame, which dropped
 /// frames through every install. The tasks button shows it's moving.
-fn install_button(b: Button, label: &'static str, pending: bool, hold: Option<&'static str>) -> Button {
-    b.label(if pending { "Installing…" } else { label })
+fn install_button(b: Button, label: &'static str, pending: bool, progress: Option<f32>, hold: Option<&'static str>, cx: &App) -> Button {
+    let fill = cx.theme().primary.opacity(0.28);
+    b.label(match (pending, progress) {
+        (true, Some(p)) => format!("Installing {}%", (p * 100.0).floor() as u32),
+        (true, None) => "Installing…".to_string(),
+        _ => label.to_string(),
+    })
         .when(pending, |b| b.icon(IconName::Hourglass))
+        // The download fills the button from the left.
+        .when_some(progress.filter(|_| pending), |b, p| {
+            let p = p.clamp(0.0, 1.0);
+            b.bg(linear_gradient(
+                90.,
+                linear_color_stop(fill, p),
+                linear_color_stop(gpui_kit::transparent_black(), p),
+            ))
+        })
         .disabled(pending || hold.is_some())
         .when_some(hold.filter(|_| !pending), |b, why| b.tooltip(why))
 }

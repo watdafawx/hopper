@@ -200,6 +200,8 @@ pub struct Store {
     /// Mods updated by a job, by instance, until the mods table has shown
     /// them as Updated and let them go ([`Store::forget_updates`]).
     recent_updates: Arc<Mutex<HashMap<PathBuf, Vec<Update>>>>,
+    /// Java downloads by key ("java-21", "graalvm-25"): their jobs.
+    java_jobs: HashMap<String, u64>,
     /// Pages for the download window, and whether it's open.
     fetch_queue: Arc<Mutex<(bool, Vec<String>)>>,
     /// Image URLs waiting for the download workers.
@@ -298,6 +300,7 @@ impl Store {
             busy: Default::default(),
             update_queue: Default::default(),
             recent_updates: Default::default(),
+            java_jobs: HashMap::new(),
             fetch_queue: Default::default(),
             pending: HashMap::new(),
             local: Arc::new(hopper::hosting::LocalPanel::new()),
@@ -1131,7 +1134,7 @@ impl Store {
         title: impl Into<String>,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
     ) {
-        self.run_job(None, title.into(), work);
+        let _ = self.run_job(None, title.into(), work);
     }
 
     /// [`spawn_job`] for work that changes an instance: it counts as busy
@@ -1142,7 +1145,31 @@ impl Store {
         title: impl Into<String>,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
     ) {
-        self.run_job(Some(root.to_path_buf()), title.into(), work);
+        let _ = self.run_job(Some(root.to_path_buf()), title.into(), work);
+    }
+
+    /// [`spawn_job`], returning the job's id (to follow its progress).
+    pub fn spawn_job_id(
+        &self,
+        title: impl Into<String>,
+        work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
+    ) -> u64 {
+        self.run_job(None, title.into(), work)
+    }
+
+    /// [`spawn_instance_job`], returning the job's id.
+    pub fn spawn_instance_job_id(
+        &self,
+        root: &Path,
+        title: impl Into<String>,
+        work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
+    ) -> u64 {
+        self.run_job(Some(root.to_path_buf()), title.into(), work)
+    }
+
+    /// A job's progress (0..=1, when known) and whether it ended (and how).
+    pub fn job_state(&self, id: u64) -> Option<hopper::jobs::JobState> {
+        self.jobs.snapshot().into_iter().find(|j| j.id == id)
     }
 
     fn run_job(
@@ -1150,8 +1177,9 @@ impl Store {
         root: Option<PathBuf>,
         title: String,
         work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
-    ) {
+    ) -> u64 {
         let job = self.jobs.start(title);
+        let id = job.id();
         if let Some(r) = &root {
             *self.busy.lock().unwrap_or_else(|e| e.into_inner()).entry(r.clone()).or_default() += 1;
         }
@@ -1182,6 +1210,7 @@ impl Store {
             }
             wake();
         });
+        id
     }
 
     fn read_pending(&mut self, inst: &Instance) {
@@ -2223,20 +2252,33 @@ impl Store {
     /// Downloads Java `major` (Temurin) into Hopper's runtimes, then looks
     /// for Java again.
     pub fn download_java(&mut self, major: u32) {
+        if self.java_download(&format!("java-{major}")).is_some() {
+            return;
+        }
         let dir = PathBuf::from(&self.settings.launcher_dir);
-        self.spawn_job(format!("Downloading Java {major}"), move |job| {
+        let id = self.spawn_job_id(format!("Downloading Java {major}"), move |job| {
             hopper::javadl::install_temurin(major, hopper::javadl::Package::Jre, job)?;
             Ok(Msg::Javas(hopper::java::detect(&dir)))
         });
+        self.java_jobs.insert(format!("java-{major}"), id);
+    }
+
+    /// A Java download running now ("java-21", "graalvm-25"): its job.
+    pub fn java_download(&self, key: &str) -> Option<hopper::jobs::JobState> {
+        self.job_state(*self.java_jobs.get(key)?).filter(|j| !j.done)
     }
 
     /// Downloads Oracle GraalVM `major` (21 or 25) into Hopper's runtimes.
     pub fn download_graalvm(&mut self, major: u32) {
+        if self.java_download(&format!("graalvm-{major}")).is_some() {
+            return;
+        }
         let dir = PathBuf::from(&self.settings.launcher_dir);
-        self.spawn_job(format!("Downloading GraalVM {major}"), move |job| {
+        let id = self.spawn_job_id(format!("Downloading GraalVM {major}"), move |job| {
             hopper::javadl::install_graalvm(major, job)?;
             Ok(Msg::Javas(hopper::java::detect(&dir)))
         });
+        self.java_jobs.insert(format!("graalvm-{major}"), id);
     }
 
     /// The server's state in the server panel, when one is set up.

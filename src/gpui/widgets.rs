@@ -3,7 +3,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::Path;
@@ -824,5 +824,82 @@ fn video_tile(
                 }),
         )
         .hover(|s| s.opacity(0.9))
+        .into_any_element()
+}
+
+// ---- downloads and finished actions in lists --------------------------------
+//
+// One way everywhere a list has a button per row that downloads or changes
+// something: the button fills as it works, turns into a green mark when
+// done, and done rows stay put while the user keeps clicking; once they
+// stop (or move off the list), the done rows fade out together.
+
+/// How long without a click before done rows go.
+pub const SETTLE: Duration = Duration::from_millis(1200);
+/// Done rows fade out over this long.
+pub const FADE: Duration = Duration::from_millis(350);
+
+/// When the user last clicked a row's action, and whether the pointer is
+/// over the list: done rows wait while they're busy clicking.
+#[derive(Clone, Copy, Default)]
+pub struct Settle {
+    pub last_click: Option<std::time::Instant>,
+    pub pointer_in: bool,
+}
+
+impl Settle {
+    pub fn clicked(&mut self) {
+        self.last_click = Some(std::time::Instant::now());
+    }
+
+    /// Done rows may go now.
+    pub fn settled(&self) -> bool {
+        !self.pointer_in || self.last_click.is_none_or(|t| t.elapsed() >= SETTLE)
+    }
+}
+
+/// `el` with progress `p` (0..=1) drawn over it from the left, while known.
+pub fn progress_fill(el: impl IntoElement, p: Option<f32>, cx: &App) -> Div {
+    let color = cx.theme().primary.opacity(0.28);
+    div().relative().child(el).when_some(p, |d, p| {
+        d.child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(relative(p.clamp(0.0, 1.0)))
+                .rounded(px(5.))
+                .bg(color),
+        )
+    })
+}
+
+/// A finished action's mark where its button was: a check and a word.
+pub fn done_mark(id: impl Into<ElementId>, label: impl Into<SharedString>, small: bool, cx: &App) -> Stateful<Div> {
+    let ok = cx.theme().success;
+    h_flex()
+        .id(id)
+        .flex_none()
+        .map(|d| if small { d.h(rems(1.375)).px_2().text_xs() } else { d.h(rems(1.75)).px_3().text_sm() })
+        .gap_1p5()
+        .rounded(cx.theme().radius)
+        .border_1()
+        .border_color(ok.opacity(0.5))
+        .bg(ok.opacity(0.14))
+        .text_color(ok)
+        .font_medium()
+        .child(Icon::new(IconName::Check).small())
+        .child(label.into())
+}
+
+/// `el` fading out (and nudged right) over [`FADE`]: a done row leaving.
+pub fn fade_out(id: impl Into<ElementId>, el: impl IntoElement) -> AnyElement {
+    div()
+        .relative()
+        .child(el)
+        .with_animation(id, Animation::new(FADE).with_easing(ease_in_out), |d, t| {
+            d.opacity(1.0 - t).left(rems(1.0 * t))
+        })
         .into_any_element()
 }

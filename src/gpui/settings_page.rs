@@ -1047,36 +1047,8 @@ impl SettingsPage {
         let get_java = h_flex()
             .gap_2()
             .flex_wrap()
-            .children([8u32, 17, 21, 25].map(|m| {
-                let store = self.store.clone();
-                Button::new(("get-java", m as usize))
-                    .small()
-                    .outline()
-                    .icon(IconName::Download)
-                    .label(format!("Java {m}"))
-                    .tooltip("Eclipse Temurin")
-                    .on_click(move |_, _, cx| {
-                        store.update(cx, |s, cx| {
-                            s.download_java(m);
-                            cx.notify();
-                        })
-                    })
-            }))
-            .children(hopper::javadl::GRAALVM_MAJORS.iter().map(|&m| {
-                let store = self.store.clone();
-                Button::new(("get-graal", m as usize))
-                    .small()
-                    .outline()
-                    .icon(IconName::Download)
-                    .label(format!("GraalVM {m}"))
-                    .tooltip("Oracle GraalVM: often faster for big modpacks")
-                    .on_click(move |_, _, cx| {
-                        store.update(cx, |s, cx| {
-                            s.download_graalvm(m);
-                            cx.notify();
-                        })
-                    })
-            }));
+            .children([8u32, 17, 21, 25].into_iter().filter_map(|m| crate::java_form::java_get(m, false, false, false, cx)))
+            .children(hopper::javadl::GRAALVM_MAJORS.iter().filter_map(|&m| crate::java_form::java_get(m, true, false, false, cx)));
         vec![
             Block::card(
                 None,

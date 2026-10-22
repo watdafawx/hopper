@@ -10,7 +10,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::java::{JavaInstall, PRESETS, recommended_major};
@@ -391,21 +391,7 @@ impl JavaForm {
                             .child(widgets::picker("java", current, items, rem, pick)),
                     )
                     .when_some(want, |r, major| {
-                        let store = self.store.clone();
-                        r.child(
-                            Button::new("java-download")
-                                .small()
-                                .map(|b| if none_fit { b.primary() } else { b.outline() })
-                                .icon(IconName::Download)
-                                .label(format!("Download Java {major}"))
-                                .tooltip("Eclipse Temurin, into Hopper's own folder")
-                                .on_click(move |_, _, cx| {
-                                    store.update(cx, |s, cx| {
-                                        s.download_java(major);
-                                        cx.notify();
-                                    })
-                                }),
-                        )
+                        r.children(java_get(major, false, true, none_fit, cx))
                     })
                     .child(
                         Button::new("java-browse")
@@ -1002,4 +988,126 @@ fn segmented(
         .when_some(selected, |t, i| t.selected_index(i))
         .children(labels.into_iter().map(|l| Tab::new().label(l)))
         .on_click(on_pick)
+}
+
+/// A button that downloads a Java ("java-21" Temurin, "graalvm-25"): it
+/// shows the download's progress, repainting only itself while it runs.
+pub struct JavaGet {
+    store: Entity<Store>,
+    key: String,
+    major: u32,
+    graal: bool,
+    label: SharedString,
+    tooltip: SharedString,
+    primary: std::rc::Rc<std::cell::Cell<bool>>,
+    small: bool,
+    _tick: Option<Task<()>>,
+}
+
+impl JavaGet {
+    fn start(&mut self, cx: &mut Context<Self>) {
+        let (major, graal) = (self.major, self.graal);
+        self.store.update(cx, |s, cx| {
+            if graal {
+                s.download_graalvm(major)
+            } else {
+                s.download_java(major)
+            }
+            cx.notify();
+        });
+        self.watch(cx);
+    }
+
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        if self._tick.is_some() {
+            return;
+        }
+        self._tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                let more = this
+                    .update(cx, |this, cx| {
+                        cx.notify();
+                        let more = this.store.read(cx).java_download(&this.key).is_some();
+                        if !more {
+                            this._tick = None;
+                        }
+                        more
+                    })
+                    .unwrap_or(false);
+                if !more {
+                    break;
+                }
+            }
+        }));
+    }
+}
+
+impl Render for JavaGet {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let running = self.store.read(cx).java_download(&self.key);
+        if running.is_some() {
+            // Opened while a download already runs (another page started it).
+            self.watch(cx);
+        }
+        let progress = running.as_ref().and_then(|j| j.progress);
+        let b = Button::new(SharedString::from(format!("get:{}", self.key)))
+            .map(|b| if self.small { b.small() } else { b })
+            .map(|b| if self.primary.get() && running.is_none() { b.primary() } else { b.outline() })
+            .icon(IconName::Download)
+            .tooltip(self.tooltip.clone());
+        let b = match (&running, progress) {
+            (Some(_), Some(p)) => b.loading(true).disabled(true).label(format!("Downloading {}%", (p * 100.0).floor() as u32)),
+            (Some(_), None) => b.loading(true).disabled(true).label("Downloading…"),
+            (None, _) => b.label(self.label.clone()).on_click(cx.listener(|this, _, _, cx| this.start(cx))),
+        };
+        widgets::progress_fill(b, progress, cx)
+    }
+}
+
+/// Every [`JavaGet`], made at start ([`init_java_gets`]) so any page can
+/// show one without making it: by (key, wording for a page that needs it).
+struct JavaGets(std::collections::HashMap<(String, bool), Entity<JavaGet>>);
+impl Global for JavaGets {}
+
+/// Makes the Java download buttons: Temurin 8–25 in both wordings, GraalVM.
+pub fn init_java_gets(store: &Entity<Store>, cx: &mut App) {
+    let mut map = std::collections::HashMap::new();
+    let mut add = |major: u32, graal: bool, need: bool, cx: &mut App| {
+        let key = if graal { format!("graalvm-{major}") } else { format!("java-{major}") };
+        let (label, tooltip): (SharedString, SharedString) = match (graal, need) {
+            (true, _) => (format!("GraalVM {major}").into(), "Oracle GraalVM: often faster for big modpacks".into()),
+            (false, true) => (format!("Download Java {major}").into(), "Eclipse Temurin, into Hopper's own folder".into()),
+            (false, false) => (format!("Java {major}").into(), "Eclipse Temurin".into()),
+        };
+        let e = cx.new(|_| JavaGet {
+            store: store.clone(),
+            key: key.clone(),
+            major,
+            graal,
+            label,
+            tooltip,
+            primary: std::rc::Rc::new(std::cell::Cell::new(false)),
+            small: true,
+            _tick: None,
+        });
+        map.insert((key, need), e);
+    };
+    for m in [8u32, 11, 16, 17, 21, 25] {
+        add(m, false, false, cx);
+        add(m, false, true, cx);
+    }
+    for &m in hopper::javadl::GRAALVM_MAJORS {
+        add(m, true, false, cx);
+    }
+    cx.set_global(JavaGets(map));
+}
+
+/// The download button for Temurin `major` (or GraalVM when `graal`);
+/// `need`: worded for a page that needs that Java, filled in when `primary`.
+pub fn java_get(major: u32, graal: bool, need: bool, primary: bool, cx: &App) -> Option<Entity<JavaGet>> {
+    let key = if graal { format!("graalvm-{major}") } else { format!("java-{major}") };
+    let e = cx.try_global::<JavaGets>()?.0.get(&(key, need))?.clone();
+    e.read(cx).primary.set(primary);
+    Some(e)
 }

@@ -72,7 +72,7 @@ pub fn java_field(
         .and_then(|r| r.reasons.first().cloned())
         .unwrap_or_else(|| req.reason.clone());
     let none_fit = best.is_none();
-    let (store2, major) = (store.clone(), req.major);
+    let major = req.major;
     Field::new()
         .label("Java")
         .description(reason)
@@ -90,20 +90,7 @@ pub fn java_field(
                         }
                     }),
                 )))
-                .child(
-                    Button::new("download-java")
-                        .small()
-                        .map(|b| if none_fit { b.primary() } else { b.outline() })
-                        .icon(IconName::Download)
-                        .label(format!("Download Java {major}"))
-                        .tooltip("Eclipse Temurin, into Hopper's own folder")
-                        .on_click(move |_, _, cx| {
-                            store2.update(cx, |s, cx| {
-                                s.download_java(major);
-                                cx.notify();
-                            })
-                        }),
-                ),
+                .children(crate::java_form::java_get(major, false, true, none_fit, cx)),
         )
         .when(none_fit, |f| {
             f.child(

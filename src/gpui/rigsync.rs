@@ -22,7 +22,7 @@ use hopper::model::{DiffEntry, DiffStatus, ModInfo};
 use hopper::rigsync::{self, EnvFilter, Filters, Group, Ops, RowAct, SourceFilter, row_key};
 use hopper::server::{ServerInfo, Status};
 use hopper::serverpack::Annotation;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -58,7 +58,22 @@ pub struct SyncPanel {
     open: HashSet<Group>,
     /// The list as drawn, rebuilt each frame from the comparison.
     items: Vec<Item>,
+    /// A bulk apply runs: every action waits for it.
     running: bool,
+    /// A comparison runs.
+    comparing: bool,
+    /// Rows whose own action runs now, by row key: (word while busy, word
+    /// when done).
+    acting: HashMap<String, (&'static str, &'static str)>,
+    /// Rows whose action finished, with the word to show, until they go.
+    acted: HashMap<String, &'static str>,
+    /// Done rows fading out now: (since, keys).
+    leaving: Option<(std::time::Instant, HashSet<String>)>,
+    /// A comparison that came in while rows were acting or done: shown once
+    /// they've gone, so rows don't jump under the pointer.
+    diff_next: Option<(Result<Vec<DiffEntry>, String>, Option<Annotation>)>,
+    settle: widgets::Settle,
+    _ticker: Option<Task<()>>,
     result: Option<Result<String, Vec<String>>>,
     allow_online: bool,
     /// The store's server revision this comparison is for.
@@ -124,6 +139,13 @@ impl SyncPanel {
             open: [Group::Add, Group::Update, Group::ServerOnly, Group::KeptOff].into(),
             items: Vec::new(),
             running: false,
+            comparing: false,
+            acting: HashMap::new(),
+            acted: HashMap::new(),
+            leaving: None,
+            diff_next: None,
+            settle: Default::default(),
+            _ticker: None,
             result: None,
             allow_online: false,
             seen_rev,
@@ -222,7 +244,7 @@ impl SyncPanel {
             cx.notify();
             return;
         };
-        self.running = true;
+        self.comparing = true;
         let anyway = self.store.read(cx).settings().sync_anyway.clone();
         self._task = Some(cx.spawn(async move |this, cx| {
             let root = server.root.clone();
@@ -239,9 +261,14 @@ impl SyncPanel {
                 if this.server.as_ref() != Some(&root) {
                     return;
                 }
-                this.running = false;
+                this.comparing = false;
                 this.crash = crash;
                 this.server_nf = server_nf;
+                if this.holding() {
+                    this.diff_next = Some(diff.map(|(d, n)| (d, Some(n))).map_or_else(|e| (Err(e), None), |(d, n)| (Ok(d), n)));
+                    cx.notify();
+                    return;
+                }
                 match diff {
                     Ok((d, note)) => {
                         let inst = this.pair(cx).map(|(_, i)| i);
@@ -303,6 +330,101 @@ impl SyncPanel {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Rows are acting, done, or leaving: a new comparison waits.
+    fn holding(&self) -> bool {
+        !self.acting.is_empty() || !self.acted.is_empty() || self.leaving.is_some()
+    }
+
+    /// One row's action: runs beside other rows' (no waiting on them), then
+    /// marks the row done and compares again. The new comparison shows once
+    /// the user stops clicking.
+    fn act_row(&mut self, key: String, words: (&'static str, &'static str), ops: Ops, cx: &mut Context<Self>) {
+        let Some((server, inst)) = self.pair(cx) else { return };
+        if ops.is_empty() || self.acting.contains_key(&key) {
+            return;
+        }
+        self.settle.clicked();
+        self.acting.insert(key.clone(), words);
+        self.result = None;
+        self.ensure_ticker(cx);
+        cx.spawn(async move |this, cx| {
+            // History is read, changed and written: one action at a time.
+            static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let results = cx
+                .background_spawn(async move {
+                    let _g = ONE.lock().unwrap_or_else(|e| e.into_inner());
+                    rigsync::run(ops, &server.root, &inst.root)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.acting.remove(&key);
+                match rigsync::summary(&results) {
+                    Ok(_) => {
+                        this.acted.insert(key, words.1);
+                    }
+                    Err(e) => this.result = Some(Err(e)),
+                }
+                this.rescan(cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn ensure_ticker(&mut self, cx: &mut Context<Self>) {
+        if self._ticker.is_some() {
+            return;
+        }
+        self._ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                if !this.update(cx, |this, cx| this.tick(cx)).unwrap_or(false) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Lets done rows go once the user is done clicking: they fade, then the
+    /// comparison that waited is shown.
+    fn tick(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some((since, _)) = &self.leaving {
+            if since.elapsed() >= widgets::FADE && !self.comparing {
+                self.leaving = None;
+                self.acted.clear();
+                if let Some((diff, note)) = self.diff_next.take() {
+                    if let Ok(d) = &diff {
+                        let keys: HashSet<String> = d.iter().map(row_key).collect();
+                        self.selected.retain(|k| keys.contains(k));
+                    }
+                    if note.is_some() {
+                        self.note = note;
+                    }
+                    self.diff = Some(diff);
+                }
+                cx.notify();
+            }
+        } else if !self.acted.is_empty() && self.acting.is_empty() && self.settle.settled() {
+            self.leaving = Some((std::time::Instant::now(), self.acted.keys().cloned().collect()));
+            cx.notify();
+        } else if self.acted.is_empty() && self.acting.is_empty() && !self.comparing {
+            // Nothing to wait for: a comparison that came in shows now.
+            if let Some((diff, note)) = self.diff_next.take() {
+                if note.is_some() {
+                    self.note = note;
+                }
+                self.diff = Some(diff);
+                cx.notify();
+            }
+        }
+        let more = self.holding() || self.diff_next.is_some() || self.comparing;
+        if !more {
+            self._ticker = None;
+        }
+        more
     }
 
     /// Picked rows the filters show: a pick the filters hide does nothing.
@@ -499,7 +621,7 @@ impl SyncPanel {
                             .small()
                             .icon(IconName::RefreshCw)
                             .tooltip("Compare again")
-                            .disabled(self.running)
+                            .disabled(self.running || self.comparing)
                             .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
                     ),
             )
@@ -922,7 +1044,15 @@ impl SyncPanel {
             .zip(tags)
             .map(|((item, d), tags)| match (item, d) {
                 (Item::Header(g, n), _) => self.group_header(g, n, cx),
-                (Item::Row(_), Some(d)) => self.row(&d, tags.unwrap_or_default(), cx),
+                (Item::Row(_), Some(d)) => {
+                    let key = row_key(&d);
+                    let el = self.row(&d, tags.unwrap_or_default(), cx);
+                    if self.leaving.as_ref().is_some_and(|(_, k)| k.contains(&key)) {
+                        widgets::fade_out(ElementId::Name(format!("sync-leave:{key}").into()), el)
+                    } else {
+                        el
+                    }
+                }
                 _ => div().into_any_element(),
             })
             .collect()
@@ -1044,7 +1174,14 @@ impl SyncPanel {
         };
         // One action per row, named for what it does.
         let act = |label: &'static str, icon: IconName, a: RowAct, danger: bool| {
-            let (d2, pair2) = (d.clone(), pair.clone());
+            let (d2, pair2, key2) = (d.clone(), pair.clone(), key.clone());
+            let words = match label {
+                "Add" => ("Adding", "Added"),
+                "Replace" => ("Replacing", "Replaced"),
+                "Update" => ("Updating", "Updated"),
+                "Remove" => ("Removing", "Removed"),
+                _ => ("Sending", "Sent"),
+            };
             Button::new(id(label))
                 .small()
                 .outline()
@@ -1055,7 +1192,7 @@ impl SyncPanel {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     if let Some((s, i)) = &pair2 {
-                        this.run(rigsync::chip_ops(a, &d2, i, s), cx);
+                        this.act_row(key2.clone(), words, rigsync::chip_ops(a, &d2, i, s), cx);
                     }
                 }))
         };
@@ -1092,7 +1229,7 @@ impl SyncPanel {
             Group::ServerOnly => h_flex()
                 .gap_1()
                 .when(d.status == DiffStatus::OnlyServer, |r| {
-                    let (d2, pair2) = (d.clone(), pair.clone());
+                    let (d2, pair2, key2) = (d.clone(), pair.clone(), key.clone());
                     r.child(
                         Button::new(id("pull"))
                             .small()
@@ -1103,7 +1240,7 @@ impl SyncPanel {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 if let Some((s, i)) = &pair2 {
-                                    this.run(rigsync::chip_ops(RowAct::Pull, &d2, i, s), cx);
+                                    this.act_row(key2.clone(), ("Copying", "Copied"), rigsync::chip_ops(RowAct::Pull, &d2, i, s), cx);
                                 }
                             })),
                     )
@@ -1152,6 +1289,19 @@ impl SyncPanel {
             )
             .text_xs()
             .into_any_element(),
+        };
+        let action: AnyElement = if let Some(w) = self.acted.get(&key) {
+            widgets::done_mark(id("done"), *w, false, cx).into_any_element()
+        } else if let Some((busy, _)) = self.acting.get(&key) {
+            Button::new(id("acting"))
+                .small()
+                .outline()
+                .loading(true)
+                .label(*busy)
+                .disabled(true)
+                .into_any_element()
+        } else {
+            action
         };
         let link = |el: Stateful<Div>, cx: &mut Context<Self>| {
             el.when(linked, |d| {
@@ -1395,6 +1545,8 @@ impl Render for SyncPanel {
                     .child(toolbar)
                     .child(
                         div()
+                            .id("sync-rows-area")
+                            .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
                             .flex_1()
                             .min_h_0()
                             .relative()

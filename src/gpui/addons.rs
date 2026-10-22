@@ -438,10 +438,17 @@ pub struct AddonsView {
     /// Mods just updated, still shown (as Updated) until the user stops
     /// clicking Update, so rows don't move under the pointer.
     recent: HashMap<u64, Update>,
-    /// When an Update button was last clicked.
-    last_update_click: Option<std::time::Instant>,
-    /// The pointer is over the rows.
-    mouse_in_rows: bool,
+    /// Clicks and pointer, for when Updated rows may go.
+    pub(crate) settle: widgets::Settle,
+    /// Missing mods installing from the banner: mod id → its job.
+    pub(crate) dep_jobs: HashMap<String, u64>,
+    /// Installed from the banner, shown as Installed until they go.
+    pub(crate) dep_done: HashSet<String>,
+    /// Installed chips fading out now.
+    pub(crate) dep_leaving: Option<(std::time::Instant, HashSet<String>)>,
+    /// A missing list read while chips were installing or done: shown once
+    /// they've gone, so the banner doesn't reflow under the pointer.
+    pub(crate) missing_next: Option<Vec<hopper::deps::Missing>>,
     /// Rows fading out now: (since, projects).
     leaving: Option<(std::time::Instant, HashSet<u64>)>,
     /// Rows sliding up into the room the leaving ones left: (generation,
@@ -453,10 +460,8 @@ pub struct AddonsView {
     _subscriptions: Vec<Subscription>,
 }
 
-/// How long the pointer must rest (no Update clicks) before Updated rows go.
-const UPDATED_LINGER: std::time::Duration = std::time::Duration::from_millis(1200);
 /// Updated rows fade out over this long, then the rows below slide up.
-const LEAVE: std::time::Duration = std::time::Duration::from_millis(350);
+const LEAVE: std::time::Duration = widgets::FADE;
 const SLIDE: std::time::Duration = std::time::Duration::from_millis(220);
 
 impl AddonsView {
@@ -514,8 +519,11 @@ impl AddonsView {
             peek,
             author_fits: true,
             recent: HashMap::new(),
-            last_update_click: None,
-            mouse_in_rows: false,
+            settle: Default::default(),
+            dep_jobs: HashMap::new(),
+            dep_done: HashSet::new(),
+            dep_leaving: None,
+            missing_next: None,
             leaving: None,
             slide: None,
             slide_gen: 0,
@@ -776,14 +784,17 @@ impl AddonsView {
         if added {
             self.sync(true, cx);
         }
-        if (running || !self.recent.is_empty()) && self._ticker.is_none() {
+        if running || !self.recent.is_empty() {
             self.start_ticker(cx);
         }
     }
 
     /// Ticks while updates run or Updated rows wait: repaints the buttons'
     /// progress and lets rows go once the user is done clicking.
-    fn start_ticker(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn start_ticker(&mut self, cx: &mut Context<Self>) {
+        if self._ticker.is_some() {
+            return;
+        }
         self._ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -826,10 +837,7 @@ impl AddonsView {
             self.slide = None;
         }
         // Done clicking: the pointer left the rows, or rested long enough.
-        let rested = self
-            .last_update_click
-            .is_none_or(|t| now.duration_since(t) >= UPDATED_LINGER);
-        if self.leaving.is_none() && !self.recent.is_empty() && (rested || !self.mouse_in_rows) {
+        if self.leaving.is_none() && !self.recent.is_empty() && self.settle.settled() {
             let ids: HashSet<u64> = self.recent.keys().copied().collect();
             if self.show == Show::Updates {
                 self.leaving = Some((now, ids));
@@ -838,13 +846,63 @@ impl AddonsView {
                 self.drop_recent(&root, &ids, cx);
             }
         }
+        let store = self.store.read(cx);
+        let ended: Vec<(String, bool)> = self
+            .dep_jobs
+            .iter()
+            .filter_map(|(id, job)| match store.job_state(*job) {
+                Some(j) if !j.done => None,
+                Some(j) => Some((id.clone(), j.error.is_none())),
+                None => Some((id.clone(), false)),
+            })
+            .collect();
+        for (id, ok) in ended {
+            self.dep_jobs.remove(&id);
+            if ok {
+                self.dep_done.insert(id);
+            }
+        }
+        self.tick_deps(now);
         cx.notify();
         let running = self.store.read(cx).queues_updates(&root);
-        let more = running || !self.recent.is_empty() || self.leaving.is_some() || self.slide.is_some();
+        let more = running
+            || !self.recent.is_empty()
+            || self.leaving.is_some()
+            || self.slide.is_some()
+            || self.deps_holding()
+            || self.missing_next.is_some();
         if !more {
             self._ticker = None;
         }
         more
+    }
+
+    /// Banner chips: installs that ended become Installed (or go back to
+    /// Install when they failed); Installed chips fade once the user is
+    /// done clicking; then the missing list read meanwhile shows.
+    fn tick_deps(&mut self, now: std::time::Instant) {
+        if let Some((since, ids)) = self.dep_leaving.clone()
+            && now.duration_since(since) >= widgets::FADE
+        {
+            self.dep_leaving = None;
+            self.dep_done.clear();
+            match self.missing_next.take() {
+                Some(next) => self.missing.list = next,
+                None => self.missing.list.retain(|m| !ids.contains(&m.needs)),
+            }
+        }
+        if self.dep_leaving.is_none() && !self.dep_done.is_empty() && self.dep_jobs.is_empty() && self.settle.settled() {
+            self.dep_leaving = Some((now, self.dep_done.clone()));
+        }
+        if !self.deps_holding()
+            && let Some(next) = self.missing_next.take()
+        {
+            self.missing.list = next;
+        }
+    }
+
+    pub(crate) fn deps_holding(&self) -> bool {
+        !self.dep_jobs.is_empty() || !self.dep_done.is_empty() || self.dep_leaving.is_some()
     }
 
     fn drop_recent(&mut self, root: &Path, ids: &HashSet<u64>, cx: &mut Context<Self>) {
@@ -1915,15 +1973,7 @@ impl AddonsView {
                     Some((*g, p, *room.get(&p)?))
                 });
                 let el: AnyElement = if leaving {
-                    div()
-                        .relative()
-                        .child(el)
-                        .with_animation(
-                            ElementId::Name(format!("leave-{}", pid.unwrap_or(0)).into()),
-                            Animation::new(LEAVE).with_easing(ease_in_out),
-                            |d, t| d.opacity(1.0 - t).left(rems(1.0 * t)),
-                        )
-                        .into_any_element()
+                    widgets::fade_out(ElementId::Name(format!("leave-{}", pid.unwrap_or(0)).into()), el)
                 } else if let Some((g, p, k)) = slide {
                     div()
                         .relative()
@@ -2254,26 +2304,10 @@ impl AddonsView {
             .as_ref()
             .filter(|_| updating == Some(true))
             .and_then(|r| store.update_progress(r, a.project_id));
-        let (fill_color, ok_color) = (theme.primary.opacity(0.28), theme.success);
         let action = col_action().when(done, |c| {
             // Updated: a quiet green mark where the button was, until the
             // row goes.
-            c.child(
-                h_flex()
-                    .id(id("updated"))
-                    .h(rems(1.75))
-                    .px_3()
-                    .gap_1p5()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(ok_color.opacity(0.5))
-                    .bg(ok_color.opacity(0.14))
-                    .text_color(ok_color)
-                    .text_sm()
-                    .font_medium()
-                    .child(Icon::new(IconName::Check).small())
-                    .child("Updated"),
-            )
+            c.child(widgets::done_mark(id("updated"), "Updated", false, cx))
         }).when_some(update.cloned().filter(|_| !done), |c, u| {
             let tip = format!("{}  →  {}", u.from, u.file.file_name);
             let (pid, file) = (u.project_id, u.file.clone());
@@ -2305,7 +2339,7 @@ It stays disabled after updating: turn it on in the On column.")
                             })
                             .disabled(hold.is_some() || updating.is_some() || from_web)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.last_update_click = Some(std::time::Instant::now());
+                                this.settle.clicked();
                                 this.run_updates(vec![u.clone()], cx);
                                 this.pull_recent(cx);
                             })),
@@ -2318,23 +2352,7 @@ It stays disabled after updating: turn it on in the On column.")
                 cx,
             );
             // The download fills the button from the left.
-            c.child(
-                div()
-                    .relative()
-                    .child(split)
-                    .when_some(progress, |d, p| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left_0()
-                                .w(relative(p.clamp(0.0, 1.0)))
-                                .rounded(px(5.))
-                                .bg(fill_color),
-                        )
-                    }),
-            )
+            c.child(widgets::progress_fill(split, progress, cx))
         });
 
         let view = cx.entity();
@@ -2813,7 +2831,7 @@ impl Render for AddonsView {
         } else {
             div()
                 .id("addon-table")
-                .on_hover(cx.listener(|this, h: &bool, _, _| this.mouse_in_rows = *h))
+                .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
                 .track_focus(&self.focus)
                 .key_context("AddonsTable")
                 .on_action(cx.listener(|this, _: &RowUp, _, cx| this.on_row_key(-1, cx)))

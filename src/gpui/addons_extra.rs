@@ -14,7 +14,7 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -184,7 +184,12 @@ impl AddonsView {
                     this.missing.dups = dups;
                     // Wrong versions are warned about when an update causes
                     // them; packs often ship a few that run anyway.
-                    this.missing.list = list.into_iter().filter(|m| m.wrong_version.is_none()).collect();
+                    let list: Vec<_> = list.into_iter().filter(|m| m.wrong_version.is_none()).collect();
+                    if this.deps_holding() {
+                        this.missing_next = Some(list);
+                    } else {
+                        this.missing.list = list;
+                    }
                     cx.notify();
                 }
             })
@@ -600,6 +605,8 @@ impl AddonsView {
             .map(|m| m.needs.clone())
             .collect();
         installable.dedup();
+        // Not what's installing or just installed.
+        installable.retain(|i| !self.dep_jobs.contains_key(i) && !self.dep_done.contains(i));
         // One row per mod, naming everything it lacks.
         let mut groups: Vec<(&str, Vec<&hopper::deps::Missing>)> = Vec::new();
         for m in &self.missing.list {
@@ -629,6 +636,33 @@ impl AddonsView {
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.enable_provider(&f, window, cx)
                                 }))
+                                .into_any_element()
+                        }
+                        None if self.dep_done.contains(&m.needs) => {
+                            widgets::done_mark(SharedString::from(format!("got:{}:{}", name, m.needs)), "Installed", true, cx)
+                                .into_any_element()
+                        }
+                        None if self.dep_jobs.contains_key(&m.needs) => {
+                            let p = self
+                                .dep_jobs
+                                .get(&m.needs)
+                                .and_then(|j| self.store.read(cx).job_state(*j))
+                                .and_then(|j| j.progress);
+                            let label = match p {
+                                Some(p) => format!("Installing {}%", (p * 100.0).floor() as u32),
+                                None => "Installing".to_string(),
+                            };
+                            widgets::progress_fill(
+                                Button::new(SharedString::from(format!("getting:{}:{}", name, m.needs)))
+                                    .xsmall()
+                                    .outline()
+                                    .loading(true)
+                                    .label(label)
+                                    .disabled(true),
+                                p,
+                                cx,
+                            )
+                            .into_any_element()
                         }
                         None => {
                             let id = m.needs.clone();
@@ -639,6 +673,7 @@ impl AddonsView {
                                 .label("Install")
                                 .tooltip("Download it from Modrinth or CurseForge, with what it needs")
                                 .on_click(cx.listener(move |this, _, _, cx| this.install_missing(vec![id.clone()], cx)))
+                                .into_any_element()
                         }
                     };
                     let dep = m.needs.clone();
@@ -660,6 +695,15 @@ impl AddonsView {
                             r.child(widgets::caption(m.versions.clone(), cx).text_xs())
                         })
                         .child(action)
+                        .map(|chip| {
+                            // Installed, fading out with the others once the
+                            // user stops clicking.
+                            if self.dep_leaving.as_ref().is_some_and(|(_, ids)| ids.contains(&m.needs)) {
+                                widgets::fade_out(SharedString::from(format!("dep-leave:{}:{}", name, m.needs)), chip)
+                            } else {
+                                chip.into_any_element()
+                            }
+                        })
                 });
                 h_flex()
                     .flex_wrap()
@@ -692,6 +736,8 @@ impl AddonsView {
         let n_rows = rows.len();
         Some(
             div()
+                .id("missing-banner")
+                .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
                 .px_6()
                 .child(
                     callout(theme.warning, cx)
@@ -744,7 +790,16 @@ impl AddonsView {
             [one] => format!("Installing {one}"),
             many => format!("Installing {} missing mods", many.len()),
         };
-        store.spawn_instance_job(&root, title, move |job| {
+        let ids: Vec<String> = ids
+            .into_iter()
+            .filter(|i| !self.dep_jobs.contains_key(i) && !self.dep_done.contains(i))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.settle.clicked();
+        let for_chips = ids.clone();
+        let job = store.spawn_instance_job_id(&root, title, move |job| {
             let mut got = 0;
             for id in &ids {
                 match hopper::install::install_mod_id(&mut inst, id, job) {
@@ -760,6 +815,11 @@ impl AddonsView {
             }
             Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
         });
+        for id in for_chips {
+            self.dep_jobs.insert(id, job);
+        }
+        self.start_ticker(cx);
+        cx.notify();
     }
 
     /// The project panel for a mod id a jar asks for, looked up like

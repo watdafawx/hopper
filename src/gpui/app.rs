@@ -329,6 +329,7 @@ impl AppView {
         };
         view.apply_args(window, cx);
         view._auto_restart = Some(Self::auto_restart(window, cx));
+        crate::java_form::init_java_gets(&view.store, cx);
         crate::setup_wizard::on_start(&view, window, cx);
         // One dialog at a time: the move offer waits for a start without
         // release notes.
