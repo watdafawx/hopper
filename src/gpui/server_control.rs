@@ -419,6 +419,16 @@ impl ServerControl {
 
     /// The state and the buttons, for the server's header.
     pub fn controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.controls_in(false, cx)
+    }
+
+    /// The same, narrow: Stop and Restart as icons with tooltips, for a
+    /// side column.
+    pub fn controls_compact(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.controls_in(true, cx)
+    }
+
+    fn controls_in(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let pname = self.panel_name(cx);
         if !self.configured(cx) {
@@ -481,7 +491,8 @@ impl ServerControl {
                     .when(busy.is_some(), |r| r.child(Spinner::new().xsmall()))
                     .child(tag.small().child(state)),
             )
-            .child(div().w_px().h_5().bg(theme.border))
+            .when(!compact, |r| r.child(div().w_px().h_5().bg(theme.border)))
+            .when(compact, |r| r.child(div().flex_1()))
             .map(|r| {
                 if running {
                     r.child(
@@ -489,7 +500,7 @@ impl ServerControl {
                             .small()
                             .outline()
                             .icon(IconName::Square)
-                            .label("Stop")
+                            .map(|b| if compact { b.tooltip("Stop") } else { b.label("Stop") })
                             .disabled(busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.request(PanelAction::Stop, window, cx)
@@ -500,7 +511,7 @@ impl ServerControl {
                             .small()
                             .outline()
                             .icon(IconName::RotateCcw)
-                            .label("Restart")
+                            .map(|b| if compact { b.tooltip("Restart") } else { b.label("Restart") })
                             .disabled(busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.request(PanelAction::Restart, window, cx)

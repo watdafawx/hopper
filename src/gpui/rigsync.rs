@@ -616,7 +616,7 @@ impl SyncPanel {
             .control
             .read(cx)
             .configured(cx)
-            .then(|| self.control.update(cx, |c, cx| c.controls(cx)));
+            .then(|| self.control.update(cx, |c, cx| c.controls_compact(cx)));
         let online = self.online(cx);
         let counts: Vec<(Group, usize)> = {
             let groups: Vec<Group> = self.counted(cx).into_iter().map(Group::of).collect();
@@ -855,11 +855,17 @@ impl SyncPanel {
                             .text_sm()
                             .child(Icon::new(IconName::CircleCheck).small().text_color(theme.success))
                             .child(
-                                div().flex_1().min_w_0().truncate().child(if pack_nf.is_some() {
-                                    format!("NeoForge {sv}, same as the pack")
-                                } else {
-                                    format!("Server on NeoForge {sv}")
-                                }),
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().truncate().child(format!("NeoForge {sv}")))
+                                    .child(
+                                        widgets::caption(
+                                            if pack_nf.is_some() { "Same as the pack" } else { "On the server" },
+                                            cx,
+                                        )
+                                        .text_xs(),
+                                    ),
                             )
                             .child(picker(
                                 Button::new("nf-change").ghost().xsmall().label("Change").icon(IconName::ChevronDown),
