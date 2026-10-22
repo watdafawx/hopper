@@ -10,6 +10,11 @@
 //!   mod and its jar (`at TRANSFORMER/<id>@<ver>/… ~[<jar>%23…]`): the first
 //!   mod frame is likely, the mods that led to it possible;
 //! - Mixin's "Mixin apply for mod <id> failed" lines: likely;
+//! - Fabric and Quilt: the loader's "Mod 'Name' (id) … requires …" lines
+//!   (certain); stack frames carry no jar there, so a frame's class is
+//!   matched to the jar that has its package (see [`PackageIndex`]), and a
+//!   mixin's injected method names its mod (`handler$…$modid$…`);
+//! - missing dependencies the loader names, to install;
 //! - `OutOfMemoryError` and a Java crash file: a note, no mod.
 
 use regex::Regex;
@@ -59,6 +64,9 @@ pub struct Suspect {
     pub certainty: Certainty,
     /// One plain sentence.
     pub why: String,
+    /// What it needs that isn't installed: (mod id, versions).
+    #[serde(default)]
+    pub needs: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -72,6 +80,9 @@ pub struct Crash {
     pub kind: CrashKind,
     /// Most certain first.
     pub suspects: Vec<Suspect>,
+    /// Suspects the player turned off from the crash card, to turn back on.
+    #[serde(default)]
+    pub turned_off: Vec<String>,
 }
 
 fn re(p: &str) -> Regex {
@@ -98,6 +109,11 @@ pub struct Raw {
     pub jar: String,
     pub certainty: Certainty,
     pub why: String,
+    /// A frame's class, when the frame names no jar (Fabric): matched to a
+    /// jar by its package.
+    pub class: String,
+    /// (missing mod id, versions).
+    pub needs: Vec<(String, String)>,
 }
 
 /// The findings in a crash report or log, most certain first, one per mod.
@@ -126,6 +142,10 @@ pub fn signals(text: &str) -> Vec<Raw> {
                     if m.is_empty() || m.contains(':') && !more.starts_with("\t\t") {
                         break;
                     }
+                    // Each line is its own sentence.
+                    if !why.ends_with(['.', '!', ':']) {
+                        why.push('.');
+                    }
                     why.push(' ');
                     why.push_str(m);
                 }
@@ -137,11 +157,13 @@ pub fn signals(text: &str) -> Vec<Raw> {
                 mod_id: id,
                 jar,
                 certainty: Certainty::Certain,
+                needs: needs_in(&why),
                 why: if why.is_empty() {
                     "The loader couldn't load it.".into()
                 } else {
                     format!("The loader couldn't load it: {why}")
                 },
+                class: String::new(),
             },
         );
     }
@@ -169,7 +191,7 @@ pub fn signals(text: &str) -> Vec<Raw> {
                 (Certainty::Possible, format!("Its code called {first_name}, where the error happened."))
             };
             first = false;
-            add(&mut out, Raw { mod_id: id, jar, certainty, why });
+            add(&mut out, Raw { mod_id: id, jar, certainty, why, class: String::new(), needs: Vec::new() });
         }
     }
 
@@ -183,12 +205,165 @@ pub fn signals(text: &str) -> Vec<Raw> {
                     jar: String::new(),
                     certainty: Certainty::Likely,
                     why: "Its changes to the game's code (a mixin) failed to apply.".into(),
+                    class: String::new(),
+                    needs: Vec::new(),
                 },
             );
         }
     }
+    fabric_signals(&lines, &mut out);
     out.sort_by_key(|r| r.certainty);
     out
+}
+
+/// `- Mod 'Sodium Extra' (sodium-extra) 0.5.1 requires version 0.5.0 of mod 'Sodium' (sodium), …`
+static FABRIC_MOD: LazyLock<Regex> =
+    LazyLock::new(|| re(r"Mod '[^']+' \(([\w.-]+)\) \S+ (requires|is incompatible with|conflicts with|breaks) (.+)$"));
+/// `mod 'Sodium' (sodium)` inside such a line.
+static FABRIC_OTHER: LazyLock<Regex> = LazyLock::new(|| re(r"mod '[^']+' \(([\w.-]+)\)"));
+/// A frame with no jar: `at com.x.Y.z(Y.java:1)` (any module prefix).
+static PLAIN_FRAME: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*at\s+(?:[\w.@-]+/)*([\w$]+(?:\.[\w$]+)+)\.[\w$<>]+\("));
+/// A mixin's injected method: `handler$zza000$sodium$onRender`.
+static MIXIN_METHOD: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"\.(?:handler|redirect|modify\w*|wrapOperation|wrapWithCondition|localvar|constant)\$\w+\$([a-z][\w-]*)\$")
+});
+
+/// Classes that are the game, the loaders or common libraries.
+const LIBRARY_PACKAGES: [&str; 18] = [
+    "java.", "javax.", "jdk.", "sun.", "com.sun.", "net.minecraft.", "com.mojang.", "net.fabricmc.",
+    "org.quiltmc.", "net.neoforged.", "net.minecraftforge.", "cpw.mods.", "org.spongepowered.", "com.google.",
+    "org.apache.", "io.netty.", "it.unimi.", "org.lwjgl.",
+];
+
+/// Fabric and Quilt: the loader's refusals, and the exception's frames,
+/// which name no jar there.
+fn fabric_signals(lines: &[&str], out: &mut Vec<Raw>) {
+    for l in lines {
+        let Some(m) = FABRIC_MOD.captures(l) else { continue };
+        let rest = m[3].trim_end_matches(['!', '.']).to_string();
+        let missing = rest.contains("which is missing");
+        let needs = match (missing, FABRIC_OTHER.captures(&rest)) {
+            (true, Some(o)) => {
+                let versions = rest.split(" of mod ").next().unwrap_or("").trim_start_matches("version ").trim();
+                vec![(o[1].to_string(), if versions.starts_with("any") { String::new() } else { versions.to_string() })]
+            }
+            _ => Vec::new(),
+        };
+        add(
+            out,
+            Raw {
+                mod_id: m[1].to_string(),
+                jar: String::new(),
+                certainty: Certainty::Certain,
+                why: format!("The loader refused it: it {} {}.", &m[2], strip_names(&rest)),
+                class: String::new(),
+                needs,
+            },
+        );
+    }
+    // The first stack, if its frames name no jar.
+    let Some(start) = lines.iter().position(|l| PLAIN_FRAME.is_match(l)) else { return };
+    if FRAME.is_match(lines[start]) {
+        return; // NeoForge/Forge: handled with the jar names.
+    }
+    let mut first = out.iter().all(|r| r.certainty != Certainty::Likely);
+    for l in lines[start..].iter().take_while(|l| !l.trim().is_empty() && !l.starts_with("A detailed")) {
+        if let Some(m) = MIXIN_METHOD.captures(l) {
+            add(
+                out,
+                Raw {
+                    mod_id: m[1].to_string(),
+                    jar: String::new(),
+                    certainty: if first { Certainty::Likely } else { Certainty::Possible },
+                    why: "Its change to the game's code (a mixin) was running when it crashed.".into(),
+                    class: String::new(),
+                    needs: Vec::new(),
+                },
+            );
+            first = false;
+            continue;
+        }
+        let Some(m) = PLAIN_FRAME.captures(l) else { continue };
+        let class = m[1].to_string();
+        if LIBRARY_PACKAGES.iter().any(|p| class.starts_with(p)) {
+            continue;
+        }
+        out.push(Raw {
+            mod_id: String::new(),
+            jar: String::new(),
+            certainty: if first { Certainty::Likely } else { Certainty::Possible },
+            why: if first {
+                "The error happened in its code.".into()
+            } else {
+                "Its code was in the chain that led to the error.".into()
+            },
+            class,
+            needs: Vec::new(),
+        });
+        first = false;
+    }
+}
+
+/// "mod 'Sodium' (sodium)" read as "Sodium".
+fn strip_names(s: &str) -> String {
+    FABRIC_OTHER
+        .replace_all(s, |c: &regex::Captures| {
+            let whole = &c[0];
+            whole.split('\'').nth(1).unwrap_or(whole).to_string()
+        })
+        .into_owned()
+}
+
+/// NeoForge's "Mod x requires y 1.0 or above … Currently, y is not
+/// installed": (y, "1.0 or above").
+fn needs_in(why: &str) -> Vec<(String, String)> {
+    static NEEDS: LazyLock<Regex> =
+        LazyLock::new(|| re(r"Mod [\w.-]+ requires ([\w.-]+) (.+?)\.?\s+Currently, ([\w.-]+) is not installed"));
+    NEEDS
+        .captures_iter(why)
+        .filter(|c| c[1] == c[3])
+        .map(|c| (c[1].to_string(), c[2].trim().to_string()))
+        .collect()
+}
+
+/// Which jar has each class package, from the jars' file lists: a package
+/// in more than one jar (a shaded library) belongs to none.
+#[derive(Default)]
+pub struct PackageIndex {
+    owner: std::collections::HashMap<String, Option<String>>,
+}
+
+impl PackageIndex {
+    /// Reads the file list of each jar in `dir` named in `mods`.
+    pub fn build(dir: &Path, mods: &[String]) -> Self {
+        let mut idx = Self::default();
+        for m in mods.iter().filter(|m| m.ends_with(".jar")) {
+            let Ok(f) = fs::File::open(dir.join(m)) else { continue };
+            let Ok(z) = zip::ZipArchive::new(f) else { continue };
+            let pkgs: std::collections::HashSet<String> = z
+                .file_names()
+                .filter(|n| n.ends_with(".class") && !n.starts_with("META-INF/"))
+                .filter_map(|n| n.rsplit_once('/').map(|(p, _)| p.replace('/', ".")))
+                .collect();
+            for p in pkgs {
+                idx.owner
+                    .entry(p)
+                    .and_modify(|o| {
+                        if o.as_deref() != Some(m.as_str()) {
+                            *o = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(m.clone()));
+            }
+        }
+        idx
+    }
+
+    /// The jar a class (`com.x.Y$Z`) is in.
+    pub fn jar_of(&self, class: &str) -> Option<&str> {
+        let pkg = class.rsplit_once('.')?.0;
+        self.owner.get(pkg)?.as_deref()
+    }
 }
 
 fn same(r: &Raw, id: &str, jar: &str) -> bool {
@@ -200,6 +375,11 @@ fn same(r: &Raw, id: &str, jar: &str) -> bool {
 fn add(out: &mut Vec<Raw>, r: Raw) {
     match out.iter_mut().find(|e| same(e, &r.mod_id, &r.jar)) {
         Some(e) => {
+            for n in r.needs {
+                if !e.needs.contains(&n) {
+                    e.needs.push(n);
+                }
+            }
             if e.jar.is_empty() {
                 e.jar = r.jar;
             }
@@ -276,14 +456,30 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
     for r in signals(&log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
         add(&mut raws, r);
     }
+    // Frames that name no jar (Fabric): the jar that has the class's package.
+    if raws.iter().any(|r| !r.class.is_empty()) {
+        let idx = PackageIndex::build(&root.join("mods"), mods);
+        let mut resolved: Vec<Raw> = Vec::new();
+        for mut r in std::mem::take(&mut raws) {
+            if !r.class.is_empty() {
+                match idx.jar_of(&r.class) {
+                    Some(j) => r.jar = j.to_string(),
+                    None => continue,
+                }
+            }
+            add(&mut resolved, r);
+        }
+        raws = resolved;
+    }
     raws.sort_by_key(|r| r.certainty);
-    let suspects: Vec<Suspect> = raws
-        .into_iter()
-        .filter_map(|r| {
-            let file = match_jar(&r, mods, &ids)?;
-            Some(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why })
-        })
-        .collect();
+    let mut suspects: Vec<Suspect> = Vec::new();
+    for r in raws {
+        let Some(file) = match_jar(&r, mods, &ids) else { continue };
+        if suspects.iter().any(|s| s.file_name == file) {
+            continue;
+        }
+        suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs });
+    }
     let out_of_memory = text.contains("OutOfMemoryError") || log.contains("java.lang.OutOfMemoryError");
     let kind = if !suspects.is_empty() {
         CrashKind::Mods
@@ -300,7 +496,7 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         (None, Some(n)) => native_line(&tail(n, 64 << 10)),
         _ => String::new(),
     };
-    Some(Crash { when: now, source, headline, kind, suspects })
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new() })
 }
 
 /// A Java crash file's "Problematic frame" line.
@@ -391,7 +587,7 @@ A detailed walkthrough of the error
         assert_eq!(s[0].mod_id, "mobflowutilities");
         assert_eq!(s[0].jar, "mobflowutilities-3.1.10.10-mc-1.21.1.jar");
         assert_eq!(s[0].certainty, Certainty::Certain);
-        assert!(s[0].why.contains("requires neoforge 21.1.259 or above Currently, neoforge is 21.1.256"), "{}", s[0].why);
+        assert!(s[0].why.contains("requires neoforge 21.1.259 or above. Currently, neoforge is 21.1.256"), "{}", s[0].why);
         assert!(headline(LOADING).starts_with("Mod loading failures have occurred"));
     }
 
@@ -414,6 +610,70 @@ A detailed walkthrough of the error
         assert_eq!(match_jar(&s[0], &mods, &ids).as_deref(), Some("CoolMod-2.0.jar"));
         let jei = &signals(TRACE)[0];
         assert_eq!(match_jar(jei, &mods, &ids).as_deref(), Some("jei-1.21.1-neoforge-19.64.0.454.jar.disabled"));
+    }
+
+    #[test]
+    fn neoforge_missing_dependency_is_offered() {
+        let t = "-- Mod loading issue for: coolmod --\nDetails:\n\tMod file: /x/mods/coolmod-1.0.jar\n\tFailure message: Mod coolmod requires balm 21.0.0 or above\n\t\tCurrently, balm is not installed\n\t\t\n\tMod version: 1.0\n";
+        let s = signals(t);
+        assert_eq!(s[0].needs, [("balm".to_string(), "21.0.0 or above".to_string())]);
+    }
+
+    #[test]
+    fn fabric_refusals_and_missing_mods() {
+        let log = "Incompatible mods found!\n - Mod 'Sodium Extra' (sodium-extra) 0.5.1 requires version 0.5.0 of mod 'Sodium' (sodium), but only the wrong version is present: 0.4.10!\n - Mod 'Cool Mod' (coolmod) 1.0 requires any version of mod 'Cloth Config API' (cloth-config), which is missing!\n";
+        let s = signals(log);
+        let ids: Vec<&str> = s.iter().map(|r| r.mod_id.as_str()).collect();
+        assert_eq!(ids, ["sodium-extra", "coolmod"]);
+        assert!(s.iter().all(|r| r.certainty == Certainty::Certain));
+        assert!(s[0].why.contains("version 0.5.0 of Sodium"), "{}", s[0].why);
+        assert!(s[0].needs.is_empty(), "wrong version, not missing");
+        assert_eq!(s[1].needs, [("cloth-config".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn fabric_frames_go_through_packages_and_mixin_names() {
+        let t = "Description: Rendering overlay\n\njava.lang.NullPointerException: oops\n\tat com.cool.render.Thing.draw(Thing.java:10)\n\tat net.minecraft.class_310.handler$zza000$sodium$onRender(class_310.java:1)\n\tat com.other.lib.Util.call(Util.java:3)\n\tat net.minecraft.class_310.method_1523(class_310.java:2)\n";
+        let s = signals(t);
+        assert_eq!(s[0].class, "com.cool.render.Thing");
+        assert_eq!(s[0].certainty, Certainty::Likely);
+        assert_eq!((s[1].mod_id.as_str(), s[1].certainty), ("sodium", Certainty::Possible));
+        assert_eq!(s[2].class, "com.other.lib.Util");
+
+        // Packages to jars, from real zip file lists.
+        let dir = std::env::temp_dir().join(format!("hopper-pkgidx-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let jar = |name: &str, classes: &[&str]| {
+            use std::io::Write;
+            let mut z = zip::ZipWriter::new(fs::File::create(dir.join(name)).unwrap());
+            for c in classes {
+                z.start_file(*c, zip::write::SimpleFileOptions::default()).unwrap();
+                z.write_all(b"x").unwrap();
+            }
+            z.finish().unwrap();
+        };
+        jar("cool-1.0.jar", &["com/cool/render/Thing.class", "shaded/lib/A.class"]);
+        jar("other-2.0.jar", &["com/other/lib/Util.class", "shaded/lib/B.class"]);
+        let mods = vec!["cool-1.0.jar".to_string(), "other-2.0.jar".to_string()];
+        let idx = PackageIndex::build(&dir, &mods);
+        assert_eq!(idx.jar_of("com.cool.render.Thing"), Some("cool-1.0.jar"));
+        assert_eq!(idx.jar_of("com.other.lib.Util$Inner"), Some("other-2.0.jar"));
+        assert_eq!(idx.jar_of("shaded.lib.A"), None, "a package in two jars is no one's");
+
+        // And through detect.
+        fs::create_dir_all(dir.join("root/crash-reports")).unwrap();
+        fs::create_dir_all(dir.join("root/logs")).unwrap();
+        fs::create_dir_all(dir.join("root/mods")).unwrap();
+        for m in &mods {
+            fs::copy(dir.join(m), dir.join("root/mods").join(m)).unwrap();
+        }
+        fs::write(dir.join("root/logs/latest.log"), "").unwrap();
+        fs::write(dir.join("root/crash-reports/crash-x-client.txt"), t).unwrap();
+        let c = detect(&dir.join("root"), crate::time::now() - 5, &mods, |_| Vec::new()).unwrap();
+        let files: Vec<&str> = c.suspects.iter().map(|s| s.file_name.as_str()).collect();
+        assert_eq!(files, ["cool-1.0.jar", "other-2.0.jar"]);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

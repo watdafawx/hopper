@@ -995,6 +995,44 @@ impl Store {
             .as_ref()
     }
 
+    /// Turns off the crash's Certain and Likely suspects that are on, and
+    /// remembers them on the crash to turn back on. The files turned off.
+    pub fn crash_turn_off(&mut self, root: &Path) -> Result<Vec<String>, String> {
+        use hopper::crashdetect::Certainty;
+        let Some(mut c) = self.crash(root).cloned() else { return Ok(Vec::new()) };
+        let inst = self.instance(root).ok_or("That instance is gone.")?;
+        let files: Vec<String> = c
+            .suspects
+            .iter()
+            .filter(|s| s.certainty <= Certainty::Likely)
+            .filter_map(|s| {
+                inst.addons
+                    .iter()
+                    .find(|a| a.enabled && a.file_name.eq_ignore_ascii_case(s.file_name.trim_end_matches(".disabled")))
+                    .map(|a| a.file_name.clone())
+            })
+            .collect();
+        self.set_enabled(root, &files, false)?;
+        for f in &files {
+            if !c.turned_off.contains(f) {
+                c.turned_off.push(f.clone());
+            }
+        }
+        hopper::crashdetect::save(root, &c);
+        self.crashes.insert(root.to_path_buf(), Some(c));
+        Ok(files)
+    }
+
+    /// Turns back on what [`crash_turn_off`] turned off.
+    pub fn crash_turn_back_on(&mut self, root: &Path) -> Result<(), String> {
+        let Some(mut c) = self.crash(root).cloned() else { return Ok(()) };
+        let files = std::mem::take(&mut c.turned_off);
+        self.set_enabled(root, &files, true)?;
+        hopper::crashdetect::save(root, &c);
+        self.crashes.insert(root.to_path_buf(), Some(c));
+        Ok(())
+    }
+
     /// Forgets the instance's last crash (the player dismissed it).
     pub fn dismiss_crash(&mut self, root: &Path) {
         hopper::crashdetect::clear(root);

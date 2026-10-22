@@ -1,6 +1,6 @@
 # Crash detection: draft
 
-Status: phase 1 built (Hopper 0.8.74, 2026-10-22). Phases 2 and 3 not yet.
+Status: phases 1 to 3 built (phase 1 in Hopper 0.8.74, phases 2 and 3 in 0.8.75, 2026-10-22).
 
 Phase 1 as built differs from the draft in three places:
 - the last crash is kept in `.hopper-crash.json` in the instance folder, not
@@ -9,6 +9,11 @@ Phase 1 as built differs from the draft in three places:
   get one); a new crash report or `hs_err_pid*.log` is what counts;
 - the Mods tab tag goes when the crash is dismissed, a game ends normally or
   the mod's file changes (updated); turning a mod off keeps it.
+- "Turn off the likely ones and play" is two steps: **Turn off the likely
+  ones**, then **Play without them** (or **Turn them back on**), so nothing
+  launches by surprise.
+- Fabric: nested jars (`META-INF/jars`) aren't in the package index yet, and
+  a package shipped in two jars (a shaded library) names neither.
 
 ## Goal
 

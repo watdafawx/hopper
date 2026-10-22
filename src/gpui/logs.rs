@@ -12,7 +12,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::logs::{Level, crash_reports, crash_summary, is_problem, level, tail};
@@ -710,7 +710,45 @@ impl LogsView {
                         .font_semibold(),
                     )
                     .child(div().flex_none().w(rems(5.)).child(tag.xsmall().outline().child(s.certainty.label())))
-                    .child(widgets::caption(why, cx).text_xs().flex_1().min_w_0().whitespace_normal())
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(widgets::caption(why, cx).text_xs().whitespace_normal())
+                            .children(s.needs.iter().enumerate().map(|(k, (id, ver))| {
+                                let loader = ["minecraft", "neoforge", "forge", "fabricloader", "quilt_loader", "java"]
+                                    .contains(&id.as_str());
+                                let label = if ver.is_empty() { format!("Needs {id}") } else { format!("Needs {id} {ver}") };
+                                let (root3, id3) = (root.to_path_buf(), id.clone());
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_family(theme.mono_font_family.clone())
+                                            .text_color(theme.warning)
+                                            .child(label),
+                                    )
+                                    .map(|r| {
+                                        if loader {
+                                            r.child(widgets::caption("Change it in Settings › Loader", cx).text_xs())
+                                        } else {
+                                            r.child(
+                                                Button::new(ElementId::Name(format!("crash-need:{i}:{k}").into()))
+                                                    .xsmall()
+                                                    .primary()
+                                                    .icon(IconName::Download)
+                                                    .label("Install")
+                                                    .tooltip("From Modrinth or CurseForge, with what it needs")
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.install_needed(&root3, id3.clone(), cx)
+                                                    })),
+                                            )
+                                        }
+                                    })
+                            })),
+                    )
                     .into_any_element()
             })
             .collect();
@@ -781,7 +819,106 @@ impl LogsView {
                     .child(v_flex().children(rows))
             })
             .when_some(note, |d, n| d.child(div().text_sm().child(n)))
+            .children(self.crash_actions(root, c, cx))
             .into_any_element()
+    }
+
+    /// Turn the likely mods off (then play), or back on.
+    fn crash_actions(&mut self, root: &Path, c: &hopper::crashdetect::Crash, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use hopper::crashdetect::Certainty;
+        let store = self.store.read(cx);
+        let inst = store.instance(root)?;
+        let on = |f: &str| {
+            inst.addons
+                .iter()
+                .any(|a| a.enabled && a.file_name.eq_ignore_ascii_case(f.trim_end_matches(".disabled")))
+        };
+        let can_turn_off = c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && on(&s.file_name)).count();
+        let turned = c.turned_off.len();
+        let playing = store.running(root).is_some();
+        if can_turn_off == 0 && turned == 0 {
+            return None;
+        }
+        let (r1, r2, r3) = (root.to_path_buf(), root.to_path_buf(), root.to_path_buf());
+        Some(
+            h_flex()
+                .gap_2()
+                .pt_1()
+                .when(can_turn_off > 0, |r| {
+                    r.child(
+                        Button::new("crash-turn-off")
+                            .small()
+                            .outline()
+                            .icon(IconName::PowerOff)
+                            .label(if can_turn_off == 1 {
+                                "Turn off the likely one".to_string()
+                            } else {
+                                format!("Turn off the {can_turn_off} likely ones")
+                            })
+                            .tooltip("Certain and Likely mods. You can turn them back on here.")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let r = this.store.update(cx, |s, cx| {
+                                    let r = s.crash_turn_off(&r1);
+                                    cx.notify();
+                                    r
+                                });
+                                if let Err(e) = r {
+                                    window.push_notification(gpui_kit::component::notification::Notification::warning(e), cx);
+                                }
+                            })),
+                    )
+                })
+                .when(turned > 0, |r| {
+                    r.child(
+                        Button::new("crash-play")
+                            .small()
+                            .primary()
+                            .icon(IconName::Play)
+                            .label(if turned == 1 { "Play without it" } else { "Play without them" })
+                            .disabled(playing)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let native = this.store.read(cx).settings().launch_native;
+                                if native && !hopper::msauth::has_saved_login() {
+                                    crate::dialogs::open_sign_in(this.store.clone(), window, cx);
+                                    return;
+                                }
+                                if let Err(e) = this.store.update(cx, |s, _| s.play(&r2)) {
+                                    window.push_notification(gpui_kit::component::notification::Notification::warning(e), cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("crash-turn-on")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Undo2)
+                            .label(if turned == 1 { "Turn it back on".to_string() } else { format!("Turn {turned} back on") })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let r = this.store.update(cx, |s, cx| {
+                                    let r = s.crash_turn_back_on(&r3);
+                                    cx.notify();
+                                    r
+                                });
+                                if let Err(e) = r {
+                                    window.push_notification(gpui_kit::component::notification::Notification::warning(e), cx);
+                                }
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Installs a mod the crash says is missing (as the Mods tab's banner
+    /// does), as a task.
+    fn install_needed(&mut self, root: &Path, id: String, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let Some(mut inst) = store.instance(root).cloned() else { return };
+        store.spawn_instance_job(root, format!("Installing {id}"), move |job| {
+            let added = hopper::install::install_mod_id(&mut inst, &id, job)?;
+            job.note(format!("Installed {}", added.join(", ")));
+            Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
+        });
     }
 
     /// A log tab: one toolbar, then the log filling the rest.
