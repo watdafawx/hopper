@@ -302,7 +302,23 @@ pub fn plan(
 
     // Mods.
     let (mods, kept, mods_note) = if new.mods_included {
-        let (m, k) = mod_changes(&server.mods_dir(), &new.jars, base.as_ref().map(|b| &b.jars));
+        let (mut m, k) = mod_changes(&server.mods_dir(), &new.jars, base.as_ref().map(|b| &b.jars));
+        // The instance knows these mods: their projects and icons.
+        for c in &mut m {
+            let jar = if c.to.is_empty() { &c.from } else { &c.to };
+            let stem = serverpack::jar_stem(jar);
+            if let Some(a) = inst
+                .addons
+                .iter()
+                .find(|a| a.file_name.eq_ignore_ascii_case(jar) || (!stem.is_empty() && serverpack::jar_stem(&a.file_name) == stem))
+            {
+                c.project = a.project_id;
+                c.icon = a.icon.clone();
+                if !a.name.is_empty() {
+                    c.name = a.name.clone();
+                }
+            }
+        }
         (m, k, None)
     } else {
         (

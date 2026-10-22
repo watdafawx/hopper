@@ -210,6 +210,9 @@ impl UpdatePreview {
                         let result = server_reviews(|m| m.get(&id).and_then(|e| e.1.clone()));
                         if let Some(r) = result {
                             this.take_result(id, r);
+                            if let Some(Ok(p)) = this.plan.clone() {
+                                this.want_icons(&p, cx);
+                            }
                         }
                         cx.notify();
                         this.plan.is_some()

@@ -514,10 +514,26 @@ impl AddonsView {
         let rows = dups.iter().map(|d| {
             let older = d.files[1..].to_vec();
             let what = d.name.clone();
+            let addon = inst.addons.iter().find(|a| a.file_name == d.files[0]);
+            let (pid, icon) = (
+                addon.map_or(0, |a| a.project_id),
+                addon.and_then(|a| self.store.read(cx).image(&a.icon)).map(std::path::Path::to_path_buf),
+            );
+            let view = cx.entity();
             h_flex()
                 .gap_3()
                 .text_sm()
-                .child(div().font_semibold().child(d.name.clone()))
+                .child(
+                    widgets::mod_link(
+                        SharedString::from(format!("dup:{}", d.files[0])),
+                        d.name.clone(),
+                        icon.as_deref(),
+                        pid,
+                        move |p, _, cx| view.update(cx, |this, cx| this.open_peek(p, cx)),
+                        cx,
+                    )
+                    .font_semibold(),
+                )
                 .child(
                     widgets::caption(
                         format!("keep {}  ·  remove {}", d.files[0], older.join(", ")),
@@ -679,6 +695,7 @@ impl AddonsView {
                     let dep = m.needs.clone();
                     h_flex()
                         .gap_1p5()
+                        .child(widgets::thumb(None, rems(1.25), cx))
                         .child(
                             div()
                                 .id(SharedString::from(format!("dep:{}:{}", name, m.needs)))
@@ -713,20 +730,24 @@ impl AddonsView {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("needer:{name}")))
-                                    .font_semibold()
-                                    .when(pid != 0, |d| {
-                                        d.cursor_pointer()
-                                            .hover(|s| s.text_color(theme.primary))
-                                            .tooltip(|w, cx| {
-                                                gpui_kit::component::tooltip::Tooltip::new("Details").build(w, cx)
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| this.open_peek(pid, cx)))
-                                    })
-                                    .child(name.to_string()),
-                            )
+                            .child({
+                                let view = cx.entity();
+                                let icon = inst
+                                    .addons
+                                    .iter()
+                                    .find(|a| a.project_id == pid && pid != 0 || a.name == *name)
+                                    .and_then(|a| self.store.read(cx).image(&a.icon))
+                                    .map(std::path::Path::to_path_buf);
+                                widgets::mod_link(
+                                    SharedString::from(format!("needer:{name}")),
+                                    name.to_string(),
+                                    icon.as_deref(),
+                                    pid,
+                                    move |p, _, cx| view.update(cx, |this, cx| this.open_peek(p, cx)),
+                                    cx,
+                                )
+                                .font_semibold()
+                            })
                             .child(widgets::caption("needs", cx)),
                     )
                     .children(chips)

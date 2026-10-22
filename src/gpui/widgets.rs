@@ -903,3 +903,31 @@ pub fn fade_out(id: impl Into<ElementId>, el: impl IntoElement) -> AnyElement {
         })
         .into_any_element()
 }
+
+/// A mod's icon and name, the way every list shows a mod. Callers add the
+/// click that opens its page (`.on_click`) where it has one.
+pub fn mod_name(id: impl Into<ElementId>, name: impl Into<SharedString>, icon: Option<&Path>, cx: &App) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .min_w_0()
+        .gap_1p5()
+        .child(thumb(icon, rems(1.25), cx))
+        .child(div().min_w_0().truncate().child(name.into()))
+}
+
+/// [`mod_name`] that opens the mod's page on click (when `project` isn't 0).
+pub fn mod_link(
+    id: impl Into<ElementId>,
+    name: impl Into<SharedString>,
+    icon: Option<&Path>,
+    project: u64,
+    open: impl Fn(u64, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Stateful<Div> {
+    let accent = cx.theme().primary;
+    mod_name(id, name, icon, cx).when(project != 0, |d| {
+        d.cursor_pointer()
+            .hover(move |s| s.text_color(accent))
+            .on_click(move |_, window, cx| open(project, window, cx))
+    })
+}

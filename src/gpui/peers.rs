@@ -548,9 +548,40 @@ impl PeersView {
                                     )
                                     .child(div().w_24().flex_none().child(tag))
                                     .map(|r| match name {
-                                        Some(n) => r
-                                            .child(div().text_sm().font_medium().child(n))
-                                            .child(widgets::caption(e.rel.clone(), cx).text_xs()),
+                                        Some(n) => {
+                                            // This instance's copy of the mod: icon and page.
+                                            let file = e.rel.rsplit('/').next().unwrap_or(&e.rel);
+                                            let addon = self
+                                                .root
+                                                .as_ref()
+                                                .and_then(|root| self.store.read(cx).instance(root))
+                                                .and_then(|i| i.addon_by_file(file).cloned());
+                                            let pid = addon.as_ref().map_or(0, |a| a.project_id);
+                                            let icon = addon
+                                                .as_ref()
+                                                .and_then(|a| self.store.read(cx).image(&a.icon))
+                                                .map(std::path::Path::to_path_buf);
+                                            let (store, root) = (self.store.clone(), self.root.clone());
+                                            r.child(
+                                                widgets::mod_link(
+                                                    SharedString::from(format!("pmod:{}", e.rel)),
+                                                    n,
+                                                    icon.as_deref(),
+                                                    pid,
+                                                    move |project, _, cx| {
+                                                        if let Some(root) = root.clone() {
+                                                            store.update(cx, |_, cx| {
+                                                                cx.emit(crate::store::StoreEvent::Peek { root, project })
+                                                            });
+                                                        }
+                                                    },
+                                                    cx,
+                                                )
+                                                .text_sm()
+                                                .font_medium(),
+                                            )
+                                            .child(widgets::caption(e.rel.clone(), cx).text_xs())
+                                        }
                                         None => r.child(div().text_sm().child(e.rel.clone())),
                                     })
                             }))

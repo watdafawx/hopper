@@ -225,23 +225,19 @@ struct Removed {
 
 /// A dialog's text: a line, then each warning with a triangle.
 /// Opens a project in the Library's panel, from inside a dialog.
-type Peek = Rc<dyn Fn(u64, &mut Window, &mut App)>;
+/// Opens a mod in the panel beside the page; knows each project's icon.
+#[derive(Clone)]
+struct Peek {
+    open: Rc<dyn Fn(u64, &mut Window, &mut App)>,
+    icons: Rc<HashMap<u64, PathBuf>>,
+}
 
 /// A mod's name that opens it in the panel beside the page (when it's a
 /// project), leaving the dialog open.
 fn peek_link(id: impl Into<ElementId>, name: String, pid: u64, peek: &Peek, cx: &App) -> AnyElement {
-    if pid == 0 {
-        return div().flex_none().child(name).into_any_element();
-    }
-    let (peek, fg) = (peek.clone(), cx.theme().foreground);
-    div()
-        .id(id.into())
+    let open = peek.open.clone();
+    widgets::mod_link(id, name, peek.icons.get(&pid).map(PathBuf::as_path), pid, move |p, w, cx| open(p, w, cx), cx)
         .flex_none()
-        .cursor_pointer()
-        .underline()
-        .hover(move |s| s.text_color(fg))
-        .child(name)
-        .on_click(move |_, window, cx| peek(pid, window, cx))
         .into_any_element()
 }
 
@@ -1282,10 +1278,26 @@ impl AddonsView {
         let body_focus = cx.focus_handle();
         let peek: Peek = {
             let view = view.clone();
-            Rc::new(move |pid, window, cx| {
-                view.update(cx, |v, cx| v.open_peek(pid, cx));
-                window.refresh();
-            })
+            let store = self.store.read(cx);
+            let icons: HashMap<u64, PathBuf> = self
+                .root
+                .as_ref()
+                .and_then(|r| store.instance(r))
+                .map(|i| {
+                    i.addons
+                        .iter()
+                        .filter(|a| a.project_id != 0)
+                        .filter_map(|a| Some((a.project_id, store.image(&a.icon)?.to_path_buf())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Peek {
+                open: Rc::new(move |pid, window, cx| {
+                    view.update(cx, |v, cx| v.open_peek(pid, cx));
+                    window.refresh();
+                }),
+                icons: Rc::new(icons),
+            }
         };
         let focus_later = body_focus.clone();
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -1316,6 +1328,7 @@ impl AddonsView {
                         let pid = pids.get(&file).copied().unwrap_or(0);
                         h_flex()
                             .gap_1()
+                            .child(widgets::thumb(peek.icons.get(&pid).map(PathBuf::as_path), rems(1.25), cx))
                             .child(
                                 gpui_kit::component::checkbox::Checkbox::new(("orphan", i))
                                     .label(name.clone())
@@ -1337,7 +1350,7 @@ impl AddonsView {
                                         .xsmall()
                                         .ghost()
                                         .tooltip("Show in the panel")
-                                        .on_click(move |_, window, cx| peek(pid, window, cx)),
+                                        .on_click(move |_, window, cx| (peek.open)(pid, window, cx)),
                                 )
                             })
                     }))

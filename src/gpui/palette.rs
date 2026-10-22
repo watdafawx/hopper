@@ -167,6 +167,8 @@ struct Item {
     target: Target,
     /// Listed before anything is typed.
     browse: bool,
+    /// A picture in place of the icon (a mod's own icon).
+    image: Option<PathBuf>,
 }
 
 impl Item {
@@ -180,6 +182,7 @@ impl Item {
             key: None,
             target,
             browse: false,
+            image: None,
         }
     }
 
@@ -311,7 +314,9 @@ fn build(app: &AppView, cx: &App) -> (Vec<Item>, Option<SharedString>) {
         for a in i.addons.iter().filter(|a| crate::addons::in_class(a, hopper::cf::CLASS_MODS)) {
             let name = if a.name.is_empty() { a.file_name.clone() } else { a.name.clone() };
             let hint = if a.enabled { a.author.clone() } else { "disabled".to_string() };
-            v.push(Item::new(S::Mods, IconName::Puzzle, name.clone(), Target::Mod(i.root.clone(), name)).hint(hint));
+            let mut item = Item::new(S::Mods, IconName::Puzzle, name.clone(), Target::Mod(i.root.clone(), name)).hint(hint);
+            item.image = app.store.read(cx).image(&a.icon).map(std::path::Path::to_path_buf);
+            v.push(item);
         }
     }
 
@@ -567,6 +572,10 @@ impl Palette {
                 .child(s.label())
                 .into_any_element(),
             Row::Item(_) | Row::Search => {
+                let image = match row {
+                    Row::Item(i) => self.items[i].image.clone(),
+                    _ => None,
+                };
                 let (icon, title, hint, key): (IconName, SharedString, Option<SharedString>, Option<Keystroke>) = match row {
                     Row::Item(i) => {
                         let it = &self.items[i];
@@ -614,7 +623,10 @@ impl Palette {
                         }
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| this.pick(ix, cx)))
-                    .child(Icon::new(icon).small().flex_none())
+                    .child(match image {
+                        Some(p) => crate::widgets::thumb(Some(&p), rems(1.0), cx),
+                        None => Icon::new(icon).small().flex_none().into_any_element(),
+                    })
                     .child(div().flex_1().min_w_0().truncate().text_color(fg).child(text))
                     .when_some(hint, |r, h| {
                         r.child(div().flex_none().max_w(rems(16.)).truncate().text_xs().text_color(muted).child(h))

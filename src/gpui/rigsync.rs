@@ -669,9 +669,45 @@ impl SyncPanel {
             } else {
                 h.mod_id.clone()
             };
+            // The pack's copy of the mod: its name, icon and page.
+            let addon = {
+                let store = self.store.read(cx);
+                let stem = hopper::serverpack::jar_stem(&h.file_name);
+                self.server
+                    .as_ref()
+                    .and_then(|r| store.server(r))
+                    .and_then(|sv| store.paired(sv))
+                    .and_then(|inst| {
+                        inst.addons
+                            .iter()
+                            .find(|a| {
+                                (!h.file_name.is_empty() && a.file_name.eq_ignore_ascii_case(&h.file_name))
+                                    || (!stem.is_empty() && hopper::serverpack::jar_stem(&a.file_name) == stem)
+                            })
+                            .cloned()
+                    })
+            };
+            let name = addon.as_ref().map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or(name);
+            let pid = addon.as_ref().map_or(0, |a| a.project_id);
+            let icon = addon
+                .as_ref()
+                .and_then(|a| self.store.read(cx).image(&a.icon))
+                .map(Path::to_path_buf);
+            let view = cx.entity();
             h_flex()
                 .gap_3()
-                .child(div().text_sm().font_semibold().child(name))
+                .child(
+                    widgets::mod_link(
+                        ElementId::Name(format!("crash-mod:{name}").into()),
+                        name.clone(),
+                        icon.as_deref(),
+                        pid,
+                        move |p, _, cx| view.update(cx, |this, cx| this.open_peek(p, cx)),
+                        cx,
+                    )
+                    .text_sm()
+                    .font_semibold(),
+                )
                 .child(widgets::caption(h.reason.clone(), cx).flex_1().min_w_0())
                 .when_some(jar, |r, j| {
                     let server = self.server.clone();
