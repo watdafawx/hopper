@@ -93,6 +93,12 @@ pub struct UpdatePreview {
     plan: Option<Result<UpdatePlan, String>>,
     /// Conflicting files where the pack's copy wins.
     take: HashSet<String>,
+    /// Mods you turned off to turn on, and removed ones to add back (their
+    /// keys); the rest stay off or out.
+    turn_on: HashSet<String>,
+    /// A mod's page, beside the lists, once one was clicked.
+    peek: Option<Entity<crate::browse::BrowseView>>,
+    _peek_watch: Option<Subscription>,
     open: HashSet<Group>,
     /// Diffs shown under conflicting files (`None` while not text).
     diffs: HashMap<String, Option<String>>,
@@ -132,6 +138,8 @@ impl UpdatePreview {
             this.update(cx, |this, cx| {
                 if let Ok(p) = &r {
                     this.take = p.default_take();
+                    this.turn_on = p.default_choices();
+                    this.want_icons(p, cx);
                     if p.count(FileAction::Conflict) > 0 {
                         this.open.insert(Group::Files(FileAction::Conflict));
                     }
@@ -372,7 +380,7 @@ impl UpdatePreview {
         let Some(Ok(plan)) = &v.plan else {
             return false;
         };
-        let overrides = plan.decisions(&v.take);
+        let overrides = plan.decisions_with(&v.take, &v.turn_on);
         let (store, root, file) = (v.store.clone(), v.root.clone(), plan.file.clone());
         let backup = v.backup_worlds;
         if let Ok(mut g) = REVIEWS.lock()
@@ -449,7 +457,7 @@ impl UpdatePreview {
                         h_flex()
                             .gap_3()
                             .py_0p5()
-                            .child(div().w_56().flex_none().text_sm().truncate().child(m.name))
+                            .child(self.mod_cell(format!("mod:{}:{}", m.name, m.to), &m.name, &m.icon, m.project, cx))
                             .child(widgets::caption(detail, cx).text_xs().min_w_0())
                     })),
                 )
@@ -508,6 +516,199 @@ impl UpdatePreview {
             }
         });
         v_flex().child(header).children(body).into_any_element()
+    }
+
+    /// Fetches the icons of every mod the plan lists.
+    fn want_icons(&self, p: &UpdatePlan, cx: &mut Context<Self>) {
+        let urls: Vec<String> = p
+            .mods
+            .iter()
+            .map(|m| m.icon.clone())
+            .chain(p.off.iter().chain(&p.removed).chain(&p.updated).map(|m| m.icon.clone()))
+            .filter(|u| !u.is_empty())
+            .collect();
+        self.store.update(cx, |s, _| {
+            for u in &urls {
+                s.want_image(u);
+            }
+        });
+    }
+
+    /// Opens a mod's page beside the lists.
+    fn open_peek(&mut self, project: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if project == 0 {
+            return;
+        }
+        let root = match &self.server {
+            Some(t) => t.inst.root.clone(),
+            None => self.root.clone(),
+        };
+        let store = self.store.clone();
+        if self.peek.is_none() {
+            let p = cx.new(|cx| crate::browse::BrowseView::peek(store, window, cx));
+            // Its own close button empties it: then the panel goes.
+            // (Only once it showed one: it's empty while the first loads.)
+            let mut shown = false;
+            self._peek_watch = Some(cx.observe(&p, move |this, p, cx| {
+                match p.read(cx).selected_id() {
+                    Some(_) => shown = true,
+                    None if shown => {
+                        this.peek = None;
+                        this._peek_watch = None;
+                        cx.notify();
+                    }
+                    None => {}
+                }
+            }));
+            self.peek = Some(p);
+        }
+        let Some(peek) = self.peek.clone() else { return };
+        peek.update(cx, |p, cx| p.peek_project(root, Some(project), cx));
+        cx.notify();
+    }
+
+    /// A mod's icon and name; a click opens its page beside the lists.
+    fn mod_cell(&self, id: String, name: &str, icon: &str, project: u64, cx: &mut Context<Self>) -> Stateful<Div> {
+        let path = self.store.read(cx).image(icon).map(|p| p.to_path_buf());
+        let theme = cx.theme();
+        h_flex()
+            .id(SharedString::from(id))
+            .w_56()
+            .flex_none()
+            .min_w_0()
+            .gap_2()
+            .child(widgets::thumb(path.as_deref(), rems(1.25), cx))
+            .child(div().min_w_0().text_sm().truncate().child(name.to_string()))
+            .when(project != 0, |d| {
+                d.cursor_pointer()
+                    .hover(|s| s.text_color(theme.primary))
+                    .on_click(cx.listener(move |this, _, window, cx| this.open_peek(project, window, cx)))
+            })
+    }
+
+    /// Mods you turned off, or removed, that the update touches: each row
+    /// picks between keeping your choice (the default) and the pack's.
+    fn your_choices(&self, plan: &UpdatePlan, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if plan.off.is_empty() && plan.removed.is_empty() && plan.updated.is_empty() {
+            return None;
+        }
+        let list = |title: &'static str,
+                    note: &'static str,
+                    labels: [&'static str; 2],
+                    all: [&'static str; 2],
+                    rows: &[hopper::packdiff::OffMod],
+                    this: &Self,
+                    cx: &mut Context<Self>| {
+            let keys: Vec<String> = rows.iter().map(|m| m.key.clone()).collect();
+            let (k1, k2) = (keys.clone(), keys);
+            v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().font_semibold().child(title))
+                        .child(div().flex_1())
+                        .child(
+                            Button::new(SharedString::from(format!("{title}-keep")))
+                                .xsmall()
+                                .ghost()
+                                .label(all[0])
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    for k in &k1 {
+                                        this.turn_on.remove(k);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("{title}-flip")))
+                                .xsmall()
+                                .ghost()
+                                .label(all[1])
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.turn_on.extend(k2.iter().cloned());
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(widgets::caption(note, cx).text_xs())
+                .children(rows.iter().map(|m| {
+                    let on = this.turn_on.contains(&m.key);
+                    let key = m.key.clone();
+                    let detail = if m.from.is_empty() || m.from == m.to {
+                        m.to.clone()
+                    } else {
+                        format!("{}  →  {}", m.from, m.to)
+                    };
+                    let detail = if m.key.starts_with("u:") {
+                        format!(
+                            "yours {}  ·  pack's {}{}",
+                            m.from,
+                            m.to,
+                            if m.pack_newer { " (newer)" } else { " (older)" }
+                        )
+                    } else {
+                        detail
+                    };
+                    h_flex()
+                        .gap_3()
+                        .py_0p5()
+                        .child(this.mod_cell(format!("cell:{}", m.key), &m.name, &m.icon, m.project, cx))
+                        .child(widgets::caption(detail, cx).text_xs().flex_1().min_w_0())
+                        .child(
+                            TabBar::new(SharedString::from(format!("pick:{}", m.key)))
+                                .segmented()
+                                .xsmall()
+                                .selected_index(usize::from(on))
+                                .child(Tab::new().label(labels[0]))
+                                .child(Tab::new().label(labels[1]))
+                                .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                                    if *ix == 1 {
+                                        this.turn_on.insert(key.clone());
+                                    } else {
+                                        this.turn_on.remove(&key);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                }))
+                .into_any_element()
+        };
+        let mut out = v_flex().gap_4();
+        if !plan.off.is_empty() {
+            out = out.child(list(
+                "Mods you turned off",
+                "The update has new files for these. They stay off unless you turn them on.",
+                ["Keep off", "Turn on"],
+                ["Keep all off", "Turn all on"],
+                &plan.off,
+                self,
+                cx,
+            ));
+        }
+        if !plan.updated.is_empty() {
+            out = out.child(list(
+                "Mods you updated",
+                "You updated these yourself. Yours stay where the pack's file is older; where it's newer, the pack's is picked.",
+                ["Keep mine", "Use the pack's"],
+                ["Keep all mine", "Use all the pack's"],
+                &plan.updated,
+                self,
+                cx,
+            ));
+        }
+        if !plan.removed.is_empty() {
+            out = out.child(list(
+                "Mods you removed",
+                "The pack still has these and would put them back. They stay out unless you add them back.",
+                ["Leave out", "Add back"],
+                ["Leave all out", "Add all back"],
+                &plan.removed,
+                self,
+                cx,
+            ));
+        }
+        Some(out.into_any_element())
     }
 
     fn conflicts(&self, rows: Vec<String>, cx: &mut Context<Self>) -> AnyElement {
@@ -752,6 +953,7 @@ impl Render for UpdatePreview {
                                 }),
                         )
                     })
+                    .children(self.your_choices(&plan, cx))
                     .child(
                         v_flex()
                             .gap_1()
@@ -786,7 +988,17 @@ impl Render for UpdatePreview {
             }
         };
         let notes = self.server_notes(cx);
-        v_flex()
+        let peek = self.peek.clone().map(|p| {
+            v_flex()
+                .w(rems(30.))
+                .flex_none()
+                .h(total_h)
+                .gap_2()
+                .child(div().flex_1().min_h_0().child(p))
+        });
+        let main = v_flex()
+            .flex_1()
+            .min_w_0()
             .when(loaded, |c| c.h(total_h))
             .gap_3()
             .children({
@@ -810,7 +1022,8 @@ impl Render for UpdatePreview {
                     .into_any_element()
             } else {
                 body
-            })
+            });
+        h_flex().items_start().gap_4().child(main).children(peek)
     }
 }
 
@@ -855,6 +1068,9 @@ fn show(
             from,
             plan: None,
             take: HashSet::new(),
+            turn_on: HashSet::new(),
+            peek: None,
+            _peek_watch: None,
             open: HashSet::new(),
             diffs: HashMap::new(),
             mc_change,
@@ -864,6 +1080,8 @@ fn show(
             Some(r) => {
                 if let Ok(p) = &r {
                     v.take = p.default_take();
+                    v.turn_on = p.default_choices();
+                    v.want_icons(p, cx);
                     if p.count(FileAction::Conflict) > 0 {
                         v.open.insert(Group::Files(FileAction::Conflict));
                     }
@@ -880,7 +1098,7 @@ fn show(
         let v2 = view.clone();
         dialog
             .title(title.clone())
-            .w(rems(54.).to_pixels(window.rem_size()))
+            .w(rems(if view.read(cx).peek.is_some() { 86. } else { 54. }).to_pixels(window.rem_size()))
             .child(view.clone())
             .footer(
                 DialogFooter::new()
@@ -939,6 +1157,9 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
             from: String::new(),
             plan: None,
             take: HashSet::new(),
+            turn_on: HashSet::new(),
+            peek: None,
+            _peek_watch: None,
             open: HashSet::new(),
             diffs: HashMap::new(),
             mc_change: None,
@@ -955,7 +1176,7 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
         let v2 = view.clone();
         dialog
             .title(title.clone())
-            .w(rems(54.).to_pixels(window.rem_size()))
+            .w(rems(if view.read(cx).peek.is_some() { 86. } else { 54. }).to_pixels(window.rem_size()))
             .child(view.clone())
             .footer(
                 DialogFooter::new()

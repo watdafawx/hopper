@@ -76,6 +76,16 @@ pub struct Overrides {
     pub backup: Vec<String>,
     /// Contents to write instead of the pack's (merged files).
     pub write: Vec<(String, Vec<u8>)>,
+    /// Pack files (jars in mods/, packs) written as `<name>.disabled`: you
+    /// turned that mod off and keep it off.
+    pub disable: HashSet<String>,
+    /// Pack projects you turned off and chose to turn on with this update.
+    pub enable: HashSet<u64>,
+    /// Pack mods you removed that stay out: "r:<project>" (CurseForge) or
+    /// "rp:<path>" (Modrinth).
+    pub leave_out: HashSet<String>,
+    /// Pack mods you updated yourself that keep your file.
+    pub keep_mine: HashSet<u64>,
 }
 
 // ── files a pack wants that could not be downloaded ─────────────────
@@ -451,7 +461,12 @@ fn extract_overrides(
         if overrides.is_some_and(|o| o.skip.contains(&key)) {
             continue;
         }
-        let out = dest.join(rel);
+        // A mod you turned off arrives turned off.
+        let out = if overrides.is_some_and(|o| o.disable.contains(&key)) {
+            dest.join(format!("{key}.disabled"))
+        } else {
+            dest.join(rel)
+        };
         fs::create_dir_all(out.parent().unwrap_or(dest))?;
         let mut f = fs::File::create(&out)?;
         std::io::copy(&mut e, &mut f)?;
@@ -742,6 +757,7 @@ fn apply_pack(
     let wanted: HashMap<u64, u64> = manifest
         .files
         .iter()
+        .filter(|f| !overrides.is_some_and(|o| o.leave_out.contains(&format!("r:{}", f.project_id))))
         .map(|f| (f.project_id, f.file_id))
         .collect();
 
@@ -750,10 +766,12 @@ fn apply_pack(
     let todo: Vec<u64> = wanted
         .iter()
         .filter(|(p, f)| {
-            !inst
-                .addons
-                .iter()
-                .any(|a| a.project_id == **p && a.file_id == **f)
+            // A mod you updated yourself keeps your file, if you chose so.
+            !overrides.is_some_and(|o| o.keep_mine.contains(p))
+                && !inst
+                    .addons
+                    .iter()
+                    .any(|a| a.project_id == **p && a.file_id == **f)
         })
         .map(|(_, f)| *f)
         .collect();
@@ -1245,6 +1263,17 @@ pub(crate) struct MrIndexFile {
     file_size: u64,
 }
 
+impl MrIndexFile {
+    /// The Modrinth project it's from, read from its download URL
+    /// (cdn.modrinth.com/data/<project>/versions/…).
+    pub(crate) fn project(&self) -> Option<&str> {
+        self.downloads.iter().find_map(|u| {
+            let rest = u.split("/data/").nth(1)?;
+            rest.split('/').next().filter(|p| !p.is_empty())
+        })
+    }
+}
+
 impl MrIndex {
     /// The Minecraft version it's for.
     pub(crate) fn minecraft(&self) -> String {
@@ -1442,16 +1471,27 @@ pub fn update_any(
         Some(o) => o,
         None => {
             let plan = crate::packdiff::plan(inst, file, job)?;
-            merged = plan.decisions(&plan.default_take());
+            // Mods you turned off stay off.
+            merged = plan.decisions_with(&plan.default_take(), &plan.default_choices());
             &merged
         }
     };
     let m = crate::source::get_mod(pack_id)?;
     if crate::modrinth::is_mr(pack_id) {
-        update_mrpack(inst, &m, file, Some(overrides), job)
+        update_mrpack(inst, &m, file, Some(overrides), job)?;
     } else {
-        update(inst, &m, file, Some(overrides), job)
+        update(inst, &m, file, Some(overrides), job)?;
     }
+    // Mods you had turned off stay off unless you chose to turn them on.
+    if !overrides.enable.is_empty() {
+        for pid in &overrides.enable {
+            if let Some(i) = inst.addons.iter().position(|a| a.project_id == *pid && !a.enabled) {
+                crate::install::set_enabled(inst, i, true)?;
+            }
+        }
+        inst.save()?;
+    }
+    Ok(())
 }
 
 /// A pack path that stays inside the instance: relative, no `..`, no
@@ -1581,6 +1621,10 @@ fn apply_mrpack_with(
                 "Skipped {}: the path leaves the instance folder",
                 f.path
             ));
+            continue;
+        }
+        // A pack mod you removed stays out.
+        if overrides.is_some_and(|o| o.leave_out.contains(&format!("rp:{}", f.path))) {
             continue;
         }
         files.push(f.clone());
@@ -1809,6 +1853,7 @@ mod override_tests {
                 ("overrides/config/take.toml", "pack"),
                 ("overrides/config/new.toml", "pack"),
                 ("overrides/config/merge.toml", "pack"),
+                ("overrides/mods/off-2.jar", "jar"),
             ] {
                 z.start_file(f, opts).unwrap();
                 z.write_all(t.as_bytes()).unwrap();
@@ -1820,6 +1865,8 @@ mod override_tests {
             remove: vec!["config/gone.toml".into()],
             backup: vec!["config/take.toml".into(), "config/merge.toml".into()],
             write: vec![("config/merge.toml".into(), b"merged".to_vec())],
+            disable: ["mods/off-2.jar".to_string()].into(),
+            ..Default::default()
         };
         prepare_overrides(&root, Some(&o)).unwrap();
         extract_overrides(&zip_path, "overrides", &root, Some(&o)).unwrap();
@@ -1830,6 +1877,9 @@ mod override_tests {
         assert_eq!(read("config/new.toml").as_deref(), Some("pack"));
         assert_eq!(read("config/merge.toml").as_deref(), Some("merged"));
         assert_eq!(read("config/gone.toml"), None);
+        // A mod you keep off arrives turned off.
+        assert_eq!(read("mods/off-2.jar.disabled").as_deref(), Some("jar"));
+        assert_eq!(read("mods/off-2.jar"), None);
         // Backups keep their folders.
         let backups: Vec<PathBuf> = walk(&root.join(crate::sync::BACKUP_DIR));
         let names: Vec<String> = backups

@@ -321,6 +321,10 @@ pub fn plan(
             mods,
             files,
             kept_mods: kept.added,
+            off: Vec::new(),
+            off_old: HashMap::new(),
+            removed: Vec::new(),
+            updated: Vec::new(),
             base_known: base.is_some(),
             new_zip,
             prefixes: vec![prefix],
@@ -423,6 +427,7 @@ fn mod_changes(
             from: from.clone(),
             to: name.clone(),
             action: ModAction::Update,
+            ..Default::default()
         };
         if let Some(h) = have_low.get(&low(name)) {
             used.insert(low(h));
@@ -455,6 +460,7 @@ fn mod_changes(
                 from: String::new(),
                 to: name.clone(),
                 action: ModAction::Add,
+                ..Default::default()
             }),
         }
     }
@@ -470,6 +476,7 @@ fn mod_changes(
                 from: h.clone(),
                 to: String::new(),
                 action: ModAction::Remove,
+                ..Default::default()
             });
         } else {
             kept.added += 1;
