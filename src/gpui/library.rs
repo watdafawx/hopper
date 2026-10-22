@@ -1417,6 +1417,7 @@ impl LibraryView {
         // First in the row on every tab, so it never moves.
         let play_small = Some(widgets::glow(play.min_w_24(), play_color, cx));
         let play_big: Option<Div> = None;
+        let site = self.pack_facts(inst, cx).map(|(_, _, _, url, mr)| (url, mr));
         let actions = h_flex()
                             .flex_none()
                             .flex_nowrap()
@@ -1431,6 +1432,16 @@ impl LibraryView {
                                     .label("Folder")
                                     .on_click(move |_, _, _| store::open_path(&r_folder)),
                             )
+                            .when_some(site, |r, (url, mr)| {
+                                r.child(
+                                    Button::new("pack-site")
+                                        .outline()
+                                        .icon(IconName::ExternalLink)
+                                        .text_color(widgets::site_color(mr))
+                                        .tooltip(if mr { "Open on Modrinth" } else { "Open on CurseForge" })
+                                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                                )
+                            })
                             .child(
                                 Button::new("more")
                                     .outline()
@@ -1439,6 +1450,25 @@ impl LibraryView {
                                     .dropdown_menu(move |menu, _, cx| instance_menu(menu, &view, &r_more, true, cx)),
                             );
         self.hero(inst, icon, playing, actions, play_big, cx)
+    }
+
+    /// On Overview, the pack's page facts the banner shows in place of the
+    /// page's own header: (author, downloads, summary, page url, Modrinth).
+    fn pack_facts(&self, inst: &Instance, cx: &App) -> Option<(String, String, String, String, bool)> {
+        if self.tab != InstTab::Overview {
+            return None;
+        }
+        let p = inst.pack.as_ref().filter(|p| p.project_id != 0)?;
+        match self.store.read(cx).pack_page(p.project_id)? {
+            store::PackPage::Ready(m, ..) => Some((
+                m.author().to_string(),
+                widgets::downloads_label(m.download_count),
+                m.summary.clone(),
+                m.page(),
+                m.modrinth.is_some(),
+            )),
+            _ => None,
+        }
     }
 
     /// The instance's header: its art large over a blurred copy of itself
@@ -1453,6 +1483,7 @@ impl LibraryView {
         play_big: Option<Div>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let page = self.pack_facts(inst, cx);
         let store = self.store.read(cx);
         let theme = cx.theme();
         let glass = widgets::glass(cx);
@@ -1554,7 +1585,30 @@ impl LibraryView {
                     p.version.clone()
                 };
                 r.child(fact(IconName::Tag, v))
+            })
+            .when_some(page.clone(), |r, (author, downloads, ..)| {
+                let soft = |icon: IconName, text: String| {
+                    h_flex()
+                        .flex_none()
+                        .gap_1p5()
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::new(icon).xsmall())
+                        .child(text)
+                };
+                r.child(soft(IconName::User, format!("by {author}")))
+                    .child(soft(IconName::Download, downloads))
             });
+        let summary = page
+            .map(|(_, _, s, ..)| s)
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| {
+                div()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .truncate()
+                    .child(s)
+            });
+        let taller = summary.is_some();
 
         // The art: large, rounded, lifted off the backdrop.
         let art = div()
@@ -1653,7 +1707,8 @@ impl LibraryView {
                                 .truncate()
                                 .child(inst.name.clone()),
                         )
-                        .child(facts),
+                        .child(facts)
+                        .children(summary),
                 )
                 .child(
                     v_flex()
@@ -1721,7 +1776,7 @@ impl LibraryView {
             })
             .child(backdrop)
             .child(content);
-        hero.h(rems(HERO)).into_any_element()
+        hero.h(rems(if taller { HERO + 1.5 } else { HERO })).into_any_element()
     }
 
     /// The tab strip, with an underline that slides from the last tab to
@@ -1835,7 +1890,7 @@ impl LibraryView {
                     Some(store::PackPage::Ready(m, ..)) => m.icon().and_then(|u| store.image(u)),
                     _ => None,
                 };
-                widgets::pack_page(page, icon, &self.store, cx)
+                widgets::pack_page(page, icon, &self.store, false, cx)
             }
             None => widgets::caption("This instance wasn't installed from a modpack.", cx).into_any_element(),
         };

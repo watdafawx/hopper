@@ -712,7 +712,7 @@ impl ServersView {
                     v_flex()
                         .gap_3()
                         .child(div().text_base().font_weight(FontWeight::BOLD).child("Modpack"))
-                        .child(widgets::pack_page(page, icon, &self.store, cx))
+                        .child(widgets::pack_page(page, icon, &self.store, true, cx))
                 });
                 c.child(
                     v_flex()

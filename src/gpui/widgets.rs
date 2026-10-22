@@ -454,13 +454,24 @@ pub fn picker_with(
         })
 }
 
+/// "332.8K downloads".
+pub fn downloads_label(count: f64) -> String {
+    match count as u64 {
+        n if n >= 1_000_000 => format!("{:.1}M downloads", n as f64 / 1e6),
+        n if n >= 1_000 => format!("{:.1}K downloads", n as f64 / 1e3),
+        n => format!("{n} downloads"),
+    }
+}
+
 /// The page of the modpack an instance came from, as CurseForge or
 /// Modrinth shows it: name, author, summary and the full description, with
 /// a button to the site. `None` while nothing has been asked for yet.
+/// Without `head`, only the description (the instance banner has the rest).
 pub fn pack_page(
     page: Option<&crate::store::PackPage>,
     icon: Option<&Path>,
     store: &Entity<crate::store::Store>,
+    head: bool,
     cx: &App,
 ) -> AnyElement {
     use crate::store::PackPage;
@@ -476,17 +487,13 @@ pub fn pack_page(
     };
     let site = if m.modrinth.is_some() { "Modrinth" } else { "CurseForge" };
     let url = m.page();
-    let downloads = match m.download_count as u64 {
-        n if n >= 1_000_000 => format!("{:.1}M downloads", n as f64 / 1e6),
-        n if n >= 1_000 => format!("{:.1}K downloads", n as f64 / 1e3),
-        n => format!("{n} downloads"),
-    };
+    let downloads = downloads_label(m.download_count);
     v_flex()
         .rounded(theme.radius_lg)
         .border_1()
         .border_color(theme.border)
         .bg(theme.foreground.opacity(0.025))
-        .child(
+        .when(head, |c| c.child(
             h_flex()
                 .gap_4()
                 .p_4()
@@ -522,7 +529,7 @@ pub fn pack_page(
                         .label(format!("Open on {site}"))
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 ),
-        )
+        ))
         .child(div().p_4().child(description_view(
             ElementId::Name(format!("pack-desc:{}", m.id).into()),
             md,

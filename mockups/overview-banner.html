@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview Banner Merge</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@0.453.0/dist/umd/lucide.min.js"></script>
+<style>
+:root{--bg:#141418;--base:#18181c;--surface:#212127;--raise:#28282f;--line:#2f2f37;--line2:#3a3a44;--text:#ececf1;--subtle:#a3a3ad;--muted:#6f6f7a;--acc:#f97316;--green:#22c55e;--blue:#60a5fa;--gold:#eab308}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.45 Inter,system-ui,sans-serif;padding:20px 16px 60px}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+[data-lucide]{width:14px;height:14px;stroke-width:2;flex:none}
+.page{max-width:1400px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+h1{font-size:20px}
+.lede{color:var(--subtle);max-width:960px}
+.switch{display:flex;gap:6px;flex-wrap:wrap}
+.switch button{padding:7px 14px;border-radius:99px;border:1px solid var(--line2);color:var(--subtle);font-weight:500}
+.switch button.on{background:var(--acc);border-color:var(--acc);color:#18181c;font-weight:600}
+.v{display:none}.v.on{display:block}
+.win{background:var(--base);border:1px solid var(--line);border-radius:10px;overflow:hidden;box-shadow:0 30px 80px #0009}
+.row{display:flex;align-items:center;gap:8px}
+.sp{flex:1}
+.pill{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 10px;border-radius:99px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:7px;border:1px solid #ffffff1f;background:#0005;font-weight:500;white-space:nowrap}
+.btn.play{background:var(--green);border-color:var(--green);color:#06150b;font-weight:600;min-width:96px;justify-content:center}
+.btn.icon{padding:7px 8px}
+.btn.cf{color:var(--acc);border-color:#f9731655}
+.hero{position:relative;display:flex;align-items:center;gap:20px;padding:20px 24px;border-bottom:1px solid var(--line);overflow:hidden}
+.hero>*{position:relative}
+.hero .bg{position:absolute;inset:0;background:radial-gradient(120% 140% at 85% 0%,#6a5a4a66,transparent 60%),linear-gradient(90deg,#18181c 25%,#2a241f 70%,#3a3028)}
+.art{width:104px;height:104px;border-radius:14px;flex:none;background:linear-gradient(160deg,#7a1e12,#1d1410);border:2px solid #ffffff22;box-shadow:0 10px 30px #0008;display:flex;flex-direction:column;align-items:center;justify-content:center;font-weight:800;line-height:1;color:#fff;text-shadow:0 2px #000}
+.art span{font-size:24px;color:#fbbf24}.art small{font-size:9px;margin:3px 0}.art b{font-size:26px}
+.main{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.title{font-size:26px;font-weight:800;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.facts{display:flex;gap:16px;color:#ececf1cc;flex-wrap:wrap}
+.facts span{display:flex;align-items:center;gap:6px}
+.by{color:var(--subtle);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.by b{color:var(--text);font-weight:600}
+.summary{color:var(--subtle);max-width:720px;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.right{display:flex;flex-direction:column;align-items:flex-end;gap:12px;flex:none}
+.stats{display:flex;border:1px solid #ffffff14;border-radius:10px;background:#0000004d}
+.stats div{display:flex;flex-direction:column;padding:6px 16px;min-width:92px}
+.stats div+div{border-left:1px solid #ffffff14}
+.stats b{font-size:15px}.stats small{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+.tabs{display:flex;gap:22px;padding:0 20px;border-bottom:1px solid var(--line);color:var(--subtle);font-weight:500}
+.tabs span{padding:12px 0;display:flex;gap:6px;align-items:center;white-space:nowrap}
+.tabs span.on{color:var(--text);box-shadow:inset 0 -2px var(--acc)}
+.body{padding:16px 24px 24px;height:420px;overflow:hidden}
+.card{border:1px solid var(--line);border-radius:10px;background:#ffffff06}
+.card .head{display:flex;gap:14px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line)}
+.card .head .art{width:52px;height:52px;border-radius:9px}
+.card .head .art span{font-size:12px}.card .head .art small{font-size:5px}.card .head .art b{font-size:13px}
+.desc{padding:16px;display:flex;flex-direction:column;gap:14px;align-items:flex-start}
+.ban{width:620px;max-width:100%;height:150px;border:3px solid #ddd;background:linear-gradient(90deg,#2b2016,#14181a 60%,#1b2430);display:grid;place-items:center;font:900 44px Inter;color:#fff;letter-spacing:-1px}
+.ban i{font-style:normal;color:var(--acc)}
+.dup{outline:2px dashed #ef4444;outline-offset:3px;border-radius:6px}
+.tag{font-size:11px;color:#ef4444;font-weight:600}
+.notes{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 16px}
+.notes ul{padding-left:18px;display:flex;flex-direction:column;gap:4px;color:var(--subtle)}
+.notes b{color:var(--text)}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Overview: one banner, no repeat</h1>
+  <p class="lede">Today the Overview tab shows the name and logo twice: once in the banner, then again in the pack card under the tabs. The merged version moves the pack card's extra facts (author, downloads, summary, "Open on CurseForge") into the banner and drops the card's header, so the description starts right under the tabs.</p>
+  <div class="switch" id="sw">
+    <button data-v="after" class="on">Merged (proposed)</button>
+    <button data-v="before">Today</button>
+  </div>
+
+  <section class="v on" id="v-after">
+    <div class="win">
+      <div class="hero">
+        <div class="bg"></div>
+        <div class="art"><span>TNP</span><small>LIMITLESS</small><b>8</b></div>
+        <div class="main">
+          <div class="row" style="gap:6px">
+            <span class="pill" style="color:var(--blue);background:#60a5fa1a;border:1px solid #60a5fa4d">1 mod update</span>
+            <span class="pill" style="color:var(--acc);background:#f973161a;border:1px solid #f973164d">CurseForge</span>
+          </div>
+          <div class="title">TNP Limitless 8 - LL8</div>
+          <div class="facts">
+            <span><i data-lucide="box" style="color:var(--green)"></i>Minecraft 1.21.1</span>
+            <span><i data-lucide="blocks" style="color:var(--gold)"></i>NeoForge 21.1.264</span>
+            <span><i data-lucide="tag" style="color:var(--blue)"></i>v1.77.0</span>
+            <span style="color:var(--subtle)"><i data-lucide="user"></i>by <b style="color:var(--text);font-weight:600">Gbergz</b></span>
+            <span style="color:var(--subtle)"><i data-lucide="download"></i>332.8K downloads</span>
+          </div>
+          <div class="summary">1.21.1 - All of your favorite mods in one place. A journey awaits you. Questing, tech, magic, exploration &amp; so much more!</div>
+        </div>
+        <div class="right">
+          <div class="stats"><div><b>711h 52m</b><small>played</small></div><div><b>1115</b><small>mods</small></div><div><b>5.2 GB</b><small>size</small></div></div>
+          <div class="row">
+            <button class="btn play"><i data-lucide="play"></i>Play</button>
+            <button class="btn"><i data-lucide="server"></i>TNP-LL8</button>
+            <button class="btn"><i data-lucide="folder-open"></i>Folder</button>
+            <button class="btn icon cf" title="Open on CurseForge"><i data-lucide="external-link"></i></button>
+            <button class="btn icon"><i data-lucide="ellipsis"></i></button>
+          </div>
+        </div>
+      </div>
+      <div class="tabs" data-tabs></div>
+      <div class="body">
+        <div class="card"><div class="desc">
+          <div class="ban">TNP <i>LIMITLESS</i> 8</div>
+          <div style="width:100%;height:6px;background:#3a3a44;border-radius:3px"></div>
+          <div style="font-size:15px;font-weight:700">A Modpack on NeoForge 1.21.1</div>
+          <div>Lead Pack Developer: <span style="color:var(--acc)">Gbergz</span></div>
+          <div>Official GitHub Link: <span style="color:var(--acc)">GitHub.com/TNP-Limitless-8</span></div>
+        </div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="v" id="v-before">
+    <div class="win">
+      <div class="hero">
+        <div class="bg"></div>
+        <div class="art dup"><span>TNP</span><small>LIMITLESS</small><b>8</b></div>
+        <div class="main">
+          <div class="row" style="gap:6px">
+            <span class="pill" style="color:var(--blue);background:#60a5fa1a;border:1px solid #60a5fa4d">1 mod update</span>
+            <span class="pill dup" style="color:var(--acc);background:#f973161a;border:1px solid #f973164d">CurseForge</span>
+          </div>
+          <div class="title"><span class="dup">TNP Limitless 8 - LL8</span></div>
+          <div class="facts">
+            <span><i data-lucide="box" style="color:var(--green)"></i>Minecraft 1.21.1</span>
+            <span><i data-lucide="blocks" style="color:var(--gold)"></i>NeoForge 21.1.264</span>
+            <span><i data-lucide="tag" style="color:var(--blue)"></i>v1.77.0</span>
+          </div>
+        </div>
+        <div class="right">
+          <div class="stats"><div><b>711h 52m</b><small>played</small></div><div><b>1115</b><small>mods</small></div><div><b>5.2 GB</b><small>size</small></div></div>
+          <div class="row">
+            <button class="btn play"><i data-lucide="play"></i>Play</button>
+            <button class="btn"><i data-lucide="server"></i>TNP-LL8</button>
+            <button class="btn"><i data-lucide="folder-open"></i>Folder</button>
+            <button class="btn icon"><i data-lucide="ellipsis"></i></button>
+          </div>
+        </div>
+      </div>
+      <div class="tabs" data-tabs></div>
+      <div class="body">
+        <div class="card">
+          <div class="head">
+            <div class="art dup"><span>TNP</span><small>LIMITLESS</small><b>8</b></div>
+            <div style="flex:1;min-width:0">
+              <div class="row"><b style="font-size:16px" class="dup">TNP Limitless 8 - LL8</b><span class="pill dup" style="color:var(--acc);background:#f973161a;border:1px solid #f973164d">CurseForge</span><span class="tag">shown twice</span></div>
+              <div style="color:var(--subtle)">by Gbergz · 332.8K downloads</div>
+              <div>1.21.1 - All of your favorite mods in one place. A journey awaits you. Questing, tech, magic, exploration &amp; so much more!</div>
+            </div>
+            <button class="btn cf"><i data-lucide="external-link"></i>Open on CurseForge</button>
+          </div>
+          <div class="desc"><div class="ban">TNP <i>LIMITLESS</i> 8</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="notes"><ul>
+    <li><b>Moves into the banner:</b> author, download count and the one-line summary (Overview only; other tabs keep the plain banner).</li>
+    <li><b>"Open on CurseForge"</b> becomes an icon button beside Folder, tinted in the site's color.</li>
+    <li><b>Goes away:</b> the card's header row (second logo, name, CurseForge pill). The description card starts with the pack's own content.</li>
+    <li><b>No pack page</b> (custom instance, or the page failed to load): the banner simply has no author/summary line.</li>
+    <li><b>Banner height</b> grows by about one line on Overview, from about 150px to about 172px.</li>
+  </ul></div>
+</div>
+<script>
+const tabs=['layout-grid:Overview','puzzle:Mods','feather:Resource packs','sun:Shaders','database:Data packs','globe:Worlds','image:Screenshots','server:Server','users:Peers','sliders-horizontal:Settings','bug:Logs & crashes'];
+document.querySelectorAll('[data-tabs]').forEach(e=>e.innerHTML=tabs.map(t=>{const[i,n]=t.split(':');return`<span class="${n==='Overview'?'on':''}"><i data-lucide="${i}"></i>${n}</span>`}).join(''));
+document.getElementById('sw').onclick=e=>{const b=e.target.closest('button');if(!b)return;document.querySelectorAll('#sw button').forEach(x=>x.classList.toggle('on',x===b));document.querySelectorAll('.v').forEach(v=>v.classList.toggle('on',v.id==='v-'+b.dataset.v))};
+lucide.createIcons();
+</script>
+</body>
+</html>
