@@ -417,7 +417,9 @@ pub struct AddonsView {
     sort: (SortCol, bool),
     pub(crate) selected: HashSet<String>,
     /// Jars in the mods folder Hopper doesn't track, by folder mtime.
-    loose: (Option<(PathBuf, std::time::SystemTime)>, Vec<String>),
+    /// Keyed by folder, its mtime and the tracked file names (identifying
+    /// jars tracks them without touching the folder).
+    loose: (Option<(PathBuf, std::time::SystemTime, u64)>, Vec<String>),
     /// What the table shows, built when it changes rather than per frame.
     pub(crate) table: Table,
     scroll: UniformListScrollHandle,
@@ -959,7 +961,15 @@ impl AddonsView {
         let mtime = std::fs::metadata(inst.mods_dir())
             .and_then(|m| m.modified())
             .ok();
-        let key = mtime.map(|t| (inst.root.clone(), t));
+        let tracked = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for a in &inst.addons {
+                a.file_name.hash(&mut h);
+            }
+            h.finish()
+        };
+        let key = mtime.map(|t| (inst.root.clone(), t, tracked));
         if key.is_none() || self.loose.0 != key {
             self.loose = (key, hopper::install::loose_jars(inst));
         }

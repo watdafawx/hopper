@@ -1016,7 +1016,7 @@ pub fn identify_loose(inst: &mut Instance, job: &Job) -> anyhow::Result<usize> {
         let mut a = addon_from(m, &mt.file, false);
         a.enabled = !name.ends_with(".disabled");
         a.file_name = name.trim_end_matches(".disabled").to_string();
-        inst.addons.push(a);
+        put_identified(inst, a);
         n += 1;
     }
     n += identify_on_modrinth(inst, &loose, job).unwrap_or_else(|e| {
@@ -1041,6 +1041,25 @@ pub fn identify_loose(inst: &mut Instance, job: &Job) -> anyhow::Result<usize> {
     }
     inst.save()?;
     Ok(n)
+}
+
+/// Adds an identified jar. An entry of the same project whose jar is gone
+/// (swapped for this one outside Hopper) is replaced instead of kept as a
+/// second copy.
+fn put_identified(inst: &mut Instance, mut a: Addon) {
+    let dir = inst.mods_dir();
+    let gone = |f: &str| !dir.join(f).exists() && !dir.join(format!("{f}.disabled")).exists();
+    match inst
+        .addons
+        .iter()
+        .position(|o| o.project_id == a.project_id && a.project_id != 0 && gone(&o.file_name))
+    {
+        Some(i) => {
+            a.from_pack = inst.addons[i].from_pack;
+            inst.addons[i] = a;
+        }
+        None => inst.addons.push(a),
+    }
 }
 
 /// One version's changelog.
@@ -1181,7 +1200,7 @@ fn identify_on_modrinth(inst: &mut Instance, names: &[String], job: &Job) -> any
         a.env = modrinth::env(&p.client_side, &p.server_side).to_string();
         a.enabled = !name.ends_with(".disabled");
         a.file_name = name.trim_end_matches(".disabled").to_string();
-        inst.addons.push(a);
+        put_identified(inst, a);
         n += 1;
     }
     Ok(n)

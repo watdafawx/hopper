@@ -207,10 +207,21 @@ fn get<T: DeserializeOwned>(path: &str, query: &[(&str, String)]) -> anyhow::Res
 }
 
 fn post<T: DeserializeOwned>(path: &str, body: &serde_json::Value) -> anyhow::Result<T> {
-    let mut resp = cf::agent()
-        .post(format!("{BASE}{path}"))
-        .send_json(body)
-        .with_context(|| format!("Modrinth POST {path}"))?;
+    let send = || {
+        cf::agent()
+            .post(format!("{BASE}{path}"))
+            .send_json(body)
+            .with_context(|| format!("Modrinth POST {path}"))
+    };
+    // One more try after a timeout or a server error.
+    let mut resp = match send() {
+        Err(e) if cf::is_transient(&e) => {
+            log::warn!("retrying Modrinth POST {path}: {e:#}");
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            send()?
+        }
+        r => r?,
+    };
     resp.body_mut()
         .with_config()
         .limit(64 * 1024 * 1024)
