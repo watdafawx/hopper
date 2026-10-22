@@ -298,6 +298,10 @@ fn key_name(name: &str) -> Option<&'static str> {
         "space" => "space",
         "end" => "end",
         "," | "comma" => ",",
+        // Letters and digits, for shortcuts like ctrl+c.
+        k if k.len() == 1 && k.chars().all(|c| c.is_ascii_alphanumeric()) => {
+            return Some(Box::leak(k.to_string().into_boxed_str()));
+        }
         _ => return None,
     })
 }

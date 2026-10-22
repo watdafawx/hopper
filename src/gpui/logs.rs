@@ -8,6 +8,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -16,7 +17,9 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::logs::{Level, crash_reports, crash_summary, is_problem, level, tail};
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -165,6 +168,15 @@ pub struct LogsView {
     /// `None` shows them all.
     visible: Option<Vec<usize>>,
     scroll: UniformListScrollHandle,
+    /// Text picked with the mouse, in log line indices and characters.
+    sel: Option<Sel>,
+    /// The mouse button is down on the log, picking text.
+    dragging: bool,
+    /// Where the log's lines are on screen, from the last frame.
+    list_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// A character's width in the log's font, from the last frame.
+    char_w: Pixels,
+    focus: FocusHandle,
     _follow: Option<Task<()>>,
     _crash_watch: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -197,6 +209,11 @@ impl LogsView {
             query,
             visible: None,
             scroll: UniformListScrollHandle::new(),
+            sel: None,
+            dragging: false,
+            list_bounds: Rc::new(Cell::new(Bounds::default())),
+            char_w: px(7.),
+            focus: cx.focus_handle(),
             _follow: None,
             _crash_watch: None,
             _subscriptions: subs,
@@ -210,6 +227,7 @@ impl LogsView {
         let new_root = self.root.as_ref() != Some(&root);
         if new_root {
             self.log = None;
+            self.sel = None;
             self._follow = None;
             self.crash = None;
             self.crashes.clear();
@@ -285,6 +303,7 @@ impl LogsView {
     /// game appends every second and keeps the view at the bottom while it
     /// is there (scrolled up, it stays put).
     fn open_log(&mut self, path: PathBuf, follow: bool, cx: &mut Context<Self>) {
+        self.sel = None;
         self.log = Some(LogFile {
             path: path.clone(),
             lines: Vec::new(),
@@ -462,10 +481,14 @@ impl LogsView {
 
     fn render_lines(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme();
+        let (sel_bg, cw) = (theme.selection, self.char_w);
         range
-            .filter_map(|ix| self.line(ix))
-            .map(|l| {
+            .filter_map(|ix| Some((self.line_ix(ix)?, self.line(ix)?)))
+            .map(|(li, l)| {
+                let text = l.replace('\t', "    ");
+                let picked = self.picked_cols(li, text.chars().count());
                 div()
+                    .relative()
                     .w_full()
                     .h_5()
                     .whitespace_nowrap()
@@ -474,10 +497,188 @@ impl LogsView {
                         Level::Warn => theme.warning,
                         Level::Plain => theme.foreground,
                     })
-                    .child(l.replace('\t', "    "))
+                    .when_some(picked, |d, r| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(cw * r.start as f32)
+                                .w(cw * (r.end - r.start) as f32)
+                                .bg(sel_bg),
+                        )
+                    })
+                    .child(div().relative().child(text))
                     .into_any_element()
             })
             .collect()
+    }
+
+    /// The log line (index into `lines`) at row `ix` of the viewer.
+    fn line_ix(&self, ix: usize) -> Option<usize> {
+        let l = self.log.as_ref()?;
+        let i = match &self.visible {
+            Some(v) => *v.get(ix)?,
+            None => ix,
+        };
+        (i < l.lines.len()).then_some(i)
+    }
+
+    /// The picked characters of log line `li` (`len` long); one past the
+    /// end when the pick runs on to the next line.
+    fn picked_cols(&self, li: usize, len: usize) -> Option<Range<usize>> {
+        let (a, b) = self.sel?.ordered();
+        if li < a.0 || li > b.0 {
+            return None;
+        }
+        let start = if li == a.0 { a.1.min(len) } else { 0 };
+        let end = if li == b.0 { b.1.min(len) } else { len + 1 };
+        (start < end).then_some(start..end)
+    }
+
+    /// The log line and character under `pos`, clamped to the log.
+    fn hit(&self, pos: Point<Pixels>, window: &Window) -> Option<(usize, usize)> {
+        let n = self.line_count();
+        if n == 0 {
+            return None;
+        }
+        let b = self.list_bounds.get();
+        let off = self.scroll.0.borrow().base_handle.offset();
+        let lh = rems(1.25).to_pixels(window.rem_size());
+        let y = pos.y - b.origin.y - off.y;
+        let row = if y < px(0.) { 0 } else { ((y / lh) as usize).min(n - 1) };
+        let x = (pos.x - b.origin.x - off.x).max(px(0.));
+        let col = (x / self.char_w).round() as usize;
+        let li = self.line_ix(row)?;
+        let len = self.display_line(li).chars().count();
+        Some((li, col.min(len)))
+    }
+
+    fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        let Some(at) = self.hit(e.position, window) else { return };
+        self.dragging = true;
+        let text = self.display_line(at.0);
+        self.sel = Some(match (e.click_count, self.sel) {
+            (1, Some(old)) if e.modifiers.shift => Sel { head: at, ..old },
+            (1, _) => Sel { anchor: at, head: at },
+            (2, _) => {
+                let r = word_at(&text, at.1);
+                Sel { anchor: (at.0, r.start), head: (at.0, r.end) }
+            }
+            _ => Sel { anchor: (at.0, 0), head: (at.0, text.chars().count()) },
+        });
+        cx.notify();
+    }
+
+    fn drag_to(&mut self, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // Past the top or bottom, the log scrolls along.
+        let b = self.list_bounds.get();
+        let lh = rems(1.25).to_pixels(window.rem_size());
+        let base = self.scroll.0.borrow().base_handle.clone();
+        let mut off = base.offset();
+        if pos.y < b.origin.y {
+            off.y = (off.y + lh).min(px(0.));
+            base.set_offset(off);
+        } else if pos.y > b.bottom() {
+            off.y -= lh;
+            base.set_offset(off);
+        }
+        if let (Some(at), Some(sel)) = (self.hit(pos, window), self.sel.as_mut()) {
+            sel.head = at;
+        }
+        cx.notify();
+    }
+
+    /// Log line `li` as shown (tabs as spaces).
+    fn display_line(&self, li: usize) -> String {
+        self.log
+            .as_ref()
+            .and_then(|l| l.lines.get(li))
+            .map(|l| l.replace('\t', "    "))
+            .unwrap_or_default()
+    }
+
+    /// The picked text, over the lines the viewer shows.
+    fn picked_text(&self) -> String {
+        let Some((a, b)) = self.sel.map(|s| s.ordered()) else {
+            return String::new();
+        };
+        let mut out = Vec::new();
+        for ix in 0..self.line_count() {
+            let Some(li) = self.line_ix(ix) else { continue };
+            if li < a.0 {
+                continue;
+            }
+            if li > b.0 {
+                break;
+            }
+            let text = self.display_line(li);
+            let len = text.chars().count();
+            let start = if li == a.0 { a.1.min(len) } else { 0 };
+            let end = if li == b.0 { b.1.min(len) } else { len };
+            out.push(text.chars().skip(start).take(end.saturating_sub(start)).collect::<String>());
+        }
+        out.join("\n")
+    }
+
+    fn copy(&mut self, cx: &mut Context<Self>) {
+        let text = self.picked_text();
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let last = self.line_count().checked_sub(1).and_then(|i| self.line_ix(i));
+        if let (Some(first), Some(last)) = (self.line_ix(0), last) {
+            let len = self.display_line(last).chars().count();
+            self.sel = Some(Sel { anchor: (first, 0), head: (last, len) });
+            cx.notify();
+        }
+    }
+
+    /// Notes where the lines are, and while text is being picked, follows
+    /// the mouse anywhere in the window (also past the log's edges).
+    fn drag_watch(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let bounds = self.list_bounds.clone();
+        let view = cx.entity().downgrade();
+        canvas(
+            move |b, _, _| bounds.set(b),
+            move |_, _, window, _| {
+                let v = view.clone();
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble && e.pressed_button == Some(MouseButton::Left) {
+                        v.update(cx, |this, cx| {
+                            if this.dragging {
+                                this.drag_to(e.position, window, cx)
+                            }
+                        })
+                        .ok();
+                    }
+                });
+                let v = view.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        v.update(cx, |this, cx| {
+                            if !this.dragging {
+                                return;
+                            }
+                            this.dragging = false;
+                            if this.sel.is_some_and(|s| s.anchor == s.head) {
+                                this.sel = None;
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
     }
 
     fn share_row(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
@@ -1029,6 +1230,13 @@ impl LogsView {
         };
         let (path, loading, total) = (log.path.clone(), log.loading, log.lines.len());
         let n = self.line_count();
+        // The log's character width, for picking text with the mouse.
+        let size = rems(0.75).to_pixels(window.rem_size());
+        let ts = window.text_system();
+        let font_id = ts.resolve_font(&font(theme.mono_font_family.clone()));
+        if let Ok(adv) = ts.advance(font_id, size, 'm') {
+            self.char_w = adv.width;
+        }
         let filtered = self.visible.is_some();
         let share = self.share_row(&path, cx);
         let logs_dir = root.join("logs");
@@ -1089,6 +1297,7 @@ impl LogsView {
             .child(toolbar)
             .child(
                 div()
+                    .id("log-view")
                     .flex_1()
                     .min_h_0()
                     .relative()
@@ -1097,20 +1306,98 @@ impl LogsView {
                     .p_3()
                     .font_family(theme.mono_font_family.clone())
                     .text_xs()
+                    .cursor_text()
+                    .track_focus(&self.focus)
+                    .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                        let m = &e.keystroke.modifiers;
+                        if !(m.control || m.platform) {
+                            return;
+                        }
+                        match e.keystroke.key.as_str() {
+                            "c" => this.copy(cx),
+                            "a" => this.select_all(cx),
+                            _ => return,
+                        }
+                        cx.stop_propagation();
+                    }))
                     .child(
-                        uniform_list(
-                            "log-lines",
-                            n,
-                            cx.processor(|this, r: Range<usize>, _, cx| this.render_lines(r, cx)),
-                        )
-                        .track_scroll(&self.scroll)
-                        .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                        .size_full(),
+                        div()
+                            .id("log-lines-wrap")
+                            .size_full()
+                            .relative()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                                this.mouse_down(e, window, cx)
+                            }))
+                            .context_menu({
+                                let view = cx.entity();
+                                let has = self.sel.is_some();
+                                move |menu, _, _| {
+                                    let (v1, v2) = (view.clone(), view.clone());
+                                    menu.when(has, |m| {
+                                        m.item(
+                                            PopupMenuItem::new("Copy")
+                                                .icon(IconName::Copy)
+                                                .on_click(move |_, _, cx| v1.update(cx, |this, cx| this.copy(cx))),
+                                        )
+                                    })
+                                    .item(
+                                        PopupMenuItem::new("Select all")
+                                            .on_click(move |_, _, cx| v2.update(cx, |this, cx| this.select_all(cx))),
+                                    )
+                                }
+                            })
+                            .child(
+                                uniform_list(
+                                    "log-lines",
+                                    n,
+                                    cx.processor(|this, r: Range<usize>, _, cx| this.render_lines(r, cx)),
+                                )
+                                .track_scroll(&self.scroll)
+                                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                                .size_full(),
+                            )
+                            .child(self.drag_watch(cx)),
                     )
                     .vertical_scrollbar(&self.scroll),
             )
             .into_any_element()
     }
+}
+
+/// Picked text: where the mouse went down and where it is now, as (log
+/// line, character).
+#[derive(Clone, Copy, PartialEq)]
+struct Sel {
+    anchor: (usize, usize),
+    head: (usize, usize),
+}
+
+impl Sel {
+    fn ordered(self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+}
+
+/// The word (run of non-space characters) around character `col`.
+fn word_at(text: &str, col: usize) -> Range<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    let col = col.min(chars.len().saturating_sub(1));
+    if chars.get(col).is_none_or(|c| c.is_whitespace()) {
+        return col..col;
+    }
+    let mut start = col;
+    while start > 0 && !chars[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    let mut end = col;
+    while end < chars.len() && !chars[end].is_whitespace() {
+        end += 1;
+    }
+    start..end
 }
 
 #[cfg(test)]
