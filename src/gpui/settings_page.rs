@@ -1598,8 +1598,11 @@ impl SettingsPage {
                 }
             }));
         let data = hopper::paths::dirs().map(|d| d.root().unwrap_or(d.data_dir()).to_path_buf());
-        let can_move = hopper::paths::dirs().is_some_and(|d| d.root().is_none()) && !hopper::paths::dev_build();
-        let store_mv = self.store.clone();
+        // "Next to hopper.exe" while the files are somewhere else.
+        let beside = hopper::paths::beside_exe()
+            .filter(|b| hopper::paths::dirs().is_some_and(|d| d.root() != Some(b.as_path())))
+            .filter(|_| !hopper::paths::dev_build());
+        let (store_mv, store_pick) = (self.store.clone(), self.store.clone());
         let port = crate::mcp::port_of(s);
         let url = format!("http://127.0.0.1:{port}/mcp");
         let status: Option<AnyElement> = s.mcp_enabled.then(|| {
@@ -1674,13 +1677,21 @@ impl SettingsPage {
                 Row::new("data-folder")
                     .when_some(data.clone(), |r, d| r.desc(d.display().to_string()))
                     .control(
-                      h_flex().gap_2().when(can_move, |r| r.child(
+                      h_flex().gap_2().when_some(beside, |r, b| r.child(
                         Button::new("data-move")
                             .small()
                             .outline()
                             .label("Move next to hopper.exe")
-                            .on_click(move |_, window, cx| crate::data_move::offer(store_mv.clone(), true, window, cx)),
+                            .tooltip(b.display().to_string())
+                            .on_click(move |_, window, cx| crate::data_move::confirm(store_mv.clone(), b.clone(), window, cx)),
                       )).child(
+                        Button::new("data-move-to")
+                            .small()
+                            .outline()
+                            .icon(IconName::FolderOpen)
+                            .label("Move to…")
+                            .on_click(move |_, window, cx| crate::data_move::pick(store_pick.clone(), window, cx)),
+                      ).child(
                         Button::new("data-folder")
                             .small()
                             .outline()

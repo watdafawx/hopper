@@ -1,5 +1,5 @@
-//! The first-run setup: a few steps in a dialog (install, the CurseForge
-//! key, instances, servers, the theme). Shown on the first start (no
+//! The first-run setup: a few steps in a dialog (install, where Hopper
+//! keeps its files, the CurseForge key, instances, servers, the theme). Shown on the first start (no
 //! settings yet), and again from Settings or Ctrl+K.
 //!
 //! Nothing is written until the user acts: a step's choices are saved on
@@ -22,8 +22,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::Path;
 
-const STEPS: [&str; 6] = ["Welcome", "CurseForge", "Instances", "Servers", "Look", "Done"];
+const STEPS: [&str; 7] = ["Welcome", "Files", "CurseForge", "Instances", "Servers", "Look", "Done"];
 const CF_CONSOLE: &str = "https://console.curseforge.com/";
+/// After a restart that moved Hopper's files: the step to open on.
+const RESUME_ARG: &str = "--setup-step=";
 
 /// Where the user's servers are.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,6 +58,11 @@ pub struct SetupWizard {
     theme_saved: (String, u8),
     /// A theme shown but not saved yet.
     theme_preview: Option<String>,
+    /// Where Hopper's files should go: `None` next to hopper.exe.
+    files_dest: Option<std::path::PathBuf>,
+    /// Copying them there (Hopper restarts after).
+    files_moving: bool,
+    files_error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -112,8 +119,18 @@ impl SetupWizard {
             server_host,
             theme_saved: (s.theme_name.clone(), s.theme),
             theme_preview: None,
+            files_dest: hopper::paths::dirs()
+                .and_then(|d| d.root())
+                .filter(|r| Some(r.to_path_buf()) != hopper::paths::beside_exe())
+                .map(Path::to_path_buf),
+            files_moving: false,
+            files_error: None,
             _subscriptions: subs,
         };
+        // Back after moving the files: carry on where the setup was.
+        if let Some(n) = std::env::args().find_map(|a| a.strip_prefix(RESUME_ARG)?.parse::<usize>().ok()) {
+            this.step = n.min(STEPS.len() - 1);
+        }
         this.count_instances(cx);
         this
     }
@@ -160,6 +177,45 @@ impl SetupWizard {
 
     fn next(&mut self, cx: &mut Context<Self>) {
         self.go(self.step + 1, cx);
+    }
+
+    /// Next, moving Hopper's files first when the Files step chose another
+    /// place (Hopper restarts and the setup carries on from the next step).
+    fn next_from(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if STEPS[self.step] != "Files" || self.files_moving {
+            return self.next(cx);
+        }
+        let Some(dest) = self.files_dest.clone().or_else(hopper::paths::beside_exe) else {
+            return self.next(cx);
+        };
+        let now = hopper::paths::dirs().and_then(|d| d.root()).map(Path::to_path_buf);
+        if now.as_ref() == Some(&dest) {
+            return self.next(cx);
+        }
+        if let Err(e) = hopper::paths::check_dest(&dest) {
+            self.files_error = Some(format!("{e:#}"));
+            cx.notify();
+            return;
+        }
+        self.files_moving = true;
+        self.files_error = None;
+        cx.notify();
+        let me = cx.entity().downgrade();
+        crate::data_move::start(
+            self.store.clone(),
+            dest,
+            vec![format!("{RESUME_ARG}{}", self.step + 1)],
+            move |e, cx| {
+                me.update(cx, |this, cx| {
+                    this.files_moving = false;
+                    this.files_error = Some(e);
+                    cx.notify();
+                })
+                .ok();
+            },
+            window,
+            cx,
+        );
     }
 
     fn back(&mut self, cx: &mut Context<Self>) {
@@ -419,6 +475,72 @@ impl SetupWizard {
                 .into_any_element()
         };
         v_flex().gap_6().child(hero).child(body).into_any_element()
+    }
+
+    fn files(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let beside = hopper::paths::beside_exe();
+        let picked = self.files_dest.clone();
+        let here = choice_card(
+            "setup-files-here",
+            IconName::FolderOpen,
+            "Next to hopper.exe",
+            "A Hopper Data folder beside the app. Move the app and its folder together.",
+            picked.is_none(),
+            cx,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.files_dest = None;
+            this.files_error = None;
+            cx.notify();
+        }));
+        let other = choice_card(
+            "setup-files-pick",
+            IconName::Search,
+            "Pick a folder",
+            "Any drive with room: Hopper keeps everything in the folder you choose.",
+            picked.is_some(),
+            cx,
+        )
+        .on_click(cx.listener(|_, _, window, cx| {
+            let me = cx.entity().downgrade();
+            crate::data_move::pick_folder(
+                "Keep Hopper's files here",
+                move |dest, _, cx| {
+                    me.update(cx, |this, cx| {
+                        this.files_error = hopper::paths::check_dest(&dest).err().map(|e| format!("{e:#}"));
+                        this.files_dest = Some(dest);
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                window,
+                cx,
+            )
+        }));
+        let target = picked.or(beside).map(|p| p.display().to_string()).unwrap_or_default();
+        v_flex()
+            .gap_4()
+            .child(note(
+                "Settings, accounts, downloads, caches and (if you don't use CurseForge's folders) your instances. Put them on a drive with room, not just C:.",
+                cx,
+            ))
+            .child(h_flex().w_full().gap_3().items_stretch().child(here).child(other))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded(theme.radius)
+                    .bg(theme.muted)
+                    .text_sm()
+                    .child(Icon::new(IconName::FolderOpen).small().text_color(theme.muted_foreground))
+                    .child(div().min_w_0().child(target)),
+            )
+            .when(self.files_moving, |c| c.child(note("Moving Hopper's files… Hopper restarts and carries on here.", cx)))
+            .when_some(self.files_error.clone(), |c, e| c.child(result_line(Err(e), cx)))
+            .child(note("You can move them again any time in Settings > Advanced.", cx))
+            .into_any_element()
     }
 
     fn curseforge(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -866,6 +988,15 @@ impl SetupWizard {
                         key,
                         cx,
                     ))
+                    .child(row(
+                        IconName::FolderOpen,
+                        "Files",
+                        hopper::paths::dirs()
+                            .map(|d| d.root().unwrap_or(d.data_dir()).display().to_string())
+                            .unwrap_or_default(),
+                        true,
+                        cx,
+                    ))
                     .child(row(IconName::LibraryBig, "Instances", inst, true, cx))
                     .child(row(
                         IconName::Server,
@@ -881,12 +1012,13 @@ impl SetupWizard {
 
     fn heading(&self, cx: &App) -> AnyElement {
         let theme = cx.theme();
-        let (icon, title, sub) = match self.step {
-            0 => (IconName::Sparkles, "Set up Hopper", "About a minute. All of it can change later in Settings."),
-            1 => (IconName::Lock, "Your CurseForge key", "The one step that matters most."),
-            2 => (IconName::LibraryBig, "Your instances", "Where Hopper finds what you play."),
-            3 => (IconName::Server, "Servers", "Optional. Skip it if you just play."),
-            4 => (IconName::Palette, "Make it yours", "A theme for Hopper."),
+        let (icon, title, sub) = match STEPS[self.step] {
+            "Welcome" => (IconName::Sparkles, "Set up Hopper", "About a minute. All of it can change later in Settings."),
+            "Files" => (IconName::FolderOpen, "Where Hopper keeps its files", "One folder for everything Hopper needs."),
+            "CurseForge" => (IconName::Lock, "Your CurseForge key", "The one step that matters most."),
+            "Instances" => (IconName::LibraryBig, "Your instances", "Where Hopper finds what you play."),
+            "Servers" => (IconName::Server, "Servers", "Optional. Skip it if you just play."),
+            "Look" => (IconName::Palette, "Make it yours", "A theme for Hopper."),
             _ => (IconName::CircleCheck, "Done", "Here's what's set."),
         };
         h_flex()
@@ -966,12 +1098,13 @@ const DIALOG_MARGIN: f32 = 24.;
 impl Render for SetupWizard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let body = match self.step {
-            0 => self.welcome(cx),
-            1 => self.curseforge(cx),
-            2 => self.instances(cx),
-            3 => self.servers(cx),
-            4 => self.look(cx),
+        let body = match STEPS[self.step] {
+            "Welcome" => self.welcome(cx),
+            "Files" => self.files(cx),
+            "CurseForge" => self.curseforge(cx),
+            "Instances" => self.instances(cx),
+            "Servers" => self.servers(cx),
+            "Look" => self.look(cx),
             _ => self.done(cx),
         };
         let last = self.step + 1 == STEPS.len();
@@ -1040,7 +1173,8 @@ impl Render for SetupWizard {
                         .primary()
                         .label(if self.step == 0 { "Get started" } else { "Next" })
                         .icon(IconName::ArrowRight)
-                        .on_click(cx.listener(|this, _, _, cx| this.next(cx))),
+                        .disabled(self.files_moving)
+                        .on_click(cx.listener(|this, _, window, cx| this.next_from(window, cx))),
                     theme.primary,
                     cx,
                 )

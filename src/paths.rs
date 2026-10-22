@@ -4,15 +4,18 @@
 //! can see (and pick the drive of) all of it. Hopper used to spread it over
 //! `%APPDATA%\Hopper` (data) and `%LOCALAPPDATA%\Hopper` (cache): a copy
 //! that still has that old layout keeps using it until the user moves it
-//! ([`move_old_layout`]); a new copy starts out next to its exe.
+//! ([`move_to`]); a new copy starts out next to its exe, and the user can
+//! move it anywhere later.
 //!
 //! Resolved once per run:
 //! 1. `HOPPER_DATA_DIR`, when set;
-//! 2. [`FOLDER`] next to the exe, when it exists;
-//! 3. a dev build (an exe under a cargo `target` folder): where the user's
+//! 2. the folder a [`LINK`] file next to the exe names (one the user
+//!    picked);
+//! 3. [`FOLDER`] next to the exe, when it exists;
+//! 4. a dev build (an exe under a cargo `target` folder): where the user's
 //!    Hopper moved its data ([`POINTER`]), else the old layout;
-//! 4. the old layout, when it has settings;
-//! 5. [`FOLDER`] next to the exe, created now (the old layout when the
+//! 5. the old layout, when it has settings;
+//! 6. [`FOLDER`] next to the exe, created now (the old layout when the
 //!    exe's folder can't be written).
 
 use anyhow::Context as _;
@@ -26,6 +29,10 @@ pub const FOLDER: &str = "Hopper Data";
 /// Left in the old data folder after a move: the path the data went to,
 /// so dev builds (and a curious user) can find it.
 pub const POINTER: &str = "moved-to.txt";
+
+/// Next to hopper.exe when Hopper's files are in a folder the user picked
+/// elsewhere: that folder's path.
+pub const LINK: &str = "hopper-data.txt";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dirs {
@@ -124,8 +131,18 @@ fn resolve() -> Option<Dirs> {
     )
 }
 
+/// The folder a [`LINK`] next to the exe names, if any.
+fn linked(exe_dir: &Path) -> Option<PathBuf> {
+    let s = fs::read_to_string(exe_dir.join(LINK)).ok()?;
+    let p = PathBuf::from(s.trim());
+    (p.is_absolute()).then_some(p)
+}
+
 /// [`resolve`] without the environment: `exe_dir` is the exe's folder.
 fn choose(exe_dir: Option<&Path>, dev: bool, old: Option<Dirs>) -> Option<Dirs> {
+    if let Some(p) = exe_dir.and_then(linked) {
+        return Some(Dirs::portable(p));
+    }
     if let Some(here) = exe_dir.map(|d| d.join(FOLDER)).filter(|h| h.is_dir()) {
         return Some(Dirs::portable(here));
     }
@@ -153,6 +170,11 @@ fn has_settings(d: &Dirs) -> bool {
     d.data.join("settings.json").is_file()
 }
 
+/// Where "next to hopper.exe" is.
+pub fn beside_exe() -> Option<PathBuf> {
+    Some(exe_dir()?.join(FOLDER))
+}
+
 /// When Hopper still uses the old layout and could move it next to the
 /// exe: (the old folders' size in bytes, where they'd go).
 pub fn move_offer() -> Option<(u64, PathBuf)> {
@@ -160,12 +182,44 @@ pub fn move_offer() -> Option<(u64, PathBuf)> {
     if d.root().is_some() || dev_build() {
         return None;
     }
-    let dest = exe_dir()?.join(FOLDER);
-    // Can the exe's folder take it? (Program Files can't.)
-    let probe = exe_dir()?.join(".hopper-write-test");
-    fs::write(&probe, b"").ok()?;
+    let dest = beside_exe()?;
+    check_dest(&dest).ok()?;
+    Some((used(), dest))
+}
+
+/// Bytes in Hopper's folders now.
+pub fn used() -> u64 {
+    dirs().map_or(0, |d| dir_size(&d.data) + dir_size(&d.cache))
+}
+
+/// Whether Hopper's files could move to `dest`: a folder that is empty or
+/// new, can be written, and isn't inside the current one (or around it).
+pub fn check_dest(dest: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(dest.is_absolute(), "Pick a full folder path.");
+    if let Some(d) = dirs() {
+        let now = d.root().unwrap_or(&d.data);
+        anyhow::ensure!(dest != now, "Hopper's files are already there.");
+        anyhow::ensure!(
+            !dest.starts_with(now) && !now.starts_with(dest) && !d.data.starts_with(dest),
+            "Pick a folder outside Hopper's current one."
+        );
+    }
+    if dest.exists() {
+        anyhow::ensure!(dest.is_dir(), "{} is a file.", dest.display());
+        let empty = fs::read_dir(dest).map(|mut r| r.next().is_none()).unwrap_or(false);
+        anyhow::ensure!(empty, "{} isn't empty. Pick an empty or new folder.", dest.display());
+    }
+    // Can it be written? (Program Files can't.)
+    let existed = dest.exists();
+    fs::create_dir_all(dest).with_context(|| format!("Hopper can't make {}", dest.display()))?;
+    let probe = dest.join(".hopper-write-test");
+    let w = fs::write(&probe, b"");
     let _ = fs::remove_file(&probe);
-    Some((dir_size(&d.data) + dir_size(&d.cache), dest))
+    if !existed {
+        let _ = fs::remove_dir(dest);
+    }
+    w.with_context(|| format!("Hopper can't write in {}", dest.display()))?;
+    Ok(())
 }
 
 pub fn dir_size(dir: &Path) -> u64 {
@@ -191,13 +245,44 @@ fn walk(dir: &Path) -> Vec<(PathBuf, u64)> {
     out
 }
 
-/// Copies the old layout into `dest` (`dest/data`, `dest/cache`),
-/// checking every file's size, and leaves [`POINTER`] in the old data
-/// folder. The old folders stay until [`remove_old_layout`] runs (after a
-/// restart, once nothing holds them open). `progress(done, total)` counts
-/// bytes. Leaves nothing half-made behind on failure.
-pub fn move_old_layout(dest: &Path, progress: impl FnMut(u64, u64)) -> anyhow::Result<()> {
-    copy_layout(&old_layout().context("no old Hopper folders")?, dest, progress)
+/// Copies Hopper's folders into `dest` (`dest/data`, `dest/cache`),
+/// checking every file's size, then points the exe at `dest`: a [`LINK`]
+/// next to it, unless `dest` is [`FOLDER`] right there. Leaves [`POINTER`]
+/// in the old layout's data folder too, for dev builds. The old folders
+/// stay until [`remove_old`] runs after a restart. `progress(done, total)`
+/// counts bytes. Leaves nothing half-made behind on failure.
+pub fn move_to(dest: &Path, progress: impl FnMut(u64, u64)) -> anyhow::Result<()> {
+    check_dest(dest)?;
+    let from = dirs().context("Hopper has no folder")?.clone();
+    copy_layout(&from, dest, progress)?;
+    if let Some(dir) = exe_dir() {
+        point(&dir, dest)?;
+    }
+    // An installed copy elsewhere follows too.
+    if let Some(installed) = crate::setup::installed_exe().and_then(|e| e.parent().map(Path::to_path_buf))
+        && Some(&installed) != exe_dir().as_ref()
+    {
+        let _ = point(&installed, dest);
+    }
+    if let Some(old) = old_layout() {
+        let _ = fs::create_dir_all(&old.data);
+        let _ = fs::write(old.data.join(POINTER), dest.to_string_lossy().as_bytes());
+    }
+    Ok(())
+}
+
+/// Makes the exe in `exe_dir` use `dest`: a [`LINK`] file, or none when
+/// `dest` is the [`FOLDER`] beside it.
+pub fn point(exe_dir: &Path, dest: &Path) -> anyhow::Result<()> {
+    let link = exe_dir.join(LINK);
+    if dest == exe_dir.join(FOLDER) {
+        if link.exists() {
+            fs::remove_file(&link)?;
+        }
+        return Ok(());
+    }
+    fs::write(&link, dest.to_string_lossy().as_bytes())
+        .with_context(|| format!("writing {}", link.display()))
 }
 
 fn copy_layout(old: &Dirs, dest: &Path, mut progress: impl FnMut(u64, u64)) -> anyhow::Result<()> {
@@ -226,7 +311,6 @@ fn copy_layout(old: &Dirs, dest: &Path, mut progress: impl FnMut(u64, u64)) -> a
         }
         fs::create_dir_all(&new.data)?;
         fs::create_dir_all(&new.cache)?;
-        fs::write(old.data.join(POINTER), dest.to_string_lossy().as_bytes())?;
         Ok(())
     })();
     if r.is_err() && !existed {
@@ -235,30 +319,48 @@ fn copy_layout(old: &Dirs, dest: &Path, mut progress: impl FnMut(u64, u64)) -> a
     r
 }
 
-/// After a move: deletes the old folders, keeping only [`POINTER`]. Retries
-/// for a while, since the Hopper that moved them may still be closing.
-pub fn remove_old_layout() {
-    let Some(old) = old_layout() else { return };
+/// After a move and restart: deletes what Hopper moved away from. `old` is
+/// the folder it used before (`None`: the old AppData layout, whose data
+/// folder keeps only [`POINTER`]). Nothing happens unless this run really
+/// uses another place. Retries for a while, since the Hopper that moved
+/// the files may still be closing.
+pub fn remove_old(old: Option<&Path>) {
     let Some(d) = dirs() else { return };
-    // Only when this run really uses the new place.
-    if d.root().is_none() || d.data_dir() == old.data {
-        return;
-    }
+    let Some(now) = d.root() else { return };
     for _ in 0..20 {
-        let a = clear_except(&old.data, POINTER);
-        let b = fs::remove_dir_all(&old.cache).or_else(|e| {
-            if old.cache.exists() { Err(e) } else { Ok(()) }
-        });
-        if a.is_ok() && b.is_ok() {
-            // Cache sat in %LOCALAPPDATA%\Hopper: drop that now-empty folder.
-            if let Some(p) = old.cache.parent() {
-                let _ = fs::remove_dir(p);
+        let done = match old {
+            Some(o) => {
+                if o == now || now.starts_with(o) || o.starts_with(now) || !o.exists() {
+                    return;
+                }
+                fs::remove_dir_all(o).is_ok()
             }
+            None => {
+                let Some(l) = old_layout() else { return };
+                if d.data_dir() == l.data {
+                    return;
+                }
+                let a = clear_except(&l.data, POINTER);
+                let b = fs::remove_dir_all(&l.cache).or_else(|e| {
+                    if l.cache.exists() { Err(e) } else { Ok(()) }
+                });
+                if a.is_ok() && b.is_ok() {
+                    // Cache sat in %LOCALAPPDATA%\Hopper: drop that now-empty folder.
+                    if let Some(p) = l.cache.parent() {
+                        let _ = fs::remove_dir(p);
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if done {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    log::warn!("couldn't remove all of the old Hopper folders");
+    log::warn!("couldn't remove all of Hopper's old folder");
 }
 
 fn clear_except(dir: &Path, keep: &str) -> std::io::Result<()> {
@@ -330,6 +432,13 @@ mod tests {
             Some(exe.join(FOLDER).as_path())
         );
         assert!(!dev.join(FOLDER).exists(), "dev builds never make their own");
+
+        // A picked folder, named by the link file, beats the one beside it.
+        let picked = base.join("picked");
+        point(&exe, &picked).unwrap();
+        assert_eq!(choose(Some(&exe), false, Some(old.clone())).unwrap().root(), Some(picked.as_path()));
+        point(&exe, &exe.join(FOLDER)).unwrap();
+        assert!(!exe.join(LINK).exists(), "back beside the exe: no link");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -349,8 +458,8 @@ mod tests {
         assert_eq!(fs::read_to_string(dest.join("data/settings.json")).unwrap(), "{}");
         assert_eq!(fs::read_to_string(dest.join("data/java/jdk/release")).unwrap(), "21");
         assert_eq!(fs::read(dest.join("cache/packs/1.zip")).unwrap().len(), 5000);
-        assert_eq!(fs::read_to_string(old.data.join(POINTER)).unwrap(), dest.to_string_lossy());
-        // The pointer itself isn't copied on a second run.
+        // A pointer in the old folder isn't copied.
+        fs::write(old.data.join(POINTER), "x").unwrap();
         fs::remove_dir_all(&dest).unwrap();
         copy_layout(&old, &dest, |_, _| {}).unwrap();
         assert!(!dest.join("data").join(POINTER).exists());

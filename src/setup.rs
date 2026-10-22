@@ -95,6 +95,10 @@ pub fn install(desktop: bool) -> anyhow::Result<PathBuf> {
             std::fs::rename(&exe, &old).context("moving the old copy aside")?;
         }
         std::fs::rename(&staged, &exe).context("putting Hopper in place")?;
+        // The installed copy keeps using this copy's files.
+        if let Some(root) = crate::paths::dirs().and_then(|d| d.root()) {
+            crate::paths::point(&dir, root)?;
+        }
     }
     if let Some(link) = start_menu_link() {
         crate::shortcut::link(&link, &exe, "")?;
