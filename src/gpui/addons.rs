@@ -581,10 +581,18 @@ impl AddonsView {
         // The last crash's mods, for their tag (read once, then cached).
         if let Some(root) = self.root.clone() {
             let c = self.store.update(cx, |s, _| s.crash(&root).cloned());
+            // A mod turned off since the crash isn't marked any more.
+            let off: HashSet<String> = self
+                .store
+                .read(cx)
+                .instance(&root)
+                .map(|i| i.addons.iter().filter(|a| !a.enabled).map(|a| a.file_name.trim_end_matches(".disabled").to_lowercase()).collect())
+                .unwrap_or_default();
             let now: HashMap<String, String> = c
                 .map(|c| {
                     c.suspects
                         .iter()
+                        .filter(|s| !off.contains(&s.file_name.trim_end_matches(".disabled").to_lowercase()))
                         .map(|s| {
                             let file = s.file_name.trim_end_matches(".disabled").to_lowercase();
                             (file, format!("{} in the last crash. {} (Logs & crashes has more.)", s.certainty.label(), s.why))

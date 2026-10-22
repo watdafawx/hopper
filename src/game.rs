@@ -77,10 +77,12 @@ fn scan(sys: &mut System, roots: &[PathBuf]) -> HashMap<PathBuf, Running> {
 }
 
 /// Watches for running instances every few seconds; `send` gets the map
-/// whenever it changes. `roots` is read fresh each round.
+/// whenever it changes, and `tick` every round while a game runs (to watch
+/// its files). `roots` is read fresh each round.
 pub fn watch(
     roots: impl Fn() -> Vec<PathBuf> + Send + 'static,
     send: impl Fn(HashMap<PathBuf, Running>) + Send + 'static,
+    tick: impl Fn(&HashMap<PathBuf, Running>) + Send + 'static,
 ) {
     std::thread::Builder::new()
         .name("game-watch".into())
@@ -93,6 +95,7 @@ pub fn watch(
                     send(now.clone());
                     last = now;
                 }
+                tick(&last);
                 std::thread::sleep(Duration::from_secs(3));
             }
         })

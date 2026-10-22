@@ -178,11 +178,14 @@ impl AppView {
                         crate::tray::notify("Hopper", msg, true);
                     }
                 }
-                StoreEvent::GameCrashed(name, top) => {
-                    let body = match top {
+                StoreEvent::GameCrashed(name, top, open) => {
+                    let mut body = match top {
                         Some(m) => format!("Hopper thinks {m} caused it. Open Hopper → Logs & crashes for more."),
                         None => "Open Hopper → Logs & crashes to see why.".to_string(),
                     };
+                    if *open {
+                        body.push_str(" You can close the game's error screen.");
+                    }
                     crate::tray::notify(&format!("{name} crashed"), &body, true);
                 }
                 StoreEvent::GamesEnded => {

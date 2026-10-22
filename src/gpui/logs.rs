@@ -555,7 +555,13 @@ impl Render for LogsView {
         let theme = cx.theme().clone();
         let running = self.store.read(cx).running(&root).is_some();
         // After a crash the tab opens on Crash help, with the crash on top.
-        if !self.tab_picked && !running && self.tab == LogTab::Game && self.crash.is_some() {
+        // So does a crash Hopper caught while the game is still open (on its
+        // error screen).
+        let caught = self.store.update(cx, |s, _| {
+            let started = s.running(&root).map_or(i64::MAX, |r| r.started as i64);
+            s.crash(&root).is_some_and(|c| c.when >= started)
+        });
+        if !self.tab_picked && self.tab == LogTab::Game && ((!running && self.crash.is_some()) || caught) {
             self.select(LogTab::Help, cx);
         }
         let tab_ix = match self.tab {
@@ -586,6 +592,7 @@ impl Render for LogsView {
             // Hopper's games; else the newest crash report as it is.
             let detected = self.store.update(cx, |s, _| s.crash(&root).cloned());
             let card = detected.map(|c| self.crash_card(&root, &c, cx));
+            let warned = self.warnings_card(&root, cx);
             let crash = self.crash.as_ref().filter(|_| card.is_none()).map(|c| {
                 let name = c.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 // When, so an old crash doesn't read as today's.
@@ -628,7 +635,7 @@ impl Render for LogsView {
                 .id("logs-diagnosis")
                 .flex_1()
                 .min_h_0()
-                .child(v_flex().gap_4().pb_2().children(card).children(crash).child(self.help.clone()))
+                .child(v_flex().gap_4().pb_2().children(card).children(warned).children(crash).child(self.help.clone()))
                 .overflow_y_scrollbar()
                 .into_any_element()
         } else if self.tab == LogTab::Crashes && self.crashes.is_empty() {
@@ -719,6 +726,14 @@ impl LogsView {
                             .children(s.needs.iter().enumerate().map(|(k, (id, ver))| {
                                 let loader = ["minecraft", "neoforge", "forge", "fabricloader", "quilt_loader", "java"]
                                     .contains(&id.as_str());
+                                // Installed since the crash: a jar named like it that provides it.
+                                let have = inst.is_some_and(|i| {
+                                    let loose = id.replace(['_', '-'], "");
+                                    i.addons.iter().filter(|a| a.enabled).any(|a| {
+                                        a.file_name.to_lowercase().replace(['_', '-'], "").contains(&loose)
+                                            && hopper::deps::provides(&i.addon_path(a)).iter().any(|p| p == id)
+                                    })
+                                });
                                 let label = if ver.is_empty() { format!("Needs {id}") } else { format!("Needs {id} {ver}") };
                                 let (root3, id3) = (root.to_path_buf(), id.clone());
                                 h_flex()
@@ -731,7 +746,14 @@ impl LogsView {
                                             .child(label),
                                     )
                                     .map(|r| {
-                                        if loader {
+                                        if have {
+                                            r.child(widgets::done_mark(
+                                                ElementId::Name(format!("crash-have:{i}:{k}").into()),
+                                                "Installed",
+                                                true,
+                                                cx,
+                                            ))
+                                        } else if loader {
                                             r.child(widgets::caption("Change it in Settings › Loader", cx).text_xs())
                                         } else {
                                             r.child(
@@ -759,6 +781,8 @@ impl LogsView {
             CrashKind::Unknown => Some("Hopper couldn't tell which mod. The crash report has the details."),
         };
         let has_report = c.source.extension().is_some_and(|e| e == "txt") && c.source.starts_with(root.join("crash-reports"));
+        // Caught while this game runs: it's sitting on its error screen.
+        let still_open = self.store.read(cx).running(root).is_some_and(|r| c.when >= r.started as i64);
         let source = c.source.clone();
         let root_d = root.to_path_buf();
         callout(theme.danger, cx)
@@ -766,9 +790,25 @@ impl LogsView {
                 h_flex()
                     .gap_2()
                     .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.danger))
-                    .child(div().font_semibold().text_color(theme.danger).child("The game crashed"))
+                    .child(div().font_semibold().text_color(theme.danger).child(if still_open {
+                        "The game crashed and is showing its error screen"
+                    } else {
+                        "The game crashed"
+                    }))
                     .child(widgets::caption(hopper::time::relative_secs(c.when), cx))
                     .child(div().flex_1())
+                    .when(still_open, |r| {
+                        let root_s = root.to_path_buf();
+                        r.child(
+                            Button::new("crash-close-game")
+                                .small()
+                                .danger()
+                                .icon(IconName::X)
+                                .label("Close game")
+                                .tooltip("It can't go further than its error screen")
+                                .on_click(cx.listener(move |this, _, _, cx| this.store.read(cx).stop(&root_s))),
+                        )
+                    })
                     .when(has_report, |r| {
                         r.child(
                             Button::new("crash-open-report")
@@ -821,6 +861,66 @@ impl LogsView {
             .when_some(note, |d, n| d.child(div().text_sm().child(n)))
             .children(self.crash_actions(root, c, cx))
             .into_any_element()
+    }
+
+    /// Mods whose mixins failed in the current or last game: no crash (yet),
+    /// but worth knowing when something misbehaves.
+    fn warnings_card(&mut self, root: &Path, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let store = self.store.read(cx);
+        let list = store.warnings(root).to_vec();
+        if list.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let inst = store.instance(root);
+        let playing = store.running(root).is_some();
+        let rows: Vec<AnyElement> = list
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let a = inst.and_then(|i| i.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(s.file_name.trim_end_matches(".disabled"))));
+                let name = a.map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| s.file_name.clone());
+                let icon = a.and_then(|a| store.image(&a.icon)).map(Path::to_path_buf);
+                let pid = a.map_or(0, |a| a.project_id);
+                let (store2, root2) = (self.store.clone(), root.to_path_buf());
+                h_flex()
+                    .gap_3()
+                    .py_0p5()
+                    .child(
+                        widgets::mod_link(
+                            ElementId::Name(format!("warned:{i}").into()),
+                            name,
+                            icon.as_deref(),
+                            pid,
+                            move |project, _, cx| {
+                                let root = root2.clone();
+                                store2.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+                            },
+                            cx,
+                        )
+                        .w(rems(16.))
+                        .flex_none()
+                        .text_sm(),
+                    )
+                    .child(widgets::caption(s.why.clone(), cx).text_xs().flex_1().min_w_0().whitespace_normal())
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            callout(theme.warning, cx)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
+                        .child(div().font_semibold().text_color(theme.warning).child(if playing {
+                            "While you play"
+                        } else {
+                            "While you last played"
+                        })),
+                )
+                .child(v_flex().children(rows))
+                .into_any_element(),
+        )
     }
 
     /// Turn the likely mods off (then play), or back on.

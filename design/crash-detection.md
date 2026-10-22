@@ -1,6 +1,10 @@
 # Crash detection: draft
 
-Status: phases 1 to 3 built (phase 1 in Hopper 0.8.74, phases 2 and 3 in 0.8.75, 2026-10-22).
+Status: phases 1 to 3 built (phase 1 in Hopper 0.8.74, phases 2 and 3 in 0.8.75), plus live watching in 0.8.76 (2026-10-22). Tested end to end on a real NeoForge launch failure.
+
+**Live watching (0.8.76).** Every 3 seconds while a game runs (the same loop that finds running games), Hopper looks at its `crash-reports/` and the new lines of `logs/latest.log`:
+- a crash report written while the game is still open (NeoForge stays on its error screen until closed) is caught at once: notification, the card (now with **Close game**), and Logs & crashes opens on Crash help. When the game then closes, it isn't told twice;
+- mixin failures logged while you play show as a "While you play" card (no notification): the game may run on, but those mods may misbehave or crash later. They clear when the instance's next game starts.
 
 Phase 1 as built differs from the draft in three places:
 - the last crash is kept in `.hopper-crash.json` in the instance folder, not

@@ -81,6 +81,11 @@ pub enum Msg {
     SessionSaved(PathBuf),
     /// What an instance's last game crash names (`None`: it ended fine).
     Crashed(PathBuf, Option<hopper::crashdetect::Crash>),
+    /// A running game wrote a crash report and is still open (its error
+    /// screen).
+    LiveCrash(PathBuf, hopper::crashdetect::Crash),
+    /// Mods whose mixins failed while a game runs.
+    LiveWarnings(PathBuf, Vec<hopper::crashdetect::Suspect>),
     /// A job that reports only through its own progress line.
     Nothing,
 }
@@ -96,8 +101,8 @@ pub enum StoreEvent {
     /// Another Hopper asks to pair.
     PairRequest(hopper::peer::PairRequest),
     /// An instance's game crashed: (its name, the mod Hopper suspects most,
-    /// if any).
-    GameCrashed(String, Option<String>),
+    /// if any, whether the game is still open on its error screen).
+    GameCrashed(String, Option<String>, bool),
     /// The hosted-server scheduler did something: (message, is a problem).
     Schedule(String, bool),
     /// A play session of this instance was saved.
@@ -162,6 +167,10 @@ pub struct Store {
     running: HashMap<PathBuf, Running>,
     /// Each instance's last game crash, read from its file once asked for.
     crashes: HashMap<PathBuf, Option<hopper::crashdetect::Crash>>,
+    /// Crash reports already told while their game was still open.
+    live_told: HashMap<PathBuf, PathBuf>,
+    /// Mixin failures of each instance's current or last game.
+    warnings: HashMap<PathBuf, Vec<hopper::crashdetect::Suspect>>,
     jobs: Jobs,
     /// Notified when only a running job's detail or progress moved, which
     /// the tasks button shows: observing the store would redraw whole pages
@@ -264,11 +273,38 @@ impl Store {
         let watched = Arc::new(Mutex::new(Vec::new()));
         {
             let (watched, tx, wake) = (watched.clone(), tx.clone(), wake.clone());
+            let (tx2, wake2) = (tx.clone(), wake.clone());
+            // Running games' files: a crash report while the game is still
+            // open, and mixin failures as they're logged.
+            let live = Mutex::new(hopper::crashdetect::LiveWatch::default());
             hopper::game::watch(
                 move || watched.lock().map(|w| w.clone()).unwrap_or_default(),
                 move |r| {
                     let _ = tx.send(Msg::Running(r));
                     wake();
+                },
+                move |running| {
+                    let mut live = live.lock().unwrap_or_else(|e| e.into_inner());
+                    live.retain(&running.keys().cloned().collect::<Vec<_>>());
+                    for (root, r) in running {
+                        let dir = root.join("mods");
+                        let mods: Vec<String> = std::fs::read_dir(&dir)
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                            .map(|e| e.file_name().to_string_lossy().into_owned())
+                            .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+                            .collect();
+                        let news = live.look(root, r.started as i64, &mods, |f| hopper::deps::own_ids(&dir.join(f)).0);
+                        if let Some(c) = news.crash {
+                            let _ = tx2.send(Msg::LiveCrash(root.clone(), c));
+                            wake2();
+                        }
+                        if !news.warnings.is_empty() {
+                            let _ = tx2.send(Msg::LiveWarnings(root.clone(), news.warnings));
+                            wake2();
+                        }
+                    }
                 },
             );
         }
@@ -285,6 +321,8 @@ impl Store {
             instances: Vec::new(),
             running: HashMap::new(),
             crashes: HashMap::new(),
+            live_told: HashMap::new(),
+            warnings: HashMap::new(),
             jobs: Jobs::with_ticker(wake.clone(), tick),
             job_ticks: cx.new(|_| JobTicks),
             images: HashMap::new(),
@@ -637,6 +675,9 @@ impl Store {
                 } else if !self.running.is_empty() && now.is_empty() {
                     cx.emit(StoreEvent::GamesEnded);
                 }
+                for root in now.keys().filter(|k| !self.running.contains_key(*k)) {
+                    self.warnings.remove(root);
+                }
                 if self.settings.record_sessions {
                     for (root, r) in now.iter().filter(|(k, _)| !self.running.contains_key(*k)) {
                         self.record_session(root, r);
@@ -686,21 +727,34 @@ impl Store {
                     }
                 }
             }
+            Msg::LiveCrash(root, c) => {
+                hopper::crashdetect::save(&root, &c);
+                self.live_told.insert(root.clone(), c.source.clone());
+                if let Some(i) = self.instances.iter().find(|i| i.root == root) {
+                    let top = self.top_suspect(i, &c);
+                    cx.emit(StoreEvent::GameCrashed(i.name.clone(), top, true));
+                }
+                self.crashes.insert(root, Some(c));
+                cx.notify();
+            }
+            Msg::LiveWarnings(root, w) => {
+                let list = self.warnings.entry(root).or_default();
+                list.extend(w);
+                cx.notify();
+            }
             Msg::Crashed(root, c) => {
+                // Told already while the game was open: just keep it.
+                let told = self.live_told.remove(&root);
                 match &c {
                     Some(c) => hopper::crashdetect::save(&root, c),
                     // A game that ended fine clears the last crash.
                     None => hopper::crashdetect::clear(&root),
                 }
-                if let (Some(c), Some(i)) = (&c, self.instances.iter().find(|i| i.root == root)) {
-                    let top = c.suspects.first().map(|s| {
-                        i.addons
-                            .iter()
-                            .find(|a| a.file_name.eq_ignore_ascii_case(&s.file_name))
-                            .map(|a| a.name.clone())
-                            .unwrap_or_else(|| s.file_name.clone())
-                    });
-                    cx.emit(StoreEvent::GameCrashed(i.name.clone(), top));
+                if let (Some(c), Some(i)) = (&c, self.instances.iter().find(|i| i.root == root))
+                    && told.as_ref() != Some(&c.source)
+                {
+                    let top = self.top_suspect(i, c);
+                    cx.emit(StoreEvent::GameCrashed(i.name.clone(), top, false));
                 }
                 self.crashes.insert(root, c);
                 cx.notify();
@@ -993,6 +1047,22 @@ impl Store {
             .entry(root.to_path_buf())
             .or_insert_with(|| hopper::crashdetect::load(root))
             .as_ref()
+    }
+
+    /// The name of the mod a crash suspects most.
+    fn top_suspect(&self, i: &Instance, c: &hopper::crashdetect::Crash) -> Option<String> {
+        c.suspects.first().map(|s| {
+            i.addons
+                .iter()
+                .find(|a| a.file_name.eq_ignore_ascii_case(s.file_name.trim_end_matches(".disabled")))
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| s.file_name.clone())
+        })
+    }
+
+    /// Mods whose mixins failed in the instance's current or last game.
+    pub fn warnings(&self, root: &Path) -> &[hopper::crashdetect::Suspect] {
+        self.warnings.get(root).map_or(&[], Vec::as_slice)
     }
 
     /// Turns off the crash's Certain and Likely suspects that are on, and

@@ -529,6 +529,108 @@ fn match_jar(r: &Raw, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) -> Op
         .cloned()
 }
 
+/// Watches running games, every few seconds: a crash report written while
+/// the game is still open (NeoForge keeps its error screen up until it's
+/// closed), and mixin failures the log reports while you play.
+#[derive(Default)]
+pub struct LiveWatch {
+    /// Per running game (by folder): (start, crash report already told,
+    /// log bytes read, mods already warned about).
+    games: std::collections::HashMap<PathBuf, LiveGame>,
+}
+
+#[derive(Default)]
+struct LiveGame {
+    started: i64,
+    reported: Option<PathBuf>,
+    log_read: u64,
+    warned: Vec<String>,
+}
+
+/// What one look at a running game found.
+#[derive(Default)]
+pub struct LiveNews {
+    /// A crash report the game wrote while still open.
+    pub crash: Option<Crash>,
+    /// Mods whose mixins failed to apply, new since the last look.
+    pub warnings: Vec<Suspect>,
+}
+
+impl LiveWatch {
+    /// Forgets games that ended.
+    pub fn retain(&mut self, running: &[PathBuf]) {
+        self.games.retain(|k, _| running.contains(k));
+    }
+
+    /// Whether this game's crash was already told while it ran.
+    pub fn reported(&self, root: &Path) -> Option<&Path> {
+        self.games.get(root)?.reported.as_deref()
+    }
+
+    /// One look at the game in `root`, which started at `started`.
+    pub fn look(&mut self, root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> Vec<String>) -> LiveNews {
+        let g = self.games.entry(root.to_path_buf()).or_default();
+        if g.started != started {
+            *g = LiveGame { started, ..Default::default() };
+        }
+        let mut news = LiveNews::default();
+        // A crash report while it's open.
+        let newest = crate::logs::crash_reports(root)
+            .into_iter()
+            .find(|p| modified_secs(p).is_some_and(|t| t >= started));
+        if let Some(p) = newest
+            && g.reported.as_ref() != Some(&p)
+        {
+            g.reported = Some(p);
+            news.crash = detect(root, started, mods, &ids);
+        }
+        // New log lines: mixin failures.
+        let log = root.join("logs").join("latest.log");
+        let len = fs::metadata(&log).map_or(0, |m| m.len());
+        if len < g.log_read {
+            g.log_read = 0; // a new log
+        }
+        if len > g.log_read {
+            let text = read_from(&log, g.log_read, 1 << 20);
+            g.log_read = len;
+            for r in signals(&text).into_iter().filter(|r| r.why.contains("mixin")) {
+                let Some(file) = match_jar(&r, mods, &ids) else { continue };
+                if g.warned.contains(&file) {
+                    continue;
+                }
+                g.warned.push(file.clone());
+                news.warnings.push(Suspect {
+                    file_name: file,
+                    mod_id: r.mod_id,
+                    certainty: Certainty::Possible,
+                    why: "Its changes to the game's code (a mixin) failed to apply while you played. It may misbehave or crash later.".into(),
+                    needs: Vec::new(),
+                });
+            }
+        }
+        news
+    }
+}
+
+/// Up to `max` bytes of `p` from `from` (the newest ones when there are
+/// more), as text starting at a line.
+fn read_from(p: &Path, from: u64, max: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = fs::File::open(p) else { return String::new() };
+    let len = f.metadata().map_or(0, |m| m.len());
+    let start = from.max(len.saturating_sub(max));
+    let _ = f.seek(SeekFrom::Start(start));
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if start > from {
+        // Cut mid-line: drop the partial first line.
+        text.split_once('\n').map(|(_, r)| r.to_string()).unwrap_or_default()
+    } else {
+        text
+    }
+}
+
 pub fn load(root: &Path) -> Option<Crash> {
     serde_json::from_slice(&fs::read(root.join(FILE)).ok()?).ok()
 }
@@ -674,6 +776,42 @@ A detailed walkthrough of the error
         let files: Vec<&str> = c.suspects.iter().map(|s| s.file_name.as_str()).collect();
         assert_eq!(files, ["cool-1.0.jar", "other-2.0.jar"]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn live_watch_tells_a_crash_once_and_new_mixin_failures() {
+        let root = std::env::temp_dir().join(format!("hopper-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("crash-reports")).unwrap();
+        fs::create_dir_all(root.join("logs")).unwrap();
+        let mods = vec!["coolmod-1.0.jar".to_string(), "mobflowutilities-3.1.10.10-mc-1.21.1.jar".to_string()];
+        let ids = |f: &str| if f.starts_with("coolmod") { vec!["coolmod".to_string()] } else { Vec::new() };
+        let started = crate::time::now() - 5;
+        let mut w = LiveWatch::default();
+        fs::write(root.join("logs/latest.log"), "[main/INFO]: starting
+").unwrap();
+        let n = w.look(&root, started, &mods, ids);
+        assert!(n.crash.is_none() && n.warnings.is_empty());
+        // A mixin failure appears.
+        let mut log = fs::read_to_string(root.join("logs/latest.log")).unwrap();
+        log.push_str("[main/ERROR] [mixin/]: Mixin apply for mod coolmod failed coolmod.mixins.json:A
+");
+        fs::write(root.join("logs/latest.log"), &log).unwrap();
+        let n = w.look(&root, started, &mods, ids);
+        assert_eq!(n.warnings.len(), 1);
+        assert_eq!(n.warnings[0].file_name, "coolmod-1.0.jar");
+        // Not again.
+        log.push_str("[main/ERROR] [mixin/]: Mixin apply for mod coolmod failed coolmod.mixins.json:B
+");
+        fs::write(root.join("logs/latest.log"), &log).unwrap();
+        assert!(w.look(&root, started, &mods, ids).warnings.is_empty());
+        // A crash report while it's open: told once.
+        fs::write(root.join("crash-reports/crash-now-fml.txt"), LOADING).unwrap();
+        let n = w.look(&root, started, &mods, ids);
+        assert_eq!(n.crash.unwrap().suspects[0].file_name, mods[1]);
+        assert!(w.look(&root, started, &mods, ids).crash.is_none());
+        assert!(w.reported(&root).is_some());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
