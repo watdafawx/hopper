@@ -83,8 +83,9 @@ pub fn in_class(a: &Addon, class: u32) -> bool {
 fn col_check() -> Div {
     div().w_6().flex_none()
 }
+/// Wide enough for "Updating 100%" and the changelog arrow.
 fn col_action() -> Div {
-    div().w_32().flex_none()
+    div().w(rems(9.5)).flex_none()
 }
 fn col_author() -> Div {
     div().w_40().flex_none()
@@ -434,8 +435,29 @@ pub struct AddonsView {
     pub(crate) move_targets: Vec<(String, String)>,
     /// Whether the Author column fits; set each frame from the window.
     author_fits: bool,
+    /// Mods just updated, still shown (as Updated) until the user stops
+    /// clicking Update, so rows don't move under the pointer.
+    recent: HashMap<u64, Update>,
+    /// When an Update button was last clicked.
+    last_update_click: Option<std::time::Instant>,
+    /// The pointer is over the rows.
+    mouse_in_rows: bool,
+    /// Rows fading out now: (since, projects).
+    leaving: Option<(std::time::Instant, HashSet<u64>)>,
+    /// Rows sliding up into the room the leaving ones left: (generation,
+    /// since, rows of room by project).
+    slide: Option<(u64, std::time::Instant, HashMap<u64, usize>)>,
+    slide_gen: u64,
+    /// Redraws while updates run (button progress) and lets rows go.
+    _ticker: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
+
+/// How long the pointer must rest (no Update clicks) before Updated rows go.
+const UPDATED_LINGER: std::time::Duration = std::time::Duration::from_millis(1200);
+/// Updated rows fade out over this long, then the rows below slide up.
+const LEAVE: std::time::Duration = std::time::Duration::from_millis(350);
+const SLIDE: std::time::Duration = std::time::Duration::from_millis(220);
 
 impl AddonsView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -455,6 +477,7 @@ impl AddonsView {
             cx.observe(&peek, |_, _, cx| cx.notify()),
             cx.observe(&store, |this, _, cx| {
                 this.want_updates(cx);
+                this.pull_recent(cx);
                 this.sync(false, cx);
                 cx.notify();
             }),
@@ -490,6 +513,13 @@ impl AddonsView {
             scroll: UniformListScrollHandle::new(),
             peek,
             author_fits: true,
+            recent: HashMap::new(),
+            last_update_click: None,
+            mouse_in_rows: false,
+            leaving: None,
+            slide: None,
+            slide_gen: 0,
+            _ticker: None,
             _subscriptions: subs,
         }
     }
@@ -702,8 +732,19 @@ impl AddonsView {
         });
     }
 
-    /// Pending updates of this tab's class, by project.
+    /// Pending updates of this tab's class, by project, with the ones just
+    /// done (shown as Updated for a moment).
     fn updates(&self, inst: &Instance, cx: &App) -> HashMap<u64, Update> {
+        let mut out = self.pending_updates(inst, cx);
+        for (pid, u) in &self.recent {
+            if inst.addons.iter().any(|a| a.project_id == *pid && in_class(a, self.class)) {
+                out.insert(*pid, u.clone());
+            }
+        }
+        out
+    }
+
+    fn pending_updates(&self, inst: &Instance, cx: &App) -> HashMap<u64, Update> {
         match self.store.read(cx).updates(&inst.root) {
             Some(Updates::Ready(u)) => u
                 .iter()
@@ -716,6 +757,113 @@ impl AddonsView {
                 .collect(),
             _ => HashMap::new(),
         }
+    }
+
+    // ---- updated rows ------------------------------------------------------
+
+    /// Takes in updates a job just finished, to show them as Updated.
+    fn pull_recent(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let store = self.store.read(cx);
+        let mut added = false;
+        for u in store.recent_updates(&root) {
+            if !self.recent.contains_key(&u.project_id) {
+                self.recent.insert(u.project_id, u);
+                added = true;
+            }
+        }
+        let running = store.queues_updates(&root);
+        if added {
+            self.sync(true, cx);
+        }
+        if (running || !self.recent.is_empty()) && self._ticker.is_none() {
+            self.start_ticker(cx);
+        }
+    }
+
+    /// Ticks while updates run or Updated rows wait: repaints the buttons'
+    /// progress and lets rows go once the user is done clicking.
+    fn start_ticker(&mut self, cx: &mut Context<Self>) {
+        self._ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let go_on = this.update(cx, |this, cx| this.tick(cx)).unwrap_or(false);
+                if !go_on {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn tick(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(root) = self.root.clone() else {
+            self._ticker = None;
+            return false;
+        };
+        let now = std::time::Instant::now();
+        // Faded out: drop them, and slide the rows below up.
+        if let Some((since, ids)) = self.leaving.clone()
+            && now.duration_since(since) >= LEAVE
+        {
+            let order: Vec<u64> = self.row_projects();
+            let mut gone = 0;
+            let mut room = HashMap::new();
+            for pid in order {
+                if ids.contains(&pid) {
+                    gone += 1;
+                } else if gone > 0 {
+                    room.insert(pid, gone);
+                }
+            }
+            self.leaving = None;
+            self.drop_recent(&root, &ids, cx);
+            self.slide_gen += 1;
+            self.slide = (!room.is_empty()).then(|| (self.slide_gen, now, room));
+        }
+        if self.slide.as_ref().is_some_and(|(_, t, _)| now.duration_since(*t) >= SLIDE) {
+            self.slide = None;
+        }
+        // Done clicking: the pointer left the rows, or rested long enough.
+        let rested = self
+            .last_update_click
+            .is_none_or(|t| now.duration_since(t) >= UPDATED_LINGER);
+        if self.leaving.is_none() && !self.recent.is_empty() && (rested || !self.mouse_in_rows) {
+            let ids: HashSet<u64> = self.recent.keys().copied().collect();
+            if self.show == Show::Updates {
+                self.leaving = Some((now, ids));
+            } else {
+                // Elsewhere the row stays; only its Updated mark goes.
+                self.drop_recent(&root, &ids, cx);
+            }
+        }
+        cx.notify();
+        let running = self.store.read(cx).queues_updates(&root);
+        let more = running || !self.recent.is_empty() || self.leaving.is_some() || self.slide.is_some();
+        if !more {
+            self._ticker = None;
+        }
+        more
+    }
+
+    fn drop_recent(&mut self, root: &Path, ids: &HashSet<u64>, cx: &mut Context<Self>) {
+        self.recent.retain(|k, _| !ids.contains(k));
+        self.store.read(cx).forget_updates(root, ids);
+        self.sync(true, cx);
+    }
+
+    /// The table's projects, top to bottom.
+    fn row_projects(&self) -> Vec<u64> {
+        let Some(inst) = &self.table.inst else { return Vec::new() };
+        self.table
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Addon(i) => inst.addons.get(*i).map(|a| a.project_id),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Re-lists untracked jars when the mods folder changed.
@@ -1349,6 +1497,12 @@ impl AddonsView {
         updates: &HashMap<u64, Update>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let pending: HashMap<u64, Update> = updates
+            .iter()
+            .filter(|(k, _)| !self.recent.contains_key(k))
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        let updates = &pending;
         let of_class = || inst.addons.iter().filter(|a| in_class(a, self.class));
         let n_up = of_class()
             .filter(|a| updates.contains_key(&a.project_id))
@@ -1751,6 +1905,38 @@ impl AddonsView {
             .map(|(k, row)| (start + k, row))
             .map(|(ix, row)| {
                 let el = self.render_row(row, &inst, &updates, &active_rp, &active_shader, now, cx);
+                let pid = match row {
+                    Row::Addon(i) => inst.addons.get(*i).map(|a| a.project_id),
+                    _ => None,
+                };
+                let leaving = pid.is_some_and(|p| self.leaving.as_ref().is_some_and(|(_, ids)| ids.contains(&p)));
+                let slide = pid.and_then(|p| {
+                    let (g, _, room) = self.slide.as_ref()?;
+                    Some((*g, p, *room.get(&p)?))
+                });
+                let el: AnyElement = if leaving {
+                    div()
+                        .relative()
+                        .child(el)
+                        .with_animation(
+                            ElementId::Name(format!("leave-{}", pid.unwrap_or(0)).into()),
+                            Animation::new(LEAVE).with_easing(ease_in_out),
+                            |d, t| d.opacity(1.0 - t).left(rems(1.0 * t)),
+                        )
+                        .into_any_element()
+                } else if let Some((g, p, k)) = slide {
+                    div()
+                        .relative()
+                        .child(el)
+                        .with_animation(
+                            ElementId::Name(format!("slide-{g}-{p}").into()),
+                            Animation::new(SLIDE).with_easing(ease_out_quint()),
+                            move |d, t| d.top(rems(ROW_H * k as f32 * (1.0 - t))),
+                        )
+                        .into_any_element()
+                } else {
+                    el
+                };
                 div()
                     .relative()
                     // A click puts the keys on this row; with Ctrl it also
@@ -2062,21 +2248,48 @@ impl AddonsView {
                 )
             });
 
-        let action = col_action().when_some(update.cloned(), |c, u| {
+        let done = self.recent.contains_key(&a.project_id);
+        let progress = self
+            .root
+            .as_ref()
+            .filter(|_| updating == Some(true))
+            .and_then(|r| store.update_progress(r, a.project_id));
+        let (fill_color, ok_color) = (theme.primary.opacity(0.28), theme.success);
+        let action = col_action().when(done, |c| {
+            // Updated: a quiet green mark where the button was, until the
+            // row goes.
+            c.child(
+                h_flex()
+                    .id(id("updated"))
+                    .h(rems(1.75))
+                    .px_3()
+                    .gap_1p5()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(ok_color.opacity(0.5))
+                    .bg(ok_color.opacity(0.14))
+                    .text_color(ok_color)
+                    .text_sm()
+                    .font_medium()
+                    .child(Icon::new(IconName::Check).small())
+                    .child("Updated"),
+            )
+        }).when_some(update.cloned().filter(|_| !done), |c, u| {
             let tip = format!("{}  →  {}", u.from, u.file.file_name);
             let (pid, file) = (u.project_id, u.file.clone());
             let view = cx.entity();
-            c.child(widgets::split(
+            let split = widgets::split(
                 widgets::split_lead(
                         Button::new(id("update"))
                             .small()
                             .outline()
                             .icon(IconName::Download)
-                            .label(match updating {
-                                Some(true) => "Updating",
-                                Some(false) => "Queued",
-                                None if from_web => "From website",
-                                None => "Update",
+                            .label(match (updating, progress) {
+                                (Some(true), Some(p)) => format!("Updating {}%", (p * 100.0).floor() as u32),
+                                (Some(true), None) => "Updating".to_string(),
+                                (Some(false), _) => "Queued".to_string(),
+                                (None, _) if from_web => "From website".to_string(),
+                                (None, _) => "Update".to_string(),
                             })
                             .loading(updating == Some(true))
                             .tooltip(if from_web && updating.is_none() {
@@ -2092,7 +2305,9 @@ It stays disabled after updating: turn it on in the On column.")
                             })
                             .disabled(hold.is_some() || updating.is_some() || from_web)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_updates(vec![u.clone()], cx)
+                                this.last_update_click = Some(std::time::Instant::now());
+                                this.run_updates(vec![u.clone()], cx);
+                                this.pull_recent(cx);
                             })),
                 ),
                 id("changes"),
@@ -2101,7 +2316,25 @@ It stays disabled after updating: turn it on in the On column.")
                 "What changed",
                 move |_, window, cx| view.update(cx, |this, cx| this.versions(pid, Some(file.clone()), window, cx)),
                 cx,
-            ))
+            );
+            // The download fills the button from the left.
+            c.child(
+                div()
+                    .relative()
+                    .child(split)
+                    .when_some(progress, |d, p| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left_0()
+                                .w(relative(p.clamp(0.0, 1.0)))
+                                .rounded(px(5.))
+                                .bg(fill_color),
+                        )
+                    }),
+            )
         });
 
         let view = cx.entity();
@@ -2580,6 +2813,7 @@ impl Render for AddonsView {
         } else {
             div()
                 .id("addon-table")
+                .on_hover(cx.listener(|this, h: &bool, _, _| this.mouse_in_rows = *h))
                 .track_focus(&self.focus)
                 .key_context("AddonsTable")
                 .on_action(cx.listener(|this, _: &RowUp, _, cx| this.on_row_key(-1, cx)))

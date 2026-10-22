@@ -160,7 +160,7 @@ fn put_file(
     from_pack: bool,
     job: &Job,
 ) -> anyhow::Result<()> {
-    match fetch_file(&inst.root, m, f, from_pack, job, true)? {
+    match fetch_file(&inst.root, m, f, from_pack, job, true, &|_| {})? {
         Fetched::File(dest) => place_file(inst, m, f, from_pack, &dest),
         Fetched::Pending(p) => add_pending_note(&inst.root, p, job),
     }
@@ -183,6 +183,7 @@ fn fetch_file(
     from_pack: bool,
     job: &Job,
     bytes: bool,
+    tick: &(dyn Fn(u64) + Sync),
 ) -> anyhow::Result<Fetched> {
     let folder = folder_for_class(m.class_id.unwrap_or(cf::CLASS_MODS));
     let Ok(url) = cf::download_url(f) else {
@@ -211,6 +212,7 @@ fn fetch_file(
         if bytes && total > 0 {
             job.progress(n as usize, total as usize);
         }
+        tick(n);
     })?;
     Ok(Fetched::File(dest))
 }
@@ -732,6 +734,18 @@ fn modrinth_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
 /// Returns the download pages of files whose authors allow website
 /// downloads only, for the user to open.
 pub fn apply_updates(inst: &mut Instance, updates: &[Update], job: &Job) -> anyhow::Result<Vec<String>> {
+    apply_updates_with(inst, updates, job, &|_, _| {})
+}
+
+/// [`apply_updates`], telling `on` how each project goes:
+/// `(project, Some(0..=1))` as its file downloads, `(project, None)` once
+/// it's in place.
+pub fn apply_updates_with(
+    inst: &mut Instance,
+    updates: &[Update],
+    job: &Job,
+    on: &(dyn Fn(u64, Option<f32>) + Sync),
+) -> anyhow::Result<Vec<String>> {
     let todo: Vec<(cf::Mod, &Update, bool)> = updates
         .iter()
         .filter_map(|u| {
@@ -744,22 +758,30 @@ pub fn apply_updates(inst: &mut Instance, updates: &[Update], job: &Job) -> anyh
     let root = inst.root.clone();
     let one = todo.len() == 1;
     let got = crate::modpack::parallel(&todo, job, |_, (m, u, from_pack)| {
-        fetch_file(&root, m, &u.file, *from_pack, job, one)
+        let total = u.file.file_length.max(1) as f32;
+        on(u.project_id, Some(0.0));
+        fetch_file(&root, m, &u.file, *from_pack, job, one, &|n| {
+            on(u.project_id, Some((n as f32 / total).min(1.0)))
+        })
     });
     let mut pages = Vec::new();
     for ((m, u, from_pack), r) in todo.iter().zip(got) {
         // A disabled mod stays disabled (see `keep_history`).
         let r = r.and_then(|f| match f {
-            Fetched::File(dest) => place_file(inst, m, &u.file, *from_pack, &dest),
+            Fetched::File(dest) => place_file(inst, m, &u.file, *from_pack, &dest).map(|_| true),
             // Hopper's download window gets it; no note to act on.
             Fetched::Pending(p) => {
                 pages.push(p.url.clone());
-                crate::modpack::add_pending(&inst.root, &[p])
+                crate::modpack::add_pending(&inst.root, &[p]).map(|_| false)
             }
         });
-        if let Err(e) = r {
-            if !job.is_cancelled() {
-                job.note(format!("{}: {e:#}", u.name));
+        match r {
+            Ok(true) => on(u.project_id, None),
+            Ok(false) => {}
+            Err(e) => {
+                if !job.is_cancelled() {
+                    job.note(format!("{}: {e:#}", u.name));
+                }
             }
         }
     }

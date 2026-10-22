@@ -197,6 +197,9 @@ pub struct Store {
     /// Mod updates of instances an update job is running on: the batch
     /// it's on and what waits for it.
     update_queue: Arc<Mutex<HashMap<PathBuf, UpdateQueue>>>,
+    /// Mods updated by a job, by instance, until the mods table has shown
+    /// them as Updated and let them go ([`Store::forget_updates`]).
+    recent_updates: Arc<Mutex<HashMap<PathBuf, Vec<Update>>>>,
     /// Pages for the download window, and whether it's open.
     fetch_queue: Arc<Mutex<(bool, Vec<String>)>>,
     /// Image URLs waiting for the download workers.
@@ -294,6 +297,7 @@ impl Store {
             panel_stats: HashMap::new(),
             busy: Default::default(),
             update_queue: Default::default(),
+            recent_updates: Default::default(),
             fetch_queue: Default::default(),
             pending: HashMap::new(),
             local: Arc::new(hopper::hosting::LocalPanel::new()),
@@ -1559,9 +1563,11 @@ impl Store {
         let Some(mut inst) = self.instance(root).cloned() else {
             return;
         };
-        q.insert(root.to_path_buf(), UpdateQueue { active: Vec::new(), waiting: updates });
+        q.insert(root.to_path_buf(), UpdateQueue { active: Vec::new(), waiting: updates, progress: HashMap::new() });
         drop(q);
         let queue = self.update_queue.clone();
+        let recent = self.recent_updates.clone();
+        let wake = self.wake.clone();
         self.spawn_instance_job(&inst.root.clone(), format!("Updating mods in {}", inst.name), move |job| {
             let mut clear = ClearQueue(queue.clone(), Some(inst.root.clone()));
             let mut done: Vec<u64> = Vec::new();
@@ -1593,7 +1599,27 @@ impl Store {
                     std::mem::take(&mut e.waiting)
                 };
                 job.detail(format!("Downloading {} file{}", batch.len(), if batch.len() == 1 { "" } else { "s" }));
-                pages.extend(install::apply_updates(&mut inst, &batch, job).map_err(install::explain_locked)?);
+                // Each mod's progress for its Update button, and the
+                // finished ones for the table to show as Updated.
+                let by_id: HashMap<u64, Update> = batch.iter().map(|u| (u.project_id, u.clone())).collect();
+                let (q2, r2, root2, wake2) = (queue.clone(), recent.clone(), inst.root.clone(), wake.clone());
+                let on = move |pid: u64, p: Option<f32>| match p {
+                    Some(f) => {
+                        if let Some(e) = q2.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&root2) {
+                            e.progress.insert(pid, f);
+                        }
+                    }
+                    None => {
+                        if let Some(u) = by_id.get(&pid) {
+                            let mut r = r2.lock().unwrap_or_else(|e| e.into_inner());
+                            let list = r.entry(root2.clone()).or_default();
+                            list.retain(|x| x.project_id != pid);
+                            list.push(u.clone());
+                        }
+                        wake2();
+                    }
+                };
+                pages.extend(install::apply_updates_with(&mut inst, &batch, job, &on).map_err(install::explain_locked)?);
                 done.extend(batch.iter().map(|u| u.project_id));
             }
             job.detail(format!("Updated {} file{}", done.len(), if done.len() == 1 { "" } else { "s" }));
@@ -1672,6 +1698,29 @@ impl Store {
             Some(true)
         } else {
             e.waiting.iter().any(|u| u.project_id == project_id).then_some(false)
+        }
+    }
+
+    /// How far this project's update download is (0..=1), while it runs.
+    pub fn update_progress(&self, root: &Path, project_id: u64) -> Option<f32> {
+        let q = self.update_queue.lock().unwrap_or_else(|e| e.into_inner());
+        q.get(root)?.progress.get(&project_id).copied()
+    }
+
+    /// Mods an update job finished on this instance, not yet let go.
+    pub fn recent_updates(&self, root: &Path) -> Vec<Update> {
+        let r = self.recent_updates.lock().unwrap_or_else(|e| e.into_inner());
+        r.get(root).cloned().unwrap_or_default()
+    }
+
+    /// Lets go of finished updates the table no longer shows as Updated.
+    pub fn forget_updates(&self, root: &Path, ids: &std::collections::HashSet<u64>) {
+        let mut r = self.recent_updates.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(list) = r.get_mut(root) {
+            list.retain(|u| !ids.contains(&u.project_id));
+            if list.is_empty() {
+                r.remove(root);
+            }
         }
     }
 
@@ -2485,6 +2534,8 @@ pub fn open_path(path: &Path) {
 struct UpdateQueue {
     active: Vec<u64>,
     waiting: Vec<Update>,
+    /// How far each active download is, 0..=1.
+    progress: HashMap<u64, f32>,
 }
 
 impl UpdateQueue {
