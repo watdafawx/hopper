@@ -93,7 +93,25 @@ pub fn create_from_server_pack(
     check_folder(opts)?;
     job.detail("Finding the pack's server pack");
     let file = resolve_server_pack(inst)?;
-    create_from_zip(&file, Some(inst), opts, job)
+    let r = create_from_zip(&file, Some(inst), opts, job)?;
+    if let Some(p) = &inst.pack {
+        remember(&r, p.project_id, p.file_id, &file);
+    }
+    Ok(r)
+}
+
+/// Records which server pack a new server came from, so a later server
+/// pack update knows what the pack changed and what you did.
+fn remember(r: &ServerPackReport, project_id: u64, pack_file_id: u64, file: &cf::File) {
+    let m = crate::server_pack_update::Marker {
+        project_id,
+        pack_file_id,
+        server_pack_file_id: file.id,
+        server_pack: file.file_name.clone(),
+    };
+    if let Err(e) = crate::server_pack_update::record(&r.create.root, &m) {
+        log::warn!("recording the server pack: {e:#}");
+    }
 }
 
 /// What a pack's server files run on, read from the pack itself.
@@ -147,7 +165,11 @@ pub fn create_from_server_files(
     check_folder(opts)?;
     job.detail("Finding the pack's server files");
     let file = crate::browse::server_zip(files)?;
-    create_from_zip(&file, None, opts, job)
+    let r = create_from_zip(&file, None, opts, job)?;
+    if files.file.is_none() {
+        remember(&r, files.project, files.pack_file, &file);
+    }
+    Ok(r)
 }
 
 /// Refuses a nameless server and a folder that has something in it.
@@ -242,7 +264,7 @@ fn create_from_zip(
 
 /// Where the server's mods come from.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum ModSource {
+pub(crate) enum ModSource {
     /// The server pack carries this many jars under mods/.
     Included(usize),
     /// It downloads them at first start; the reason, for the note.
@@ -250,7 +272,7 @@ enum ModSource {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Action {
+pub(crate) enum Action {
     /// Copy to this path under the server folder.
     Copy(String),
     /// Merged by [`merge_pack_properties`].
@@ -262,10 +284,10 @@ enum Action {
 }
 
 #[derive(Clone, Debug)]
-struct Plan {
+pub(crate) struct Plan {
     /// One per zip entry, in zip order.
-    actions: Vec<Action>,
-    mods: ModSource,
+    pub(crate) actions: Vec<Action>,
+    pub(crate) mods: ModSource,
     /// Index of the server pack's server.properties.
     properties: Option<usize>,
 }
@@ -323,7 +345,7 @@ const CONTENT_DIRS: &[&str] = &[
     "versions",
 ];
 
-fn zip_names(zip_path: &Path) -> anyhow::Result<Vec<String>> {
+pub(crate) fn zip_names(zip_path: &Path) -> anyhow::Result<Vec<String>> {
     let z = zip::ZipArchive::new(fs::File::open(zip_path)?)
         .with_context(|| format!("{} isn't a readable zip", zip_path.display()))?;
     // In index order, so the plan's actions line up with `by_index`.
@@ -352,7 +374,7 @@ fn is_junk(name: &str) -> bool {
 
 /// The wrapping folder(s) to strip: while every file sits under one top
 /// folder that isn't itself content (mods/, config/...), strip it.
-fn wrapper_prefix(names: &[String]) -> String {
+pub(crate) fn wrapper_prefix(names: &[String]) -> String {
     let files: Vec<&str> = names
         .iter()
         .map(String::as_str)
@@ -412,7 +434,7 @@ fn classify(rel: &str) -> Action {
     }
 }
 
-fn plan(names: &[String]) -> Plan {
+pub(crate) fn plan(names: &[String]) -> Plan {
     let prefix = wrapper_prefix(names);
     let mut properties = None;
     let actions: Vec<Action> = names

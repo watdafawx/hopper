@@ -93,13 +93,13 @@ pub struct UpdatePlan {
     /// be told apart from the pack's. Without it every differing file is a
     /// conflict.
     pub base_known: bool,
-    new_zip: PathBuf,
+    pub(crate) new_zip: PathBuf,
     /// Override folders in the zip, later ones on top.
-    prefixes: Vec<String>,
+    pub(crate) prefixes: Vec<String>,
     /// Files already identical to the pack's.
-    same: Vec<String>,
+    pub(crate) same: Vec<String>,
     /// Merged contents of the `Merge` files.
-    merged: HashMap<String, Vec<u8>>,
+    pub(crate) merged: HashMap<String, Vec<u8>>,
 }
 
 impl UpdatePlan {
@@ -156,7 +156,7 @@ impl UpdatePlan {
     pub fn pack_file(&self, rel: &str) -> anyhow::Result<Vec<u8>> {
         let mut z = zip::ZipArchive::new(fs::File::open(&self.new_zip)?)?;
         for p in self.prefixes.iter().rev() {
-            let name = format!("{}/{rel}", p.trim_end_matches('/'));
+            let name = entry_name(p, rel);
             if let Ok(mut e) = z.by_name(&name) {
                 let mut b = Vec::new();
                 e.read_to_end(&mut b)?;
@@ -234,7 +234,7 @@ pub fn merge3(base: &str, yours: &str, theirs: &str) -> Option<String> {
 fn read_entry(zip: &Path, prefixes: &[String], rel: &str) -> Option<Vec<u8>> {
     let mut z = zip::ZipArchive::new(fs::File::open(zip).ok()?).ok()?;
     for p in prefixes.iter().rev() {
-        let name = format!("{}/{rel}", p.trim_end_matches('/'));
+        let name = entry_name(p, rel);
         if let Ok(mut e) = z.by_name(&name) {
             let mut b = Vec::new();
             e.read_to_end(&mut b).ok()?;
@@ -242,6 +242,14 @@ fn read_entry(zip: &Path, prefixes: &[String], rel: &str) -> Option<Vec<u8>> {
         }
     }
     None
+}
+
+/// `rel` under override folder `prefix` ("" for the zip's root).
+pub(crate) fn entry_name(prefix: &str, rel: &str) -> String {
+    match prefix.trim_end_matches('/') {
+        "" => rel.to_string(),
+        p => format!("{p}/{rel}"),
+    }
 }
 
 fn sha1_of(bytes: &[u8]) -> String {
@@ -288,6 +296,17 @@ pub fn plan_files(
     old: Option<&HashMap<String, String>>,
     new: &HashMap<String, String>,
     root: &Path,
+) -> (Vec<FileChange>, Vec<String>) {
+    plan_files_by(old, new, root, file_hash)
+}
+
+/// [`plan_files`] with hashes of the instance's files from `file_hash`,
+/// in the same form as `old` and `new`.
+pub fn plan_files_by(
+    old: Option<&HashMap<String, String>>,
+    new: &HashMap<String, String>,
+    root: &Path,
+    file_hash: impl Fn(&Path) -> Option<String>,
 ) -> (Vec<FileChange>, Vec<String>) {
     let mut changes = Vec::new();
     let mut same = Vec::new();

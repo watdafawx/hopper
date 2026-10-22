@@ -435,6 +435,32 @@ impl SyncPanel {
                     .when(!in_instance, |r| r.child(widgets::thumb(icon.as_deref(), rems(2.5), cx)))
                     .child(title)
                     .children(controls)
+                    .when(
+                        inst.pack
+                            .as_ref()
+                            .is_some_and(|p| p.project_id != 0 && !hopper::modrinth::is_mr(p.project_id)),
+                        |r| {
+                            let (server, inst) = (server.clone(), inst.clone());
+                            r.child(
+                                Button::new("server-pack-update")
+                                    .outline()
+                                    .small()
+                                    .icon(IconName::Package)
+                                    .label("Server pack update")
+                                    .tooltip("Update the server from the pack's server pack. Shows what changes in mods and config files first, like a pack update.")
+                                    .disabled(online || self.running)
+                                    .on_click(cx.listener(move |this, _, w, cx| {
+                                        crate::pack_update::open_server(
+                                            this.store.clone(),
+                                            server.clone(),
+                                            inst.clone(),
+                                            w,
+                                            cx,
+                                        )
+                                    })),
+                            )
+                        },
+                    )
                     .child({
                         let lead = Button::new("update-server")
                             .primary()

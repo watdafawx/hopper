@@ -292,6 +292,60 @@ pub fn remote_zip_names(url: &str, size: u64) -> anyhow::Result<Vec<String>> {
     names_from_ranges(size, |start, end| cf::fetch_range(url, start, end))
 }
 
+/// One file in a zip's central directory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ZipEntry {
+    /// With `/`.
+    pub name: String,
+    pub crc32: u32,
+    pub size: u64,
+    pub compressed: u64,
+    /// 0 stored, 8 deflate.
+    pub method: u16,
+    /// Where its local header starts.
+    pub offset: u64,
+}
+
+/// Every entry of a remote zip, from its central directory.
+pub fn remote_zip_entries(url: &str, size: u64) -> anyhow::Result<Vec<ZipEntry>> {
+    entries_from_ranges(size, |start, end| cf::fetch_range(url, start, end))
+}
+
+/// One small entry's contents from a remote zip, read by range.
+pub fn remote_zip_read(url: &str, e: &ZipEntry) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read as _;
+    if e.size > 16 << 20 || e.compressed > 16 << 20 {
+        bail!("{} is too large to read remotely", e.name);
+    }
+    let head = cf::fetch_range(url, e.offset, e.offset + 29)?;
+    if !sig_at(&head, 0, [0x50, 0x4b, 0x03, 0x04]) {
+        bail!("bad local header for {}", e.name);
+    }
+    let start = e.offset + 30 + u16_at(&head, 26)? + u16_at(&head, 28)?;
+    let data = if e.compressed == 0 {
+        Vec::new()
+    } else {
+        cf::fetch_range(url, start, start + e.compressed - 1)?
+    };
+    let out = match e.method {
+        0 => data,
+        8 => {
+            let mut out = Vec::with_capacity(e.size as usize);
+            flate2::read::DeflateDecoder::new(&data[..])
+                .take(e.size + 1)
+                .read_to_end(&mut out)?;
+            out
+        }
+        m => bail!("{} uses zip method {m}", e.name),
+    };
+    let mut crc = flate2::Crc::new();
+    crc.update(&out);
+    if crc.sum() != e.crc32 {
+        bail!("{} didn't check out (crc)", e.name);
+    }
+    Ok(out)
+}
+
 /// The central directory is read from the zip's last 4 MB, or fetched on
 /// its own when it starts earlier. Larger than this is not a server pack.
 const MAX_CD: u64 = 256 << 20;
@@ -302,6 +356,13 @@ fn names_from_ranges(
     size: u64,
     fetch: impl Fn(u64, u64) -> anyhow::Result<Vec<u8>>,
 ) -> anyhow::Result<Vec<String>> {
+    Ok(entries_from_ranges(size, fetch)?.into_iter().map(|e| e.name).collect())
+}
+
+fn entries_from_ranges(
+    size: u64,
+    fetch: impl Fn(u64, u64) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<Vec<ZipEntry>> {
     const TAIL: u64 = 4 * 1024 * 1024;
     if size < EOCD_LEN as u64 {
         bail!("not a zip ({size} bytes)");
@@ -330,7 +391,7 @@ fn names_from_ranges(
         }
         fetch(cd_offset, cd_end - 1)?
     };
-    parse_central_directory(&cd)
+    parse_entries(&cd)
 }
 
 const EOCD_LEN: usize = 22;
@@ -384,7 +445,12 @@ fn find_central_directory(tail: &[u8], tail_start: u64) -> anyhow::Result<(u64, 
     Ok((offset, size))
 }
 
+#[cfg(test)]
 fn parse_central_directory(cd: &[u8]) -> anyhow::Result<Vec<String>> {
+    Ok(parse_entries(cd)?.into_iter().map(|e| e.name).collect())
+}
+
+fn parse_entries(cd: &[u8]) -> anyhow::Result<Vec<ZipEntry>> {
     let mut names = Vec::new();
     let mut i = 0usize;
     while i.checked_add(46).is_some_and(|end| end <= cd.len())
@@ -399,7 +465,30 @@ fn parse_central_directory(cd: &[u8]) -> anyhow::Result<Vec<String>> {
         let name = cd
             .get(start..start + n)
             .ok_or_else(|| anyhow!("truncated central directory"))?;
-        names.push(String::from_utf8_lossy(name).replace('\\', "/"));
+        let mut e = ZipEntry {
+            name: String::from_utf8_lossy(name).replace('\\', "/"),
+            crc32: u32_at(cd, i + 16)? as u32,
+            compressed: u32_at(cd, i + 20)?,
+            size: u32_at(cd, i + 24)?,
+            method: u16_at(cd, i + 10)? as u16,
+            offset: u32_at(cd, i + 42)?,
+        };
+        // ZIP64: the extra field carries the values that didn't fit.
+        let (mut j, xend) = (start + n, start + n + x);
+        while j + 4 <= xend {
+            let (id, len) = (u16_at(cd, j)?, u16_at(cd, j + 2)? as usize);
+            if id == 1 {
+                let mut k = j + 4;
+                for v in [&mut e.size, &mut e.compressed, &mut e.offset] {
+                    if *v == 0xFFFF_FFFF && k + 8 <= j + 4 + len {
+                        *v = u64_at(cd, k)?;
+                        k += 8;
+                    }
+                }
+            }
+            j += 4 + len;
+        }
+        names.push(e);
         i = start + n + x + c;
     }
     Ok(names)

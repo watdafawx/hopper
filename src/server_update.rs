@@ -203,6 +203,28 @@ impl Report {
     }
 }
 
+/// Points the panel's own launch command for `server` (Crafty's Server
+/// Execution Command) at NeoForge `want`. What happened, if anything.
+pub fn point_panel(
+    server: &ServerInfo,
+    want: &str,
+    panel: &dyn crate::panel::ServerPanel,
+    job: &Job,
+) -> Option<String> {
+    job.detail(format!("Checking {}'s launch command", panel.name()));
+    let r = panel.servers().and_then(|list| match crate::panel::match_server(&list, server) {
+        Some(ps) => panel.use_neoforge(&ps.id, want),
+        None => Ok(None),
+    });
+    match r {
+        Ok(msg) => msg,
+        Err(e) => Some(format!(
+            "{0}'s launch command still names the old NeoForge ({e:#}). Change it to {want} in {0}",
+            panel.name()
+        )),
+    }
+}
+
 /// Brings `server` up to `inst`: loader first, then mods with the usual
 /// skip rules. Refuses while the server answers a ping. A `panel` that keeps
 /// its own launch command (Crafty's Server Execution Command) is pointed at
@@ -234,18 +256,7 @@ pub fn update_server(
     // The panel's copy of the launch line, checked even when run.bat was
     // already right (an earlier update, or a hand edit).
     if let (Some(want), Some(panel)) = (inst.loader.strip_prefix("neoforge-"), panel) {
-        job.detail(format!("Checking {}'s launch command", panel.name()));
-        let r = panel.servers().and_then(|list| match crate::panel::match_server(&list, server) {
-            Some(ps) => panel.use_neoforge(&ps.id, want),
-            None => Ok(None),
-        });
-        report.panel = match r {
-            Ok(msg) => msg,
-            Err(e) => Some(format!(
-                "{0}'s launch command still names the old NeoForge ({e:#}). Change it to {want} in {0}",
-                panel.name()
-            )),
-        };
+        report.panel = point_panel(server, want, panel, job);
     }
 
     // Mods.

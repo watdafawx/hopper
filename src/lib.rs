@@ -55,6 +55,7 @@ pub mod scan;
 pub mod server;
 pub mod server_update;
 pub mod serverpack;
+pub mod server_pack_update;
 pub mod secrets;
 pub mod selfupdate;
 pub mod settings;

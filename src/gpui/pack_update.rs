@@ -17,7 +17,10 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::cf;
+use hopper::instances::Instance;
 use hopper::packdiff::{FileAction, ModAction, UpdatePlan};
+use hopper::server::ServerInfo;
+use hopper::server_pack_update::ServerPlan;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -46,9 +49,24 @@ pub fn reopen(store: Entity<Store>, id: u64, window: &mut Window, cx: &mut App) 
     }
 }
 
+/// Server mode: a server updated from its pack's server pack.
+#[derive(Clone)]
+struct ServerTarget {
+    server: ServerInfo,
+    inst: Instance,
+    /// A newer pack version than the instance's, when there is one.
+    latest: Option<cf::File>,
+    /// Pack versions to pick from (newest first), once looked up.
+    targets: Vec<cf::File>,
+    pick: usize,
+    splan: Option<ServerPlan>,
+}
+
 pub struct UpdatePreview {
     store: Entity<Store>,
+    /// The folder being updated: the instance, or the server.
     root: PathBuf,
+    server: Option<ServerTarget>,
     from: String,
     plan: Option<Result<UpdatePlan, String>>,
     /// Conflicting files where the pack's copy wins.
@@ -102,6 +120,159 @@ impl UpdatePreview {
             .ok();
         })
         .detach();
+    }
+
+    /// Server mode: looks up the pack versions (first time), then compares
+    /// the picked one's server pack with the server.
+    fn plan_server(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = self.server.clone() else { return };
+        self.plan = None;
+        self.diffs.clear();
+        let job = self
+            .store
+            .read(cx)
+            .jobs()
+            .start(format!("Comparing {} with its server pack", t.server.name));
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    let r = (|| {
+                        let targets = if t.targets.is_empty() {
+                            hopper::server_pack_update::targets(&t.inst, t.latest.clone())?
+                        } else {
+                            t.targets.clone()
+                        };
+                        let pick = t.pick.min(targets.len() - 1);
+                        let p = hopper::server_pack_update::plan(&t.server, &t.inst, &targets[pick], &job)?;
+                        Ok::<_, anyhow::Error>((targets, p))
+                    })();
+                    job.finish(&r.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e:#}")));
+                    r.map_err(|e| format!("{e:#}"))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match r {
+                    Ok((targets, p)) => {
+                        this.take = p.plan.default_take();
+                        if p.plan.count(FileAction::Conflict) > 0 {
+                            this.open.insert(Group::Files(FileAction::Conflict));
+                        }
+                        this.from = p.base.clone().unwrap_or_else(|| "this server".into());
+                        this.plan = Some(Ok(p.plan.clone()));
+                        if let Some(t) = this.server.as_mut() {
+                            t.targets = targets;
+                            t.splan = Some(p);
+                        }
+                    }
+                    Err(e) => this.plan = Some(Err(e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn pick_target(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(t) = self.server.as_mut() else { return };
+        if t.pick == ix || t.targets.len() <= ix {
+            return;
+        }
+        t.pick = ix;
+        t.splan = None;
+        self.plan_server(cx);
+        cx.notify();
+    }
+
+    fn apply_server(view: &Entity<Self>, cx: &mut App) -> bool {
+        let v = view.read(cx);
+        let Some(t) = &v.server else { return false };
+        let Some(p) = t.splan.clone() else { return false };
+        let (server, take) = (t.server.clone(), v.take.clone());
+        let s = v.store.read(cx);
+        let host = s.settings().server_host.clone();
+        let java = hopper::launch::installer_java(std::path::Path::new(&s.settings().launcher_dir));
+        let panel = hopper::panel::from_settings(s.settings());
+        s.spawn_job(format!("{} → {}", server.name, p.plan.file.display_name), move |job| {
+            job.announce();
+            let r = hopper::server_pack_update::apply(&server, &p, &take, &host, &java, panel.as_deref(), job)?;
+            job.detail(r.summary());
+            if let Some(b) = &r.backups {
+                job.note(format!("Replaced and removed files: {}", b.display()));
+            }
+            Ok(crate::store::Msg::ServersChanged)
+        });
+        true
+    }
+
+    /// Server mode: the version choice, loader change and caveats.
+    fn server_notes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.server.as_ref()?;
+        let theme = cx.theme();
+        let warn = |text: String| {
+            h_flex()
+                .gap_2()
+                .text_sm()
+                .text_color(theme.warning)
+                .child(Icon::new(IconName::TriangleAlert).small())
+                .child(text)
+        };
+        let inst_file = t.inst.pack.as_ref().map_or(0, |p| p.file_id);
+        let mut c = v_flex().gap_2();
+        if t.targets.len() > 1 {
+            let labels: Vec<String> = t
+                .targets
+                .iter()
+                .map(|f| {
+                    let whose = if f.id == inst_file { "your instance" } else { "latest" };
+                    format!("{} ({whose})", f.display_name)
+                })
+                .collect();
+            c = c.child(
+                h_flex()
+                    .gap_3()
+                    .child(div().text_sm().child("Pack version"))
+                    .child(
+                        TabBar::new("server-target")
+                            .segmented()
+                            .xsmall()
+                            .selected_index(t.pick)
+                            .children(labels.into_iter().map(|l| Tab::new().label(l)))
+                            .on_click(cx.listener(|this, ix: &usize, _, cx| this.pick_target(*ix, cx))),
+                    ),
+            );
+        }
+        if let Some(f) = t.targets.get(t.pick).filter(|f| f.id != inst_file) {
+            c = c.child(warn(format!(
+                "Your instance is on another pack version. Players need {} to join: update the instance too.",
+                f.display_name
+            )));
+        }
+        if let Some(p) = &t.splan {
+            if let Some((from, to)) = &p.loader {
+                c = c.child(
+                    h_flex()
+                        .gap_2()
+                        .text_sm()
+                        .child(Icon::new(IconName::ServerCog).small().text_color(theme.info))
+                        .child(format!("NeoForge {from} → {to}: installed on the server, run.bat pointed at it.")),
+                );
+            }
+            if let Some(n) = &p.mods_note {
+                c = c.child(warn(n.clone()));
+            }
+            if p.plan.base_known && p.base_assumed {
+                let base = p.base.clone().unwrap_or_default();
+                c = c.child(
+                    widgets::caption(
+                        format!("No record of the server pack this server came from, so it's compared with {base} (your instance's version)."),
+                        cx,
+                    )
+                    .text_xs(),
+                );
+            }
+        }
+        Some(c.into_any_element())
     }
 
     fn toggle(&mut self, g: Group, cx: &mut Context<Self>) {
@@ -400,7 +571,11 @@ impl Render for UpdatePreview {
                 .py_4()
                 .child(Spinner::new().small())
                 .child(widgets::caption(
-                    "Downloading both pack versions and comparing them with your instance",
+                    if self.server.is_some() {
+                        "Downloading the server pack and comparing it with the server"
+                    } else {
+                        "Downloading both pack versions and comparing them with your instance"
+                    },
                     cx,
                 ))
                 .into_any_element(),
@@ -411,6 +586,7 @@ impl Render for UpdatePreview {
                 .into_any_element(),
             Some(Ok(plan)) => {
                 let plan = plan.clone();
+                let server_mode = self.server.is_some();
                 let mods: Vec<AnyElement> = [ModAction::Add, ModAction::Update, ModAction::Remove]
                     .into_iter()
                     .map(|a| self.mods_group(&plan, a, cx))
@@ -467,7 +643,11 @@ impl Render for UpdatePreview {
                                 .text_sm()
                                 .text_color(theme.warning)
                                 .child(Icon::new(IconName::TriangleAlert).small())
-                                .child("The installed pack version couldn't be downloaded, so every file that differs counts as both changed."),
+                                .child(if server_mode {
+                                    "Hopper can't tell which server pack this server came from, so every file that differs counts as both changed."
+                                } else {
+                                    "The installed pack version couldn't be downloaded, so every file that differs counts as both changed."
+                                }),
                         )
                     })
                     .child(
@@ -475,10 +655,24 @@ impl Render for UpdatePreview {
                             .gap_1()
                             .child(div().font_semibold().child("Mods"))
                             .children(mods)
-                            .child(widgets::caption(
-                                format!("{} mods you added stay as they are.", plan.kept_mods),
-                                cx,
-                            ).text_xs().pl(rems(1.5))),
+                            .children({
+                                let kept_text = if let Some(k) = self.server.as_ref().and_then(|t| t.splan.as_ref()).map(|p| p.kept) {
+                                    let mut t = format!("{} mods that aren't in the server pack stay.", k.added);
+                                    if k.yours > 0 {
+                                        t.push_str(&format!("\n{} mods where the server runs another version and the pack didn't change it keep the server's.", k.yours));
+                                    }
+                                    if k.left_off > 0 {
+                                        t.push_str(&format!("\n{} pack mods the server doesn't have stay off.", k.left_off));
+                                    }
+                                    t
+                                } else {
+                                    format!("{} mods you added stay as they are.", plan.kept_mods)
+                                };
+                                kept_text
+                                    .lines()
+                                    .map(|l| widgets::caption(l.to_string(), cx).text_xs().pl(rems(1.5)))
+                                    .collect::<Vec<_>>()
+                            }),
                     )
                     .child(
                         v_flex()
@@ -489,6 +683,7 @@ impl Render for UpdatePreview {
                     .into_any_element()
             }
         };
+        let notes = self.server_notes(cx);
         v_flex()
             .when(loaded, |c| c.h(total_h))
             .gap_3()
@@ -499,6 +694,7 @@ impl Render for UpdatePreview {
                 },
                 cx,
             ))
+            .children(notes)
             // Loaded, the list fills the window-tall dialog and scrolls;
             // before that the "comparing" line sizes itself (a flex child
             // with no height to share collapses to nothing).
@@ -553,6 +749,7 @@ fn show(
         let mut v = UpdatePreview {
             store,
             root,
+            server: None,
             from,
             plan: None,
             take: HashSet::new(),
@@ -595,5 +792,55 @@ fn show(
                     )),
             )
             .on_ok(move |_, _, cx| UpdatePreview::apply(&v2, cx))
+    });
+}
+
+/// Previews updating `server` (which runs `inst`) from the pack's server
+/// pack, then updates it.
+pub fn open_server(store: Entity<Store>, server: ServerInfo, inst: Instance, window: &mut Window, cx: &mut App) {
+    let latest = store.read(cx).pack_update(&inst).cloned();
+    let title = format!("Update {} from the server pack", server.name);
+    let view = cx.new(|cx| {
+        let mut v = UpdatePreview {
+            store,
+            root: server.root.clone(),
+            server: Some(ServerTarget {
+                server,
+                inst,
+                latest,
+                targets: Vec::new(),
+                pick: 0,
+                splan: None,
+            }),
+            from: "Finding the server pack".into(),
+            plan: None,
+            take: HashSet::new(),
+            open: HashSet::new(),
+            diffs: HashMap::new(),
+            mc_change: None,
+            backup_worlds: false,
+        };
+        v.plan_server(cx);
+        v
+    });
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let ready = view.read(cx).server.as_ref().is_some_and(|t| t.splan.is_some());
+        let v2 = view.clone();
+        dialog
+            .title(title.clone())
+            .w(rems(54.).to_pixels(window.rem_size()))
+            .child(view.clone())
+            .footer(
+                DialogFooter::new()
+                    .child(DialogClose::new().child(Button::new("supd-cancel").outline().label("Cancel")))
+                    .child(DialogAction::new().child(
+                        Button::new("supd-go")
+                            .primary()
+                            .icon(IconName::ServerCog)
+                            .label("Update server")
+                            .disabled(!ready),
+                    )),
+            )
+            .on_ok(move |_, _, cx| UpdatePreview::apply_server(&v2, cx))
     });
 }
