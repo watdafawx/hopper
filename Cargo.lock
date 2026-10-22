@@ -3463,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "hopper"
-version = "0.8.84"
+version = "0.8.85"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
