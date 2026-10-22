@@ -404,8 +404,47 @@ pub fn install(
 /// The project for a mod id a jar asks for ("geckolib"): Modrinth's slug,
 /// else a Modrinth or CurseForge search hit whose slug or name is that id.
 /// Only exact matches count, so a lookalike is never installed.
+fn squash_id(s: &str) -> String {
+    s.to_lowercase().replace(['-', '_', ' ', '.'], "")
+}
+
+/// Word endings library ids glue on ("cyclopscore", "codechickenlib")
+/// that their pages split off ("cyclops-core", "codechicken-lib").
+const ID_SUFFIXES: &[&str] = &["library", "core", "lib", "api", "config", "utils", "util"];
+
+/// `mod_id` with a glued-on ending split off: ("cyclops", "core").
+fn split_id_suffix(mod_id: &str) -> Option<(&str, &str)> {
+    ID_SUFFIXES.iter().find_map(|suf| {
+        let head = mod_id.strip_suffix(suf)?;
+        let head = head.trim_end_matches(['_', '-']);
+        (head.len() >= 3).then_some((head, *suf))
+    })
+}
+
+/// Modrinth slugs to try for a mod id, most likely first.
+fn slug_tries(mod_id: &str) -> Vec<String> {
+    let dashed = mod_id.replace('_', "-");
+    let mut tries = vec![mod_id.to_string(), dashed.clone()];
+    if let Some((head, suf)) = split_id_suffix(mod_id) {
+        tries.push(format!("{}-{suf}", head.replace('_', "-")));
+    }
+    tries.push(format!("{dashed}-api"));
+    tries.push(format!("{dashed}-lib"));
+    let mut seen = std::collections::HashSet::new();
+    tries.retain(|t| seen.insert(t.clone()));
+    tries
+}
+
+/// Whether a search hit's slug or name is the mod id. A trailing version
+/// tail on the slug is allowed (CurseForge's "codechicken-lib-1-8").
+fn hit_is_mod_id(want: &str, slug: &str, name: &str) -> bool {
+    let slug_sq = squash_id(slug);
+    let slug_trimmed = slug.trim_end_matches(|c: char| c.is_ascii_digit() || c == '-');
+    slug_sq == want || squash_id(name) == want || (slug_trimmed.len() < slug.len() && squash_id(slug_trimmed) == want)
+}
+
 pub fn project_for_mod_id(inst: &Instance, mod_id: &str) -> anyhow::Result<Option<cf::Mod>> {
-    let squash = |s: &str| s.to_lowercase().replace(['-', '_', ' ', '.'], "");
+    let squash = squash_id;
     let want = squash(mod_id);
     // Library ids whose pages are named differently.
     const ALIASES: &[(&str, &str)] = &[
@@ -422,12 +461,7 @@ pub fn project_for_mod_id(inst: &Instance, mod_id: &str) -> anyhow::Result<Optio
         ("ftblibrary", "ftb-library-forge"),
     ];
     let alias = ALIASES.iter().find(|(id, _)| *id == mod_id).map(|(_, s)| s.to_string());
-    let tries = alias.into_iter().chain([
-        mod_id.to_string(),
-        mod_id.replace('_', "-"),
-        format!("{}-api", mod_id.replace('_', "-")),
-        format!("{}-lib", mod_id.replace('_', "-")),
-    ]);
+    let tries = alias.into_iter().chain(slug_tries(mod_id));
     for slug in tries {
         if let Ok(p) = crate::modrinth::project(&slug)
             && p.project_type == "mod"
@@ -436,20 +470,25 @@ pub fn project_for_mod_id(inst: &Instance, mod_id: &str) -> anyhow::Result<Optio
             return Ok(Some(crate::modrinth::project_to_mod(&p, "")));
         }
     }
-    let search = cf::Search {
-        class_id: cf::CLASS_MODS,
-        text: mod_id.replace(['_', '-'], " "),
-        game_version: inst.game_version.clone(),
-        loader: loader_of(inst),
-        ..Default::default()
-    };
-    for modrinth in [true, false] {
-        let Ok((hits, _)) = crate::source::search(&search, modrinth) else { continue };
-        if let Some(m) = hits
-            .into_iter()
-            .find(|m| squash(&m.slug) == want || squash(&m.name) == want)
-        {
-            return Ok(Some(m));
+    // Search the id as typed, then with a glued-on ending split off
+    // ("cyclops core"), as search engines match whole words.
+    let mut texts = vec![mod_id.replace(['_', '-'], " ")];
+    if let Some((head, suf)) = split_id_suffix(mod_id) {
+        texts.push(format!("{} {suf}", head.replace(['_', '-'], " ")));
+    }
+    for text in texts {
+        let search = cf::Search {
+            class_id: cf::CLASS_MODS,
+            text,
+            game_version: inst.game_version.clone(),
+            loader: loader_of(inst),
+            ..Default::default()
+        };
+        for modrinth in [true, false] {
+            let Ok((hits, _)) = crate::source::search(&search, modrinth) else { continue };
+            if let Some(m) = hits.into_iter().find(|m| hit_is_mod_id(&want, &m.slug, &m.name)) {
+                return Ok(Some(m));
+            }
         }
     }
     Ok(None)
@@ -1333,6 +1372,69 @@ mod mod_id_lookup {
             let m = super::project_for_mod_id(&inst, id).unwrap();
             println!("{id} -> {:?}", m.map(|m| (m.name, m.slug, m.id)));
         }
+    }
+
+    /// Library ids that glue "core"/"lib" onto the name, which the slug
+    /// splits off. `cargo test --lib glued_suffix_ids_resolve -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn glued_suffix_ids_resolve() {
+        let inst = crate::instances::Instance {
+            game_version: "1.21.1".into(),
+            loader: "neoforge-21.1.256".into(),
+            ..Default::default()
+        };
+        for (id, name) in [("cyclopscore", "cyclops core"), ("codechickenlib", "codechicken")] {
+            let m = super::project_for_mod_id(&inst, id).unwrap().unwrap_or_else(|| panic!("{id} not found"));
+            println!("{id} -> {} ({}, {})", m.name, m.slug, m.id);
+            assert!(m.name.to_lowercase().contains(name), "{id} matched {}", m.name);
+            let f = super::best_file(m.id, m.class_id, &inst).unwrap();
+            let f = f.unwrap_or_else(|| panic!("{id}: no NeoForge 1.21.1 file"));
+            println!("  file {}", f.file_name);
+        }
+    }
+
+    #[test]
+    fn splits_glued_suffixes() {
+        use super::split_id_suffix as s;
+        assert_eq!(s("cyclopscore"), Some(("cyclops", "core")));
+        assert_eq!(s("codechickenlib"), Some(("codechicken", "lib")));
+        assert_eq!(s("puzzleslib"), Some(("puzzles", "lib")));
+        assert_eq!(s("ftblibrary"), Some(("ftb", "library")));
+        assert_eq!(s("cloth_config"), Some(("cloth", "config")));
+        // Too short to be a name on its own, or no known ending.
+        assert_eq!(s("core"), None);
+        assert_eq!(s("xlib"), None);
+        assert_eq!(s("geckolib"), Some(("gecko", "lib")));
+        assert_eq!(s("balm"), None);
+    }
+
+    #[test]
+    fn slug_tries_include_split_form() {
+        let t = super::slug_tries("cyclopscore");
+        assert_eq!(t[0], "cyclopscore");
+        assert!(t.contains(&"cyclops-core".to_string()));
+        let t = super::slug_tries("codechickenlib");
+        assert!(t.contains(&"codechicken-lib".to_string()));
+        // The id itself stays first, and nothing repeats.
+        let t = super::slug_tries("balm");
+        assert_eq!(t, ["balm", "balm-api", "balm-lib"]);
+        let t = super::slug_tries("cloth_config");
+        assert_eq!(t[..2], ["cloth_config", "cloth-config"]);
+        assert_eq!(t.iter().filter(|s| *s == "cloth-config").count(), 1);
+    }
+
+    #[test]
+    fn hits_match_by_slug_name_or_versioned_slug() {
+        use super::hit_is_mod_id as hit;
+        assert!(hit("cyclopscore", "cyclops-core", "Cyclops Core"));
+        assert!(hit("codechickenlib", "codechicken-lib-1-8", "CodeChicken Lib"));
+        assert!(hit("codechickenlib", "codechicken-lib-1-8", "Something Else"));
+        assert!(hit("balm", "balm", "Balm"));
+        // Lookalikes don't count.
+        assert!(!hit("codechickenlib", "codechickenlib-unofficial", "CodeChickenLib Unofficial 1.7.10"));
+        assert!(!hit("cyclopscore", "cyclops-core-addon", "Cyclops Core Addon"));
+        assert!(!hit("balm", "balmy", "Balmy"));
     }
 }
 
