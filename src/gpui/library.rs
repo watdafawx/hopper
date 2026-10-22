@@ -32,10 +32,8 @@ use std::time::{Duration, Instant};
 /// How long the tab underline and the hero's height take to move.
 const MOTION: Duration = Duration::from_millis(300);
 
-/// Hero heights in rem: the compact strip on most tabs, and the taller
-/// banner on Overview.
-const HERO: f32 = 5.5;
-const HERO_TALL: f32 = 17.5;
+/// The hero's height in rem, the same on every tab.
+const HERO: f32 = 9.5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstTab {
@@ -1419,10 +1417,9 @@ impl LibraryView {
         // First in the row on every tab, so it never moves.
         let play_small = Some(widgets::glow(play.min_w_24(), play_color, cx));
         let play_big: Option<Div> = None;
-        let compact = self.tab != InstTab::Overview;
         let actions = h_flex()
-                            .when(!compact, |r| r.flex_wrap())
-                            .when(compact, |r| r.flex_none().flex_nowrap())
+                            .flex_none()
+                            .flex_nowrap()
                             .gap_2()
                             .children(play_small)
                             .children(pack_update)
@@ -1431,8 +1428,7 @@ impl LibraryView {
                                 Button::new("folder")
                                     .outline()
                                     .icon(IconName::FolderOpen)
-                                    .when(!compact, |b| b.label("Folder"))
-                                    .when(compact, |b| b.tooltip("Open folder"))
+                                    .label("Folder")
                                     .on_click(move |_, _, _| store::open_path(&r_folder)),
                             )
                             .child(
@@ -1447,7 +1443,7 @@ impl LibraryView {
 
     /// The instance's header: its art large over a blurred copy of itself
     /// (made once, off the UI thread), state pills, name, actions and a
-    /// few figures. Taller on Overview, with the big Play button.
+    /// few figures. The same on every tab.
     fn hero(
         &self,
         inst: &Instance,
@@ -1461,7 +1457,6 @@ impl LibraryView {
         let theme = cx.theme();
         let glass = widgets::glass(cx);
         let dark = theme.mode.is_dark();
-        let overview = self.tab == InstTab::Overview;
 
         // State pills.
         let mut pills: Vec<Div> = Vec::new();
@@ -1561,46 +1556,7 @@ impl LibraryView {
                 r.child(fact(IconName::Tag, v))
             });
 
-        // Figures, on the trailing side.
-        let tiles = {
-            let mods = inst.addons.iter().filter(|a| in_class(a, cf::CLASS_MODS)).count();
-            let time = match store::played(inst.play_seconds) {
-                Some(t) => widgets::stat_tile(t, "Played", cx),
-                None => widgets::stat_tile(
-                    inst.last_played
-                        .as_deref()
-                        .map(hopper::time::relative)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "Never".into()),
-                    "Last played",
-                    cx,
-                ),
-            };
-            let size = match self.sizes.get(&inst.root) {
-                Some(Some(n)) => Some(widgets::stat_tile(hopper::instance_ops::human_bytes(*n), "Size", cx)),
-                _ => None,
-            };
-            // As many as fit beside the actions.
-            let room = match self.detail_w {
-                w if w >= 74.0 => 3,
-                w if w >= 58.0 => 2,
-                _ => 0,
-            };
-            h_flex()
-                .flex_none()
-                .gap_2p5()
-                .children(
-                    [Some(time), Some(widgets::stat_tile(mods.to_string(), "Mods", cx)), size]
-                        .into_iter()
-                        .flatten()
-                        .take(room),
-                )
-        };
-
         // The art: large, rounded, lifted off the backdrop.
-        let (art_to, art_from) = if overview { (9.5, 3.5) } else { (3.5, 9.5) };
-        let (h_to, h_from) = if overview { (HERO_TALL, HERO) } else { (HERO, HERO_TALL) };
-        let grow = self.moving() && (self.tab_from == InstTab::Overview) != overview;
         let art = div()
             .flex_none()
             .rounded(rems(1.))
@@ -1621,102 +1577,93 @@ impl LibraryView {
                     .text_color(theme.muted_foreground)
                     .child(Icon::new(IconName::Package).large()),
             });
-        let art = if grow {
-            art.with_animation(
-                ElementId::Name(format!("hero-art:{}", self.tab_serial).into()),
-                Animation::new(MOTION).with_easing(ease_out_quint()),
-                move |el, t| el.size(rems(art_from + (art_to - art_from) * t)),
-            )
-            .into_any_element()
-        } else {
-            art.size(rems(art_to)).into_any_element()
-        };
+        let art = art.size(rems(6.5));
 
-        // Off Overview: one strip. Title and pills on a line, then the facts
-        // with the figures after them, actions on the right.
-        let content = if !overview {
+        // The banner: pills over the title, the facts under it; on the right
+        // the figures in one box over the actions.
+        let content = {
             let mods = inst.addons.iter().filter(|a| in_class(a, cf::CLASS_MODS)).count();
-            let played = store::played(inst.play_seconds).unwrap_or_else(|| {
-                inst.last_played
-                    .as_deref()
-                    .map(hopper::time::relative)
-                    .filter(|s| !s.is_empty())
-                    .map_or_else(|| "Never played".into(), |t| format!("Played {t}"))
-            });
+            let (time, time_label) = match store::played(inst.play_seconds) {
+                Some(t) => (t, "Played"),
+                None => (
+                    inst.last_played
+                        .as_deref()
+                        .map(hopper::time::relative)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "Never".into()),
+                    "Last played",
+                ),
+            };
             let size = match self.sizes.get(&inst.root) {
                 Some(Some(n)) => Some(hopper::instance_ops::human_bytes(*n)),
                 _ => None,
             };
-            let figure = |icon: IconName, text: String| {
+            let room = match self.detail_w {
+                w if w >= 80.0 => 3,
+                w if w >= 64.0 => 2,
+                _ => 0,
+            };
+            let cells: Vec<(String, &str)> = [Some((time, time_label)), Some((mods.to_string(), "Mods")), size.map(|s| (s, "Size"))]
+                .into_iter()
+                .flatten()
+                .take(room)
+                .collect();
+            let line = white().opacity(0.08);
+            let stats = (!cells.is_empty()).then(|| {
                 h_flex()
                     .flex_none()
-                    .gap_1p5()
-                    .child(Icon::new(icon).xsmall().text_color(theme.muted_foreground))
-                    .child(text)
-            };
-            let facts = facts
-                .child(div().flex_none().w_px().h_3p5().bg(theme.foreground.opacity(0.18)))
-                .child(figure(IconName::Clock, played))
-                .child(figure(IconName::Puzzle, format!("{mods} mods")))
-                .when_some(size, |r, s| r.child(figure(IconName::HardDrive, s)));
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(line)
+                    .bg(black().opacity(if dark { 0.3 } else { 0.08 }))
+                    .children(cells.into_iter().enumerate().map(|(i, (v, l))| {
+                        v_flex()
+                            .min_w(rems(5.75))
+                            .px_4()
+                            .py_1p5()
+                            .when(i > 0, |c| c.border_l_1().border_color(line))
+                            .child(div().text_base().font_weight(FontWeight::BOLD).child(v))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child(l.to_uppercase()),
+                            )
+                    }))
+            });
             h_flex()
                 .absolute()
                 .inset_0()
                 .items_center()
-                .gap_4()
+                .gap_5()
                 .px_6()
                 .child(art)
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .gap_1()
+                        .gap_1p5()
+                        .child(h_flex().gap_1p5().flex_wrap().children(pills))
                         .child(
-                            h_flex()
-                                .min_w_0()
-                                .gap_2p5()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .text_size(rems(1.3))
-                                        .font_weight(FontWeight::EXTRA_BOLD)
-                                        .line_height(relative(1.2))
-                                        .truncate()
-                                        .child(inst.name.clone()),
-                                )
-                                .children(pills),
+                            div()
+                                .text_size(rems(1.65))
+                                .font_weight(FontWeight::EXTRA_BOLD)
+                                .line_height(relative(1.15))
+                                .truncate()
+                                .child(inst.name.clone()),
                         )
                         .child(facts),
                 )
-                .child(actions)
-        } else {
-            h_flex()
-            .absolute()
-            .inset_0()
-            .items_end()
-            .gap_6()
-            .px_8()
-            .pb_6()
-            .child(art)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .child(h_flex().gap_1p5().flex_wrap().children(pills))
-                    .child(
-                        div()
-                            .text_size(rems(if overview { 2.4 } else { 1.9 }))
-                            .font_weight(FontWeight::EXTRA_BOLD)
-                            .line_height(relative(1.15))
-                            .truncate()
-                            .child(inst.name.clone()),
-                    )
-                    .child(facts)
-                    .child(actions.pt_2()),
-            )
-            .child(tiles)
-            .children(play_big)
+                .child(
+                    v_flex()
+                        .flex_none()
+                        .items_end()
+                        .gap_3()
+                        .children(stats)
+                        .child(actions),
+                )
+                .children(play_big)
         };
 
         // The backdrop: the art blurred and stretched, faded into the page
@@ -1774,16 +1721,7 @@ impl LibraryView {
             })
             .child(backdrop)
             .child(content);
-        if grow {
-            hero.with_animation(
-                ElementId::Name(format!("hero-h:{}", self.tab_serial).into()),
-                Animation::new(MOTION).with_easing(ease_out_quint()),
-                move |el, t| el.h(rems(h_from + (h_to - h_from) * t)),
-            )
-            .into_any_element()
-        } else {
-            hero.h(rems(h_to)).into_any_element()
-        }
+        hero.h(rems(HERO)).into_any_element()
     }
 
     /// The tab strip, with an underline that slides from the last tab to
