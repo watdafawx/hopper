@@ -105,6 +105,22 @@ impl Page {
         }
     }
 
+    /// Its key in settings.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Page::Library => "library",
+            Page::Browse => "browse",
+            Page::Servers => "servers",
+            Page::Sync => "sync",
+            Page::Settings => "settings",
+        }
+    }
+
+    /// A start page from settings (Settings itself isn't one).
+    pub(crate) fn from_key(key: &str) -> Option<Page> {
+        Self::ALL.into_iter().find(|p| p.key() == key)
+    }
+
     fn icon(self) -> IconName {
         match self {
             Page::Library => IconName::LibraryBig,
@@ -330,6 +346,17 @@ impl AppView {
             _auto_restart: None,
             _subscriptions: subs,
         };
+        // Start where set in Settings, else where Hopper was left.
+        let start = {
+            let st = view.store.read(cx).settings();
+            let key = if st.start_page.is_empty() { &st.last_page } else { &st.start_page };
+            Page::from_key(key)
+        };
+        if let Some(p) = start
+            && p != Page::Library
+        {
+            view.go(p, cx);
+        }
         view.apply_args(window, cx);
         view._auto_restart = Some(Self::auto_restart(window, cx));
         crate::java_form::init_java_gets(&view.store, cx);
@@ -632,8 +659,22 @@ impl AppView {
             let fallback = self.library.read(cx).drop_target(cx).0;
             self.browse.update(cx, |b, cx| b.shown(fallback, cx));
         }
+        self.remember_page(cx);
         self.track(cx);
         cx.notify();
+    }
+
+    /// Saves the page shown, to start on it next time (not Settings).
+    fn remember_page(&mut self, cx: &mut Context<Self>) {
+        if self.page == Page::Settings {
+            return;
+        }
+        let key = self.page.key();
+        self.store.update(cx, |s, cx| {
+            if s.settings().last_page != key {
+                s.update_settings(|st| st.last_page = key.to_string(), cx);
+            }
+        });
     }
 
     /// Notes where the app is, for back and forward.
@@ -694,6 +735,7 @@ impl AppView {
                 let fallback = self.library.read(cx).drop_target(cx).0;
                 self.browse.update(cx, |b, cx| b.shown(fallback, cx));
             }
+            self.remember_page(cx);
         }
         match loc {
             Loc::Library(i, t, p) => self.library.update(cx, |l, cx| l.nav_restore(i, t, p, cx)),

@@ -176,7 +176,9 @@ use Category as C;
 /// Every setting, in page order. Rows take their label and description
 /// from here (some descriptions change with the state).
 const ENTRIES: &[Entry] = &[
-    e(C::General, "instance-tab", "Instances open on", "The tab an instance shows first when Hopper starts.", "overview mods tab start"),
+    e(C::General, "start-page", "Hopper opens on", "The page Hopper shows when it starts. Last used picks up where you left off.", "start page library browse servers sync resume continue last"),
+    e(C::General, "instance-tab", "Instances open on", "The tab an instance shows first when Hopper starts. Last used opens the tab you had open.", "overview mods tab start resume continue last"),
+    e(C::General, "browse-sort", "Browse sorts by", "How Browse orders results when it opens. Last used keeps the sort you picked last.", "sort order popularity downloads newest updated name featured last"),
     e(C::General, "dependents", "Mods others need", "Turning off a mod that others need, or turning on one that needs mods that are off.", "dependencies deps required library"),
     e(C::General, "delete-permanently", "Skip the Recycle Bin", "Deleted instances, worlds and backups are removed for good, so they don't fill up your C: drive. Off sends them to the Recycle Bin.", "delete recycle bin trash permanent disk space"),
     e(C::Accounts, "account", "Microsoft accounts", "Switch which one starts your games, add another, or sign one out.", "sign in login microsoft profile skin"),
@@ -817,6 +819,33 @@ impl SettingsPage {
             }))
     }
 
+    /// A picker over `options` (settings key, label) with "Last used"
+    /// (an empty key) first.
+    fn key_picker(
+        &self,
+        id: &'static str,
+        current: &str,
+        options: Vec<(String, String)>,
+        set: fn(&mut hopper::settings::Settings, String),
+        rem: Pixels,
+    ) -> impl IntoElement {
+        let mut all = vec![(String::new(), "Last used".to_string())];
+        all.extend(options);
+        let ix = all.iter().position(|(k, _)| k == current).unwrap_or(0);
+        let keys: Vec<String> = all.iter().map(|(k, _)| k.clone()).collect();
+        let store = self.store.clone();
+        div().w(rems(15.)).child(widgets::picker(
+            id,
+            all[ix].1.clone(),
+            all.iter().enumerate().map(|(i, (_, l))| (l.clone(), i == ix)).collect(),
+            rem,
+            Rc::new(move |i, _, cx| {
+                let v = keys.get(i).cloned().unwrap_or_default();
+                store.update(cx, |s, cx| s.update_settings(|st| set(st, v), cx));
+            }),
+        ))
+    }
+
     // ---- categories ----------------------------------------------------------------
 
     fn general(&self, s: &hopper::settings::Settings, rem: Pixels, cx: &mut Context<Self>) -> Vec<Block> {
@@ -829,16 +858,26 @@ impl SettingsPage {
         vec![Block::card(
             None,
             vec![
-                Row::new("instance-tab").control(segmented(
+                Row::new("start-page").control(self.key_picker(
+                    "start-page",
+                    &s.start_page,
+                    crate::app::Page::ALL.iter().map(|p| (p.key().to_string(), p.label().to_string())).collect(),
+                    |st, v| st.start_page = v,
+                    rem,
+                )),
+                Row::new("instance-tab").control(self.key_picker(
                     "instance-tab",
-                    &["Overview", "Mods"],
-                    usize::from(s.instance_opens_mods),
-                    cx.listener(|this, ix: &usize, _, cx| {
-                        let mods = *ix == 1;
-                        this.store.update(cx, |s, cx| {
-                            s.update_settings(|st| st.instance_opens_mods = mods, cx)
-                        });
-                    }),
+                    &s.instance_tab,
+                    crate::library::InstTab::ALL.iter().map(|t| (t.key(), t.label().to_string())).collect(),
+                    |st, v| st.instance_tab = v,
+                    rem,
+                )),
+                Row::new("browse-sort").control(self.key_picker(
+                    "browse-sort",
+                    &s.browse_sort,
+                    hopper::cf::SortField::ALL.iter().map(|f| (f.key().to_string(), f.name().to_string())).collect(),
+                    |st, v| st.browse_sort = v,
+                    rem,
                 )),
                 Row::new("dependents").control(div().w(rems(15.)).child(widgets::picker(
                     "dependents",
@@ -2116,21 +2155,6 @@ impl Row {
             })
             .into_any_element()
     }
-}
-
-/// Two or three choices side by side.
-fn segmented(
-    id: &'static str,
-    labels: &[&'static str],
-    selected: usize,
-    on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    TabBar::new(id)
-        .segmented()
-        .small()
-        .selected_index(selected)
-        .children(labels.iter().map(|l| Tab::new().label(*l)))
-        .on_click(on_pick)
 }
 
 fn warning(text: &'static str, cx: &App) -> impl IntoElement {

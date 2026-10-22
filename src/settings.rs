@@ -118,8 +118,21 @@ pub struct Settings {
     pub mcp_window: bool,
     /// Where servers Hopper hosts on this PC live.
     pub hosted_root: String,
-    /// The instance page opens on Mods instead of Overview.
-    pub instance_opens_mods: bool,
+    /// The page Hopper starts on: "library", "browse", "servers" or
+    /// "sync"; empty for the one left last.
+    pub start_page: String,
+    /// The page shown last (same keys), for an empty `start_page`.
+    pub last_page: String,
+    /// The tab an instance opens on (an instance tab's label, lowercase);
+    /// empty for the one shown last.
+    pub instance_tab: String,
+    /// The instance tab shown last, for an empty `instance_tab`.
+    pub last_tab: String,
+    /// Browse's sort ([`crate::cf::SortField::key`]); empty for the one
+    /// picked last.
+    pub browse_sort: String,
+    /// The Browse sort picked last, for an empty `browse_sort`.
+    pub last_sort: String,
     /// Turning a mod off or on that others depend on (or that needs mods
     /// that are off): "ask" (or empty), "all" to change them too, "only"
     /// to change just that mod.
@@ -306,7 +319,12 @@ impl Default for Settings {
             mcp_window: false,
             hosted_root: default_hosted_root(),
             launcher_dirs: Vec::new(),
-            instance_opens_mods: false,
+            start_page: String::new(),
+            last_page: String::new(),
+            instance_tab: String::new(),
+            last_tab: String::new(),
+            browse_sort: String::new(),
+            last_sort: String::new(),
             dependents: String::new(),
             delete_permanently: true,
             // A new user: Hopper shows its setup on the first start.

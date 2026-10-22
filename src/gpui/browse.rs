@@ -97,6 +97,13 @@ pub enum BrowseEvent {
 
 impl EventEmitter<BrowseEvent> for BrowseView {}
 
+/// The sort a fresh Browse starts on: the one set in Settings, else the
+/// one picked last.
+fn start_sort(st: &hopper::settings::Settings) -> SortField {
+    let key = if st.browse_sort.is_empty() { &st.last_sort } else { &st.browse_sort };
+    SortField::from_key(key).unwrap_or(SortField::Popularity)
+}
+
 pub struct BrowseView {
     store: Entity<Store>,
     /// Redraws a few times a second while installs run, for the Install
@@ -212,6 +219,7 @@ impl BrowseView {
                 _ => {}
             }),
         ];
+        let sort = start_sort(store.read(cx).settings());
         Self {
             install_tick: None,
             store,
@@ -221,7 +229,7 @@ impl BrowseView {
             text: String::new(),
             game_version: String::new(),
             loader: Loader::Any,
-            sort: SortField::Popularity,
+            sort,
             category: None,
             results: Vec::new(),
             total: 0,
@@ -562,7 +570,7 @@ impl BrowseView {
         self.category = None;
         self.game_version.clear();
         self.loader = Loader::Any;
-        self.sort = SortField::Popularity;
+        self.sort = start_sort(self.store.read(cx).settings());
         self.dest = None;
         self.selected = None;
         self.link_file = None;
@@ -2335,6 +2343,9 @@ impl BrowseView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.sort != f {
                             this.sort = f;
+                            this.store.update(cx, |s, cx| {
+                                s.update_settings(|st| st.last_sort = f.key().to_string(), cx)
+                            });
                             this.refilter(cx);
                         }
                     }))

@@ -52,7 +52,7 @@ pub(crate) enum InstTab {
 }
 
 impl InstTab {
-    const ALL: [InstTab; 12] = [
+    pub(crate) const ALL: [InstTab; 12] = [
         InstTab::Overview,
         InstTab::Mods,
         InstTab::ResourcePacks,
@@ -67,7 +67,7 @@ impl InstTab {
         InstTab::Performance,
     ];
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             InstTab::Overview => "Overview",
             InstTab::Mods => "Mods",
@@ -82,6 +82,15 @@ impl InstTab {
             InstTab::Logs => "Logs & crashes",
             InstTab::Performance => "Performance",
         }
+    }
+
+    /// Its key in settings.
+    pub(crate) fn key(self) -> String {
+        self.label().to_lowercase()
+    }
+
+    pub(crate) fn from_key(key: &str) -> Option<InstTab> {
+        Self::ALL.into_iter().find(|t| t.key() == key)
     }
 
     fn icon(self) -> IconName {
@@ -318,10 +327,12 @@ impl LibraryView {
                 }
             }),
         ];
-        let first_tab = if store.read(cx).settings().instance_opens_mods {
-            InstTab::Mods
-        } else {
-            InstTab::Overview
+        let first_tab = {
+            let st = store.read(cx).settings();
+            let key = if st.instance_tab.is_empty() { &st.last_tab } else { &st.instance_tab };
+            // Before "Last used", a switch picked Overview or Mods.
+            let old_mods = st.unknown.get("instance_opens_mods").and_then(|v| v.as_bool()) == Some(true);
+            InstTab::from_key(key).unwrap_or(if old_mods { InstTab::Mods } else { InstTab::Overview })
         };
         let mut view = Self {
             drag_width: None,
@@ -486,6 +497,12 @@ impl LibraryView {
             self.tab_serial += 1;
         }
         self.tab = tab;
+        let key = tab.key();
+        self.store.update(cx, |s, cx| {
+            if s.settings().last_tab != key {
+                s.update_settings(|st| st.last_tab = key, cx);
+            }
+        });
         self.want_tab_images(cx);
         cx.notify();
     }

@@ -109,6 +109,22 @@ impl SortField {
             SortField::Released => "Newest",
         }
     }
+
+    /// Its key in settings.
+    pub fn key(self) -> &'static str {
+        match self {
+            SortField::Featured => "featured",
+            SortField::Popularity => "popularity",
+            SortField::LastUpdated => "updated",
+            SortField::Name => "name",
+            SortField::TotalDownloads => "downloads",
+            SortField::Released => "newest",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<SortField> {
+        Self::ALL.into_iter().find(|f| f.key() == key)
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
