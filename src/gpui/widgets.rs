@@ -156,6 +156,8 @@ pub struct ModTags<'a> {
     pub env: &'a str,
     pub categories: &'a [String],
     pub modrinth: bool,
+    /// Named in the instance's last game crash: why.
+    pub crashed: Option<&'a str>,
 }
 
 /// Categories shown before the rest fold into "+n".
@@ -173,10 +175,19 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         _ => None,
     };
     let more = t.categories.len().saturating_sub(MOD_TAG_CATEGORIES);
+    let crashed = t.crashed.map(|why| {
+        let why = SharedString::from(why.to_string());
+        div()
+            .id(ElementId::Name(format!("crashed:{}", t.key).into()))
+            .flex_none()
+            .child(Tag::danger().xsmall().child("Crashed"))
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(why.clone()).build(w, cx))
+    });
     h_flex_row()
         .gap_1()
         .min_w_0()
         .overflow_hidden()
+        .children(crashed)
         .when(t.in_use, |r| r.child(tag(Tag::info(), "In use".into())))
         .when(t.new, |r| r.child(tag(Tag::success(), "New".into())))
         .when(t.added, |r| r.child(tag(Tag::warning(), "Yours".into())))

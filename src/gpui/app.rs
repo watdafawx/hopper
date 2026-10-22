@@ -178,12 +178,12 @@ impl AppView {
                         crate::tray::notify("Hopper", msg, true);
                     }
                 }
-                StoreEvent::GameCrashed(name) => {
-                    crate::tray::notify(
-                        &format!("{name} crashed"),
-                        "Open Hopper → Logs & crashes to see why.",
-                        true,
-                    );
+                StoreEvent::GameCrashed(name, top) => {
+                    let body = match top {
+                        Some(m) => format!("Hopper thinks {m} caused it. Open Hopper → Logs & crashes for more."),
+                        None => "Open Hopper → Logs & crashes to see why.".to_string(),
+                    };
+                    crate::tray::notify(&format!("{name} crashed"), &body, true);
                 }
                 StoreEvent::GamesEnded => {
                     if this.store.read(cx).settings().minimize_while_playing {

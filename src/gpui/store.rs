@@ -79,6 +79,8 @@ pub enum Msg {
     PackPage(u64, Result<(hopper::cf::Mod, Vec<hopper::richtext::Segment>, Vec<String>), String>),
     /// A play session was recorded for this instance.
     SessionSaved(PathBuf),
+    /// What an instance's last game crash names (`None`: it ended fine).
+    Crashed(PathBuf, Option<hopper::crashdetect::Crash>),
     /// A job that reports only through its own progress line.
     Nothing,
 }
@@ -93,8 +95,9 @@ pub enum StoreEvent {
     Link(String),
     /// Another Hopper asks to pair.
     PairRequest(hopper::peer::PairRequest),
-    /// An instance's game ended with a crash report (its name).
-    GameCrashed(String),
+    /// An instance's game crashed: (its name, the mod Hopper suspects most,
+    /// if any).
+    GameCrashed(String, Option<String>),
     /// The hosted-server scheduler did something: (message, is a problem).
     Schedule(String, bool),
     /// A play session of this instance was saved.
@@ -157,6 +160,8 @@ pub struct Store {
     settings: Settings,
     instances: Vec<Instance>,
     running: HashMap<PathBuf, Running>,
+    /// Each instance's last game crash, read from its file once asked for.
+    crashes: HashMap<PathBuf, Option<hopper::crashdetect::Crash>>,
     jobs: Jobs,
     /// Notified when only a running job's detail or progress moved, which
     /// the tasks button shows: observing the store would redraw whole pages
@@ -279,6 +284,7 @@ impl Store {
             settings,
             instances: Vec::new(),
             running: HashMap::new(),
+            crashes: HashMap::new(),
             jobs: Jobs::with_ticker(wake.clone(), tick),
             job_ticks: cx.new(|_| JobTicks),
             images: HashMap::new(),
@@ -651,16 +657,24 @@ impl Store {
                     if hopper::locked::flush(&root) > 0 {
                         self.handle(Msg::InstanceChanged(root.clone()), cx);
                     }
-                    // A crash report written since it started: it crashed.
-                    let crashed = hopper::logs::crash_reports(&root).first().is_some_and(|p| {
-                        std::fs::metadata(p)
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .is_some_and(|t| t.as_secs() >= started)
-                    });
-                    if crashed && let Some(i) = self.instances.iter().find(|i| i.root == root) {
-                        cx.emit(StoreEvent::GameCrashed(i.name.clone()));
+                    // Did it crash, and which mods does the crash name? Read
+                    // in the background: crash reports and logs run to MBs.
+                    if let Some(i) = self.instances.iter().find(|i| i.root == root) {
+                        let mods: Vec<String> = std::fs::read_dir(i.mods_dir())
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                            .map(|e| e.file_name().to_string_lossy().into_owned())
+                            .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+                            .collect();
+                        let (tx, wake, root, dir) = (self.tx.clone(), self.wake.clone(), root.clone(), i.mods_dir());
+                        std::thread::spawn(move || {
+                            let c = hopper::crashdetect::detect(&root, started as i64, &mods, |f| {
+                                hopper::deps::own_ids(&dir.join(f)).0
+                            });
+                            let _ = tx.send(Msg::Crashed(root, c));
+                            wake();
+                        });
                     }
                     // Count the session (sanity-capped at a day).
                     if let Some(i) = self.instances.iter_mut().find(|i| i.root == root) {
@@ -671,6 +685,25 @@ impl Store {
                         }
                     }
                 }
+            }
+            Msg::Crashed(root, c) => {
+                match &c {
+                    Some(c) => hopper::crashdetect::save(&root, c),
+                    // A game that ended fine clears the last crash.
+                    None => hopper::crashdetect::clear(&root),
+                }
+                if let (Some(c), Some(i)) = (&c, self.instances.iter().find(|i| i.root == root)) {
+                    let top = c.suspects.first().map(|s| {
+                        i.addons
+                            .iter()
+                            .find(|a| a.file_name.eq_ignore_ascii_case(&s.file_name))
+                            .map(|a| a.name.clone())
+                            .unwrap_or_else(|| s.file_name.clone())
+                    });
+                    cx.emit(StoreEvent::GameCrashed(i.name.clone(), top));
+                }
+                self.crashes.insert(root, c);
+                cx.notify();
             }
             Msg::Categories(found) => {
                 for k in found.keys() {
@@ -952,6 +985,20 @@ impl Store {
             return Some("a server hosted here is running".into());
         }
         None
+    }
+
+    /// The instance's last game crash, until a game ends fine.
+    pub fn crash(&mut self, root: &Path) -> Option<&hopper::crashdetect::Crash> {
+        self.crashes
+            .entry(root.to_path_buf())
+            .or_insert_with(|| hopper::crashdetect::load(root))
+            .as_ref()
+    }
+
+    /// Forgets the instance's last crash (the player dismissed it).
+    pub fn dismiss_crash(&mut self, root: &Path) {
+        hopper::crashdetect::clear(root);
+        self.crashes.insert(root.to_path_buf(), None);
     }
 
     pub fn running(&self, root: &Path) -> Option<&Running> {

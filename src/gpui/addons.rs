@@ -434,6 +434,8 @@ pub struct AddonsView {
     /// Mods just updated, still shown (as Updated) until the user stops
     /// clicking Update, so rows don't move under the pointer.
     recent: HashMap<u64, Update>,
+    /// Mods the instance's last game crash names: lower-case file name → why.
+    crashed: HashMap<String, String>,
     /// Clicks and pointer, for when Updated rows may go.
     pub(crate) settle: widgets::Settle,
     /// Missing mods installing from the banner: mod id → its job.
@@ -516,6 +518,7 @@ impl AddonsView {
             author_fits: true,
             recent: HashMap::new(),
             settle: Default::default(),
+            crashed: HashMap::new(),
             dep_jobs: HashMap::new(),
             dep_done: HashSet::new(),
             dep_leaving: None,
@@ -575,6 +578,25 @@ impl AddonsView {
     /// always, with `force`). All the disk reads the table needs happen
     /// here, never while rendering.
     fn sync(&mut self, force: bool, cx: &mut Context<Self>) {
+        // The last crash's mods, for their tag (read once, then cached).
+        if let Some(root) = self.root.clone() {
+            let c = self.store.update(cx, |s, _| s.crash(&root).cloned());
+            let now: HashMap<String, String> = c
+                .map(|c| {
+                    c.suspects
+                        .iter()
+                        .map(|s| {
+                            let file = s.file_name.trim_end_matches(".disabled").to_lowercase();
+                            (file, format!("{} in the last crash. {} (Logs & crashes has more.)", s.certainty.label(), s.why))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if now != self.crashed {
+                self.crashed = now;
+                cx.notify();
+            }
+        }
         let Some(root) = self.root.clone() else {
             self.table = Table::default();
             return;
@@ -2270,6 +2292,7 @@ impl AddonsView {
                 env: &a.env,
                 categories: store.categories(a),
                 modrinth: !a.mr_project.is_empty(),
+                crashed: self.crashed.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).map(String::as_str),
             },
             cx,
         );

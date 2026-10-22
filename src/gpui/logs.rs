@@ -12,7 +12,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::logs::{Level, crash_reports, crash_summary, is_problem, level, tail};
@@ -582,7 +582,11 @@ impl Render for LogsView {
             }));
 
         let body: AnyElement = if self.tab == LogTab::Help {
-            let crash = self.crash.as_ref().map(|c| {
+            // What Hopper read from the last crash, when it was one of
+            // Hopper's games; else the newest crash report as it is.
+            let detected = self.store.update(cx, |s, _| s.crash(&root).cloned());
+            let card = detected.map(|c| self.crash_card(&root, &c, cx));
+            let crash = self.crash.as_ref().filter(|_| card.is_none()).map(|c| {
                 let name = c.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 // When, so an old crash doesn't read as today's.
                 let when = c
@@ -624,7 +628,7 @@ impl Render for LogsView {
                 .id("logs-diagnosis")
                 .flex_1()
                 .min_h_0()
-                .child(v_flex().gap_4().pb_2().children(crash).child(self.help.clone()))
+                .child(v_flex().gap_4().pb_2().children(card).children(crash).child(self.help.clone()))
                 .overflow_y_scrollbar()
                 .into_any_element()
         } else if self.tab == LogTab::Crashes && self.crashes.is_empty() {
@@ -645,6 +649,141 @@ impl Render for LogsView {
 }
 
 impl LogsView {
+    /// The last game crash, as Hopper read it: what happened, and which mods
+    /// it names, each with how sure Hopper is and why.
+    fn crash_card(&mut self, root: &Path, c: &hopper::crashdetect::Crash, cx: &mut Context<Self>) -> AnyElement {
+        use gpui_kit::component::tag::Tag;
+        use hopper::crashdetect::{Certainty, CrashKind};
+        let theme = cx.theme().clone();
+        let store = self.store.read(cx);
+        let inst = store.instance(root);
+        // The mod's own name and icon for each suspect.
+        let addon = |file: &str| inst.and_then(|i| i.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(file)));
+        let named: Vec<(String, String)> = c
+            .suspects
+            .iter()
+            .filter(|s| !s.mod_id.is_empty())
+            .filter_map(|s| Some((s.mod_id.clone(), addon(&s.file_name)?.name.clone())))
+            .collect();
+        let rows: Vec<AnyElement> = c
+            .suspects
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let a = addon(&s.file_name);
+                let name = a
+                    .map(|a| a.name.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| s.file_name.trim_end_matches(".disabled").to_string());
+                let icon = a.and_then(|a| store.image(&a.icon)).map(Path::to_path_buf);
+                let pid = a.map_or(0, |a| a.project_id);
+                // Mod ids in the reason read as names.
+                let mut why = s.why.clone();
+                for (id, n) in &named {
+                    why = why.replace(&format!(" {id},"), &format!(" {n},")).replace(&format!(" {id} "), &format!(" {n} "));
+                }
+                let tag = match s.certainty {
+                    Certainty::Certain => Tag::danger(),
+                    Certainty::Likely => Tag::warning(),
+                    Certainty::Possible => Tag::secondary(),
+                };
+                let (store2, root2) = (self.store.clone(), root.to_path_buf());
+                h_flex()
+                    .gap_3()
+                    .items_start()
+                    .py_1()
+                    .child(
+                        widgets::mod_link(
+                            ElementId::Name(format!("crash-suspect:{i}").into()),
+                            name,
+                            icon.as_deref(),
+                            pid,
+                            move |project, _, cx| {
+                                let root = root2.clone();
+                                store2.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Peek { root, project }));
+                            },
+                            cx,
+                        )
+                        .w(rems(16.))
+                        .flex_none()
+                        .text_sm()
+                        .font_semibold(),
+                    )
+                    .child(div().flex_none().w(rems(5.)).child(tag.xsmall().outline().child(s.certainty.label())))
+                    .child(widgets::caption(why, cx).text_xs().flex_1().min_w_0().whitespace_normal())
+                    .into_any_element()
+            })
+            .collect();
+        let note: Option<&str> = match c.kind {
+            CrashKind::Mods => None,
+            CrashKind::Memory => Some("Java ran out of memory. Give this instance more in Settings › Memory."),
+            CrashKind::Native => Some("Java itself crashed. Try another Java in Settings › Java, or update your graphics driver."),
+            CrashKind::Unknown => Some("Hopper couldn't tell which mod. The crash report has the details."),
+        };
+        let has_report = c.source.extension().is_some_and(|e| e == "txt") && c.source.starts_with(root.join("crash-reports"));
+        let source = c.source.clone();
+        let root_d = root.to_path_buf();
+        callout(theme.danger, cx)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.danger))
+                    .child(div().font_semibold().text_color(theme.danger).child("The game crashed"))
+                    .child(widgets::caption(hopper::time::relative_secs(c.when), cx))
+                    .child(div().flex_1())
+                    .when(has_report, |r| {
+                        r.child(
+                            Button::new("crash-open-report")
+                                .small()
+                                .outline()
+                                .label("Crash report")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.tab_picked = true;
+                                    this.select(LogTab::Crashes, cx)
+                                })),
+                        )
+                    })
+                    .when(!has_report && source.is_file(), |r| {
+                        let p = source.clone();
+                        r.child(
+                            Button::new("crash-open-file")
+                                .small()
+                                .outline()
+                                .label("Open file")
+                                .on_click(move |_, _, _| open_path(&p)),
+                        )
+                    })
+                    .child(
+                        Button::new("crash-dismiss")
+                            .small()
+                            .ghost()
+                            .icon(IconName::X)
+                            .tooltip("Dismiss")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.store.update(cx, |s, cx| {
+                                    s.dismiss_crash(&root_d);
+                                    cx.notify();
+                                });
+                            })),
+                    ),
+            )
+            .when(!c.headline.is_empty(), |d| {
+                d.child(
+                    div()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(c.headline.clone()),
+                )
+            })
+            .when(!rows.is_empty(), |d| {
+                d.child(widgets::caption("Mods in this crash, most likely first:", cx).text_xs())
+                    .child(v_flex().children(rows))
+            })
+            .when_some(note, |d, n| d.child(div().text_sm().child(n)))
+            .into_any_element()
+    }
+
     /// A log tab: one toolbar, then the log filling the rest.
     fn log_body(&mut self, root: &Path, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
