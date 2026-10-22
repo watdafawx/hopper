@@ -4,8 +4,8 @@ use crate::model::{DiffAction, DiffEntry, DiffStatus, ModInfo};
 use crate::scan::{compare_versions, strip_version_suffix, version_from_file_name};
 use std::collections::{HashMap, HashSet};
 
-/// Mods that only make sense on a client. A substring match on the file name
-/// defaults them to "skip" instead of "copy to server".
+/// Mods that only make sense on a client. Used only when nothing else says
+/// which side a mod runs on; see `known_client_only` for the matching.
 const KNOWN_CLIENT_ONLY: &[&str] = &[
     "sodium",
     "iris",
@@ -116,14 +116,31 @@ fn skip_reason(m: &ModInfo) -> Option<String> {
     if let Some(r) = &m.wont_sync {
         return Some(r.clone());
     }
-    if m.side == "client" {
-        return Some("Client-only (the mod, CurseForge or Modrinth says so)".into());
+    match m.side.as_str() {
+        "client" => Some("Client-only (the mod, CurseForge or Modrinth says so)".into()),
+        // The jar or the site says the server needs it: trust that over the list.
+        "" => known_client_only(m).then(|| "Known client-only mod".into()),
+        _ => None,
     }
-    let f = m.file_name.to_lowercase();
-    KNOWN_CLIENT_ONLY
-        .iter()
-        .any(|p| f.contains(p))
-        .then(|| "Known client-only mod".into())
+}
+
+/// Lowercase words of a name: "Dynamic-FPS_3.9+mc" -> [dynamic, fps, 3, 9, mc].
+fn words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// A list entry matches whole words of the file name (so "emi" matches
+/// "emi-1.1.jar" but not "alchemistry"), or the mod id exactly.
+fn known_client_only(m: &ModInfo) -> bool {
+    let file = words(&m.file_name);
+    let id: String = words(&m.mod_id).concat();
+    KNOWN_CLIENT_ONLY.iter().any(|p| {
+        let p = words(p);
+        (!id.is_empty() && id == p.concat()) || file.windows(p.len()).any(|w| w == p.as_slice())
+    })
 }
 
 /// Matches each client jar to a server jar by file name, then by name without
@@ -287,6 +304,26 @@ mod tests {
         let d = compute_diff(&[jar("sodium-0.6.jar", "sodium", "0.6")], &[]);
         assert_eq!(d[0].action, DiffAction::Skip);
         assert!(d[0].skip_reason.is_some());
+    }
+
+    #[test]
+    fn list_matches_whole_words_only() {
+        let skip = |f: &str, id: &str| compute_diff(&[jar(f, id, "1")], &[])[0].action;
+        assert_eq!(skip("emi-1.1.18+1.21.1+neoforge.jar", "emi"), DiffAction::Skip);
+        assert_eq!(skip("dynamic-fps-3.9+minecraft-1.21.0-neoforge.jar", "dynamic_fps"), DiffAction::Skip);
+        assert_eq!(skip("Particular-1.21.1-NeoForge-1.2.jar", "particular"), DiffAction::Skip);
+        assert_eq!(skip("alchemistry-1.21.1-3.0.jar", "alchemistry"), DiffAction::CopyToServer);
+        assert_eq!(skip("premium_wood-1.0.jar", "premium_wood"), DiffAction::CopyToServer);
+        assert_eq!(skip("jeiintegration-1.0.jar", "jeiintegration"), DiffAction::CopyToServer);
+    }
+
+    #[test]
+    fn a_known_side_beats_the_list() {
+        let mut a = jar("emi-1.1.jar", "emi", "1.1");
+        a.side = "both".into();
+        let d = compute_diff(&[a], &[]);
+        assert_eq!(d[0].action, DiffAction::CopyToServer);
+        assert!(d[0].skip_reason.is_none());
     }
 
     #[test]

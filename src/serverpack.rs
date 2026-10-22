@@ -190,6 +190,11 @@ pub fn annotate(
         if !a.name.is_empty() {
             m.mod_name = a.name.clone();
         }
+        // The site says the server needs it: that outranks the built-in
+        // client-only list. A "client" tag stays a won't-sync (below).
+        if m.side.is_empty() && matches!(a.env.as_str(), "both" | "server") {
+            m.side = a.env.clone();
+        }
         if let Some((side, why)) = guessed.remove(&m.file_name) {
             // Overridden: no side, so nothing holds it back.
             let anyway = side == "client" && sync_anyway.contains(&a.project_id);
