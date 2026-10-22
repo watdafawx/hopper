@@ -141,7 +141,7 @@ impl TasksButton {
                 Icon::new(IconName::CircleCheck).small().text_color(theme.success).into_any_element()
             };
             // A finished comparison opens its review on click.
-            let review = j.done && j.error.is_none() && crate::pack_update::has_review(id);
+            let review = j.error.is_none() && crate::pack_update::has_review(id, j.done);
             let (store_r, me) = (store.clone(), me.clone());
             v_flex()
                 .id(ElementId::Name(format!("task-row-{id}").into()))

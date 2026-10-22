@@ -36,13 +36,31 @@ enum Group {
 type Review = (PathBuf, cf::File, Result<UpdatePlan, String>);
 static REVIEWS: std::sync::Mutex<Option<HashMap<u64, Review>>> = std::sync::Mutex::new(None);
 
-/// Whether job `id` left a review to open.
-pub fn has_review(id: u64) -> bool {
-    REVIEWS.lock().ok().and_then(|g| g.as_ref().map(|m| m.contains_key(&id))).unwrap_or(false)
+/// Server comparisons by job, from the moment they start: (what is
+/// compared, the result once there). The task list reopens one while it is
+/// still downloading, and the dialog follows the job instead of owning it.
+type ServerResult = Result<(Vec<cf::File>, ServerPlan), String>;
+type ServerReview = (ServerTarget, Option<ServerResult>);
+static SERVER_REVIEWS: std::sync::Mutex<Option<HashMap<u64, ServerReview>>> = std::sync::Mutex::new(None);
+
+fn server_reviews<T>(f: impl FnOnce(&mut HashMap<u64, ServerReview>) -> T) -> T {
+    let mut g = SERVER_REVIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    f(g.get_or_insert_with(HashMap::new))
 }
 
-/// Opens the review job `id` made, without comparing again.
+/// Whether job `id` has a review to open: a finished pack comparison, or
+/// a server comparison, finished or still running.
+pub fn has_review(id: u64, done: bool) -> bool {
+    (done && REVIEWS.lock().ok().and_then(|g| g.as_ref().map(|m| m.contains_key(&id))).unwrap_or(false))
+        || server_reviews(|m| m.contains_key(&id))
+}
+
+/// Opens the review job `id` made (or is making), without comparing again.
 pub fn reopen(store: Entity<Store>, id: u64, window: &mut Window, cx: &mut App) {
+    if let Some((t, _)) = server_reviews(|m| m.get(&id).cloned()) {
+        show_server(store, t, Some(id), window, cx);
+        return;
+    }
     let review = REVIEWS.lock().ok().and_then(|g| g.as_ref().and_then(|m| m.get(&id).cloned()));
     if let Some((root, file, plan)) = review {
         show(store, root, file, Some(plan), window, cx);
@@ -60,6 +78,10 @@ struct ServerTarget {
     targets: Vec<cf::File>,
     pick: usize,
     splan: Option<ServerPlan>,
+    /// The comparison job this dialog follows.
+    job: Option<u64>,
+    /// That job's detail and progress while it runs.
+    status: Option<(String, Option<f32>)>,
 }
 
 pub struct UpdatePreview {
@@ -125,52 +147,95 @@ impl UpdatePreview {
     /// Server mode: looks up the pack versions (first time), then compares
     /// the picked one's server pack with the server.
     fn plan_server(&mut self, cx: &mut Context<Self>) {
-        let Some(t) = self.server.clone() else { return };
+        let Some(t) = self.server.as_mut() else { return };
+        t.splan = None;
+        t.status = None;
         self.plan = None;
         self.diffs.clear();
-        let job = self
-            .store
-            .read(cx)
-            .jobs()
-            .start(format!("Comparing {} with its server pack", t.server.name));
-        cx.spawn(async move |this, cx| {
-            let r = cx
-                .background_spawn(async move {
-                    let r = (|| {
-                        let targets = if t.targets.is_empty() {
-                            hopper::server_pack_update::targets(&t.inst, t.latest.clone())?
-                        } else {
-                            t.targets.clone()
-                        };
-                        let pick = t.pick.min(targets.len() - 1);
-                        let p = hopper::server_pack_update::plan(&t.server, &t.inst, &targets[pick], &job)?;
-                        Ok::<_, anyhow::Error>((targets, p))
-                    })();
-                    job.finish(&r.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e:#}")));
-                    r.map_err(|e| format!("{e:#}"))
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                match r {
-                    Ok((targets, p)) => {
-                        this.take = p.plan.default_take();
-                        if p.plan.count(FileAction::Conflict) > 0 {
-                            this.open.insert(Group::Files(FileAction::Conflict));
-                        }
-                        this.from = p.base.clone().unwrap_or_else(|| "this server".into());
-                        this.plan = Some(Ok(p.plan.clone()));
-                        if let Some(t) = this.server.as_mut() {
-                            t.targets = targets;
-                            t.splan = Some(p);
-                        }
-                    }
-                    Err(e) => this.plan = Some(Err(e)),
+        let jobs = self.store.read(cx).jobs().clone();
+        let job = jobs.start(format!("Comparing {} with its server pack", t.server.name));
+        let id = job.id();
+        t.job = Some(id);
+        let t = t.clone();
+        server_reviews(|m| m.insert(id, (t.clone(), None)));
+        // Runs on its own: closing the dialog doesn't stop it.
+        cx.background_spawn(async move {
+            let r = (|| {
+                let targets = if t.targets.is_empty() {
+                    hopper::server_pack_update::targets(&t.inst, t.latest.clone())?
+                } else {
+                    t.targets.clone()
+                };
+                let pick = t.pick.min(targets.len() - 1);
+                let p = hopper::server_pack_update::plan(&t.server, &t.inst, &targets[pick], &job)?;
+                Ok::<_, anyhow::Error>((targets, p))
+            })();
+            job.finish(&r.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e:#}")));
+            match r {
+                Ok(r) => {
+                    server_reviews(|m| m.get_mut(&id).map(|e| e.1 = Some(Ok(r))));
+                    job.detail("Ready to review: click to open");
                 }
-                cx.notify();
-            })
-            .ok();
+                // A failed job isn't reopened; the open dialog shows why.
+                Err(e) => {
+                    server_reviews(|m| m.get_mut(&id).map(|e2| e2.1 = Some(Err(format!("{e:#}")))));
+                }
+            }
         })
         .detach();
+        self.follow(cx);
+    }
+
+    /// Shows the followed job's progress until its result is in.
+    fn follow(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.server.as_ref().and_then(|t| t.job) else { return };
+        cx.spawn(async move |this, cx| {
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        let Some(t) = this.server.as_mut() else { return true };
+                        if t.job != Some(id) {
+                            return true; // another version was picked
+                        }
+                        let state = this.store.read(cx).jobs().snapshot().into_iter().find(|j| j.id == id);
+                        t.status = state.map(|j| (j.detail, j.progress));
+                        let result = server_reviews(|m| m.get(&id).and_then(|e| e.1.clone()));
+                        if let Some(r) = result {
+                            this.take_result(id, r);
+                        }
+                        cx.notify();
+                        this.plan.is_some()
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            }
+        })
+        .detach();
+    }
+
+    fn take_result(&mut self, id: u64, r: ServerResult) {
+        match r {
+            Ok((targets, p)) => {
+                self.take = p.plan.default_take();
+                if p.plan.count(FileAction::Conflict) > 0 {
+                    self.open.insert(Group::Files(FileAction::Conflict));
+                }
+                self.from = p.base.clone().unwrap_or_else(|| "this server".into());
+                self.plan = Some(Ok(p.plan.clone()));
+                if let Some(t) = self.server.as_mut() {
+                    t.targets = targets;
+                    t.splan = Some(p);
+                    t.status = None;
+                }
+            }
+            Err(e) => {
+                server_reviews(|m| m.remove(&id));
+                self.plan = Some(Err(e));
+            }
+        }
     }
 
     fn pick_target(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -179,7 +244,11 @@ impl UpdatePreview {
             return;
         }
         t.pick = ix;
-        t.splan = None;
+        // The other version's comparison is no longer wanted.
+        if let Some(old) = t.job.take() {
+            server_reviews(|m| m.remove(&old));
+            self.store.read(cx).jobs().cancel(old);
+        }
         self.plan_server(cx);
         cx.notify();
     }
@@ -188,6 +257,9 @@ impl UpdatePreview {
         let v = view.read(cx);
         let Some(t) = &v.server else { return false };
         let Some(p) = t.splan.clone() else { return false };
+        if let Some(id) = t.job {
+            server_reviews(|m| m.remove(&id));
+        }
         let (server, take) = (t.server.clone(), v.take.clone());
         let s = v.store.read(cx);
         let host = s.settings().server_host.clone();
@@ -566,16 +638,46 @@ impl Render for UpdatePreview {
         let loaded = matches!(self.plan, Some(Ok(_)));
         let theme = cx.theme();
         let body: AnyElement = match &self.plan {
+            None if self.server.is_some() => {
+                let (detail, progress) = self
+                    .server
+                    .as_ref()
+                    .and_then(|t| t.status.clone())
+                    .unwrap_or_else(|| ("Finding the server pack".into(), None));
+                let id = self.server.as_ref().and_then(|t| t.job).unwrap_or(0);
+                v_flex()
+                    .gap_2()
+                    .py_3()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Spinner::new().small())
+                            .child(div().text_sm().min_w_0().truncate().child(detail)),
+                    )
+                    .child(
+                        gpui_kit::component::progress::Progress::new(ElementId::Name(
+                            format!("server-pack-bar-{id}").into(),
+                        ))
+                        .loading(progress.is_none())
+                        .value(progress.unwrap_or(0.) * 100.),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .pt_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(Icon::new(IconName::Info).xsmall())
+                            .child("You can close this window: the download keeps going. Open it again from the task list (the download icon, top right), or with Server pack update."),
+                    )
+                    .into_any_element()
+            }
             None => h_flex()
                 .gap_2()
                 .py_4()
                 .child(Spinner::new().small())
                 .child(widgets::caption(
-                    if self.server.is_some() {
-                        "Downloading the server pack and comparing it with the server"
-                    } else {
-                        "Downloading both pack versions and comparing them with your instance"
-                    },
+                    "Downloading both pack versions and comparing them with your instance",
                     cx,
                 ))
                 .into_any_element(),
@@ -687,13 +789,13 @@ impl Render for UpdatePreview {
         v_flex()
             .when(loaded, |c| c.h(total_h))
             .gap_3()
-            .child(widgets::caption(
-                match &self.plan {
+            .children({
+                let caption = match &self.plan {
                     Some(Ok(p)) => format!("{}  →  {}", self.from, p.file.file_name),
                     _ => self.from.clone(),
-                },
-                cx,
-            ))
+                };
+                (!caption.is_empty()).then(|| widgets::caption(caption, cx))
+            })
             .children(notes)
             // Loaded, the list fills the window-tall dialog and scrolls;
             // before that the "comparing" line sizes itself (a flex child
@@ -798,21 +900,43 @@ fn show(
 /// Previews updating `server` (which runs `inst`) from the pack's server
 /// pack, then updates it.
 pub fn open_server(store: Entity<Store>, server: ServerInfo, inst: Instance, window: &mut Window, cx: &mut App) {
+    // A comparison for this server still running: show that one rather
+    // than downloading again. A finished one may be stale: compare anew.
+    let running = server_reviews(|m| {
+        m.iter()
+            .filter(|(_, (t, r))| t.server.root == server.root && r.is_none())
+            .max_by_key(|(id, _)| **id)
+            .map(|(id, (t, _))| (*id, t.clone()))
+    });
+    if let Some((id, t)) = running {
+        show_server(store, t, Some(id), window, cx);
+        return;
+    }
     let latest = store.read(cx).pack_update(&inst).cloned();
+    let t = ServerTarget {
+        server,
+        inst,
+        latest,
+        targets: Vec::new(),
+        pick: 0,
+        splan: None,
+        job: None,
+        status: None,
+    };
+    show_server(store, t, None, window, cx);
+}
+
+/// The server pack dialog for `t`: following comparison `job`, or starting
+/// one when `None`.
+fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: &mut Window, cx: &mut App) {
+    let server = t.server.clone();
     let title = format!("Update {} from the server pack", server.name);
     let view = cx.new(|cx| {
         let mut v = UpdatePreview {
             store,
             root: server.root.clone(),
-            server: Some(ServerTarget {
-                server,
-                inst,
-                latest,
-                targets: Vec::new(),
-                pick: 0,
-                splan: None,
-            }),
-            from: "Finding the server pack".into(),
+            server: Some(ServerTarget { job, ..t }),
+            from: String::new(),
             plan: None,
             take: HashSet::new(),
             open: HashSet::new(),
@@ -820,7 +944,10 @@ pub fn open_server(store: Entity<Store>, server: ServerInfo, inst: Instance, win
             mc_change: None,
             backup_worlds: false,
         };
-        v.plan_server(cx);
+        match job {
+            Some(_) => v.follow(cx),
+            None => v.plan_server(cx),
+        }
         v
     });
     window.open_dialog(cx, move |dialog, window, cx| {

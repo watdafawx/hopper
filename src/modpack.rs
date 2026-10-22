@@ -353,11 +353,41 @@ pub(crate) fn fetch_pack_zip(pack_file: &cf::File, job: &Job) -> anyhow::Result<
         let url = cf::download_url(pack_file)?;
         job.detail(format!("Downloading {}", pack_file.file_name));
         let total = pack_file.file_length as usize;
+        // Size and speed in the detail, refreshed about once a second.
+        let mut last = (std::time::Instant::now(), 0u64);
+        let mut speed = 0.0f64;
         cf::download_checked(&url, &zip_path, &pack_file.expect(), Some(job), |n| {
-            job.progress(n as usize, total)
+            job.progress(n as usize, total);
+            let dt = last.0.elapsed().as_secs_f64();
+            if dt >= 1.0 || n < last.1 {
+                let now = n.saturating_sub(last.1) as f64 / dt.max(0.001);
+                speed = if speed == 0.0 { now } else { speed * 0.5 + now * 0.5 };
+                last = (std::time::Instant::now(), n);
+                job.detail(download_detail(&pack_file.file_name, n, total as u64, speed));
+            }
         })?;
     }
     Ok(zip_path)
+}
+
+/// "Downloading x.zip: 512 MB of 1.4 GB · 24 MB/s · about 40 s left".
+fn download_detail(name: &str, done: u64, total: u64, speed: f64) -> String {
+    use crate::instance_ops::human_bytes;
+    let mut s = format!("Downloading {name}: {}", human_bytes(done));
+    if total > 0 {
+        s.push_str(&format!(" of {}", human_bytes(total)));
+    }
+    if speed >= 1.0 {
+        s.push_str(&format!(" · {}/s", human_bytes(speed as u64)));
+        if total > done {
+            let left = ((total - done) as f64 / speed).round() as u64;
+            s.push_str(&match left {
+                0..60 => format!(" · about {left} s left"),
+                _ => format!(" · about {} min left", left.div_ceil(60)),
+            });
+        }
+    }
+    s
 }
 
 pub(crate) fn read_manifest(zip_path: &Path) -> anyhow::Result<PackManifest> {
