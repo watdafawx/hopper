@@ -2856,6 +2856,7 @@ impl Render for AddonsView {
         let global_head = self.global_header(cx);
         let missing = self.missing_banner(&inst, cx);
         let dups = self.duplicate_banner(&inst, cx);
+        let blockers = self.blocker_banner(&inst, cx);
         let shaders = self.shader_notes(&inst, cx);
         let updates = self.table.updates.clone();
         let rows = self.table.rows.clone();
@@ -2916,6 +2917,7 @@ impl Render for AddonsView {
             .children(tabs)
             .children(global_head)
             .child(toolbar)
+            .children(blockers)
             .children(dups)
             .children(missing)
             .children(shaders)

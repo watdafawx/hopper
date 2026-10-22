@@ -70,6 +70,9 @@ pub struct MissingDeps {
     pub list: Vec<Missing>,
     /// Jars that are the same mod twice.
     pub dups: Vec<hopper::install::Duplicate>,
+    /// What else the loader will refuse (too old a loader, mods that
+    /// refuse each other, jars it can't read).
+    pub blockers: Vec<hopper::deps::Blocker>,
     /// Old files a running game holds, leaving when it closes.
     pub queued: usize,
 }
@@ -169,19 +172,25 @@ impl AddonsView {
             mtime,
             list: if same { std::mem::take(&mut self.missing.list) } else { Vec::new() },
             dups: if same { std::mem::take(&mut self.missing.dups) } else { Vec::new() },
+            blockers: if same { std::mem::take(&mut self.missing.blockers) } else { Vec::new() },
             queued: hopper::locked::list(&inst.root).len(),
         };
         let root = inst.root.clone();
         let snapshot = inst.clone();
         cx.spawn(async move |this, cx| {
-            let (list, dups) = cx
+            let (list, dups, blockers) = cx
                 .background_spawn(async move {
-                    (hopper::deps::missing(&dir), hopper::install::duplicates(&snapshot))
+                    (
+                        hopper::deps::missing(&dir),
+                        hopper::install::duplicates(&snapshot),
+                        hopper::deps::blockers(&dir, &snapshot.loader, &snapshot.game_version),
+                    )
                 })
                 .await;
             this.update(cx, |this, cx| {
                 if this.missing.root.as_ref() == Some(&root) && this.missing.mtime == mtime {
                     this.missing.dups = dups;
+                    this.missing.blockers = blockers;
                     // Wrong versions are warned about when an update causes
                     // them; packs often ship a few that run anyway.
                     let list: Vec<_> = list.into_iter().filter(|m| m.wrong_version.is_none()).collect();
@@ -860,6 +869,136 @@ impl AddonsView {
             .ok();
         })
         .detach();
+    }
+
+    /// Turns off a jar in mods/, tracked or not.
+    fn turn_off_jar(&mut self, file: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let file = file.to_string();
+        let r = self.store.update(cx, |s, cx| {
+            let tracked = s
+                .instance(&root)
+                .is_some_and(|i| i.addons.iter().any(|a| a.file_name.eq_ignore_ascii_case(&file)));
+            let r = if tracked {
+                s.set_enabled(&root, std::slice::from_ref(&file), false)
+            } else {
+                let dir = root.join("mods");
+                std::fs::rename(dir.join(&file), dir.join(format!("{file}.disabled"))).map_err(|e| format!("{e:#}"))
+            };
+            cx.notify();
+            r
+        });
+        self.resync(cx);
+        if let Err(e) = r {
+            window.push_notification(Notification::error(e), cx);
+        }
+    }
+
+    /// "N problems will stop the game at loading": what the loader refuses
+    /// besides missing mods, with Turn off where that fixes it.
+    pub(crate) fn blocker_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use hopper::deps::BlockerKind;
+        if self.class != cf::CLASS_MODS
+            || self.missing.root.as_ref() != Some(&inst.root)
+            || self.missing.blockers.is_empty()
+        {
+            return None;
+        }
+        let theme = cx.theme();
+        let n = self.missing.blockers.len();
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (i, b) in self.missing.blockers.iter().enumerate() {
+            let addon = inst.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(&b.file_name));
+            let (pid, icon) = (
+                addon.map_or(0, |a| a.project_id),
+                addon.and_then(|a| self.store.read(cx).image(&a.icon)).map(std::path::Path::to_path_buf),
+            );
+            let off = |id: String, file: String, label: String| {
+                Button::new(SharedString::from(id))
+                    .xsmall()
+                    .outline()
+                    .label(label)
+                    .tooltip(file.clone())
+                    .on_click(cx.listener(move |this, _, window, cx| this.turn_off_jar(&file, window, cx)))
+                    .into_any_element()
+            };
+            let mut actions: Vec<AnyElement> = Vec::new();
+            match &b.kind {
+                BlockerKind::Invalid(_) | BlockerKind::Loader { .. } => {
+                    actions.push(off(format!("blk-off:{i}"), b.file_name.clone(), "Turn off".into()));
+                }
+                BlockerKind::Incompatible { with, jar, .. } => {
+                    actions.push(off(format!("blk-off:{i}"), b.file_name.clone(), "Turn off this".into()));
+                    actions.push(off(format!("blk-off2:{i}"), jar.clone(), format!("Turn off {with}")));
+                }
+                BlockerKind::WrongVersion { needs, .. } => {
+                    actions.push(off(format!("blk-off:{i}"), b.file_name.clone(), "Turn off this".into()));
+                    let id = needs.clone();
+                    actions.push(
+                        Button::new(SharedString::from(format!("blk-dep:{i}")))
+                            .xsmall()
+                            .outline()
+                            .label(format!("Update {needs}"))
+                            .tooltip("Its page, to get a newer file")
+                            .on_click(cx.listener(move |this, _, _, cx| this.peek_mod_id(id.clone(), cx)))
+                            .into_any_element(),
+                    );
+                }
+            }
+            let view = cx.entity();
+            rows.push(
+                h_flex()
+                    .flex_wrap()
+                    .gap_x_3()
+                    .gap_y_1()
+                    .text_sm()
+                    .child(
+                        widgets::mod_link(
+                            SharedString::from(format!("blk:{i}")),
+                            b.mod_name.clone(),
+                            icon.as_deref(),
+                            pid,
+                            move |p, _, cx| view.update(cx, |this, cx| this.open_peek(p, cx)),
+                            cx,
+                        )
+                        .font_semibold(),
+                    )
+                    .child(widgets::caption(b.text(), cx).text_xs())
+                    .children(actions)
+                    .into_any_element(),
+            );
+        }
+        let loader_note = self
+            .missing
+            .blockers
+            .iter()
+            .any(|b| matches!(&b.kind, BlockerKind::Loader { id, .. } if id != "minecraft"));
+        let n_rows = rows.len();
+        Some(
+            div()
+                .px_6()
+                .child(
+                    callout(theme.danger, cx)
+                        .child(div().font_semibold().text_color(theme.danger).child(format!(
+                            "{n} problem{} will stop the game at loading",
+                            if n == 1 { "" } else { "s" }
+                        )))
+                        .when(loader_note, |c| {
+                            c.child(widgets::caption(
+                                "For a mod that needs a newer loader, pick a newer loader version in this instance's settings.",
+                                cx,
+                            ))
+                        })
+                        .child(
+                            div()
+                                .id("blocker-rows")
+                                .when(n_rows > 6, |d| d.h(rems(10.5)))
+                                .overflow_y_scrollbar()
+                                .child(v_flex().gap_2().children(rows)),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn enable_provider(&mut self, file: &str, window: &mut Window, cx: &mut Context<Self>) {
