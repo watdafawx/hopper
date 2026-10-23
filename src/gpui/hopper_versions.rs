@@ -157,7 +157,7 @@ impl HopperVersions {
             .map(|b| if up { b.primary() } else { b.danger() })
             .on_click(cx.listener(move |this, _, window, cx| this.install(picked.clone(), window, cx)));
         let mut notes = vec![
-            "Instances, mods and worlds aren't touched. Hopper restarts into it once its tasks finish and no server hosted on this PC is running. Games keep running."
+            "Instances, mods and worlds aren't touched. Hopper restarts into it once its tasks finish. Games and servers hosted on this PC keep running."
                 .to_string(),
         ];
         if !up {

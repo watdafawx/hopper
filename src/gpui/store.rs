@@ -1025,19 +1025,15 @@ impl Store {
         self.instances.iter().find(|i| i.root == root)
     }
 
-    /// What keeps Hopper from restarting by itself now: tasks, a game, or
-    /// servers hosted here. `None` when it's idle.
+    /// What keeps Hopper from restarting by itself now: running tasks.
+    /// `None` when it's idle.
     pub fn busy_reason(&self) -> Option<String> {
         let tasks = self.jobs.snapshot().iter().filter(|j| !j.done).count();
         if tasks > 0 {
             return Some(format!("{tasks} task{} running", if tasks == 1 { "" } else { "s" }));
         }
-        // Games aren't in this list: they run on their own and a restarted
-        // Hopper finds them again. A server hosted here has its console
-        // piped through Hopper, so restarting would cut it loose.
-        if self.local.all().iter().any(|s| s.state().is_alive()) {
-            return Some("a server hosted here is running".into());
-        }
+        // Games and servers hosted here aren't in this list: they run on
+        // their own and a restarted Hopper finds them again.
         None
     }
 
