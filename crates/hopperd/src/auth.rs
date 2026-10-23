@@ -1,6 +1,7 @@
-//! Who may use the panel: the owner's password (browser sessions), paired
-//! devices such as Hopper desktop (bearer tokens), and the pairing requests
-//! waiting for the owner to allow them.
+//! Who may use the panel: the owner's password (browser sessions), other
+//! people the owner adds (users with a role), paired devices such as Hopper
+//! desktop (bearer tokens), and the pairing requests waiting for the owner
+//! to allow them.
 //!
 //! Secrets are only stored hashed: the password with Argon2, tokens with
 //! SHA-256 (they are long random values, so a fast hash is enough).
@@ -53,6 +54,9 @@ fn readable_code(len: usize) -> String {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     hash: String,
+    /// The user it belongs to; the owner's when `None`.
+    #[serde(default)]
+    user: Option<String>,
     pub created: u64,
     pub last_seen: u64,
     pub ip: String,
@@ -82,6 +86,105 @@ struct Stored {
     totp_step: u64,
     #[serde(default)]
     tokens: Vec<ApiToken>,
+    #[serde(default)]
+    users: Vec<User>,
+}
+
+/// What a user may do. The owner can do everything; only the owner manages
+/// users, devices, tokens, webhooks, two-factor and panel settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// Everything on their servers: files, mods, settings, backups.
+    Admin,
+    /// Start, stop, console, players and making backups.
+    Operator,
+    /// Looking only.
+    Viewer,
+}
+
+impl Role {
+    pub fn parse(s: &str) -> Option<Role> {
+        match s {
+            "admin" => Some(Role::Admin),
+            "operator" => Some(Role::Operator),
+            "viewer" => Some(Role::Viewer),
+            _ => None,
+        }
+    }
+}
+
+/// Someone the owner added, who signs in with a name and password.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct User {
+    pub id: String,
+    pub name: String,
+    hash: String,
+    pub role: Role,
+    /// Only these servers; all when empty.
+    #[serde(default)]
+    pub servers: Vec<String>,
+    pub created: u64,
+    #[serde(default)]
+    pub last_seen: u64,
+    #[serde(default)]
+    totp: Option<String>,
+    #[serde(default)]
+    totp_step: u64,
+}
+
+impl User {
+    pub fn two_factor(&self) -> bool {
+        self.totp.is_some()
+    }
+}
+
+/// The owner (`None`) or a user's id.
+pub type Account<'a> = Option<&'a str>;
+
+impl Stored {
+    fn secrets(&self, acct: Account) -> Option<(String, Option<String>, u64)> {
+        match acct {
+            None => self.owner.clone().map(|h| (h, self.totp.clone(), self.totp_step)),
+            Some(id) => self.users.iter().find(|u| u.id == id).map(|u| (u.hash.clone(), u.totp.clone(), u.totp_step)),
+        }
+    }
+
+    fn set_totp(&mut self, acct: Account, secret: Option<String>) {
+        match acct {
+            None => self.totp = secret,
+            Some(id) => {
+                if let Some(u) = self.users.iter_mut().find(|u| u.id == id) {
+                    u.totp = secret;
+                }
+            }
+        }
+    }
+
+    fn set_step(&mut self, acct: Account, step: u64) {
+        match acct {
+            None => self.totp_step = step,
+            Some(id) => {
+                if let Some(u) = self.users.iter_mut().find(|u| u.id == id) {
+                    u.totp_step = step;
+                }
+            }
+        }
+    }
+}
+
+fn hash_password(password: &str) -> anyhow::Result<String> {
+    if password.chars().count() < MIN_PASSWORD {
+        bail!("Use at least {MIN_PASSWORD} characters.");
+    }
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &SaltString::encode_b64(&random_bytes16()).unwrap())
+        .map_err(|e| anyhow::anyhow!("hashing the password: {e}"))?
+        .to_string())
+}
+
+fn verify_password(hash: &str, password: &str) -> bool {
+    PasswordHash::new(hash).ok().is_some_and(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok())
 }
 
 /// An API token the owner made for a script or another app.
@@ -154,6 +257,7 @@ pub enum Who {
     Owner,
     Device { id: String, name: String },
     Token { id: String, name: String, read_only: bool, servers: Vec<String> },
+    User { id: String, name: String, role: Role, servers: Vec<String> },
 }
 
 impl Who {
@@ -162,6 +266,24 @@ impl Who {
             Who::Owner => "owner".into(),
             Who::Device { name, .. } => name.clone(),
             Who::Token { name, .. } => format!("token \"{name}\""),
+            Who::User { name, .. } => format!("user \"{name}\""),
+        }
+    }
+
+    /// Whether this one may see the server with `id` at all.
+    pub fn sees(&self, id: &str) -> bool {
+        match self {
+            Who::Token { servers, .. } | Who::User { servers, .. } => servers.is_empty() || servers.iter().any(|s| s == id),
+            _ => true,
+        }
+    }
+
+    /// The account two-factor and passwords are about.
+    pub fn account(&self) -> Option<Account<'_>> {
+        match self {
+            Who::Owner => Some(None),
+            Who::User { id, .. } => Some(Some(id.as_str())),
+            _ => None,
         }
     }
 }
@@ -172,7 +294,7 @@ pub struct Auth {
     setup_code: Mutex<Option<String>>,
     fails: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     /// A two-factor secret being set up, until a code confirms it.
-    pending_totp: Mutex<Option<String>>,
+    pending_totp: Mutex<HashMap<String, String>>,
     pairs: Mutex<Vec<PairRequest>>,
 }
 
@@ -223,18 +345,12 @@ impl Auth {
             self.failed(ip);
             bail!("That setup code isn't right. It's in hopperd's log and in setup-code.txt.");
         }
-        if password.chars().count() < MIN_PASSWORD {
-            bail!("Use at least {MIN_PASSWORD} characters.");
-        }
-        let hash = Argon2::default()
-            .hash_password(password.as_bytes(), &SaltString::encode_b64(&random_bytes16()).unwrap())
-            .map_err(|e| anyhow::anyhow!("hashing the password: {e}"))?
-            .to_string();
+        let hash = hash_password(password)?;
         *sc = None;
         drop(sc);
         let mut s = self.stored.lock().unwrap();
         s.owner = Some(hash);
-        let token = new_session(&mut s, ip);
+        let token = new_session(&mut s, None, ip);
         self.save(&s);
         Ok(token)
     }
@@ -248,25 +364,44 @@ impl Auth {
     /// `private`: the client is on this PC, the LAN or Tailscale; from the
     /// internet, two-factor sign-in must be on.
     pub fn login_2fa(&self, password: &str, code: Option<&str>, ip: IpAddr, private: bool) -> Result<String, LoginError> {
+        self.login_as("", password, code, ip, private)
+    }
+
+    /// Signs in the owner (empty `name`, or "owner") or the user called `name`.
+    pub fn login_as(&self, name: &str, password: &str, code: Option<&str>, ip: IpAddr, private: bool) -> Result<String, LoginError> {
         self.check_lockout(ip).map_err(|e| LoginError::Refused(e.to_string()))?;
-        let (owner, totp) = {
+        let name = name.trim();
+        let (acct, secrets) = {
             let s = self.stored.lock().unwrap();
-            (s.owner.clone(), s.totp.clone())
+            if s.owner.is_none() {
+                return Err(LoginError::Refused("Set the panel up first.".into()));
+            }
+            let acct = if name.is_empty() || name.eq_ignore_ascii_case("owner") {
+                None
+            } else {
+                s.users.iter().find(|u| u.name.eq_ignore_ascii_case(name)).map(|u| u.id.clone())
+            };
+            let secrets = if name.is_empty() || name.eq_ignore_ascii_case("owner") || acct.is_some() { s.secrets(acct.as_deref()) } else { None };
+            (acct, secrets)
         };
-        let Some(owner) = owner else { return Err(LoginError::Refused("Set the panel up first.".into())) };
-        let ok = PasswordHash::new(&owner)
-            .ok()
-            .is_some_and(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok());
-        if !ok {
+        let Some((hash, totp, _)) = secrets else {
+            // Same work and answer as a wrong password: names aren't revealed.
+            static DUMMY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let _ = verify_password(DUMMY.get_or_init(|| hash_password("not-a-real-password").unwrap_or_default()), password);
             self.failed(ip);
-            return Err(LoginError::Refused("Wrong password.".into()));
+            return Err(LoginError::Refused("Wrong name or password.".into()));
+        };
+        if !verify_password(&hash, password) {
+            self.failed(ip);
+            return Err(LoginError::Refused(if name.is_empty() { "Wrong password.".into() } else { "Wrong name or password.".into() }));
         }
+        let acct = acct.as_deref();
         match (&totp, code.map(str::trim).filter(|c| !c.is_empty())) {
             (None, _) if !private => return Err(LoginError::NeedTwoFactor),
             (None, _) => {}
             (Some(_), None) => return Err(LoginError::NeedCode),
             (Some(secret), Some(code)) => {
-                if !self.use_code(secret, code) {
+                if !self.use_code(acct, secret, code) {
                     self.failed(ip);
                     return Err(LoginError::Refused("That code isn't right (or was already used).".into()));
                 }
@@ -274,7 +409,7 @@ impl Auth {
         }
         self.fails.lock().unwrap().remove(&ip);
         let mut s = self.stored.lock().unwrap();
-        let token = new_session(&mut s, ip);
+        let token = new_session(&mut s, acct.map(str::to_string), ip);
         self.save(&s);
         Ok(token)
     }
@@ -319,10 +454,20 @@ impl Auth {
             // Saved lazily: a minute's precision is plenty.
             let stale = t.saturating_sub(sess.last_seen) > 60;
             sess.last_seen = t;
+            let user = sess.user.clone();
+            let who = match user {
+                None => Who::Owner,
+                Some(uid) => {
+                    // A removed user's sessions end with them.
+                    let u = s.users.iter_mut().find(|u| u.id == uid)?;
+                    u.last_seen = t;
+                    Who::User { id: u.id.clone(), name: u.name.clone(), role: u.role, servers: u.servers.clone() }
+                }
+            };
             if stale {
                 self.save(&s);
             }
-            return Some(Who::Owner);
+            return Some(who);
         }
         if let Some(d) = s.devices.iter_mut().find(|x| x.hash == h) {
             let stale = t.saturating_sub(d.last_seen) > 60;
@@ -352,13 +497,14 @@ impl Auth {
 
     /// Whether a code matches `secret` now (one step either side), and it
     /// wasn't used before. Uses it up.
-    fn use_code(&self, secret: &str, code: &str) -> bool {
+    fn use_code(&self, acct: Account, secret: &str, code: &str) -> bool {
         let Some(key) = base32_decode(secret) else { return false };
         let step = now() / 30;
         let mut s = self.stored.lock().unwrap();
+        let last = s.secrets(acct).map_or(0, |x| x.2);
         for st in [step.saturating_sub(1), step, step + 1] {
-            if st > s.totp_step && format!("{:06}", totp(&key, st)) == code {
-                s.totp_step = st;
+            if st > last && format!("{:06}", totp(&key, st)) == code {
+                s.set_step(acct, st);
                 self.save(&s);
                 return true;
             }
@@ -366,50 +512,143 @@ impl Auth {
         false
     }
 
-    pub fn two_factor_on(&self) -> bool {
-        self.stored.lock().unwrap().totp.is_some()
+    pub fn two_factor_on(&self, acct: Account) -> bool {
+        self.stored.lock().unwrap().secrets(acct).is_some_and(|x| x.1.is_some())
     }
 
     /// A new secret to scan; it takes effect once a code from it is
     /// confirmed with [`Self::two_factor_enable`].
-    pub fn two_factor_begin(&self, account: &str) -> (String, String) {
+    pub fn two_factor_begin(&self, acct: Account, account: &str) -> (String, String) {
         let mut key = [0u8; 20];
         getrandom::fill(&mut key).expect("system random generator");
         let secret = base32_encode(&key);
-        *self.pending_totp.lock().unwrap() = Some(secret.clone());
+        self.pending_totp.lock().unwrap().insert(acct.unwrap_or("").to_string(), secret.clone());
         let label: String = account.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
         let uri = format!("otpauth://totp/Hopper%20Server:{label}?secret={secret}&issuer=Hopper%20Server&digits=6&period=30");
         (secret, uri)
     }
 
-    pub fn two_factor_enable(&self, code: &str) -> anyhow::Result<()> {
-        let Some(secret) = self.pending_totp.lock().unwrap().clone() else {
+    pub fn two_factor_enable(&self, acct: Account, code: &str) -> anyhow::Result<()> {
+        let key = acct.unwrap_or("").to_string();
+        let Some(secret) = self.pending_totp.lock().unwrap().get(&key).cloned() else {
             bail!("Start setting up two-factor sign-in again.");
         };
-        if !self.use_code(&secret, code.trim()) {
+        if !self.use_code(acct, &secret, code.trim()) {
             bail!("That code isn't right. Check the time on your phone and try the next one.");
         }
         let mut s = self.stored.lock().unwrap();
-        s.totp = Some(secret);
+        s.set_totp(acct, Some(secret));
         self.save(&s);
-        *self.pending_totp.lock().unwrap() = None;
+        self.pending_totp.lock().unwrap().remove(&key);
         Ok(())
     }
 
     /// Turns it off; needs the password and a current code.
-    pub fn two_factor_disable(&self, password: &str, code: &str, ip: IpAddr) -> anyhow::Result<()> {
-        let secret = self.stored.lock().unwrap().totp.clone();
-        let Some(secret) = secret else { return Ok(()) };
-        let owner = self.stored.lock().unwrap().owner.clone().unwrap_or_default();
-        let ok = PasswordHash::new(&owner)
-            .ok()
-            .is_some_and(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok());
-        if !ok || !self.use_code(&secret, code.trim()) {
+    pub fn two_factor_disable(&self, acct: Account, password: &str, code: &str, ip: IpAddr) -> anyhow::Result<()> {
+        let Some((hash, Some(secret), _)) = self.stored.lock().unwrap().secrets(acct) else { return Ok(()) };
+        if !verify_password(&hash, password) || !self.use_code(acct, &secret, code.trim()) {
             self.failed(ip);
             bail!("The password or code isn't right.");
         }
         let mut s = self.stored.lock().unwrap();
-        s.totp = None;
+        s.set_totp(acct, None);
+        self.save(&s);
+        Ok(())
+    }
+
+    // ---- users ----------------------------------------------------------------------
+
+    pub fn users(&self) -> Vec<User> {
+        self.stored.lock().unwrap().users.clone()
+    }
+
+    fn check_user_name(s: &Stored, name: &str, except: Option<&str>) -> anyhow::Result<()> {
+        if name.is_empty() || name.len() > 32 || !name.chars().all(|c| c.is_alphanumeric() || "-_.".contains(c)) {
+            bail!("Names are up to 32 letters, digits, - _ or .");
+        }
+        if name.eq_ignore_ascii_case("owner") || s.users.iter().any(|u| u.name.eq_ignore_ascii_case(name) && Some(u.id.as_str()) != except) {
+            bail!("That name is taken.");
+        }
+        Ok(())
+    }
+
+    pub fn user_create(&self, name: &str, password: &str, role: Role, servers: Vec<String>) -> anyhow::Result<User> {
+        let name = name.trim();
+        let hash = hash_password(password)?;
+        let mut s = self.stored.lock().unwrap();
+        Self::check_user_name(&s, name, None)?;
+        let u = User {
+            id: random_hex(6),
+            name: name.to_string(),
+            hash,
+            role,
+            servers,
+            created: now(),
+            last_seen: 0,
+            totp: None,
+            totp_step: 0,
+        };
+        s.users.push(u.clone());
+        self.save(&s);
+        Ok(u)
+    }
+
+    /// Changes a user's role, servers, and (when given) password. A new
+    /// password signs them out everywhere.
+    pub fn user_update(&self, id: &str, name: &str, role: Role, servers: Vec<String>, password: Option<&str>) -> anyhow::Result<()> {
+        let hash = password.filter(|p| !p.is_empty()).map(hash_password).transpose()?;
+        let mut s = self.stored.lock().unwrap();
+        Self::check_user_name(&s, name.trim(), Some(id))?;
+        let Some(u) = s.users.iter_mut().find(|u| u.id == id) else { bail!("No user with that id.") };
+        u.name = name.trim().to_string();
+        u.role = role;
+        u.servers = servers;
+        if let Some(h) = hash {
+            u.hash = h;
+            s.sessions.retain(|x| x.user.as_deref() != Some(id));
+        }
+        self.save(&s);
+        Ok(())
+    }
+
+    /// Turns a user's two-factor sign-in off (they lost their phone).
+    pub fn user_reset_2fa(&self, id: &str) -> bool {
+        let mut s = self.stored.lock().unwrap();
+        let Some(u) = s.users.iter_mut().find(|u| u.id == id) else { return false };
+        u.totp = None;
+        self.save(&s);
+        true
+    }
+
+    pub fn user_delete(&self, id: &str) -> bool {
+        let mut s = self.stored.lock().unwrap();
+        let before = s.users.len();
+        s.users.retain(|u| u.id != id);
+        let gone = s.users.len() != before;
+        if gone {
+            s.sessions.retain(|x| x.user.as_deref() != Some(id));
+            self.save(&s);
+        }
+        gone
+    }
+
+    /// Changes your own password; needs the current one.
+    pub fn change_password(&self, acct: Account, current: &str, new: &str, ip: IpAddr) -> anyhow::Result<()> {
+        let Some((hash, _, _)) = self.stored.lock().unwrap().secrets(acct) else { bail!("No such account.") };
+        if !verify_password(&hash, current) {
+            self.failed(ip);
+            bail!("The current password isn't right.");
+        }
+        let h = hash_password(new)?;
+        let mut s = self.stored.lock().unwrap();
+        match acct {
+            None => s.owner = Some(h),
+            Some(id) => {
+                if let Some(u) = s.users.iter_mut().find(|u| u.id == id) {
+                    u.hash = h;
+                }
+            }
+        }
         self.save(&s);
         Ok(())
     }
@@ -621,9 +860,9 @@ fn random_bytes16() -> [u8; 16] {
     b
 }
 
-fn new_session(s: &mut Stored, ip: IpAddr) -> String {
+fn new_session(s: &mut Stored, user: Option<String>, ip: IpAddr) -> String {
     let token = random_hex(32);
-    s.sessions.push(Session { hash: hash_token(&token), created: now(), last_seen: now(), ip: ip.to_string() });
+    s.sessions.push(Session { hash: hash_token(&token), user, created: now(), last_seen: now(), ip: ip.to_string() });
     token
 }
 
@@ -698,18 +937,51 @@ mod tests {
         let net: IpAddr = "8.8.8.8".parse().unwrap();
         // From the internet, two-factor must be on.
         assert_eq!(a.login_2fa("password1", None, net, false).unwrap_err(), LoginError::NeedTwoFactor);
-        let (secret, uri) = a.two_factor_begin("rig");
+        let (secret, uri) = a.two_factor_begin(None, "rig");
         assert!(uri.starts_with("otpauth://totp/") && uri.contains(&secret));
         let key = base32_decode(&secret).unwrap();
         let code = || format!("{:06}", totp(&key, now() / 30));
-        assert!(a.two_factor_enable("000000").is_err() || code() == "000000");
-        a.two_factor_enable(&code()).unwrap();
-        assert!(a.two_factor_on());
+        assert!(a.two_factor_enable(None, "000000").is_err() || code() == "000000");
+        a.two_factor_enable(None, &code()).unwrap();
+        assert!(a.two_factor_on(None));
         assert_eq!(a.login_2fa("password1", None, IP, true).unwrap_err(), LoginError::NeedCode);
         // The code used to turn it on can't be reused.
         assert!(matches!(a.login_2fa("password1", Some(&code()), net, false), Err(LoginError::Refused(_))));
         let next = format!("{:06}", totp(&key, now() / 30 + 1));
         assert!(a.login_2fa("password1", Some(&next), net, false).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn users_sign_in_by_name() {
+        let dir = temp();
+        let a = Auth::load(&dir).unwrap();
+        a.setup(&a.setup_code().unwrap(), "password1", IP).unwrap();
+        let u = a.user_create("Alex", "alexpass1", Role::Operator, vec!["tnp".into()]).unwrap();
+        assert!(a.user_create("alex", "whatever1", Role::Viewer, vec![]).is_err(), "names are unique");
+        assert!(a.user_create("owner", "whatever1", Role::Viewer, vec![]).is_err());
+        assert!(a.user_create("bo", "short", Role::Viewer, vec![]).is_err());
+        let s = a.login_as("alex", "alexpass1", None, IP, true).unwrap();
+        let who = a.check(&s).unwrap();
+        assert_eq!(who, Who::User { id: u.id.clone(), name: "Alex".into(), role: Role::Operator, servers: vec!["tnp".into()] });
+        assert!(who.sees("tnp") && !who.sees("other"));
+        assert!(a.login_as("alex", "password1", None, IP, true).is_err(), "not the owner's password");
+        assert!(a.login_as("nobody", "alexpass1", None, IP, true).is_err());
+        assert_eq!(a.check(&a.login_as("", "password1", None, IP, true).unwrap()), Some(Who::Owner));
+        // Their own two-factor, apart from the owner's.
+        let (secret, _) = a.two_factor_begin(Some(&u.id), "Alex");
+        let key = base32_decode(&secret).unwrap();
+        a.two_factor_enable(Some(&u.id), &format!("{:06}", totp(&key, now() / 30))).unwrap();
+        assert!(a.two_factor_on(Some(&u.id)) && !a.two_factor_on(None));
+        assert_eq!(a.login_as("Alex", "alexpass1", None, IP, true).unwrap_err(), LoginError::NeedCode);
+        assert!(a.user_reset_2fa(&u.id));
+        // A new password signs them out; removing them ends their sessions.
+        a.user_update(&u.id, "Alex", Role::Viewer, vec![], Some("newpass12")).unwrap();
+        assert_eq!(a.check(&s), None);
+        let s2 = a.login_as("alex", "newpass12", None, IP, true).unwrap();
+        assert!(matches!(a.check(&s2), Some(Who::User { role: Role::Viewer, .. })));
+        assert!(a.user_delete(&u.id));
+        assert_eq!(a.check(&s2), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

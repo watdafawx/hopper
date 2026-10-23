@@ -7,6 +7,7 @@
   let hello = $state(null);
   let signedIn = $state(null);
   let failed = $state('');
+  let me = $state(null);
 
   async function load() {
     try {
@@ -15,7 +16,7 @@
         signedIn = false;
         return;
       }
-      await api('/auth/me');
+      me = await api('/auth/me');
       signedIn = true;
     } catch (e) {
       if (e.status === 401) signedIn = false;
@@ -29,9 +30,9 @@
 {#if failed}
   <div class="center"><p class="err">Can't reach the panel: {failed}</p></div>
 {:else if hello && signedIn === false}
-  <Auth {hello} onDone={() => { hello.setup_needed = false; signedIn = true; }} />
+  <Auth {hello} onDone={() => { hello.setup_needed = false; load(); }} />
 {:else if hello && signedIn}
-  <Shell {hello} onSignOut={() => (signedIn = false)} />
+  <Shell {hello} {me} onSignOut={() => (signedIn = false)} />
 {/if}
 
 <style>

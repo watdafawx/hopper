@@ -3,13 +3,15 @@
   import { Link, Check, X, Network, Wifi, Globe, Waypoints, Lock, MonitorSmartphone, Trash2 } from '@lucide/svelte';
   import Security from './Security.svelte';
   import Webhooks from './Webhooks.svelte';
+  import Users from './Users.svelte';
   import { pathKind } from './lib/format.js';
 
   const kindOf = (url) => pathKind(url.split('://')[1].split(/[:/]/)[0].replace(/^\[|\]$/g, ''));
   import { api, post, del } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
 
-  let { hello, pending = $bindable([]) } = $props();
+  let { hello, me, pending = $bindable([]) } = $props();
+  const owner = $derived(me?.role === 'owner');
   let devices = $state([]);
 
   async function loadDevices() {
@@ -43,10 +45,17 @@
 
   const when = (t) => new Date(t * 1000).toLocaleString();
 
-  onMount(loadDevices);
+  onMount(() => owner && loadDevices());
 </script>
 
 <div class="pad">
+  {#if !owner}
+  <h2>Your account</h2>
+  <div class="grid">
+    <div class="card"><h3>{me?.name}</h3><p class="small subtle">Role: <b class="txt">{me?.role}</b> · {me?.servers?.length ? `${me.servers.length} server${me.servers.length === 1 ? '' : 's'}` : 'all servers'}. The owner manages what you can do.</p></div>
+    <Security own />
+  </div>
+  {:else}
   <h2>Access &amp; devices</h2>
   <div class="grid">
     <div class="card">
@@ -90,6 +99,8 @@
 
     <Security />
 
+    <Users />
+
     <Webhooks />
 
     <div class="card wide">
@@ -108,6 +119,7 @@
       {/each}
     </div>
   </div>
+  {/if}
 </div>
 
 <style>

@@ -1,7 +1,7 @@
 //! Checks every request goes through, before its handler:
 //! - plain HTTP only where the network is private (see [`Net`]);
 //! - rate limits per address (tighter on sign-in and pairing);
-//! - API tokens only do what they're scoped to.
+//! - API tokens and users only do what they're scoped to.
 //!
 //! Afterwards, changes and sign-ins go to the audit log.
 
@@ -47,6 +47,10 @@ impl Limiter {
         e.1 <= LIMIT_ALL && (!auth || e.2 <= LIMIT_AUTH)
     }
 }
+
+/// Who a sign-in became, set on the response for the audit log.
+#[derive(Clone)]
+pub struct SignedIn(pub String);
 
 /// A line of the audit log.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,6 +118,51 @@ fn is_guessable(path: &str) -> bool {
     matches!(path, "/api/v1/auth/login" | "/api/v1/auth/setup" | "/api/v1/auth/2fa/enable" | "/api/v1/auth/2fa/disable" | "/api/v1/pair/request")
 }
 
+/// Why a scoped token or a user may not make this request, if they may not.
+/// (Owner-only routes check that themselves.)
+fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Option<&'static str> {
+    use crate::auth::{Role, Who};
+    let reading = method == Method::GET || method == Method::HEAD;
+    match who {
+        Who::Token { read_only, servers, .. } => {
+            if *read_only && !reading {
+                Some("This token can only read.")
+            } else if !servers.is_empty() && server_of(path).is_some_and(|id| !servers.iter().any(|s| s == id)) {
+                Some("This token isn't for that server.")
+            } else {
+                None
+            }
+        }
+        Who::User { role, servers, .. } => {
+            if server_of(path).is_some_and(|id| !who.sees(id)) {
+                return Some("You don't have access to that server.");
+            }
+            // Your own sign-in: sign out, password, two-factor.
+            if reading || path == "/api/v1/auth/logout" || path == "/api/v1/auth/password" || path.starts_with("/api/v1/auth/2fa/") {
+                return None;
+            }
+            match role {
+                Role::Viewer => Some("Your account can only look."),
+                Role::Operator => {
+                    let rest = path.strip_prefix("/api/v1/servers/").map(|r| r.splitn(2, '/').nth(1).unwrap_or(""));
+                    match rest {
+                        Some("power" | "command" | "players" | "backups") => None,
+                        _ => Some("Your account can start and stop servers, use the console, manage players and make backups."),
+                    }
+                }
+                Role::Admin => {
+                    if !servers.is_empty() && (path == "/api/v1/servers/create" || path == "/api/v1/servers/rescan") {
+                        Some("Only accounts with every server can add servers.")
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
 fn deny(status: StatusCode, msg: &str) -> Response {
     (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
 }
@@ -148,15 +197,8 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
     // Who's asking, for scopes and the log.
     let token = crate::api::token(req.headers()).0;
     let who = if token.is_empty() { None } else { app.auth.check(&token) };
-    if let Some(w @ crate::auth::Who::Token { read_only, servers, .. }) = &who {
-        let refused = if *read_only && method != Method::GET && method != Method::HEAD {
-            Some("This token can only read.")
-        } else if !servers.is_empty() && server_of(&path).is_some_and(|id| !servers.iter().any(|s| s == id)) {
-            Some("This token isn't for that server.")
-        } else {
-            None
-        };
-        if let Some(msg) = refused {
+    if let Some(w) = &who {
+        if let Some(msg) = refusal(w, &method, &path) {
             app.audit.record(&Event { at: now(), who: w.name(), ip: ip.to_string(), net, method: method.to_string(), path, status: 403 });
             return deny(StatusCode::FORBIDDEN, msg);
         }
@@ -171,7 +213,7 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
         let status = res.status().as_u16();
         // A sign-in names who it became; a failed one stays anonymous.
         let who_name = who.as_ref().map(|w| w.name()).unwrap_or_else(|| {
-            if path.starts_with("/api/v1/auth/") && status < 300 { "owner".into() } else { "-".into() }
+            res.extensions().get::<SignedIn>().map(|s| s.0.clone()).unwrap_or_else(|| "-".into())
         });
         app.audit.record(&Event { at: now(), who: who_name, ip: ip.to_string(), net, method: method.to_string(), path, status });
     }
@@ -189,6 +231,30 @@ mod tests {
         assert_eq!(server_of("/api/v1/servers"), None);
         assert_eq!(server_of("/api/v1/servers/infos"), None);
         assert_eq!(server_of("/api/v1/host"), None);
+    }
+
+    #[test]
+    fn user_roles() {
+        use crate::auth::{Role, Who};
+        let user = |role, servers: &[&str]| Who::User { id: "u".into(), name: "u".into(), role, servers: servers.iter().map(|s| s.to_string()).collect() };
+        let (get, post) = (Method::GET, Method::POST);
+        let v = user(Role::Viewer, &[]);
+        assert!(refusal(&v, &get, "/api/v1/fs/tnp/list").is_none());
+        assert!(refusal(&v, &post, "/api/v1/servers/tnp/power").is_some());
+        assert!(refusal(&v, &post, "/api/v1/auth/logout").is_none());
+        assert!(refusal(&v, &post, "/api/v1/auth/2fa/begin").is_none());
+        let o = user(Role::Operator, &["tnp"]);
+        assert!(refusal(&o, &post, "/api/v1/servers/tnp/power").is_none());
+        assert!(refusal(&o, &post, "/api/v1/servers/tnp/command").is_none());
+        assert!(refusal(&o, &post, "/api/v1/servers/tnp/backups").is_none());
+        assert!(refusal(&o, &post, "/api/v1/servers/tnp/backups/x.zip/restore").is_some());
+        assert!(refusal(&o, &Method::PUT, "/api/v1/fs/tnp/text").is_some());
+        assert!(refusal(&o, &post, "/api/v1/servers/other/power").is_some(), "not their server");
+        assert!(refusal(&o, &get, "/api/v1/fs/other/list").is_some(), "can't even look");
+        let a = user(Role::Admin, &["tnp"]);
+        assert!(refusal(&a, &Method::PUT, "/api/v1/fs/tnp/text").is_none());
+        assert!(refusal(&a, &post, "/api/v1/servers/create").is_some());
+        assert!(refusal(&user(Role::Admin, &[]), &post, "/api/v1/servers/create").is_none());
     }
 
     #[test]

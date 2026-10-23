@@ -11,7 +11,8 @@
   import Dialog from './Dialog.svelte';
   import Transfers from './Transfers.svelte';
 
-  let { hello, onSignOut } = $props();
+  let { hello, me, onSignOut } = $props();
+  const owner = $derived(me?.role === 'owner');
 
   let route = $state(location.hash.slice(1) || '/');
   let pending = $state([]);
@@ -58,8 +59,10 @@
     addEventListener('hashchange', onHash);
     connect();
     pingTimer = startPing();
-    checkPending();
-    pendTimer = setInterval(checkPending, 3000);
+    if (owner) {
+      checkPending();
+      pendTimer = setInterval(checkPending, 3000);
+    }
     return () => removeEventListener('hashchange', onHash);
   });
 
@@ -78,7 +81,7 @@
     </div>
     <button class="nav" class:on={page === 'overview'} onclick={() => go('/')}><LayoutDashboard size={14} />Overview</button>
     <div class="navsec lbl row">Servers<span class="sp"></span>
-      <button class="btn ghost icon" title="Look for new server folders" onclick={rescan}><RefreshCw size={12} /></button>
+      {#if owner}<button class="btn ghost icon" title="Look for new server folders" onclick={rescan}><RefreshCw size={12} /></button>{/if}
     </div>
     {#each live.servers as s (s.id)}
       <button class="srv" class:on={serverId === s.id} onclick={() => go(`/server/${encodeURIComponent(s.id)}`)}>
@@ -91,7 +94,7 @@
     {/each}
     <div class="foot">
       <button class="nav" class:on={page === 'access'} onclick={() => go('/access')}>
-        <Shield size={14} />Access &amp; devices
+        <Shield size={14} />{owner ? 'Access & devices' : `Account · ${me?.name}`}
         {#if pending.length}<span class="badge">{pending.length}</span>{/if}
       </button>
       <button class="nav" onclick={signOut}><LogOut size={14} />Sign out</button>
@@ -113,7 +116,7 @@
       {#if page === 'server'}
         {#key serverId}<ServerPage id={serverId} {tab} path={subpath} />{/key}
       {:else if page === 'access'}
-        <Access {hello} bind:pending />
+        <Access {hello} {me} bind:pending />
       {:else}
         <Overview />
       {/if}

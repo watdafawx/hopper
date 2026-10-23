@@ -1,5 +1,5 @@
 <script>
-  import { Server, KeyRound, Lock } from '@lucide/svelte';
+  import { Server, KeyRound, Lock, User } from '@lucide/svelte';
   import { post } from './lib/api.js';
 
   let { hello, onDone } = $props();
@@ -9,6 +9,7 @@
   let busy = $state(false);
   let error = $state('');
   let otp = $state('');
+  let name = $state('');
   let needCode = $state(false);
 
   const setup = $derived(hello.setup_needed);
@@ -23,7 +24,7 @@
     busy = true;
     try {
       if (setup) await post('/auth/setup', { code, password });
-      else await post('/auth/login', { password, code: needCode ? otp : null });
+      else await post('/auth/login', { name, password, code: needCode ? otp : null });
       onDone();
     } catch (err) {
       if (err.data?.need_code) {
@@ -56,6 +57,10 @@
       <div class="input">
         <KeyRound size={14} /><input id="code" bind:value={code} autocomplete="off" spellcheck="false" placeholder="8 characters" />
       </div>
+    {/if}
+    {#if !setup}
+      <label class="lbl" for="nm">Name <span class="muted">(empty for the owner)</span></label>
+      <div class="input"><User size={14} /><input id="nm" bind:value={name} autocomplete="username" spellcheck="false" placeholder="owner" /></div>
     {/if}
     <label class="lbl" for="pw">{setup ? 'New password' : 'Password'}</label>
     <div class="input">

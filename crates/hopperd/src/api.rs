@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "users"];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -112,6 +112,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/auth/2fa/begin", post(two_factor_begin))
         .route("/api/v1/auth/2fa/enable", post(two_factor_enable))
         .route("/api/v1/auth/2fa/disable", post(two_factor_disable))
+        .route("/api/v1/auth/password", post(change_password))
+        .route("/api/v1/users", get(users).post(user_create))
+        .route("/api/v1/users/{id}", axum::routing::put(user_update).delete(user_delete))
+        .route("/api/v1/users/{id}/reset-2fa", post(user_reset_2fa))
         .route("/api/v1/tokens", get(tokens).post(token_create))
         .route("/api/v1/tokens/{id}", axum::routing::delete(token_revoke))
         .route("/api/v1/audit", get(audit))
@@ -178,11 +182,15 @@ async fn setup(
     let token = app.auth.setup(&b.code, &b.password, addr.ip()).map_err(bad)?;
     let _ = std::fs::remove_file(app.data_dir.join(crate::SETUP_FILE));
     log::info!("owner set up from {}", addr.ip());
-    Ok(([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response())
+    let mut r = ([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response();
+    r.extensions_mut().insert(crate::security::SignedIn("owner".into()));
+    Ok(r)
 }
 
 #[derive(Deserialize)]
 struct LoginBody {
+    #[serde(default)]
+    name: String,
     password: String,
     #[serde(default)]
     code: Option<String>,
@@ -196,8 +204,13 @@ async fn login(
 ) -> Response {
     use crate::auth::LoginError;
     let private = crate::net::Net::of(addr.ip()).private();
-    match app.auth.login_2fa(&b.password, b.code.as_deref(), addr.ip(), private) {
-        Ok(token) => ([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response(),
+    match app.auth.login_as(&b.name, &b.password, b.code.as_deref(), addr.ip(), private) {
+        Ok(token) => {
+            let who = app.auth.check(&token).map_or_else(|| "owner".into(), |w| w.name());
+            let mut r = ([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response();
+            r.extensions_mut().insert(crate::security::SignedIn(who));
+            r
+        }
         Err(e) => (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": e.to_string(), "need_code": e == LoginError::NeedCode, "need_two_factor": e == LoginError::NeedTwoFactor })),
@@ -206,17 +219,30 @@ async fn login(
     }
 }
 
-// ---- two-factor sign-in, tokens, audit (owner only) -------------------------------
+// ---- two-factor sign-in and passwords (your own), tokens, audit (owner) -----------
+
+/// The signed-in person (owner or user), for their own password and two-factor.
+fn account(app: &App, headers: &HeaderMap, method: &Method) -> ApiResult<Who> {
+    let who = require(app, headers, method)?;
+    if who.account().is_none() {
+        return Err(ApiError(StatusCode::FORBIDDEN, "Only people signed in with a password can do that.".into()));
+    }
+    Ok(who)
+}
 
 async fn two_factor_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
-    Ok(Json(json!({ "on": app.auth.two_factor_on() })))
+    let who = account(&app, &headers, &method)?;
+    Ok(Json(json!({ "on": app.auth.two_factor_on(who.account().flatten()) })))
 }
 
 async fn two_factor_begin(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
-    let name = app.cfg.read().unwrap().name.clone();
-    let (secret, uri) = app.auth.two_factor_begin(&name);
+    let who = account(&app, &headers, &method)?;
+    let panel = app.cfg.read().unwrap().name.clone();
+    let label = match &who {
+        Who::User { name, .. } => format!("{name}-{panel}"),
+        _ => panel,
+    };
+    let (secret, uri) = app.auth.two_factor_begin(who.account().flatten(), &label);
     let qr = qrcode::QrCode::new(uri.as_bytes())
         .map(|c| c.render::<qrcode::render::svg::Color>().min_dimensions(200, 200).quiet_zone(true).build())
         .unwrap_or_default();
@@ -231,8 +257,8 @@ struct CodeBody {
 }
 
 async fn two_factor_enable(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<CodeBody>) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
-    app.auth.two_factor_enable(&b.code).map_err(bad)?;
+    let who = account(&app, &headers, &method)?;
+    app.auth.two_factor_enable(who.account().flatten(), &b.code).map_err(bad)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -243,8 +269,85 @@ async fn two_factor_disable(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(b): Json<CodeBody>,
 ) -> ApiResult<Json<Value>> {
+    let who = account(&app, &headers, &method)?;
+    app.auth.two_factor_disable(who.account().flatten(), &b.password, &b.code, addr.ip()).map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct PasswordBody {
+    current: String,
+    new: String,
+}
+
+async fn change_password(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(b): Json<PasswordBody>,
+) -> ApiResult<Json<Value>> {
+    let who = account(&app, &headers, &method)?;
+    app.auth.change_password(who.account().flatten(), &b.current, &b.new, addr.ip()).map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- users (owner only) -----------------------------------------------------------
+
+fn user_json(u: &crate::auth::User) -> Value {
+    json!({ "id": u.id, "name": u.name, "role": u.role, "servers": u.servers, "created": u.created, "last_seen": u.last_seen, "two_factor": u.two_factor() })
+}
+
+async fn users(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
     require_owner(&app, &headers, &method)?;
-    app.auth.two_factor_disable(&b.password, &b.code, addr.ip()).map_err(bad)?;
+    Ok(Json(json!(app.auth.users().iter().map(user_json).collect::<Vec<_>>())))
+}
+
+#[derive(Deserialize)]
+struct UserBody {
+    name: String,
+    #[serde(default)]
+    password: String,
+    role: String,
+    #[serde(default)]
+    servers: Vec<String>,
+}
+
+fn role_of(s: &str) -> ApiResult<crate::auth::Role> {
+    crate::auth::Role::parse(s).ok_or_else(|| bad("The role is admin, operator or viewer."))
+}
+
+async fn user_create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<UserBody>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    let u = app.auth.user_create(&b.name, &b.password, role_of(&b.role)?, b.servers).map_err(bad)?;
+    Ok(Json(user_json(&u)))
+}
+
+async fn user_update(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<UserBody>,
+) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    app.auth.user_update(&id, &b.name, role_of(&b.role)?, b.servers, Some(b.password.as_str())).map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn user_delete(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    if !app.auth.user_delete(&id) {
+        return Err(not_found("user"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn user_reset_2fa(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    if !app.auth.user_reset_2fa(&id) {
+        return Err(not_found("user"));
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -300,6 +403,7 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> 
         Who::Owner => json!({ "role": "owner", "min_password": MIN_PASSWORD }),
         Who::Device { id, name } => json!({ "role": "device", "id": id, "name": name }),
         Who::Token { id, name, read_only, servers } => json!({ "role": "token", "id": id, "name": name, "read_only": read_only, "servers": servers }),
+        Who::User { id, name, role, servers } => json!({ "role": role, "user": true, "id": id, "name": name, "servers": servers, "min_password": MIN_PASSWORD }),
     }))
 }
 
@@ -380,20 +484,21 @@ async fn host(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -
 }
 
 async fn servers(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
-    require(&app, &headers, &method)?;
+    let who = require(&app, &headers, &method)?;
     let snap = app.snapshot.borrow().clone();
-    Ok(Json(json!(snap.servers)))
+    Ok(Json(json!(snap.servers.iter().filter(|s| who.sees(&s.id)).collect::<Vec<_>>())))
 }
 
 /// Every server as Hopper desktop describes one: folder, manager, loader,
 /// Java, memory and server.properties.
 async fn infos(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
-    require(&app, &headers, &method)?;
+    let who = require(&app, &headers, &method)?;
     let a = app.clone();
     let list = tokio::task::spawn_blocking(move || {
         a.servers
             .list()
             .iter()
+            .filter(|e| who.sees(&e.id))
             .map(|e| {
                 let i = hopper_core::server::load(&e.root);
                 json!({
@@ -546,25 +651,23 @@ async fn console(
 
 /// Browsers: the cookie, from a page on this panel (Origin matches Host).
 /// Devices: a bearer token.
-fn ws_allowed(app: &App, headers: &HeaderMap) -> bool {
+fn ws_allowed(app: &App, headers: &HeaderMap) -> Option<Who> {
     let (tok, from_cookie) = token(headers);
-    if app.auth.check(&tok).is_none() {
-        return false;
-    }
+    let who = app.auth.check(&tok)?;
     if !from_cookie {
-        return true;
+        return Some(who);
     }
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
     let origin_host = origin.split("://").nth(1).unwrap_or("");
-    !host.is_empty() && origin_host == host
+    (!host.is_empty() && origin_host == host).then_some(who)
 }
 
 async fn ws(State(app): State<Arc<App>>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Response {
-    if !ws_allowed(&app, &headers) {
+    let Some(who) = ws_allowed(&app, &headers) else {
         return ApiError(StatusCode::UNAUTHORIZED, "Sign in first.".into()).into_response();
-    }
-    upgrade.on_upgrade(move |socket| live(app, socket))
+    };
+    upgrade.on_upgrade(move |socket| live(app, who, socket))
 }
 
 #[derive(Deserialize)]
@@ -578,13 +681,13 @@ enum ClientMsg {
 /// One client's live feed: the servers and host snapshot whenever it
 /// changes (about once a second) and new console lines of the servers it
 /// follows (checked every 150 ms).
-async fn live(app: Arc<App>, mut socket: WebSocket) {
+async fn live(app: Arc<App>, who: Who, mut socket: WebSocket) {
     let mut snap_rx = app.snapshot.subscribe();
     let mut follows: HashMap<String, u64> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_millis(150));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let first = snap_rx.borrow_and_update().clone();
-    if send_snapshot(&mut socket, &first).await.is_err() {
+    if send_snapshot(&mut socket, &first, &who).await.is_err() {
         return;
     }
     loop {
@@ -592,7 +695,7 @@ async fn live(app: Arc<App>, mut socket: WebSocket) {
             changed = snap_rx.changed() => {
                 if changed.is_err() { break; }
                 let snap = snap_rx.borrow_and_update().clone();
-                if send_snapshot(&mut socket, &snap).await.is_err() { break; }
+                if send_snapshot(&mut socket, &snap, &who).await.is_err() { break; }
             }
             _ = tick.tick() => {
                 for (id, seen) in follows.iter_mut() {
@@ -610,7 +713,8 @@ async fn live(app: Arc<App>, mut socket: WebSocket) {
                 let Message::Text(text) = msg else { continue };
                 match serde_json::from_str::<ClientMsg>(&text) {
                     // u64::MAX: send everything, flagged as a fresh console.
-                    Ok(ClientMsg::Console { server }) => { follows.insert(server, u64::MAX); }
+                    Ok(ClientMsg::Console { server }) if who.sees(&server) => { follows.insert(server, u64::MAX); }
+                    Ok(ClientMsg::Console { .. }) => {}
                     Ok(ClientMsg::Unconsole { server }) => { follows.remove(&server); }
                     Err(e) => log::debug!("ws: {e}"),
                 }
@@ -619,7 +723,8 @@ async fn live(app: Arc<App>, mut socket: WebSocket) {
     }
 }
 
-async fn send_snapshot(socket: &mut WebSocket, snap: &Snapshot) -> Result<(), axum::Error> {
-    let msg = json!({ "t": "snapshot", "servers": snap.servers, "host": snap.host });
+async fn send_snapshot(socket: &mut WebSocket, snap: &Snapshot, who: &Who) -> Result<(), axum::Error> {
+    let servers: Vec<&Summary> = snap.servers.iter().filter(|s| who.sees(&s.id)).collect();
+    let msg = json!({ "t": "snapshot", "servers": servers, "host": snap.host });
     socket.send(Message::Text(msg.to_string().into())).await
 }

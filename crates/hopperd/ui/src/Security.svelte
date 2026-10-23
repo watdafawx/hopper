@@ -1,6 +1,22 @@
 <script>
   import { onMount } from 'svelte';
-  import { ShieldCheck, KeyRound, ScrollText, Plus, Trash2, Copy } from '@lucide/svelte';
+  import { ShieldCheck, KeyRound, ScrollText, Plus, Trash2, Copy, Lock } from '@lucide/svelte';
+
+  let { own = false } = $props();
+  let pwCur = $state('');
+  let pwNew = $state('');
+  let pwNew2 = $state('');
+
+  async function changePassword() {
+    if (pwNew !== pwNew2) return say("The new passwords don't match.", true);
+    try {
+      await post('/auth/password', { current: pwCur, new: pwNew });
+      pwCur = pwNew = pwNew2 = '';
+      say('Password changed.');
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
   import { api, post, del } from './lib/api.js';
   import { live } from './lib/live.svelte.js';
   import { say } from './lib/toast.svelte.js';
@@ -22,6 +38,7 @@
   async function load() {
     try {
       twofa = await api('/auth/2fa');
+      if (own) return;
       tokens = await api('/tokens');
       audit = await api('/audit?limit=60');
     } catch (e) {
@@ -121,6 +138,17 @@
 </div>
 
 <div class="card">
+  <h3><Lock size={14} />Password</h3>
+  <div class="input"><input type="password" bind:value={pwCur} placeholder="Current password" autocomplete="current-password" /></div>
+  <div class="row">
+    <div class="input grow"><input type="password" bind:value={pwNew} placeholder="New password" autocomplete="new-password" /></div>
+    <div class="input grow"><input type="password" bind:value={pwNew2} placeholder="Repeat it" autocomplete="new-password" /></div>
+  </div>
+  <div class="row"><span class="sp"></span><button class="btn sm" disabled={!pwCur || pwNew.length < 8} onclick={changePassword}>Change password</button></div>
+</div>
+
+{#if !own}
+<div class="card">
   <h3><KeyRound size={14} />API tokens</h3>
   <p class="small subtle">For scripts and other apps. Send it as <span class="mono">Authorization: Bearer …</span>.</p>
   {#if made}
@@ -176,6 +204,7 @@
     </table>
   </div>
 </div>
+{/if}
 
 <style>
   .card { display: flex; flex-direction: column; gap: 8px; }
