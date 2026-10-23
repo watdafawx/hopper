@@ -1,5 +1,6 @@
 //! Hopper's logic: CurseForge and Modrinth, instances, servers, sync,
-//! logs and launching. The app (GPUI, in src/gpui) sits on top.
+//! logs and launching. Shared by Hopper desktop (src/gpui) and Hopper
+//! Server (crates/hopperd).
 
 pub mod account;
 pub mod accounts;

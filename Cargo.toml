@@ -1,12 +1,18 @@
-[package]
-name = "hopper"
+[workspace]
+members = [".", "crates/hopper-core", "crates/hopperd"]
+default-members = ["."]
+resolver = "3"
+
+# One version for every crate: release.ps1 and release.yml read the first
+# `version = "..."` line of this file.
+[workspace.package]
 version = "0.8.93"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-description = "A native Minecraft modpack and server manager"
 
-[dependencies]
+[workspace.dependencies]
+hopper-core = { path = "crates/hopper-core" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -21,7 +27,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 tiny_http = "0.12"
 base64 = "0.22"
 flate2 = "1"
-# Frames of big description GIFs, kept compressed between loops.
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
 trash = "5"
 sha1_smol = { version = "1", features = ["std"] }
@@ -29,6 +34,32 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 regex = "1"
 keyring = { version = "3", features = ["windows-native"] }
 similar = "2"
+windows = "0.62"
+
+# Hopper desktop: the GPUI app. Its logic lives in crates/hopper-core.
+[package]
+name = "hopper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A native Minecraft modpack and server manager"
+
+[dependencies]
+# Imported as `hopper` so the app's `hopper::...` paths stay as they were.
+hopper = { path = "crates/hopper-core", package = "hopper-core" }
+anyhow.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+directories.workspace = true
+log.workspace = true
+env_logger.workspace = true
+image.workspace = true
+base64.workspace = true
+# Frames of big description GIFs, kept compressed between loops.
+lz4_flex.workspace = true
+trash.workspace = true
+sha1_smol.workspace = true
 # The app: GPUI, gpui-component and Lucide icons in one crate.
 gpui-kit = "0.8"
 
@@ -39,18 +70,13 @@ raw-window-handle = "0.6"
 # The small window that fetches website-only CurseForge files (WebView2).
 wry = "0.57"
 tao = "0.37"
-windows = { version = "0.62", features = [
+windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
-    "Win32_Security_Cryptography",
-    "Win32_System_Diagnostics_Etw",
-    "Win32_System_Performance",
-    "Win32_System_Time",
-    "Win32_Storage_FileSystem",
-    "Win32_UI_Controls",
     "Win32_Storage_Xps",
     "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

@@ -957,7 +957,7 @@ mod tests {
     fn real_world_and_datapack() {
         crate::env::load(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/.env"
+            "/../../.env"
         )));
         let root = std::env::temp_dir().join(format!("hopper-realworld-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);

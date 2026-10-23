@@ -1124,7 +1124,7 @@ mod real {
     #[ignore = "network and a real instance"]
     fn plan_real() {
         let Ok(dir) = std::env::var("HOPPER_PLAN") else { return };
-        crate::env::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/.env")));
+        crate::env::load(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env")));
         let inst = crate::instances::load(Path::new(&dir)).expect("instance");
         let p = inst.pack.clone().expect("a pack");
         let ups = crate::instance_ops::pack_updates(&[(

@@ -1,6 +1,8 @@
 name: Release
 
 # Push a tag like v0.2.0 (matching Cargo.toml's version) to build Hopper
+# desktop. Hopper Server (crates/hopperd) is released on its own, from
+# hopperd-v<version> tags, which "v*" does not match.
 # and attach hopper.exe and a zip to that release. Copies of Hopper update
 # themselves from these.
 on:

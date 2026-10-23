@@ -3469,13 +3469,33 @@ dependencies = [
  "base64 0.22.1",
  "directories",
  "env_logger",
- "flate2",
  "gpui-kit",
+ "hopper-core",
  "image",
- "keyring",
  "log",
  "lz4_flex",
  "raw-window-handle",
+ "serde_json",
+ "sha1_smol",
+ "tao",
+ "trash",
+ "windows 0.62.2",
+ "winresource",
+ "wry",
+ "zip",
+]
+
+[[package]]
+name = "hopper-core"
+version = "0.8.93"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "directories",
+ "flate2",
+ "image",
+ "keyring",
+ "log",
  "regex",
  "rusqlite",
  "serde",
@@ -3483,15 +3503,22 @@ dependencies = [
  "sha1_smol",
  "similar",
  "sysinfo 0.37.2",
- "tao",
  "tiny_http",
  "toml 0.8.23",
  "trash",
  "ureq",
  "windows 0.62.2",
- "winresource",
- "wry",
  "zip",
+]
+
+[[package]]
+name = "hopperd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "hopper-core",
+ "log",
 ]
 
 [[package]]

@@ -1,0 +1,48 @@
+[package]
+name = "hopper-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Hopper's logic, shared by Hopper desktop and Hopper Server"
+
+[lib]
+name = "hopper_core"
+
+[dependencies]
+rusqlite.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+zip.workspace = true
+directories.workspace = true
+log.workspace = true
+ureq.workspace = true
+image.workspace = true
+tiny_http.workspace = true
+base64.workspace = true
+flate2.workspace = true
+trash.workspace = true
+sha1_smol.workspace = true
+sysinfo.workspace = true
+regex.workspace = true
+keyring.workspace = true
+similar.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security_Cryptography",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_Performance",
+    "Win32_System_Time",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Controls",
+    "Win32_Storage_Xps",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

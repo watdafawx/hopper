@@ -1,0 +1,15 @@
+[package]
+name = "hopperd"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Hopper Server: a standalone Minecraft server panel"
+# Released on its own (tags hopperd-v<version>), not with Hopper desktop.
+publish = false
+
+[dependencies]
+hopper-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true

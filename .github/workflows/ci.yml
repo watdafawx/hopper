@@ -14,6 +14,8 @@ jobs:
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
       - name: Library tests
-        run: cargo test --lib
+        run: cargo test -p hopper-core --lib
       - name: Build the app
         run: cargo build --bin hopper
+      - name: Build Hopper Server
+        run: cargo build -p hopperd
