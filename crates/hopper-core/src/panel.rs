@@ -3,9 +3,11 @@
 //! restarts or kills them. Crafty Controller 4 is the first; others plug in
 //! through [`ServerPanel`].
 
+mod hopperd;
 mod mcss;
 mod pterodactyl;
 
+pub use hopperd::HopperServer;
 pub use mcss::Mcss;
 pub use pterodactyl::Pterodactyl;
 
@@ -155,7 +157,8 @@ pub trait ServerPanel: Send + Sync {
 }
 
 /// The panels Hopper knows: (settings value, name shown).
-pub const KINDS: [(&str, &str); 3] = [
+pub const KINDS: [(&str, &str); 4] = [
+    ("hopperd", "Hopper Server"),
     ("crafty", "Crafty Controller 4"),
     ("mcss", "MCSS (MC Server Soft)"),
     ("pterodactyl", "Pterodactyl"),
@@ -166,6 +169,7 @@ pub fn short_name(kind: &str) -> &'static str {
     match kind {
         "mcss" => "MCSS",
         "pterodactyl" => "Pterodactyl",
+        "hopperd" => "Hopper Server",
         _ => "Crafty",
     }
 }
@@ -174,6 +178,7 @@ pub fn short_name(kind: &str) -> &'static str {
 pub fn address_hint(kind: &str) -> &'static str {
     match kind {
         "mcss" => "https://rig:25560",
+        "hopperd" => "rig (or http://192.168.50.3:8790)",
         "pterodactyl" => "https://panel.example.com",
         _ => "https://rig:8443",
     }
@@ -183,13 +188,14 @@ pub fn address_hint(kind: &str) -> &'static str {
 /// `HOPPER_PANEL_TOKEN` in .env, which win), if any.
 pub fn from_settings(s: &crate::settings::Settings) -> Option<Box<dyn ServerPanel>> {
     let url = env("HOPPER_PANEL_URL").unwrap_or_else(|| s.panel_url.trim().to_string());
-    let token = token()?;
+    let token = if s.panel_kind == "hopperd" { hopperd_token()? } else { token()? };
     if url.is_empty() {
         return None;
     }
     let ss = s.panel_self_signed;
     Some(match s.panel_kind.as_str() {
         "mcss" => Box::new(Mcss::new(&url, &token, ss)),
+        "hopperd" => Box::new(HopperServer::new(&url, &token)),
         "pterodactyl" => Box::new(Pterodactyl::new(&url, &token, ss)),
         _ => Box::new(Crafty::new(&url, &token, ss)),
     })
@@ -288,6 +294,16 @@ pub fn token() -> Option<String> {
 /// Saves the API key (empty removes it).
 pub fn set_token(token: &str) -> anyhow::Result<()> {
     crate::secrets::set(crate::secrets::PANEL_KEY, token)
+}
+
+/// The token from pairing with a Hopper Server, kept apart from other
+/// panels' API keys (HOPPER_PANEL_TOKEN wins, for tests).
+pub fn hopperd_token() -> Option<String> {
+    env("HOPPER_PANEL_TOKEN").or_else(|| crate::secrets::get(crate::secrets::HOPPERD_KEY))
+}
+
+pub fn set_hopperd_token(token: &str) -> anyhow::Result<()> {
+    crate::secrets::set(crate::secrets::HOPPERD_KEY, token)
 }
 
 // ---- Crafty Controller 4 ---------------------------------------------------
@@ -704,6 +720,7 @@ mod tests {
             loader: None,
             java: None,
             max_memory: None,
+            remote: None,
         }
     }
 

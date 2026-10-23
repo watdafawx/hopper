@@ -22,6 +22,7 @@ pub mod folderrules;
 pub mod fuzzy;
 pub mod game;
 pub mod history;
+pub mod hopperd;
 pub mod hosting;
 pub mod imgcache;
 pub mod install;

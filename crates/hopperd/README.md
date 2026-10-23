@@ -38,6 +38,13 @@ hopperd --servers-root G:\Minecraft\packs
   the UI, device gets a bearer token.
 - LAN discovery: mDNS `_hopperd._tcp.local.`
 
+## With Hopper desktop (M3)
+
+In Hopper: Settings → Servers → Panel → **Hopper Server**, then **Find** and
+**Pair**. Allow the request in the panel (Access & devices) after checking the
+code matches. Hopper then lists the panel's servers and syncs mods over the
+network: no shared drive needed.
+
 ## Files (M2)
 
 - Browse any server folder (fast even with 10 000 files: the list is
@@ -86,6 +93,8 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `PUT /fs/{id}/uploads/{up}?offset=n` (raw body, ≤ 32 MB) | a chunk; 409 `{offset}` if out of step |
 | `GET` / `DELETE /fs/{id}/uploads/{up}` | progress / cancel |
 | `GET /fs/{id}/trash`, `POST .../trash/restore` `{id}`, `POST .../trash/purge` `{ids}` | |
+| `GET /servers/infos` | every server as Hopper desktop describes one |
+| `GET /servers/{id}/mods` | the server's mods, scanned on the panel |
 | `GET /ws` | live: `snapshot` every second; send `{"op":"console","server":id}` to follow a console |
 
 ## Develop

@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos"];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -111,6 +111,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/host", get(host))
         .route("/api/v1/servers", get(servers))
         .route("/api/v1/servers/rescan", post(rescan))
+        .route("/api/v1/servers/infos", get(infos))
+        .route("/api/v1/servers/{id}/mods", get(mods))
         .route("/api/v1/servers/{id}", get(server))
         .route("/api/v1/servers/{id}/power", post(power))
         .route("/api/v1/servers/{id}/command", post(command))
@@ -263,6 +265,48 @@ async fn servers(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
     require(&app, &headers, &method)?;
     let snap = app.snapshot.borrow().clone();
     Ok(Json(json!(snap.servers)))
+}
+
+/// Every server as Hopper desktop describes one: folder, manager, loader,
+/// Java, memory and server.properties.
+async fn infos(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let a = app.clone();
+    let list = tokio::task::spawn_blocking(move || {
+        a.servers
+            .list()
+            .iter()
+            .map(|e| {
+                let i = hopper_core::server::load(&e.root);
+                json!({
+                    "id": e.id, "name": e.name, "path": e.root.to_string_lossy(), "managed_by": e.managed_by,
+                    "loader": i.loader, "java": i.java, "max_memory": i.max_memory, "properties": i.properties,
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(bad)?;
+    Ok(Json(json!(list)))
+}
+
+/// The server's mods, read from the jars here so only the list travels.
+async fn mods(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let dir = e.root.join("mods");
+    let mods = tokio::task::spawn_blocking(move || {
+        if dir.is_dir() { hopper_core::scan::scan_folder(&dir) } else { Ok(Vec::new()) }
+    })
+    .await
+    .map_err(bad)?
+    .map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({ "mods": mods })))
 }
 
 async fn rescan(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {

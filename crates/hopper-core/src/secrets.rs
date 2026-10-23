@@ -9,6 +9,8 @@ const SERVICE: &str = "Hopper";
 pub const CF_KEY: &str = "curseforge_api_key";
 /// The server panel's API key.
 pub const PANEL_KEY: &str = "panel_api_key";
+/// The token a Hopper Server gave this PC when it was paired.
+pub const HOPPERD_KEY: &str = "hopperd_token";
 
 fn entry(name: &str) -> anyhow::Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, name).context("Credential Manager")

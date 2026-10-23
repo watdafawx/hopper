@@ -3624,6 +3624,7 @@ dependencies = [
  "image",
  "keyring",
  "log",
+ "mdns-sd",
  "regex",
  "rusqlite",
  "serde",

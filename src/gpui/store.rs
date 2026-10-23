@@ -2242,6 +2242,12 @@ impl Store {
         });
     }
 
+    /// Reads the server list again (after pairing with a Hopper Server, or
+    /// changing the panel).
+    pub fn rediscover_servers(&mut self) {
+        self.discover_servers();
+    }
+
     /// The rig's servers, then the ones Hopper hosts here (run by Hopper
     /// itself through the local panel).
     fn discover_servers(&mut self) {
@@ -2256,6 +2262,16 @@ impl Store {
                 self.ping(&s);
                 self.servers.push(s);
             }
+        }
+        // A Hopper Server lists its servers itself; no shared drive needed.
+        if let Some(client) = hopper::hopperd::Client::from_settings(&self.settings) {
+            self.spawn(move || {
+                Msg::RigServers(client.server_infos().unwrap_or_else(|e| {
+                    log::warn!("Hopper Server at {}: {e:#}", client.base);
+                    Vec::new()
+                }))
+            });
+            return;
         }
         self.spawn(move || Msg::RigServers(hopper::server::discover(&rig_root)));
     }

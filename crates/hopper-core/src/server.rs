@@ -28,6 +28,8 @@ pub struct ServerInfo {
     pub java: Option<String>,
     /// -Xmx from user_jvm_args.txt.
     pub max_memory: Option<String>,
+    /// On a Hopper Server: reached through its API, not the file system.
+    pub remote: Option<crate::hopperd::Remote>,
 }
 
 impl ServerInfo {
@@ -83,6 +85,7 @@ pub fn load(root: &Path) -> ServerInfo {
                 t.lines()
                     .find_map(|l| l.trim().strip_prefix("-Xmx").map(str::to_string))
             }),
+        remote: None,
     }
 }
 

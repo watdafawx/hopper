@@ -29,6 +29,8 @@ sysinfo.workspace = true
 regex.workspace = true
 keyring.workspace = true
 similar.workspace = true
+# Finding Hopper Servers on the LAN.
+mdns-sd.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

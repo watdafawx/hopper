@@ -158,6 +158,16 @@ impl UpdatePreview {
         let Some(t) = self.server.as_mut() else { return };
         t.splan = None;
         t.status = None;
+        // Server pack updates write into the server folder directly; not
+        // over Hopper Server's API yet.
+        if t.server.remote.is_some() {
+            t.status = Some((
+                "Updating a server on Hopper Server from its server pack comes in a later version. Sync the mods from the Server tab.".into(),
+                None,
+            ));
+            cx.notify();
+            return;
+        }
         self.plan = None;
         self.diffs.clear();
         let jobs = self.store.read(cx).jobs().clone();

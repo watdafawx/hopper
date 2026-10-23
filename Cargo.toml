@@ -35,6 +35,7 @@ regex = "1"
 keyring = { version = "3", features = ["windows-native"] }
 similar = "2"
 windows = "0.62"
+mdns-sd = "0.13"
 
 # Hopper desktop: the GPUI app. Its logic lives in crates/hopper-core.
 [package]

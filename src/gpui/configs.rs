@@ -872,9 +872,18 @@ impl ConfigsPanel {
 
 impl Render for ConfigsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(_) = self.pair(cx) else {
+        let Some((server, _)) = self.pair(cx) else {
             return div().into_any_element();
         };
+        if server.remote.is_some() {
+            return div()
+                .p_4()
+                .child(widgets::caption(
+                    "Comparing configs with a server on Hopper Server comes in a later version. Edit them in the panel's Files tab for now.",
+                    cx,
+                ))
+                .into_any_element();
+        }
         let folders = self.folders(cx);
         let online = self.online(cx);
         let folder_ix = folders.iter().position(|f| *f == self.folder).unwrap_or(0);

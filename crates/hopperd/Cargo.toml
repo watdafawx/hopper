@@ -28,7 +28,7 @@ argon2 = "0.5"
 getrandom = "0.3"
 sha2 = "0.10"
 include_dir = "0.7"
-mdns-sd = "0.13"
+mdns-sd.workspace = true
 if-addrs = "0.13"
 
 [build-dependencies]

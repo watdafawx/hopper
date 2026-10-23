@@ -1,6 +1,6 @@
 # Hopper Server: companion server panel (draft)
 
-Status: M0, M1 and M2 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
+Status: M0–M3 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
 
 **M1 as built** differs from the draft in a few places:
 - No separate shim process: hopper-core's `LocalServer` already starts each
@@ -32,6 +32,22 @@ Status: M0, M1 and M2 built (2026-10-23). Mockups: `mockups/panel.html`. Run and
   the old copy (20 per file, 30 days), restorable. Diff views are later.
 - Not in M2 yet: folder tree, content search, mod-aware columns in `mods/`,
   zip / unzip on the server, SFTP, per-path permissions (all v1).
+
+**M3 as built** (Hopper desktop, in Hopper 0.8.96):
+- Settings → Servers → Panel: **Hopper Server**. Find (mDNS) fills the
+  address; Pair shows a 6-digit code that the owner allows in the panel; the
+  token is kept in Credential Manager apart from other panels' API keys.
+- With Hopper Server as the panel, the server list comes from the panel
+  (no `Q:` drive). A remote server is a normal `ServerInfo` with `remote`
+  set and a stand-in root `hopperd:\<folder>`, so the existing screens work
+  unchanged and local file reads on it fail at once.
+- Server sync's mods: the panel scans its own `mods/` (`/servers/{id}/mods`)
+  so no jar crosses the wire to compare; Add uploads, Copy to pack
+  downloads (through local backups), Remove goes to the panel's trash.
+  Start / stop / restart / console go through the panel like Crafty's.
+- Not over the API yet (shown as "comes later" in the UI): config drift and
+  the Configs tab, server pack updates, crash scan of the server's logs,
+  the server's NeoForge version check. Next: M3b.
 
 ## Goal
 
@@ -217,11 +233,24 @@ Tiers: **MVP** = first usable release, **v1** = parity with good panels,
 | Docker isolation per server, opt-in toggle, off by default (Linux, Windows via Docker Desktop) | v1 |
 
 ### Mods and plugins
+
+**A server is managed like an instance.** Its mods get the same treatment
+as a client instance's in Hopper: a mod list with icons, names, versions
+and side; enable / disable; add, update and remove; browse CurseForge and
+Modrinth for new mods (server-side and both-side ones, with dependencies).
+This works in the panel's web UI and in Hopper desktop for a server on a
+Hopper Server, through the same API. Updates for a modpack server still
+come from the pack's **server files** (the server pack), not from each
+mod's newest build: a pack update moves the server to the pack's new
+server pack, and single-mod updates are for mods added on top of the pack
+(or when the pack author's server files lag behind).
+
 | Feature | Tier |
 |---|---|
-| Installed list with icons, versions, side | v1 |
-| Search + install from Modrinth / CurseForge with dependencies | v1 |
-| Update check and one-click update (backup first) | v1 |
+| Installed list with icons, versions, side, enable / disable | v1 |
+| Search + install from Modrinth / CurseForge with dependencies (server-side filter) | v1 |
+| Updates: pack mods from the pack's server files; extra mods from CurseForge / Modrinth (backup first) | v1 |
+| ★ Server treated as an instance in Hopper desktop (same Mods tab, peek, add / update) | v1 |
 | ★ Pack ↔ server sync from Hopper (diff, client-only mods skipped) | MVP |
 | ★ Server pack update when the modpack updates | v1 |
 
@@ -345,7 +374,7 @@ features light up only when both sides have them.
 | M0 ✅ | Workspace split: `hopper-core`, `hopper` (desktop), `hopperd` | 2–3 days |
 | M1 ✅ | `hopperd` MVP: servers list, power, console WS, stats, shim supervisor, auth + pairing, LAN discovery, embedded UI shell | 1.5–2 weeks |
 | M2 ✅ | Files MVP: browse, upload/download chunked + resumable, ops, editor, trash, transfer queue | 1–1.5 weeks |
-| M3 | Hopper integration: panel kind, pairing UI, sync over API (drop `Q:`) | 1 week |
+| M3 ✅ | Hopper integration: panel kind, pairing UI, sync over API (drop `Q:`) | 1 week |
 | M4 | Backups, schedules, properties, JVM, players, create server | 1.5 weeks |
 | M5 | Internet: Tailscale path + open port (ACME / pinned TLS, required 2FA, rate limit, allow-list), split path transfers, audit, tokens | 1 week |
 | M6 | v1 rest: mods, history/diff, search, SFTP, sub-users, webhooks, MCP, installers | 2–3 weeks |

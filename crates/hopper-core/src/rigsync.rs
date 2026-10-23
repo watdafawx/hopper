@@ -57,8 +57,13 @@ pub fn compare(
 ) -> Result<(Vec<DiffEntry>, Annotation), String> {
     let mut client =
         crate::scan::scan_folder(&inst.mods_dir()).map_err(|e| format!("client: {e:#}"))?;
-    let theirs =
-        crate::scan::scan_folder(&server.mods_dir()).map_err(|e| format!("server: {e:#}"))?;
+    let theirs = match &server.remote {
+        // The panel reads its own jars; only the list comes over.
+        Some(r) => crate::hopperd::Client::for_remote(r)
+            .and_then(|c| c.mods(&r.id))
+            .map_err(|e| format!("server: {e:#}"))?,
+        None => crate::scan::scan_folder(&server.mods_dir()).map_err(|e| format!("server: {e:#}"))?,
+    };
     let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
     Ok((crate::diff::compute_diff(&client, &theirs), note))
 }
@@ -455,12 +460,32 @@ pub fn mod_ops(act: ModAct, d: &DiffEntry, inst: &Instance, server: &ServerInfo)
 /// Runs the operations and records them in the server's history (pulls
 /// back up into the client, so their backups go there).
 pub fn run(ops: Ops, server_root: &Path, inst_root: &Path) -> Vec<SyncResult> {
+    if crate::hopperd::is_remote_root(server_root) {
+        return Vec::new();
+    }
     let mut results = crate::sync::execute(ops.up, server_root);
     crate::history::record(server_root, "server", server_root, &results);
     let pulled = crate::sync::execute(ops.down, inst_root);
     crate::history::record(server_root, "client", inst_root, &pulled);
     results.extend(pulled);
     results
+}
+
+/// Like [`run`], for any server: a server on a Hopper Server syncs over its
+/// API (replaced and removed files land in the panel's trash; pulls keep
+/// local backups as usual).
+pub fn run_on(ops: Ops, server: &ServerInfo, inst_root: &Path) -> Vec<SyncResult> {
+    match &server.remote {
+        Some(r) => {
+            let mut results = crate::hopperd::execute(ops.up, r, &server.root, inst_root);
+            crate::history::record(&server.root, "server", &server.root, &results);
+            let pulled = crate::hopperd::execute(ops.down, r, &server.root, inst_root);
+            crate::history::record(&server.root, "client", inst_root, &pulled);
+            results.extend(pulled);
+            results
+        }
+        None => run(ops, &server.root, inst_root),
+    }
 }
 
 /// "Done: 12 files; 3 kept in .hopper-backups." or the failures.
@@ -568,6 +593,7 @@ mod tests {
             loader: None,
             java: None,
             max_memory: None,
+            remote: None,
         };
         let ops = mod_ops(RemoveFromServer, &entry(DiffStatus::Same, "both", false), &inst("I"), &server);
         assert!(matches!(&ops.up[..], [SyncOp::Delete { path }] if path.ends_with("a.jar")));
@@ -584,6 +610,7 @@ mod tests {
             loader: None,
             java: None,
             max_memory: None,
+            remote: None,
         };
         let mut d = entry(DiffStatus::ServerNewer, "both", false);
         d.server.as_mut().unwrap().file_name = "a-2.jar".into();

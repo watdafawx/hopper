@@ -196,8 +196,10 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "hosted-root", "Hosted servers", "Servers Hopper runs on this PC live here.", "folder host path directory"),
     e(C::Servers, "server-host", "Server host", "The server PC's name or address, for status pings.", "hostname ping address rig"),
     e(C::Servers, "auto-update", "Update paired servers", "After a pack update, update its paired server too (only while it is offline).", "rig auto update"),
-    e(C::Servers, "panel-kind", "Panel", "The panel that runs your servers: start, stop, console and backups.", "crafty mcss pterodactyl server panel"),
+    e(C::Servers, "panel-kind", "Panel", "The panel that runs your servers: start, stop, console and backups.", "hopper server hopperd crafty mcss pterodactyl server panel"),
     e(C::Servers, "panel-url", "Address", "Where the panel answers, like https://myserver:8443.", "url https server panel"),
+    e(C::Servers, "panel-find", "Find on the LAN", "Hopper Servers announce themselves on your network.", "hopper server hopperd discover lan"),
+    e(C::Servers, "panel-pair", "Pairing", "Pair this PC: the panel shows the same code, allow it there under Access & devices.", "hopper server hopperd pair code"),
     e(C::Servers, "panel-key", "API key", "Kept in Windows Credential Manager, not in settings.json.", "token server panel"),
     e(C::Servers, "panel-cert", "Self-signed certificate", "Accept a certificate the panel makes for itself.", "https ssl tls server panel"),
     e(C::Servers, "panel-test", "Connection", "Whether the panel answers with this address and key.", "test server panel"),
@@ -362,6 +364,12 @@ pub struct SettingsPage {
     /// The last connection test: Ok(summary) or Err(why).
     panel_test: Option<Result<String, String>>,
     panel_testing: bool,
+    /// Hopper Servers found on the LAN (None until looked for).
+    found: Option<Vec<hopper::hopperd::Found>>,
+    /// A Hopper Server token is saved.
+    hopperd_paired: bool,
+    finding: bool,
+    pairing: Pairing,
     /// A new CurseForge key; empty keeps the current one.
     cf_key: Entity<InputState>,
     cf_test: Option<Result<String, String>>,
@@ -370,6 +378,17 @@ pub struct SettingsPage {
     java: Entity<JavaForm>,
     launchers: Entity<crate::launchers_list::LaunchersList>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Pairing with a Hopper Server.
+#[derive(Clone, Debug, PartialEq)]
+enum Pairing {
+    Idle,
+    Asking,
+    /// Waiting for the owner to allow it; both sides show `code`.
+    Waiting(String),
+    Done(String),
+    Failed(String),
 }
 
 /// What the Settings page asks of the app.
@@ -522,6 +541,10 @@ impl SettingsPage {
             panel_key_saved,
             panel_test: None,
             panel_testing: false,
+            found: None,
+            hopperd_paired: hopper::panel::hopperd_token().is_some(),
+            finding: false,
+            pairing: Pairing::Idle,
             cf_key,
             cf_test: None,
             cf_testing: false,
@@ -1131,6 +1154,7 @@ impl SettingsPage {
         let kind_help = match kind.as_str() {
             "mcss" => "API key: MCSS Web Panel → API keys. Its web API must be on (port 25560 by default).",
             "pterodactyl" => "API key: a client key (ptlc_…) from Account → API Credentials. The console stays in the panel.",
+            "hopperd" => "Hopper's own panel (hopperd) on the server PC. Find it on the LAN, then pair: no API key to copy. Sync goes over the network, no shared drive needed.",
             _ => "API key: in Crafty, your user → API Keys, with the Commands permission.",
         };
         let store = self.store.clone();
@@ -1145,7 +1169,11 @@ impl SettingsPage {
             Rc::new(move |ix, _, cx| {
                 if let Some((k, _)) = hopper::panel::KINDS.get(ix) {
                     let k = k.to_string();
-                    store.update(cx, |s, cx| s.update_settings(|st| st.panel_kind = k, cx));
+                    store.update(cx, |s, cx| {
+                        s.update_settings(|st| st.panel_kind = k, cx);
+                        // A Hopper Server lists the servers; others use the folder.
+                        s.rediscover_servers();
+                    });
                 }
             }),
         );
@@ -1156,7 +1184,8 @@ impl SettingsPage {
             Some(Err(e)) => status_line(IconName::CircleX, e.clone(), theme.danger),
             None => widgets::caption("Not tested yet.", cx).text_xs().into_any_element(),
         };
-        let configured = !s.panel_url.trim().is_empty() && self.panel_key_saved;
+        let configured =
+            !s.panel_url.trim().is_empty() && if kind == "hopperd" { self.hopperd_paired } else { self.panel_key_saved };
         vec![
             Block::card(
                 Some("Server packs and hosting"),
@@ -1178,15 +1207,46 @@ impl SettingsPage {
                     )),
                 ],
             ),
-            Block::card(
-                Some("Server panel"),
-                vec![
+            Block::card(Some("Server panel"), {
+                let mut rows = vec![
                     Row::new("panel-kind")
                         .desc(kind_help)
                         .control(div().w(rems(15.)).child(picker)),
                     Row::new("panel-url")
                         .control(div().w(rems(20.)).child(Input::new(&self.texts[&Text::PanelUrl]).small()))
                         .note(self.note(Text::PanelUrl, cx)),
+                ];
+                if kind == "hopperd" {
+                    rows.extend(self.hopperd_rows(s, cx));
+                } else {
+                    rows.extend(self.key_rows(s, key_typed, cx));
+                }
+                rows.push(
+                    Row::new("panel-test")
+                        .note(Some(result))
+                        .control(
+                            Button::new("panel-test")
+                                .small()
+                                .outline()
+                                .icon(IconName::Activity)
+                                .label("Test")
+                                .loading(self.panel_testing)
+                                .disabled(self.panel_testing || !configured)
+                                .when(!configured, |b| {
+                                    b.tooltip(if kind == "hopperd" { "Pair with the panel first" } else { "Add the address and an API key first" })
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| this.test_panel(cx))),
+                        ),
+                );
+                rows
+            }),
+        ]
+    }
+
+    /// The API key rows, for Crafty, MCSS and Pterodactyl.
+    fn key_rows(&self, s: &hopper::settings::Settings, key_typed: bool, cx: &mut Context<Self>) -> Vec<Row> {
+        let theme = cx.theme().clone();
+        vec![
                     Row::new("panel-key")
                         .control(
                             h_flex()
@@ -1212,22 +1272,167 @@ impl SettingsPage {
                         |st, v| st.panel_self_signed = v,
                         cx,
                     )),
-                    Row::new("panel-test")
-                        .note(Some(result))
-                        .control(
-                            Button::new("panel-test")
-                                .small()
-                                .outline()
-                                .icon(IconName::Activity)
-                                .label("Test")
-                                .loading(self.panel_testing)
-                                .disabled(self.panel_testing || !configured)
-                                .when(!configured, |b| b.tooltip("Add the address and an API key first"))
-                                .on_click(cx.listener(|this, _, _, cx| this.test_panel(cx))),
-                        ),
-                ],
-            ),
         ]
+    }
+
+    /// Finding and pairing a Hopper Server.
+    fn hopperd_rows(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Row> {
+        let theme = cx.theme().clone();
+        let found: AnyElement = match &self.found {
+            _ if self.finding => widgets::caption("Looking on the LAN…", cx).text_xs().into_any_element(),
+            None => widgets::caption("Not looked yet.", cx).text_xs().into_any_element(),
+            Some(list) if list.is_empty() => widgets::caption(
+                "None found. Is hopperd running on the server PC? Type its address above instead.",
+                cx,
+            )
+            .text_xs()
+            .into_any_element(),
+            Some(list) => v_flex()
+                .gap_1()
+                .children(list.iter().enumerate().map(|(i, f)| {
+                    let url = f.url.clone();
+                    let current = hopper::hopperd::base_url(&s.panel_url) == hopper::hopperd::base_url(&f.url);
+                    Button::new(("found-panel", i))
+                        .small()
+                        .when(current, |b| b.primary())
+                        .when(!current, |b| b.outline())
+                        .icon(IconName::Server)
+                        .label(format!("{} · {} · v{}", f.name, f.url, f.version))
+                        .on_click(cx.listener(move |this, _, window, cx| this.use_panel_url(url.clone(), window, cx)))
+                }))
+                .into_any_element(),
+        };
+        let has_url = !s.panel_url.trim().is_empty();
+        let busy = matches!(self.pairing, Pairing::Asking | Pairing::Waiting(_));
+        let state: AnyElement = match &self.pairing {
+            Pairing::Idle if self.hopperd_paired => h_flex().child(widgets::pill("Paired", theme.success, false)).into_any_element(),
+            Pairing::Idle => h_flex().child(widgets::pill("Not paired", theme.warning, false)).into_any_element(),
+            Pairing::Asking => widgets::caption("Asking the panel…", cx).text_xs().into_any_element(),
+            Pairing::Waiting(code) => h_flex()
+                .gap_2()
+                .child(div().text_lg().font_weight(FontWeight::BOLD).font_family("JetBrains Mono").child(code.clone()))
+                .child(widgets::caption("Allow it in the panel: Access & devices. Check it shows this code.", cx).text_xs())
+                .into_any_element(),
+            Pairing::Done(t) => status_line(IconName::CircleCheck, t.clone(), theme.success),
+            Pairing::Failed(e) => status_line(IconName::CircleX, e.clone(), theme.danger),
+        };
+        vec![
+            Row::new("panel-find")
+                .control(
+                    Button::new("panel-find")
+                        .small()
+                        .outline()
+                        .icon(IconName::Search)
+                        .label("Find")
+                        .loading(self.finding)
+                        .disabled(self.finding)
+                        .on_click(cx.listener(|this, _, _, cx| this.find_panels(cx))),
+                )
+                .below(found),
+            Row::new("panel-pair")
+                .control(
+                    Button::new("panel-pair")
+                        .small()
+                        .primary()
+                        .label(if self.hopperd_paired { "Pair again" } else { "Pair" })
+                        .disabled(!has_url || busy)
+                        .when(!has_url, |b| b.tooltip("Find the panel or type its address first"))
+                        .on_click(cx.listener(|this, _, _, cx| this.pair_panel(cx))),
+                )
+                .below(state),
+        ]
+    }
+
+    fn use_panel_url(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.texts[&Text::PanelUrl].update(cx, |t, cx| t.set_value(url.clone(), window, cx));
+        self.store.update(cx, |s, cx| {
+            s.update_settings(|st| st.panel_url = url, cx);
+            s.rediscover_servers();
+        });
+        cx.notify();
+    }
+
+    fn find_panels(&mut self, cx: &mut Context<Self>) {
+        self.finding = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_spawn(async move { hopper::hopperd::discover(std::time::Duration::from_secs(3)) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.finding = false;
+                this.found = Some(found);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks the panel to pair, then waits (up to five minutes) for the
+    /// owner to allow it there.
+    fn pair_panel(&mut self, cx: &mut Context<Self>) {
+        let url = self.store.read(cx).settings().panel_url.clone();
+        self.pairing = Pairing::Asking;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let req = cx
+                .background_spawn(async move { hopper::hopperd::pair_request(&url, &hopper::hopperd::device_name()) })
+                .await;
+            let req = match req {
+                Ok(r) => r,
+                Err(e) => {
+                    this.update(cx, |this, cx| {
+                        this.pairing = Pairing::Failed(format!("{e:#}"));
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let code = req.code.clone();
+            if this
+                .update(cx, |this, cx| {
+                    this.pairing = Pairing::Waiting(code);
+                    cx.notify();
+                })
+                .is_err()
+            {
+                return;
+            }
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(300);
+            let outcome = loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let r = req.clone();
+                let st = cx.background_spawn(async move { hopper::hopperd::pair_status(&r) }).await;
+                match st {
+                    Ok(hopper::hopperd::PairState::Waiting) if std::time::Instant::now() < end => continue,
+                    Ok(hopper::hopperd::PairState::Approved(token)) => {
+                        break match hopper::panel::set_hopperd_token(&token) {
+                            Ok(()) => Ok("Paired. Hopper now syncs with this panel over the network.".to_string()),
+                            Err(e) => Err(format!("Paired, but the token couldn't be saved: {e:#}")),
+                        };
+                    }
+                    Ok(hopper::hopperd::PairState::Denied) => break Err("The panel refused this PC.".into()),
+                    Ok(_) => break Err("The request expired. Pair again and allow it in the panel within 5 minutes.".into()),
+                    Err(e) => break Err(format!("{e:#}")),
+                }
+            };
+            this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(t) => {
+                        this.hopperd_paired = true;
+                        this.pairing = Pairing::Done(t);
+                        this.store.update(cx, |s, _| s.rediscover_servers());
+                        this.test_panel(cx);
+                    }
+                    Err(e) => this.pairing = Pairing::Failed(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn content(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {
