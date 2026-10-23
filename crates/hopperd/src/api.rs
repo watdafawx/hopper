@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "users", "mcp"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "users", "mcp", "sftp"];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -162,6 +162,7 @@ async fn hello(State(app): State<Arc<App>>) -> Json<Value> {
         "port": cfg.port,
         "capabilities": CAPABILITIES,
         "tls": { "fingerprint": app.tls.fingerprint, "ca": app.tls.ca_pem, "domain": cfg.acme_domain },
+        "sftp": (cfg.sftp_port != 0).then(|| json!({ "port": cfg.sftp_port, "fingerprint": app.sftp_fingerprint })),
     }))
 }
 

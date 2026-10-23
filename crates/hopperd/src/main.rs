@@ -23,6 +23,7 @@ mod security;
 mod net;
 mod pack_api;
 mod servers;
+mod sftp;
 mod tls;
 mod ui;
 mod webhooks;
@@ -72,6 +73,8 @@ pub struct App {
     pub limiter: security::Limiter,
     pub audit: security::Audit,
     pub tls: TlsInfo,
+    /// The SFTP host key's "SHA256:…".
+    pub sftp_fingerprint: Option<String>,
     /// Finished jobs' results, until fetched.
     pub results: std::sync::Mutex<std::collections::HashMap<u64, serde_json::Value>>,
 }
@@ -195,6 +198,7 @@ fn main() -> anyhow::Result<()> {
         limiter: Default::default(),
         audit: security::Audit::new(&data_dir),
         tls: tls_info,
+        sftp_fingerprint: sftp::fingerprint(&data_dir),
     });
     app.rescan();
     // Schedules: daily restarts, crash restarts, backups; and servers set
@@ -243,6 +247,9 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::Certified
     });
 
     webhooks::watch(app.clone());
+    if cfg.sftp_port != 0 {
+        tokio::spawn(sftp::serve(app.clone(), cfg.bind.clone(), cfg.sftp_port));
+    }
 
     let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse().context("bind address")?;
     let listener = tokio::net::TcpListener::bind(addr)

@@ -556,6 +556,45 @@ impl Auth {
         Ok(())
     }
 
+    /// SFTP sign-in: a person's name and password (not from the internet,
+    /// and not when they use two-factor sign-in, which SFTP can't ask for),
+    /// or an API or device token as the password, from anywhere.
+    pub fn sftp_login(&self, name: &str, password: &str, ip: IpAddr, private: bool) -> anyhow::Result<Who> {
+        self.check_lockout(ip)?;
+        if let Some(who @ (Who::Token { .. } | Who::Device { .. })) = self.check(password.trim()) {
+            return Ok(who);
+        }
+        if !private {
+            self.failed(ip);
+            bail!("from the internet, sign in with an API token as the password");
+        }
+        let name = name.trim();
+        let (acct, secrets) = {
+            let s = self.stored.lock().unwrap();
+            let acct = if name.eq_ignore_ascii_case("owner") { None } else { s.users.iter().find(|u| u.name.eq_ignore_ascii_case(name)).map(|u| u.id.clone()) };
+            let found = name.eq_ignore_ascii_case("owner") || acct.is_some();
+            let secrets = if found { s.secrets(acct.as_deref()) } else { None };
+            (acct, secrets)
+        };
+        let Some((hash, totp, _)) = secrets.filter(|(h, _, _)| verify_password(h, password)) else {
+            self.failed(ip);
+            bail!("wrong name or password");
+        };
+        let _ = hash;
+        if totp.is_some() {
+            bail!("this account uses two-factor sign-in; use an API token as the password");
+        }
+        self.fails.lock().unwrap().remove(&ip);
+        let s = self.stored.lock().unwrap();
+        Ok(match acct {
+            None => Who::Owner,
+            Some(id) => {
+                let u = s.users.iter().find(|u| u.id == id).context("user gone")?;
+                Who::User { id: u.id.clone(), name: u.name.clone(), role: u.role, servers: u.servers.clone() }
+            }
+        })
+    }
+
     // ---- users ----------------------------------------------------------------------
 
     pub fn users(&self) -> Vec<User> {

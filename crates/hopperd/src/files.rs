@@ -271,7 +271,7 @@ pub fn trash(root: &Path, rel: &str) -> anyhow::Result<TrashItem> {
 }
 
 /// Keeps a copy of `p` as its previous version, and only the newest few.
-fn keep_version(root: &Path, rel: &str, p: &Path) -> anyhow::Result<()> {
+pub fn keep_version(root: &Path, rel: &str, p: &Path) -> anyhow::Result<()> {
     let (id, slot) = new_trash_slot(root)?;
     fs::copy(p, slot.join(ITEM)).with_context(|| format!("keeping the old {rel}"))?;
     let path = rel_of(root, p);

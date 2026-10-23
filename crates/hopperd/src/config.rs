@@ -36,6 +36,8 @@ pub struct Config {
     /// CurseForge API key for mod search, identify and updates (Modrinth
     /// needs none).
     pub curseforge_key: String,
+    /// SFTP port; 0 turns SFTP off.
+    pub sftp_port: u16,
 }
 
 impl Default for Config {
@@ -53,6 +55,7 @@ impl Default for Config {
             acme_email: String::new(),
             acme_staging: false,
             curseforge_key: String::new(),
+            sftp_port: 8022,
         }
     }
 }
