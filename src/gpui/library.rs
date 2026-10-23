@@ -318,6 +318,7 @@ impl LibraryView {
             cx.subscribe(&datapacks, |this, _, event, cx| this.content_event(event, cx)),
             cx.observe(&store, |this, _, cx| {
                 this.ensure_selection(cx);
+                this.follow_paired_server(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&search, window, |this, state, event, _, cx| {
@@ -403,6 +404,21 @@ impl LibraryView {
     }
 
     /// Keeps a valid instance picked.
+    /// On the Server tab, points the compare panel at the paired server once
+    /// it is known: at startup the tab opens before the servers have loaded.
+    fn follow_paired_server(&mut self, cx: &mut Context<Self>) {
+        if self.tab != InstTab::Server {
+            return;
+        }
+        let Some(root) = self.selected.as_ref() else { return };
+        let Some(server) = self.store.read(cx).server_of(root).map(|s| s.root.clone()) else {
+            return;
+        };
+        if self.server.read(cx).server() != Some(server.as_path()) {
+            self.server.update(cx, |p, cx| p.show(server, cx));
+        }
+    }
+
     fn ensure_selection(&mut self, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
         if self
