@@ -1032,9 +1032,9 @@ impl Store {
         if tasks > 0 {
             return Some(format!("{tasks} task{} running", if tasks == 1 { "" } else { "s" }));
         }
-        if !self.running.is_empty() {
-            return Some("a game is running".into());
-        }
+        // Games aren't in this list: they run on their own and a restarted
+        // Hopper finds them again. A server hosted here has its console
+        // piped through Hopper, so restarting would cut it loose.
         if self.local.all().iter().any(|s| s.state().is_alive()) {
             return Some("a server hosted here is running".into());
         }

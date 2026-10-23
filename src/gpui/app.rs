@@ -783,7 +783,7 @@ impl AppView {
     }
 
     /// Once an update is installed and nothing is going on (no tasks, no
-    /// game, no hosted server), restarts into it right away; otherwise
+    /// server hosted on this PC), restarts into it right away; otherwise
     /// waits until things are idle.
     fn auto_restart(window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn_in(window, async move |this, cx| loop {
