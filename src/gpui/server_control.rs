@@ -9,7 +9,10 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::form::Field;
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex,
@@ -17,7 +20,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hopper::panel::{BackupSet, PanelAction, PanelServer, PanelStats, ServerPanel};
+use hopper::panel::{BackupSet, PanelAction, PanelOptions, PanelServer, PanelStats, ServerPanel};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,6 +67,19 @@ pub struct ServerControl {
     /// Console lines that scrolled off the panel's window so far, so a
     /// line keeps its key (and a pick stays put) as new ones arrive.
     console_base: usize,
+    /// The console shows the whole log file of the run, not just the
+    /// panel's latest lines.
+    console_full: bool,
+    /// How the panel runs the server, once read (`None` inside when the
+    /// panel has no such settings).
+    options: Option<Result<Option<PanelOptions>, String>>,
+    /// Those settings as edited.
+    opts: PanelOptions,
+    opts_loading: bool,
+    opts_saving: bool,
+    stop_input: Entity<InputState>,
+    delay_input: Entity<InputState>,
+    log_days_input: Entity<InputState>,
     _poll: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -73,7 +89,10 @@ impl ServerControl {
         let command = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Console command, e.g. say Restarting soon")
         });
-        let subs = vec![
+        let stop_input = cx.new(|cx| InputState::new(window, cx).placeholder("stop"));
+        let delay_input = cx.new(|cx| InputState::new(window, cx).placeholder("0"));
+        let log_days_input = cx.new(|cx| InputState::new(window, cx).placeholder("0"));
+        let mut subs = vec![
             cx.subscribe_in(&command, window, |this, _, e: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } = e {
                     this.send(window, cx);
@@ -88,6 +107,14 @@ impl ServerControl {
                 }
             }),
         ];
+        for i in [&stop_input, &delay_input, &log_days_input] {
+            subs.push(cx.subscribe(i, |this, _, e: &InputEvent, cx| {
+                if matches!(e, InputEvent::Change) {
+                    this.read_option_inputs(cx);
+                    cx.notify();
+                }
+            }));
+        }
         Self {
             store,
             root: None,
@@ -104,6 +131,14 @@ impl ServerControl {
             command,
             lines: crate::line_select::LineSelect::new(cx),
             console_base: 0,
+            console_full: false,
+            options: None,
+            opts: PanelOptions::default(),
+            opts_loading: false,
+            opts_saving: false,
+            stop_input,
+            delay_input,
+            log_days_input,
             _poll: None,
             _subscriptions: subs,
         }
@@ -182,6 +217,8 @@ impl ServerControl {
         self.console.clear();
         self.console_base = 0;
         self.lines.clear();
+        self.options = None;
+        self.opts_loading = false;
         self._poll = None;
         let Some(panel) = self.the_panel(cx) else {
             cx.notify();
@@ -225,16 +262,16 @@ impl ServerControl {
                 return;
             }
             loop {
-                let Ok(Some((id, console))) =
-                    this.update(cx, |this, _| this.id.clone().map(|id| (id, this.console_open)))
-                else {
+                let Ok(Some((id, console, full))) = this.update(cx, |this, _| {
+                    this.id.clone().map(|id| (id, this.console_open, this.console_full))
+                }) else {
                     return;
                 };
                 let p = panel.clone();
                 let (stats, lines) = cx
                     .background_spawn(async move {
                         let stats = p.stats(&id).map_err(|e| format!("{e:#}"));
-                        let lines = console.then(|| p.console(&id).ok()).flatten();
+                        let lines = console.then(|| read_console(&*p, &id, full)).flatten();
                         (stats, lines)
                     })
                     .await;
@@ -245,7 +282,12 @@ impl ServerControl {
                     return;
                 }
                 // Faster while the console shows, so it reads as live.
-                let wait = if console { Duration::from_secs(1) } else { POLL };
+                // The whole file is bigger: read it less often.
+                let wait = match (console, full) {
+                    (true, false) => Duration::from_secs(1),
+                    (true, true) => Duration::from_secs(5),
+                    _ => POLL,
+                };
                 cx.background_executor().timer(wait).await;
             }
         }));
@@ -299,13 +341,13 @@ impl ServerControl {
         let (Some(panel), Some(id)) = (self.the_panel(cx), self.id.clone()) else {
             return;
         };
-        let console = self.console_open;
+        let (console, full) = (self.console_open, self.console_full);
         cx.spawn(async move |this, cx| {
             let (stats, lines) = cx
                 .background_spawn(async move {
                     (
                         panel.stats(&id).map_err(|e| format!("{e:#}")),
-                        console.then(|| panel.console(&id).ok()).flatten(),
+                        console.then(|| read_console(&*panel, &id, full)).flatten(),
                     )
                 })
                 .await;
@@ -1249,10 +1291,36 @@ impl ServerControl {
         }
         let running = matches!(&self.stats, Some(Ok(s)) if s.running);
         let empty = widgets::caption("No console output yet.", cx).into_any_element();
+        // Crafty can also read the run's whole log file.
+        let has_file = self.panel.as_ref().is_some_and(|(_, p)| p.name() == "Crafty");
+        let full = self.console_full;
         v_flex()
             .flex_1()
             .min_h_0()
             .gap_2()
+            .when(has_file, |c| {
+                c.child(
+                    h_flex()
+                        .gap_3()
+                        .child(
+                            TabBar::new("console-source")
+                                .segmented()
+                                .small()
+                                .selected_index(usize::from(full))
+                                .child(Tab::new().label("Live"))
+                                .child(Tab::new().label("Whole log file"))
+                                .on_click(cx.listener(|this, ix: &usize, _, cx| this.set_console_full(*ix == 1, cx))),
+                        )
+                        .child(widgets::caption(
+                            if full {
+                                "This run's latest.log from the start, read every few seconds."
+                            } else {
+                                "The panel's latest lines, live."
+                            },
+                            cx,
+                        )),
+                )
+            })
             .child(crate::line_select::view(self, "console", Some(empty), window, cx))
             .child(
                 h_flex()
@@ -1279,6 +1347,225 @@ impl ServerControl {
             })
             .into_any_element()
     }
+}
+
+impl ServerControl {
+    fn set_console_full(&mut self, full: bool, cx: &mut Context<Self>) {
+        if self.console_full == full {
+            return;
+        }
+        self.console_full = full;
+        self.console.clear();
+        self.console_base = 0;
+        self.lines.clear();
+        self.poll_now(cx);
+        cx.notify();
+    }
+
+    /// Reads how the panel runs the server, and fills the form.
+    fn load_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(panel), Some(id)) = (self.the_panel(cx), self.id.clone()) else {
+            return;
+        };
+        self.opts_loading = true;
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { panel.options(&id).map_err(|e| format!("{e:#}")) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.opts_loading = false;
+                if let Ok(Some(o)) = &r {
+                    this.opts = o.clone();
+                    this.fill_option_inputs(window, cx);
+                }
+                this.options = Some(r);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn fill_option_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let o = self.opts.clone();
+        let num = |n: u32| if n == 0 { String::new() } else { n.to_string() };
+        self.stop_input.update(cx, |s, cx| s.set_value(o.stop_command.clone(), window, cx));
+        self.delay_input.update(cx, |s, cx| s.set_value(num(o.auto_start_delay), window, cx));
+        self.log_days_input.update(cx, |s, cx| s.set_value(num(o.logs_delete_after), window, cx));
+    }
+
+    fn read_option_inputs(&mut self, cx: &App) {
+        let text = |i: &Entity<InputState>| i.read(cx).value().trim().to_string();
+        let stop = text(&self.stop_input);
+        self.opts.stop_command = if stop.is_empty() { "stop".into() } else { stop };
+        self.opts.auto_start_delay = text(&self.delay_input).parse().unwrap_or(0);
+        self.opts.logs_delete_after = text(&self.log_days_input).parse().unwrap_or(0);
+    }
+
+    /// The settings as last read from the panel.
+    fn saved_options(&self) -> Option<&PanelOptions> {
+        match &self.options {
+            Some(Ok(Some(o))) => Some(o),
+            _ => None,
+        }
+    }
+
+    fn save_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(panel), Some(id), Some(old)) =
+            (self.the_panel(cx), self.id.clone(), self.saved_options().cloned())
+        else {
+            return;
+        };
+        let new = self.opts.clone();
+        self.opts_saving = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let n = new.clone();
+            let r = cx
+                .background_spawn(async move { panel.set_options(&id, &old, &n).map_err(|e| format!("{e:#}")) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.opts_saving = false;
+                match r {
+                    Ok(()) => {
+                        this.options = Some(Ok(Some(new)));
+                        window.push_notification(Notification::success("Saved to the panel."), cx);
+                    }
+                    Err(e) => window.push_notification(Notification::error(e), cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The panel's own settings for the server (Crafty's crash restart,
+    /// auto start, stop command and log cleanup), for the Settings tab.
+    /// Nothing for panels without them and servers Hopper hosts.
+    pub fn options_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.hosted(cx) || self.id.is_none() || !self.configured(cx) {
+            return None;
+        }
+        if self.options.is_none() && !self.opts_loading {
+            self.load_options(window, cx);
+        }
+        let theme = cx.theme().clone();
+        let panel = self.panel.as_ref().map(|(_, p)| p.name()).unwrap_or("Panel");
+        let heading = div().text_lg().font_weight(FontWeight::SEMIBOLD).child(panel);
+        let body: AnyElement = match &self.options {
+            None => h_flex()
+                .gap_2()
+                .child(Spinner::new().small())
+                .child(widgets::caption(format!("Reading {panel} settings for this server"), cx))
+                .into_any_element(),
+            Some(Ok(None)) => return None,
+            Some(Err(e)) => div().text_sm().text_color(theme.danger).child(e.clone()).into_any_element(),
+            Some(Ok(Some(saved))) => {
+                let changed = *saved != self.opts;
+                let o = self.opts.clone();
+                let rem = window.rem_size();
+                v_flex()
+                    .gap_3()
+                    .child(
+                        crate::java_form::settings_form(rem)
+                            .child(
+                                Field::new()
+                                    .label("After a crash")
+                                    .description("The panel notices a crash and starts the server again.")
+                                    .child(
+                                        Switch::new("panel-crash")
+                                            .label("Start it again")
+                                            .checked(o.crash_detection)
+                                            .on_change(cx.listener(|this, v: &bool, _, cx| {
+                                                this.opts.crash_detection = *v;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                Field::new().label(format!("With {panel}")).child(
+                                    h_flex()
+                                        .gap_3()
+                                        .child(
+                                            Switch::new("panel-auto-start")
+                                                .label(format!("Start when {panel} starts, after"))
+                                                .checked(o.auto_start)
+                                                .on_change(cx.listener(|this, v: &bool, _, cx| {
+                                                    this.opts.auto_start = *v;
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(div().w_16().child(Input::new(&self.delay_input).small()))
+                                        .child(div().text_sm().child("seconds")),
+                                ),
+                            )
+                            .child(
+                                Field::new()
+                                    .label("Stop command")
+                                    .description("What the panel types in the console to stop the server.")
+                                    .child(div().w_48().child(Input::new(&self.stop_input).small())),
+                            )
+                            .child(
+                                Field::new().label("Old logs").child(
+                                    h_flex()
+                                        .gap_3()
+                                        .child(div().text_sm().child("Delete after"))
+                                        .child(div().w_16().child(Input::new(&self.log_days_input).small()))
+                                        .child(div().text_sm().child("days (empty keeps them all)")),
+                                ),
+                            )
+                            .when(!o.execution_command.is_empty(), |f| {
+                                f.child(
+                                    Field::new()
+                                        .label("Launch command")
+                                        .description("How the panel starts the server. Change it in the panel.")
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_family(theme.mono_font_family.clone())
+                                                .text_color(theme.muted_foreground)
+                                                .child(o.execution_command.clone()),
+                                        ),
+                                )
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(
+                                Button::new("panel-options-save")
+                                    .primary()
+                                    .label(format!("Save to {panel}"))
+                                    .loading(self.opts_saving)
+                                    .disabled(!changed || self.opts_saving)
+                                    .on_click(cx.listener(|this, _, window, cx| this.save_options(window, cx))),
+                            )
+                            .child(
+                                Button::new("panel-options-undo")
+                                    .ghost()
+                                    .icon(IconName::RotateCcw)
+                                    .label("Undo changes")
+                                    .disabled(!changed)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(o) = this.saved_options().cloned() {
+                                            this.opts = o;
+                                            this.fill_option_inputs(window, cx);
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            }
+        };
+        Some(v_flex().gap_3().child(heading).child(body).into_any_element())
+    }
+}
+
+/// The console's lines: the panel's latest, or the run's whole log file.
+fn read_console(p: &dyn ServerPanel, id: &str, full: bool) -> Option<Vec<String>> {
+    if full { p.log_file(id) } else { p.console(id) }.ok()
 }
 
 impl crate::line_select::Lines for ServerControl {

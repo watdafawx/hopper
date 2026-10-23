@@ -83,6 +83,23 @@ impl PanelStats {
     }
 }
 
+/// How the panel runs a server, where the panel has such settings.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PanelOptions {
+    /// Start the server again when it crashes.
+    pub crash_detection: bool,
+    /// Start the server when the panel starts.
+    pub auto_start: bool,
+    /// Seconds to wait before that start.
+    pub auto_start_delay: u32,
+    /// The console command that stops the server.
+    pub stop_command: String,
+    /// Days to keep old logs; 0 keeps them all.
+    pub logs_delete_after: u32,
+    /// The command the panel starts the server with (shown, not edited).
+    pub execution_command: String,
+}
+
 /// One of a server's backup setups in the panel, with its backup files.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BackupSet {
@@ -103,6 +120,20 @@ pub trait ServerPanel: Send + Sync {
     fn console(&self, id: &str) -> anyhow::Result<Vec<String>>;
     /// Sends a console command (without the leading slash).
     fn command(&self, id: &str, line: &str) -> anyhow::Result<()>;
+    /// The whole log file of the current run, where the panel reads it;
+    /// else the console's latest lines.
+    fn log_file(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        self.console(id)
+    }
+    /// How the panel runs the server, where it has such settings.
+    fn options(&self, _id: &str) -> anyhow::Result<Option<PanelOptions>> {
+        Ok(None)
+    }
+    /// Changes how the panel runs the server (only the fields that differ
+    /// from `old`).
+    fn set_options(&self, _id: &str, _old: &PanelOptions, _new: &PanelOptions) -> anyhow::Result<()> {
+        bail!("Change this in the panel itself.")
+    }
     /// The server's backup setups and files, where the panel lists them.
     fn backups(&self, _id: &str) -> anyhow::Result<Vec<BackupSet>> {
         bail!("Backups for this panel are in the panel itself.")
@@ -459,6 +490,53 @@ fn crafty_neoforge_patch(d: &Value, version: &str) -> serde_json::Map<String, Va
     patch
 }
 
+/// Crafty's log lines, which it escapes for its web page (&quot; and so on).
+fn log_lines(data: &Value) -> Vec<String> {
+    data.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l.as_str().map(unescape_html))
+        .collect()
+}
+
+/// A Crafty server record's run settings.
+fn parse_options(d: &Value) -> PanelOptions {
+    let num = |k: &str| match &d[k] {
+        Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
+        Value::String(s) => s.trim().parse().unwrap_or(0),
+        _ => 0,
+    };
+    PanelOptions {
+        crash_detection: d["crash_detection"].as_bool().unwrap_or(false),
+        auto_start: d["auto_start"].as_bool().unwrap_or(false),
+        auto_start_delay: num("auto_start_delay"),
+        stop_command: d["stop_command"].as_str().unwrap_or("stop").to_string(),
+        logs_delete_after: num("logs_delete_after"),
+        execution_command: d["execution_command"].as_str().unwrap_or_default().to_string(),
+    }
+}
+
+/// The fields of a Crafty server record that changed from `old` to `new`.
+fn options_patch(old: &PanelOptions, new: &PanelOptions) -> serde_json::Map<String, Value> {
+    let mut p = serde_json::Map::new();
+    if old.crash_detection != new.crash_detection {
+        p.insert("crash_detection".into(), new.crash_detection.into());
+    }
+    if old.auto_start != new.auto_start {
+        p.insert("auto_start".into(), new.auto_start.into());
+    }
+    if old.auto_start_delay != new.auto_start_delay {
+        p.insert("auto_start_delay".into(), new.auto_start_delay.into());
+    }
+    if old.stop_command != new.stop_command {
+        p.insert("stop_command".into(), new.stop_command.trim().into());
+    }
+    if old.logs_delete_after != new.logs_delete_after {
+        p.insert("logs_delete_after".into(), new.logs_delete_after.into());
+    }
+    p
+}
+
 /// Undoes HTML escaping: `&quot;`, `&amp;`, `&lt;`, `&gt;`, `&#39;`, `&#x27;`
 /// and other numeric references. Anything else stays as it is.
 fn unescape_html(s: &str) -> String {
@@ -535,14 +613,32 @@ impl ServerPanel for Crafty {
     }
 
     fn console(&self, id: &str) -> anyhow::Result<Vec<String>> {
-        let data = self.call("GET", &format!("/servers/{id}/logs"), None)?;
-        // Crafty escapes the lines for its web page (&quot; and so on).
-        Ok(data
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|l| l.as_str().map(unescape_html))
-            .collect())
+        Ok(log_lines(&self.call("GET", &format!("/servers/{id}/logs"), None)?))
+    }
+
+    fn log_file(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        Ok(log_lines(&self.call("GET", &format!("/servers/{id}/logs?file=true"), None)?))
+    }
+
+    fn options(&self, id: &str) -> anyhow::Result<Option<PanelOptions>> {
+        Ok(Some(parse_options(&self.call("GET", &format!("/servers/{id}"), None)?)))
+    }
+
+    fn set_options(&self, id: &str, old: &PanelOptions, new: &PanelOptions) -> anyhow::Result<()> {
+        let patch = options_patch(old, new);
+        if patch.is_empty() {
+            return Ok(());
+        }
+        let body = Value::Object(patch).to_string();
+        self.send_json("PATCH", &format!("/servers/{id}"), &body)
+            .map(|_| ())
+            .map_err(|e| {
+                if e.to_string().contains("Commands permission") {
+                    anyhow::anyhow!("the API key needs the Config permission on this server")
+                } else {
+                    e
+                }
+            })
     }
 
     fn command(&self, id: &str, line: &str) -> anyhow::Result<()> {
@@ -627,6 +723,24 @@ mod tests {
         // Falls back to the panel's name for the server (trimmed).
         assert_eq!(match_server(&list, &server(r"Q:\packs\Val", 1)).unwrap().id, "c3");
         assert!(match_server(&list, &server(r"Q:\packs\none", 1)).is_none());
+    }
+
+    #[test]
+    fn options_read_and_patch_only_what_changed() {
+        let o = parse_options(&json!({
+            "crash_detection": true, "auto_start": false, "auto_start_delay": "10",
+            "stop_command": "stop", "logs_delete_after": 7, "execution_command": "java -jar x.jar"
+        }));
+        assert!(o.crash_detection && !o.auto_start);
+        assert_eq!((o.auto_start_delay, o.logs_delete_after), (10, 7));
+        let mut n = o.clone();
+        n.auto_start = true;
+        n.stop_command = " end ".into();
+        let p = options_patch(&o, &n);
+        assert_eq!(p.len(), 2);
+        assert_eq!(p["auto_start"], json!(true));
+        assert_eq!(p["stop_command"], json!("end"));
+        assert!(options_patch(&o, &o).is_empty());
     }
 
     #[test]

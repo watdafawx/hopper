@@ -743,12 +743,18 @@ impl ServersView {
             .when(self.tab == 3, |c| {
                 let root = s.root.clone();
                 self.settings_view.update(cx, |v, cx| v.show(root, window, cx));
+                let panel = self.control.update(cx, |ctl, cx| ctl.options_view(window, cx));
                 c.child(
                     div()
                         .id("server-settings")
                         .flex_1()
                         .min_h_0()
-                        .child(self.settings_view.clone())
+                        .child(
+                            v_flex()
+                                .gap_6()
+                                .children(panel)
+                                .child(self.settings_view.clone()),
+                        )
                         .overflow_y_scrollbar(),
                 )
             })
