@@ -56,3 +56,25 @@ jobs:
         run: cargo test -p hopperd
       - name: Build Hopper Server
         run: cargo build -p hopperd
+
+  # Hopper desktop on Linux and macOS: does it compile yet? Not required
+  # to pass while the ports are under way.
+  desktop-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux libraries GPUI needs
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev libxcb1-dev             libfontconfig-dev libfreetype-dev libasound2-dev libssl-dev libzstd-dev libdbus-1-dev pkg-config clang
+      - name: Rust (from rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the desktop app
+        run: cargo check --bin hopper --message-format short
