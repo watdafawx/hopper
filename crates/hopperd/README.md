@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M5: servers, console, files, players, backups, schedules, settings, new servers; LAN, Tailscale and internet (HTTPS, two-factor).** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -93,7 +93,58 @@ scan, NeoForge version, and server pack updates (run here as jobs).
 - Rate limits, an audit log of changes and sign-ins, and API tokens
   (read-only or full, per server, expiring) in Access & devices.
 
-Not yet: incremental and off-site backups, mods tab (see the roadmap).
+Not yet: incremental and off-site backups (see the roadmap).
+
+## v1 extras (M6)
+
+- **Mods tab:** the server is managed like an instance (`hopper.json` in
+  its folder): identify jars on CurseForge and Modrinth, add mods from
+  either (with dependencies), turn them on and off, remove, and update the
+  ones added on top of the pack. Pack mods update from the pack's server
+  files. CurseForge needs a key (`curseforge_key`, or the Mods tab).
+- **File history and search:** the editor's History shows earlier
+  versions side by side with the current file and can load one back. The
+  file manager's filter box searches inside files on Enter (plain text or
+  a regular expression).
+- **People:** the owner adds people with a name, a password and a role:
+  admin (everything on their servers), operator (power, console, players,
+  backups) or viewer (looking only), limited to chosen servers. Everyone
+  can change their password and set up their own two-factor sign-in.
+- **Webhooks:** Discord or any URL (JSON) for start, stop, crash, join,
+  leave, backups, schedules and failures. Access & devices.
+- **MCP:** `/api/v1/mcp` (Streamable HTTP) for AI assistants, with an API
+  token. Tools: servers, console, power, commands, files (list, read,
+  write, search), mods, last crash, backups. Read-only tokens only look.
+- **SFTP** on port 8022 (`sftp_port`, 0 = off): `/` lists your servers.
+  Your name and password from the LAN or Tailscale, or an API token as
+  the password from anywhere. Saved-over files keep their old version and
+  deleted ones go to the trash.
+
+## Install as a service
+
+From an admin terminal (Windows) or with sudo (Linux):
+
+```
+hopperd service install [--data <dir>]
+hopperd service status
+hopperd service uninstall
+```
+
+Windows: a service that starts with the machine (as LocalSystem; to run
+as a user, change Log On in services.msc). Logs go to `hopperd.log` in the
+data folder. Linux: a systemd unit running as the user behind sudo, with
+`KillMode=process` so servers survive restarts. On Linux hopperd starts
+servers but doesn't yet reattach to them after it restarts.
+
+Docker (Java 21 included), from the repository root:
+
+```
+docker build -f crates/hopperd/Dockerfile -t hopperd .
+docker run -d -p 8790:8790 -p 8022:8022 -p 25565:25565 -v hopperd-data:/data -v /srv/minecraft:/servers hopperd
+```
+
+or `crates/hopperd/packaging/docker-compose.yml`. Releases: pushing a
+`hopperd-v<version>` tag builds Windows and Linux downloads.
 
 ## API (v1)
 
@@ -137,6 +188,14 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `GET /auth/2fa`, `POST /auth/2fa/begin`, `/enable` `{code}`, `/disable` `{password, code}` | two-factor (owner) |
 | `GET` / `POST /tokens` `{name, read_only, servers, days}`, `DELETE /tokens/{id}` | API tokens (owner) |
 | `GET /audit?limit=` | audit log (owner) |
+| `POST /auth/password` `{current, new}` | your own password |
+| `GET` / `POST /users` `{name, password, role, servers}`, `PUT` / `DELETE /users/{id}`, `POST /users/{id}/reset-2fa` | people (owner); roles `admin`, `operator`, `viewer` |
+| `GET` / `POST /webhooks` `{name, url, events, servers}`, `PUT` / `DELETE /webhooks/{id}`, `POST /webhooks/{id}/test` | webhooks (owner) |
+| `GET /servers/{id}/mods/list`, `PUT .../mods/meta`, `POST .../mods/identify` (job), `.../toggle` `{file, enabled}`, `.../remove` `{file}`, `GET .../mods/search?q=&source=`, `POST .../mods/install` `{project_id}` (job), `GET .../mods/updates`, `POST .../mods/update` `{project_ids}` (job) | the server as an instance |
+| `PUT /settings/curseforge` `{key}` | CurseForge key (owner) |
+| `GET /fs/{id}/history?path=`, `GET /fs/{id}/diff?path=&version=` | earlier versions, line diff against now |
+| `GET /fs/{id}/search?q=&path=[&regex=1]` → `{hits: [{path, line, text}], more}` | text in files and names |
+| `POST /mcp` | Model Context Protocol (JSON-RPC) |
 | `GET /ws` | live: `snapshot` every second; send `{"op":"console","server":id}` to follow a console |
 
 ## Develop

@@ -1,6 +1,6 @@
 # Hopper Server: companion server panel (draft)
 
-Status: M0–M5 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
+Status: M0–M6 built (v1, 2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
 
 **M1 as built** differs from the draft in a few places:
 - No separate shim process: hopper-core's `LocalServer` already starts each
@@ -97,6 +97,38 @@ Status: M0–M5 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: 
   sign-in (who, address, network, result), in the Access page.
 - API tokens: read-only or full, limited to servers, with expiry.
 - Not done: a relay for NAT'd boxes, passkeys, OIDC (later).
+
+**M6 as built** (v1 list):
+- Mods tab: the server folder gets a `hopper.json` (game version and
+  loader detected from HostedMeta, run.bat's NeoForge, the console or the
+  loader jars) and uses Hopper's instance code: identify (CurseForge
+  fingerprints, then Modrinth hashes), search and add with dependencies,
+  on/off, remove (to `.hopper-backups`), updates for mods outside the
+  pack. Mods first identified on a pack server are marked as the pack's
+  and only change through server pack updates.
+- History: every save already kept the old file in the trash; the editor
+  shows those versions as a side-by-side diff (configdiff::line_diff) and
+  can load one. Search: names and text files under a folder, plain or
+  regex, 2 MB per file, 500 hits, skipping libraries, logs, regions and
+  binaries.
+- Webhooks from snapshot changes (start, stop, crash, join, leave) and
+  scheduler events (backups, restarts, warnings, failures); manual
+  backups too. Discord embeds or plain JSON; URLs are masked in the UI.
+- People: roles admin / operator / viewer, optional server list, own
+  password and TOTP. One policy (security::refusal) covers the HTTP API,
+  MCP tool calls and SFTP; lists and live updates only show your servers.
+- MCP (2025-06-18, Streamable HTTP, JSON answers only) behind the same
+  tokens.
+- SFTP (russh, ring): virtual root of servers, internal folders hidden,
+  saved-over files versioned, deletes to the trash, audit log entries.
+  Password sign-in only on private networks and without 2FA; tokens work
+  from anywhere.
+- Installers: `hopperd service install` (Windows service with restart on
+  failure, or a systemd unit with KillMode=process), Dockerfile (Java 21)
+  and compose, hopperd-v* release workflow (Windows zip, Linux tarball),
+  Linux CI job.
+- Not done: reattaching to servers after a restart on Linux, SFTP public
+  keys, Docker image publishing.
 
 ## Goal
 
@@ -426,7 +458,7 @@ features light up only when both sides have them.
 | M3 ✅ | Hopper integration: panel kind, pairing UI, sync over API (drop `Q:`) | 1 week |
 | M4 ✅ | Backups, schedules, properties, JVM, players, create server | 1.5 weeks |
 | M5 ✅ | Internet: Tailscale path + open port (ACME / pinned TLS, required 2FA, rate limit, allow-list), split path transfers, audit, tokens | 1 week |
-| M6 | v1 rest: mods, history/diff, search, SFTP, sub-users, webhooks, MCP, installers | 2–3 weeks |
+| M6 ✅ | v1 rest: mods, history/diff, search, SFTP, sub-users, webhooks, MCP, installers | 2–3 weeks |
 
 | M7 | Rig cutover: import every Crafty / MCSS server, run side by side, then retire them | 2–3 days |
 | M8 | Multi-node (after the panel runs fully on rig) | 1–1.5 weeks |
