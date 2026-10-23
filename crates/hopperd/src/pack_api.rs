@@ -32,7 +32,7 @@ fn ensure_cf_key(key: &str) {
 }
 
 /// Runs `work` as a job; its result (as JSON) is kept for `/jobs/{id}`.
-fn spawn<T: serde::Serialize>(
+pub(crate) fn spawn<T: serde::Serialize>(
     app: &Arc<App>,
     title: String,
     work: impl FnOnce(&hopper_core::jobs::Job) -> anyhow::Result<T> + Send + 'static,

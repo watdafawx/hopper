@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M2 (servers, console, files), LAN only.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M4 (servers, console, files, players, backups, schedules, settings, new servers), LAN only.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -63,7 +63,21 @@ scan, NeoForge version, and server pack updates (run here as jobs).
   previous version of every saved or replaced file; restore or delete for
   good.
 
-Not yet: TLS / internet access, backups, schedules, settings editor
+## Running servers (M4)
+
+- **Players:** online list with op / kick / ban, whitelist, ops and bans.
+- **Backups:** everything or worlds only, from the Backups tab or on a
+  schedule (every N hours while running, keep M). A running server's world
+  is saved first. Restore whole (stopped server; current worlds are moved
+  aside) or pick files from a backup.
+- **Schedule:** daily restart with chat warnings, restart after a crash
+  (with a per-hour limit), start with the panel, scheduled backups.
+- **Settings:** server.properties with descriptions and checks; memory and
+  GC preset for Java.
+- **New server:** vanilla, NeoForge, Fabric or Quilt on any release; Java
+  is found or downloaded.
+
+Not yet: TLS / internet access, incremental and off-site backups, mods tab
 (see the roadmap).
 
 ## API (v1)
@@ -100,6 +114,11 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `GET /fs/{id}/walk?path=`, `POST /fs/{id}/hashes`, `GET /fs/{id}/dirs?names=` | config compare |
 | `POST /servers/{id}/pack/plan` `{inst, pack, cf_key}`, `POST /servers/{id}/pack/apply` `{plan, take}` | server pack update jobs |
 | `GET /jobs/{job}`, `POST /jobs/{job}/cancel` | progress and result |
+| `GET` / `PUT /servers/{id}/properties`, `GET` / `PUT /servers/{id}/jvm` | settings |
+| `GET /servers/{id}/players`, `POST` `{action: op\|deop\|kick\|ban\|pardon\|whitelist_add\|whitelist_remove, name, reason}` | players |
+| `GET` / `POST /servers/{id}/backups` `{worlds_only, note}`, `DELETE .../backups/{name}`, `GET .../entries`, `POST .../restore` `{paths}` | backups (jobs) |
+| `GET` / `PUT /servers/{id}/schedule` | schedule |
+| `POST /servers/create` `{name, mc_version, loader, loader_version, memory_mb, port, accept_eula}`, `GET /meta/minecraft`, `GET /meta/loaders/{mc}` | new servers (job) |
 | `GET /ws` | live: `snapshot` every second; send `{"op":"console","server":id}` to follow a console |
 
 ## Develop

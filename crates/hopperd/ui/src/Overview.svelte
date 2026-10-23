@@ -1,9 +1,12 @@
 <script>
-  import { Play, Square, RotateCw, Terminal } from '@lucide/svelte';
+  import { Play, Square, RotateCw, Terminal, Plus } from '@lucide/svelte';
   import { live, history } from './lib/live.svelte.js';
   import { bytes, uptime, color, xmx, stateLabel } from './lib/format.js';
   import { power } from './lib/power.js';
   import Spark from './Spark.svelte';
+  import NewServer from './NewServer.svelte';
+
+  let making = $state(false);
 
   const h = $derived(live.host);
   const players = $derived(live.servers.reduce((n, s) => n + s.players.length, 0));
@@ -12,7 +15,8 @@
 </script>
 
 <div class="pad">
-  <h2>Overview</h2>
+  <div class="row hd"><h2>Overview</h2><span class="sp"></span>
+    <button class="btn pri" onclick={() => (making = true)}><Plus size={14} />New server</button></div>
   <div class="grid4">
     <div class="card stat">
       <div class="lbl">CPU{h?.cpu_name ? ` · ${h.cpu_name.replace(/\(R\)|\(TM\)|CPU|Processor|\d+-Core/g, '').trim()}` : ''}</div>
@@ -89,9 +93,12 @@
   </div>
 </div>
 
+{#if making}<NewServer close={() => (making = false)} />{/if}
+
 <style>
   .pad { padding: 18px; }
-  h2 { font-size: 17px; margin-bottom: 14px; }
+  h2 { font-size: 17px; }
+  .hd { margin-bottom: 14px; }
   .grid4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
   .stat .v { font-size: 22px; font-weight: 700; margin-top: 4px; white-space: nowrap; }
   .stat .u { font-size: 12px; color: var(--muted); font-weight: 400; }

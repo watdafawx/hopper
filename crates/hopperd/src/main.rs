@@ -16,6 +16,7 @@ mod discovery;
 mod files;
 mod fs_api;
 mod host;
+mod manage_api;
 mod pack_api;
 mod servers;
 mod ui;
@@ -53,6 +54,8 @@ pub struct App {
     pub refresh: Notify,
     /// Long work (server pack updates) Hopper desktop follows.
     pub jobs: hopper_core::jobs::Jobs,
+    /// Runs schedules: restarts, crash restarts, backups, autostart.
+    pub scheduler: std::sync::Mutex<Option<hopper_core::hosting::Scheduler>>,
     /// Finished jobs' results, until fetched.
     pub results: std::sync::Mutex<std::collections::HashMap<u64, serde_json::Value>>,
 }
@@ -151,8 +154,14 @@ fn main() -> anyhow::Result<()> {
         refresh: Notify::new(),
         jobs: Default::default(),
         results: Default::default(),
+        scheduler: Default::default(),
     });
     app.rescan();
+    // Schedules: daily restarts, crash restarts, backups; and servers set
+    // to start with the panel.
+    let sched = hopper_core::hosting::Scheduler::start(app.servers.panel());
+    sched.start_autostart(&app.servers.panel());
+    *app.scheduler.lock().unwrap() = Some(sched);
     log::info!(
         "{} server(s) in {}",
         app.servers.list().len(),

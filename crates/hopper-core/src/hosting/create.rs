@@ -221,6 +221,18 @@ fn sha1_file(path: &Path) -> anyhow::Result<String> {
 }
 
 /// Mojang's server.jar for `mc`, checked against its SHA-1.
+/// Minecraft's release versions, newest first (Mojang's list).
+pub fn release_versions() -> anyhow::Result<Vec<String>> {
+    let manifest = fetch_json(MOJANG_MANIFEST)?;
+    Ok(manifest["versions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["type"] == "release")
+        .filter_map(|v| v["id"].as_str().map(str::to_string))
+        .collect())
+}
+
 pub fn install_vanilla(root: &Path, mc: &str, job: &Job) -> anyhow::Result<()> {
     job.detail(format!("Finding Minecraft {mc}"));
     let manifest = fetch_json(MOJANG_MANIFEST)?;

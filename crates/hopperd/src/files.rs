@@ -27,7 +27,7 @@ const UPLOAD_KEEP: Duration = Duration::from_secs(24 * 3600);
 
 /// Names hopperd keeps for itself; not listed, not touched by file ops.
 pub fn is_internal(name: &str) -> bool {
-    name == TRASH_DIR || name == UPLOAD_DIR
+    name == TRASH_DIR || name == UPLOAD_DIR || name == hopper_core::hosting::backup::DIR
 }
 
 fn secs(t: SystemTime) -> u64 {

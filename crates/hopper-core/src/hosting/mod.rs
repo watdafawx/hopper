@@ -4,6 +4,7 @@
 //! the Servers page drives through [`LocalPanel`], like a Crafty server,
 //! and that keeps running when Hopper restarts.
 
+pub mod backup;
 pub mod create;
 pub mod jvm;
 pub mod local_panel;

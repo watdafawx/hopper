@@ -45,7 +45,7 @@ pub struct Summary {
 }
 
 pub struct Servers {
-    panel: LocalPanel,
+    panel: Arc<LocalPanel>,
     entries: RwLock<Vec<Arc<Entry>>>,
 }
 
@@ -75,7 +75,7 @@ fn state_name(s: &ServerState) -> &'static str {
 
 impl Servers {
     pub fn new() -> Self {
-        Servers { panel: LocalPanel::new(), entries: RwLock::new(Vec::new()) }
+        Servers { panel: Arc::new(LocalPanel::new()), entries: RwLock::new(Vec::new()) }
     }
 
     /// Picks up every server folder under `root` and in `extra`. Servers
@@ -127,6 +127,11 @@ impl Servers {
             }));
         }
         entries.sort_by_key(|e| e.name.to_lowercase());
+    }
+
+    /// The panel the scheduler runs over.
+    pub fn panel(&self) -> Arc<LocalPanel> {
+        self.panel.clone()
     }
 
     pub fn list(&self) -> Vec<Arc<Entry>> {

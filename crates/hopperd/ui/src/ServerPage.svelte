@@ -10,6 +10,10 @@
   import Files from './Files.svelte';
   import Editor from './Editor.svelte';
   import Trash from './Trash.svelte';
+  import Players from './Players.svelte';
+  import Backups from './Backups.svelte';
+  import Schedule from './Schedule.svelte';
+  import Settings from './Settings.svelte';
 
   let { id, tab = 'console', path = '' } = $props();
 
@@ -129,6 +133,10 @@
   <nav class="tabs">
     <button class:on={tab === 'console'} onclick={() => nav('console')}>Console</button>
     <button class:on={filesTab} onclick={() => nav('files')}>Files</button>
+    <button class:on={tab === 'players'} onclick={() => nav('players')}>Players</button>
+    <button class:on={tab === 'backups'} onclick={() => nav('backups')}>Backups</button>
+    <button class:on={tab === 'schedule'} onclick={() => nav('schedule')}>Schedule</button>
+    <button class:on={tab === 'settings'} onclick={() => nav('settings')}>Settings</button>
   </nav>
 
   {#if tab === 'files'}
@@ -137,6 +145,14 @@
     <div class="full">{#key path}<Editor server={s} {path} close={() => nav('files', path.split('/').slice(0, -1).join('/'))} />{/key}</div>
   {:else if tab === 'trash'}
     <div class="full"><Trash server={s} close={() => nav('files')} /></div>
+  {:else if tab === 'players'}
+    <div class="full scroll"><Players server={s} /></div>
+  {:else if tab === 'backups'}
+    <div class="full scroll"><Backups server={s} openSchedule={() => nav('schedule')} /></div>
+  {:else if tab === 'schedule'}
+    <div class="full scroll"><Schedule server={s} /></div>
+  {:else if tab === 'settings'}
+    <div class="full scroll"><Settings server={s} /></div>
   {:else}
   <div class="split">
     <section class="term">
@@ -208,6 +224,8 @@
   .tabs button { padding: 9px 0; color: var(--subtle); font-weight: 500; }
   .tabs button.on { color: var(--text); box-shadow: inset 0 -2px var(--acc); }
   .full { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 18px 18px; }
+  .full.scroll { overflow: auto; display: block; }
+  .tabs { overflow-x: auto; }
   .split { flex: 1; min-height: 0; display: flex; gap: 14px; padding: 0 18px 18px; }
   .term { flex: 1; min-width: 0; min-height: 360px; background: var(--term); border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; position: relative; }
   .tb { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--base); flex-wrap: wrap; }

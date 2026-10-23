@@ -1,6 +1,6 @@
 # Hopper Server: companion server panel (draft)
 
-Status: M0–M3b built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
+Status: M0–M4 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
 
 **M1 as built** differs from the draft in a few places:
 - No separate shim process: hopper-core's `LocalServer` already starts each
@@ -56,6 +56,26 @@ Status: M0–M3b built (2026-10-23). Mockups: `mockups/panel.html`. Run and API:
   for the job when the panel has none (plain HTTP until M5's TLS).
   "Open server" buttons open that file or folder in the panel's web UI.
 - Still local-only: folder mirror and link rules (they say so).
+
+**M4 as built** (hopperd tabs: Players, Backups, Schedule, Settings; New server):
+- Backups (hopper-core `hosting::backup`): zips in `.hopper-server-backups`,
+  everything (minus logs, crash reports, Hopper's folders) or worlds only;
+  a running server is flushed with `save-off` / `save-all flush` / waits
+  for "Saved the game" / `save-on`. Restore needs the server stopped;
+  worlds it contains are replaced whole and the current ones moved to
+  `replaced/`. Restoring single files from a backup works. Not yet:
+  incremental / deduplicated, off-site targets (v1).
+- Schedules: Hopper's existing scheduler (daily restart with warnings,
+  crash restart with a limit, start with the panel) now runs in hopperd,
+  plus "back up every N hours while running, keep M".
+- server.properties form (Hopper's spec table, validated), other keys raw;
+  JVM memory and GC presets in `user_jvm_args.txt`.
+- Players: online, ops, whitelist, bans from the server's json files;
+  changes go through the server's own commands, so the server must run
+  (offline edits with name lookup are v1).
+- New server: vanilla, NeoForge, Fabric, Quilt, any release version;
+  Java found or Temurin downloaded. Not tested end to end yet because it
+  accepts Mojang's EULA (guard and version lists are tested).
 
 ## Goal
 
@@ -383,7 +403,7 @@ features light up only when both sides have them.
 | M1 ✅ | `hopperd` MVP: servers list, power, console WS, stats, shim supervisor, auth + pairing, LAN discovery, embedded UI shell | 1.5–2 weeks |
 | M2 ✅ | Files MVP: browse, upload/download chunked + resumable, ops, editor, trash, transfer queue | 1–1.5 weeks |
 | M3 ✅ | Hopper integration: panel kind, pairing UI, sync over API (drop `Q:`) | 1 week |
-| M4 | Backups, schedules, properties, JVM, players, create server | 1.5 weeks |
+| M4 ✅ | Backups, schedules, properties, JVM, players, create server | 1.5 weeks |
 | M5 | Internet: Tailscale path + open port (ACME / pinned TLS, required 2FA, rate limit, allow-list), split path transfers, audit, tokens | 1 week |
 | M6 | v1 rest: mods, history/diff, search, SFTP, sub-users, webhooks, MCP, installers | 2–3 weeks |
 

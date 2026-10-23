@@ -44,6 +44,12 @@ pub struct Schedule {
     pub max_crash_restarts: u32,
     /// Start the server when Hopper starts.
     pub start_with_hopper: bool,
+    /// Back up every this many hours while the server runs. 0: never.
+    pub backup_every_hours: u32,
+    /// Scheduled backups kept; older ones are deleted.
+    pub backup_keep: u32,
+    /// What scheduled backups hold.
+    pub backup_scope: super::backup::Scope,
 }
 
 impl Default for Schedule {
@@ -54,6 +60,9 @@ impl Default for Schedule {
             auto_restart_on_crash: true,
             max_crash_restarts: 3,
             start_with_hopper: false,
+            backup_every_hours: 0,
+            backup_keep: 12,
+            backup_scope: super::backup::Scope::Worlds,
         }
     }
 }
@@ -216,6 +225,8 @@ pub enum ScheduleEvent {
     GaveUp { root: PathBuf, crashes: u32 },
     /// Started with Hopper.
     AutoStarted { root: PathBuf },
+    /// A scheduled backup was made (its file name).
+    BackedUp { root: PathBuf, name: String },
     /// Something the scheduler tried failed.
     Failed { root: PathBuf, error: String },
 }
@@ -228,6 +239,7 @@ impl ScheduleEvent {
             | ScheduleEvent::CrashRestarted { root, .. }
             | ScheduleEvent::GaveUp { root, .. }
             | ScheduleEvent::AutoStarted { root }
+            | ScheduleEvent::BackedUp { root, .. }
             | ScheduleEvent::Failed { root, .. } => root,
         }
     }
@@ -251,6 +263,7 @@ impl ScheduleEvent {
                 "{name} crashed {crashes} times within an hour; Hopper stopped restarting it"
             ),
             ScheduleEvent::AutoStarted { .. } => format!("{name} started with Hopper"),
+            ScheduleEvent::BackedUp { name: file, .. } => format!("{name} backed up ({file})"),
             ScheduleEvent::Failed { error, .. } => format!("{name}: {error}"),
         }
     }
@@ -269,6 +282,14 @@ pub trait ScheduledServer {
     /// Asks the server to stop (saving the world); returns at once.
     fn stop(&self) -> anyhow::Result<()>;
     fn command(&self, line: &str) -> anyhow::Result<()>;
+    /// Makes a scheduled backup and drops old ones; returns its file name.
+    fn backup(&self, _scope: super::backup::Scope, _keep: u32) -> anyhow::Result<String> {
+        anyhow::bail!("backups aren't supported here")
+    }
+    /// When the last scheduled backup was made (Unix seconds).
+    fn last_backup(&self) -> Option<i64> {
+        None
+    }
 }
 
 impl ScheduledServer for LocalServer {
@@ -287,6 +308,16 @@ impl ScheduledServer for LocalServer {
     fn command(&self, line: &str) -> anyhow::Result<()> {
         LocalServer::command(self, line)
     }
+    fn backup(&self, scope: super::backup::Scope, keep: u32) -> anyhow::Result<String> {
+        let root = LocalServer::root(self);
+        let job = crate::jobs::Jobs::default().start("scheduled backup");
+        let b = super::backup::make(root, scope, super::backup::Kind::Scheduled, "", Some(self), &job)?;
+        super::backup::prune(root, keep as usize)?;
+        Ok(b.name)
+    }
+    fn last_backup(&self) -> Option<i64> {
+        super::backup::last_scheduled(LocalServer::root(self)).map(|t| t as i64)
+    }
 }
 
 /// What the scheduler remembers about one server.
@@ -303,6 +334,9 @@ struct Track {
     /// Why Hopper stopped restarting the server after crashes. Cleared
     /// once the server is no longer crashed (someone started it).
     gave_up: Option<String>,
+    /// Last scheduled backup, in Unix seconds (read from the server's
+    /// backups the first time).
+    last_backup: Option<i64>,
 }
 
 /// The scheduler's logic without threads or a clock.
@@ -385,6 +419,19 @@ fn tick_server(
     }
     t.gave_up = None;
 
+    // Backups, every few hours while it runs.
+    if schedule.backup_every_hours > 0 && state == ServerState::Running {
+        let unix = now.0 - local_offset();
+        let last = *t.last_backup.get_or_insert_with(|| s.last_backup().unwrap_or(0));
+        if unix - last >= schedule.backup_every_hours as i64 * HOUR {
+            t.last_backup = Some(unix);
+            events.push(match s.backup(schedule.backup_scope, schedule.backup_keep) {
+                Ok(name) => ScheduleEvent::BackedUp { root: root.clone(), name },
+                Err(e) => ScheduleEvent::Failed { root: root.clone(), error: format!("scheduled backup failed: {e:#}") },
+            });
+        }
+    }
+
     // The daily restart: look at yesterday's, today's and tomorrow's, so
     // warnings before a 00:05 restart and a 23:58 restart's grace both
     // work across midnight.
@@ -426,6 +473,12 @@ fn tick_server(
             return;
         }
     }
+}
+
+/// Local time minus Unix time, in seconds.
+fn local_offset() -> i64 {
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    LocalTime::now().0 - unix
 }
 
 /// Starts the servers marked `start_with_hopper` that aren't running and
@@ -610,6 +663,28 @@ mod tests {
             lock(&self.log).push(line.into());
             Ok(())
         }
+        fn backup(&self, _scope: crate::hosting::backup::Scope, keep: u32) -> anyhow::Result<String> {
+            lock(&self.log).push(format!("backup keep {keep}"));
+            Ok("b.zip".into())
+        }
+    }
+
+    #[test]
+    fn backs_up_every_few_hours_while_running() {
+        let s = Fake::new("/srv/a", ServerState::Running);
+        s.set(ServerState::Running);
+        let sched = Schedule { backup_every_hours: 2, backup_keep: 5, ..Schedule::default() };
+        let mut core = Core::default();
+        let tick = |core: &mut Core, t: &str| core.tick(at(t), &[(&s as &dyn ScheduledServer, sched.clone())]);
+        let e = tick(&mut core, "2026-10-23 10:00");
+        assert!(matches!(&e[..], [ScheduleEvent::BackedUp { name, .. }] if name == "b.zip"), "{e:?}");
+        assert!(tick(&mut core, "2026-10-23 11:00").is_empty());
+        assert!(tick(&mut core, "2026-10-23 11:59").is_empty());
+        assert_eq!(tick(&mut core, "2026-10-23 12:00").len(), 1);
+        // Stopped: no backups (nothing changes).
+        s.set(ServerState::Stopped);
+        assert!(tick(&mut core, "2026-10-23 15:00").is_empty());
+        assert_eq!(lock(&s.log).iter().filter(|l| l.starts_with("backup keep 5")).count(), 2);
     }
 
     fn at(s: &str) -> LocalTime {
@@ -835,6 +910,8 @@ mod tests {
             auto_restart_on_crash: false,
             max_crash_restarts: 5,
             start_with_hopper: true,
+            backup_every_hours: 6,
+            ..Schedule::default()
         };
         s.save(&dir).unwrap();
         assert_eq!(Schedule::load(&dir), s);
