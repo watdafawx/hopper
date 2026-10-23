@@ -133,7 +133,7 @@ fn side(
 }
 
 /// Everything a server pack update would do, before it does it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ServerPlan {
     /// The changes, as for a modpack update: `plan.file` is the new server
     /// pack, `plan.kept_mods` the server's mods that aren't the pack's.
@@ -186,6 +186,10 @@ pub fn plan(
     pack: &cf::File,
     job: &Job,
 ) -> anyhow::Result<ServerPlan> {
+    // A server on a Hopper Server: the panel plans it next to the files.
+    if let Some(r) = &server.remote {
+        return crate::hopperd::Client::for_remote(r)?.pack_plan(&r.id, inst, pack, job);
+    }
     let pid = inst.pack.as_ref().map_or(0, |p| p.project_id);
     let sp_id = pack.server_pack_file_id.filter(|id| *id != 0).ok_or_else(|| {
         anyhow::anyhow!("{} has no server pack.", pack.display_name)
@@ -381,7 +385,7 @@ fn jars_in(dir: &Path) -> HashMap<String, u64> {
 }
 
 /// Server mods that stay as they are, by why.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeptMods {
     /// Not the pack's: you added them.
     pub added: usize,
@@ -502,7 +506,7 @@ fn mod_changes(
 }
 
 /// What [`apply`] did.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Report {
     pub loader: Option<(String, String)>,
     pub mods: [usize; 3],
@@ -540,6 +544,10 @@ pub fn apply(
     panel: Option<&dyn crate::panel::ServerPanel>,
     job: &Job,
 ) -> anyhow::Result<Report> {
+    // A server on a Hopper Server: the panel updates its own files.
+    if let Some(r) = &server.remote {
+        return crate::hopperd::Client::for_remote(r)?.pack_apply(&r.id, p, take, job);
+    }
     if matches!(server::ping(host, server.port()), Status::Online { .. }) {
         bail!("{} is running. Stop it first.", server.name);
     }

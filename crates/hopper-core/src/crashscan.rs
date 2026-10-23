@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Hit {
     pub mod_id: String,
     pub file_name: String,
@@ -17,7 +17,7 @@ pub struct Hit {
     pub class: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ServerCrash {
     pub source: String,
     pub headline: String,
@@ -169,6 +169,13 @@ pub fn hits(text: &str) -> (Vec<Hit>, bool) {
 /// crash report was written as latest.log stopped (a server that kept
 /// running, or started again, writes to its log long after).
 pub fn last_crash(root: &Path) -> Option<ServerCrash> {
+    if let Some(r) = crate::hopperd::locate(root) {
+        return r
+            .and_then(|(c, id, _)| c.crash(&id))
+            .inspect_err(|e| log::warn!("crash scan: {e:#}"))
+            .ok()
+            .flatten();
+    }
     let newest = std::fs::read_dir(root.join("crash-reports"))
         .ok()
         .into_iter()

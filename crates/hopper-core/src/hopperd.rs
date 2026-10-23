@@ -32,6 +32,53 @@ pub struct Remote {
     pub id: String,
 }
 
+/// Stand-in roots and the panels they're on, so code given only a path
+/// (config compare, file copies, crash scan) can reach the server.
+static REMOTES: std::sync::LazyLock<std::sync::Mutex<Vec<(PathBuf, Remote)>>> = std::sync::LazyLock::new(Default::default);
+
+pub fn register(root: &Path, remote: &Remote) {
+    let mut r = REMOTES.lock().unwrap_or_else(|e| e.into_inner());
+    r.retain(|(p, _)| p != root);
+    r.push((root.to_path_buf(), remote.clone()));
+}
+
+/// The server root `p` is in (or is), and its panel, when it's remote.
+pub fn remote_of(p: &Path) -> Option<(PathBuf, Remote)> {
+    if !is_remote_root(p) {
+        return None;
+    }
+    REMOTES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(root, _)| p.starts_with(root))
+        .cloned()
+}
+
+/// `p` inside a remote server: the client, the server's id, and the path
+/// relative to its folder.
+pub fn locate(p: &Path) -> Option<anyhow::Result<(Client, String, String)>> {
+    let (root, r) = remote_of(p)?;
+    let rel = remote_rel(&root, p).unwrap_or_default();
+    Some(Client::for_remote(&r).map(|c| (c, r.id.clone(), rel)))
+}
+
+/// Where the panel's web UI shows `p` (a file opens in its editor, a
+/// folder in its file manager), when `p` is on a remote server.
+pub fn web_url(p: &Path) -> Option<String> {
+    let (root, r) = remote_of(p)?;
+    let rel = remote_rel(&root, p).unwrap_or_default();
+    let segs: Vec<String> = rel.split('/').filter(|s| !s.is_empty()).map(enc).collect();
+    let file = segs.last().is_some_and(|l| l.contains('.'));
+    let tab = if file { "edit" } else { "files" };
+    let mut url = format!("{}/#/server/{}/{tab}", r.base, enc(&r.id));
+    for s in segs {
+        url.push('/');
+        url.push_str(&s);
+    }
+    Some(url)
+}
+
 /// The stand-in root for a server on a Hopper Server.
 pub fn remote_root(folder: &str) -> PathBuf {
     PathBuf::from(format!("hopperd:\\{folder}"))
@@ -145,6 +192,102 @@ impl Client {
         Ok(serde_json::from_value(v["mods"].clone())?)
     }
 
+    /// The server's last crash, read by the panel from its logs.
+    pub fn crash(&self, id: &str) -> anyhow::Result<Option<crate::crashscan::ServerCrash>> {
+        Ok(serde_json::from_value(self.get(&format!("/servers/{}/crash", enc(id)))?["crash"].clone())?)
+    }
+
+    /// The NeoForge version the server's run.bat starts.
+    pub fn neoforge(&self, id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.get(&format!("/servers/{}/neoforge", enc(id)))?["version"].as_str().map(str::to_string))
+    }
+
+    /// Every file under `folder` (relative to the server folder) as (path
+    /// inside the folder, size, modified time). Empty when it's missing.
+    pub fn walk(&self, id: &str, folder: &str) -> anyhow::Result<Vec<(String, u64, u64)>> {
+        let v = self.get(&format!("/fs/{}/walk?path={}", enc(id), enc(folder)))?;
+        Ok(serde_json::from_value(v["files"].clone())?)
+    }
+
+    /// Content hashes of files (paths relative to the server folder).
+    pub fn hashes(&self, id: &str, rels: &[String]) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        let v = self.post(&format!("/fs/{}/hashes", enc(id)), json!({ "paths": rels }))?;
+        Ok(serde_json::from_value(v["hashes"].clone())?)
+    }
+
+    /// A text file's content.
+    pub fn read_text(&self, id: &str, rel: &str) -> anyhow::Result<String> {
+        let v = self.get(&format!("/fs/{}/text?path={}", enc(id), enc(rel)))?;
+        Ok(v["content"].as_str().unwrap_or("").to_string())
+    }
+
+    /// Which of `names` are folders in the server folder.
+    pub fn dirs(&self, id: &str, names: &[&str]) -> anyhow::Result<Vec<String>> {
+        let v = self.get(&format!("/fs/{}/dirs?names={}", enc(id), enc(&names.join(","))))?;
+        Ok(serde_json::from_value(v["dirs"].clone())?)
+    }
+
+    // ---- jobs on the panel ---------------------------------------------------------
+
+    /// Follows a job the panel runs until it ends, showing its detail and
+    /// progress in `job`; cancelling `job` cancels it there. Returns its result.
+    fn follow(&self, remote_job: u64, job: &crate::jobs::Job) -> anyhow::Result<Value> {
+        let mut cancelled = false;
+        loop {
+            std::thread::sleep(Duration::from_millis(400));
+            if job.is_cancelled() && !cancelled {
+                cancelled = true;
+                let _ = self.post(&format!("/jobs/{remote_job}/cancel"), json!({}));
+            }
+            let v = self.get(&format!("/jobs/{remote_job}"))?;
+            if let Some(d) = v["detail"].as_str().filter(|d| !d.is_empty()) {
+                job.detail(d);
+            }
+            if let Some(p) = v["progress"].as_f64() {
+                job.progress((p * 1000.0) as usize, 1000);
+            }
+            if v["done"].as_bool() == Some(true) {
+                if let Some(e) = v["error"].as_str() {
+                    bail!("{e}");
+                }
+                return Ok(v["result"].clone());
+            }
+        }
+    }
+
+    /// Plans a server pack update on the panel (it downloads the server
+    /// pack and compares it with the server's files there).
+    pub fn pack_plan(
+        &self,
+        id: &str,
+        inst: &crate::instances::Instance,
+        pack: &crate::cf::File,
+        job: &crate::jobs::Job,
+    ) -> anyhow::Result<crate::server_pack_update::ServerPlan> {
+        let v = self.post(
+            &format!("/servers/{}/pack/plan", enc(id)),
+            json!({ "inst": inst, "pack": pack, "cf_key": crate::cf::api_key().unwrap_or("") }),
+        )?;
+        let result = self.follow(v["job"].as_u64().context("no job id")?, job)?;
+        Ok(serde_json::from_value(result)?)
+    }
+
+    /// Applies a server pack update on the panel.
+    pub fn pack_apply(
+        &self,
+        id: &str,
+        plan: &crate::server_pack_update::ServerPlan,
+        take: &std::collections::HashSet<String>,
+        job: &crate::jobs::Job,
+    ) -> anyhow::Result<crate::server_pack_update::Report> {
+        let v = self.post(
+            &format!("/servers/{}/pack/apply", enc(id)),
+            json!({ "plan": plan, "take": take, "cf_key": crate::cf::api_key().unwrap_or("") }),
+        )?;
+        let result = self.follow(v["job"].as_u64().context("no job id")?, job)?;
+        Ok(serde_json::from_value(result)?)
+    }
+
     // ---- files -----------------------------------------------------------------
 
     /// Uploads `local` to `rel` in the server folder, replacing what is
@@ -237,9 +380,12 @@ fn info_from(v: &Value, base: &str) -> ServerInfo {
         .filter(|f| !f.is_empty())
         .unwrap_or_else(|| name.clone());
     let properties: BTreeMap<String, String> = serde_json::from_value(v["properties"].clone()).unwrap_or_default();
+    let root = remote_root(&folder);
+    let remote = Remote { base: base.to_string(), id: s("id").unwrap_or_default() };
+    register(&root, &remote);
     ServerInfo {
         name,
-        root: remote_root(&folder),
+        root,
         manager: match v["managed_by"].as_str() {
             Some("Crafty") => Manager::Crafty,
             Some("MCSS") => Manager::Mcss,
@@ -249,7 +395,7 @@ fn info_from(v: &Value, base: &str) -> ServerInfo {
         loader: s("loader"),
         java: s("java"),
         max_memory: s("max_memory"),
-        remote: Some(Remote { base: base.to_string(), id: s("id").unwrap_or_default() }),
+        remote: Some(remote),
     }
 }
 
@@ -287,7 +433,7 @@ pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path
                     let tmp = std::env::temp_dir().join(format!("hopper-pull-{}", std::process::id()));
                     let staged = tmp.join(src.file_name().unwrap_or_default());
                     let r = client.download(&remote.id, &rel, &staged).and_then(|_| {
-                        let res = crate::sync::execute(vec![SyncOp::Copy { src: staged.clone(), dst: dst.clone() }], local_root);
+                        let res = crate::sync::execute_local(vec![SyncOp::Copy { src: staged.clone(), dst: dst.clone() }], local_root);
                         match res.into_iter().next() {
                             Some(r) if r.ok => Ok(()),
                             Some(r) => Err(anyhow::anyhow!(r.error.unwrap_or_default())),
@@ -305,7 +451,7 @@ pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path
             },
             // Local-only operations (removing the client's old jar on a pull).
             _ => {
-                let res = crate::sync::execute(vec![op.clone()], local_root);
+                let res = crate::sync::execute_local(vec![op.clone()], local_root);
                 out.extend(res);
                 continue;
             }
@@ -466,6 +612,19 @@ mod tests {
         assert_eq!(base_url("https://panel.example.com"), "https://panel.example.com:8790");
         assert_eq!(base_url("http://rig:8790"), "http://rig:8790");
         assert_eq!(enc("config/a b.toml"), "config%2Fa%20b.toml");
+    }
+
+    #[test]
+    fn web_urls() {
+        let root = remote_root("Web Test");
+        register(&root, &Remote { base: "http://rig:8790".into(), id: "web-test".into() });
+        assert_eq!(
+            web_url(&root.join("config").join("a b.toml")).unwrap(),
+            "http://rig:8790/#/server/web-test/edit/config/a%20b.toml"
+        );
+        assert_eq!(web_url(&root.join("mods")).unwrap(), "http://rig:8790/#/server/web-test/files/mods");
+        assert_eq!(web_url(&root).unwrap(), "http://rig:8790/#/server/web-test/files");
+        assert!(web_url(Path::new(r"C:\x")).is_none());
     }
 
     #[test]

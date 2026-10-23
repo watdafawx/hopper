@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs"];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -113,12 +113,15 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/servers/rescan", post(rescan))
         .route("/api/v1/servers/infos", get(infos))
         .route("/api/v1/servers/{id}/mods", get(mods))
+        .route("/api/v1/servers/{id}/crash", get(crash))
+        .route("/api/v1/servers/{id}/neoforge", get(neoforge))
         .route("/api/v1/servers/{id}", get(server))
         .route("/api/v1/servers/{id}/power", post(power))
         .route("/api/v1/servers/{id}/command", post(command))
         .route("/api/v1/servers/{id}/console", get(console))
         .route("/api/v1/ws", get(ws))
         .merge(crate::fs_api::routes())
+        .merge(crate::pack_api::routes())
         .fallback(crate::ui::serve)
         .with_state(app)
 }
@@ -307,6 +310,32 @@ async fn mods(
     .map_err(bad)?
     .map_err(|e| bad(format!("{e:#}")))?;
     Ok(Json(json!({ "mods": mods })))
+}
+
+/// The server's last crash, from its logs and crash reports.
+async fn crash(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let c = tokio::task::spawn_blocking(move || hopper_core::crashscan::last_crash(&e.root)).await.map_err(bad)?;
+    Ok(Json(json!({ "crash": c })))
+}
+
+/// The NeoForge version the server's run.bat starts.
+async fn neoforge(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let v = hopper_core::server_update::server_neoforge(&e.root);
+    Ok(Json(json!({ "version": v })))
 }
 
 async fn rescan(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {

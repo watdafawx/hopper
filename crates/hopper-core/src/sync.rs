@@ -44,6 +44,25 @@ pub fn plan(diff: &[DiffEntry], client_mods: &Path, server_mods: &Path) -> Vec<S
 
 /// `server_root` holds the backup folder; one timestamped subfolder per run.
 pub fn execute(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
+    // A server on a Hopper Server: its side goes over the panel's API.
+    let remote = ops.iter().find_map(|op| match op {
+        SyncOp::Copy { src, dst } => crate::hopperd::remote_of(dst).or_else(|| crate::hopperd::remote_of(src)),
+        SyncOp::Delete { path } => crate::hopperd::remote_of(path),
+    });
+    if let Some((root, r)) = remote {
+        // Local backups (a pull replacing a client file) stay local.
+        let local = if crate::hopperd::is_remote_root(server_root) {
+            std::env::temp_dir()
+        } else {
+            server_root.to_path_buf()
+        };
+        return crate::hopperd::execute(ops, &r, &root, &local);
+    }
+    execute_local(ops, server_root)
+}
+
+/// [`execute`] for operations on this PC's disks only.
+pub fn execute_local(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());

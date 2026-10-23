@@ -38,7 +38,7 @@ pub fn pack_content(rel: &str) -> bool {
     PACK_CONTENT.iter().any(|p| rel.starts_with(p))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FileAction {
     /// New in the pack; you don't have it.
     Add,
@@ -57,14 +57,14 @@ pub enum FileAction {
     KeepDropped,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FileChange {
     /// Relative to the instance, with `/`.
     pub rel: String,
     pub action: FileAction,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ModAction {
     #[default]
     Add,
@@ -72,7 +72,7 @@ pub enum ModAction {
     Remove,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ModChange {
     pub name: String,
     /// The file you have (empty for an addition).
@@ -88,7 +88,7 @@ pub struct ModChange {
 
 /// A mod you turned off that the update touches: it stays off unless you
 /// choose to turn it on.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OffMod {
     pub name: String,
     /// Your (turned off) file.
@@ -107,7 +107,7 @@ pub struct OffMod {
 }
 
 /// Everything an update would do, before it does it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct UpdatePlan {
     pub file: cf::File,
     pub mods: Vec<ModChange>,

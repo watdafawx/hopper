@@ -57,15 +57,18 @@ pub fn compare(
 ) -> Result<(Vec<DiffEntry>, Annotation), String> {
     let mut client =
         crate::scan::scan_folder(&inst.mods_dir()).map_err(|e| format!("client: {e:#}"))?;
-    let theirs = match &server.remote {
-        // The panel reads its own jars; only the list comes over.
-        Some(r) => crate::hopperd::Client::for_remote(r)
-            .and_then(|c| c.mods(&r.id))
-            .map_err(|e| format!("server: {e:#}"))?,
-        None => crate::scan::scan_folder(&server.mods_dir()).map_err(|e| format!("server: {e:#}"))?,
-    };
+    let theirs = server_mods(server).map_err(|e| format!("server: {e:#}"))?;
     let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
     Ok((crate::diff::compute_diff(&client, &theirs), note))
+}
+
+/// The server's mods; a Hopper Server reads its own jars and sends the
+/// list.
+pub fn server_mods(server: &ServerInfo) -> anyhow::Result<Vec<crate::model::ModInfo>> {
+    match &server.remote {
+        Some(r) => crate::hopperd::Client::for_remote(r)?.mods(&r.id),
+        None => crate::scan::scan_folder(&server.mods_dir()),
+    }
 }
 
 /// What one row's chip does.
@@ -460,9 +463,6 @@ pub fn mod_ops(act: ModAct, d: &DiffEntry, inst: &Instance, server: &ServerInfo)
 /// Runs the operations and records them in the server's history (pulls
 /// back up into the client, so their backups go there).
 pub fn run(ops: Ops, server_root: &Path, inst_root: &Path) -> Vec<SyncResult> {
-    if crate::hopperd::is_remote_root(server_root) {
-        return Vec::new();
-    }
     let mut results = crate::sync::execute(ops.up, server_root);
     crate::history::record(server_root, "server", server_root, &results);
     let pulled = crate::sync::execute(ops.down, inst_root);
@@ -475,17 +475,10 @@ pub fn run(ops: Ops, server_root: &Path, inst_root: &Path) -> Vec<SyncResult> {
 /// API (replaced and removed files land in the panel's trash; pulls keep
 /// local backups as usual).
 pub fn run_on(ops: Ops, server: &ServerInfo, inst_root: &Path) -> Vec<SyncResult> {
-    match &server.remote {
-        Some(r) => {
-            let mut results = crate::hopperd::execute(ops.up, r, &server.root, inst_root);
-            crate::history::record(&server.root, "server", &server.root, &results);
-            let pulled = crate::hopperd::execute(ops.down, r, &server.root, inst_root);
-            crate::history::record(&server.root, "client", inst_root, &pulled);
-            results.extend(pulled);
-            results
-        }
-        None => run(ops, &server.root, inst_root),
+    if let Some(r) = &server.remote {
+        crate::hopperd::register(&server.root, r);
     }
+    run(ops, &server.root, inst_root)
 }
 
 /// "Done: 12 files; 3 kept in .hopper-backups." or the failures.

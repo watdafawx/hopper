@@ -16,6 +16,7 @@ mod discovery;
 mod files;
 mod fs_api;
 mod host;
+mod pack_api;
 mod servers;
 mod ui;
 mod zipstream;
@@ -50,6 +51,10 @@ pub struct App {
     pub snapshot: watch::Sender<Arc<Snapshot>>,
     /// Wakes the snapshot loop early.
     pub refresh: Notify,
+    /// Long work (server pack updates) Hopper desktop follows.
+    pub jobs: hopper_core::jobs::Jobs,
+    /// Finished jobs' results, until fetched.
+    pub results: std::sync::Mutex<std::collections::HashMap<u64, serde_json::Value>>,
 }
 
 impl App {
@@ -144,6 +149,8 @@ fn main() -> anyhow::Result<()> {
         addresses,
         snapshot,
         refresh: Notify::new(),
+        jobs: Default::default(),
+        results: Default::default(),
     });
     app.rescan();
     log::info!(

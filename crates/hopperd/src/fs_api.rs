@@ -30,6 +30,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/fs/{id}/zip", get(zip))
         .route("/api/v1/fs/{id}/text", get(read_text).put(write_text).layer(CompressionLayer::new()))
         .route("/api/v1/fs/{id}/ops", post(ops))
+        .route("/api/v1/fs/{id}/walk", get(walk).layer(CompressionLayer::new()))
+        .route("/api/v1/fs/{id}/hashes", post(hashes).layer(CompressionLayer::new()))
+        .route("/api/v1/fs/{id}/dirs", get(dirs))
         .route("/api/v1/fs/{id}/trash", get(trash_list))
         .route("/api/v1/fs/{id}/trash/restore", post(trash_restore))
         .route("/api/v1/fs/{id}/trash/purge", post(trash_purge))
@@ -245,6 +248,70 @@ async fn zip(
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)))
         .map_err(bad)
+}
+
+/// Every file under a folder, as (path inside it, size, modified time),
+/// for Hopper's config compare.
+async fn walk(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let rel = path_q(&q);
+    let files = blocking(move || {
+        let dir = files::resolve(&e.root, &rel)?;
+        Ok(if dir.is_dir() { hopper_core::configdiff::walk_stats(&dir) } else { Vec::new() })
+    })
+    .await?;
+    Ok(Json(json!({ "files": files })))
+}
+
+#[derive(Deserialize)]
+struct HashesBody {
+    paths: Vec<String>,
+}
+
+/// Content hashes of files, the way Hopper's deep compare makes them.
+async fn hashes(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<HashesBody>,
+) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let out = blocking(move || {
+        let mut out = serde_json::Map::new();
+        for rel in b.paths {
+            let p = files::resolve(&e.root, &rel)?;
+            if let Some(h) = hopper_core::configdiff::file_hash(&p) {
+                out.insert(rel, Value::String(h));
+            }
+        }
+        Ok(out)
+    })
+    .await?;
+    Ok(Json(json!({ "hashes": out })))
+}
+
+/// Which of the named folders exist in the server folder.
+async fn dirs(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let names: Vec<String> = q.get("names").map(|n| n.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let dirs: Vec<String> = names
+        .into_iter()
+        .filter(|n| files::resolve(&e.root, n).is_ok_and(|p| p.is_dir()))
+        .collect();
+    Ok(Json(json!({ "dirs": dirs })))
 }
 
 async fn read_text(

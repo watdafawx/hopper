@@ -131,12 +131,40 @@ fn walk_cached(root: &Path) -> HashMap<String, Stat> {
     {
         return m.clone();
     }
+    // A server on a Hopper Server walks its own disk.
+    if let Some(r) = crate::hopperd::locate(root) {
+        let m: Walk = r
+            .and_then(|(c, id, rel)| c.walk(&id, &rel))
+            .inspect_err(|e| log::warn!("config walk: {e:#}"))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(rel, _, _)| !is_noise(rel))
+            .map(|(rel, size, mtime)| (rel, Stat { size, mtime }))
+            .collect();
+        WALKS.lock().unwrap().insert(root.to_path_buf(), (Instant::now(), m.clone()));
+        return m;
+    }
     let m = walk(root);
     WALKS
         .lock()
         .unwrap()
         .insert(root.to_path_buf(), (Instant::now(), m.clone()));
     m
+}
+
+/// Every file under `root` as (path inside it, size, modified time): what
+/// Hopper Server sends for its side of a compare.
+pub fn walk_stats(root: &Path) -> Vec<(String, u64, u64)> {
+    walk(root).into_iter().map(|(rel, s)| (rel, s.size, s.mtime)).collect()
+}
+
+/// A file's content hash, as the compare uses (cached).
+pub fn file_hash(path: &Path) -> Option<String> {
+    let md = fs::metadata(path).ok()?;
+    let mtime = md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let h = hash(path, Stat { size: md.len(), mtime });
+    save_hashes();
+    h
 }
 
 pub fn forget_walk(root: &Path) {
@@ -243,17 +271,29 @@ pub fn compare(
         }
     }
     let mut same = equal.len();
+    // The server's hashes, from the panel in one request when it's remote.
+    let remote_hashes: Option<HashMap<String, String>> = match crate::hopperd::locate(&s_root) {
+        Some(r) if deep && !equal.is_empty() => {
+            let rels: Vec<String> = equal.iter().map(|(rel, _, _)| format!("{folder}/{rel}")).collect();
+            let h = r.and_then(|(c, id, _)| c.hashes(&id, &rels)).unwrap_or_default();
+            Some(h.into_iter().map(|(k, v)| (k.strip_prefix(&format!("{folder}/")).unwrap_or(&k).to_string(), v)).collect())
+        }
+        _ => None,
+    };
     if deep && !equal.is_empty() {
         let done = std::sync::atomic::AtomicUsize::new(0);
         let changed = Mutex::new(Vec::new());
         let (chunk, total) = (equal.len().div_ceil(12), equal.len());
         std::thread::scope(|sc| {
             for part in equal.chunks(chunk) {
-                let (done, changed, c_root, s_root) = (&done, &changed, &c_root, &s_root);
+                let (done, changed, c_root, s_root, rh) = (&done, &changed, &c_root, &s_root, &remote_hashes);
                 sc.spawn(move || {
                     for (rel, cs, ss) in part {
                         let a = hash(&c_root.join(rel), *cs);
-                        let b = hash(&s_root.join(rel), *ss);
+                        let b = match rh {
+                            Some(h) => h.get(rel).cloned(),
+                            None => hash(&s_root.join(rel), *ss),
+                        };
                         if matches!((&a, &b), (Some(a), Some(b)) if a != b) {
                             changed.lock().unwrap().push(FileDiff {
                                 rel: rel.clone(),
@@ -292,6 +332,14 @@ pub fn compare(
 
 /// Folders from `FOLDERS` that exist on either side.
 pub fn present(client_root: &Path, server_root: &Path) -> Vec<String> {
+    if let Some(r) = crate::hopperd::locate(server_root) {
+        let theirs = r.and_then(|(c, id, _)| c.dirs(&id, FOLDERS)).unwrap_or_default();
+        return FOLDERS
+            .iter()
+            .filter(|f| client_root.join(f).is_dir() || theirs.iter().any(|t| t == *f))
+            .map(|f| f.to_string())
+            .collect();
+    }
     FOLDERS
         .iter()
         .filter(|f| client_root.join(f).is_dir() || server_root.join(f).is_dir())
@@ -312,6 +360,12 @@ const TEXT_CAP: u64 = 3 << 20;
 
 /// A file's text for the preview, or why it can't be shown.
 pub fn read_text(path: &Path) -> Result<String, String> {
+    if let Some(r) = crate::hopperd::locate(path) {
+        return r
+            .and_then(|(c, id, rel)| c.read_text(&id, &rel))
+            .map(|t| t.replace("\r\n", "\n"))
+            .map_err(|e| format!("{e:#}"));
+    }
     let md = fs::metadata(path).map_err(|e| e.to_string())?;
     if md.len() > TEXT_CAP {
         return Err(format!(
@@ -706,7 +760,8 @@ pub fn drift(client_root: &Path, server_root: &Path, mods: &[(String, String)]) 
         walked
             .entry(folder)
             .or_insert_with(|| {
-                if client_root.join(folder).is_dir() || server_root.join(folder).is_dir() {
+                let remote = crate::hopperd::is_remote_root(server_root);
+                if remote || client_root.join(folder).is_dir() || server_root.join(folder).is_dir() {
                     compare(client_root, server_root, folder, false, &|_, _| {})
                 } else {
                     ConfigDiff::default()

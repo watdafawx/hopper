@@ -28,6 +28,9 @@ fn args_file(server_root: &Path, version: &str) -> PathBuf {
 
 /// The NeoForge version a server's run.bat points at.
 pub fn server_neoforge(server_root: &Path) -> Option<String> {
+    if let Some(r) = crate::hopperd::locate(server_root) {
+        return r.and_then(|(c, id, _)| c.neoforge(&id)).ok().flatten();
+    }
     let text = fs::read_to_string(server_root.join("run.bat")).ok()?;
     version_in(&text)
 }

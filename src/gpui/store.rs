@@ -2735,6 +2735,11 @@ pub fn played(secs: u64) -> Option<String> {
 }
 
 pub fn open_path(path: &Path) {
+    // A server on a Hopper Server: open the spot in the panel's web UI.
+    if let Some(url) = hopper::hopperd::web_url(path) {
+        let _ = std::process::Command::new("explorer").arg(url).spawn();
+        return;
+    }
     let _ = std::process::Command::new("explorer").arg(path).spawn();
 }
 

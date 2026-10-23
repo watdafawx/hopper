@@ -1,6 +1,6 @@
 # Hopper Server: companion server panel (draft)
 
-Status: M0–M3 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
+Status: M0–M3b built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
 
 **M1 as built** differs from the draft in a few places:
 - No separate shim process: hopper-core's `LocalServer` already starts each
@@ -45,9 +45,17 @@ Status: M0–M3 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: 
   so no jar crosses the wire to compare; Add uploads, Copy to pack
   downloads (through local backups), Remove goes to the panel's trash.
   Start / stop / restart / console go through the panel like Crafty's.
-- Not over the API yet (shown as "comes later" in the UI): config drift and
-  the Configs tab, server pack updates, crash scan of the server's logs,
-  the server's NeoForge version check. Next: M3b.
+- M3b (Hopper 0.8.97): the rest goes over the API too. Shared code finds
+  a remote server from its stand-in path (a registry filled when the panel
+  lists its servers), so config compare (`/fs/{id}/walk`, `/hashes`,
+  `/dirs`, `/text`), file copies, the crash scan (`/servers/{id}/crash`)
+  and the NeoForge check (`/servers/{id}/neoforge`) work unchanged in the
+  UI. Server pack updates run on the panel as jobs (`/servers/{id}/pack/
+  plan`, `/pack/apply`, `/jobs/{id}`); the desktop shows the same review
+  and mirrors the job's progress. The desktop passes its CurseForge key
+  for the job when the panel has none (plain HTTP until M5's TLS).
+  "Open server" buttons open that file or folder in the panel's web UI.
+- Still local-only: folder mirror and link rules (they say so).
 
 ## Goal
 

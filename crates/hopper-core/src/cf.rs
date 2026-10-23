@@ -502,6 +502,16 @@ pub fn api_key_source() -> Option<(&'static str, KeySource)> {
     })
 }
 
+/// Uses `key` for this run only (Hopper Server gets the desktop's key for a
+/// server pack update when it has none of its own).
+pub fn set_session_key(key: &str) {
+    let key = key.trim();
+    if key.is_empty() {
+        return;
+    }
+    *KEY.lock().unwrap_or_else(|e| e.into_inner()) = Some(Some((&*Box::leak(key.to_string().into_boxed_str()), KeySource::Env)));
+}
+
 /// Saves the key in Credential Manager (empty removes it).
 pub fn set_api_key(key: &str) -> anyhow::Result<()> {
     crate::secrets::set(crate::secrets::CF_KEY, key)?;

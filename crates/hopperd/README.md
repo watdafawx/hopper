@@ -42,8 +42,9 @@ hopperd --servers-root G:\Minecraft\packs
 
 In Hopper: Settings → Servers → Panel → **Hopper Server**, then **Find** and
 **Pair**. Allow the request in the panel (Access & devices) after checking the
-code matches. Hopper then lists the panel's servers and syncs mods over the
-network: no shared drive needed.
+code matches. Hopper then lists the panel's servers and works with them over the network,
+no shared drive needed: mods sync, config compare and push/pull, crash
+scan, NeoForge version, and server pack updates (run here as jobs).
 
 ## Files (M2)
 
@@ -95,6 +96,10 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `GET /fs/{id}/trash`, `POST .../trash/restore` `{id}`, `POST .../trash/purge` `{ids}` | |
 | `GET /servers/infos` | every server as Hopper desktop describes one |
 | `GET /servers/{id}/mods` | the server's mods, scanned on the panel |
+| `GET /servers/{id}/crash`, `GET /servers/{id}/neoforge` | last crash, NeoForge version |
+| `GET /fs/{id}/walk?path=`, `POST /fs/{id}/hashes`, `GET /fs/{id}/dirs?names=` | config compare |
+| `POST /servers/{id}/pack/plan` `{inst, pack, cf_key}`, `POST /servers/{id}/pack/apply` `{plan, take}` | server pack update jobs |
+| `GET /jobs/{job}`, `POST /jobs/{job}/cancel` | progress and result |
 | `GET /ws` | live: `snapshot` every second; send `{"op":"console","server":id}` to follow a console |
 
 ## Develop

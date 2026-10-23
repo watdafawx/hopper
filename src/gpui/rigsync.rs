@@ -340,11 +340,6 @@ impl SyncPanel {
     /// isn't held up.
     fn check_drift(&mut self, diff: &[DiffEntry], cx: &mut Context<Self>) {
         let Some((server, inst)) = self.pair_header(cx) else { return };
-        // Config drift reads the server's files directly; not over Hopper
-        // Server's API yet.
-        if server.remote.is_some() {
-            return;
-        }
         let mods: Vec<(String, String)> = diff
             .iter()
             .filter_map(|e| e.server.as_ref())
