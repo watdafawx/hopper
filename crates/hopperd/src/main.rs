@@ -24,6 +24,7 @@ mod pack_api;
 mod servers;
 mod tls;
 mod ui;
+mod webhooks;
 mod zipstream;
 
 use anyhow::Context as _;
@@ -239,6 +240,8 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::Certified
             }
         }
     });
+
+    webhooks::watch(app.clone());
 
     let addr: SocketAddr = format!("{}:{}", cfg.bind, cfg.port).parse().context("bind address")?;
     let listener = tokio::net::TcpListener::bind(addr)

@@ -295,8 +295,13 @@ async fn make_backup(
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     let scope = if b.worlds_only { Scope::Worlds } else { Scope::Full };
+    let a = app.clone();
     let job = crate::pack_api::spawn(&app, format!("Backing up {}", e.name), move |job| {
-        backup::make(&e.root, scope, Kind::Manual, b.note.trim(), Some(&e.server), job)
+        let r = backup::make(&e.root, scope, Kind::Manual, b.note.trim(), Some(&e.server), job)?;
+        let text = format!("{} backed up ({})", e.name, r.name);
+        let ev = crate::webhooks::Event { event: "backup", server_id: e.id.clone(), server: e.name.clone(), text, at: crate::webhooks::now() };
+        crate::webhooks::emit(&a, vec![ev]);
+        Ok(r)
     });
     Ok(Json(json!({ "job": job })))
 }

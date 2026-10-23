@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { Link, Check, X, Network, Wifi, Globe, Waypoints, Lock, MonitorSmartphone, Trash2 } from '@lucide/svelte';
   import Security from './Security.svelte';
+  import Webhooks from './Webhooks.svelte';
   import { pathKind } from './lib/format.js';
 
   const kindOf = (url) => pathKind(url.split('://')[1].split(/[:/]/)[0].replace(/^\[|\]$/g, ''));
@@ -88,6 +89,8 @@
     </div>
 
     <Security />
+
+    <Webhooks />
 
     <div class="card wide">
       <h3><MonitorSmartphone size={14} />Paired devices</h3>
