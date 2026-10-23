@@ -110,7 +110,7 @@ Limits:
 - MCSS: doesn't report ports, so servers pair by folder or name. Key from Web Panel → API keys.
 - Pterodactyl: needs a client key (`ptlc_…`, Account → API Credentials). Its console is a websocket Hopper doesn't read yet; commands still work.
 - Server sync needs the server's files as a folder: this PC, or a share on another PC at home. No SFTP or FTP yet.
-- Servers hosted by Hopper run while Hopper does. Quitting stops them, saving the world first.
+- Servers hosted by Hopper keep running when Hopper restarts (an update) or closes unexpectedly, and Hopper reconnects to them. Quitting stops them, saving the world first.
 
 ## Build
 

@@ -1,7 +1,8 @@
 //! Hosting a Minecraft server on this PC: making the server folder for a
 //! loader (or from a client instance), its settings (server.properties,
-//! Java arguments, run.bat, EULA), and running it as a child process that
-//! the Servers page drives through [`LocalPanel`], like a Crafty server.
+//! Java arguments, run.bat, EULA), and running it as a process of its own that
+//! the Servers page drives through [`LocalPanel`], like a Crafty server,
+//! and that keeps running when Hopper restarts.
 
 pub mod create;
 pub mod jvm;

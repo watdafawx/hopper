@@ -782,9 +782,9 @@ impl AppView {
         self.go(Page::Servers, cx);
     }
 
-    /// Once an update is installed and nothing is going on (no tasks, no
-    /// server hosted on this PC), restarts into it right away; otherwise
-    /// waits until things are idle.
+    /// Once an update is installed and no task is running, restarts into
+    /// it right away; otherwise waits until the tasks finish. Games and
+    /// hosted servers keep running through it.
     fn auto_restart(window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
@@ -823,10 +823,13 @@ impl AppView {
         self.told_jobs = self.store.read(cx).jobs().snapshot().iter().map(|j| j.id).collect();
         let events = crate::tray::start();
         self._subscriptions.push(cx.on_app_quit(|this, cx| {
-            // Hosted servers stop (and save) rather than being orphaned;
-            // the scheduler goes first so it doesn't restart them.
+            // Quitting stops hosted servers (saving the world); the
+            // scheduler goes first so it doesn't restart them. A restart
+            // leaves them running for the new Hopper to pick up.
             this.store.update(cx, |s, _| s.stop_scheduler());
-            this.store.read(cx).local_panel().stop_all();
+            if !crate::settings_page::RESTARTING.load(std::sync::atomic::Ordering::SeqCst) {
+                this.store.read(cx).local_panel().stop_all();
+            }
             crate::tray::remove();
             async {}
         }));

@@ -2177,6 +2177,10 @@ fn status_line(icon: IconName, text: String, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
+/// Set by [`restart`]: quitting to come right back, so hosted servers keep
+/// running for the new Hopper to pick up instead of being stopped.
+pub static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Starts Hopper again (the updated exe) and quits this one.
 pub fn restart(cx: &mut App) {
     match std::env::current_exe() {
@@ -2185,6 +2189,7 @@ pub fn restart(cx: &mut App) {
                 log::error!("restarting: {e}");
                 return;
             }
+            RESTARTING.store(true, std::sync::atomic::Ordering::SeqCst);
             cx.quit();
         }
         Err(e) => log::error!("restarting: {e}"),
