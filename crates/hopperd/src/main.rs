@@ -17,6 +17,7 @@ mod files;
 mod fs_api;
 mod host;
 mod manage_api;
+mod mcp;
 mod mods_api;
 mod security;
 mod net;

@@ -151,6 +151,7 @@
 <div class="card">
   <h3><KeyRound size={14} />API tokens</h3>
   <p class="small subtle">For scripts and other apps. Send it as <span class="mono">Authorization: Bearer …</span>.</p>
+  <p class="tiny muted">AI assistants (MCP): add <span class="mono brk">{location.origin}/api/v1/mcp</span> as an HTTP server with a token. A read-only token lets them look but not start, stop or edit.</p>
   {#if made}
     <div class="made">
       <div class="small">Copy it now; it isn't shown again.</div>

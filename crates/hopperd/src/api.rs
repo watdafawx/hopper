@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "users"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit", "mods", "files.history", "files.search", "webhooks", "users", "mcp"];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -142,6 +142,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::manage_api::routes())
         .merge(crate::mods_api::routes())
         .merge(crate::webhooks::routes())
+        .merge(crate::mcp::routes())
         .fallback(crate::ui::serve)
         .layer(axum::middleware::from_fn_with_state(app.clone(), crate::security::guard))
         .with_state(app)

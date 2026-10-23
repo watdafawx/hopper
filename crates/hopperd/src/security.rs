@@ -120,12 +120,12 @@ fn is_guessable(path: &str) -> bool {
 
 /// Why a scoped token or a user may not make this request, if they may not.
 /// (Owner-only routes check that themselves.)
-fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Option<&'static str> {
+pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Option<&'static str> {
     use crate::auth::{Role, Who};
     let reading = method == Method::GET || method == Method::HEAD;
     match who {
         Who::Token { read_only, servers, .. } => {
-            if *read_only && !reading {
+            if *read_only && !reading && path != "/api/v1/mcp" {
                 Some("This token can only read.")
             } else if !servers.is_empty() && server_of(path).is_some_and(|id| !servers.iter().any(|s| s == id)) {
                 Some("This token isn't for that server.")
@@ -136,6 +136,10 @@ fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Option<&'stat
         Who::User { role, servers, .. } => {
             if server_of(path).is_some_and(|id| !who.sees(id)) {
                 return Some("You don't have access to that server.");
+            }
+            // MCP checks each tool call itself.
+            if path == "/api/v1/mcp" {
+                return None;
             }
             // Your own sign-in: sign out, password, two-factor.
             if reading || path == "/api/v1/auth/logout" || path == "/api/v1/auth/password" || path.starts_with("/api/v1/auth/2fa/") {
@@ -167,7 +171,7 @@ fn deny(status: StatusCode, msg: &str) -> Response {
     (status, axum::Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
