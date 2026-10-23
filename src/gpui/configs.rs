@@ -207,6 +207,15 @@ impl ConfigsPanel {
         folders
     }
 
+    /// Opens `folder` with the file filter set to `filter`, from a notice
+    /// that points at these files.
+    pub fn focus(&mut self, folder: &str, filter: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.update(cx, |s, cx| s.set_value(filter.to_string(), window, cx));
+        self.query = filter.trim().to_lowercase();
+        self.folder = folder.to_string();
+        self.reset(cx);
+    }
+
     pub fn show(&mut self, server: PathBuf, cx: &mut Context<Self>) {
         if self.server.as_ref() == Some(&server) && self.diff.is_some() {
             return;

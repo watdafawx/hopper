@@ -575,6 +575,225 @@ pub fn merge_fields(client: &str, server: &str) -> Vec<MergedField> {
     order.into_iter().filter_map(|k| map.remove(&k)).collect()
 }
 
+// ── drift: what a pack or server update tends to leave behind ──────
+
+/// Where global datapacks and server scripts live: (folder, prefix inside
+/// it, one group per pack under the prefix). Every world on the server
+/// loads these, and a server pack often doesn't carry them.
+const DATA_ROOTS: &[(&str, &str, bool)] = &[
+    ("config", "paxi/datapacks/", true),
+    ("config", "openloader/", true),
+    ("openloader", "", true),
+    ("global_packs", "", true),
+    ("kubejs", "data/", false),
+    ("kubejs", "server_scripts/", false),
+    ("kubejs", "startup_scripts/", false),
+    // Quests run on the server; players get the server's copy.
+    ("config", "ftbquests/quests/", false),
+];
+
+/// Folders whose files belong to mods by name.
+const MOD_CONFIG_FOLDERS: &[&str] = &["config", "defaultconfigs"];
+
+/// Files that differ between a pack and its server, in one group.
+#[derive(Clone, Debug)]
+pub struct DriftGroup {
+    /// A datapack's path (`config/paxi/datapacks/tnp_data`) or a mod's name.
+    pub label: String,
+    /// The Configs view's folder and filter that show these files.
+    pub folder: String,
+    pub filter: String,
+    pub files: Vec<FileDiff>,
+}
+
+impl DriftGroup {
+    pub fn count(&self, s: FileStatus) -> usize {
+        self.files.iter().filter(|f| f.status == s).count()
+    }
+}
+
+/// Global datapacks, server scripts and mod configs that differ between a
+/// pack and its server: what a server or pack update may not have brought
+/// along.
+#[derive(Clone, Debug, Default)]
+pub struct Drift {
+    /// Global datapacks and server scripts, any difference.
+    pub data: Vec<DriftGroup>,
+    /// Config files of mods the server runs, missing on the server or changed.
+    pub mods: Vec<DriftGroup>,
+}
+
+impl Drift {
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty() && self.mods.is_empty()
+    }
+
+    /// "2 datapacks and 3 mods' configs", for a notice.
+    pub fn summary(&self) -> String {
+        let n = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let mut v = Vec::new();
+        if !self.data.is_empty() {
+            v.push(n(self.data.len(), "datapack or script folder", "datapacks or script folders"));
+        }
+        if !self.mods.is_empty() {
+            v.push(n(self.mods.len(), "mod's configs", "mods' configs"));
+        }
+        v.join(" and ")
+    }
+
+    /// Changes when any listed file or its status does.
+    pub fn signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for g in self.data.iter().chain(&self.mods) {
+            g.label.hash(&mut h);
+            for f in &g.files {
+                (&f.rel, rank(f.status), f.client_size, f.server_size).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+}
+
+/// Letters and digits only, lowercase: `bedrock_ores` and `BedrockOres` match.
+fn squash(s: &str) -> String {
+    s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// Files a mod writes for itself (caches, benchmarks, error copies), not
+/// settings anyone picked.
+fn drift_noise(rel: &str) -> bool {
+    let l = rel.to_lowercase();
+    ["cache", "benchmark", "had-error", "backup"].iter().any(|w| l.contains(w))
+        || [".csv", ".dat", ".db", ".bin"].iter().any(|e| l.ends_with(e))
+}
+
+/// Whether a changed config matters to the server: its server or common
+/// settings. Other changed files are mostly client tweaks (HUD, keys).
+fn server_side_config(folder: &str, rel: &str) -> bool {
+    let l = rel.to_lowercase();
+    folder == "defaultconfigs" || l.contains("server") || l.contains("common")
+}
+
+/// The mod a config file is named after, squashed: `bedrockores-common.toml`
+/// and `mekanism/general.toml` give `bedrockores` and `mekanism`. Client
+/// configs don't matter to a server.
+fn config_owner(rel: &str) -> Option<String> {
+    let l = rel.to_lowercase();
+    if l.contains("client") {
+        return None;
+    }
+    let (first, nested) = match l.split_once('/') {
+        Some((d, _)) => (d, true),
+        None => (l.as_str(), false),
+    };
+    let mut stem = if nested { first } else { first.split('.').next().unwrap_or(first) };
+    for s in ["-common", "_common", "-server", "_server", "-startup", "_startup", "-config", "_config"] {
+        stem = stem.strip_suffix(s).unwrap_or(stem);
+    }
+    let k = squash(stem);
+    (!k.is_empty()).then_some(k)
+}
+
+/// What differs in the global datapacks, server scripts and in the configs
+/// of `mods` (the server's mods as (mod id, name)) between `client_root`
+/// and `server_root`. Compares by size, through the same cache as the
+/// Configs view.
+pub fn drift(client_root: &Path, server_root: &Path, mods: &[(String, String)]) -> Drift {
+    let mut out = Drift::default();
+    let mut walked: HashMap<&str, ConfigDiff> = HashMap::new();
+    let mut get = |folder: &'static str| -> ConfigDiff {
+        walked
+            .entry(folder)
+            .or_insert_with(|| {
+                if client_root.join(folder).is_dir() || server_root.join(folder).is_dir() {
+                    compare(client_root, server_root, folder, false, &|_, _| {})
+                } else {
+                    ConfigDiff::default()
+                }
+            })
+            .clone()
+    };
+
+    let mut data: Vec<DriftGroup> = Vec::new();
+    for &(folder, prefix, per_pack) in DATA_ROOTS {
+        for f in get(folder).files {
+            let Some(rest) = f.rel.strip_prefix(prefix) else { continue };
+            if rest.is_empty() || rest.to_lowercase().contains("resources/") || drift_noise(rest) {
+                continue;
+            }
+            let inner = match (per_pack, rest.split_once('/')) {
+                (true, Some((pack, _))) => format!("{prefix}{pack}"),
+                (true, None) => format!("{prefix}{rest}"),
+                (false, _) => prefix.trim_end_matches('/').to_string(),
+            };
+            let label = format!("{folder}/{inner}");
+            match data.iter_mut().find(|g| g.label == label) {
+                Some(g) => g.files.push(f),
+                None => data.push(DriftGroup {
+                    label,
+                    folder: folder.to_string(),
+                    filter: inner,
+                    files: vec![f],
+                }),
+            }
+        }
+    }
+
+    let owners: HashMap<String, &str> = mods
+        .iter()
+        .map(|(id, name)| (squash(id), if name.is_empty() { id.as_str() } else { name.as_str() }))
+        .filter(|(k, _)| k.len() >= 3)
+        .collect();
+    let mut by_mod: Vec<DriftGroup> = Vec::new();
+    let mut server_tops: HashMap<(&str, String), bool> = HashMap::new();
+    for &folder in MOD_CONFIG_FOLDERS {
+        for f in get(folder).files {
+            // A server-only file is the server's own business.
+            if f.status == FileStatus::OnlyServer
+                || drift_noise(&f.rel)
+                || (f.status == FileStatus::Modified && !server_side_config(folder, &f.rel))
+                || DATA_ROOTS.iter().any(|&(d, p, _)| d == folder && !p.is_empty() && f.rel.starts_with(p))
+                || f.rel.starts_with("paxi/")
+            {
+                continue;
+            }
+            let Some(name) = config_owner(&f.rel).and_then(|k| owners.get(&k).copied()) else {
+                continue;
+            };
+            // A missing file counts when the server has none of the mod's
+            // config: a mod new to the pack. Inside a folder the server
+            // already has, missing files are mostly ones the mod generates.
+            if f.status == FileStatus::OnlyClient && f.rel.contains('/') {
+                let top = f.rel.split('/').next().unwrap_or_default().to_string();
+                let has = *server_tops
+                    .entry((folder, top.clone()))
+                    .or_insert_with(|| server_root.join(folder).join(&top).exists());
+                if has {
+                    continue;
+                }
+            }
+            match by_mod.iter_mut().find(|g| g.label == name) {
+                Some(g) => g.files.push(f),
+                None => {
+                    let filter = f.rel.split(['/', '-', '.']).next().unwrap_or("").to_string();
+                    by_mod.push(DriftGroup {
+                        label: name.to_string(),
+                        folder: folder.to_string(),
+                        filter,
+                        files: vec![f],
+                    })
+                }
+            }
+        }
+    }
+    // Missing files first: a mod new to the pack has all its configs missing.
+    by_mod.sort_by_key(|g| (std::cmp::Reverse(g.count(FileStatus::OnlyClient)), std::cmp::Reverse(g.files.len())));
+    out.data = data;
+    out.mods = by_mod;
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +841,76 @@ mod tests {
         );
         assert_eq!(deep.same, 1);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn drift_finds_datapacks_and_mod_configs() {
+        let root = std::env::temp_dir().join(format!("hopper-drift-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (c, s) = (root.join("c"), root.join("s"));
+        let put = |p: PathBuf, t: &str| {
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, t).unwrap();
+        };
+        put(c.join("config/paxi/datapacks/tnp_data/data/bedrockores/a.json"), "{}");
+        put(c.join("config/paxi/datapacks/tnp_data/pack.mcmeta"), "{}");
+        put(s.join("config/paxi/datapacks/tnp_data/pack.mcmeta"), "{}");
+        put(s.join("config/paxi/datapacks/tnp_data/data/old/x.json"), "{}");
+        put(c.join("config/paxi/resourcepacks/r.zip"), "zip");
+        put(c.join("config/bedrockores-common.toml"), "a = 1");
+        put(s.join("config/bedrockores-common.toml"), "a = 22");
+        put(c.join("config/bedrockores-client.toml"), "ui");
+        put(c.join("config/mekanism/general.toml"), "x");
+        put(c.join("config/jei/jei.ini"), "x");
+        put(s.join("config/servermod.toml"), "x");
+        put(c.join("kubejs/server_scripts/main.js"), "x");
+        put(c.join("kubejs/client_scripts/ui.js"), "x");
+        let mods = [
+            ("bedrockores".to_string(), "Bedrock Ores".to_string()),
+            ("mekanism".to_string(), "Mekanism".to_string()),
+            ("servermod".to_string(), "Server Mod".to_string()),
+        ];
+        let d = drift(&c, &s, &mods);
+        let data: Vec<(&str, usize)> = d.data.iter().map(|g| (g.label.as_str(), g.files.len())).collect();
+        assert_eq!(data, [("config/paxi/datapacks/tnp_data", 2), ("kubejs/server_scripts", 1)]);
+        assert_eq!(d.data[0].filter, "paxi/datapacks/tnp_data");
+        let mods: Vec<(&str, usize)> = d.mods.iter().map(|g| (g.label.as_str(), g.files.len())).collect();
+        // Mekanism's config is missing (first); jei isn't a server mod,
+        // the client config and the server-only file don't count.
+        assert_eq!(mods, [("Mekanism", 1), ("Bedrock Ores", 1)]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Prints the drift between TNP-LL8 and its rig server.
+    /// `cargo test real_drift -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_drift() {
+        let c = Path::new(r"G:\Games\Minecraft\Curse\Instances\TNP Limitless 8");
+        let s = Path::new(r"Q:\Minecraft\packs\TNP-LL8");
+        let jars = crate::scan::scan_folder(&s.join("mods")).unwrap();
+        let mods: Vec<(String, String)> = jars
+            .iter()
+            .filter(|m| m.side != "client")
+            .map(|m| (m.mod_id.clone(), m.mod_name.clone()))
+            .collect();
+        let t = Instant::now();
+        let d = drift(c, s, &mods);
+        println!("{:?}", t.elapsed());
+        for g in d.data.iter().chain(&d.mods) {
+            println!(
+                "{} [{} / {}]: {} missing, {} changed, {} server only",
+                g.label,
+                g.folder,
+                g.filter,
+                g.count(FileStatus::OnlyClient),
+                g.count(FileStatus::Modified),
+                g.count(FileStatus::OnlyServer)
+            );
+            for f in g.files.iter().take(3) {
+                println!("    {} {:?}", f.rel, f.status);
+            }
+        }
     }
 
     #[test]

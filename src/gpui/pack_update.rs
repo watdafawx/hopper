@@ -271,7 +271,7 @@ impl UpdatePreview {
         if let Some(id) = t.job {
             server_reviews(|m| m.remove(&id));
         }
-        let (server, take) = (t.server.clone(), v.take.clone());
+        let (server, take, client_root) = (t.server.clone(), v.take.clone(), t.inst.root.clone());
         let s = v.store.read(cx);
         let host = s.settings().server_host.clone();
         let java = hopper::launch::installer_java(std::path::Path::new(&s.settings().launcher_dir));
@@ -282,6 +282,22 @@ impl UpdatePreview {
             job.detail(r.summary());
             if let Some(b) = &r.backups {
                 job.note(format!("Replaced and removed files: {}", b.display()));
+            }
+            // Server packs often leave out global datapacks and the
+            // configs of mods new to the pack.
+            if let Ok(jars) = hopper::scan::scan_folder(&server.mods_dir()) {
+                let mods: Vec<(String, String)> = jars
+                    .into_iter()
+                    .filter(|m| m.side != "client" && !m.mod_id.is_empty())
+                    .map(|m| (m.mod_id, m.mod_name))
+                    .collect();
+                let d = hopper::configdiff::drift(&client_root, &server.root, &mods);
+                if !d.is_empty() {
+                    job.note(format!(
+                        "Still different from your instance: {}. Review them in Server sync.",
+                        d.summary()
+                    ));
+                }
             }
             Ok(crate::store::Msg::ServersChanged)
         });
@@ -355,6 +371,13 @@ impl UpdatePreview {
                 );
             }
         }
+        c = c.child(
+            widgets::caption(
+                "Server packs often leave out global datapacks (Paxi, OpenLoader) and configs of mods new to the pack.                  Server sync flags what still differs afterwards.",
+                cx,
+            )
+            .text_xs(),
+        );
         Some(c.into_any_element())
     }
 

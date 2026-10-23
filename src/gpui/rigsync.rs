@@ -50,6 +50,13 @@ pub struct SyncPanel {
     diff: Option<Result<Vec<DiffEntry>, String>>,
     note: Option<Annotation>,
     crash: Option<ServerCrash>,
+    /// Global datapacks and mod configs that differ from the pack, looked
+    /// up after each comparison (they sit on the same slow share).
+    drift: Option<hopper::configdiff::Drift>,
+    drift_open: bool,
+    /// The drift the user hid: shown again once it changes.
+    drift_hidden: Option<u64>,
+    _drift_task: Option<Task<()>>,
     /// The NeoForge version the server's run.bat starts, read with each
     /// comparison (run.bat may sit on a network share: not per frame).
     server_nf: Option<String>,
@@ -146,6 +153,10 @@ impl SyncPanel {
             diff: None,
             note: None,
             crash: None,
+            drift: None,
+            drift_open: false,
+            drift_hidden: None,
+            _drift_task: None,
             server_nf: None,
             nf_versions: None,
             nf_loading: false,
@@ -215,6 +226,8 @@ impl SyncPanel {
             };
             self.result = None;
             self.diff = None;
+            self.drift = None;
+            self.drift_hidden = None;
             self.server_nf = None;
             self.only = None;
         }
@@ -285,6 +298,9 @@ impl SyncPanel {
                 }
                 this.comparing = false;
                 this.crash = crash;
+                if let Ok((d, _)) = &diff {
+                    this.check_drift(d, cx);
+                }
                 this.server_nf = server_nf;
                 this.want_nf_versions(cx);
                 if this.holding() {
@@ -317,6 +333,32 @@ impl SyncPanel {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Looks for global datapacks and configs of the server's mods that
+    /// differ from the pack, apart from the mod comparison so its list
+    /// isn't held up.
+    fn check_drift(&mut self, diff: &[DiffEntry], cx: &mut Context<Self>) {
+        let Some((server, inst)) = self.pair_header(cx) else { return };
+        let mods: Vec<(String, String)> = diff
+            .iter()
+            .filter_map(|e| e.server.as_ref())
+            .filter(|m| m.side != "client" && !m.mod_id.is_empty())
+            .map(|m| (m.mod_id.clone(), m.mod_name.clone()))
+            .collect();
+        let root = server.root.clone();
+        self._drift_task = Some(cx.spawn(async move |this, cx| {
+            let d = cx
+                .background_spawn(async move { hopper::configdiff::drift(&inst.root, &server.root, &mods) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.server.as_ref() == Some(&root) {
+                    this.drift = Some(d);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
     }
 
     /// Up, by ping or by its panel (which also knows a server that is still
@@ -1384,6 +1426,150 @@ impl SyncPanel {
         )
     }
 
+    /// Opens the Configs section on the files a drift group lists.
+    fn review_drift(&mut self, folder: &str, filter: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.section = Section::Configs;
+        self.configs.update(cx, |c, cx| c.focus(folder, filter, window, cx));
+        cx.notify();
+    }
+
+    /// Pack and server updates often leave global datapacks and the configs
+    /// of new mods behind: which differ from the pack, each a click from
+    /// its files in Configs.
+    fn drift_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use hopper::configdiff::{DriftGroup, FileStatus};
+        let d = self.drift.as_ref().filter(|d| !d.is_empty())?;
+        let sig = d.signature();
+        if self.drift_hidden == Some(sig) || self.section == Section::Configs {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let counts = |g: &DriftGroup| {
+            let mut v = Vec::new();
+            for (s, w) in [
+                (FileStatus::OnlyClient, "missing on the server"),
+                (FileStatus::Modified, "changed"),
+                (FileStatus::OnlyServer, "only on the server"),
+            ] {
+                let n = g.count(s);
+                if n > 0 {
+                    v.push(format!("{n} {w}"));
+                }
+            }
+            v.join(" · ")
+        };
+        let row = |ix: usize, g: &DriftGroup, data: bool, cx: &mut Context<Self>| {
+            let (folder, filter) = (g.folder.clone(), g.filter.clone());
+            h_flex()
+                .gap_3()
+                .child(
+                    Icon::new(if data { IconName::Package } else { IconName::Settings })
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(div().text_sm().font_semibold().truncate().max_w(rems(22.)).child(g.label.clone()))
+                .child(widgets::caption(counts(g), cx).flex_1().min_w_0())
+                .child(
+                    Button::new(ElementId::Name(format!("drift-review:{ix}").into()))
+                        .xsmall()
+                        .outline()
+                        .label("Review")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.review_drift(&folder, &filter, window, cx)
+                        })),
+                )
+        };
+        const SHOWN: usize = 8;
+        let groups: Vec<(&DriftGroup, bool)> = d
+            .data
+            .iter()
+            .map(|g| (g, true))
+            .chain(d.mods.iter().map(|g| (g, false)))
+            .collect();
+        let more = groups.len().saturating_sub(SHOWN);
+        let rows: Vec<AnyElement> = if self.drift_open {
+            groups
+                .iter()
+                .take(SHOWN)
+                .enumerate()
+                .map(|(i, (g, data))| row(i, g, *data, cx).into_any_element())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let open = self.drift_open;
+        // The first group's folder, unfiltered: the rest are a tab away.
+        let first = groups.first().map(|(g, _)| g.folder.clone());
+        Some(
+            v_flex()
+                .gap_2()
+                .p_3()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.warning)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .id("drift-toggle")
+                                .flex_1()
+                                .min_w_0()
+                                .gap_2()
+                                .cursor_pointer()
+                                .text_color(theme.warning)
+                                .font_semibold()
+                                .child(
+                                    Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                                        .small(),
+                                )
+                                .child(Icon::new(IconName::TriangleAlert).small())
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .child(format!("Not synced with the pack: {}", d.summary())),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.drift_open = !this.drift_open;
+                                    cx.notify();
+                                })),
+                        )
+                        .when_some(first, |r, folder| {
+                            r.child(
+                                Button::new("drift-review-all")
+                                    .xsmall()
+                                    .primary()
+                                    .label("Review in Configs")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.review_drift(&folder, "", window, cx)
+                                    })),
+                            )
+                        })
+                        .child(
+                            Button::new("drift-hide")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::X)
+                                .tooltip("Hide until something else changes")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.drift_hidden = Some(sig);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(widgets::caption(
+                    "Pack and server updates don't always bring these along. Check global datapacks and \
+                     server scripts after every update, and the configs of mods new to the pack.",
+                    cx,
+                ))
+                .children(rows)
+                .when(open && more > 0, |r| {
+                    r.child(widgets::caption(format!("And {more} more in Configs."), cx))
+                })
+                .into_any_element(),
+        )
+    }
+
     fn group_color(g: Group, cx: &App) -> Hsla {
         let theme = cx.theme();
         match g {
@@ -2174,6 +2360,7 @@ impl Render for SyncPanel {
         let header = (!side).then(|| self.header(&server, &inst, cx));
         let sidebar = side.then(|| self.sidebar(&server, &inst, cx));
         let crash = self.crash_banner(cx);
+        let drift = self.drift_banner(cx);
         let section_ix = match self.section {
             Section::Mods => 0,
             Section::Configs => 1,
@@ -2278,6 +2465,7 @@ impl Render for SyncPanel {
                         .gap_3()
                         .child(sections)
                         .children(crash)
+                        .children(drift)
                         .child(v_flex().flex_1().min_h_0().child(body)),
                 )
                 .into_any_element();
@@ -2289,6 +2477,7 @@ impl Render for SyncPanel {
             .gap_4()
             .children(header)
             .children(crash)
+            .children(drift)
             .child(sections)
             .child(v_flex().flex_1().min_h_0().child(body))
             .into_any_element()
