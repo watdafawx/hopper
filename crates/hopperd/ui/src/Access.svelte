@@ -1,0 +1,113 @@
+<script>
+  import { onMount } from 'svelte';
+  import { Link, Check, X, Network, Wifi, MonitorSmartphone, Trash2 } from '@lucide/svelte';
+  import { api, post, del } from './lib/api.js';
+  import { say } from './lib/toast.svelte.js';
+
+  let { hello, pending = $bindable([]) } = $props();
+  let devices = $state([]);
+
+  async function loadDevices() {
+    try {
+      devices = await api('/devices');
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
+  async function answer(r, allow) {
+    try {
+      await post(`/pair/${r.id}/answer`, { allow });
+      pending = pending.filter((p) => p.id !== r.id);
+      say(allow ? `${r.device} can now use this panel.` : `Refused ${r.device}.`);
+      loadDevices();
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
+  async function forget(d) {
+    if (!confirm(`Remove ${d.name}? It will have to pair again.`)) return;
+    try {
+      await del(`/devices/${d.id}`);
+      loadDevices();
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
+  const when = (t) => new Date(t * 1000).toLocaleString();
+
+  onMount(loadDevices);
+</script>
+
+<div class="pad">
+  <h2>Access &amp; devices</h2>
+  <div class="grid">
+    <div class="card">
+      <h3><Link size={14} />Pair a device</h3>
+      {#each pending as r (r.id)}
+        <div class="req">
+          <div class="small subtle"><b class="txt">{r.device}</b> wants to connect from <span class="mono">{r.ip}</span>. Check it shows the same code.</div>
+          <div class="code">{#each r.code.split('') as c, i (i)}<span>{c}</span>{/each}</div>
+          <div class="row center">
+            <button class="btn" onclick={() => answer(r, false)}><X size={14} />Refuse</button>
+            <button class="btn pri" onclick={() => answer(r, true)}><Check size={14} />Allow {r.device}</button>
+          </div>
+        </div>
+      {:else}
+        <p class="small subtle">
+          No requests. In Hopper desktop, add a Hopper Server panel and pick this one; its request and a 6-digit code show
+          up here to allow.
+        </p>
+      {/each}
+    </div>
+
+    <div class="card">
+      <h3><Network size={14} />How clients reach this panel</h3>
+      <div class="col">
+        {#each hello.addresses as a (a)}
+          <div class="path"><Wifi size={14} /><span class="mono small">{a}</span><span class="sp"></span><span class="chip lan">LAN</span></div>
+        {:else}
+          <div class="small muted">No LAN address found.</div>
+        {/each}
+        <div class="path dim"><span class="small">Tailscale and internet access (TLS, 2FA) come in a later version.</span></div>
+      </div>
+      <p class="tiny muted note">Announced on the LAN as <span class="mono">_hopperd._tcp</span> so Hopper desktop finds it.</p>
+    </div>
+
+    <div class="card wide">
+      <h3><MonitorSmartphone size={14} />Paired devices</h3>
+      {#each devices as d (d.id)}
+        <div class="row dev">
+          <div>
+            <div>{d.name}</div>
+            <div class="tiny muted">Paired {when(d.created)} · last used {when(d.last_seen)}</div>
+          </div>
+          <span class="sp"></span>
+          <button class="btn sm ghost" title="Remove" onclick={() => forget(d)}><Trash2 size={13} /></button>
+        </div>
+      {:else}
+        <div class="small muted">No devices yet.</div>
+      {/each}
+    </div>
+  </div>
+</div>
+
+<style>
+  .pad { padding: 18px; }
+  h2 { font-size: 17px; margin-bottom: 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .wide { grid-column: 1 / -1; }
+  .txt { color: var(--text); }
+  .req { padding-bottom: 12px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+  .req:last-child { border: 0; margin: 0; padding: 0; }
+  .code { display: flex; gap: 8px; justify-content: center; margin: 14px 0; }
+  .code span { width: 42px; height: 52px; border-radius: 9px; background: var(--base); border: 1px solid var(--line2); display: grid; place-items: center; font: 600 24px var(--mono); }
+  .center { justify-content: center; }
+  .path { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #60a5fa55; border-radius: 8px; background: #60a5fa0d; color: var(--blue); }
+  .path.dim { border-color: var(--line); background: var(--base); color: var(--muted); }
+  .note { margin-top: 10px; }
+  .dev { padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .dev:last-child { border: 0; }
+</style>

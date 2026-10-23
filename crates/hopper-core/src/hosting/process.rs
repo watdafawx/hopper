@@ -48,6 +48,9 @@ pub struct Tracker {
     pub port_in_use: bool,
     pub eula_missing: bool,
     pub max_from_list: Option<u32>,
+    /// Lines pushed since this tracker was made, including ones dropped
+    /// from `lines`, so a reader can ask for only the lines after its last.
+    pub total: u64,
 }
 
 impl Tracker {
@@ -76,6 +79,18 @@ impl Tracker {
             self.lines.pop_front();
         }
         self.lines.push_back(line);
+        self.total += 1;
+    }
+
+    /// The lines after the first `seen` (as counted by `total`), oldest
+    /// first, and the new total. Lines already dropped are skipped. When
+    /// `seen` is past `total` the server started again with a fresh console,
+    /// so every line comes back.
+    pub fn since(&self, seen: u64) -> (Vec<String>, u64) {
+        let seen = if seen > self.total { 0 } else { seen };
+        let new = (self.total - seen).min(self.lines.len() as u64) as usize;
+        let skip = self.lines.len() - new;
+        (self.lines.iter().skip(skip).cloned().collect(), self.total)
     }
 }
 
@@ -208,6 +223,12 @@ impl LocalServer {
     /// The console so far, oldest first.
     pub fn console(&self) -> Vec<String> {
         self.lock().tracker.lines.iter().cloned().collect()
+    }
+
+    /// Console lines after the first `seen`, and the count to pass next
+    /// time (see [`Tracker::since`]).
+    pub fn console_since(&self, seen: u64) -> (Vec<String>, u64) {
+        self.lock().tracker.since(seen)
     }
 
     /// Players online, from joins and leaves (and `list` replies).
@@ -679,6 +700,28 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn since_returns_only_new_lines_and_survives_restarts() {
+        let mut t = Tracker::default();
+        for i in 0..3 {
+            t.push(format!("line {i}"));
+        }
+        let (all, seen) = t.since(0);
+        assert_eq!((all.len(), seen), (3, 3));
+        t.push("line 3".into());
+        assert_eq!(t.since(seen), (vec!["line 3".to_string()], 4));
+        assert!(t.since(4).0.is_empty());
+        // More lines than the ring keeps: only what is still there.
+        for i in 0..MAX_LINES + 10 {
+            t.push(format!("x {i}"));
+        }
+        assert_eq!(t.since(4).0.len(), MAX_LINES);
+        // A new run starts a new tracker: a reader past it gets everything.
+        let mut fresh = Tracker::default();
+        fresh.push("again".into());
+        assert_eq!(fresh.since(9999), (vec!["again".to_string()], 1));
+    }
 
     #[test]
     fn states() {
