@@ -57,9 +57,9 @@ jobs:
       - name: Build Hopper Server
         run: cargo build -p hopperd
 
-  # Hopper desktop on Linux and macOS: does it compile yet? Not required
-  # to pass while the ports are under way.
-  desktop-check:
+  # Hopper desktop on Linux and macOS: release builds, packaged as
+# artifacts to try. Not required to pass while the ports are under way.
+  desktop-build:
     strategy:
       fail-fast: false
       matrix:
@@ -72,9 +72,58 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev libxcb1-dev             libfontconfig-dev libfreetype-dev libasound2-dev libssl-dev libzstd-dev libdbus-1-dev pkg-config clang
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libvulkan-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev libasound2-dev libssl-dev libzstd-dev libdbus-1-dev pkg-config clang
       - name: Rust (from rust-toolchain.toml)
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
-      - name: Check the desktop app
-        run: cargo check --bin hopper --message-format short
+      - name: Build
+        run: cargo build --release --bin hopper --message-format short
+      - name: Package (Linux tarball)
+        if: runner.os == 'Linux'
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
+          mkdir -p dist/hopper
+          cp target/release/hopper dist/hopper/
+          cp assets/hopper.png dist/hopper/
+          tar czf "dist/hopper-$v-linux-x64.tar.gz" -C dist hopper
+          ldd target/release/hopper | sed 's/ (0x.*//'
+      - name: Package (macOS app)
+        if: runner.os == 'macOS'
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
+          app=dist/Hopper.app/Contents
+          mkdir -p "$app/MacOS" "$app/Resources" icon.iconset
+          cp target/release/hopper "$app/MacOS/hopper"
+          for s in 16 32 128 256 512; do
+            sips -z $s $s assets/hopper.png --out icon.iconset/icon_${s}x${s}.png >/dev/null
+            sips -z $((s*2)) $((s*2)) assets/hopper.png --out icon.iconset/icon_${s}x${s}@2x.png >/dev/null
+          done
+          iconutil -c icns icon.iconset -o "$app/Resources/hopper.icns"
+          cat > "$app/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>Hopper</string>
+            <key>CFBundleDisplayName</key><string>Hopper</string>
+            <key>CFBundleIdentifier</key><string>dev.hopper.app</string>
+            <key>CFBundleVersion</key><string>$v</string>
+            <key>CFBundleShortVersionString</key><string>$v</string>
+            <key>CFBundleExecutable</key><string>hopper</string>
+            <key>CFBundleIconFile</key><string>hopper</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          sed -i '' 's/^          //' "$app/Info.plist"
+          # Ad-hoc signature: Apple silicon won't run unsigned code at all.
+          codesign --force --deep --sign - dist/Hopper.app
+          lipo -info "$app/MacOS/hopper"
+          (cd dist && ditto -c -k --keepParent Hopper.app "hopper-$v-macos-$(uname -m).zip")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hopper-${{ runner.os }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
