@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M1, LAN only.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M2 (servers, console, files), LAN only.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -38,7 +38,24 @@ hopperd --servers-root G:\Minecraft\packs
   the UI, device gets a bearer token.
 - LAN discovery: mDNS `_hopperd._tcp.local.`
 
-Not yet: TLS / internet access, files, backups, schedules, settings editor
+## Files (M2)
+
+- Browse any server folder (fast even with 10 000 files: the list is
+  virtualized and the reply is gzipped).
+- Upload files or whole folders (button or drag-drop): 8 MB chunks, three
+  files at a time, pause / resume, automatic retry; a dropped connection
+  carries on from the last chunk.
+- Download a file (resumable: Range requests) or any selection as a zip,
+  streamed while it's made (no temp file; zip64, so worlds over 4 GB work).
+- New file / folder, rename, move, copy, trash. Keyboard: Delete, F2,
+  Enter, Backspace, Ctrl+A.
+- Editor (CodeMirror) for configs: TOML / JSON checked before saving,
+  conflicts with changes made on disk caught, Ctrl+S.
+- Trash per server (`.hopper-trash`, 30 days): deleted items and the
+  previous version of every saved or replaced file; restore or delete for
+  good.
+
+Not yet: TLS / internet access, backups, schedules, settings editor
 (see the roadmap).
 
 ## API (v1)
@@ -60,6 +77,15 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `POST /servers/{id}/power` `{action: start\|stop\|restart\|kill}` | |
 | `POST /servers/{id}/command` `{line}` | |
 | `GET /servers/{id}/console?since=<n>` → `{lines, total}` | |
+| `GET /fs/{id}/list?path=` | folder entries |
+| `GET /fs/{id}/file?path=[&inline]` | download, supports `Range` |
+| `GET /fs/{id}/zip?path=a&path=b[&name=]` | streamed zip (no path: the whole server) |
+| `GET /fs/{id}/text?path=` / `PUT /fs/{id}/text` `{path, content, modified, force}` | editor; `saved` / `invalid` / `conflict` |
+| `POST /fs/{id}/ops` `{ops: [{op: mkdir\|rename\|move\|copy\|trash, ...}]}` | |
+| `POST /fs/{id}/uploads` `{path, size, overwrite}` → `{id}` | start an upload |
+| `PUT /fs/{id}/uploads/{up}?offset=n` (raw body, ≤ 32 MB) | a chunk; 409 `{offset}` if out of step |
+| `GET` / `DELETE /fs/{id}/uploads/{up}` | progress / cancel |
+| `GET /fs/{id}/trash`, `POST .../trash/restore` `{id}`, `POST .../trash/purge` `{ids}` | |
 | `GET /ws` | live: `snapshot` every second; send `{"op":"console","server":id}` to follow a console |
 
 ## Develop

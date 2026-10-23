@@ -1,6 +1,6 @@
 # Hopper Server: companion server panel (draft)
 
-Status: M0 and M1 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
+Status: M0, M1 and M2 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
 
 **M1 as built** differs from the draft in a few places:
 - No separate shim process: hopper-core's `LocalServer` already starts each
@@ -18,6 +18,20 @@ Status: M0 and M1 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API
 - Folders Crafty or MCSS manage are listed but never started by hopperd.
 - Tested with a fake server (a Java program printing Minecraft-style logs);
   not yet with a real modded server on rig.
+
+**M2 as built** (files):
+- Measured on FOX over localhost: upload 696 MB/s, download 916 MB/s,
+  10 000-file folder listed in ~25 ms (36 KB gzipped). LAN speed will be
+  the network's.
+- Uploads are sequential chunks per file (three files in parallel), not
+  parallel chunks of one file; a single stream already fills a LAN.
+- Zips are stored, not compressed (jars and worlds are already compressed;
+  the disk is the limit on a LAN). Written by our own small zip64 streamer
+  because the `zip` crate needs a seekable output.
+- "File history" is the trash: every save and every replaced upload keeps
+  the old copy (20 per file, 30 days), restorable. Diff views are later.
+- Not in M2 yet: folder tree, content search, mod-aware columns in `mods/`,
+  zip / unzip on the server, SFTP, per-path permissions (all v1).
 
 ## Goal
 
@@ -330,7 +344,7 @@ features light up only when both sides have them.
 |---|---|---|
 | M0 ✅ | Workspace split: `hopper-core`, `hopper` (desktop), `hopperd` | 2–3 days |
 | M1 ✅ | `hopperd` MVP: servers list, power, console WS, stats, shim supervisor, auth + pairing, LAN discovery, embedded UI shell | 1.5–2 weeks |
-| M2 | Files MVP: browse, upload/download chunked + resumable, ops, editor, trash, transfer queue | 1–1.5 weeks |
+| M2 ✅ | Files MVP: browse, upload/download chunked + resumable, ops, editor, trash, transfer queue | 1–1.5 weeks |
 | M3 | Hopper integration: panel kind, pairing UI, sync over API (drop `Q:`) | 1 week |
 | M4 | Backups, schedules, properties, JVM, players, create server | 1.5 weeks |
 | M5 | Internet: Tailscale path + open port (ACME / pinned TLS, required 2FA, rate limit, allow-list), split path transfers, audit, tokens | 1 week |

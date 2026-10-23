@@ -7,8 +7,18 @@
   import { power } from './lib/power.js';
   import { say } from './lib/toast.svelte.js';
   import Spark from './Spark.svelte';
+  import Files from './Files.svelte';
+  import Editor from './Editor.svelte';
+  import Trash from './Trash.svelte';
 
-  let { id } = $props();
+  let { id, tab = 'console', path = '' } = $props();
+
+  /** #/server/<id>/<tab>/<path> */
+  function nav(t, p = '') {
+    const segs = [id, t, ...(p ? p.split('/') : [])].map(encodeURIComponent);
+    location.hash = `/server/${segs.join('/')}`;
+  }
+  const filesTab = $derived(tab === 'files' || tab === 'edit' || tab === 'trash');
 
   const s = $derived(live.servers.find((x) => x.id === id));
   const lines = $derived(consoles[id] || []);
@@ -116,6 +126,18 @@
     </div>
   </div>
 
+  <nav class="tabs">
+    <button class:on={tab === 'console'} onclick={() => nav('console')}>Console</button>
+    <button class:on={filesTab} onclick={() => nav('files')}>Files</button>
+  </nav>
+
+  {#if tab === 'files'}
+    <div class="full"><Files server={s} {path} go={(p) => nav('files', p)} openFile={(p) => nav('edit', p)} openTrash={() => nav('trash')} /></div>
+  {:else if tab === 'edit'}
+    <div class="full">{#key path}<Editor server={s} {path} close={() => nav('files', path.split('/').slice(0, -1).join('/'))} />{/key}</div>
+  {:else if tab === 'trash'}
+    <div class="full"><Trash server={s} close={() => nav('files')} /></div>
+  {:else}
   <div class="split">
     <section class="term">
       <div class="tb">
@@ -171,6 +193,7 @@
       </div>
     </aside>
   </div>
+  {/if}
 {/if}
 
 <style>
@@ -181,6 +204,10 @@
   .wrap { flex-wrap: wrap; }
   h2 { font-size: 17px; font-weight: 700; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tabs { display: flex; gap: 20px; padding: 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+  .tabs button { padding: 9px 0; color: var(--subtle); font-weight: 500; }
+  .tabs button.on { color: var(--text); box-shadow: inset 0 -2px var(--acc); }
+  .full { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 18px 18px; }
   .split { flex: 1; min-height: 0; display: flex; gap: 14px; padding: 0 18px 18px; }
   .term { flex: 1; min-width: 0; min-height: 360px; background: var(--term); border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; position: relative; }
   .tb { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--base); flex-wrap: wrap; }

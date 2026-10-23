@@ -13,9 +13,12 @@ mod api;
 mod auth;
 mod config;
 mod discovery;
+mod files;
+mod fs_api;
 mod host;
 mod servers;
 mod ui;
+mod zipstream;
 
 use anyhow::Context as _;
 use config::Config;

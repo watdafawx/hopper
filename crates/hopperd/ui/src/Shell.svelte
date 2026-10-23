@@ -8,6 +8,8 @@
   import Overview from './Overview.svelte';
   import ServerPage from './ServerPage.svelte';
   import Access from './Access.svelte';
+  import Dialog from './Dialog.svelte';
+  import Transfers from './Transfers.svelte';
 
   let { hello, onSignOut } = $props();
 
@@ -16,7 +18,11 @@
   let pingTimer, pendTimer;
 
   const page = $derived(route.startsWith('/server/') ? 'server' : route === '/access' ? 'access' : 'overview');
-  const serverId = $derived(page === 'server' ? decodeURIComponent(route.slice(8)) : null);
+  // #/server/<id>/<tab>/<path...>
+  const segs = $derived(route.split('/').slice(2).map(decodeURIComponent));
+  const serverId = $derived(page === 'server' ? segs[0] : null);
+  const tab = $derived(page === 'server' ? segs[1] || 'console' : null);
+  const subpath = $derived(page === 'server' ? segs.slice(2).join('/') : '');
   const kind = pathKind();
   const PathIcon = { LAN: Wifi, Local: Wifi, Tailscale: Waypoints, Internet: Globe }[kind];
 
@@ -105,7 +111,7 @@
     </header>
     <div class="content">
       {#if page === 'server'}
-        {#key serverId}<ServerPage id={serverId} />{/key}
+        {#key serverId}<ServerPage id={serverId} {tab} path={subpath} />{/key}
       {:else if page === 'access'}
         <Access {hello} bind:pending />
       {:else}
@@ -115,6 +121,8 @@
   </div>
 </div>
 
+<Transfers />
+<Dialog />
 {#if toast.text}<div class="toast" class:bad={toast.bad}>{toast.text}</div>{/if}
 
 <style>

@@ -18,6 +18,32 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A .gz copy next to every text file worth compressing, which the panel
+/// serves to browsers that accept gzip.
+fn gzip_all(dir: &Path) {
+    use std::io::Write as _;
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            gzip_all(&p);
+            continue;
+        }
+        let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if !matches!(ext, "js" | "css" | "html" | "svg" | "json" | "webmanifest") {
+            continue;
+        }
+        let data = std::fs::read(&p).unwrap();
+        if data.len() < 1024 {
+            continue;
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(&data).unwrap();
+        let mut name = p.file_name().unwrap().to_os_string();
+        name.push(".gz");
+        std::fs::write(p.with_file_name(name), gz.finish().unwrap()).unwrap();
+    }
+}
+
 fn main() {
     let out = Path::new(&std::env::var("OUT_DIR").unwrap()).join("ui");
     let _ = std::fs::remove_dir_all(&out);
@@ -25,6 +51,7 @@ fn main() {
     println!("cargo:rerun-if-changed=ui/dist");
     if dist.join("index.html").is_file() {
         copy_dir(dist, &out).expect("copying ui/dist");
+        gzip_all(&out);
     } else {
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(

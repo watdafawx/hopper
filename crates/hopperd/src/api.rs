@@ -26,9 +26,10 @@ pub const COOKIE: &str = "hopperd_session";
 pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
-pub const CAPABILITIES: &[&str] = &["servers", "power", "console", "console.ws", "stats", "host", "pairing"];
+pub const CAPABILITIES: &[&str] =
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text"];
 
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -36,15 +37,15 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn bad(e: impl std::fmt::Display) -> ApiError {
+pub(crate) fn bad(e: impl std::fmt::Display) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, e.to_string())
 }
 
-fn not_found(what: &str) -> ApiError {
+pub(crate) fn not_found(what: &str) -> ApiError {
     ApiError(StatusCode::NOT_FOUND, format!("No {what} with that id."))
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 /// The session cookie or bearer token on a request.
 fn token(headers: &HeaderMap) -> (String, bool) {
@@ -67,7 +68,7 @@ fn token(headers: &HeaderMap) -> (String, bool) {
 
 /// Who is asking; refuses anonymous requests, and cookie requests that
 /// change state without the `X-Hopperd` header.
-fn require(app: &App, headers: &HeaderMap, method: &Method) -> ApiResult<Who> {
+pub(crate) fn require(app: &App, headers: &HeaderMap, method: &Method) -> ApiResult<Who> {
     let (tok, from_cookie) = token(headers);
     let who = app
         .auth
@@ -115,6 +116,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/servers/{id}/command", post(command))
         .route("/api/v1/servers/{id}/console", get(console))
         .route("/api/v1/ws", get(ws))
+        .merge(crate::fs_api::routes())
         .fallback(crate::ui::serve)
         .with_state(app)
 }
