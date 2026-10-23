@@ -1850,7 +1850,9 @@ impl Store {
                 }
                 std::mem::take(&mut q.1)
             };
-            let (Ok(exe), Some(dir)) = (std::env::current_exe(), hopper::modpack::fetch_dir()) else {
+            // The download window is WebView2 (Windows); elsewhere the browser
+            // downloads them and the download watcher picks them up.
+            let (true, Ok(exe), Some(dir)) = (cfg!(windows), std::env::current_exe(), hopper::modpack::fetch_dir()) else {
                 let _ = tx.send(Msg::OpenUrls(urls));
                 wake();
                 continue;

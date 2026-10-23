@@ -17,6 +17,7 @@ mod content;
 mod datapacks;
 mod dialogs;
 mod drag_pick;
+#[cfg(windows)]
 mod fetch_window;
 mod crash_help;
 mod host_dialog;
@@ -68,6 +69,7 @@ fn main() {
     }
     // The window that fetches website-only files: `--fetch DIR URL...`.
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
     if args.get(1).is_some_and(|a| a == "--fetch") && args.len() > 2 {
         std::process::exit(fetch_window::run(args[2].clone().into(), args[3..].to_vec()));
     }
