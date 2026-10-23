@@ -351,16 +351,32 @@ pub fn push(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<Syn
     crate::sync::plan(&rows, &inst.mods_dir(), &server.mods_dir())
 }
 
-/// Copies server-only files down to the client.
+/// Copies server files down to the client: server-only jars, and the
+/// server's build of a mod both sides have in another version (the
+/// client's old file is removed when its name differs).
 pub fn pull(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<SyncOp> {
-    rows.iter()
-        .filter(|d| d.status == DiffStatus::OnlyServer)
-        .filter_map(|d| d.server.as_ref())
-        .map(|m| SyncOp::Copy {
-            src: server.mods_dir().join(&m.file_name),
-            dst: inst.mods_dir().join(&m.file_name),
-        })
-        .collect()
+    let mut ops = Vec::new();
+    for d in rows {
+        let Some(s) = &d.server else { continue };
+        match d.status {
+            DiffStatus::OnlyServer => {}
+            DiffStatus::ServerNewer | DiffStatus::ClientNewer => {
+                if let Some(c) = &d.client
+                    && !c.file_name.eq_ignore_ascii_case(&s.file_name)
+                {
+                    ops.push(SyncOp::Delete {
+                        path: inst.mods_dir().join(&c.file_name),
+                    });
+                }
+            }
+            _ => continue,
+        }
+        ops.push(SyncOp::Copy {
+            src: server.mods_dir().join(&s.file_name),
+            dst: inst.mods_dir().join(&s.file_name),
+        });
+    }
+    ops
 }
 
 /// Deletes server-only and leftover files from the server.
@@ -556,6 +572,30 @@ mod tests {
         let ops = mod_ops(RemoveFromServer, &entry(DiffStatus::Same, "both", false), &inst("I"), &server);
         assert!(matches!(&ops.up[..], [SyncOp::Delete { path }] if path.ends_with("a.jar")));
         assert!(ops.down.is_empty());
+    }
+
+    #[test]
+    fn pull_takes_the_servers_build() {
+        let server = ServerInfo {
+            name: "S".into(),
+            root: "S".into(),
+            manager: crate::server::Manager::Unknown,
+            properties: Default::default(),
+            loader: None,
+            java: None,
+            max_memory: None,
+        };
+        let mut d = entry(DiffStatus::ServerNewer, "both", false);
+        d.server.as_mut().unwrap().file_name = "a-2.jar".into();
+        let ops = pull(std::slice::from_ref(&d), &inst("I"), &server);
+        assert!(matches!(&ops[..], [
+            SyncOp::Delete { path },
+            SyncOp::Copy { src, dst },
+        ] if path.ends_with("mods/a.jar") && src.ends_with("S/mods/a-2.jar") && dst.ends_with("mods/a-2.jar")));
+        // Same name: overwritten in place, nothing deleted.
+        let same = entry(DiffStatus::ClientNewer, "both", false);
+        assert!(matches!(&pull(&[same], &inst("I"), &server)[..], [SyncOp::Copy { .. }]));
+        assert!(pull(&[entry(DiffStatus::Same, "both", false)], &inst("I"), &server).is_empty());
     }
 
     #[test]

@@ -2057,7 +2057,30 @@ impl SyncPanel {
                     RowAct::Push,
                     false,
                 );
-                match pair.as_ref().filter(|_| pid != 0 && d.client.is_some()) {
+                // The other way: the server's build into this instance.
+                let down = (d.client.is_some() && d.server.is_some()).then(|| {
+                    let (d2, pair2, key2) = (d.clone(), pair.clone(), key.clone());
+                    let (from, to) = (
+                        d.server.as_ref().map(|m| m.version.clone()).unwrap_or_default(),
+                        d.client.as_ref().map(|m| m.version.clone()).unwrap_or_default(),
+                    );
+                    Button::new(id("pull-update"))
+                        .small()
+                        .ghost()
+                        .icon(IconName::Download)
+                        .label("Pull to pack")
+                        .tooltip(format!(
+                            "Copy the server's {from} into this instance in place of {to} (the old jar goes to .hopper-backups)"
+                        ))
+                        .disabled(self.running)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some((s, i)) = &pair2 {
+                                this.act_row(key2.clone(), ("Pulling", "Pulled"), rigsync::chip_ops(RowAct::Pull, &d2, i, s), cx);
+                            }
+                        }))
+                });
+                let lead: AnyElement = match pair.as_ref().filter(|_| pid != 0 && d.client.is_some()) {
                     Some((_, inst)) => {
                         let (store, root) = (self.store.clone(), inst.root.clone());
                         widgets::split(
@@ -2075,7 +2098,8 @@ impl SyncPanel {
                         .into_any_element()
                     }
                     None => lead.into_any_element(),
-                }
+                };
+                h_flex().gap_1().children(down).child(lead).into_any_element()
             }
             Group::ServerOnly => h_flex()
                 .gap_1()
