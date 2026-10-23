@@ -6,6 +6,8 @@
 //! hopperd --servers-root <dir>    set the servers folder and run
 //! hopperd --port <n>              set the port and run
 //! hopperd --data <dir>            keep config and accounts in <dir>
+//! hopperd service install         run in the background with the machine
+//! hopperd service uninstall|status
 //! hopperd --version
 //! ```
 
@@ -23,6 +25,7 @@ mod security;
 mod net;
 mod pack_api;
 mod servers;
+mod service;
 mod sftp;
 mod tls;
 mod ui;
@@ -95,7 +98,7 @@ impl App {
 
 /// `p` as a full path, without Windows' `\\?\` prefix (canonicalize adds
 /// it; java, run.bat and people don't want it).
-fn absolute(p: &std::path::Path) -> PathBuf {
+pub(crate) fn absolute(p: &std::path::Path) -> PathBuf {
     let full = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let s = full.to_string_lossy();
     match s.strip_prefix(r"\\?\") {
@@ -105,13 +108,15 @@ fn absolute(p: &std::path::Path) -> PathBuf {
 }
 
 struct Args {
+    /// Started by the Windows service manager.
+    service: bool,
     data: Option<PathBuf>,
     port: Option<u16>,
     servers_root: Option<PathBuf>,
 }
 
 fn parse_args() -> anyhow::Result<Option<Args>> {
-    let mut a = Args { data: None, port: None, servers_root: None };
+    let mut a = Args { service: false, data: None, port: None, servers_root: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = || it.next().with_context(|| format!("{arg} needs a value"));
@@ -121,10 +126,11 @@ fn parse_args() -> anyhow::Result<Option<Args>> {
                 return Ok(None);
             }
             "--data" => a.data = Some(val()?.into()),
+            "--service" => a.service = true,
             "--port" => a.port = Some(val()?.parse().context("--port takes a number")?),
             "--servers-root" => a.servers_root = Some(val()?.into()),
             "--help" | "-h" => {
-                println!("{}", include_str!("main.rs").lines().skip(3).take(7).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
+                println!("{}", include_str!("main.rs").lines().skip(4).take(7).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
                 return Ok(None);
             }
             other => anyhow::bail!("Unknown argument {other}. Try --help."),
@@ -133,9 +139,36 @@ fn parse_args() -> anyhow::Result<Option<Args>> {
     Ok(Some(a))
 }
 
+type Shutdown = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
 fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,mdns_sd=warn")).init();
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut log = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,mdns_sd=warn"));
+    if argv.first().map(String::as_str) == Some("service") {
+        log.init();
+        return service::command(&argv[1..]);
+    }
+    let Some(args) = parse_args()? else { return Ok(()) };
+    if args.service {
+        // No console as a service: log to hopperd.log in the data folder.
+        let dir = args.data.clone().unwrap_or_else(config::data_dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hopperd.log"))?;
+        log.target(env_logger::Target::Pipe(Box::new(file))).init();
+        #[cfg(windows)]
+        return service::run_as_service();
+        #[cfg(not(windows))]
+        anyhow::bail!("--service is for the Windows service manager. Use hopperd service install.");
+    }
+    log.init();
+    run_main(Box::pin(async {
+        let _ = tokio::signal::ctrl_c().await;
+    }))
+}
+
+/// Runs the panel until `shutdown` finishes.
+pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     let Some(args) = parse_args()? else { return Ok(()) };
     let data_dir = args.data.unwrap_or_else(config::data_dir);
     std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
@@ -224,10 +257,10 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
-    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve(app, cfg, own_cert))
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve(app, cfg, own_cert, shutdown))
 }
 
-async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::CertifiedKey>) -> anyhow::Result<()> {
+async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::CertifiedKey>, shutdown: Shutdown) -> anyhow::Result<()> {
     // The live snapshot: once a second, or right away when asked.
     let a = app.clone();
     tokio::spawn(async move {
@@ -279,7 +312,7 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::Certified
 
     log::info!("hopperd {} on {}", env!("CARGO_PKG_VERSION"), app.addresses.first().cloned().unwrap_or_else(|| format!("https://{addr}")));
     net::serve(listener, api::router(app), tls, async {
-        let _ = tokio::signal::ctrl_c().await;
+        shutdown.await;
         log::info!("stopping the panel; servers keep running");
     })
     .await;

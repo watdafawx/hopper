@@ -1,0 +1,16 @@
+# docker compose -f crates/hopperd/packaging/docker-compose.yml up -d
+services:
+  hopperd:
+    build:
+      context: ../../..
+      dockerfile: crates/hopperd/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8790:8790"   # web UI and API
+      - "8022:8022"   # SFTP
+      - "25565:25565" # a Minecraft server; add one line per server
+    volumes:
+      - hopperd-data:/data
+      - ./servers:/servers
+volumes:
+  hopperd-data:

@@ -1,0 +1,6 @@
+target
+**/node_modules
+crates/hopperd/ui/dist
+.git
+.claude
+mockups

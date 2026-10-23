@@ -1,0 +1,69 @@
+name: Hopper Server release
+
+# Push a tag like hopperd-v0.1.0 (matching crates/hopperd/Cargo.toml's
+# version) to build hopperd for Windows and Linux and attach both to that
+# release.
+on:
+  push:
+    tags: ["hopperd-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            exe: hopperd.exe
+            asset: windows-x64.zip
+          - os: ubuntu-latest
+            exe: hopperd
+            asset: linux-x64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (from rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the tag matches crates/hopperd/Cargo.toml
+        shell: bash
+        run: |
+          v=$(grep -m1 '^version' crates/hopperd/Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
+          [ "hopperd-v$v" = "${{ github.ref_name }}" ] || { echo "Tag ${{ github.ref_name }} doesn't match version $v"; exit 1; }
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/hopperd/ui/pnpm-lock.yaml
+      - name: Build the web UI
+        working-directory: crates/hopperd/ui
+        run: pnpm install --frozen-lockfile && pnpm build
+      - name: Build
+        run: cargo build --release -p hopperd
+      - name: Package
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#hopperd-v}"
+          mkdir -p dist
+          cp "target/release/${{ matrix.exe }}" dist/
+          cp crates/hopperd/README.md dist/
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "../hopperd-$v-${{ matrix.asset }}" ${{ matrix.exe }} README.md
+          else
+            tar czf "../hopperd-$v-${{ matrix.asset }}" ${{ matrix.exe }} README.md
+          fi
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${GITHUB_REF_NAME#hopperd-v}"
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --title "Hopper Server $v" --notes "Hopper Server $v. Run hopperd, open http://localhost:8790, and see the README for setup, services and Docker."
+          gh release upload "$GITHUB_REF_NAME" "hopperd-$v-${{ matrix.asset }}" --clobber

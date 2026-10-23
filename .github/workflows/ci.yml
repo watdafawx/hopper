@@ -32,3 +32,27 @@ jobs:
         run: cargo test -p hopperd
       - name: Build Hopper Server
         run: cargo build -p hopperd
+
+  # Hopper Server runs on Linux too: its tests and a build there.
+  hopperd-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (from rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/hopperd/ui/pnpm-lock.yaml
+      - name: Build Hopper Server's web UI
+        working-directory: crates/hopperd/ui
+        run: pnpm install --frozen-lockfile && pnpm build
+      - name: Hopper Server tests
+        run: cargo test -p hopperd
+      - name: Build Hopper Server
+        run: cargo build -p hopperd
