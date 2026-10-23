@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { ArrowLeft, Save, Download, CheckCircle2, AlertTriangle, ChevronRight } from '@lucide/svelte';
+  import { ArrowLeft, Save, Download, CheckCircle2, AlertTriangle, ChevronRight, History, X, RotateCcw } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
@@ -17,6 +17,44 @@
   let dirty = $state(false);
   let problem = $state('');
   let saving = $state(false);
+
+  let versions = $state(null);
+  let picked = $state(null);
+  let rows = $state([]);
+
+  async function history() {
+    if (versions) {
+      versions = null;
+      picked = null;
+      return;
+    }
+    try {
+      versions = (await api(`${base}/history?path=${encodeURIComponent(path)}`)).versions;
+      if (versions.length) show(versions[0]);
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
+  async function show(v) {
+    picked = v;
+    try {
+      rows = (await api(`${base}/diff?path=${encodeURIComponent(path)}&version=${encodeURIComponent(v.id)}`)).lines;
+    } catch (e) {
+      rows = [];
+      say(e.message, true);
+    }
+  }
+
+  function useVersion() {
+    ed?.set(rows.filter((l) => l.old != null).map((l) => l.old).join('\n'));
+    versions = null;
+    picked = null;
+    say('Loaded the old version. Save to keep it.');
+  }
+
+  const changes = $derived(rows.filter((l) => l.k !== 'same').length);
+  const when = (t) => new Date(t * 1000).toLocaleString();
 
   const base = $derived(`/fs/${encodeURIComponent(server.id)}`);
   const name = $derived(path.split('/').pop());
@@ -105,13 +143,43 @@
     {#if problem}<span class="chip crashed" title={problem}><AlertTriangle size={12} />{problem.length > 60 ? `${problem.slice(0, 60)}…` : problem}</span>
     {:else if loaded && !dirty}<span class="chip running"><CheckCircle2 size={12} />Saved</span>{/if}
     <span class="sp"></span>
+    <button class="btn sm" class:on={versions} title="Earlier versions" onclick={history}><History size={14} />History</button>
     <button class="btn sm icon" title="Download" onclick={() => download(`/api/v1${base}/file?path=${encodeURIComponent(path)}`)}><Download size={14} /></button>
     <button class="btn sm pri" disabled={!dirty || saving} onclick={() => save()}><Save size={14} />Save <span class="kbd k">Ctrl S</span></button>
   </div>
   {#if error}
     <div class="msg err">{error}</div>
   {/if}
-  <div class="host" bind:this={host}></div>
+  {#if versions}
+    <div class="hist">
+      <div class="vers">
+        {#each versions as v (v.id)}
+          <button class="ver" class:on={picked?.id === v.id} onclick={() => show(v)}>
+            <div class="small">{when(v.at)}</div><div class="tiny muted">{v.kind === 'deleted' ? 'deleted' : 'saved over'}</div>
+          </button>
+        {:else}
+          <p class="small muted pad">No earlier versions. One is kept in the trash each time the file is saved.</p>
+        {/each}
+      </div>
+      {#if picked}
+        <div class="diff">
+          <div class="dh"><span class="small">{changes ? `${changes} changed line${changes === 1 ? '' : 's'}` : 'Same as now'} <span class="muted">· old on the left, current on the right</span></span><span class="sp"></span>
+            <button class="btn sm" disabled={!changes} onclick={useVersion}><RotateCcw size={13} />Use this version</button>
+            <button class="btn sm icon ghost" onclick={history}><X size={13} /></button></div>
+          <div class="dl mono">
+            {#each rows as l, i (i)}
+              {#if l.k !== 'same' || rows.slice(Math.max(0, i - 3), i + 4).some((x) => x.k !== 'same')}
+                <div class="dr {l.k}"><span class="n">{l.on ?? ''}</span><span class="t o">{l.old ?? ''}</span><span class="n">{l.nn ?? ''}</span><span class="t c">{l.new ?? ''}</span></div>
+              {:else if rows[i - 1]?.k !== 'same' || i === 0}
+                <div class="dr gap"><span class="tiny muted">⋯</span></div>
+              {/if}
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
+  <div class="host" class:hide={versions} bind:this={host}></div>
   <div class="foot tiny muted">The previous version is kept in the trash each time you save.</div>
 </div>
 
@@ -123,5 +191,21 @@
   .k { border-color: #0003; color: #1a1a1f; }
   .host { flex: 1; min-height: 300px; overflow: hidden; }
   .msg { padding: 24px; text-align: center; }
+  .hide { display: none; }
+  .on { border-color: var(--acc); color: var(--acc); }
+  .hist { flex: 1; min-height: 300px; display: flex; overflow: hidden; }
+  .vers { width: 190px; flex: none; border-right: 1px solid var(--line); overflow: auto; background: var(--base); }
+  .ver { display: block; width: 100%; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .ver.on, .ver:hover { background: var(--acc-dim); color: var(--text); }
+  .pad { padding: 12px; }
+  .diff { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .dh { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  .dl { flex: 1; overflow: auto; font-size: 12px; }
+  .dr { display: grid; grid-template-columns: 44px 1fr 44px 1fr; white-space: pre-wrap; word-break: break-all; }
+  .dr .n { color: var(--muted); text-align: right; padding-right: 8px; user-select: none; }
+  .dr .t { padding: 0 6px; }
+  .dr.del .o, .dr.change .o { background: #ef444426; }
+  .dr.add .c, .dr.change .c { background: #22c55e22; }
+  .dr.gap { display: block; padding: 0 12px; }
   .foot { padding: 6px 12px; border-top: 1px solid var(--line); background: var(--base); }
 </style>

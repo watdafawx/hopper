@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     Folder, FolderOpen, File, FileText, FileArchive, Image, ChevronRight, HardDrive, Search, FolderPlus, Upload, FolderUp,
-    Download, Copy, FolderInput, Pencil, Trash2, RefreshCw, ArrowUp, FilePlus,
+    Download, Copy, FolderInput, Pencil, Trash2, RefreshCw, ArrowUp, FilePlus, TextSearch, X,
   } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { bytes } from './lib/format.js';
@@ -28,6 +28,31 @@
   let scrollTop = $state(0);
   let viewH = $state(600);
   let filePick = $state();
+  let found = $state(null);
+  let finding = $state(false);
+  let regex = $state(false);
+
+  async function searchIn(ev) {
+    ev?.preventDefault();
+    if (filter.trim().length < 2) return;
+    finding = true;
+    try {
+      found = await api(`${base}/search?path=${encodeURIComponent(path)}&q=${encodeURIComponent(filter.trim())}${regex ? '&regex=1' : ''}`);
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      finding = false;
+    }
+  }
+
+  const groups = $derived.by(() => {
+    const m = new Map();
+    for (const h of found?.hits || []) {
+      if (!m.has(h.path)) m.set(h.path, []);
+      if (h.line) m.get(h.path).push(h);
+    }
+    return [...m];
+  });
   let folderPick = $state();
 
   const base = $derived(`/fs/${encodeURIComponent(server.id)}`);
@@ -63,6 +88,7 @@
     server.id;
     selected = new Set();
     filter = '';
+    found = null;
     if (scroller) scroller.scrollTop = 0;
     load();
   });
@@ -258,7 +284,11 @@
     </div>
     <span class="tiny muted nw">{entries.length} items</span>
     <span class="sp"></span>
-    <div class="input find"><Search size={13} /><input placeholder="Filter this folder" bind:value={filter} /></div>
+    <form class="input find" onsubmit={searchIn} title="Type to filter; Enter searches inside files here and below">
+      <Search size={13} /><input placeholder="Filter · Enter searches inside" bind:value={filter} />
+      <button type="button" class="rx" class:on={regex} title="Regular expression" onclick={() => (regex = !regex)}>.*</button>
+    </form>
+    <button class="btn sm icon" title="Search inside files here and below" disabled={filter.trim().length < 2 || finding} onclick={searchIn}><TextSearch size={14} /></button>
     <button class="btn sm icon" title="Up a folder" disabled={!path} onclick={() => go(crumbs.slice(0, -1).join('/'))}><ArrowUp size={14} /></button>
     <button class="btn sm icon" title="Refresh" onclick={load}><RefreshCw size={14} /></button>
     <button class="btn sm icon" title="New file" onclick={newFile}><FilePlus size={14} /></button>
@@ -270,6 +300,25 @@
     <input type="file" hidden webkitdirectory bind:this={folderPick} onchange={(e) => picked(e, true)} />
   </div>
 
+  {#if found || finding}
+    <div class="found">
+      <div class="fh"><span class="small">{finding ? 'Searching…' : `${found.hits.length}${found.more ? '+' : ''} matches in ${groups.length} file${groups.length === 1 ? '' : 's'}`}</span><span class="sp"></span>
+        <button class="btn sm icon ghost" title="Close search" onclick={() => (found = null)}><X size={13} /></button></div>
+      {#if found}
+        {#each groups as [p, hits] (p)}
+          <div class="fg">
+            <button class="fp mono small" onclick={() => openFile(p, 0)}>{p}</button>
+            {#each hits.slice(0, 20) as h (h.line)}
+              <button class="hit mono tiny" onclick={() => openFile(p, 0)}><span class="muted ln">{h.line}</span>{h.text}</button>
+            {/each}
+            {#if hits.length > 20}<div class="tiny muted ln2">and {hits.length - 20} more</div>{/if}
+          </div>
+        {:else}
+          <p class="small muted msg">Nothing found.</p>
+        {/each}
+      {/if}
+    </div>
+  {:else}
   <div class="head row">
     <span class="c-name">Name</span><span class="c-size">Size</span><span class="c-date">Changed</span>
   </div>
@@ -301,7 +350,9 @@
     </div>
   </div>
 
-  {#if selList.length}
+  {/if}
+
+  {#if selList.length && !found}
     <div class="selbar">
       <b>{selList.length} selected</b><span class="muted small">{selSize ? `· ${bytes(selSize)}` : ''}</span>
       <span class="sp"></span>
@@ -327,6 +378,16 @@
   .crumb.cur { color: var(--text); font-weight: 600; }
   .nw { white-space: nowrap; }
   .find { padding: 3px 8px; width: 180px; }
+  .find .rx { font: 600 11px var(--mono); color: var(--muted); padding: 0 3px; border-radius: 4px; }
+  .find .rx.on { color: var(--acc); background: var(--acc-dim); }
+  .found { flex: 1; overflow: auto; min-height: 200px; }
+  .fh { display: flex; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--base); }
+  .fg { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .fp { display: block; padding: 2px 12px; color: var(--acc); text-align: left; }
+  .hit { display: flex; gap: 10px; width: 100%; text-align: left; padding: 1px 12px 1px 24px; white-space: pre; overflow: hidden; text-overflow: ellipsis; color: var(--subtle); }
+  .hit:hover, .fp:hover { background: var(--raise); }
+  .ln { min-width: 34px; text-align: right; flex: none; }
+  .ln2 { padding-left: 24px; }
   .head { padding: 6px 12px 6px 40px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11.5px; font-weight: 500; }
   .list { flex: 1; overflow: auto; position: relative; min-height: 200px; }
   .spacer { position: relative; }

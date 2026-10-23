@@ -351,6 +351,94 @@ pub fn purge(root: &Path, ids: &[String]) -> anyhow::Result<usize> {
     Ok(n)
 }
 
+/// A trashed file's text (a saved-over version, for diffs).
+pub fn trash_text(root: &Path, id: &str) -> anyhow::Result<String> {
+    check_name(id)?;
+    let p = trash_root(root).join(id).join(ITEM);
+    let meta = fs::metadata(&p).context("That version is gone.")?;
+    if meta.is_dir() || meta.len() > MAX_TEXT {
+        bail!("That version can't be shown as text.");
+    }
+    let bytes = fs::read(&p)?;
+    if bytes.iter().take(8192).any(|b| *b == 0) {
+        bail!("That version isn't text.");
+    }
+    Ok(String::from_utf8_lossy(&bytes).replace("\r\n", "\n"))
+}
+
+// ---- search ----------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct Hit {
+    pub path: String,
+    /// 1-based; 0 when the name matched.
+    pub line: usize,
+    pub text: String,
+}
+
+/// Files bigger than this aren't searched inside.
+const SEARCH_MAX_FILE: u64 = 2 * 1024 * 1024;
+
+/// Looks for `query` in file names and text files under `rel`: plain text
+/// (any case) or a regular expression. At most `limit` hits.
+pub fn search(root: &Path, rel: &str, query: &str, regex: bool, limit: usize) -> anyhow::Result<(Vec<Hit>, bool)> {
+    let start = resolve(root, rel)?;
+    let re = if regex {
+        regex::RegexBuilder::new(query).case_insensitive(true).size_limit(1 << 20).build().map_err(|e| anyhow::anyhow!("{e}"))?
+    } else {
+        regex::RegexBuilder::new(&regex::escape(query)).case_insensitive(true).build()?
+    };
+    let mut hits = Vec::new();
+    let mut stack = vec![start];
+    let skip_dirs = ["libraries", "versions", ".fabric", "cache", "logs", "crash-reports"];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        let mut entries: Vec<_> = rd.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                let top = p.parent() == Some(root);
+                if !(is_internal(&name) || (top && skip_dirs.contains(&name.as_str())) || name.ends_with("region")) {
+                    stack.push(p);
+                }
+                continue;
+            }
+            let path = rel_of(root, &p);
+            if re.is_match(&name) {
+                hits.push(Hit { path: path.clone(), line: 0, text: name.clone() });
+            }
+            if hits.len() >= limit {
+                return Ok((hits, true));
+            }
+            let lower = name.to_lowercase();
+            if [".jar", ".zip", ".mca", ".png", ".dat", ".nbt", ".ogg", ".gz", ".class", ".exe", ".dll"].iter().any(|x| lower.ends_with(x)) {
+                continue;
+            }
+            if e.metadata().map(|m| m.len()).unwrap_or(u64::MAX) > SEARCH_MAX_FILE {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&p) else { continue };
+            if bytes.iter().take(4096).any(|b| *b == 0) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&bytes);
+            for (i, l) in text.lines().enumerate() {
+                if re.is_match(l) {
+                    let t: String = l.trim().chars().take(240).collect();
+                    hits.push(Hit { path: path.clone(), line: i + 1, text: t });
+                    if hits.len() >= limit {
+                        return Ok((hits, true));
+                    }
+                }
+            }
+        }
+    }
+    Ok((hits, false))
+}
+
 // ---- operations --------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -634,6 +722,28 @@ mod tests {
         assert!(validate("x.json", "{\"a\": }").unwrap_err().contains("line 1"));
         fs::write(root.join("bin.dat"), [0u8, 1, 2]).unwrap();
         assert!(read_text(&root, "bin.dat").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_names_and_text() {
+        let root = temp("search");
+        fs::create_dir_all(root.join("config/sub")).unwrap();
+        fs::create_dir_all(root.join("mods")).unwrap();
+        fs::write(root.join("config/create.toml"), "a = 1\nmaxBeltLength = 20\n").unwrap();
+        fs::write(root.join("config/sub/other.json"), "{\"maxbeltlength\": 5}").unwrap();
+        fs::write(root.join("mods/belt.jar"), [0u8, 1, 2]).unwrap();
+        let (h, more) = search(&root, "", "maxBeltLength", false, 100).unwrap();
+        assert!(!more);
+        let got: Vec<(String, usize)> = h.iter().map(|x| (x.path.clone(), x.line)).collect();
+        assert!(got.contains(&("config/create.toml".into(), 2)) && got.contains(&("config/sub/other.json".into(), 1)), "{got:?}");
+        let (h, _) = search(&root, "", "belt", false, 100).unwrap();
+        assert!(h.iter().any(|x| x.path == "mods/belt.jar" && x.line == 0), "names match; jars aren't read");
+        let (h, _) = search(&root, "config", r"max\w+ = \d+", true, 100).unwrap();
+        assert_eq!(h.len(), 1);
+        assert!(search(&root, "", "(", true, 10).is_err());
+        let (h, more) = search(&root, "", "a", false, 2).unwrap();
+        assert!(more && h.len() == 2);
         let _ = fs::remove_dir_all(&root);
     }
 

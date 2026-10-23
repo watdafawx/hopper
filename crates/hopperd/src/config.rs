@@ -33,6 +33,9 @@ pub struct Config {
     pub acme_email: String,
     /// Use Let's Encrypt's staging server (for testing).
     pub acme_staging: bool,
+    /// CurseForge API key for mod search, identify and updates (Modrinth
+    /// needs none).
+    pub curseforge_key: String,
 }
 
 impl Default for Config {
@@ -49,6 +52,7 @@ impl Default for Config {
             acme_domain: None,
             acme_email: String::new(),
             acme_staging: false,
+            curseforge_key: String::new(),
         }
     }
 }

@@ -14,6 +14,7 @@
   import Backups from './Backups.svelte';
   import Schedule from './Schedule.svelte';
   import Settings from './Settings.svelte';
+  import Mods from './Mods.svelte';
 
   let { id, tab = 'console', path = '' } = $props();
 
@@ -133,6 +134,7 @@
   <nav class="tabs">
     <button class:on={tab === 'console'} onclick={() => nav('console')}>Console</button>
     <button class:on={filesTab} onclick={() => nav('files')}>Files</button>
+    <button class:on={tab === 'mods'} onclick={() => nav('mods')}>Mods</button>
     <button class:on={tab === 'players'} onclick={() => nav('players')}>Players</button>
     <button class:on={tab === 'backups'} onclick={() => nav('backups')}>Backups</button>
     <button class:on={tab === 'schedule'} onclick={() => nav('schedule')}>Schedule</button>
@@ -145,6 +147,8 @@
     <div class="full">{#key path}<Editor server={s} {path} close={() => nav('files', path.split('/').slice(0, -1).join('/'))} />{/key}</div>
   {:else if tab === 'trash'}
     <div class="full"><Trash server={s} close={() => nav('files')} /></div>
+  {:else if tab === 'mods'}
+    <div class="full scroll"><Mods server={s} /></div>
   {:else if tab === 'players'}
     <div class="full scroll"><Players server={s} /></div>
   {:else if tab === 'backups'}

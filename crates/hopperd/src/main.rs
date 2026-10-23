@@ -17,6 +17,7 @@ mod files;
 mod fs_api;
 mod host;
 mod manage_api;
+mod mods_api;
 mod security;
 mod net;
 mod pack_api;
@@ -147,6 +148,9 @@ fn main() -> anyhow::Result<()> {
         cfg.save(&data_dir)?;
     }
 
+    if !cfg.curseforge_key.trim().is_empty() {
+        hopper_core::cf::set_session_key(&cfg.curseforge_key);
+    }
     let auth = auth::Auth::load(&data_dir)?;
     if let Some(code) = auth.setup_code() {
         let _ = std::fs::write(data_dir.join(SETUP_FILE), &code);

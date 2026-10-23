@@ -34,6 +34,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/fs/{id}/hashes", post(hashes).layer(CompressionLayer::new()))
         .route("/api/v1/fs/{id}/dirs", get(dirs))
         .route("/api/v1/fs/{id}/trash", get(trash_list))
+        .route("/api/v1/fs/{id}/history", get(history))
+        .route("/api/v1/fs/{id}/diff", get(diff).layer(CompressionLayer::new()))
+        .route("/api/v1/fs/{id}/search", get(search).layer(CompressionLayer::new()))
         .route("/api/v1/fs/{id}/trash/restore", post(trash_restore))
         .route("/api/v1/fs/{id}/trash/purge", post(trash_purge))
         .route("/api/v1/fs/{id}/uploads", post(upload_start))
@@ -384,6 +387,70 @@ async fn trash_list(
     let e = server(&app, &headers, &method, &id)?;
     let items = blocking(move || files::list_trash(&e.root)).await?;
     Ok(Json(json!({ "items": items })))
+}
+
+/// Earlier versions of one file (saved over, or deleted), newest first.
+async fn history(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let rel = path_q(&q).trim_matches('/').replace('\\', "/");
+    let items = blocking(move || Ok(files::list_trash(&e.root)?.into_iter().filter(|t| t.path == rel && !t.dir).collect::<Vec<_>>())).await?;
+    Ok(Json(json!({ "versions": items })))
+}
+
+/// A version against the file as it is now, line by line.
+async fn diff(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let rel = path_q(&q);
+    let version = q.get("version").cloned().unwrap_or_default();
+    let lines = blocking(move || {
+        let old = files::trash_text(&e.root, &version)?;
+        let now = files::read_text(&e.root, &rel).map(|t| t.content.replace("\r\n", "\n")).unwrap_or_default();
+        Ok(hopper_core::configdiff::line_diff(&old, &now)
+            .into_iter()
+            .map(|l| {
+                let k = match l.kind {
+                    hopper_core::configdiff::LineKind::Same => "same",
+                    hopper_core::configdiff::LineKind::Del => "del",
+                    hopper_core::configdiff::LineKind::Add => "add",
+                    hopper_core::configdiff::LineKind::Change => "change",
+                };
+                json!({ "k": k, "old": l.server, "new": l.client, "on": l.server_no.map(|n| n + 1), "nn": l.client_no.map(|n| n + 1) })
+            })
+            .collect::<Vec<_>>())
+    })
+    .await?;
+    Ok(Json(json!({ "lines": lines })))
+}
+
+/// Text in files and names, under a folder.
+async fn search(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let rel = path_q(&q);
+    let query = q.get("q").cloned().unwrap_or_default();
+    if query.trim().len() < 2 {
+        return Err(bad("Search for at least 2 characters."));
+    }
+    let regex = q.get("regex").is_some_and(|v| v == "1" || v == "true");
+    let (hits, more) = blocking(move || files::search(&e.root, &rel, &query, regex, 500)).await?;
+    Ok(Json(json!({ "hits": hits, "more": more })))
 }
 
 #[derive(Deserialize)]

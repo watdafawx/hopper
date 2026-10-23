@@ -3762,6 +3762,7 @@ dependencies = [
  "mdns-sd",
  "qrcode",
  "rcgen 0.14.10",
+ "regex",
  "rustls",
  "rustls-acme",
  "serde",
