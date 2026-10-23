@@ -59,7 +59,11 @@ pub struct ServerControl {
     /// Backups a backup mod in the server made, once looked for.
     mod_backups: Option<Vec<hopper::backupmods::ModBackups>>,
     command: Entity<InputState>,
-    console_scroll: ScrollHandle,
+    /// The console's lines on screen, with text picking.
+    lines: crate::line_select::LineSelect,
+    /// Console lines that scrolled off the panel's window so far, so a
+    /// line keeps its key (and a pick stays put) as new ones arrive.
+    console_base: usize,
     _poll: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -98,7 +102,8 @@ impl ServerControl {
             backups: None,
             mod_backups: None,
             command,
-            console_scroll: ScrollHandle::new(),
+            lines: crate::line_select::LineSelect::new(cx),
+            console_base: 0,
             _poll: None,
             _subscriptions: subs,
         }
@@ -175,6 +180,8 @@ impl ServerControl {
         self.history.clear();
         self.backups = None;
         self.console.clear();
+        self.console_base = 0;
+        self.lines.clear();
         self._poll = None;
         let Some(panel) = self.the_panel(cx) else {
             cx.notify();
@@ -262,11 +269,15 @@ impl ServerControl {
                 self.busy = None;
             }
         }
-        if let Some(lines) = lines {
-            let grew = lines.len() != self.console.len();
+        if let Some(lines) = lines
+            && lines != self.console
+        {
+            // Follows new lines while at the bottom and nothing is picked.
+            let follow = !self.lines.is_active() && self.lines.scroll.is_scrolled_to_end().unwrap_or(true);
+            self.console_base += crate::line_select::shift(&self.console, &lines);
             self.console = lines;
-            if grew {
-                self.console_scroll.scroll_to_bottom();
+            if follow {
+                self.lines.scroll_to_end(self.console.len());
             }
         }
         match &stats {
@@ -1218,8 +1229,7 @@ impl ServerControl {
     }
 
     /// The Console tab.
-    pub fn console_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
+    pub fn console_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !self.configured(cx) || self.id.is_none() {
             return v_flex()
                 .gap_3()
@@ -1238,40 +1248,12 @@ impl ServerControl {
                 .into_any_element();
         }
         let running = matches!(&self.stats, Some(Ok(s)) if s.running);
-        let lines = self.console.iter().enumerate().map(|(i, l)| {
-            let color = if l.contains("ERROR") || l.contains("FATAL") {
-                theme.danger
-            } else if l.contains("WARN") {
-                theme.warning
-            } else {
-                theme.foreground
-            };
-            div()
-                .id(("console-line", i))
-                .text_color(color)
-                .child(l.clone())
-        });
+        let empty = widgets::caption("No console output yet.", cx).into_any_element();
         v_flex()
             .flex_1()
             .min_h_0()
             .gap_2()
-            .child(
-                div()
-                    .id("console")
-                    .flex_1()
-                    .min_h_0()
-                    .p_3()
-                    .rounded(theme.radius)
-                    .bg(theme.muted)
-                    .font_family("Consolas")
-                    .text_xs()
-                    .track_scroll(&self.console_scroll)
-                    .overflow_y_scroll()
-                    .when(self.console.is_empty(), |d| {
-                        d.child(widgets::caption("No console output yet.", cx))
-                    })
-                    .children(lines),
-            )
+            .child(crate::line_select::view(self, "console", Some(empty), window, cx))
             .child(
                 h_flex()
                     .gap_2()
@@ -1296,6 +1278,41 @@ impl ServerControl {
                 c.child(widgets::caption("Start the server to send commands.", cx).text_xs())
             })
             .into_any_element()
+    }
+}
+
+impl crate::line_select::Lines for ServerControl {
+    fn line_select(&self) -> &crate::line_select::LineSelect {
+        &self.lines
+    }
+
+    fn line_select_mut(&mut self) -> &mut crate::line_select::LineSelect {
+        &mut self.lines
+    }
+
+    fn row_count(&self) -> usize {
+        self.console.len()
+    }
+
+    fn row_key(&self, row: usize) -> Option<usize> {
+        (row < self.console.len()).then_some(self.console_base + row)
+    }
+
+    fn key_text(&self, key: usize) -> Option<String> {
+        let line = self.console.get(key.checked_sub(self.console_base)?)?;
+        Some(line.replace('\t', "    "))
+    }
+
+    fn row_color(&self, row: usize, cx: &App) -> Hsla {
+        let theme = cx.theme();
+        let l = self.console.get(row).map(String::as_str).unwrap_or("");
+        if l.contains("ERROR") || l.contains("FATAL") {
+            theme.danger
+        } else if l.contains("WARN") {
+            theme.warning
+        } else {
+            theme.foreground
+        }
     }
 }
 

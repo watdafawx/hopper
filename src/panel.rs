@@ -459,6 +459,53 @@ fn crafty_neoforge_patch(d: &Value, version: &str) -> serde_json::Map<String, Va
     patch
 }
 
+/// Undoes HTML escaping: `&quot;`, `&amp;`, `&lt;`, `&gt;`, `&#39;`, `&#x27;`
+/// and other numeric references. Anything else stays as it is.
+fn unescape_html(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let end = rest[1..].find(';').map(|e| e + 1).filter(|&e| e <= 10);
+        let decoded = end.and_then(|e| {
+            let name = &rest[1..e];
+            let c = match name {
+                "quot" => Some('"'),
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "apos" => Some('\''),
+                "nbsp" => Some(' '),
+                _ => {
+                    let n = name.strip_prefix('#')?;
+                    let code = match n.strip_prefix(['x', 'X']) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                        None => n.parse().ok()?,
+                    };
+                    char::from_u32(code)
+                }
+            }?;
+            Some((c, e))
+        });
+        match decoded {
+            Some((c, e)) => {
+                out.push(c);
+                rest = &rest[e + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn crafty_action(a: PanelAction) -> &'static str {
     match a {
         PanelAction::Start => "start_server",
@@ -489,11 +536,12 @@ impl ServerPanel for Crafty {
 
     fn console(&self, id: &str) -> anyhow::Result<Vec<String>> {
         let data = self.call("GET", &format!("/servers/{id}/logs"), None)?;
+        // Crafty escapes the lines for its web page (&quot; and so on).
         Ok(data
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|l| l.as_str().map(String::from))
+            .filter_map(|l| l.as_str().map(unescape_html))
             .collect())
     }
 
@@ -579,6 +627,16 @@ mod tests {
         // Falls back to the panel's name for the server (trimmed).
         assert_eq!(match_server(&list, &server(r"Q:\packs\Val", 1)).unwrap().id, "c3");
         assert!(match_server(&list, &server(r"Q:\packs\none", 1)).is_none());
+    }
+
+    #[test]
+    fn console_lines_are_unescaped() {
+        assert_eq!(
+            unescape_html("Stuck Thread: &quot;DH-IO Thread[4]&quot; Id=1457"),
+            "Stuck Thread: \"DH-IO Thread[4]\" Id=1457"
+        );
+        assert_eq!(unescape_html("a &lt;b&gt; &amp; c&#39;s &#x27;d&#x27;"), "a <b> & c's 'd'");
+        assert_eq!(unescape_html("R&D & co &unknown; &"), "R&D & co &unknown; &");
     }
 
     #[test]

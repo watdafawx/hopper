@@ -728,7 +728,7 @@ impl ServersView {
                 )
             })
             .when(self.tab == 1, |c| {
-                c.child(self.control.update(cx, |ctl, cx| ctl.console_view(cx)))
+                c.child(self.control.update(cx, |ctl, cx| ctl.console_view(window, cx)))
             })
             .when(self.tab == 2, |c| {
                 c.child(
