@@ -16,6 +16,7 @@ mod configs;
 mod content;
 mod datapacks;
 mod dialogs;
+mod drag_pick;
 mod fetch_window;
 mod crash_help;
 mod host_dialog;

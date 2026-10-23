@@ -1,6 +1,7 @@
 //! The Mods, Resource packs and Shaders tabs: a sortable, filterable table
 //! of what an instance has installed, with updates, toggles and removal.
 
+use crate::drag_pick::{DragPick, PickDrag, Picks};
 use crate::store::{Store, Updates};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -416,6 +417,12 @@ pub struct AddonsView {
     updates_first: bool,
     sort: (SortCol, bool),
     pub(crate) selected: HashSet<String>,
+    /// A drag across the tick boxes, while the button is down.
+    pick: Option<DragPick>,
+    /// The row a tick box was last pressed on, for Shift.
+    pick_anchor: Option<usize>,
+    pick_row_h: Pixels,
+    _pick_tick: Option<Task<()>>,
     /// Jars in the mods folder Hopper doesn't track, by folder mtime.
     /// Keyed by folder, its mtime and the tracked file names (identifying
     /// jars tracks them without touching the folder).
@@ -513,6 +520,10 @@ impl AddonsView {
             updates_first: true,
             sort: (SortCol::Added, false),
             selected: HashSet::new(),
+            pick: None,
+            pick_anchor: None,
+            pick_row_h: px(0.),
+            _pick_tick: None,
             loose: (None, Vec::new()),
             table: Table::default(),
             scroll: UniformListScrollHandle::new(),
@@ -2179,6 +2190,90 @@ impl AddonsView {
         }
     }
 
+    /// The row showing `file`.
+    fn row_ix_of(&self, file: &str) -> Option<usize> {
+        (0..self.table.rows.len()).find(|&ix| self.row_file(ix).as_deref() == Some(file))
+    }
+
+    /// A tick box pressed: Shift ticks the rows from the last pressed box,
+    /// else a drag starts (ticking, or unticking from a ticked box).
+    fn pick_down(&mut self, file: &str, shift: bool, cx: &mut Context<Self>) {
+        let Some(ix) = self.row_ix_of(file) else { return };
+        match self.pick_anchor.or(self.cursor).filter(|_| shift) {
+            Some(a) => {
+                self.select_range(a, ix, true);
+                self.pick = None;
+            }
+            None => {
+                let p = DragPick::new(ix, !self.selected.contains(file), self.selected.clone());
+                self.selected = p.apply(|i| self.row_file(i));
+                self.pick = Some(p);
+            }
+        }
+        self.pick_anchor = Some(ix);
+        cx.notify();
+    }
+
+    fn pick_move(&mut self, y: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut p) = self.pick.take() else { return };
+        self.pick_row_h = rems(ROW_H).to_pixels(window.rem_size());
+        if p.moved(y, &self.scroll, self.pick_row_h, self.table.rows.len()) {
+            self.selected = p.apply(|i| self.row_file(i));
+            cx.notify();
+        }
+        if let Some(c) = &p.chip {
+            let t = p.label();
+            c.update(cx, |c, cx| {
+                c.text = t;
+                cx.notify();
+            });
+        }
+        self.pick = Some(p);
+        if self._pick_tick.is_none() {
+            self._pick_tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                    let go = this.update(cx, |this, cx| this.pick_frame(cx)).unwrap_or(false);
+                    if !go {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    /// One frame while a drag runs: scrolls at the edges. False once it ended.
+    fn pick_frame(&mut self, cx: &mut Context<Self>) -> bool {
+        if !cx.has_active_drag() {
+            self.pick_end(cx);
+            return false;
+        }
+        let Some(mut p) = self.pick.take() else {
+            self._pick_tick = None;
+            return false;
+        };
+        if p.edge_scroll(&self.scroll, self.pick_row_h, self.table.rows.len()) {
+            self.selected = p.apply(|i| self.row_file(i));
+            if let Some(c) = &p.chip {
+                let t = p.label();
+                c.update(cx, |c, cx| {
+                    c.text = t;
+                    cx.notify();
+                });
+            }
+            cx.notify();
+        }
+        self.pick = Some(p);
+        true
+    }
+
+    fn pick_end(&mut self, cx: &mut Context<Self>) {
+        if self.pick.take().is_some() {
+            cx.notify();
+        }
+        self._pick_tick = None;
+    }
+
     /// Picks row `ix`, or unpicks it if picked (Ctrl+click).
     fn toggle_row(&mut self, ix: usize) {
         if let Some(f) = self.row_file(ix)
@@ -2447,18 +2542,24 @@ It stays disabled after updating: turn it on in the On column.")
                 )
             })
             .child(
-                col_check().child(
-                    Checkbox::new(id("sel"))
-                        .checked(picked)
-                        .on_change(cx.listener(move |this, v: &bool, _, cx| {
-                            if *v {
-                                this.selected.insert(f_sel.clone());
-                            } else {
-                                this.selected.remove(&f_sel);
-                            }
-                            cx.notify();
-                        })),
-                ),
+                {
+                    let view = cx.entity();
+                    col_check()
+                        .id(id("pick"))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                this.pick_down(&f_sel, e.modifiers.shift, cx)
+                            }),
+                        )
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .on_drag(PickDrag, move |_, _, _, cx| crate::drag_pick::chip_for(&view, cx))
+                        .child(Checkbox::new(id("sel")).checked(picked))
+                },
             )
             .child({
                 let pid = a.project_id;
@@ -2851,6 +2952,12 @@ struct Flags {
     new: bool,
 }
 
+impl Picks for AddonsView {
+    fn pick_mut(&mut self) -> Option<&mut DragPick> {
+        self.pick.as_mut()
+    }
+}
+
 impl Render for AddonsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // With the project panel open, Author goes only on a narrow window.
@@ -2891,6 +2998,11 @@ impl Render for AddonsView {
         } else {
             div()
                 .id("addon-table")
+                .on_drag_move::<PickDrag>(cx.listener(|this, e: &DragMoveEvent<PickDrag>, window, cx| {
+                    this.pick_move(e.event.position.y, window, cx)
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.pick_end(cx)))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.pick_end(cx)))
                 .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
                 .track_focus(&self.focus)
                 .key_context("AddonsTable")

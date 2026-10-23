@@ -1,6 +1,7 @@
 //! A pack compared with its rig server: what differs, and pushing, pulling
 //! or removing mods. Used by the Server sync page and an instance's Server tab.
 
+use crate::drag_pick::{DragPick, PickDrag, Picks};
 use crate::store::{Msg, Store};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -61,6 +62,12 @@ pub struct SyncPanel {
     filters: Filters,
     search: Entity<InputState>,
     selected: HashSet<String>,
+    /// A drag across the tick boxes, while the button is down.
+    pick: Option<DragPick>,
+    /// The row a tick box was last pressed on, for Shift.
+    pick_anchor: Option<usize>,
+    pick_row_h: Pixels,
+    _pick_tick: Option<Task<()>>,
     /// Groups showing their rows.
     open: HashSet<Group>,
     /// The list as drawn, rebuilt each frame from the comparison.
@@ -146,6 +153,10 @@ impl SyncPanel {
             filters: Filters::default(),
             search,
             selected: HashSet::new(),
+            pick: None,
+            pick_anchor: None,
+            pick_row_h: px(0.),
+            _pick_tick: None,
             open: [Group::Add, Group::Update, Group::ServerOnly, Group::KeptOff].into(),
             items: Vec::new(),
             running: false,
@@ -494,6 +505,100 @@ impl SyncPanel {
                     true
                 })
         });
+    }
+
+    /// The pick key of list line `ix`: a row whose group can be picked.
+    fn line_key(&self, ix: usize) -> Option<String> {
+        let Some(Ok(diff)) = &self.diff else { return None };
+        match self.items.get(ix)? {
+            Item::Row(i) => diff.get(*i).filter(|d| Group::of(d).pickable()).map(row_key),
+            Item::Header(..) => None,
+        }
+    }
+
+    /// A tick box pressed: Shift ticks the rows from the last pressed box,
+    /// else a drag starts (ticking, or unticking from a ticked box).
+    fn pick_down(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) {
+        let Some(ix) = (0..self.items.len()).find(|&i| self.line_key(i).as_deref() == Some(key)) else {
+            return;
+        };
+        match self.pick_anchor.filter(|_| shift) {
+            Some(a) => {
+                for i in a.min(ix)..=a.max(ix) {
+                    if let Some(k) = self.line_key(i) {
+                        self.selected.insert(k);
+                    }
+                }
+                self.pick = None;
+            }
+            None => {
+                let p = DragPick::new(ix, !self.selected.contains(key), self.selected.clone());
+                self.selected = p.apply(|i| self.line_key(i));
+                self.pick = Some(p);
+            }
+        }
+        self.pick_anchor = Some(ix);
+        cx.notify();
+    }
+
+    fn pick_move(&mut self, y: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut p) = self.pick.take() else { return };
+        self.pick_row_h = rems(ROW_H).to_pixels(window.rem_size());
+        if p.moved(y, &self.scroll, self.pick_row_h, self.items.len()) {
+            self.selected = p.apply(|i| self.line_key(i));
+            cx.notify();
+        }
+        if let Some(c) = &p.chip {
+            let t = p.label();
+            c.update(cx, |c, cx| {
+                c.text = t;
+                cx.notify();
+            });
+        }
+        self.pick = Some(p);
+        if self._pick_tick.is_none() {
+            self._pick_tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                    let go = this.update(cx, |this, cx| this.pick_frame(cx)).unwrap_or(false);
+                    if !go {
+                        break;
+                    }
+                }
+            }));
+        }
+    }
+
+    /// One frame while a drag runs: scrolls at the edges. False once it ended.
+    fn pick_frame(&mut self, cx: &mut Context<Self>) -> bool {
+        if !cx.has_active_drag() {
+            self.pick_end(cx);
+            return false;
+        }
+        let Some(mut p) = self.pick.take() else {
+            self._pick_tick = None;
+            return false;
+        };
+        if p.edge_scroll(&self.scroll, self.pick_row_h, self.items.len()) {
+            self.selected = p.apply(|i| self.line_key(i));
+            if let Some(c) = &p.chip {
+                let t = p.label();
+                c.update(cx, |c, cx| {
+                    c.text = t;
+                    cx.notify();
+                });
+            }
+            cx.notify();
+        }
+        self.pick = Some(p);
+        true
+    }
+
+    fn pick_end(&mut self, cx: &mut Context<Self>) {
+        if self.pick.take().is_some() {
+            cx.notify();
+        }
+        self._pick_tick = None;
     }
 
     /// Lists the NeoForge builds for the pack's Minecraft version, once,
@@ -1917,20 +2022,25 @@ impl SyncPanel {
                     cx.notify();
                 }))
             })
-            .child(div().w_6().flex_none().when(pickable, |c| {
-                let pick_id = id("pick");
+            .child(div().w_6().h_full().flex_none().when(pickable, |c| {
                 let key = key.clone();
+                let view = cx.entity();
                 c.child(
-                    Checkbox::new(pick_id)
-                        .checked(picked)
-                        .on_change(cx.listener(move |this, v: &bool, _, cx| {
-                            if *v {
-                                this.selected.insert(key.clone());
-                            } else {
-                                this.selected.remove(&key);
-                            }
-                            cx.notify();
-                        })),
+                    div()
+                        .id(id("pick-cell"))
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                this.pick_down(&key, e.modifiers.shift, cx)
+                            }),
+                        )
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .on_drag(PickDrag, move |_, _, _, cx| crate::drag_pick::chip_for(&view, cx))
+                        .child(Checkbox::new(id("pick")).checked(picked)),
                 )
             }))
             .child(thumb)
@@ -2021,6 +2131,12 @@ impl RowTags {
             added: inst.is_some_and(|i| i.pack.is_some()) && a.is_some_and(|a| !a.from_pack),
             modrinth: a.is_some_and(|a| !a.mr_project.is_empty()),
         }
+    }
+}
+
+impl Picks for SyncPanel {
+    fn pick_mut(&mut self) -> Option<&mut DragPick> {
+        self.pick.as_mut()
     }
 }
 
@@ -2118,6 +2234,11 @@ impl Render for SyncPanel {
                     .child(
                         div()
                             .id("sync-rows-area")
+                            .on_drag_move::<PickDrag>(cx.listener(|this, e: &DragMoveEvent<PickDrag>, window, cx| {
+                                this.pick_move(e.event.position.y, window, cx)
+                            }))
+                            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.pick_end(cx)))
+                            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.pick_end(cx)))
                             .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
                             .flex_1()
                             .min_h_0()
