@@ -27,7 +27,7 @@ pub const API_VERSION: u32 = 1;
 
 /// Features this panel has, so clients light up only what both sides know.
 pub const CAPABILITIES: &[&str] =
-    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "players", "backups", "schedule", "create"];
+    &["servers", "power", "console", "console.ws", "stats", "host", "pairing", "files", "files.upload", "files.zip", "files.trash", "files.text", "mods.scan", "servers.infos", "configs", "crash", "neoforge", "pack.update", "jobs", "properties", "jvm", "players", "backups", "schedule", "create", "tls", "2fa", "tokens", "audit"];
 
 pub struct ApiError(pub StatusCode, pub String);
 
@@ -48,7 +48,7 @@ pub(crate) fn not_found(what: &str) -> ApiError {
 pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 /// The session cookie or bearer token on a request.
-fn token(headers: &HeaderMap) -> (String, bool) {
+pub(crate) fn token(headers: &HeaderMap) -> (String, bool) {
     if let Some(b) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -83,16 +83,22 @@ pub(crate) fn require(app: &App, headers: &HeaderMap, method: &Method) -> ApiRes
 fn require_owner(app: &App, headers: &HeaderMap, method: &Method) -> ApiResult<()> {
     match require(app, headers, method)? {
         Who::Owner => Ok(()),
-        Who::Device { .. } => Err(ApiError(StatusCode::FORBIDDEN, "Only the owner can do that.".into())),
+        _ => Err(ApiError(StatusCode::FORBIDDEN, "Only the owner can do that.".into())),
     }
 }
 
-fn session_cookie(token: &str) -> HeaderValue {
+/// The session cookie; `Secure` over HTTPS, so it's never sent in the clear.
+fn session_cookie(token: &str, secure: bool) -> HeaderValue {
     HeaderValue::from_str(&format!(
-        "{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-        30 * 24 * 3600
+        "{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}{}",
+        30 * 24 * 3600,
+        if secure { "; Secure" } else { "" }
     ))
     .expect("cookie header")
+}
+
+fn secure(t: &Option<axum::Extension<crate::net::Transport>>) -> bool {
+    t.as_ref().is_some_and(|t| t.tls)
 }
 
 pub fn router(app: Arc<App>) -> Router {
@@ -102,6 +108,13 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(me))
+        .route("/api/v1/auth/2fa", get(two_factor_status))
+        .route("/api/v1/auth/2fa/begin", post(two_factor_begin))
+        .route("/api/v1/auth/2fa/enable", post(two_factor_enable))
+        .route("/api/v1/auth/2fa/disable", post(two_factor_disable))
+        .route("/api/v1/tokens", get(tokens).post(token_create))
+        .route("/api/v1/tokens/{id}", axum::routing::delete(token_revoke))
+        .route("/api/v1/audit", get(audit))
         .route("/api/v1/pair/request", post(pair_request))
         .route("/api/v1/pair/status", post(pair_status))
         .route("/api/v1/pair/pending", get(pair_pending))
@@ -124,6 +137,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::pack_api::routes())
         .merge(crate::manage_api::routes())
         .fallback(crate::ui::serve)
+        .layer(axum::middleware::from_fn_with_state(app.clone(), crate::security::guard))
         .with_state(app)
 }
 
@@ -140,6 +154,7 @@ async fn hello(State(app): State<Arc<App>>) -> Json<Value> {
         "addresses": app.addresses,
         "port": cfg.port,
         "capabilities": CAPABILITIES,
+        "tls": { "fingerprint": app.tls.fingerprint, "ca": app.tls.ca_pem, "domain": cfg.acme_domain },
     }))
 }
 
@@ -152,29 +167,123 @@ struct SetupBody {
 async fn setup(
     State(app): State<Arc<App>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    t: Option<axum::Extension<crate::net::Transport>>,
     Json(b): Json<SetupBody>,
 ) -> ApiResult<Response> {
+    if !crate::net::Net::of(addr.ip()).private() {
+        return Err(ApiError(StatusCode::FORBIDDEN, "Set the panel up from its own LAN first.".into()));
+    }
     let token = app.auth.setup(&b.code, &b.password, addr.ip()).map_err(bad)?;
     let _ = std::fs::remove_file(app.data_dir.join(crate::SETUP_FILE));
     log::info!("owner set up from {}", addr.ip());
-    Ok(([(header::SET_COOKIE, session_cookie(&token))], Json(json!({ "ok": true }))).into_response())
+    Ok(([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response())
 }
 
 #[derive(Deserialize)]
 struct LoginBody {
     password: String,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 async fn login(
     State(app): State<Arc<App>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    t: Option<axum::Extension<crate::net::Transport>>,
     Json(b): Json<LoginBody>,
-) -> ApiResult<Response> {
-    let token = app
-        .auth
-        .login(&b.password, addr.ip())
-        .map_err(|e| ApiError(StatusCode::UNAUTHORIZED, e.to_string()))?;
-    Ok(([(header::SET_COOKIE, session_cookie(&token))], Json(json!({ "ok": true }))).into_response())
+) -> Response {
+    use crate::auth::LoginError;
+    let private = crate::net::Net::of(addr.ip()).private();
+    match app.auth.login_2fa(&b.password, b.code.as_deref(), addr.ip(), private) {
+        Ok(token) => ([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response(),
+        Err(e) => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": e.to_string(), "need_code": e == LoginError::NeedCode, "need_two_factor": e == LoginError::NeedTwoFactor })),
+        )
+            .into_response(),
+    }
+}
+
+// ---- two-factor sign-in, tokens, audit (owner only) -------------------------------
+
+async fn two_factor_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    Ok(Json(json!({ "on": app.auth.two_factor_on() })))
+}
+
+async fn two_factor_begin(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    let name = app.cfg.read().unwrap().name.clone();
+    let (secret, uri) = app.auth.two_factor_begin(&name);
+    let qr = qrcode::QrCode::new(uri.as_bytes())
+        .map(|c| c.render::<qrcode::render::svg::Color>().min_dimensions(200, 200).quiet_zone(true).build())
+        .unwrap_or_default();
+    Ok(Json(json!({ "secret": secret, "uri": uri, "qr_svg": qr })))
+}
+
+#[derive(Deserialize)]
+struct CodeBody {
+    code: String,
+    #[serde(default)]
+    password: String,
+}
+
+async fn two_factor_enable(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<CodeBody>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    app.auth.two_factor_enable(&b.code).map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn two_factor_disable(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(b): Json<CodeBody>,
+) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    app.auth.two_factor_disable(&b.password, &b.code, addr.ip()).map_err(bad)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn tokens(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    Ok(Json(json!(app.auth.tokens())))
+}
+
+#[derive(Deserialize)]
+struct TokenBody {
+    name: String,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    servers: Vec<String>,
+    days: Option<u64>,
+}
+
+async fn token_create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<TokenBody>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    let (token, rec) = app.auth.token_create(&b.name, b.read_only, b.servers, b.days).map_err(bad)?;
+    Ok(Json(json!({ "token": token, "info": rec })))
+}
+
+async fn token_revoke(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    if !app.auth.token_revoke(&id) {
+        return Err(not_found("token"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn audit(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(200).min(2000);
+    Ok(Json(json!(app.audit.recent(limit))))
 }
 
 async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
@@ -188,6 +297,7 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> 
     Ok(Json(match require(&app, &headers, &method)? {
         Who::Owner => json!({ "role": "owner", "min_password": MIN_PASSWORD }),
         Who::Device { id, name } => json!({ "role": "device", "id": id, "name": name }),
+        Who::Token { id, name, read_only, servers } => json!({ "role": "token", "id": id, "name": name, "read_only": read_only, "servers": servers }),
     }))
 }
 
@@ -203,9 +313,11 @@ async fn pair_request(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(b): Json<PairBody>,
 ) -> ApiResult<Json<Value>> {
-    let (id, secret, code) = app.auth.pair_request(&b.device, addr.ip()).map_err(bad)?;
+    let (id, secret, code) = app.auth.pair_request(&b.device, addr.ip(), &app.tls.fingerprint).map_err(bad)?;
     log::info!("pairing request from {} ({}): code {code}", b.device.trim(), addr.ip());
-    Ok(Json(json!({ "id": id, "secret": secret, "code": code })))
+    // The code isn't sent: the device works it out from the certificate it
+    // sees, so a machine in the middle can't show the right one.
+    Ok(Json(json!({ "id": id, "secret": secret })))
 }
 
 #[derive(Deserialize)]
@@ -391,10 +503,7 @@ async fn power(
 }
 
 fn who_name(w: &Who) -> String {
-    match w {
-        Who::Owner => "owner".into(),
-        Who::Device { name, .. } => name.clone(),
-    }
+    w.name()
 }
 
 #[derive(Deserialize)]

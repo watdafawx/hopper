@@ -50,12 +50,6 @@ fn readable_code(len: usize) -> String {
     b.iter().map(|x| ABC[*x as usize % ABC.len()] as char).collect()
 }
 
-fn six_digits() -> String {
-    let mut b = [0u8; 4];
-    getrandom::fill(&mut b).expect("system random generator");
-    format!("{:06}", u32::from_le_bytes(b) % 1_000_000)
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     hash: String,
@@ -80,6 +74,53 @@ struct Stored {
     sessions: Vec<Session>,
     #[serde(default)]
     devices: Vec<Device>,
+    /// The owner's two-factor secret (base32), once turned on.
+    #[serde(default)]
+    totp: Option<String>,
+    /// The last time step a code was used for, so a code works once.
+    #[serde(default)]
+    totp_step: u64,
+    #[serde(default)]
+    tokens: Vec<ApiToken>,
+}
+
+/// An API token the owner made for a script or another app.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiToken {
+    pub id: String,
+    pub name: String,
+    hash: String,
+    pub created: u64,
+    pub last_used: u64,
+    /// Unix seconds; never when `None`.
+    pub expires: Option<u64>,
+    /// Only GET requests (looking, not changing).
+    pub read_only: bool,
+    /// Only these servers' routes; any when empty.
+    pub servers: Vec<String>,
+}
+
+/// Why a sign-in didn't work.
+#[derive(Debug, PartialEq)]
+pub enum LoginError {
+    /// Wrong password or code, a lockout, no owner yet.
+    Refused(String),
+    /// The password was right; a two-factor code is needed too.
+    NeedCode,
+    /// From the internet without two-factor sign-in set up.
+    NeedTwoFactor,
+}
+
+impl std::fmt::Display for LoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoginError::Refused(m) => f.write_str(m),
+            LoginError::NeedCode => f.write_str("Enter the 6-digit code from your authenticator app."),
+            LoginError::NeedTwoFactor => f.write_str(
+                "Signing in from the internet needs two-factor sign-in. Turn it on from the LAN first (Access & devices).",
+            ),
+        }
+    }
 }
 
 /// A device asking to pair, shown to the owner with its code.
@@ -112,6 +153,17 @@ pub enum PairStatus {
 pub enum Who {
     Owner,
     Device { id: String, name: String },
+    Token { id: String, name: String, read_only: bool, servers: Vec<String> },
+}
+
+impl Who {
+    pub fn name(&self) -> String {
+        match self {
+            Who::Owner => "owner".into(),
+            Who::Device { name, .. } => name.clone(),
+            Who::Token { name, .. } => format!("token \"{name}\""),
+        }
+    }
 }
 
 pub struct Auth {
@@ -119,6 +171,8 @@ pub struct Auth {
     stored: Mutex<Stored>,
     setup_code: Mutex<Option<String>>,
     fails: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    /// A two-factor secret being set up, until a code confirms it.
+    pending_totp: Mutex<Option<String>>,
     pairs: Mutex<Vec<PairRequest>>,
 }
 
@@ -136,6 +190,7 @@ impl Auth {
             stored: Mutex::new(stored),
             setup_code: Mutex::new(setup_code),
             fails: Default::default(),
+            pending_totp: Default::default(),
             pairs: Default::default(),
         })
     }
@@ -186,15 +241,36 @@ impl Auth {
 
     /// Checks the owner's password; returns a session token.
     pub fn login(&self, password: &str, ip: IpAddr) -> anyhow::Result<String> {
-        self.check_lockout(ip)?;
-        let owner = self.stored.lock().unwrap().owner.clone();
-        let Some(owner) = owner else { bail!("Set the panel up first.") };
+        self.login_2fa(password, None, ip, true).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Checks the password, and the two-factor code when it's on.
+    /// `private`: the client is on this PC, the LAN or Tailscale; from the
+    /// internet, two-factor sign-in must be on.
+    pub fn login_2fa(&self, password: &str, code: Option<&str>, ip: IpAddr, private: bool) -> Result<String, LoginError> {
+        self.check_lockout(ip).map_err(|e| LoginError::Refused(e.to_string()))?;
+        let (owner, totp) = {
+            let s = self.stored.lock().unwrap();
+            (s.owner.clone(), s.totp.clone())
+        };
+        let Some(owner) = owner else { return Err(LoginError::Refused("Set the panel up first.".into())) };
         let ok = PasswordHash::new(&owner)
             .ok()
             .is_some_and(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok());
         if !ok {
             self.failed(ip);
-            bail!("Wrong password.");
+            return Err(LoginError::Refused("Wrong password.".into()));
+        }
+        match (&totp, code.map(str::trim).filter(|c| !c.is_empty())) {
+            (None, _) if !private => return Err(LoginError::NeedTwoFactor),
+            (None, _) => {}
+            (Some(_), None) => return Err(LoginError::NeedCode),
+            (Some(secret), Some(code)) => {
+                if !self.use_code(secret, code) {
+                    self.failed(ip);
+                    return Err(LoginError::Refused("That code isn't right (or was already used).".into()));
+                }
+            }
         }
         self.fails.lock().unwrap().remove(&ip);
         let mut s = self.stored.lock().unwrap();
@@ -257,7 +333,125 @@ impl Auth {
             }
             return Some(who);
         }
+        if let Some(tk) = s.tokens.iter_mut().find(|x| x.hash == h) {
+            if tk.expires.is_some_and(|e| e <= t) {
+                return None;
+            }
+            let stale = t.saturating_sub(tk.last_used) > 60;
+            tk.last_used = t;
+            let who = Who::Token { id: tk.id.clone(), name: tk.name.clone(), read_only: tk.read_only, servers: tk.servers.clone() };
+            if stale {
+                self.save(&s);
+            }
+            return Some(who);
+        }
         None
+    }
+
+    // ---- two-factor sign-in --------------------------------------------------
+
+    /// Whether a code matches `secret` now (one step either side), and it
+    /// wasn't used before. Uses it up.
+    fn use_code(&self, secret: &str, code: &str) -> bool {
+        let Some(key) = base32_decode(secret) else { return false };
+        let step = now() / 30;
+        let mut s = self.stored.lock().unwrap();
+        for st in [step.saturating_sub(1), step, step + 1] {
+            if st > s.totp_step && format!("{:06}", totp(&key, st)) == code {
+                s.totp_step = st;
+                self.save(&s);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn two_factor_on(&self) -> bool {
+        self.stored.lock().unwrap().totp.is_some()
+    }
+
+    /// A new secret to scan; it takes effect once a code from it is
+    /// confirmed with [`Self::two_factor_enable`].
+    pub fn two_factor_begin(&self, account: &str) -> (String, String) {
+        let mut key = [0u8; 20];
+        getrandom::fill(&mut key).expect("system random generator");
+        let secret = base32_encode(&key);
+        *self.pending_totp.lock().unwrap() = Some(secret.clone());
+        let label: String = account.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        let uri = format!("otpauth://totp/Hopper%20Server:{label}?secret={secret}&issuer=Hopper%20Server&digits=6&period=30");
+        (secret, uri)
+    }
+
+    pub fn two_factor_enable(&self, code: &str) -> anyhow::Result<()> {
+        let Some(secret) = self.pending_totp.lock().unwrap().clone() else {
+            bail!("Start setting up two-factor sign-in again.");
+        };
+        if !self.use_code(&secret, code.trim()) {
+            bail!("That code isn't right. Check the time on your phone and try the next one.");
+        }
+        let mut s = self.stored.lock().unwrap();
+        s.totp = Some(secret);
+        self.save(&s);
+        *self.pending_totp.lock().unwrap() = None;
+        Ok(())
+    }
+
+    /// Turns it off; needs the password and a current code.
+    pub fn two_factor_disable(&self, password: &str, code: &str, ip: IpAddr) -> anyhow::Result<()> {
+        let secret = self.stored.lock().unwrap().totp.clone();
+        let Some(secret) = secret else { return Ok(()) };
+        let owner = self.stored.lock().unwrap().owner.clone().unwrap_or_default();
+        let ok = PasswordHash::new(&owner)
+            .ok()
+            .is_some_and(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok());
+        if !ok || !self.use_code(&secret, code.trim()) {
+            self.failed(ip);
+            bail!("The password or code isn't right.");
+        }
+        let mut s = self.stored.lock().unwrap();
+        s.totp = None;
+        self.save(&s);
+        Ok(())
+    }
+
+    // ---- API tokens ---------------------------------------------------------------
+
+    /// Makes a token; returns it (shown once) and its record.
+    pub fn token_create(&self, name: &str, read_only: bool, servers: Vec<String>, days: Option<u64>) -> anyhow::Result<(String, ApiToken)> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 64 {
+            bail!("Give the token a name (up to 64 characters).");
+        }
+        let token = format!("hst_{}", random_hex(32));
+        let t = ApiToken {
+            id: random_hex(6),
+            name: name.to_string(),
+            hash: hash_token(&token),
+            created: now(),
+            last_used: 0,
+            expires: days.filter(|d| *d > 0).map(|d| now() + d * 86_400),
+            read_only,
+            servers,
+        };
+        let mut s = self.stored.lock().unwrap();
+        s.tokens.push(t.clone());
+        self.save(&s);
+        Ok((token, t))
+    }
+
+    pub fn tokens(&self) -> Vec<ApiToken> {
+        self.stored.lock().unwrap().tokens.clone()
+    }
+
+    pub fn token_revoke(&self, id: &str) -> bool {
+        let mut s = self.stored.lock().unwrap();
+        let before = s.tokens.len();
+        s.tokens.retain(|t| t.id != id);
+        let gone = s.tokens.len() != before;
+        if gone {
+            self.save(&s);
+        }
+        gone
     }
 
     pub fn devices(&self) -> Vec<Device> {
@@ -279,7 +473,7 @@ impl Auth {
 
     /// A device asks to pair. Returns (request id, secret to poll with,
     /// code both sides show).
-    pub fn pair_request(&self, device: &str, ip: IpAddr) -> anyhow::Result<(String, String, String)> {
+    pub fn pair_request(&self, device: &str, ip: IpAddr, fingerprint: &str) -> anyhow::Result<(String, String, String)> {
         let device = device.trim();
         if device.is_empty() || device.len() > 64 {
             bail!("Give the device a name (up to 64 characters).");
@@ -289,12 +483,13 @@ impl Auth {
         if p.iter().filter(|r| r.answer.is_none()).count() >= MAX_PENDING {
             bail!("Too many pairing requests waiting. Answer them in the panel first.");
         }
+        let (id, secret) = (random_hex(8), random_hex(32));
         let req = PairRequest {
-            id: random_hex(8),
+            code: hopper_core::hopperd::pair_code(fingerprint, &id, &secret),
+            id,
             device: device.to_string(),
-            code: six_digits(),
             ip: ip.to_string(),
-            secret: random_hex(32),
+            secret,
             at: Instant::now(),
             answer: None,
         };
@@ -362,6 +557,64 @@ impl Auth {
     }
 }
 
+/// RFC 6238 TOTP (HMAC-SHA1, 6 digits) for time step `step`.
+pub fn totp(key: &[u8], step: u64) -> u32 {
+    let mac = hmac_sha1(key, &step.to_be_bytes());
+    let off = (mac[19] & 0x0f) as usize;
+    let bin = u32::from_be_bytes([mac[off] & 0x7f, mac[off + 1], mac[off + 2], mac[off + 3]]);
+    bin % 1_000_000
+}
+
+fn hmac_sha1(key: &[u8], msg: &[u8]) -> [u8; 20] {
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..20].copy_from_slice(&sha1_smol::Sha1::from(key).digest().bytes());
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = sha1_smol::Sha1::new();
+    inner.update(&k.map(|b| b ^ 0x36));
+    inner.update(msg);
+    let mut outer = sha1_smol::Sha1::new();
+    outer.update(&k.map(|b| b ^ 0x5c));
+    outer.update(&inner.digest().bytes());
+    outer.digest().bytes()
+}
+
+const B32: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+fn base32_encode(data: &[u8]) -> String {
+    let mut out = String::new();
+    let (mut buf, mut bits) = (0u32, 0);
+    for &b in data {
+        buf = (buf << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            out.push(B32[((buf >> (bits - 5)) & 31) as usize] as char);
+            bits -= 5;
+        }
+    }
+    if bits > 0 {
+        out.push(B32[((buf << (5 - bits)) & 31) as usize] as char);
+    }
+    out
+}
+
+fn base32_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let (mut buf, mut bits) = (0u32, 0);
+    for c in s.chars().filter(|c| *c != '=' && !c.is_whitespace()) {
+        let v = B32.iter().position(|&x| x as char == c.to_ascii_uppercase())? as u32;
+        buf = (buf << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            out.push((buf >> (bits - 8)) as u8);
+            bits -= 8;
+        }
+    }
+    Some(out)
+}
+
 fn random_bytes16() -> [u8; 16] {
     let mut b = [0u8; 16];
     getrandom::fill(&mut b).expect("system random generator");
@@ -427,10 +680,60 @@ mod tests {
     }
 
     #[test]
+    fn totp_matches_rfc6238() {
+        // RFC 6238 test vector (SHA-1): time 59 → 94287082 (8 digits).
+        let key = b"12345678901234567890";
+        assert_eq!(totp(key, 59 / 30), 94287082 % 1_000_000);
+        assert_eq!(totp(key, 1111111109 / 30), 7081804 % 1_000_000);
+        let enc = base32_encode(key);
+        assert_eq!(enc, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+        assert_eq!(base32_decode(&enc).unwrap(), key);
+    }
+
+    #[test]
+    fn two_factor_login() {
+        let dir = temp();
+        let a = Auth::load(&dir).unwrap();
+        a.setup(&a.setup_code().unwrap(), "password1", IP).unwrap();
+        let net: IpAddr = "8.8.8.8".parse().unwrap();
+        // From the internet, two-factor must be on.
+        assert_eq!(a.login_2fa("password1", None, net, false).unwrap_err(), LoginError::NeedTwoFactor);
+        let (secret, uri) = a.two_factor_begin("rig");
+        assert!(uri.starts_with("otpauth://totp/") && uri.contains(&secret));
+        let key = base32_decode(&secret).unwrap();
+        let code = || format!("{:06}", totp(&key, now() / 30));
+        assert!(a.two_factor_enable("000000").is_err() || code() == "000000");
+        a.two_factor_enable(&code()).unwrap();
+        assert!(a.two_factor_on());
+        assert_eq!(a.login_2fa("password1", None, IP, true).unwrap_err(), LoginError::NeedCode);
+        // The code used to turn it on can't be reused.
+        assert!(matches!(a.login_2fa("password1", Some(&code()), net, false), Err(LoginError::Refused(_))));
+        let next = format!("{:06}", totp(&key, now() / 30 + 1));
+        assert!(a.login_2fa("password1", Some(&next), net, false).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn api_tokens_scoped_and_expiring() {
+        let dir = temp();
+        let a = Auth::load(&dir).unwrap();
+        let (tok, rec) = a.token_create("grafana", true, vec!["tnp".into()], None).unwrap();
+        assert!(tok.starts_with("hst_"));
+        assert_eq!(a.check(&tok), Some(Who::Token { id: rec.id.clone(), name: "grafana".into(), read_only: true, servers: vec!["tnp".into()] }));
+        assert!(!std::fs::read_to_string(dir.join(FILE)).unwrap().contains(&tok));
+        assert!(a.token_revoke(&rec.id));
+        assert_eq!(a.check(&tok), None);
+        let (tok2, _) = a.token_create("short", false, vec![], Some(1)).unwrap();
+        assert!(a.check(&tok2).is_some());
+        assert!(a.token_create("", false, vec![], None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn pairing_flow() {
         let dir = temp();
         let a = Auth::load(&dir).unwrap();
-        let (id, secret, code) = a.pair_request("Hopper on FOX", IP).unwrap();
+        let (id, secret, code) = a.pair_request("Hopper on FOX", IP, "AA:BB").unwrap();
         assert_eq!(code.len(), 6);
         assert_eq!(a.pair_status(&id, &secret), PairStatus::Waiting);
         assert_eq!(a.pair_status(&id, "wrong"), PairStatus::Unknown);
@@ -443,10 +746,10 @@ mod tests {
         assert!(a.pending().is_empty());
         assert!(a.forget_device(&device_id));
         assert_eq!(a.check(&token), None);
-        let (id2, s2, _) = a.pair_request("Phone", IP).unwrap();
+        let (id2, s2, _) = a.pair_request("Phone", IP, "AA:BB").unwrap();
         a.answer(&id2, false).unwrap();
         assert_eq!(a.pair_status(&id2, &s2), PairStatus::Denied);
-        assert!(a.pair_request("", IP).is_err());
+        assert!(a.pair_request("", IP, "AA:BB").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

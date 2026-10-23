@@ -106,7 +106,7 @@
       <span class="sp"></span>
       <span class="conn" class:off={!live.connected} title="How this browser reaches the panel">
         {#if live.connected}<PathIcon size={13} />{:else}<WifiOff size={13} />{/if}
-        {live.connected ? kind : 'Reconnecting…'} · {location.hostname}{live.ping != null && live.connected ? ` · ${live.ping} ms` : ''}
+        {#if location.protocol === 'https:'}🔒 {/if}{live.connected ? kind : 'Reconnecting…'} · {location.hostname}{live.ping != null && live.connected ? ` · ${live.ping} ms` : ''}
       </span>
     </header>
     <div class="content">

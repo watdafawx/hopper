@@ -1,6 +1,10 @@
 <script>
   import { onMount } from 'svelte';
-  import { Link, Check, X, Network, Wifi, MonitorSmartphone, Trash2 } from '@lucide/svelte';
+  import { Link, Check, X, Network, Wifi, Globe, Waypoints, Lock, MonitorSmartphone, Trash2 } from '@lucide/svelte';
+  import Security from './Security.svelte';
+  import { pathKind } from './lib/format.js';
+
+  const kindOf = (url) => pathKind(url.split('://')[1].split(/[:/]/)[0].replace(/^\[|\]$/g, ''));
   import { api, post, del } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
 
@@ -67,14 +71,23 @@
       <h3><Network size={14} />How clients reach this panel</h3>
       <div class="col">
         {#each hello.addresses as a (a)}
-          <div class="path"><Wifi size={14} /><span class="mono small">{a}</span><span class="sp"></span><span class="chip lan">LAN</span></div>
+          {@const k = kindOf(a)}
+          <div class="path" class:ts={k === 'Tailscale'} class:net={k === 'Internet'}>
+            {#if k === 'Tailscale'}<Waypoints size={14} />{:else if k === 'Internet'}<Globe size={14} />{:else}<Wifi size={14} />{/if}
+            <span class="mono small ell">{a}</span><span class="sp"></span><span class="chip" class:lan={k === 'LAN' || k === 'Local'} class:ts={k === 'Tailscale'} class:acc={k === 'Internet'}>{k}</span>
+          </div>
         {:else}
-          <div class="small muted">No LAN address found.</div>
+          <div class="small muted">No address found.</div>
         {/each}
-        <div class="path dim"><span class="small">Tailscale and internet access (TLS, 2FA) come in a later version.</span></div>
       </div>
-      <p class="tiny muted note">Announced on the LAN as <span class="mono">_hopperd._tcp</span> so Hopper desktop finds it.</p>
+      {#if hello.tls}
+        <div class="fp"><Lock size={13} /><div><div class="tiny muted">Certificate fingerprint (Hopper desktop shows the same when pairing)</div>
+          <div class="mono tiny">{hello.tls.fingerprint}</div></div></div>
+      {/if}
+      <p class="tiny muted note">Plain HTTP works from this PC, the LAN and Tailscale; from the internet only HTTPS, and signing in needs two-factor. Browsers warn about the panel's own certificate; set a domain (<span class="mono">acme_domain</span> in hopperd.toml, port 443 forwarded) for a Let's Encrypt one. Announced on the LAN as <span class="mono">_hopperd._tcp</span>.</p>
     </div>
+
+    <Security />
 
     <div class="card wide">
       <h3><MonitorSmartphone size={14} />Paired devices</h3>
@@ -107,6 +120,10 @@
   .center { justify-content: center; }
   .path { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #60a5fa55; border-radius: 8px; background: #60a5fa0d; color: var(--blue); }
   .path.dim { border-color: var(--line); background: var(--base); color: var(--muted); }
+  .path.ts { border-color: #a78bfa55; background: #a78bfa0d; color: var(--violet); }
+  .path.net { border-color: #f9731655; background: #f973160d; color: var(--acc); }
+  .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .fp { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; color: var(--green); word-break: break-all; }
   .note { margin-top: 10px; }
   .dev { padding: 8px 0; border-bottom: 1px solid var(--line); }
   .dev:last-child { border: 0; }

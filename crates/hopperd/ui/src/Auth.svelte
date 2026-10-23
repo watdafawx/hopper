@@ -8,6 +8,8 @@
   let confirm = $state('');
   let busy = $state(false);
   let error = $state('');
+  let otp = $state('');
+  let needCode = $state(false);
 
   const setup = $derived(hello.setup_needed);
 
@@ -21,10 +23,15 @@
     busy = true;
     try {
       if (setup) await post('/auth/setup', { code, password });
-      else await post('/auth/login', { password });
+      else await post('/auth/login', { password, code: needCode ? otp : null });
       onDone();
     } catch (err) {
-      error = err.message;
+      if (err.data?.need_code) {
+        needCode = true;
+        error = otp ? err.message : '';
+      } else {
+        error = err.message;
+      }
     } finally {
       busy = false;
     }
@@ -58,6 +65,13 @@
     {#if setup}
       <label class="lbl" for="pw2">Repeat it</label>
       <div class="input"><Lock size={14} /><input id="pw2" type="password" bind:value={confirm} autocomplete="new-password" /></div>
+    {/if}
+    {#if needCode}
+      <label class="lbl" for="otp">Code from your authenticator app</label>
+      <div class="input"><KeyRound size={14} /><input id="otp" bind:value={otp} inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" /></div>
+    {/if}
+    {#if location.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(location.hostname)}
+      <p class="tiny muted">Not encrypted. Fine on your own LAN; from elsewhere use https://{location.host}.</p>
     {/if}
     {#if error}<p class="err">{error}</p>{/if}
     <button class="btn pri big" disabled={busy || !password || (setup && !code)}>

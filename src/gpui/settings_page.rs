@@ -385,8 +385,9 @@ pub struct SettingsPage {
 enum Pairing {
     Idle,
     Asking,
-    /// Waiting for the owner to allow it; both sides show `code`.
-    Waiting(String),
+    /// Waiting for the owner to allow it; both sides show `code`. And the
+    /// start of the certificate fingerprint.
+    Waiting(String, String),
     Done(String),
     Failed(String),
 }
@@ -1303,15 +1304,20 @@ impl SettingsPage {
                 .into_any_element(),
         };
         let has_url = !s.panel_url.trim().is_empty();
-        let busy = matches!(self.pairing, Pairing::Asking | Pairing::Waiting(_));
+        let busy = matches!(self.pairing, Pairing::Asking | Pairing::Waiting(..));
         let state: AnyElement = match &self.pairing {
             Pairing::Idle if self.hopperd_paired => h_flex().child(widgets::pill("Paired", theme.success, false)).into_any_element(),
             Pairing::Idle => h_flex().child(widgets::pill("Not paired", theme.warning, false)).into_any_element(),
             Pairing::Asking => widgets::caption("Asking the panel…", cx).text_xs().into_any_element(),
-            Pairing::Waiting(code) => h_flex()
-                .gap_2()
-                .child(div().text_lg().font_weight(FontWeight::BOLD).font_family("JetBrains Mono").child(code.clone()))
-                .child(widgets::caption("Allow it in the panel: Access & devices. Check it shows this code.", cx).text_xs())
+            Pairing::Waiting(code, fp) => v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().text_lg().font_weight(FontWeight::BOLD).font_family("JetBrains Mono").child(code.clone()))
+                        .child(widgets::caption("Allow it in the panel: Access & devices. Check it shows this code.", cx).text_xs()),
+                )
+                .child(widgets::caption(format!("Certificate {fp}…"), cx).text_xs())
                 .into_any_element(),
             Pairing::Done(t) => status_line(IconName::CircleCheck, t.clone(), theme.success),
             Pairing::Failed(e) => status_line(IconName::CircleX, e.clone(), theme.danger),
@@ -1391,9 +1397,10 @@ impl SettingsPage {
                 }
             };
             let code = req.code.clone();
+            let fp: String = req.fingerprint.chars().take(23).collect();
             if this
                 .update(cx, |this, cx| {
-                    this.pairing = Pairing::Waiting(code);
+                    this.pairing = Pairing::Waiting(code, fp);
                     cx.notify();
                 })
                 .is_err()
@@ -1409,7 +1416,7 @@ impl SettingsPage {
                     Ok(hopper::hopperd::PairState::Waiting) if std::time::Instant::now() < end => continue,
                     Ok(hopper::hopperd::PairState::Approved(token)) => {
                         break match hopper::panel::set_hopperd_token(&token) {
-                            Ok(()) => Ok("Paired. Hopper now syncs with this panel over the network.".to_string()),
+                            Ok(()) => Ok("Paired over an encrypted connection. Hopper now syncs with this panel over the network.".to_string()),
                             Err(e) => Err(format!("Paired, but the token couldn't be saved: {e:#}")),
                         };
                     }
@@ -1423,6 +1430,14 @@ impl SettingsPage {
                     Ok(t) => {
                         this.hopperd_paired = true;
                         this.pairing = Pairing::Done(t);
+                        // Keep the pinned certificate and the HTTPS address.
+                        let (ca, base) = (req.ca.clone(), req.base.clone());
+                        this.store.update(cx, |s, cx| {
+                            s.update_settings(|st| {
+                                st.panel_ca = ca;
+                                st.panel_url = base;
+                            }, cx)
+                        });
                         this.store.update(cx, |s, _| s.rediscover_servers());
                         this.test_panel(cx);
                     }

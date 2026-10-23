@@ -97,6 +97,8 @@ pub struct Settings {
     pub panel_url: String,
     /// Accept the panel's self-signed certificate (Crafty makes its own).
     pub panel_self_signed: bool,
+    /// Hopper Server's certificate authority (PEM), pinned when pairing.
+    pub panel_ca: String,
     /// Where the GPUI window was last, to open there again.
     pub window: Option<SavedWindow>,
     /// The GPUI theme by name; empty follows Windows (Hopper Dark or Light).
@@ -308,6 +310,7 @@ impl Default for Settings {
             panel_kind: "crafty".into(),
             panel_url: String::new(),
             panel_self_signed: true,
+            panel_ca: String::new(),
             window: None,
             theme_name: String::new(),
             update_repo: DEFAULT_UPDATE_REPO.into(),

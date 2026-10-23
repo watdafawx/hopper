@@ -20,6 +20,19 @@ pub struct Config {
     pub servers: Vec<PathBuf>,
     /// Announce the panel on the LAN (mDNS).
     pub discovery: bool,
+    /// Plain HTTP from the LAN and Tailscale too is refused (it always is
+    /// from the internet).
+    pub require_tls: bool,
+    /// Other names or addresses the panel is reached by (a public IP, a
+    /// DDNS name), put in its certificate.
+    pub public_names: Vec<String>,
+    /// A domain to get a Let's Encrypt certificate for. Needs port 443 on
+    /// that name to reach this panel.
+    pub acme_domain: Option<String>,
+    /// Contact for Let's Encrypt.
+    pub acme_email: String,
+    /// Use Let's Encrypt's staging server (for testing).
+    pub acme_staging: bool,
 }
 
 impl Default for Config {
@@ -31,6 +44,11 @@ impl Default for Config {
             servers_root: None,
             servers: Vec::new(),
             discovery: true,
+            require_tls: false,
+            public_names: Vec::new(),
+            acme_domain: None,
+            acme_email: String::new(),
+            acme_staging: false,
         }
     }
 }

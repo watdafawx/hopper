@@ -1,6 +1,6 @@
 # Hopper Server: companion server panel (draft)
 
-Status: M0–M4 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
+Status: M0–M5 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: `crates/hopperd/README.md`.
 
 **M1 as built** differs from the draft in a few places:
 - No separate shim process: hopper-core's `LocalServer` already starts each
@@ -76,6 +76,27 @@ Status: M0–M4 built (2026-10-23). Mockups: `mockups/panel.html`. Run and API: 
 - New server: vanilla, NeoForge, Fabric, Quilt, any release version;
   Java found or Temurin downloaded. Not tested end to end yet because it
   accepts Mojang's EULA (guard and version lists are tested).
+
+**M5 as built** (internet access, Hopper 0.8.98):
+- One port speaks HTTPS and plain HTTP (first byte decides). Plain HTTP
+  only from this PC, the LAN and Tailscale (`require_tls` refuses it
+  there too); from the internet, TLS only.
+- hopperd is its own CA (`ca.pem`, made once); each start it issues a
+  server certificate for its current LAN IPs, hostname, Tailscale name and
+  `public_names`. Hopper pins the CA, so new IPs don't break anything.
+  With `acme_domain` set (and port 443 on it reaching the panel), Let's
+  Encrypt certificates via ACME TLS-ALPN-01 are served for that name.
+- Pairing: Hopper reads the CA over a first unverified request, then does
+  everything over a connection pinned to it. The 6-digit code is derived
+  from the CA fingerprint on both sides, so a machine in the middle shows
+  a different code. The code is no longer sent in the reply.
+- Two-factor sign-in (TOTP, codes used once); required to sign in from
+  the internet. Setup only from the LAN.
+- Rate limits per address (20/min on sign-in, setup, 2FA changes and
+  pairing requests; 1200/min overall). Audit log of every change and
+  sign-in (who, address, network, result), in the Access page.
+- API tokens: read-only or full, limited to servers, with expiry.
+- Not done: a relay for NAT'd boxes, passkeys, OIDC (later).
 
 ## Goal
 
@@ -404,7 +425,7 @@ features light up only when both sides have them.
 | M2 ✅ | Files MVP: browse, upload/download chunked + resumable, ops, editor, trash, transfer queue | 1–1.5 weeks |
 | M3 ✅ | Hopper integration: panel kind, pairing UI, sync over API (drop `Q:`) | 1 week |
 | M4 ✅ | Backups, schedules, properties, JVM, players, create server | 1.5 weeks |
-| M5 | Internet: Tailscale path + open port (ACME / pinned TLS, required 2FA, rate limit, allow-list), split path transfers, audit, tokens | 1 week |
+| M5 ✅ | Internet: Tailscale path + open port (ACME / pinned TLS, required 2FA, rate limit, allow-list), split path transfers, audit, tokens | 1 week |
 | M6 | v1 rest: mods, history/diff, search, SFTP, sub-users, webhooks, MCP, installers | 2–3 weeks |
 
 | M7 | Rig cutover: import every Crafty / MCSS server, run side by side, then retire them | 2–3 days |

@@ -11,8 +11,8 @@ pub struct HopperServer {
 }
 
 impl HopperServer {
-    pub fn new(url: &str, token: &str) -> Self {
-        HopperServer { client: Client::new(url, token) }
+    pub fn new(url: &str, token: &str, ca: &str) -> Self {
+        HopperServer { client: Client::new(url, token, ca) }
     }
 }
 

@@ -27,9 +27,11 @@ const CHUNK: usize = 8 * 1024 * 1024;
 /// Which Hopper Server a server is on, and its id there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
-    /// "http://192.168.50.3:8790"
+    /// "https://192.168.50.3:8790"
     pub base: String,
     pub id: String,
+    /// The panel's certificate authority (PEM), pinned at pairing.
+    pub ca: String,
 }
 
 /// Stand-in roots and the panels they're on, so code given only a path
@@ -88,10 +90,15 @@ pub fn is_remote_root(p: &Path) -> bool {
     p.to_string_lossy().starts_with("hopperd:")
 }
 
-/// `http://host:8790` from what was typed ("rig", "rig:8790", a URL).
+/// `https://host:8790` from what was typed ("rig", "rig:8790", a URL).
+/// An old `http://` address is moved to HTTPS.
 pub fn base_url(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
-    let url = if url.contains("://") { url.to_string() } else { format!("http://{url}") };
+    let url = match url.split_once("://") {
+        Some(("http", rest)) | Some(("https", rest)) => format!("https://{rest}"),
+        Some(_) => url.to_string(),
+        None => format!("https://{url}"),
+    };
     let after = url.split("://").nth(1).unwrap_or("");
     let host = after.split('/').next().unwrap_or("");
     // No port given: hopperd's.
@@ -99,18 +106,64 @@ pub fn base_url(url: &str) -> String {
     if has_port || host.is_empty() { url } else { format!("{url}:{PORT}") }
 }
 
-fn agent(timeout: Duration) -> ureq::Agent {
+/// Whether `base`'s host is a LAN, Tailscale or local name: the panel's
+/// own certificate covers those. A public domain has a Let's Encrypt one.
+fn private_host(base: &str) -> bool {
+    let host = base.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host });
+    let host = host.trim_matches(['[', ']']);
+    host.parse::<std::net::IpAddr>().is_ok() || !host.contains('.') || host.ends_with(".local") || host.ends_with(".ts.net")
+}
+
+/// How to trust the panel's certificate.
+#[derive(Clone)]
+enum Trust {
+    /// Its own CA (PEM), pinned at pairing.
+    Pinned(String),
+    /// The normal web roots (Let's Encrypt on a public domain).
+    Web,
+    /// Anything: only to fetch the CA before pairing.
+    Unverified,
+}
+
+fn trust_for(base: &str, ca: &str) -> Trust {
+    if !ca.trim().is_empty() && private_host(base) { Trust::Pinned(ca.to_string()) } else { Trust::Web }
+}
+
+fn agent_with(timeout: Duration, trust: &Trust) -> ureq::Agent {
+    use ureq::tls::{Certificate, RootCerts, TlsConfig};
+    let tls = match trust {
+        Trust::Pinned(pem) => match Certificate::from_pem(pem.as_bytes()) {
+            Ok(c) => TlsConfig::builder().root_certs(RootCerts::Specific(std::sync::Arc::new(vec![c]))).build(),
+            // A broken pin trusts nothing rather than everything.
+            Err(_) => TlsConfig::builder().root_certs(RootCerts::Specific(std::sync::Arc::new(Vec::new()))).build(),
+        },
+        Trust::Web => TlsConfig::builder().root_certs(RootCerts::WebPki).build(),
+        Trust::Unverified => TlsConfig::builder().disable_verification(true).build(),
+    };
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .http_status_as_error(false)
+        .tls_config(tls)
         .build()
         .into()
+}
+
+/// "AB:CD:…" of a PEM certificate, worked out here (never taken from what
+/// the panel says about itself).
+pub fn fingerprint_of(pem: &str) -> Option<String> {
+    use base64::Engine as _;
+    let b64: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    let der = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let hex = crate::javadl::sha256_hex(&der);
+    Some(hex.as_bytes().chunks(2).map(|c| String::from_utf8_lossy(c).to_uppercase()).collect::<Vec<_>>().join(":"))
 }
 
 /// A paired Hopper Server.
 pub struct Client {
     pub base: String,
     token: String,
+    ca: String,
     agent: ureq::Agent,
     /// For file transfers, which take as long as they take.
     slow: ureq::Agent,
@@ -130,12 +183,16 @@ fn reply(resp: Result<ureq::http::Response<ureq::Body>, ureq::Error>, base: &str
 }
 
 impl Client {
-    pub fn new(url: &str, token: &str) -> Self {
+    /// `ca`: the panel's certificate authority, pinned at pairing.
+    pub fn new(url: &str, token: &str, ca: &str) -> Self {
+        let base = base_url(url);
+        let trust = trust_for(&base, ca);
         Client {
-            base: base_url(url),
+            agent: agent_with(Duration::from_secs(15), &trust),
+            slow: agent_with(Duration::from_secs(3600), &trust),
+            base,
             token: token.to_string(),
-            agent: agent(Duration::from_secs(15)),
-            slow: agent(Duration::from_secs(3600)),
+            ca: ca.to_string(),
         }
     }
 
@@ -148,13 +205,13 @@ impl Client {
         if url.trim().is_empty() {
             return None;
         }
-        Some(Client::new(&url, &crate::panel::hopperd_token()?))
+        Some(Client::new(&url, &crate::panel::hopperd_token()?, &s.panel_ca))
     }
 
     /// For a server on this panel.
     pub fn for_remote(r: &Remote) -> anyhow::Result<Client> {
         let token = crate::panel::hopperd_token().context("Pair with the Hopper Server first (Settings → Server panel).")?;
-        Ok(Client::new(&r.base, &token))
+        Ok(Client::new(&r.base, &token, &r.ca))
     }
 
     fn url(&self, path: &str) -> String {
@@ -182,7 +239,7 @@ impl Client {
             .as_array()
             .into_iter()
             .flatten()
-            .map(|v| info_from(v, &self.base))
+            .map(|v| info_from(v, &self.base, &self.ca))
             .collect())
     }
 
@@ -372,7 +429,7 @@ fn enc(s: &str) -> String {
         .collect()
 }
 
-fn info_from(v: &Value, base: &str) -> ServerInfo {
+fn info_from(v: &Value, base: &str, ca: &str) -> ServerInfo {
     let s = |k: &str| v[k].as_str().map(str::to_string);
     let name = s("name").unwrap_or_default();
     let folder = s("path")
@@ -381,7 +438,7 @@ fn info_from(v: &Value, base: &str) -> ServerInfo {
         .unwrap_or_else(|| name.clone());
     let properties: BTreeMap<String, String> = serde_json::from_value(v["properties"].clone()).unwrap_or_default();
     let root = remote_root(&folder);
-    let remote = Remote { base: base.to_string(), id: s("id").unwrap_or_default() };
+    let remote = Remote { base: base.to_string(), id: s("id").unwrap_or_default(), ca: ca.to_string() };
     register(&root, &remote);
     ServerInfo {
         name,
@@ -532,12 +589,22 @@ pub struct Hello {
     pub version: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub tls: Option<HelloTls>,
 }
 
-/// The panel's name and version (no pairing needed).
+#[derive(Debug, Deserialize)]
+pub struct HelloTls {
+    pub fingerprint: String,
+    pub ca: String,
+    pub domain: Option<String>,
+}
+
+/// The panel's name, version and certificate authority. Unverified: only
+/// to learn the CA, which pairing then pins and the codes confirm.
 pub fn hello(url: &str) -> anyhow::Result<Hello> {
     let base = base_url(url);
-    let v = reply(agent(Duration::from_secs(5)).get(&format!("{base}/api/v1/hello")).call(), &base)?;
+    let v = reply(agent_with(Duration::from_secs(5), &Trust::Unverified).get(&format!("{base}/api/v1/hello")).call(), &base)?;
     if v["panel"].as_str() != Some("hopperd") {
         bail!("{base} isn't a Hopper Server.");
     }
@@ -550,24 +617,33 @@ pub struct Pairing {
     pub base: String,
     pub id: String,
     pub secret: String,
-    /// The 6-digit code both sides show.
+    /// The 6-digit code, worked out here from the certificate this PC
+    /// pinned; the panel shows its own, and they only match for the real
+    /// panel.
     pub code: String,
+    /// The panel's CA (PEM), to keep once paired.
+    pub ca: String,
+    pub fingerprint: String,
 }
 
-/// Asks the panel to pair this PC, named `device`.
+/// Asks the panel to pair this PC, named `device`. Everything after
+/// learning the CA goes over a connection pinned to it, so the token can
+/// only come from whoever holds that CA's key.
 pub fn pair_request(url: &str, device: &str) -> anyhow::Result<Pairing> {
     let base = base_url(url);
-    hello(&base)?;
+    let h = hello(&base)?;
+    let tls = h.tls.context("This Hopper Server is too old for encrypted pairing; update it.")?;
+    let fingerprint = fingerprint_of(&tls.ca).context("The panel sent a broken certificate.")?;
+    let trust = trust_for(&base, &tls.ca);
     let v = reply(
-        agent(Duration::from_secs(10)).post(&format!("{base}/api/v1/pair/request")).send_json(json!({ "device": device })),
+        agent_with(Duration::from_secs(10), &trust)
+            .post(&format!("{base}/api/v1/pair/request"))
+            .send_json(json!({ "device": device })),
         &base,
-    )?;
-    Ok(Pairing {
-        base,
-        id: v["id"].as_str().unwrap_or("").into(),
-        secret: v["secret"].as_str().unwrap_or("").into(),
-        code: v["code"].as_str().unwrap_or("").into(),
-    })
+    )
+    .context("The panel's certificate didn't check out")?;
+    let (id, secret) = (v["id"].as_str().unwrap_or("").to_string(), v["secret"].as_str().unwrap_or("").to_string());
+    Ok(Pairing { code: pair_code(&fingerprint, &id, &secret), base, id, secret, ca: tls.ca, fingerprint })
 }
 
 #[derive(Debug, PartialEq)]
@@ -582,7 +658,7 @@ pub enum PairState {
 /// Where a pairing request stands.
 pub fn pair_status(p: &Pairing) -> anyhow::Result<PairState> {
     let v = reply(
-        agent(Duration::from_secs(10))
+        agent_with(Duration::from_secs(10), &trust_for(&p.base, &p.ca))
             .post(&format!("{}/api/v1/pair/status", p.base))
             .send_json(json!({ "id": p.id, "secret": p.secret })),
         &p.base,
@@ -593,6 +669,16 @@ pub fn pair_status(p: &Pairing) -> anyhow::Result<PairState> {
         Some("denied") => PairState::Denied,
         _ => PairState::Expired,
     })
+}
+
+/// The 6-digit pairing code: from the panel's certificate fingerprint and
+/// the request, so both sides only show the same code when the desktop
+/// talks to the real panel (a machine in the middle has another
+/// certificate, so the codes differ).
+pub fn pair_code(fingerprint: &str, id: &str, secret: &str) -> String {
+    let h = crate::javadl::sha256_hex(format!("{}|{id}|{secret}", fingerprint.to_uppercase()).as_bytes());
+    let n = u32::from_str_radix(&h[..8], 16).unwrap_or(0);
+    format!("{:06}", n % 1_000_000)
 }
 
 /// "Hopper on FOX".
@@ -607,17 +693,29 @@ mod tests {
 
     #[test]
     fn urls() {
-        assert_eq!(base_url("rig"), "http://rig:8790");
-        assert_eq!(base_url("192.168.50.3:9000/"), "http://192.168.50.3:9000");
+        assert_eq!(base_url("rig"), "https://rig:8790");
+        assert_eq!(base_url("192.168.50.3:9000/"), "https://192.168.50.3:9000");
         assert_eq!(base_url("https://panel.example.com"), "https://panel.example.com:8790");
-        assert_eq!(base_url("http://rig:8790"), "http://rig:8790");
+        assert_eq!(base_url("http://rig:8790"), "https://rig:8790");
+        for (b, private) in [
+            ("https://rig:8790", true),
+            ("https://192.168.50.3:8790", true),
+            ("https://rig.tail3c9e.ts.net:8790", true),
+            ("https://fox.local:8790", true),
+            ("https://panel.example.com", false),
+        ] {
+            assert_eq!(private_host(b), private, "{b}");
+        }
+        assert_eq!(pair_code("aa:bb", "1", "2"), pair_code("AA:BB", "1", "2"));
+        assert_ne!(pair_code("AA:BB", "1", "2"), pair_code("AA:BC", "1", "2"));
+        assert_eq!(pair_code("AA", "1", "2").len(), 6);
         assert_eq!(enc("config/a b.toml"), "config%2Fa%20b.toml");
     }
 
     #[test]
     fn web_urls() {
         let root = remote_root("Web Test");
-        register(&root, &Remote { base: "http://rig:8790".into(), id: "web-test".into() });
+        register(&root, &Remote { base: "http://rig:8790".into(), id: "web-test".into(), ca: String::new() });
         assert_eq!(
             web_url(&root.join("config").join("a b.toml")).unwrap(),
             "http://rig:8790/#/server/web-test/edit/config/a%20b.toml"
@@ -653,7 +751,7 @@ mod tests {
             "managed_by": null, "loader": "neoforge 21.1.172", "java": null, "max_memory": "12G",
             "properties": { "server-port": "25565", "motd": "hi" }
         });
-        let i = info_from(&v, "http://rig:8790");
+        let i = info_from(&v, "https://rig:8790", "");
         assert_eq!(i.root, remote_root("TNP Limitless 8"));
         assert_eq!(i.port(), 25565);
         assert_eq!(i.remote.as_ref().unwrap().id, "tnp-limitless-8");

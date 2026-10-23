@@ -195,7 +195,7 @@ pub fn from_settings(s: &crate::settings::Settings) -> Option<Box<dyn ServerPane
     let ss = s.panel_self_signed;
     Some(match s.panel_kind.as_str() {
         "mcss" => Box::new(Mcss::new(&url, &token, ss)),
-        "hopperd" => Box::new(HopperServer::new(&url, &token)),
+        "hopperd" => Box::new(HopperServer::new(&url, &token, &s.panel_ca)),
         "pterodactyl" => Box::new(Pterodactyl::new(&url, &token, ss)),
         _ => Box::new(Crafty::new(&url, &token, ss)),
     })

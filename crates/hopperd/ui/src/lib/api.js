@@ -2,9 +2,11 @@
 // requires from browsers (other sites can't add it).
 
 export class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, data = null) {
     super(message);
     this.status = status;
+    /** The reply's JSON, for flags like need_code. */
+    this.data = data;
   }
 }
 
@@ -21,7 +23,7 @@ export async function api(path, { method = 'GET', body } = {}) {
   } catch {
     // empty body
   }
-  if (!res.ok) throw new ApiError(res.status, data?.error || `${res.status} ${res.statusText}`);
+  if (!res.ok) throw new ApiError(res.status, data?.error || `${res.status} ${res.statusText}`, data);
   return data;
 }
 

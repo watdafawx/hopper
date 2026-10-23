@@ -17,8 +17,11 @@ mod files;
 mod fs_api;
 mod host;
 mod manage_api;
+mod security;
+mod net;
 mod pack_api;
 mod servers;
+mod tls;
 mod ui;
 mod zipstream;
 
@@ -41,6 +44,13 @@ pub struct Snapshot {
     pub host: host::HostStats,
 }
 
+/// What clients need to trust the panel's certificate.
+pub struct TlsInfo {
+    /// SHA-256 of the panel's CA, "AB:CD:…".
+    pub fingerprint: String,
+    pub ca_pem: String,
+}
+
 pub struct App {
     pub cfg: RwLock<Config>,
     pub data_dir: PathBuf,
@@ -56,6 +66,9 @@ pub struct App {
     pub jobs: hopper_core::jobs::Jobs,
     /// Runs schedules: restarts, crash restarts, backups, autostart.
     pub scheduler: std::sync::Mutex<Option<hopper_core::hosting::Scheduler>>,
+    pub limiter: security::Limiter,
+    pub audit: security::Audit,
+    pub tls: TlsInfo,
     /// Finished jobs' results, until fetched.
     pub results: std::sync::Mutex<std::collections::HashMap<u64, serde_json::Value>>,
 }
@@ -115,6 +128,7 @@ fn parse_args() -> anyhow::Result<Option<Args>> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,mdns_sd=warn")).init();
     let Some(args) = parse_args()? else { return Ok(()) };
     let data_dir = args.data.unwrap_or_else(config::data_dir);
@@ -140,7 +154,24 @@ fn main() -> anyhow::Result<()> {
     }
 
     let lan = discovery::lan_addresses();
-    let addresses = lan.iter().map(|ip| format!("http://{ip}:{}", cfg.port)).collect();
+    let ca = tls::load_or_create_ca(&data_dir, &cfg.name)?;
+    let tls_info = TlsInfo { fingerprint: tls::fingerprint(&ca.der), ca_pem: ca.pem.clone() };
+    let names = tls::local_names(&cfg.public_names);
+    let mut ips: Vec<std::net::IpAddr> = lan.clone();
+    ips.push([127, 0, 0, 1].into());
+    ips.extend(cfg.public_names.iter().filter_map(|n| n.parse::<std::net::IpAddr>().ok()));
+    let own_cert = std::sync::Arc::new(tls::issue(&ca, &names, &ips)?);
+    let mut addresses: Vec<String> = lan.iter().map(|ip| format!("https://{ip}:{}", cfg.port)).collect();
+    if let Some(ts) = tls::tailscale_name() {
+        addresses.push(format!("https://{ts}:{}", cfg.port));
+    }
+    for n in &cfg.public_names {
+        addresses.push(format!("https://{n}:{}", cfg.port));
+    }
+    if let Some(d) = &cfg.acme_domain {
+        addresses.push(format!("https://{d}"));
+    }
+    log::info!("certificate fingerprint {}", tls_info.fingerprint);
     let host = host::start(cfg.servers_root.clone());
     let (snapshot, _) = watch::channel(Arc::new(Snapshot::default()));
     let app = Arc::new(App {
@@ -155,6 +186,9 @@ fn main() -> anyhow::Result<()> {
         jobs: Default::default(),
         results: Default::default(),
         scheduler: Default::default(),
+        limiter: Default::default(),
+        audit: security::Audit::new(&data_dir),
+        tls: tls_info,
     });
     app.rescan();
     // Schedules: daily restarts, crash restarts, backups; and servers set
@@ -180,10 +214,10 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
-    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve(app, cfg))
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve(app, cfg, own_cert))
 }
 
-async fn serve(app: Arc<App>, cfg: Config) -> anyhow::Result<()> {
+async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::CertifiedKey>) -> anyhow::Result<()> {
     // The live snapshot: once a second, or right away when asked.
     let a = app.clone();
     tokio::spawn(async move {
@@ -206,12 +240,33 @@ async fn serve(app: Arc<App>, cfg: Config) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr} (is another hopperd running?)"))?;
-    log::info!("hopperd {} on {}", env!("CARGO_PKG_VERSION"), app.addresses.first().cloned().unwrap_or_else(|| format!("http://{addr}")));
-    axum::serve(listener, api::router(app).into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            log::info!("stopping the panel; servers keep running");
-        })
-        .await?;
+    // Let's Encrypt, when a domain is set.
+    let acme = cfg.acme_domain.clone().filter(|d| !d.trim().is_empty()).map(|domain| {
+        use futures_util::StreamExt as _;
+        let mut state = rustls_acme::AcmeConfig::new([domain.clone()])
+            .contact(cfg.acme_email.trim().is_empty().then(Vec::<String>::new).unwrap_or_else(|| vec![format!("mailto:{}", cfg.acme_email.trim())]))
+            .cache(rustls_acme::caches::DirCache::new(app.data_dir.join("acme")))
+            .directory_lets_encrypt(!cfg.acme_staging)
+            .state();
+        let resolver = state.resolver();
+        tokio::spawn(async move {
+            while let Some(r) = state.next().await {
+                match r {
+                    Ok(ok) => log::info!("Let's Encrypt: {ok:?}"),
+                    Err(e) => log::warn!("Let's Encrypt: {e:?}"),
+                }
+            }
+        });
+        log::info!("getting a Let's Encrypt certificate for {domain} (port 443 on it must reach this panel)");
+        (domain, resolver)
+    });
+    let tls = tls::server_config(tls::Resolver { own: own_cert, acme });
+
+    log::info!("hopperd {} on {}", env!("CARGO_PKG_VERSION"), app.addresses.first().cloned().unwrap_or_else(|| format!("https://{addr}")));
+    net::serve(listener, api::router(app), tls, async {
+        let _ = tokio::signal::ctrl_c().await;
+        log::info!("stopping the panel; servers keep running");
+    })
+    .await;
     Ok(())
 }

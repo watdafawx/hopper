@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M4 (servers, console, files, players, backups, schedules, settings, new servers), LAN only.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M5: servers, console, files, players, backups, schedules, settings, new servers; LAN, Tailscale and internet (HTTPS, two-factor).** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -77,8 +77,23 @@ scan, NeoForge version, and server pack updates (run here as jobs).
 - **New server:** vanilla, NeoForge, Fabric or Quilt on any release; Java
   is found or downloaded.
 
-Not yet: TLS / internet access, incremental and off-site backups, mods tab
-(see the roadmap).
+## Security and remote access (M5)
+
+- HTTPS on the same port as before. The panel makes its own certificate
+  authority on first start; Hopper desktop pins it when pairing. Browsers
+  warn about it; for a trusted certificate set `acme_domain` (and
+  `acme_email`) in `hopperd.toml` and forward port 443 on that name to the
+  panel: it gets one from Let's Encrypt.
+- Plain HTTP still works from this PC, the LAN and Tailscale (set
+  `require_tls = true` to refuse it); from the internet only HTTPS.
+- Tailscale: nothing to set up; the panel's Tailscale name is in its
+  certificate and address list.
+- Open port: forward the panel's port (or 443 with ACME). Signing in from
+  the internet needs two-factor sign-in (Access & devices).
+- Rate limits, an audit log of changes and sign-ins, and API tokens
+  (read-only or full, per server, expiring) in Access & devices.
+
+Not yet: incremental and off-site backups, mods tab (see the roadmap).
 
 ## API (v1)
 
@@ -89,8 +104,8 @@ All under `/api/v1`. Browsers use the session cookie and must send
 |---|---|
 | `GET /hello` | name, version, addresses, capabilities (no auth) |
 | `POST /auth/setup` `{code, password}` | first owner password |
-| `POST /auth/login` `{password}` / `POST /auth/logout` / `GET /auth/me` | |
-| `POST /pair/request` `{device}` → `{id, secret, code}` | device asks to pair (no auth) |
+| `POST /auth/login` `{password, code}` / `POST /auth/logout` / `GET /auth/me` | `need_code` / `need_two_factor` in a 401 |
+| `POST /pair/request` `{device}` → `{id, secret}` | device asks to pair (no auth); the code is `pair_code(CA fingerprint, id, secret)` on both sides |
 | `POST /pair/status` `{id, secret}` → `waiting` / `approved {token}` / `denied` | device polls |
 | `GET /pair/pending`, `POST /pair/{id}/answer` `{allow}` | owner |
 | `GET /devices`, `DELETE /devices/{id}` | owner |
@@ -119,6 +134,9 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `GET` / `POST /servers/{id}/backups` `{worlds_only, note}`, `DELETE .../backups/{name}`, `GET .../entries`, `POST .../restore` `{paths}` | backups (jobs) |
 | `GET` / `PUT /servers/{id}/schedule` | schedule |
 | `POST /servers/create` `{name, mc_version, loader, loader_version, memory_mb, port, accept_eula}`, `GET /meta/minecraft`, `GET /meta/loaders/{mc}` | new servers (job) |
+| `GET /auth/2fa`, `POST /auth/2fa/begin`, `/enable` `{code}`, `/disable` `{password, code}` | two-factor (owner) |
+| `GET` / `POST /tokens` `{name, read_only, servers, days}`, `DELETE /tokens/{id}` | API tokens (owner) |
+| `GET /audit?limit=` | audit log (owner) |
 | `GET /ws` | live: `snapshot` every second; send `{"op":"console","server":id}` to follow a console |
 
 ## Develop
