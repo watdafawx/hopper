@@ -161,6 +161,27 @@ enum Anim {
 /// Decoded clips kept at once; the oldest goes (and frees its GPU copies).
 const ANIMS_KEPT: usize = 12;
 
+/// Marks the key of a clip decoded big for the image viewer (see
+/// [`Store::want_anim_view`]), apart from the page's copy of the same image.
+const VIEW_SUFFIX: &str = "#view";
+
+/// The key of image `url`'s big clip for the image viewer.
+pub fn view_key(url: &str) -> String {
+    format!("{url}{VIEW_SUFFIX}")
+}
+
+/// What a clip key decodes: the URL, the width to show it at, and how big
+/// it may get.
+fn anim_parts(key: &str) -> (&str, Option<u32>, crate::anim::Limits) {
+    match key.strip_suffix(VIEW_SUFFIX) {
+        Some(url) => (url, None, crate::anim::VIEWER),
+        None => {
+            let (url, width) = hopper::imgcache::split_width(key);
+            (url, width, crate::anim::PAGE)
+        }
+    }
+}
+
 pub struct Store {
     settings: Settings,
     instances: Vec<Instance>,
@@ -769,15 +790,24 @@ impl Store {
                 let ok = path.is_some();
                 self.images
                     .insert(url.clone(), path.map_or(Image::Failed, Image::Ready));
-                if matches!(self.anims.get(&url), Some(Anim::Waiting)) {
-                    if ok {
-                        self.decode_anim(url);
-                    } else {
-                        self.anims.insert(url, Anim::Still);
+                for key in [view_key(&url), url] {
+                    if matches!(self.anims.get(&key), Some(Anim::Waiting)) {
+                        if ok {
+                            self.decode_anim(key);
+                        } else {
+                            self.anims.insert(key, Anim::Still);
+                        }
                     }
                 }
             }
             Msg::Anim { key, clip } => {
+                // Forgotten while it decoded (the viewer moved on).
+                if !matches!(self.anims.get(&key), Some(Anim::Decoding)) {
+                    for f in clip.iter().flat_map(|c| c.frames()) {
+                        cx.drop_image(f, None);
+                    }
+                    return;
+                }
                 let Some(clip) = clip else {
                     self.anims.insert(key, Anim::Still);
                     return;
@@ -1201,14 +1231,47 @@ impl Store {
         }
     }
 
+    /// Like [`Self::want_anim`] for the image viewer: image `url` decoded
+    /// big, as [`view_key`]. Let it go with [`Self::forget_anim`] once the
+    /// viewer moves on.
+    pub fn want_anim_view(&mut self, url: &str) {
+        let key = view_key(url);
+        if url.is_empty() || self.anims.contains_key(&key) {
+            return;
+        }
+        let animated = hopper::imgcache::path_for(url).is_some_and(|p| hopper::imgcache::maybe_animated(&p));
+        if !animated {
+            self.anims.insert(key, Anim::Still);
+            return self.want_image(url);
+        }
+        self.anims.insert(key.clone(), Anim::Waiting);
+        match self.images.get(url) {
+            Some(Image::Ready(_)) => self.decode_anim(key),
+            Some(Image::Failed) => {
+                self.anims.insert(key, Anim::Still);
+            }
+            _ => self.want_image(url),
+        }
+    }
+
+    /// Drops clip `key` and frees its GPU copies.
+    pub fn forget_anim(&mut self, key: &str, cx: &mut App) {
+        self.anims_ready.retain(|k| k != key);
+        if let Some(Anim::Ready(c)) = self.anims.remove(key) {
+            for f in c.frames() {
+                cx.drop_image(f, None);
+            }
+        }
+    }
+
     /// Decodes the cached original of `key` on a thread.
     fn decode_anim(&mut self, key: String) {
         self.anims.insert(key.clone(), Anim::Decoding);
         self.spawn(move || {
-            let (base, width) = hopper::imgcache::split_width(&key);
+            let (base, width, limits) = anim_parts(&key);
             let clip = hopper::imgcache::cached(base)
                 .ok_or_else(|| anyhow::anyhow!("not cached"))
-                .and_then(|p| crate::anim::decode(&p, width))
+                .and_then(|p| crate::anim::decode(&p, width, limits))
                 .inspect_err(|e| log::debug!("animating {key}: {e:#}"))
                 .ok()
                 .flatten()

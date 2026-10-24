@@ -20,6 +20,9 @@ pub struct ImageViewer {
     focus: FocusHandle,
     /// A redraw for an animated image's next frame is on its way.
     anim_due: bool,
+    /// The big clip of the image shown (`store::view_key`), freed when the
+    /// viewer moves on or closes.
+    playing: Option<String>,
     _store: Subscription,
     /// A paused GIF picks up again when the window is focused.
     _focus: Subscription,
@@ -37,10 +40,15 @@ impl ImageViewer {
             .iter()
             .map(|&i| self.images[i].0.clone())
             .collect();
-        // The one shown plays if it's an animated GIF or WebP (like the
-        // description does); the neighbours just load.
-        self.store.update(cx, |s, _| {
-            s.want_anim(&want[0]);
+        // The one shown plays if it's an animated GIF or WebP, decoded big;
+        // the one before is let go. The neighbours just load.
+        let key = crate::store::view_key(&want[0]);
+        let old = self.playing.replace(key.clone()).filter(|k| *k != key);
+        self.store.update(cx, |s, cx| {
+            if let Some(old) = old {
+                s.forget_anim(&old, cx);
+            }
+            s.want_anim_view(&want[0]);
             for u in &want[1..] {
                 s.want_image(u);
             }
@@ -57,7 +65,8 @@ impl ImageViewer {
         if self.anim_due || !window.is_window_active() {
             return;
         }
-        let Some(wait) = self.store.read(cx).anim(url).map(|c| c.wait_now()) else {
+        let key = crate::store::view_key(url);
+        let Some(wait) = self.store.read(cx).anim(&key).map(|c| c.wait_now()) else {
             return;
         };
         // At most 25 redraws a second.
@@ -113,7 +122,7 @@ impl Render for ImageViewer {
         let (url, title) = self.images.get(self.at).cloned().unwrap_or_default();
         self.anim_tick(&url, window, cx);
         let store = self.store.read(cx);
-        let frame = store.anim(&url).map(|c| c.frame_now());
+        let frame = store.anim(&crate::store::view_key(&url)).map(|c| c.frame_now());
         let path = store.image(&url).map(|p| p.to_path_buf());
         let h = (window.viewport_size().height - window.rem_size() * 12.).max(window.rem_size() * 12.);
         let picture: AnyElement = match (frame, path) {
@@ -194,6 +203,13 @@ pub fn open(store: Entity<Store>, images: Vec<(String, String)>, at: usize, wind
     let view = cx.new(|cx| {
         let sub = cx.observe(&store, |_, _, cx| cx.notify());
         let refocus = cx.observe_window_activation(window, |_, _, cx| cx.notify());
+        // Closed: its big clip goes.
+        cx.on_release(|this: &mut ImageViewer, cx| {
+            if let Some(key) = this.playing.take() {
+                this.store.update(cx, |s, cx| s.forget_anim(&key, cx));
+            }
+        })
+        .detach();
         let mut v = ImageViewer {
             store,
             images,
@@ -201,6 +217,7 @@ pub fn open(store: Entity<Store>, images: Vec<(String, String)>, at: usize, wind
             wheel: 0.,
             focus: cx.focus_handle(),
             anim_due: false,
+            playing: None,
             _store: sub,
             _focus: refocus,
         };

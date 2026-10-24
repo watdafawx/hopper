@@ -18,17 +18,38 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Clips whose frames fit in this many bytes are decoded once and kept.
-const KEEP_BUDGET: usize = 48 << 20;
-/// Frames are scaled down to this width at most (the description column is
-/// narrower).
-const MAX_WIDTH: u32 = 720;
-/// Streamed clips (big ones) are scaled down further: frames are decoded
-/// again each loop, and a smaller frame is cheaper at every step.
-const STREAM_MAX_WIDTH: u32 = 560;
-/// A streamed clip keeps its frames compressed after the first loop, up to
-/// this many bytes; one that doesn't fit decodes the file every loop.
-const STREAM_CACHE: usize = 40 << 20;
+/// How big a clip may get, decoded.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    /// Frames are scaled down to this width at most.
+    pub max_width: u32,
+    /// Clips whose frames fit in this many bytes are decoded once and kept.
+    pub keep_budget: usize,
+    /// Streamed clips (big ones) are scaled down further: frames are
+    /// decoded again each loop, and a smaller frame is cheaper at every step.
+    pub stream_width: u32,
+    /// A streamed clip keeps its frames compressed after the first loop, up
+    /// to this many bytes; one that doesn't fit decodes the file every loop.
+    pub stream_cache: usize,
+}
+
+/// GIFs in a page: many can be on screen and a dozen are kept, and the
+/// description column is narrower than this.
+pub const PAGE: Limits = Limits {
+    max_width: 720,
+    keep_budget: 48 << 20,
+    stream_width: 560,
+    stream_cache: 40 << 20,
+};
+
+/// The one GIF in the image viewer, shown big. It is freed when the viewer
+/// moves on or closes, so it can take more.
+pub const VIEWER: Limits = Limits {
+    max_width: 1920,
+    keep_budget: 192 << 20,
+    stream_width: 1280,
+    stream_cache: 128 << 20,
+};
 /// How often a stream that fell behind its decoder looks again.
 const LATE_RETRY: Duration = Duration::from_millis(15);
 
@@ -187,13 +208,9 @@ fn frames(
 }
 
 /// The GIF or WebP at `path` to play, no wider than `width` (or
-/// [`MAX_WIDTH`]). `None` when it has a single frame.
-pub fn decode(path: &Path, width: Option<u32>) -> anyhow::Result<Option<Clip>> {
-    decode_within(path, width, KEEP_BUDGET)
-}
-
-fn decode_within(path: &Path, width: Option<u32>, budget: usize) -> anyhow::Result<Option<Clip>> {
-    let max = width.unwrap_or(MAX_WIDTH).clamp(1, MAX_WIDTH);
+/// `limits.max_width`). `None` when it has a single frame.
+pub fn decode(path: &Path, width: Option<u32>, limits: Limits) -> anyhow::Result<Option<Clip>> {
+    let max = width.unwrap_or(limits.max_width).clamp(1, limits.max_width);
     let Some(all) = frames(path, max)? else { return Ok(None) };
     let (mut out, mut ends, mut bytes, mut at) = (Vec::new(), Vec::new(), 0usize, 0u64);
     for f in all {
@@ -204,8 +221,8 @@ fn decode_within(path: &Path, width: Option<u32>, budget: usize) -> anyhow::Resu
             Err(e) => return Err(e),
         };
         bytes += img.as_bytes(0).map_or(0, <[u8]>::len);
-        if bytes > budget {
-            return stream(path.to_path_buf(), max.min(STREAM_MAX_WIDTH));
+        if bytes > limits.keep_budget {
+            return stream(path.to_path_buf(), max.min(limits.stream_width), limits.stream_cache);
         }
         at += ms;
         ends.push(at);
@@ -215,12 +232,12 @@ fn decode_within(path: &Path, width: Option<u32>, budget: usize) -> anyhow::Resu
 }
 
 /// A clip whose frames a thread decodes as they're needed, looping.
-fn stream(path: PathBuf, max: u32) -> anyhow::Result<Option<Clip>> {
+fn stream(path: PathBuf, max: u32, cache: usize) -> anyhow::Result<Option<Clip>> {
     // The frame showing plus one ready: little memory, no stutter.
     let (tx, rx) = sync_channel(1);
     std::thread::Builder::new()
         .name("gif".into())
-        .spawn(move || decode_loop(&path, max, &tx))?;
+        .spawn(move || decode_loop(&path, max, cache, &tx))?;
     let Ok((current, ms)) = rx.recv() else {
         anyhow::bail!("no frames");
     };
@@ -276,9 +293,9 @@ fn xor(into: &mut [u8], with: &[u8]) {
 /// cut off by the download cap); one before any frame ends playback.
 ///
 /// The first loop decodes the file and keeps each frame compressed (up to
-/// [`STREAM_CACHE`]); later loops unpack those, which costs a fraction of
+/// `cache` bytes); later loops unpack those, which costs a fraction of
 /// decoding a big GIF again.
-fn decode_loop(path: &Path, max: u32, tx: &SyncSender<(Arc<RenderImage>, u64)>) {
+fn decode_loop(path: &Path, max: u32, cache: usize, tx: &SyncSender<(Arc<RenderImage>, u64)>) {
     let mut packed: Option<Vec<Packed>> = Some(Vec::new());
     loop {
         if let Some(frames) = packed.as_ref().filter(|p| !p.is_empty()) {
@@ -301,7 +318,7 @@ fn decode_loop(path: &Path, max: u32, tx: &SyncSender<(Arc<RenderImage>, u64)>) 
             };
             if let Some(p) = packed.as_mut() {
                 match Packed::pack(&frame.0, frame.1, &mut prev) {
-                    Some(pk) if kept + pk.bytes.len() <= STREAM_CACHE => {
+                    Some(pk) if kept + pk.bytes.len() <= cache => {
                         kept += pk.bytes.len();
                         p.push(pk);
                     }
@@ -344,10 +361,20 @@ mod tests {
     }
 
     #[test]
+    fn the_viewer_decodes_wider_than_a_page() {
+        let dir = dir("viewer");
+        let path = gif(&dir, &[100, 100], 1000);
+        let page = decode(&path, None, PAGE).unwrap().unwrap();
+        assert_eq!(page.frame_now().size(0).width.0, 720);
+        let big = decode(&path, None, VIEWER).unwrap().unwrap();
+        assert_eq!(big.frame_now().size(0).width.0, 1000);
+    }
+
+    #[test]
     fn frames_follow_their_delays() {
         let dir = dir("kept");
         // 10 ms counts as 100 ms, as in browsers.
-        let clip = decode(&gif(&dir, &[50, 200, 10], 4), None).unwrap().unwrap();
+        let clip = decode(&gif(&dir, &[50, 200, 10], 4), None, PAGE).unwrap().unwrap();
         let Inner::Kept { ends, frames, .. } = &clip.0 else { panic!("small clips are kept") };
         assert_eq!(ends, &vec![50, 250, 350]);
         assert_eq!(index_at(ends, 0), 0);
@@ -358,10 +385,10 @@ mod tests {
         assert_eq!(wait_at(ends, 60), Duration::from_millis(190));
         assert_eq!(frames.len(), 3);
         // Wide frames shrink to the width asked for.
-        let wide = decode(&gif(&dir, &[100, 100], 40), Some(10)).unwrap().unwrap();
+        let wide = decode(&gif(&dir, &[100, 100], 40), Some(10), PAGE).unwrap().unwrap();
         assert_eq!(wide.frame_now().size(0).width.0, 10);
         // One frame: nothing to play.
-        assert!(decode(&gif(&dir, &[100], 4), None).unwrap().is_none());
+        assert!(decode(&gif(&dir, &[100], 4), None, PAGE).unwrap().is_none());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -372,11 +399,11 @@ mod tests {
         let bytes = std::fs::read(&full).unwrap();
         let cut = dir.join("cut.gif");
         std::fs::write(&cut, &bytes[..bytes.len() * 3 / 4]).unwrap();
-        let clip = decode(&cut, None).unwrap().unwrap();
+        let clip = decode(&cut, None, PAGE).unwrap().unwrap();
         let Inner::Kept { frames, .. } = &clip.0 else { panic!("small clips are kept") };
         assert!((2..4).contains(&frames.len()), "{} frames", frames.len());
         // Streamed, it loops over the same part.
-        let s = decode_within(&cut, None, 1).unwrap().unwrap();
+        let s = decode(&cut, None, Limits { keep_budget: 1, ..PAGE }).unwrap().unwrap();
         std::thread::sleep(Duration::from_millis(50));
         s.frame_now();
         std::fs::remove_dir_all(dir).ok();
@@ -408,7 +435,7 @@ mod tests {
     fn big_clips_stream_and_hand_back_shown_frames() {
         let dir = dir("stream");
         // Three 4x2 frames are 96 bytes: over a 40 byte budget.
-        let clip = decode_within(&gif(&dir, &[20, 20, 20], 4), None, 40).unwrap().unwrap();
+        let clip = decode(&gif(&dir, &[20, 20, 20], 4), None, Limits { keep_budget: 40, ..PAGE }).unwrap().unwrap();
         assert!(matches!(clip.0, Inner::Streamed(_)));
         let first = clip.frame_now();
         assert!(clip.take_shown().is_empty());
