@@ -14,7 +14,6 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
@@ -991,22 +990,58 @@ impl LibraryView {
                             .prefix(Icon::new(IconName::Search).small())
                             .cleanable(true),
                     )
-                    .child(
-                        TabBar::new("sort")
-                            .segmented()
-                            .xsmall()
-                            .selected_index(usize::from(recent))
-                            .child(Tab::new().label("Name"))
-                            .child(Tab::new().label("Recently played"))
-                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                let by_recent = *ix == 1;
-                                this.store.update(cx, |s, cx| {
-                                    s.update_settings(|st| st.library_by_recent = by_recent, cx)
-                                });
-                            })),
-                    ),
+                    .child(self.sort_bar(recent, cx)),
             )
             .child(self.instance_list(cx))
+    }
+
+    /// Name or Recent, styled like Browse's sort row: a SORT label and a
+    /// track whose two halves share the width, the picked one tinted.
+    fn sort_bar(&self, recent: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let (muted, fg, hover, track, radius, color) =
+            (theme.muted_foreground, theme.foreground, theme.list_hover, theme.muted, theme.radius, theme.primary);
+        let button = |key: &'static str, label: &'static str, icon: IconName, by_recent: bool, cx: &mut Context<Self>| {
+            let on = by_recent == recent;
+            h_flex()
+                .id(ElementId::Name(format!("lib-sort-{key}").into()))
+                .flex_1()
+                .justify_center()
+                .h_7()
+                .px_2()
+                .gap_1p5()
+                .rounded(radius)
+                .text_sm()
+                .cursor_pointer()
+                .child(Icon::new(icon).small())
+                .child(label)
+                .map(|d| {
+                    if on {
+                        d.bg(color.opacity(0.15)).text_color(color).font_medium()
+                    } else {
+                        d.text_color(muted).hover(move |s| s.bg(hover).text_color(fg))
+                    }
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if by_recent != recent {
+                        this.store.update(cx, |s, cx| s.update_settings(|st| st.library_by_recent = by_recent, cx));
+                    }
+                }))
+        };
+        h_flex()
+            .w_full()
+            .gap_2()
+            .child(div().flex_none().text_xs().font_semibold().text_color(muted).child("SORT"))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .p_0p5()
+                    .gap_0p5()
+                    .rounded(radius * 1.5)
+                    .bg(track)
+                    .child(button("name", "Name", IconName::ArrowDownAZ, false, cx))
+                    .child(button("recent", "Recent", IconName::Clock, true, cx)),
+            )
     }
 
     fn instance_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
