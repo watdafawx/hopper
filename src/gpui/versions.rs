@@ -281,7 +281,22 @@ impl Render for VersionsView {
                                 .child(div().flex_1())
                                 .child(widgets::caption(hopper::time::relative(&e.date), cx).text_xs())
                                 .children(action)
-                                .children(reinstall),
+                                .children(reinstall)
+                                .when(e.installed && !pack, |r| {
+                                    let (store, root, pid, from) =
+                                        (self.store.clone(), self.root.clone(), self.project_id, self.from.clone());
+                                    r.child(
+                                        Button::new("reset-config")
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::Settings2)
+                                            .label("Reset config")
+                                            .tooltip("Reset config: move this mod's config files to backups so it writes fresh defaults")
+                                            .on_click(move |_, window, cx| {
+                                                open_reset_config(store.clone(), root.clone(), pid, from.clone(), window, cx)
+                                            }),
+                                    )
+                                }),
                         )
                         .child(self.changelog(
                             ElementId::Name(format!("cl:{}", e.name).into()),
@@ -633,5 +648,142 @@ pub fn open_file(store: Entity<Store>, root: Option<PathBuf>, file: cf::File, wi
             .title("Changelog")
             .w(rems(46.).to_pixels(window.rem_size()))
             .child(view.clone())
+    });
+}
+
+/// Confirms resetting a mod's config: lists the files that go to backups.
+struct ResetConfig {
+    name: String,
+    /// The files, once looked up.
+    files: Option<Vec<String>>,
+}
+
+impl Render for ResetConfig {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let body: AnyElement = match &self.files {
+            None => h_flex()
+                .gap_2()
+                .child(Spinner::new().small())
+                .child(widgets::caption("Looking for its config files", cx))
+                .into_any_element(),
+            Some(f) if f.is_empty() => widgets::caption(
+                format!("No config files named after {} in config/.", self.name),
+                cx,
+            )
+            .into_any_element(),
+            Some(f) => {
+                // A list as tall as it needs, up to half the window; then it scrolls.
+                let row_h = window.rem_size() * 1.5;
+                let h = (row_h * f.len() as f32 + window.rem_size())
+                    .min(window.viewport_size().height * 0.5);
+                v_flex()
+                    .gap_2()
+                    .child(div().text_sm().child(format!(
+                        "{} to .hopper-backups (you can put {} back from Backups). {} writes fresh defaults the next time the game starts.",
+                        if f.len() == 1 { "This file goes".to_string() } else { format!("These {} files go", f.len()) },
+                        if f.len() == 1 { "it" } else { "them" },
+                        self.name
+                    )))
+                    .child(
+                        div()
+                            .id("reset-files")
+                            .h(h)
+                            .p_2()
+                            .rounded(theme.radius)
+                            .bg(theme.muted)
+                            .overflow_y_scrollbar()
+                            .child(v_flex().children(f.iter().map(|r| {
+                                div().h(row_h).flex().items_center().text_sm().font_family("monospace").truncate().child(r.clone())
+                            }))),
+                    )
+                    .child(widgets::caption("Close the game first: it writes its configs again when it quits.", cx).text_xs())
+                    .into_any_element()
+            }
+        };
+        v_flex().gap_3().child(body)
+    }
+}
+
+/// Resets a mod's config after a confirm that lists its files: they move
+/// to the instance's backups and the mod writes fresh defaults.
+pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, file_name: String, window: &mut Window, cx: &mut App) {
+    let Some(inst) = store.read(cx).instance(&root).cloned() else { return };
+    let Some(addon) = inst
+        .addons
+        .iter()
+        .find(|a| (project_id != 0 && a.project_id == project_id) || a.file_name == file_name)
+        .cloned()
+    else {
+        return;
+    };
+    let name = addon.name.clone();
+    let view = cx.new(|cx| {
+        cx.spawn(async move |this, cx| {
+            let files = cx.background_spawn(async move { hopper::modconfig::files(&inst, &addon) }).await;
+            this.update(cx, |this: &mut ResetConfig, cx| {
+                this.files = Some(files);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        ResetConfig { name: name.clone(), files: None }
+    });
+    let title = format!("Reset {name}'s config");
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let files = view.read(cx).files.clone().unwrap_or_default();
+        let (root, store, name) = (root.clone(), store.clone(), view.read(cx).name.clone());
+        dialog
+            .title(title.clone())
+            .w(rems(40.).to_pixels(window.rem_size()))
+            .child(view.clone())
+            .footer(
+                gpui_kit::component::dialog::DialogFooter::new()
+                    .child(gpui_kit::component::dialog::DialogClose::new().child(
+                        Button::new("reset-cancel").ghost().label("Cancel"),
+                    ))
+                    .child(
+                        Button::new("reset-go")
+                            .outline()
+                            .danger()
+                            .icon(IconName::RotateCcw)
+                            .label("Move to backups")
+                            .disabled(files.is_empty())
+                            .on_click(move |_, window, cx| {
+                                let (root, files, name) = (root.clone(), files.clone(), name.clone());
+                                let store = store.clone();
+                                window.close_dialog(cx);
+                                window
+                                    .spawn(cx, async move |cx| {
+                                        let r2 = root.clone();
+                                        let r = cx
+                                            .background_spawn(async move { hopper::modconfig::reset(&r2, &files) })
+                                            .await;
+                                        cx.update(|window, cx| {
+                                            use gpui_kit::component::notification::Notification;
+                                            match r {
+                                                Ok(n) => {
+                                                    window.push_notification(
+                                                        Notification::success(format!(
+                                                            "{name}: {n} config file{} moved to backups. Fresh defaults next launch.",
+                                                            if n == 1 { "" } else { "s" }
+                                                        )),
+                                                        cx,
+                                                    );
+                                                    store.update(cx, |_, cx| cx.notify());
+                                                }
+                                                Err(e) => window.push_notification(
+                                                    Notification::error(format!("{name}'s config: {e:#}")),
+                                                    cx,
+                                                ),
+                                            }
+                                        })
+                                        .ok();
+                                    })
+                                    .detach();
+                            }),
+                    ),
+            )
     });
 }

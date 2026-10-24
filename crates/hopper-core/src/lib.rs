@@ -45,6 +45,7 @@ pub mod mcp;
 pub mod mcprofile;
 pub mod model;
 pub mod modmeta;
+pub mod modconfig;
 pub mod modpack;
 pub mod modrinth;
 pub mod packdiff;

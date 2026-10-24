@@ -2537,6 +2537,11 @@ It stays disabled after updating: turn it on in the On column.")
 
         let view = cx.entity();
         let move_targets = if global { self.move_targets.clone() } else { Vec::new() };
+        // A mod of the instance: its config can be reset.
+        let reset_cfg = (!global && self.class == cf::CLASS_MODS)
+            .then(|| self.root.clone())
+            .flatten()
+            .map(|r| (self.store.clone(), r, a.project_id, a.file_name.clone()));
         let (pid_menu, update_file) = (a.project_id, update.map(|u| u.file.clone()));
         let (page, locked, mr, has_project) = (
             a.page.clone(),
@@ -2824,6 +2829,15 @@ It stays disabled after updating: turn it on in the On column.")
                             v1.update(cx, |this, cx| this.show_in_folder(&f1, cx))
                         }),
                 )
+                .when_some(reset_cfg.clone(), |m, (store, root, pid, file)| {
+                    m.item(
+                        PopupMenuItem::new("Reset config…")
+                            .icon(IconName::Settings2)
+                            .on_click(move |_, window, cx| {
+                                crate::versions::open_reset_config(store.clone(), root.clone(), pid, file.clone(), window, cx)
+                            }),
+                    )
+                })
                 .when(!page.is_empty(), |m| {
                     m.item(
                         PopupMenuItem::new(if mr { "Open on Modrinth" } else { "Open on CurseForge" })
