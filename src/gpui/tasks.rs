@@ -9,7 +9,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::cell::Cell;
@@ -103,7 +103,7 @@ impl TasksButton {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(Icon::new(IconName::Download).small())
+                    .child(Icon::new(IconName::ListChecks).small())
                     .with_animation(
                         ElementId::Name(format!("fly:{id}").into()),
                         Animation::new(FLIGHT).with_easing(ease_in_out),
@@ -129,8 +129,11 @@ impl TasksButton {
         let store = self.store.clone();
         let jobs = store.read(cx).jobs().snapshot();
         let me = cx.entity();
-        let view = window.viewport_size();
-        let gap = px(8.);
+        // Under its button, right edges lined up, inside the window.
+        let place = widgets::anchored_popover(b, window);
+        let rem = window.rem_size();
+        // The list's room: the window under the button, less the heading.
+        let list_h = (rem * 26.).min(place.max_h - rem * 3.5).max(rem * 4.);
         let lines = jobs.len() + jobs.iter().map(|j| j.notes.len()).sum::<usize>();
         let rows = jobs.iter().rev().map(|j| {
             let id = j.id;
@@ -235,8 +238,6 @@ impl TasksButton {
         let bounds = self.bounds.clone();
         let panel = v_flex()
             .id("tasks-popover")
-            .absolute()
-            .w(rems(30.))
             .bg(theme.popover)
             .text_color(theme.popover_foreground)
             .border_1()
@@ -252,14 +253,6 @@ impl TasksButton {
                 this.open = false;
                 cx.notify();
             }))
-            // Beside a button low in the window, below one at the top.
-            .map(|p| {
-                if b.center().y > view.height / 2. {
-                    p.left(b.right() + gap).bottom(view.height - b.bottom())
-                } else {
-                    p.top(b.bottom() + gap).right(view.width - b.right())
-                }
-            })
             .child(
                 h_flex()
                     .px_4()
@@ -287,7 +280,7 @@ impl TasksButton {
                 div()
                     .id("tasks-list")
                     // A set height once long: a max height alone doesn't scroll.
-                    .when(lines > 7, |d| d.h(rems(26.)))
+                    .map(|d| if lines > 7 { d.h(list_h) } else { d.max_h(list_h) })
                     .px_4()
                     .pb_3()
                     .overflow_y_scrollbar()
@@ -302,7 +295,8 @@ impl TasksButton {
                         )
                     })),
             );
-        widgets_pop(panel)
+        // 22-30rem by content.
+        widgets_pop(place.apply(panel, 22., 30., window))
     }
 }
 
@@ -347,7 +341,7 @@ fn widgets_pop(panel: Stateful<Div>) -> AnyElement {
 }
 
 impl Render for TasksButton {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let jobs = self.store.read(cx).jobs().snapshot();
         let running: Vec<_> = jobs.iter().filter(|j| !j.done).collect();
         let attention = jobs
@@ -355,17 +349,8 @@ impl Render for TasksButton {
             .filter(|j| j.done && (j.error.is_some() || !j.notes.is_empty()))
             .count();
         let failed = jobs.iter().any(|j| j.done && j.error.is_some());
-        // Overall progress of what runs, for the bar under the icon.
-        let progress = (!running.is_empty()).then(|| {
-            running.iter().map(|j| j.progress.unwrap_or(0.)).sum::<f32>() / running.len() as f32
-        });
+        let dialog = window.has_active_dialog(cx);
         let theme = cx.theme();
-        let tip: SharedString = match (running.len(), attention) {
-            (0, 0) => "Tasks".into(),
-            (0, n) => format!("{n} task{} need{} a look", if n == 1 { "" } else { "s" }, if n == 1 { "s" } else { "" }).into(),
-            // Short: a long tooltip spills over the page below the bar.
-            (n, _) => format!("{n} task{} running", if n == 1 { "" } else { "s" }).into(),
-        };
         let bounds = self.bounds.clone();
         let (primary, open) = (theme.primary, self.open);
         div()
@@ -382,37 +367,38 @@ impl Render for TasksButton {
             .text_color(if running.is_empty() { theme.muted_foreground } else { theme.primary })
             .when(open, |d| d.bg(theme.list_active))
             .hover(|s| s.bg(theme.list_hover))
-            .when(!open, |d| {
-                d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-            })
+            // None under a dialog, where it could stay stuck.
+            .when(!open && !dialog, |d| d.tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Tasks").build(w, cx)))
             .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
             .child(
                 canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
                     .absolute()
                     .size_full(),
             )
-            .child(Icon::new(IconName::Download).small())
-            .when_some(progress, |d, p| {
+            .child(Icon::new(IconName::ListChecks).small())
+            // A spinning ring while anything runs.
+            .when(!running.is_empty(), |d| {
                 d.child(
-                    div()
-                        .absolute()
-                        .bottom(px(2.))
-                        .left(rems(0.375))
-                        .right(rems(0.375))
-                        .h(px(2.))
-                        .rounded_full()
-                        .bg(theme.muted)
-                        .child(div().h_full().rounded_full().bg(theme.primary).w(relative(p.clamp(0.04, 1.)))),
+                    div().absolute().inset_0().child(
+                        Icon::new(IconName::LoaderCircle)
+                            .size_full()
+                            .text_color(primary)
+                            .with_animation(
+                                "tasks-ring",
+                                Animation::new(Duration::from_millis(900)).repeat(),
+                                |i, t| i.transform(Transformation::rotate(percentage(t))),
+                            ),
+                    ),
                 )
             })
-            .when(!running.is_empty() || attention > 0, |d| {
-                let n = if running.is_empty() { attention } else { running.len() };
-                let bg = if !running.is_empty() {
-                    theme.primary
-                } else if failed {
-                    theme.danger
+            // A failure shows "!", else the count running (or needing a look).
+            .when(failed || !running.is_empty() || attention > 0, |d| {
+                let (n, bg) = if failed {
+                    ("!".to_string(), theme.danger)
+                } else if !running.is_empty() {
+                    (running.len().to_string(), theme.primary)
                 } else {
-                    theme.warning
+                    (attention.to_string(), theme.warning)
                 };
                 d.child(
                     div()
@@ -430,7 +416,7 @@ impl Render for TasksButton {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(n.to_string()),
+                        .child(n),
                 )
             })
             // A ring that swells and fades when a file lands.

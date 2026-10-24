@@ -231,6 +231,8 @@ pub struct Store {
     scheduler: Option<hopper::hosting::Scheduler>,
     /// Instances jobs are changing, with how many jobs.
     busy: Arc<std::sync::Mutex<HashMap<PathBuf, u32>>>,
+    /// Instances whose game is being launched (the Play button says so).
+    launching: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
     /// Mod updates of instances an update job is running on: the batch
     /// it's on and what waits for it.
     update_queue: Arc<Mutex<HashMap<PathBuf, UpdateQueue>>>,
@@ -365,6 +367,7 @@ impl Store {
             statuses: HashMap::new(),
             panel_stats: HashMap::new(),
             busy: Default::default(),
+            launching: Default::default(),
             update_queue: Default::default(),
             recent_updates: Default::default(),
             java_jobs: HashMap::new(),
@@ -1471,6 +1474,34 @@ impl Store {
     }
 
     /// Whether a job is changing this instance.
+    /// Whether a Play on this instance is still starting the game.
+    pub fn is_launching(&self, root: &Path) -> bool {
+        self.launching.lock().unwrap_or_else(|e| e.into_inner()).contains(root)
+    }
+
+    /// Starts a game: a quiet job (not in the task list unless it fails),
+    /// with the instance marked as launching until it ends.
+    fn spawn_launch(
+        &self,
+        root: PathBuf,
+        title: String,
+        work: impl FnOnce(&Job) -> anyhow::Result<Msg> + Send + 'static,
+    ) {
+        let job = self.jobs.start_quiet(title);
+        self.launching.lock().unwrap_or_else(|e| e.into_inner()).insert(root.clone());
+        let (tx, wake, launching) = (self.tx.clone(), self.wake.clone(), self.launching.clone());
+        std::thread::spawn(move || {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&job)))
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("Hopper hit a bug while starting the game.")));
+            job.finish(&r);
+            launching.lock().unwrap_or_else(|e| e.into_inner()).remove(&root);
+            if let Ok(msg) = r {
+                let _ = tx.send(msg);
+            }
+            wake();
+        });
+    }
+
     pub fn is_busy(&self, root: &Path) -> bool {
         self.busy.lock().unwrap_or_else(|e| e.into_inner()).contains_key(root)
     }
@@ -1547,7 +1578,7 @@ impl Store {
             if !hopper::msauth::has_saved_login() {
                 return Err("Sign in with Microsoft in Settings first.".into());
             }
-            self.spawn_job(format!("Starting {}", full.name), move |job| {
+            self.spawn_launch(root.to_path_buf(), format!("Starting {}", full.name), move |job| {
                 job.detail("Signing in");
                 let session = hopper::msauth::session_from_saved()?;
                 let player = hopper::launch_native::Player::from_session(&session);
@@ -1558,7 +1589,7 @@ impl Store {
                 Ok(Msg::InstanceChanged(full.root.clone()))
             });
         } else {
-            self.spawn_job(format!("Launching {}", full.name), move |job| {
+            self.spawn_launch(root.to_path_buf(), format!("Launching {}", full.name), move |job| {
                 hopper::launch::launch(&full, &dir, &defaults, job)?;
                 full.last_played = Some(hopper::time::now_iso());
                 full.save()?;

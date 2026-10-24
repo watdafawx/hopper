@@ -314,7 +314,11 @@ impl JavaForm {
             _ => format!("{gb:.1} GB"),
         };
         let memory = h_flex()
-            .w(rems(FIELD_W))
+            .w_full()
+            .max_w(rems(FIELD_W))
+            // A floor for where its parent is sized by it (Settings page
+            // row control): the slider would collapse otherwise.
+            .min_w(rems(24.))
             .gap_4()
             .child(div().flex_1().min_w_0().child(Slider::new(&self.memory)))
             .child(
@@ -390,7 +394,7 @@ impl JavaForm {
             .gap_2()
             .child(
                 h_flex()
-                    .w(rems(FIELD_W))
+                    .w_full().max_w(rems(FIELD_W))
                     .gap_2()
                     .child(
                         div()
@@ -669,10 +673,10 @@ impl JavaForm {
 
         let args = v_flex()
             .gap_2()
-            .child(div().w(rems(FIELD_W)).child(Textarea::new(&self.args)))
+            .child(div().w_full().max_w(rems(FIELD_W)).child(Textarea::new(&self.args)))
             .child(
                 h_flex()
-                    .w(rems(FIELD_W))
+                    .w_full().max_w(rems(FIELD_W))
                     .items_start()
                     .gap_2()
                     .child(presets.flex_1().min_w_0())
@@ -992,6 +996,10 @@ impl Render for JavaForm {
 /// The width of a settings form's field column in rems: inputs, pickers
 /// and the arguments box all end at the same edge.
 pub const FIELD_W: f32 = 40.;
+
+/// A settings form's whole width (label, gap, field) in rems: pages centre
+/// their forms in a column this wide, like the Settings page.
+pub const FORM_W: f32 = 50.;
 
 /// The label column and rhythm every settings form shares, so stacked
 /// forms line up.

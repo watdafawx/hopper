@@ -349,10 +349,12 @@ impl PerfView {
                 .gap_3()
                 .items_start()
                 .child(div().pt_0p5().child(Icon::new(icon).size_4().text_color(color)))
+                // Capped so Why and Apply stay by the text on wide windows.
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
+                        .max_w(rems(48.))
                         .gap_1()
                         .child(div().text_sm().font_semibold().child(a.title.clone()))
                         .child(div().text_sm().text_color(theme.muted_foreground).child(a.detail.clone()))
@@ -461,6 +463,7 @@ impl PerfView {
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
+                                .max_w(rems(48.))
                                 .child(div().text_sm().font_semibold().child(a.text.clone()))
                                 .child(
                                     div().text_xs().text_color(theme.muted_foreground).child(
@@ -637,10 +640,12 @@ impl PerfView {
             .py_2()
             .rounded(theme.radius)
             .hover(|st| st.bg(theme.list_hover))
+            // Capped so the graph and Delete stay by the run on wide windows.
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
+                    .max_w(rems(48.))
                     .gap_0p5()
                     .child(
                         h_flex()

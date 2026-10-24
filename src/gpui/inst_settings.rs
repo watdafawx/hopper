@@ -1,7 +1,7 @@
 //! An instance's Settings tab: name, Minecraft and loader, memory and Java,
 //! window size and which updates to offer.
 
-use crate::java_form::{FIELD_W, JavaForm, settings_form};
+use crate::java_form::{FIELD_W, FORM_W, JavaForm, settings_form};
 use crate::store::{Msg, Store, loader_label, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -513,7 +513,7 @@ impl Render for InstanceSettings {
                 }
             });
             div()
-                .w(rems(FIELD_W))
+                .w_full().max_w(rems(FIELD_W))
                 .child(widgets::picker(
                     "mc",
                     self.game_version.clone(),
@@ -568,7 +568,7 @@ impl Render for InstanceSettings {
                 .gap_1p5()
                 .child(
                     h_flex()
-                        .w(rems(FIELD_W))
+                        .w_full().max_w(rems(FIELD_W))
                         .gap_2()
                         .child(div().flex_1().min_w_0().child(widgets::picker(
                             "loader",
@@ -644,7 +644,7 @@ impl Render for InstanceSettings {
             .child(
                 Field::new()
                     .label("Name")
-                    .child(div().w(rems(FIELD_W)).child(Input::new(&self.name))),
+                    .child(div().w_full().max_w(rems(FIELD_W)).child(Input::new(&self.name))),
             )
             .child(Field::new().label("Minecraft").child(minecraft))
             .child(Field::new().label("Loader").items_start().child(loader));
@@ -663,7 +663,7 @@ impl Render for InstanceSettings {
                     .label("Updates")
                     .items_start()
                     .description("Least stable files offered as updates. A mod already on a beta still gets newer betas.")
-                    .child(div().w(rems(FIELD_W)).child(widgets::picker(
+                    .child(div().w_full().max_w(rems(FIELD_W)).child(widgets::picker(
                         "channel",
                         channel_label,
                         channel_items,
@@ -688,39 +688,54 @@ impl Render for InstanceSettings {
             );
         // The Save bar stays in view under the scrolling form.
         let theme = cx.theme();
+        // Its buttons line up with the centred form above.
         let save_bar = h_flex()
             .flex_none()
+            .justify_center()
             .px_6()
             .py_2p5()
-            .gap_3()
             .border_t_1()
             .border_color(theme.border)
             .bg(theme.background)
             .child(
-                Button::new("save-settings")
-                    .primary()
-                    .label("Save")
-                    .disabled(!dirty)
-                    .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
-            )
-            .child(if dirty {
-                widgets::caption("Unsaved changes", cx).font_medium()
-            } else {
-                widgets::caption("All saved", cx)
-            });
+                h_flex()
+                    .w_full()
+                    .max_w(rems(FORM_W))
+                    .gap_3()
+                    .child(
+                        Button::new("save-settings")
+                            .primary()
+                            .label("Save")
+                            .disabled(!dirty)
+                            .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
+                    )
+                    .child(if dirty {
+                        widgets::caption("Unsaved changes", cx).font_medium()
+                    } else {
+                        widgets::caption("All saved", cx)
+                    }),
+            );
         v_flex()
             .size_full()
             .child(
+                // Centred in a column like the Settings page, rather than
+                // left-aligned with the room to its right empty.
                 v_flex()
                     .id("instance-settings")
                     .flex_1()
                     .min_h_0()
                     .px_6()
                     .pb_6()
-                    .gap_3()
-                    .child(top)
-                    .child(self.java.clone())
-                    .child(bottom)
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(rems(FORM_W))
+                            .gap_3()
+                            .child(top)
+                            .child(self.java.clone())
+                            .child(bottom),
+                    )
                     .overflow_y_scrollbar(),
             )
             .child(save_bar)

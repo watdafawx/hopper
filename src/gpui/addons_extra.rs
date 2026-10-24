@@ -3,7 +3,6 @@
 
 use crate::addons::{AddonsEvent, AddonsView};
 use crate::crash_help::callout;
-use crate::store::open_path;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -12,7 +11,6 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
     v_flex,
@@ -61,6 +59,42 @@ pub fn datapacks(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut v = hopper::instance_ops::datapacks(dir);
     v.retain(|p| !is_hopper_file(p));
     v
+}
+
+/// A pack file as a table row: what the lookup found it to be (project,
+/// author, version) and its update. `from_pack` false marks it "Yours".
+pub(crate) fn pack_addon(p: &PackFile, class: u32, from_pack: bool) -> (Addon, Option<Update>) {
+    let file = p.path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let enabled = !file.ends_with(".disabled");
+    let file_name = file.trim_end_matches(".disabled").to_string();
+    let mut a = Addon {
+        file_name: file_name.clone(),
+        name: p.name.trim_end_matches(".disabled").to_string(),
+        icon: p.icon.as_ref().map(|i| i.display().to_string()).unwrap_or_default(),
+        enabled,
+        from_pack,
+        class_id: class,
+        date_added: hopper::time::iso_from_secs(p.modified),
+        ..Default::default()
+    };
+    let mut update = None;
+    if let Some(f) = crate::pack_lookup::found(p).flatten() {
+        let m = &f.project;
+        a.project_id = m.id;
+        a.name = m.name.clone();
+        a.author = m.authors.first().map(|x| x.name.clone()).unwrap_or_default();
+        a.icon = m.icon().map(str::to_string).unwrap_or(a.icon);
+        a.page = m.page();
+        a.mr_project = m.modrinth.as_ref().map(|_| m.slug.clone()).unwrap_or_default();
+        if let Some(i) = &f.version.installed {
+            a.file_id = i.id;
+            a.file_date = i.file_date.clone();
+        }
+        if let Some(u) = &f.version.update {
+            update = Some(Update { project_id: m.id, name: m.name.clone(), from: file_name.clone(), file: u.clone() });
+        }
+    }
+    (a, update)
 }
 
 /// Required mods that are missing, for the mods folder as of `mtime`.
@@ -153,14 +187,6 @@ impl AddonsView {
         .detach();
     }
 
-    /// The packs of the global folder shown.
-    fn picked_packs(&self) -> &[PackFile] {
-        self.globals
-            .picked
-            .and_then(|p| self.globals.packs.get(p))
-            .map_or(&[], Vec::as_slice)
-    }
-
     /// Looks for missing required mods when the mods folder changed.
     pub(crate) fn want_missing(&mut self, inst: &Instance, cx: &mut Context<Self>) {
         let dir = inst.mods_dir();
@@ -214,40 +240,6 @@ impl AddonsView {
         .detach();
     }
 
-    /// "This instance | Paxi (12) | …" above Resource packs.
-    pub(crate) fn pack_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.class != cf::CLASS_RESOURCE_PACKS || self.globals.dirs.is_empty() {
-            return None;
-        }
-        let ix = self
-            .globals
-            .picked
-            .and_then(|p| self.globals.dirs.iter().position(|(d, _)| *d == p))
-            .map_or(0, |i| i + 1);
-        let dirs = self.globals.dirs.clone();
-        Some(
-            h_flex()
-                .px_6()
-                .child(
-                    TabBar::new("rp-folders")
-                        .segmented()
-                        .small()
-                        .selected_index(ix)
-                        .child(Tab::new().label("This instance"))
-                        .children(dirs.iter().zip(&self.globals.counts).map(|((_, name), n)| {
-                            Tab::new().label(format!("{name} {n}"))
-                        }))
-                        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                            let picked = ix.checked_sub(1).and_then(|i| dirs.get(i)).map(|(d, _)| *d);
-                            this.globals.picked = picked;
-                            this.selected.clear();
-                            this.resync(cx);
-                        })),
-                )
-                .into_any_element(),
-        )
-    }
-
     /// The global folder picked (Paxi's), when Resource packs shows one.
     pub(crate) fn global_dir(&self) -> Option<PathBuf> {
         if let Some(rel) = self.folder.as_ref().filter(|_| self.class == cf::CLASS_DATAPACKS) {
@@ -257,27 +249,9 @@ impl AddonsView {
         Some(self.root.as_ref()?.join(rel))
     }
 
-    /// Shows the data packs of `rel` (a Paxi or world folder) in the table.
-    pub fn show_folder(
-        &mut self,
-        root: PathBuf,
-        rel: String,
-        move_targets: Vec<(String, String)>,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_targets = move_targets;
-        if self.folder.as_ref() != Some(&rel) || self.root.as_ref() != Some(&root) {
-            self.folder_packs = None;
-            self.selected.clear();
-        }
-        self.folder = Some(rel);
-        self.show_for(root, cf::CLASS_DATAPACKS, cx);
-        self.read_folder(cx);
-    }
-
     /// Reads the data pack folder shown, then which projects its packs
     /// are, then their versions, filling the table at each step.
-    fn read_folder(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn read_folder(&mut self, cx: &mut Context<Self>) {
         let (Some(dir), Some(inst)) = (
             self.global_dir(),
             self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).map(|i| i.clone_header()),
@@ -334,38 +308,9 @@ impl AddonsView {
         let mut inst = real.clone_header();
         let mut updates = std::collections::HashMap::new();
         for p in &packs {
-            let file = p.path.file_name().unwrap_or_default().to_string_lossy().to_string();
-            let enabled = !file.ends_with(".disabled");
-            let file_name = file.trim_end_matches(".disabled").to_string();
-            let hit = crate::pack_lookup::found(p).flatten();
-            let mut a = Addon {
-                file_name: file_name.clone(),
-                name: p.name.trim_end_matches(".disabled").to_string(),
-                icon: p.icon.as_ref().map(|i| i.display().to_string()).unwrap_or_default(),
-                enabled,
-                from_pack: true,
-                class_id: class,
-                date_added: hopper::time::iso_from_secs(p.modified),
-                ..Default::default()
-            };
-            if let Some(f) = &hit {
-                let m = &f.project;
-                a.project_id = m.id;
-                a.name = m.name.clone();
-                a.author = m.authors.first().map(|x| x.name.clone()).unwrap_or_default();
-                a.icon = m.icon().map(str::to_string).unwrap_or(a.icon);
-                a.page = m.page();
-                a.mr_project = m.modrinth.as_ref().map(|_| m.slug.clone()).unwrap_or_default();
-                if let Some(i) = &f.version.installed {
-                    a.file_id = i.id;
-                    a.file_date = i.file_date.clone();
-                }
-                if let Some(u) = &f.version.update {
-                    updates.insert(
-                        m.id,
-                        Update { project_id: m.id, name: m.name.clone(), from: file_name.clone(), file: u.clone() },
-                    );
-                }
+            let (a, u) = pack_addon(p, class, true);
+            if let Some(u) = u {
+                updates.insert(u.project_id, u);
             }
             inst.addons.push(a);
         }
@@ -374,6 +319,7 @@ impl AddonsView {
         self.table.active_rp = Default::default();
         self.table.rows_for = None;
         self.ensure_rows();
+        self.fill_also();
         self.want_images(cx);
         cx.notify();
     }
@@ -434,69 +380,14 @@ impl AddonsView {
         }
     }
 
-    /// Moves a data pack (on or off) into another data pack folder.
-    pub(crate) fn move_global(&mut self, file: String, rel: String, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(dir), Some(root)) = (self.global_dir(), self.root.clone()) else { return };
-        let from = Self::global_path(&dir, &file);
-        let to_dir = root.join(&rel);
-        let dest = to_dir.join(from.file_name().unwrap_or_default());
-        let r = if dest.exists() {
-            Err(anyhow::anyhow!("{file} is already in {rel}"))
-        } else {
-            std::fs::create_dir_all(&to_dir).and_then(|_| std::fs::rename(&from, &dest)).map_err(Into::into)
-        };
-        match r {
-            Ok(()) => window.push_notification(Notification::success(format!("Moved {file} to {rel}")), cx),
-            Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
-        }
-        // The Data packs tab's folder counts read the store's change.
-        self.store.update(cx, |_, cx| cx.notify());
-        self.reload_globals(cx);
-    }
-
     /// Reads the global folders again (after a change made here).
-    fn reload_globals(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reload_globals(&mut self, cx: &mut Context<Self>) {
         if self.folder.is_some() && self.class == cf::CLASS_DATAPACKS {
             return self.read_folder(cx);
         }
         if let Some(inst) = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).cloned() {
             self.load_globals(&inst, cx);
         }
-    }
-
-    /// Above the table while a global folder is picked: what the folder
-    /// does, and Open folder.
-    pub(crate) fn global_header(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let rel = self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS)?;
-        let dir = self.root.as_ref()?.join(rel);
-        let loading = !self.globals.packs.contains_key(rel);
-        let n = self.picked_packs().len();
-        Some(
-            h_flex()
-                .px_6()
-                .gap_2()
-                .child(widgets::caption(
-                    if loading {
-                        format!("Reading the packs in {rel}…")
-                    } else {
-                        format!("{n} packs in {rel}: the mod loads them for every world, in its load order. Switched off, a pack is skipped.")
-                    },
-                    cx,
-                ))
-                .child(div().flex_1())
-                .child(
-                    Button::new("gp-folder")
-                        .outline()
-                        .small()
-                        .icon(IconName::FolderOpen)
-                        .label("Open folder")
-                        .on_click(move |_, _, _| {
-                            let _ = std::fs::create_dir_all(&dir);
-                            open_path(&dir)
-                        }),
-                )
-                .into_any_element(),
-        )
     }
 
     /// "N mods are in twice", with Keep newest; and old files waiting for
@@ -1047,58 +938,40 @@ impl AddonsView {
         }
     }
 
-    /// Shader packs: which is on in game, and whether a loader runs them.
+    /// Shader packs need Iris or Oculus: a callout with Find when it's missing.
     pub(crate) fn shader_notes(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.class != cf::CLASS_SHADERS {
             return None;
         }
-        let theme = cx.theme();
         // Read from disk when the table was built, not per frame.
-        let (active, has_loader) = self.shader_state();
-        let forge = inst.loader.starts_with("forge");
-        let want = if forge { "Oculus" } else { "Iris" };
+        let (_, has_loader) = self.shader_state();
+        if has_loader {
+            return None;
+        }
+        let theme = cx.theme();
+        let want = if inst.loader.starts_with("forge") { "Oculus" } else { "Iris" };
         let root = inst.root.clone();
         Some(
-            v_flex()
+            div()
                 .px_6()
-                .gap_2()
-                .when_some(active, |c, sp| {
-                    c.child(
+                .child(
+                    callout(theme.warning, cx).child(
                         h_flex()
-                            .gap_2()
-                            .text_sm()
-                            .text_color(theme.info)
-                            .child(Icon::new(IconName::Sun).small())
-                            .child(format!(
-                                "In use in game: {}",
-                                hopper::instance_ops::strip_formatting(&sp)
-                            )),
-                    )
-                })
-                .when(!has_loader, |c| {
-                    c.child(
-                        h_flex()
-                            .gap_2()
-                            .text_sm()
-                            .text_color(theme.warning)
-                            .child(Icon::new(IconName::TriangleAlert).small())
-                            .child(format!(
-                                "Shader packs need {want} to run; this instance doesn't have it."
-                            ))
+                            .gap_3()
+                            .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
+                            .child(div().flex_1().text_sm().child("Install Iris or Oculus to use shaders"))
                             .child(
                                 Button::new("find-shader-loader")
-                                    .xsmall()
+                                    .small()
                                     .outline()
+                                    .icon(IconName::Search)
                                     .label(format!("Find {want}"))
                                     .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(AddonsEvent::Find {
-                                            root: root.clone(),
-                                            text: want.to_lowercase(),
-                                        })
+                                        cx.emit(AddonsEvent::Find { root: root.clone(), text: want.to_lowercase() })
                                     })),
                             ),
-                    )
-                })
+                    ),
+                )
                 .into_any_element(),
         )
     }

@@ -40,6 +40,8 @@ enum Section {
 
 pub struct SyncPanel {
     store: Entity<Store>,
+    /// The side column's width (inside an instance), resizable.
+    side_panel: widgets::SidePanel,
     section: Section,
     configs: Entity<crate::configs::ConfigsPanel>,
     history: Entity<crate::configs::HistoryPanel>,
@@ -138,6 +140,7 @@ impl SyncPanel {
         subs.push(cx.observe(&control, |_, _, cx| cx.notify()));
         Self {
             store,
+            side_panel: widgets::SidePanel::new(widgets::PanelSpec::new("sync.side", 18., 15., 28.)),
             // `--section configs|history` for scripted runs.
             section: match std::env::args()
                 .skip_while(|a| a != "--section")
@@ -814,7 +817,7 @@ impl SyncPanel {
 
     /// The Server tab's left column: the server and its controls, whether
     /// the mods match, the loader, which group to show, and the big actions.
-    fn sidebar(&self, server: &ServerInfo, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
+    fn sidebar(&self, server: &ServerInfo, inst: &Instance, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let controls = self
             .control
             .read(cx)
@@ -1183,22 +1186,22 @@ impl SyncPanel {
             .disabled(online || self.running)
             .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)));
 
-        v_flex()
+        let border = theme.border;
+        let content = v_flex()
             .id("sync-side")
-            .w(rems(18.))
-            .flex_none()
-            .h_full()
+            .size_full()
             .gap_3()
             .p_4()
-            .border_r_1()
-            .border_color(theme.border)
             .overflow_y_scroll()
             .child(server_card)
             .child(status)
             .children(loader)
             .child(show)
             .child(div().flex_1())
-            .child(v_flex().gap_1p5().children(pack_btn).child(copy))
+            .child(v_flex().gap_1p5().children(pack_btn).child(copy));
+        widgets::side_panel("sync-side-resize", &self.side_panel, |p| &mut p.side_panel, &self.store, content, window, cx)
+            .border_r_1()
+            .border_color(border)
             .into_any_element()
     }
 
@@ -2465,7 +2468,7 @@ impl Picks for SyncPanel {
 }
 
 impl Render for SyncPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(root) = self.server.clone() else {
             // No servers at all is a different page from "none picked".
             let none = self.store.read(cx).servers().is_empty();
@@ -2522,7 +2525,7 @@ impl Render for SyncPanel {
         };
         let side = self.in_instance;
         let header = (!side).then(|| self.header(&server, &inst, cx));
-        let sidebar = side.then(|| self.sidebar(&server, &inst, cx));
+        let sidebar = side.then(|| self.sidebar(&server, &inst, window, cx));
         let crash = self.crash_banner(cx);
         let drift = self.drift_banner(cx);
         let section_ix = match self.section {

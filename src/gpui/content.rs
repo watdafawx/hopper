@@ -22,8 +22,6 @@ use std::path::{Path, PathBuf};
 pub enum ContentEvent {
     /// Find content of a class; data packs go to `dest` (instance-relative).
     Browse { class: u32, dest: Option<String> },
-    /// Search Browse by name.
-    Find { text: String },
 }
 
 /// "1 world", "3 worlds".
@@ -129,10 +127,12 @@ impl WorldsView {
                         .small()
                         .text_color(theme.muted_foreground),
                 )
+                // Like the world's title: Remove stays near the name.
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
+                        .max_w(rems(38.5))
                         .text_sm()
                         .truncate()
                         .child(file_name(p)),
@@ -219,10 +219,13 @@ impl WorldsView {
                 h_flex()
                     .gap_4()
                     .child(icon)
+                    // The title stops growing at 40rem so the actions sit
+                    // by it on wide windows, not at the far edge.
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
+                            .max_w(rems(40.))
                             .gap_0p5()
                             .child(div().font_semibold().truncate().child(w.name.clone()))
                             .child(widgets::caption(

@@ -178,6 +178,8 @@ pub struct BrowseView {
     blur_armed: Option<u64>,
     /// The panel's width while its edge is being dragged, in rem.
     drag_width: Option<f32>,
+    /// The filter column, resizable.
+    filters_panel: widgets::SidePanel,
     /// The list shows the saved bookmarks instead of search results.
     bookmarked: bool,
     /// Modrinth packs' server files, once looked up (`None`: it has none).
@@ -262,6 +264,7 @@ impl BrowseView {
             peeks: 0,
             blur_armed: None,
             drag_width: None,
+            filters_panel: widgets::SidePanel::new(FILTERS_PANEL),
             bookmarked: false,
             server_files: HashMap::new(),
             detail_tab: 0,
@@ -1641,15 +1644,10 @@ impl BrowseView {
                 cat_row(Some(c.id), c.name, icon)
             }));
 
-        v_flex()
+        let (side_bg, side_border) = (theme.sidebar.opacity(0.6), theme.sidebar_border);
+        let content = v_flex()
             .id("browse-filters")
-            .w_64()
-            .flex_none()
-            .h_full()
-            // Lets the page's site color through (see `render`).
-            .bg(theme.sidebar.opacity(0.6))
-            .border_r_1()
-            .border_color(theme.sidebar_border)
+            .size_full()
             .px_4()
             .py_4()
             .gap_5()
@@ -1694,7 +1692,21 @@ impl BrowseView {
                 },
             )
             .when(!self.bookmarked, |r| r.child(Self::section("CATEGORY", cx).child(categories)))
-            .overflow_y_scrollbar()
+            .overflow_y_scrollbar();
+        let store = self.store.clone();
+        widgets::side_panel(
+            "browse-filters-resize",
+            &self.filters_panel,
+            |b| &mut b.filters_panel,
+            &store,
+            content,
+            window,
+            cx,
+        )
+        // Lets the page's site color through (see `render`).
+        .bg(side_bg)
+        .border_r_1()
+        .border_color(side_border)
     }
 
     fn set_dest(&mut self, key: String, dir: String, cx: &mut Context<Self>) {
@@ -3353,6 +3365,9 @@ fn instances_root_at(view: &Entity<BrowseView>, ix: usize, cx: &App) -> Option<P
     store.instances().get(ix).map(|i| i.root.clone())
 }
 
+/// The filter column: 16rem by default, dragged between 13 and 26.
+const FILTERS_PANEL: widgets::PanelSpec = widgets::PanelSpec::new("browse.filters", 16., 13., 26.);
+
 /// The project panel's default width, in rem.
 pub const PANEL_W: f32 = 32.;
 /// The narrowest and widest the panel's edge can be dragged, in rem; it
@@ -3458,7 +3473,9 @@ impl Render for BrowseView {
                 )
             })
             .clone();
-        let filters = AnyView::from(filters).cached(StyleRefinement::default().w_64().flex_none().h_full());
+        // The cache style carries the column's width (a cached view sizes by it).
+        let filters_w = self.filters_panel.layout(self.store.read(cx).settings(), window).width;
+        let filters = AnyView::from(filters).cached(StyleRefinement::default().w(rems(filters_w)).flex_none().h_full());
         let results = AnyView::from(results).cached(StyleRefinement::default().flex_1().min_w_0().h_full());
         // The panel too, so a redraw from above (a file flying into the
         // tasks button) doesn't rebuild the project and its description

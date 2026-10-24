@@ -647,7 +647,10 @@ impl Focusable for Palette {
 }
 
 impl Render for Palette {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Never taller than the window under its top offset.
+        let rem = window.rem_size();
+        let max_h = (rem * 34.).min(window.viewport_size().height - rem * 7.5).max(rem * 10.);
         let rows: Vec<AnyElement> = (0..self.rows.len()).map(|ix| self.row(ix, self.rows[ix], cx)).collect();
         let theme = cx.theme();
         let empty = self.rows.is_empty();
@@ -692,7 +695,7 @@ impl Render for Palette {
                     .w(rems(40.))
                     .max_w_4_5()
                     .h_auto()
-                    .max_h(rems(34.))
+                    .max_h(max_h)
                     .bg(theme.popover)
                     .text_color(theme.popover_foreground)
                     .border_1()

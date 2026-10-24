@@ -73,6 +73,9 @@ pub struct Settings {
     pub accounts_sidebar_width: f32,
     /// Width of the GPUI project page panel (Browse and the Library peek), in rem.
     pub browse_panel_width: f32,
+    /// Widths of the GPUI side panels in rem, by panel key. Negative means
+    /// collapsed to a rail, remembering the open width.  Missing = default.
+    pub panel_widths: HashMap<String, f32>,
     /// The instance picked last, to open on it again.
     pub last_instance: String,
     /// GPUI zoom in percent (Ctrl + / Ctrl - / Ctrl 0).
@@ -299,6 +302,7 @@ impl Default for Settings {
             accounts_sidebar_collapsed: false,
             accounts_sidebar_width: 17.0,
             browse_panel_width: 32.0,
+            panel_widths: HashMap::new(),
             last_instance: String::new(),
             zoom: 100,
             launch_native: false,
@@ -440,6 +444,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn panel_widths_load_and_round_trip() {
+        // Settings from before panel widths existed still load.
+        let old: Settings = serde_json::from_str(r#"{"sidebar_width":22.0}"#).unwrap();
+        assert!(old.panel_widths.is_empty());
+        let mut s = old;
+        s.panel_widths.insert("browse.filters".into(), 18.5);
+        s.panel_widths.insert("servers.list".into(), -20.0);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.panel_widths, s.panel_widths);
     }
 
     #[test]

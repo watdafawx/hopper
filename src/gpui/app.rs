@@ -1019,7 +1019,9 @@ impl AppView {
             .into_any_element()
     }
 
-    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn title_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // No tooltips under an open dialog: GPUI can leave one stuck over it.
+        let dialog = window.has_active_dialog(cx);
         // Who plays: the Microsoft sign-in when Hopper launches directly,
         // else the launcher's account.
         let store = self.store.read(cx);
@@ -1035,7 +1037,7 @@ impl AppView {
                 .rounded(radius)
                 .clickable(cx)
                 .hover(move |s| s.bg(hover))
-                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
+                .when(!dialog, |d| d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx)))
                 .child(div().text_xs().font_semibold().child(name))
                 .child(face)
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -1094,7 +1096,7 @@ impl AppView {
                                 .ghost()
                                 .small()
                                 .icon(IconName::ChevronLeft)
-                                .tooltip("Back (Alt+Left)")
+                                .when(!dialog, |b| b.tooltip("Back (Alt+Left)"))
                                 .disabled(!self.history.can_step(true))
                                 .on_click(cx.listener(|this, _, _, cx| this.step(true, cx))),
                         )
@@ -1103,7 +1105,7 @@ impl AppView {
                                 .ghost()
                                 .small()
                                 .icon(IconName::ChevronRight)
-                                .tooltip("Forward (Alt+Right)")
+                                .when(!dialog, |b| b.tooltip("Forward (Alt+Right)"))
                                 .disabled(!self.history.can_step(false))
                                 .on_click(cx.listener(|this, _, _, cx| this.step(false, cx))),
                         ),
@@ -1179,7 +1181,7 @@ impl AppView {
                                         .small()
                                         .icon(IconName::Search)
                                         .label("Ctrl K")
-                                        .tooltip("Search or run a command (Ctrl+K)")
+                                        .when(!dialog, |b| b.tooltip("Search or run a command (Ctrl+K)"))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.toggle_palette(&CommandPalette, window, cx)
                                         })),
@@ -1189,7 +1191,7 @@ impl AppView {
                                         .ghost()
                                         .small()
                                         .icon(IconName::RefreshCw)
-                                        .tooltip("Re-read instances and servers from disk (F5)")
+                                        .when(!dialog, |b| b.tooltip("Re-read instances and servers from disk (F5)"))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.refresh(&Refresh, window, cx)
                                         })),
@@ -1200,7 +1202,7 @@ impl AppView {
                                         .small()
                                         .icon(IconName::Settings)
                                         .selected(self.page == Page::Settings)
-                                        .tooltip("Settings (Ctrl+,)")
+                                        .when(!dialog, |b| b.tooltip("Settings (Ctrl+,)"))
                                         .on_click(cx.listener(|this, _, _, cx| this.go(Page::Settings, cx))),
                                 ),
                         )
@@ -1228,7 +1230,7 @@ impl Render for AppView {
             Page::Browse => page.into_any_element(),
             _ => page.cached(StyleRefinement::default().size_full()).into_any_element(),
         };
-        let title = self.title_bar(cx);
+        let title = self.title_bar(window, cx);
         let overlay = self.tasks.update(cx, |t, cx| t.overlay(window, cx));
         let theme = cx.theme();
         let ring = theme.primary;

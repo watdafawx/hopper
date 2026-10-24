@@ -18,6 +18,9 @@ pub struct JobState {
     /// Worth a Windows notification when it finishes fine (a modpack
     /// download); failures always get one.
     pub announce: bool,
+    /// Kept out of the task list (a game launch): it only shows up if it
+    /// fails, so the error isn't lost.
+    pub quiet: bool,
 }
 
 #[derive(Clone, Default)]
@@ -58,18 +61,28 @@ impl Jobs {
     }
 
     pub fn start(&self, title: impl Into<String>) -> Job {
+        self.start_with(title.into(), false)
+    }
+
+    /// A job left out of [`Jobs::snapshot`] unless it fails (see [`JobState::quiet`]).
+    pub fn start_quiet(&self, title: impl Into<String>) -> Job {
+        self.start_with(title.into(), true)
+    }
+
+    fn start_with(&self, title: String, quiet: bool) -> Job {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.0 += 1;
         let id = g.0;
         g.1.push(JobState {
             id,
-            title: title.into(),
+            title,
             detail: String::new(),
             progress: None,
             done: false,
             error: None,
             notes: Vec::new(),
             announce: false,
+            quiet,
         });
         drop(g);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -106,12 +119,16 @@ impl Jobs {
             .retain(|id, _| live.contains(id));
     }
 
+    /// The jobs the task list shows (quiet ones only once they fail).
     pub fn snapshot(&self) -> Vec<JobState> {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .1
-            .clone()
+            .iter()
+            .filter(|j| !j.quiet)
+            .cloned()
+            .collect()
     }
 
     pub fn dismiss(&self, id: u64) {
@@ -219,17 +236,41 @@ impl Job {
     /// Marks the job finished with `result`.
     pub fn finish<T>(&self, result: &anyhow::Result<T>) {
         let err = result.as_ref().err().map(|e| format!("{e:#}"));
+        let failed = err.is_some();
         self.jobs.update(self.id, |j| {
             j.done = true;
             j.progress = Some(1.0);
             j.error = err;
+            // A quiet job that failed joins the list, with its error.
+            if failed {
+                j.quiet = false;
+            }
         });
+        // One that went fine leaves no trace.
+        let gone = self.jobs.inner.lock().unwrap_or_else(|e| e.into_inner()).1.iter().any(|j| j.id == self.id && j.quiet);
+        if gone {
+            self.jobs.dismiss(self.id);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_jobs_show_only_when_they_fail() {
+        let jobs = Jobs::default();
+        let ok = jobs.start_quiet("launch");
+        assert!(jobs.snapshot().is_empty());
+        ok.finish(&anyhow::Ok(()));
+        assert!(jobs.snapshot().is_empty());
+        let bad = jobs.start_quiet("launch");
+        bad.finish::<()>(&Err(anyhow::anyhow!("no Java")));
+        let s = jobs.snapshot();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].error.as_deref(), Some("no Java"));
+    }
 
     #[test]
     fn clear_removes_every_finished_job_and_keeps_running_ones() {

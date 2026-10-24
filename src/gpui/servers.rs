@@ -93,17 +93,26 @@ fn no_servers(on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>, cx: &App) -> D
     })
 }
 
-/// The server list down the leading side, shared by both pages.
+/// The server list's width, shared by both pages: a rail of status tiles
+/// when dragged narrow.
+const LIST_PANEL: widgets::PanelSpec = widgets::PanelSpec::new("servers.list", 18., 14., 30.).rail(10., 4.5);
+
+/// The server list down the leading side, shared by both pages, or a
+/// rail of tiles when `collapsed`.
 fn server_list(
     id: &'static str,
     store: &Entity<Store>,
     picked: Option<&PathBuf>,
     with_pairing: bool,
+    collapsed: bool,
     rem: Pixels,
     on_pick: Rc<dyn Fn(PathBuf, &mut Window, &mut App)>,
     on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     cx: &App,
 ) -> Stateful<Div> {
+    if collapsed {
+        return server_rail(id, store, picked, on_pick, cx);
+    }
     let s = store.read(cx);
     let theme = cx.theme();
     let instances: Vec<(PathBuf, String)> = s
@@ -278,14 +287,18 @@ fn server_list(
         v_flex().children(local_head).child(row)
     });
     let empty = s.servers().is_empty();
+    let collapse = {
+        let store = store.clone();
+        Button::new("servers-collapse")
+            .ghost()
+            .small()
+            .icon(IconName::PanelLeftClose)
+            .tooltip("Hide server list")
+            .on_click(move |_, _, cx| widgets::SidePanel::new(LIST_PANEL).set_collapsed(true, &store, cx))
+    };
     v_flex()
         .id(id)
-        .w_72()
-        .flex_none()
-        .h_full()
-        .bg(theme.sidebar)
-        .border_r_1()
-        .border_color(theme.sidebar_border)
+        .size_full()
         .px_2()
         .py_4()
         .gap_1()
@@ -296,7 +309,7 @@ fn server_list(
                 .gap_0p5()
                 .child(
                     h_flex()
-                        .child(div().flex_1().text_lg().font_semibold().child("Servers"))
+                        .child(div().flex_1().min_w_0().truncate().text_lg().font_semibold().child("Servers"))
                         .when_some(on_host.clone(), |r, host| {
                             r.child(
                                 Button::new("host-server")
@@ -306,7 +319,8 @@ fn server_list(
                                     .tooltip("Host a server on this PC")
                                     .on_click(move |_, window, cx| host(window, cx)),
                             )
-                        }),
+                        })
+                        .child(collapse),
                 )
                 .child(widgets::caption(s.settings().servers_root.clone(), cx).text_xs()),
         )
@@ -316,10 +330,85 @@ fn server_list(
         })
 }
 
+/// The collapsed server list: a tile per server with its status light,
+/// and a button to open the list again.
+fn server_rail(
+    id: &'static str,
+    store: &Entity<Store>,
+    picked: Option<&PathBuf>,
+    on_pick: Rc<dyn Fn(PathBuf, &mut Window, &mut App)>,
+    cx: &App,
+) -> Stateful<Div> {
+    let s = store.read(cx);
+    let theme = cx.theme();
+    let mut ordered: Vec<&ServerInfo> = s.servers().iter().collect();
+    ordered.sort_by_key(|srv| s.is_hosted(&srv.root));
+    let tiles: Vec<AnyElement> = ordered
+        .into_iter()
+        .map(|srv| {
+            let active = picked == Some(&srv.root);
+            let (root, pick) = (srv.root.clone(), on_pick.clone());
+            let name: SharedString = srv.name.clone().into();
+            let initials: String = srv
+                .name
+                .split(|c: char| !c.is_alphanumeric())
+                .filter_map(|w| w.chars().next())
+                .take(2)
+                .collect::<String>()
+                .to_uppercase();
+            div()
+                .id(ElementId::Name(format!("server-tile:{}", srv.root.display()).into()))
+                .relative()
+                .size(rems(2.75))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .text_sm()
+                .font_semibold()
+                .clickable(cx)
+                .when(active, |r| widgets::row_selected(r, cx))
+                .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx))
+                .on_click(move |_, w, cx| pick(root.clone(), w, cx))
+                .child(initials)
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(3.))
+                        .right(px(3.))
+                        .child(status_dot(s.status(&srv.root), s.panel_stats(&srv.root), cx)),
+                )
+                .into_any_element()
+        })
+        .collect();
+    let store = store.clone();
+    v_flex()
+        .id(id)
+        .size_full()
+        .items_center()
+        .py_3()
+        .gap_2()
+        .child(
+            Button::new("servers-expand")
+                .ghost()
+                .small()
+                .icon(IconName::PanelLeftOpen)
+                .tooltip("Show server list")
+                .on_click(move |_, _, cx| widgets::SidePanel::new(LIST_PANEL).set_collapsed(false, &store, cx)),
+        )
+        .children(tiles)
+}
+
 // ---- Servers page --------------------------------------------------------
 
 pub struct ServersView {
     store: Entity<Store>,
+    /// The server list's width.
+    list_panel: widgets::SidePanel,
     /// The Overview's modpack description, its GIFs playing.
     pack_desc: Entity<widgets::DescView>,
     picked: Option<PathBuf>,
@@ -372,6 +461,7 @@ impl ServersView {
         let pack_desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
         let mut v = Self {
             store,
+            list_panel: widgets::SidePanel::new(LIST_PANEL),
             pack_desc,
             picked: None,
             mods: HashMap::new(),
@@ -862,11 +952,13 @@ impl ServersView {
 impl Render for ServersView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
+        let collapsed = self.list_panel.layout(self.store.read(cx).settings(), window).collapsed;
         let list = server_list(
             "servers-list",
             &self.store,
             self.picked.as_ref(),
             false,
+            collapsed,
             window.rem_size(),
             Rc::new(move |root, _, cx| view.update(cx, |v, cx| v.pick(root, cx))),
             {
@@ -878,6 +970,12 @@ impl Render for ServersView {
             cx,
         )
         .overflow_y_scrollbar();
+        let theme = cx.theme();
+        let (bg, border) = (theme.sidebar, theme.sidebar_border);
+        let list = widgets::side_panel("servers-list-resize", &self.list_panel, |p| &mut p.list_panel, &self.store, list, window, cx)
+            .bg(bg)
+            .border_r_1()
+            .border_color(border);
         let server = self
             .picked
             .as_ref()
@@ -921,6 +1019,8 @@ impl Render for ServersView {
 
 pub struct SyncPage {
     store: Entity<Store>,
+    /// The server list's width.
+    list_panel: widgets::SidePanel,
     panel: Entity<SyncPanel>,
     /// The first paired server was opened on its own, once.
     auto_picked: bool,
@@ -933,6 +1033,7 @@ impl SyncPage {
         let subs = vec![cx.observe(&store, |_, _, cx| cx.notify())];
         Self {
             store,
+            list_panel: widgets::SidePanel::new(LIST_PANEL),
             panel,
             auto_picked: false,
             _subscriptions: subs,
@@ -968,11 +1069,13 @@ impl Render for SyncPage {
                 window.defer(cx, move |_, cx| view.update(cx, |v, cx| v.compare(root, cx)));
             }
         }
+        let collapsed = self.list_panel.layout(self.store.read(cx).settings(), window).collapsed;
         let list = server_list(
             "sync-list",
             &self.store,
             picked.as_ref(),
             true,
+            collapsed,
             window.rem_size(),
             Rc::new(move |root, _, cx| view.update(cx, |v, cx| v.compare(root, cx))),
             {
@@ -984,6 +1087,12 @@ impl Render for SyncPage {
             cx,
         )
         .overflow_y_scrollbar();
+        let theme = cx.theme();
+        let (bg, border) = (theme.sidebar, theme.sidebar_border);
+        let list = widgets::side_panel("sync-list-resize", &self.list_panel, |p| &mut p.list_panel, &self.store, list, window, cx)
+            .bg(bg)
+            .border_r_1()
+            .border_color(border);
         h_flex()
             .size_full()
             .items_stretch()

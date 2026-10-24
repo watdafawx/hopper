@@ -24,6 +24,8 @@ enum Target {
     Compare { repo: String, range: String },
     Release { repo: String, tag: String },
     Pull { repo: String, number: u64 },
+    /// A wiki page of a repo ("Home" when the link names none).
+    Wiki { repo: String, page: String },
 }
 
 impl Target {
@@ -33,7 +35,8 @@ impl Target {
             | Target::Commit { repo, .. }
             | Target::Compare { repo, .. }
             | Target::Release { repo, .. }
-            | Target::Pull { repo, .. } => repo,
+            | Target::Pull { repo, .. }
+            | Target::Wiki { repo, .. } => repo,
         }
     }
 
@@ -45,6 +48,7 @@ impl Target {
             Target::Compare { repo, range } => format!("{repo} · {range}"),
             Target::Release { repo, tag } => format!("{repo} · release {tag}"),
             Target::Pull { repo, number } => format!("{repo} · pull request #{number}"),
+            Target::Wiki { repo, page } => format!("{repo} · wiki {page}"),
         }
     }
 }
@@ -77,8 +81,13 @@ fn parse_target(url: &str) -> Option<Target> {
     if host != "github.com" && host != "www.github.com" {
         return None;
     }
-    let [owner, name, kind, tail @ ..] = segs.as_slice() else { return None };
+    let [owner, name, tail @ ..] = segs.as_slice() else { return None };
     let repo = format!("{owner}/{name}");
+    if let ["wiki", page @ ..] = tail {
+        let page = page.first().copied().unwrap_or("Home");
+        return (!page.starts_with('_')).then(|| Target::Wiki { repo, page: page.to_string() });
+    }
+    let [kind, tail @ ..] = tail else { return None };
     match (*kind, tail) {
         ("blob", [r, path @ ..]) if !path.is_empty() => Some(Target::File {
             repo,
@@ -185,6 +194,19 @@ fn resolve(t: &Target, f: &cf::File) -> anyhow::Result<Option<String>> {
                 &format!("https://github.com/{repo}/blob/{git_ref}/{dir}"),
                 &format!("https://raw.githubusercontent.com/{repo}/{git_ref}/{dir}"),
             )
+        }
+        Target::Wiki { page, .. } => {
+            let text = fetch(&format!("https://raw.githubusercontent.com/wiki/{repo}/{page}.md"), FILE_TTL)?;
+            // Wikis often list only x.y.0; a patch falls back to the nearest
+            // heading below it in the same x.y.
+            let mut hints = Vec::new();
+            for v in version_hints(f) {
+                hints.extend(patch_fallbacks(&v));
+            }
+            let Some(s) = section(&text, None, &hints) else {
+                return Ok(None);
+            };
+            s
         }
         Target::Commit { sha, .. } => {
             let v = api(&format!("repos/{repo}/commits/{sha}"))?;
@@ -302,6 +324,18 @@ fn version_hints(f: &cf::File) -> Vec<String> {
     }
     out.sort_by_key(|v| std::cmp::Reverse(v.len()));
     out
+}
+
+/// `v`, then the same x.y with each lower patch down to 0 ("5.27.2" gives
+/// 5.27.2, 5.27.1, 5.27.0). Anything but a plain x.y.z stays as it is.
+fn patch_fallbacks(v: &str) -> Vec<String> {
+    let parts: Vec<&str> = v.split('.').collect();
+    let patch = match parts.as_slice() {
+        [_, _, p] => p.parse::<u32>().ok(),
+        _ => None,
+    };
+    let Some(p) = patch else { return vec![v.to_string()] };
+    (0..=p.min(500)).rev().map(|n| format!("{}.{}.{n}", parts[0], parts[1])).collect()
 }
 
 /// GitHub's anchor for a heading: lower case, punctuation dropped, spaces
@@ -667,6 +701,63 @@ mod tests {
         assert_eq!(link_only(&b).as_deref(), Some("https://github.com/a/b/commit/abc"));
         let b = richtext::parse("<ul><li>Fixed a crash when opening the menu with a full inventory</li><li>See https://github.com/a/b/issues/1</li></ul>");
         assert_eq!(link_only(&b), None);
+    }
+
+    const WIKI: &str = "# 5.27.0
+
+Big release.
+
+## Performance
+
+- Faster surface
+
+# 5.26.0
+
+* Drops Fabric
+
+# 5.24.1
+
+Patch notes
+
+# 5.24.0
+
+Old
+";
+
+    fn wiki_pick(name: &str) -> Option<String> {
+        let mut hints = Vec::new();
+        for v in version_hints(&file(name)) {
+            hints.extend(patch_fallbacks(&v));
+        }
+        section(WIKI, None, &hints)
+    }
+
+    #[test]
+    fn wiki_links() {
+        let w = |repo: &str, page: &str| Some(Target::Wiki { repo: repo.into(), page: page.into() });
+        assert_eq!(parse_target("https://github.com/embeddedt/ModernFix/wiki/Changelog"), w("embeddedt/ModernFix", "Changelog"));
+        assert_eq!(parse_target("https://github.com/embeddedt/ModernFix/wiki"), w("embeddedt/ModernFix", "Home"));
+        assert_eq!(parse_target("https://github.com/a/b/wiki/"), w("a/b", "Home"));
+        assert_eq!(parse_target("https://github.com/a/b/wiki/Changelog#x"), w("a/b", "Changelog"));
+        assert_eq!(parse_target("https://github.com/a/b/wiki/_history"), None);
+        // A link with generic text still counts.
+        let b = richtext::parse(r#"<p>Please check the <a href="https://github.com/a/b/wiki/Changelog">GitHub wiki</a> for major changes.</p>"#);
+        assert_eq!(link_only(&b).as_deref(), Some("https://github.com/a/b/wiki/Changelog"));
+    }
+
+    #[test]
+    fn wiki_sections() {
+        // Exact heading.
+        assert_eq!(wiki_pick("modernfix-neoforge-5.26.0+mc1.21.1.jar").as_deref(), Some("* Drops Fabric"));
+        // A patch falls back to its x.y.0.
+        let s = wiki_pick("modernfix-neoforge-5.27.27+mc1.21.1.jar").unwrap();
+        assert!(s.starts_with("Big release.") && s.contains("Faster surface") && !s.contains("Drops"));
+        // The highest heading at or below the patch wins.
+        assert_eq!(wiki_pick("modernfix-neoforge-5.24.3+mc1.21.1.jar").as_deref(), Some("Patch notes"));
+        assert_eq!(wiki_pick("modernfix-neoforge-5.24.0+mc1.21.1.jar").as_deref(), Some("Old"));
+        // No heading for that minor: nothing, not the page.
+        assert_eq!(wiki_pick("modernfix-neoforge-5.25.2+mc1.21.1.jar"), None);
+        assert_eq!(wiki_pick("modernfix-neoforge-6.0.1+mc1.21.1.jar"), None);
     }
 
     const LOG: &str = "# 1.11.0\n\n### Changed\n\n- New tag (#87)\n\n# 1.10.0\n\n### Fixed\n\n- Old fix\n\n```\n# 1.9.0 not a heading\n```\n";

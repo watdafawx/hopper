@@ -696,8 +696,11 @@ impl Render for LogsView {
                 .id("logs-diagnosis")
                 .flex_1()
                 .min_h_0()
+                // Capped like a page of text: on wide windows the cards'
+                // buttons stay near their titles.
                 .child(
                     v_flex()
+                        .max_w(rems(64.))
                         .gap_4()
                         .pb_2()
                         .children(card)

@@ -1,4 +1,4 @@
-//! The Mods, Resource packs and Shaders tabs: a sortable, filterable table
+//! The Mods, Resource packs, Shaders and Data packs tabs: a sortable, filterable table
 //! of what an instance has installed, with updates, toggles and removal.
 
 use crate::drag_pick::{DragPick, PickDrag, Picks};
@@ -54,6 +54,10 @@ pub(crate) enum Row {
     /// "N jars not from CurseForge".
     LooseHeader(usize),
     Loose(String),
+    /// A group's heading: resource packs "In game · top wins", "Not in use".
+    Section(&'static str, &'static str),
+    /// Shaders' "Off" choice, above the packs.
+    ShaderOff,
 }
 
 gpui_kit::actions!(
@@ -81,38 +85,63 @@ pub fn in_class(a: &Addon, class: u32) -> bool {
 }
 
 // Column widths, shared by the header and every row so they line up.
-fn col_check() -> Div {
+pub(crate) fn col_check() -> Div {
     div().w_6().flex_none()
 }
 /// The Update / Changelog column: wide enough for "Updating 100%" and the
 /// changelog half, or with `compact` the icon-only pill.
-fn col_action(compact: bool) -> Div {
+pub(crate) fn col_action(compact: bool) -> Div {
     div()
         .w(rems(if compact { widgets::SPLIT_W_COMPACT + 0.25 } else { 9.5 }))
         .flex_none()
 }
-fn col_author() -> Div {
+pub(crate) fn col_author() -> Div {
     div().w_40().flex_none()
 }
-fn col_env() -> Div {
+pub(crate) fn col_env() -> Div {
     div().w_12().flex_none()
 }
-fn col_active() -> Div {
+pub(crate) fn col_active() -> Div {
     div().w_16().flex_none()
 }
-fn col_date() -> Div {
+pub(crate) fn col_date() -> Div {
     div().w_24().flex_none()
 }
 /// The row's ⋯ menu and Remove.
-fn col_trash() -> Div {
+pub(crate) fn col_trash() -> Div {
     h_flex().w_16().flex_none().justify_end()
 }
 
+/// The name column's narrowest (columns step aside below it) and widest
+/// (on wide windows the actions follow the name instead of the far edge).
+const NAME_MIN: f32 = 16.0;
+const NAME_MAX: f32 = 40.0;
+
+/// Which optional columns the table shows, fitted to its room each frame.
+/// Header and rows read the same value so they line up.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct Cols {
+    pub(crate) date: bool,
+    /// Off: the author goes into the name's tooltip.
+    pub(crate) author: bool,
+    pub(crate) side: bool,
+    /// The Side icon in the name line, once its column has gone.
+    pub(crate) side_inline: bool,
+    /// The name stops at NAME_MAX and a spacer takes the rest.
+    pub(crate) cap: bool,
+}
+
+impl Default for Cols {
+    fn default() -> Self {
+        Self { date: true, author: true, side: true, side_inline: false, cap: false }
+    }
+}
+
 /// Row height: a 40 px icon plus breathing room.
-const ROW_H: f32 = 3.5;
+pub(crate) const ROW_H: f32 = 3.5;
 
 /// A row's hover group, for controls shown only on the hovered row.
-const ROW_GROUP: &str = "addon-row";
+pub(crate) const ROW_GROUP: &str = "addon-row";
 
 /// What the table shows, built from the store and the disk when the
 /// instance, its updates or the jobs change, and kept between frames: the
@@ -130,9 +159,16 @@ pub(crate) struct Table {
     /// The shader pack on in game, as options say it.
     pub(crate) shader: Option<String>,
     pub(crate) has_shader_loader: bool,
+    /// Other locations holding the same file, by lower-case file name
+    /// (resource and data packs), read when the table is built.
+    pub(crate) also: Rc<HashMap<String, String>>,
+    /// Resource packs in use: each addon's place in game order (1 = top).
+    pub(crate) rank: Rc<HashMap<usize, usize>>,
     /// The filtered, sorted rows, and the filters they are for.
     pub(crate) rows: Rc<Vec<Row>>,
     pub(crate) rows_for: Option<RowsKey>,
+    /// Some row has a side (client / server / both): else no Side column.
+    pub(crate) has_side: bool,
 }
 
 /// The view's filters and sort, as the rows were built for them.
@@ -194,7 +230,7 @@ fn marks_key(store: &Store, inst: &Instance) -> u64 {
 
 /// Where `remove_files` put `original`: the newest `.hopper-backups/<time>/`
 /// entry for its name (repeats are numbered `2-name`), from `since` on.
-fn find_backup(root: &Path, original: &Path, since: u64) -> Option<PathBuf> {
+pub(crate) fn find_backup(root: &Path, original: &Path, since: u64) -> Option<PathBuf> {
     let name = original.file_name()?.to_string_lossy().into_owned();
     let mut best: Option<((u64, u32), PathBuf)> = None;
     for d in std::fs::read_dir(root.join(hopper::sync::BACKUP_DIR)).ok()?.flatten() {
@@ -225,10 +261,10 @@ fn find_backup(root: &Path, original: &Path, since: u64) -> Option<PathBuf> {
 
 /// A removed file: where it was, where its backup is, and its entry.
 #[derive(Clone)]
-struct Removed {
-    original: PathBuf,
-    backup: PathBuf,
-    addon: Option<Addon>,
+pub(crate) struct Removed {
+    pub(crate) original: PathBuf,
+    pub(crate) backup: PathBuf,
+    pub(crate) addon: Option<Addon>,
 }
 
 /// A dialog's text: a line, then each warning with a triangle.
@@ -348,7 +384,7 @@ impl Breaks {
 }
 
 /// Moves removed files back and puts their entries back in the instance.
-fn undo_remove(store: &Entity<Store>, root: PathBuf, items: Vec<Removed>, window: &mut Window, cx: &mut App) {
+pub(crate) fn undo_remove(store: &Entity<Store>, root: PathBuf, items: Vec<Removed>, window: &mut Window, cx: &mut App) {
     let s = store.read(cx);
     if let Some(why) = s.edit_hold_reason(&root) {
         window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
@@ -398,6 +434,8 @@ pub enum AddonsEvent {
     OpenProject { root: PathBuf, project: u64 },
     /// Compare the instance with this server in Server sync.
     Compare(PathBuf),
+    /// Collapse the Library's instance list to its rail, for room.
+    CollapseList,
 }
 
 impl EventEmitter<AddonsEvent> for AddonsView {}
@@ -438,25 +476,41 @@ pub struct AddonsView {
     loose: (Option<(PathBuf, std::time::SystemTime, u64)>, Vec<String>),
     /// What the table shows, built when it changes rather than per frame.
     pub(crate) table: Table,
-    scroll: UniformListScrollHandle,
+    pub(crate) scroll: UniformListScrollHandle,
     /// A mod's project page, docked on the right.
     peek: Entity<crate::browse::BrowseView>,
     /// A data pack folder shown instead of the instance's content
     /// (instance-relative), and its packs once read.
     pub(crate) folder: Option<String>,
     pub(crate) folder_packs: Option<Vec<hopper::instance_ops::PackFile>>,
-    /// Other data pack folders a pack can move to: (label, relative path).
-    pub(crate) move_targets: Vec<(String, String)>,
-    /// Whether the Author column fits; set each frame from the window.
-    author_fits: bool,
+    /// Where this class's packs can be (resource and data packs).
+    pub(crate) locs: Vec<hopper::packs::Location>,
+    /// The shown data pack folder's and saves/' times as last read, to
+    /// notice files and worlds coming and going.
+    pub(crate) folder_stamp: (Option<std::time::SystemTime>, Option<std::time::SystemTime>),
+    /// Resource packs as the game orders them, top (wins) first.
+    pub(crate) rp_order: Rc<Vec<String>>,
+    /// Packs in the instance's own folder it doesn't track (added by hand,
+    /// copied in): the folder, its time when read, and the packs.
+    pub(crate) loose_packs: Option<(PathBuf, Option<std::time::SystemTime>, Vec<hopper::instance_ops::PackFile>)>,
+    /// Lower-case names of those listed now.
+    pub(crate) loose_set: HashSet<String>,
+    /// The optional columns that fit; set each frame from `room`.
+    pub(crate) cols: Cols,
+    /// The work area's width in rem, from the Library (None: the window's).
+    pub(crate) room: Option<f32>,
+    /// The Library's instance list is open (not the rail).
+    pub(crate) list_open: bool,
+    /// "Collapse the list for more room" was dismissed this session.
+    hint_gone: bool,
     /// The list is narrow (the project panel is open, or it's a global or
     /// Paxi folder beside its folder list): the action column shrinks to
     /// icon buttons and leaves the name its room.
-    compact: bool,
+    pub(crate) compact: bool,
     /// Narrower still (a global or Paxi folder with the project panel
     /// open): the Added column goes, and the changelog column unless a row
     /// has an update (the open panel lists the files and their changelogs).
-    tight: bool,
+    pub(crate) tight: bool,
     /// Mods just updated, still shown (as Updated) until the user stops
     /// clicking Update, so rows don't move under the pointer.
     recent: HashMap<u64, Update>,
@@ -531,7 +585,11 @@ impl AddonsView {
             globals: Default::default(),
             folder: None,
             folder_packs: None,
-            move_targets: Vec::new(),
+            locs: Vec::new(),
+            folder_stamp: (None, None),
+            rp_order: Rc::default(),
+            loose_packs: None,
+            loose_set: HashSet::new(),
             marks: None,
             missing: Default::default(),
             hunt: Default::default(),
@@ -550,7 +608,10 @@ impl AddonsView {
             table: Table::default(),
             scroll: UniformListScrollHandle::new(),
             peek,
-            author_fits: true,
+            cols: Cols::default(),
+            room: None,
+            list_open: false,
+            hint_gone: false,
             compact: false,
             tight: false,
             recent: HashMap::new(),
@@ -656,6 +717,8 @@ impl AddonsView {
             return;
         };
         let sig = fingerprint(self.store.read(cx), &root, self.class);
+        // A data pack folder or a world came or went.
+        let force = self.folder_moved(&root) || force;
         if !force && sig == self.table.sig {
             return;
         }
@@ -667,6 +730,7 @@ impl AddonsView {
         let class = self.class;
         let updates = self.updates(&inst, cx);
         self.load_globals(&inst, cx);
+        self.load_locations(&inst, cx);
         let active_rp = if class == cf::CLASS_RESOURCE_PACKS {
             hopper::instance_ops::active_resourcepacks(&inst)
         } else {
@@ -691,8 +755,11 @@ impl AddonsView {
             active_rp: Rc::new(active_rp),
             shader,
             has_shader_loader,
+            also: Rc::default(),
+            rank: Rc::default(),
             rows: Rc::default(),
             rows_for: None,
+            has_side: false,
         };
         self.ensure_rows();
         log::debug!(
@@ -703,7 +770,9 @@ impl AddonsView {
         );
         self.want_images(cx);
         self.want_marks(cx);
+        self.want_loose(cx);
         self.apply_global(cx);
+        self.fill_also();
     }
 
     /// Reads the folders again and rebuilds the table.
@@ -739,6 +808,14 @@ impl AddonsView {
             Some(inst) => self.rows(inst, &self.table.updates),
             None => Vec::new(),
         };
+        self.table.rank = Rc::new(self.order_ranks());
+        self.table.has_side = self.class == cf::CLASS_MODS
+            || self.table.inst.as_ref().is_some_and(|inst| {
+                rows.iter().any(|r| match r {
+                    Row::Addon(i) => inst.addons.get(*i).is_some_and(|a| crate::side_card::side_of(&a.env).is_some()),
+                    _ => false,
+                })
+            });
         self.table.rows = Rc::new(rows);
         self.table.rows_for = Some(key);
     }
@@ -814,7 +891,7 @@ impl AddonsView {
 
     /// Pending updates of this tab's class, by project, with the ones just
     /// done (shown as Updated for a moment).
-    fn updates(&self, inst: &Instance, cx: &App) -> HashMap<u64, Update> {
+    pub(crate) fn updates(&self, inst: &Instance, cx: &App) -> HashMap<u64, Update> {
         let mut out = self.pending_updates(inst, cx);
         for (pid, u) in &self.recent {
             if inst.addons.iter().any(|a| a.project_id == *pid && in_class(a, self.class)) {
@@ -1029,7 +1106,7 @@ impl AddonsView {
             .filter(|(_, a)| !self.added_only || inst.pack.is_none() || !a.from_pack)
             .filter(|(_, a)| match self.show {
                 Show::Updates => updates.contains_key(&a.project_id),
-                Show::Disabled => !a.enabled,
+                Show::Disabled => !self.row_on(a),
                 Show::All => true,
             })
             .filter(|(_, a)| {
@@ -1059,7 +1136,15 @@ impl AddonsView {
             lead.then(if asc { ord } else { ord.reverse() })
                 .then_with(|| na.cmp(nb))
         });
-        let mut out: Vec<Row> = rows.into_iter().map(|(i, _)| Row::Addon(i)).collect();
+        let mut out: Vec<Row> = if self.order_mode() {
+            self.order_rows(inst, rows.into_iter().map(|(i, _)| i).collect())
+        } else {
+            rows.into_iter().map(|(i, _)| Row::Addon(i)).collect()
+        };
+        // Shaders: one choice, "Off" first.
+        if self.class == cf::CLASS_SHADERS && self.show == Show::All && q.is_empty() && !out.is_empty() {
+            out.insert(0, Row::ShaderOff);
+        }
         let loose = &self.loose.1;
         if self.class == cf::CLASS_MODS
             && !loose.is_empty()
@@ -1129,13 +1214,17 @@ impl AddonsView {
     /// Switches files on or off. Mods that need them (when turning off), or
     /// that they need (when turning on), go along, stay, or are asked
     /// about, as Settings says.
-    fn toggle(
+    pub(crate) fn toggle(
         &mut self,
         files: Vec<String>,
         on: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Resource packs of the instance: on means used in game.
+        if self.order_mode() {
+            return self.set_in_use(files, on, window, cx);
+        }
         if let Some(dir) = self.global_dir() {
             return self.toggle_global(dir, files, on, window, cx);
         }
@@ -1287,13 +1376,21 @@ impl AddonsView {
         self.store.update(cx, |s, cx| s.update_settings(|st| st.dependents = mode, cx));
     }
 
-    fn set_enabled(
+    pub(crate) fn set_enabled(
         &mut self,
         files: Vec<String>,
         on: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Packs the instance doesn't track are renamed where they are.
+        let (loose, files): (Vec<String>, Vec<String>) = files.into_iter().partition(|f| self.is_loose(f));
+        if !loose.is_empty() {
+            self.set_loose_enabled(loose, on, window, cx);
+        }
+        if files.is_empty() {
+            return;
+        }
         let Some(root) = self.root.clone() else {
             return;
         };
@@ -1308,6 +1405,14 @@ impl AddonsView {
     fn ask_remove(&mut self, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(dir) = self.global_dir() {
             return self.remove_global(dir, files, window, cx);
+        }
+        // Packs the instance doesn't track go to backups as they are.
+        let (loose, files): (Vec<String>, Vec<String>) = files.into_iter().partition(|f| self.is_loose(f));
+        if !loose.is_empty() {
+            self.remove_loose(loose, window, cx);
+        }
+        if files.is_empty() {
+            return;
         }
         let what = self.describe(&files, cx);
         let warnings = self.dependents(&files, cx);
@@ -1637,6 +1742,15 @@ impl AddonsView {
         if let Some(dir) = self.global_dir() {
             return self.update_global(dir, updates, cx);
         }
+        // Untracked packs update in place, like a global folder's.
+        let (loose, updates): (Vec<Update>, Vec<Update>) =
+            updates.into_iter().partition(|u| self.loose_pid(u.project_id));
+        if let (false, Some(dir)) = (loose.is_empty(), self.own_dir()) {
+            self.update_global(dir, loose, cx);
+        }
+        if updates.is_empty() {
+            return;
+        }
         let Some(root) = &self.root else { return };
         let store = self.store.read(cx);
         // A running update job queues these; any other job holds the
@@ -1829,6 +1943,7 @@ impl AddonsView {
         &self,
         inst: &Instance,
         updates: &HashMap<u64, Update>,
+        hint: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let pending: HashMap<u64, Update> = updates
@@ -1841,7 +1956,7 @@ impl AddonsView {
         let n_up = of_class()
             .filter(|a| updates.contains_key(&a.project_id))
             .count();
-        let n_off = of_class().filter(|a| !a.enabled).count();
+        let n_off = of_class().filter(|a| !self.row_on(a)).count();
         let n_added = of_class().filter(|a| !a.from_pack).count();
         let show_ix = match self.show {
             Show::All => 0,
@@ -1921,6 +2036,7 @@ impl AddonsView {
                         let rel = this
                             .folder
                             .clone()
+                            .filter(|_| this.class == cf::CLASS_DATAPACKS)
                             .or_else(|| this.globals.picked.filter(|_| this.class == cf::CLASS_RESOURCE_PACKS).map(str::to_string));
                         match rel {
                             Some(rel) => cx.emit(AddonsEvent::AddTo {
@@ -1990,6 +2106,7 @@ impl AddonsView {
                         cx.notify();
                     })),
             )
+            .when(hint, |r| r.child(self.collapse_hint(cx)))
             .child(div().flex_1())
             .when(self.store.read(cx).running(&inst.root).is_some(), |r| {
                 r.child(
@@ -2012,6 +2129,41 @@ impl AddonsView {
                             })
                         })),
                 ),
+            )
+    }
+
+    /// "Collapse the list for more room": collapses the instance list, or
+    /// goes for the session with its ×.
+    fn collapse_hint(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        h_flex()
+            .flex_none()
+            .gap_0p5()
+            .pl_2()
+            .rounded(theme.radius)
+            .bg(theme.primary.opacity(widgets::alpha::TINT))
+            .child(
+                Button::new("collapse-list")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::PanelLeftClose)
+                    .label("Collapse the list for more room")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.hint_gone = true;
+                        cx.emit(AddonsEvent::CollapseList);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("collapse-hint-x")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::X)
+                    .tooltip("Don't show this again")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.hint_gone = true;
+                        cx.notify();
+                    })),
             )
     }
 
@@ -2206,13 +2358,17 @@ impl AddonsView {
                         })),
                 ),
             )
+            .when(self.order_mode(), |r| r.child(crate::datapacks::col_order()))
             .child(div().w_10().flex_none())
-            .child(head(SortCol::Name, "Name", div().flex_1().min_w_0()))
+            .child(head(SortCol::Name, "Name", self.name_cell()))
             .when(self.action_fits(), |r| r.child(col_action(self.compact)))
-            .when(self.author_fits, |r| {
+            .children(self.spacer())
+            .when(self.cols.author, |r| {
                 r.child(head(SortCol::Author, "Author", col_author()))
             })
-            .child(head(SortCol::Env, "Side", col_env()).id("head-side").tooltip(|w, cx| {
+            // Data packs run on the server by nature, and packs with no
+            // side say nothing: no Side column.
+            .when(self.cols.side, |r| r.child(head(SortCol::Env, "Side", col_env()).id("head-side").tooltip(|w, cx| {
                 gpui_kit::component::tooltip::Tooltip::element(|_, cx| {
                     let muted = cx.theme().muted_foreground;
                     let line = |icon: IconName, text: &'static str| {
@@ -2228,14 +2384,14 @@ impl AddonsView {
                         .child(div().text_xs().text_color(muted).child("Hover a row's icon for more. Click to sort."))
                 })
                 .build(w, cx)
-            }))
-            .child(head(SortCol::Active, "On", col_active()).id("head-on").tooltip(|w, cx| {
+            })))
+            .child(head(SortCol::Active, if self.class == cf::CLASS_SHADERS { "Use" } else { "On" }, col_active()).id("head-on").tooltip(|w, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(
                     "Off keeps the file but the game doesn't load it (renamed to .disabled). Click to sort.",
                 )
                 .build(w, cx)
             }))
-            .when(!self.tight, |r| r.child(head(SortCol::Added, "Added", col_date())))
+            .when(self.cols.date, |r| r.child(head(SortCol::Added, "Added", col_date())))
             .child(col_trash())
     }
 
@@ -2333,7 +2489,9 @@ impl AddonsView {
                 Row::Addon(i) => {
                     let a = &inst.addons[*i];
                     let f = a.file_name.to_lowercase();
-                    let in_use = active_rp.contains(&f)
+                    // Order groups and the shader choice say it already.
+                    let plain = !self.order_mode() && self.class != cf::CLASS_SHADERS;
+                    let in_use = plain && active_rp.contains(&f)
                         || active_shader
                             .as_ref()
                             .is_some_and(|s| *s == f || *s == f.trim_end_matches(".zip"));
@@ -2343,9 +2501,12 @@ impl AddonsView {
                         added: inst.pack.is_some() && !a.from_pack,
                         in_use,
                         new,
+                        rank: self.table.rank.get(i).copied(),
                     };
                     self.addon_row(a, updates.get(&a.project_id), flags, cx)
                 }
+                Row::Section(title, hint) => self.section_row(title, hint, cx),
+                Row::ShaderOff => self.shader_off_row(cx),
                 Row::LooseHeader(n) => h_flex()
                     .h(rems(ROW_H))
                     .w_full()
@@ -2414,7 +2575,7 @@ impl AddonsView {
         match self.table.rows.get(ix)? {
             Row::Addon(i) => Some(inst.addons.get(*i)?.file_name.clone()),
             Row::Loose(name) => Some(name.clone()),
-            Row::LooseHeader(_) => None,
+            Row::LooseHeader(_) | Row::Section(..) | Row::ShaderOff => None,
         }
     }
 
@@ -2557,7 +2718,7 @@ impl AddonsView {
     fn on_toggle(&mut self, _: &RowToggle, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((inst, Row::Addon(i))) = self.cursor_row(cx) {
             let a = &inst.addons[i];
-            self.toggle(vec![a.file_name.clone()], !a.enabled, window, cx);
+            self.toggle(vec![a.file_name.clone()], !self.row_on(a), window, cx);
         }
     }
 
@@ -2580,6 +2741,14 @@ impl AddonsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let hunt_chip = self.hunt_chip(&a.file_name, cx);
+        // Resource packs in game order: grip, place and ↑↓ (or Use).
+        let order_cell = self.order_mode().then(|| self.order_cell(&a.file_name, &a.name, flags.rank, cx));
+        let shader_on = self.class == cf::CLASS_SHADERS && self.is_active_shader(&a.file_name);
+        // Iris and Oculus run one pack: a choice, not switches.
+        let shader_radio = (self.class == cf::CLASS_SHADERS).then(|| {
+            let id = ElementId::Name(format!("use:{}", a.file_name).into());
+            self.shader_radio(id, Some(a.file_name.clone()), shader_on, cx)
+        });
         let store = self.store.read(cx);
         let theme = cx.theme();
         let hold = self
@@ -2594,16 +2763,19 @@ impl AddonsView {
         let from_web = a.project_id != 0
             && self.root.as_ref().is_some_and(|r| store.pending(r).iter().any(|p| p.project_id == a.project_id));
         // A Paxi pack no site knows shows its own pack.png.
-        let global = self.global_dir().is_some();
+        // A global folder's pack, or one the instance doesn't track.
+        let global = self.global_dir().is_some() || self.is_loose(&a.file_name);
         let icon = store.image(&a.icon).map(Path::to_path_buf).or_else(|| {
             (global && !a.icon.starts_with("http")).then(|| PathBuf::from(&a.icon)).filter(|p| p.is_file())
         });
         let file = a.file_name.clone();
         let picked = self.selected.contains(&file);
-        let dim = !a.enabled;
+        // Resource packs of the instance: on is "used in game".
+        let on = self.row_on(a);
+        let dim = !on;
         let id = |p: &str| ElementId::Name(format!("{p}:{file}").into());
         let (f_sel, f_on, f_rm, f_menu) = (file.clone(), file.clone(), file.clone(), file.clone());
-        let on = a.enabled;
+        let also = self.table.also.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).cloned();
 
         // The Server column: this mod's state on the paired server.
         let mark = self
@@ -2623,17 +2795,50 @@ impl AddonsView {
                 (color, SharedString::from(format!("Server: {text}")))
             });
         let side = crate::side_card::side_of(&a.env);
-        let card = self.side_card(a, cx);
+        // The Side cell, in its column or (narrow) by the name.
+        let side_el = (self.cols.side || self.cols.side_inline).then(|| {
+            let card = self.side_card(a, cx);
+            let theme = cx.theme();
+            crate::side_card::wrap(
+                id("side-card"),
+                h_flex()
+                    .id(id("side"))
+                    .flex_none()
+                    .gap_1()
+                    .px_1()
+                    .py_0p5()
+                    .rounded(theme.radius)
+                    .cursor_pointer()
+                    .hover(|s| widgets::row_hover(s, cx))
+                    .child(
+                        // A fixed slot, so the server dot lines up on every row.
+                        div()
+                            .size_4()
+                            .flex_none()
+                            .text_color(theme.muted_foreground)
+                            .when_some(side, |d, (icon, _)| d.child(Icon::new(icon).small())),
+                    )
+                    .when_some(mark, |c, (color, _)| {
+                        c.child(div().size_2().rounded_full().bg(color))
+                    }),
+                card,
+            )
+        });
+        let (side_inline, side_col) = if self.cols.side_inline { (side_el, None) } else { (None, side_el) };
+        // The Author column gone: the name's tooltip says it.
+        let by = (!self.cols.author && !a.author.is_empty()).then(|| format!("by {}", a.author));
 
         let tags = widgets::mod_tags(
             widgets::ModTags {
                 key: &file,
-                in_use: flags.in_use,
+                // Shaders say "Active" instead.
+                in_use: flags.in_use && self.class != cf::CLASS_SHADERS,
                 // One marker: "Yours" says it's new to the pack already.
                 new: flags.new && !flags.added,
                 added: flags.added,
                 env: &a.env,
-                categories: store.categories(a),
+                // Narrow, the categories give the version chip room.
+                categories: if self.compact { &[] } else { store.categories(a) },
                 modrinth: !a.mr_project.is_empty(),
                 crashed: self.crashed.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).map(String::as_str),
             },
@@ -2643,18 +2848,25 @@ impl AddonsView {
             .gap_1p5()
             .child({
                 let pid = a.project_id;
+                let tip: Option<SharedString> = match (by, pid != 0) {
+                    (Some(by), true) => Some(format!("{by}
+Details").into()),
+                    (Some(by), false) => Some(by.into()),
+                    (None, true) => Some("Details".into()),
+                    (None, false) => None,
+                };
                 div()
                     .id(id("name"))
                     .min_w_0()
                     .text_sm()
                     .font_medium()
                     .truncate()
+                    .when_some(tip, |d, tip| {
+                        d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                    })
                     .when(pid != 0, |d| {
                         d.clickable(cx)
                             .hover(|s| s.text_color(theme.primary))
-                            .tooltip(|w, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new("Details").build(w, cx)
-                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.open_peek(pid, cx);
@@ -2662,7 +2874,20 @@ impl AddonsView {
                     })
                     .child(a.name.clone())
             })
+            .children(side_inline)
             .children(hunt_chip)
+            .when(shader_on, |r| r.child(widgets::chip(theme.success).child("Active")))
+            .when_some(also, |r, also| {
+                r.child(
+                    div()
+                        .id(id("also"))
+                        .flex_none()
+                        .child(widgets::chip(theme.primary).child(format!("Also in: {also}")))
+                        .tooltip(|w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("The same file is in these places too").build(w, cx)
+                        }),
+                )
+            })
             .when(a.locked, |r| {
                 r.child(
                     div()
@@ -2764,7 +2989,8 @@ It stays disabled after updating: turn it on in the On column.")
         });
 
         let view = cx.entity();
-        let move_targets = if global { self.move_targets.clone() } else { Vec::new() };
+        // Copy to / Move to: the other places packs of this kind can be.
+        let places = self.other_places();
         // A mod of the instance: its config can be reset.
         let reset_cfg = (!global && self.class == cf::CLASS_MODS)
             .then(|| self.root.clone())
@@ -2780,7 +3006,7 @@ It stays disabled after updating: turn it on in the On column.")
         let menu_fn = Self::row_menu(
             view,
             f_menu,
-            move_targets,
+            places,
             page,
             update_file,
             reset_cfg,
@@ -2835,6 +3061,7 @@ It stays disabled after updating: turn it on in the On column.")
                         .child(Checkbox::new(id("sel")).checked(picked))
                 },
             )
+            .children(order_cell)
             .child({
                 let pid = a.project_id;
                 div()
@@ -2849,9 +3076,9 @@ It stays disabled after updating: turn it on in the On column.")
                     .child(widgets::thumb(icon.as_deref(), rems(2.5), cx))
             })
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
+                self.name_cell()
+                    .flex()
+                    .flex_col()
                     .gap_0p5()
                     .when(dim, |d| d.opacity(0.55))
                     .child(name_line)
@@ -2957,8 +3184,8 @@ Change version", a.file_name).into()
                     })),
             )
             .when(self.action_fits(), |r| r.child(action))
-            // Room for the project panel.
-            .when(self.author_fits, |r| {
+            .children(self.spacer())
+            .when(self.cols.author, |r| {
                 r.child(
                     col_author()
                         .text_sm()
@@ -2967,41 +3194,26 @@ Change version", a.file_name).into()
                         .child(a.author.clone()),
                 )
             })
-            .child(col_env().child(crate::side_card::wrap(
-                id("side-card"),
-                h_flex()
-                    .id(id("side"))
-                    .gap_1()
-                    .px_1()
-                    .py_0p5()
-                    .rounded(theme.radius)
-                    .cursor_pointer()
-                    .hover(|s| widgets::row_hover(s, cx))
-                    .child(
-                        // A fixed slot, so the server dot lines up on every row.
-                        div()
-                            .size_4()
-                            .flex_none()
-                            .text_color(theme.muted_foreground)
-                            .when_some(side, |d, (icon, _)| d.child(Icon::new(icon).small())),
-                    )
-                    .when_some(mark, |c, (color, _)| {
-                        c.child(div().size_2().rounded_full().bg(color))
-                    }),
-                card,
-            )))
-            .child(
-                col_active().child(
-                    Switch::new(id("on"))
-                        .small()
-                        .checked(on)
-                        .tooltip(if on { "Turn off" } else { "Turn on" })
-                        .on_change(cx.listener(move |this, v: &bool, w, cx| {
-                            this.toggle(vec![f_on.clone()], *v, w, cx)
-                        })),
-                ),
-            )
-            .when(!self.tight, |r| r.child({
+            .when_some(side_col, |r, el| r.child(col_env().child(el)))
+            .child(col_active().child(if let Some(radio) = shader_radio {
+                radio
+            } else {
+                let order = self.order_mode();
+                Switch::new(id("on"))
+                    .small()
+                    .checked(on)
+                    .tooltip(match (order, on) {
+                        (true, true) => "Stop using it in game",
+                        (true, false) => "Use it in game (adds it at the top)",
+                        (false, true) => "Turn off",
+                        (false, false) => "Turn on",
+                    })
+                    .on_change(cx.listener(move |this, v: &bool, w, cx| {
+                        this.toggle(vec![f_on.clone()], *v, w, cx)
+                    }))
+                    .into_any_element()
+            }))
+            .when(self.cols.date, |r| r.child({
                 let exact = hopper::time::date_of(&a.date_added);
                 col_date()
                     .id(id("added"))
@@ -3050,6 +3262,7 @@ Change version", a.file_name).into()
                             })),
                     ),
             )
+            .map(|r| self.order_drop(r, &file, flags.rank, cx))
             .context_menu(move |menu, w, cx| menu_fn(menu, w, cx))
             .into_any_element()
     }
@@ -3059,7 +3272,7 @@ Change version", a.file_name).into()
     fn row_menu(
         view: Entity<Self>,
         f_menu: String,
-        move_targets: Vec<(String, String)>,
+        places: Vec<(String, PathBuf)>,
         page: String,
         update_file: Option<hopper::cf::File>,
         reset_cfg: Option<(Entity<Store>, PathBuf, u64, String)>,
@@ -3077,21 +3290,8 @@ Change version", a.file_name).into()
                 let (f1, f2, f3, f4, f5) = (f.clone(), f.clone(), f.clone(), f.clone(), f.clone());
                 let page = page.clone();
                 let (v6, v7) = (view.clone(), view.clone());
-                let moves: Vec<(String, String, Entity<Self>, String)> = move_targets
-                    .iter()
-                    .map(|(label, rel)| (label.clone(), rel.clone(), view.clone(), f.clone()))
-                    .collect();
                 let upd = update_file.clone();
-                let menu = moves.into_iter().fold(menu, |m, (label, rel, v, file)| {
-                    m.item(
-                        PopupMenuItem::new(format!("Move to {label}"))
-                            .icon(IconName::ArrowRightLeft)
-                            .on_click(move |_, window, cx| {
-                                v.update(cx, |this, cx| this.move_global(file.clone(), rel.clone(), window, cx))
-                            }),
-                    )
-                });
-                menu.when(has_project, |m| {
+                let menu = menu.when(has_project, |m| {
                     m.item(
                         PopupMenuItem::new("Open in Browse")
                             .icon(IconName::Search)
@@ -3176,7 +3376,9 @@ Change version", a.file_name).into()
                             })
                         },
                     ),
-                )
+                );
+                // Copy to / Move to the other places this kind of pack loads from.
+                crate::datapacks::copy_move_items(menu, &view, &f, &places)
                 .separator()
                 .item(PopupMenuItem::new("Remove").icon(IconName::Trash).on_click(
                     move |_, window, cx| {
@@ -3187,7 +3389,70 @@ Change version", a.file_name).into()
     }
 
     /// Whether the rows show the Update / Changelog column.
-    fn action_fits(&self) -> bool {
+    /// Fits the optional columns to the room. When the name would get
+    /// less than NAME_MIN they step aside in order: Added, Author (into
+    /// the name's tooltip), Side (to an icon by the name); then Update
+    /// shrinks to its icon. Wide, the name stops at NAME_MAX. Only from
+    /// widths known before layout, so it never flips back and forth.
+    fn fit_columns(&mut self, window: &Window) {
+        let room = self.room.unwrap_or_else(|| window.viewport_size().width / window.rem_size());
+        let has_side = self.class != cf::CLASS_DATAPACKS && self.table.has_side;
+        let mut c = Cols { date: !self.tight, author: true, side: has_side, side_inline: false, cap: false };
+        let mut compact = self.compact;
+        if self.name_room(room, &c, compact) < NAME_MIN {
+            c.date = false;
+        }
+        if self.name_room(room, &c, compact) < NAME_MIN {
+            c.author = false;
+        }
+        if has_side && self.name_room(room, &c, compact) < NAME_MIN {
+            c.side = false;
+            c.side_inline = true;
+        }
+        if self.name_room(room, &c, compact) < NAME_MIN {
+            compact = true;
+        }
+        c.cap = self.name_room(room, &c, compact) > NAME_MAX;
+        self.cols = c;
+        self.compact = compact;
+    }
+
+    /// The name column's width in rem with these columns, from the
+    /// widths in `col_*` and the row's padding and gaps.
+    fn name_room(&self, room: f32, c: &Cols, compact: bool) -> f32 {
+        // List padding, row padding and border, tick, icon, On, ⋯ and Remove.
+        let mut fixed = 3.0 + 1.4 + 1.5 + 2.5 + 4.0 + 4.0;
+        // In-flow cells, the name included.
+        let mut cells = 5;
+        for (on, w) in [
+            (self.order_mode(), 5.75),
+            (self.action_fits(), if compact { widgets::SPLIT_W_COMPACT + 0.25 } else { 9.5 }),
+            (c.author, 10.0),
+            (c.side, 3.0),
+            (c.date, 6.0),
+        ] {
+            if on {
+                fixed += w;
+                cells += 1;
+            }
+        }
+        room - fixed - 0.75 * (cells - 1) as f32
+    }
+
+    /// The name cell. Wide, it is NAME_MAX (it may still shrink) and a
+    /// spacer after the actions takes the rest; a max width on a growing
+    /// cell would share the room with the spacer instead.
+    pub(crate) fn name_cell(&self) -> Div {
+        let d = div().min_w_0();
+        if self.cols.cap { d.flex_shrink(1.).w(rems(NAME_MAX)) } else { d.flex_1() }
+    }
+
+    /// Takes the room the capped name leaves, after the actions.
+    pub(crate) fn spacer(&self) -> Option<Div> {
+        self.cols.cap.then(|| div().flex_1())
+    }
+
+    pub(crate) fn action_fits(&self) -> bool {
         !self.tight || !self.table.updates.is_empty()
     }
 
@@ -3201,7 +3466,7 @@ Change version", a.file_name).into()
         // A global or Paxi folder isn't the instance's own content, so its
         // packs get the one changelog (the update's, else the installed
         // file's) instead of the versions to switch between.
-        if self.global_dir().is_some() {
+        if self.global_dir().is_some() || self.loose_pid(pid) {
             let root = self.root.clone();
             if let Some(f) = update {
                 return crate::versions::open_file(self.store.clone(), root, f, window, cx);
@@ -3226,7 +3491,7 @@ Change version", a.file_name).into()
     }
 
     fn show_in_folder(&self, file: &str, cx: &App) {
-        if let Some(dir) = self.global_dir() {
+        if let Some(dir) = self.global_dir().or_else(|| self.own_dir().filter(|_| self.is_loose(file))) {
             let path = Self::global_path(&dir, file);
             let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
             return;
@@ -3782,6 +4047,8 @@ struct Flags {
     in_use: bool,
     /// Added in the last three days.
     new: bool,
+    /// A resource pack in use: its place in game order.
+    rank: Option<usize>,
 }
 
 impl Picks for AddonsView {
@@ -3792,21 +4059,22 @@ impl Picks for AddonsView {
 
 impl Render for AddonsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // With the project panel open, Author goes only on a narrow window.
         let peek_open = self.peek.read(cx).is_open();
-        // A global or Paxi folder sits beside its folder list: narrow too.
-        self.compact = peek_open || self.global_dir().is_some();
+        self.compact = peek_open;
         self.tight = peek_open && self.global_dir().is_some();
-        self.author_fits = !peek_open
-            || window.viewport_size().width / window.rem_size() >= 100.0;
         // Built by `sync` when the store changes; here only the filters
         // may need applying again (in memory).
         self.ensure_rows();
+        self.fit_columns(window);
         let Some(inst) = self.table.inst.clone() else {
             return div().into_any_element();
         };
-        let tabs = self.pack_tabs(cx);
-        let global_head = self.global_header(cx);
+        // Data packs with no folder to show: what to do instead.
+        if self.class == cf::CLASS_DATAPACKS && self.folder.is_none() {
+            return self.no_datapack_folders(cx);
+        }
+        let tabs = self.location_row(cx);
+        let global_head = self.location_caption(cx);
         let missing = self.missing_banner(&inst, cx);
         let dups = self.duplicate_banner(&inst, cx);
         let blockers = self.blocker_banner(&inst, cx);
@@ -3814,7 +4082,13 @@ impl Render for AddonsView {
         let hunt = self.hunt_strip(&inst, cx);
         let updates = self.table.updates.clone();
         let rows = self.table.rows.clone();
-        let toolbar = self.toolbar(&inst, &updates, cx);
+        // Narrow with the instance list open: offer its room, once.
+        let hint = self.class == cf::CLASS_MODS
+            && self.list_open
+            && !self.hint_gone
+            && self.room.is_some()
+            && window.viewport_size().width < px(1100.);
+        let toolbar = self.toolbar(&inst, &updates, hint, cx);
         let bulk = self.bulk_bar(&inst, &updates, cx);
         let header = self.header(&rows, &inst, cx);
         let count = rows.len();
@@ -3859,6 +4133,8 @@ impl Render for AddonsView {
                             cx.notify();
                         })),
                 )
+            } else if let Some(empty) = self.location_empty(cx) {
+                empty
             } else {
                 widgets::empty_state(
                     IconName::Package,

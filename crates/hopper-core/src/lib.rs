@@ -50,6 +50,7 @@ pub mod modconfig;
 pub mod modpack;
 pub mod modrinth;
 pub mod packdiff;
+pub mod packs;
 pub mod panel;
 pub mod paths;
 pub mod msauth;

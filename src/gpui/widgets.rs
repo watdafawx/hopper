@@ -1230,3 +1230,292 @@ impl Render for DescView {
         }
     }
 }
+
+// ---- resizable side panels -------------------------------------------------
+
+/// Which edge of a side panel its drag handle sits on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelEdge {
+    /// A panel on the leading side: the handle is on its right.
+    Right,
+    /// A panel on the trailing side: the handle is on its left.
+    Left,
+}
+
+/// A resizable side panel: where its width is saved and its limits, in rem.
+#[derive(Clone, Copy, Debug)]
+pub struct PanelSpec {
+    /// Key in `Settings::panel_widths`.
+    pub key: &'static str,
+    pub default: f32,
+    pub min: f32,
+    pub max: f32,
+    /// Let go narrower than `.0`, it collapses to a rail `.1` wide.
+    pub rail: Option<(f32, f32)>,
+    pub edge: PanelEdge,
+}
+
+impl PanelSpec {
+    pub const fn new(key: &'static str, default: f32, min: f32, max: f32) -> Self {
+        Self { key, default, min, max, rail: None, edge: PanelEdge::Right }
+    }
+
+    /// Collapses to a rail `width` wide when let go narrower than `below`.
+    pub const fn rail(mut self, below: f32, width: f32) -> Self {
+        self.rail = Some((below, width));
+        self
+    }
+
+    /// Docked on the trailing side, its handle on the left.
+    #[allow(dead_code)]
+    pub const fn trailing(mut self) -> Self {
+        self.edge = PanelEdge::Left;
+        self
+    }
+}
+
+/// The most of the window an open side panel takes, so the page beside it
+/// keeps room at the 960px minimum.
+const PANEL_MAX_SHARE: f32 = 0.4;
+
+/// Dragging a side panel's edge; carries the panel's key.
+pub struct PanelDrag(pub &'static str);
+
+/// What a panel drag shows under the pointer: nothing.
+struct PanelGhost;
+
+impl Render for PanelGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// A side panel's width right now, in rem.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelLayout {
+    pub width: f32,
+    pub collapsed: bool,
+}
+
+/// A resizable side panel's live state, kept in the view that draws it
+/// with [`side_panel`]. The width is saved per key in the settings; a
+/// negative value means collapsed, remembering the open width.
+pub struct SidePanel {
+    pub spec: PanelSpec,
+    /// The width while the edge is dragged.
+    drag: Option<f32>,
+}
+
+impl SidePanel {
+    pub const fn new(spec: PanelSpec) -> Self {
+        Self { spec, drag: None }
+    }
+
+    /// Saved (collapsed, open width).
+    fn saved(&self, s: &hopper::settings::Settings) -> (bool, f32) {
+        let v = s.panel_widths.get(self.spec.key).copied().unwrap_or(self.spec.default);
+        (v < 0. && self.spec.rail.is_some(), v.abs().clamp(self.spec.min, self.spec.max))
+    }
+
+    /// The width to draw: the live drag, else the saved one, kept within
+    /// the limits and the window.
+    pub fn layout(&self, s: &hopper::settings::Settings, window: &Window) -> PanelLayout {
+        let spec = &self.spec;
+        let (collapsed, w) = match self.drag {
+            Some(w) if spec.rail.is_some_and(|(below, _)| w < below) => (true, w),
+            Some(w) => (false, w),
+            None => self.saved(s),
+        };
+        if let (true, Some((_, rail))) = (collapsed, spec.rail) {
+            return PanelLayout { width: rail, collapsed: true };
+        }
+        let window_w = window.viewport_size().width / window.rem_size();
+        let cap = (window_w * PANEL_MAX_SHARE).max(spec.min);
+        PanelLayout { width: w.clamp(spec.min, spec.max).min(cap), collapsed: false }
+    }
+
+    /// The edge is being dragged.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// Collapses to the rail, or opens again at the width it had.
+    pub fn set_collapsed(&self, collapsed: bool, store: &Entity<crate::store::Store>, cx: &mut App) {
+        let (spec, open) = (self.spec, self.saved(store.read(cx).settings()).1);
+        save_panel(spec, collapsed, open, store, cx);
+    }
+
+    /// The edge was let go: collapse below the threshold, else keep the width.
+    fn end_drag(&mut self, store: &Entity<crate::store::Store>, cx: &mut App) {
+        let Some(w) = self.drag.take() else { return };
+        let spec = self.spec;
+        match spec.rail {
+            Some((below, _)) if w < below => {
+                let open = self.saved(store.read(cx).settings()).1;
+                save_panel(spec, true, open, store, cx)
+            }
+            _ => save_panel(spec, false, w.clamp(spec.min, spec.max), store, cx),
+        }
+    }
+}
+
+fn save_panel(spec: PanelSpec, collapsed: bool, open: f32, store: &Entity<crate::store::Store>, cx: &mut App) {
+    let v = if collapsed { -open } else { open };
+    store.update(cx, |s, cx| {
+        s.update_settings(
+            |st| {
+                // The default width needs no entry.
+                if v == spec.default {
+                    st.panel_widths.remove(spec.key);
+                } else {
+                    st.panel_widths.insert(spec.key.to_string(), v);
+                }
+            },
+            cx,
+        )
+    });
+}
+
+/// A side panel `panel.layout(..)` wide holding `content`, with the shared
+/// handle on its edge: a thin bar that lights up on hover and while
+/// dragged. Drag between the limits (below the rail threshold it
+/// collapses); double-click resets. `lens` finds the panel in the view.
+/// Add the background and border to what this returns; pass the rail as
+/// `content` when the layout says collapsed.
+pub fn side_panel<V: 'static>(
+    id: impl Into<ElementId>,
+    panel: &SidePanel,
+    lens: fn(&mut V) -> &mut SidePanel,
+    store: &Entity<crate::store::Store>,
+    content: impl IntoElement,
+    window: &Window,
+    cx: &mut Context<V>,
+) -> Div {
+    let spec = panel.spec;
+    let layout = panel.layout(store.read(cx).settings(), window);
+    let (bar, active) = (cx.theme().primary, panel.dragging());
+    let left = spec.edge == PanelEdge::Left;
+    // Moves are seen wherever the pointer is; the width is measured from
+    // the panel's fixed edge.
+    let drag_move = cx.listener(move |this: &mut V, e: &DragMoveEvent<PanelDrag>, window, cx| {
+        if e.drag(cx).0 != spec.key {
+            return;
+        }
+        let x = e.event.position.x;
+        let w = if left { e.bounds.right() - x } else { x - e.bounds.left() };
+        lens(this).drag = Some(w / window.rem_size());
+        cx.notify();
+    });
+    // Let go anywhere, over the panel or not.
+    let end = {
+        let store = store.clone();
+        move |this: &mut V, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<V>| {
+            if lens(this).dragging() {
+                lens(this).end_drag(&store, cx);
+                cx.notify();
+            }
+        }
+    };
+    let reset = {
+        let store = store.clone();
+        cx.listener(move |this: &mut V, e: &ClickEvent, _, cx| {
+            if e.click_count() == 2 {
+                lens(this).drag = None;
+                save_panel(spec, false, spec.default, &store, cx);
+                cx.notify();
+            }
+        })
+    };
+    div()
+        .relative()
+        .flex_none()
+        .h_full()
+        .w(rems(layout.width))
+        .on_drag_move(drag_move)
+        .capture_any_mouse_up(cx.listener(end.clone()))
+        .on_mouse_up_out(MouseButton::Left, cx.listener(end))
+        .child(div().size_full().overflow_hidden().child(content))
+        .child(
+            div()
+                .id(id)
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .map(|d| if left { d.left(rems(-0.25)) } else { d.right(rems(-0.25)) })
+                .w(rems(0.5))
+                .cursor_col_resize()
+                .when(active, |d| d.bg(bar.opacity(0.5)))
+                .hover(move |s| s.bg(bar.opacity(0.35)))
+                .on_click(reset)
+                .on_drag(PanelDrag(spec.key), |_, _, _, cx| cx.new(|_| PanelGhost)),
+        )
+}
+
+// ---- anchored popovers -------------------------------------------------------
+
+/// Kept between a popover and the window's edge.
+const POPOVER_MARGIN: f32 = 8.;
+/// Between the control and its popover.
+const POPOVER_GAP: f32 = 6.;
+
+/// Where a popover goes beside the control that opened it, in window
+/// coordinates: under a control in the top half (above one lower down),
+/// right edges lined up for a control on the right half (left edges
+/// otherwise), always 8px inside the window.
+#[derive(Clone, Copy, Debug)]
+pub struct Anchored {
+    pub left: Option<Pixels>,
+    pub right: Option<Pixels>,
+    pub top: Option<Pixels>,
+    pub bottom: Option<Pixels>,
+    /// The widest and tallest it can be and stay in the window.
+    pub max_w: Pixels,
+    pub max_h: Pixels,
+}
+
+/// The place for a popover opened by the control at `anchor` (window
+/// coordinates, e.g. from a `canvas` in the control). Draw the popover
+/// absolute in a window-sized root at the origin and [`Anchored::apply`] it.
+pub fn anchored_popover(anchor: Bounds<Pixels>, window: &Window) -> Anchored {
+    let view = window.viewport_size();
+    let (m, gap) = (px(POPOVER_MARGIN), px(POPOVER_GAP));
+    let (left, right, max_w) = if anchor.center().x > view.width / 2. {
+        let r = (view.width - anchor.right()).max(m);
+        (None, Some(r), view.width - r - m)
+    } else {
+        let l = anchor.left().max(m);
+        (Some(l), None, view.width - l - m)
+    };
+    let (top, bottom, max_h) = if anchor.center().y <= view.height / 2. {
+        let t = anchor.bottom() + gap;
+        (Some(t), None, view.height - t - m)
+    } else {
+        let b = view.height - anchor.top() + gap;
+        (None, Some(b), view.height - b - m)
+    };
+    Anchored { left, right, top, bottom, max_w: max_w.max(px(0.)), max_h: max_h.max(px(0.)) }
+}
+
+impl Anchored {
+    /// Positions `el` and caps it to the window: its width follows the
+    /// content between `min_w` and `max_w` rem, never past the window.
+    pub fn apply<E: Styled>(&self, el: E, min_w: f32, max_w: f32, window: &Window) -> E {
+        let rem = window.rem_size();
+        let max = (rem * max_w).min(self.max_w);
+        let min = (rem * min_w).min(max);
+        let mut el = el.absolute().min_w(min).max_w(max).max_h(self.max_h);
+        if let Some(l) = self.left {
+            el = el.left(l);
+        }
+        if let Some(r) = self.right {
+            el = el.right(r);
+        }
+        if let Some(t) = self.top {
+            el = el.top(t);
+        }
+        if let Some(b) = self.bottom {
+            el = el.bottom(b);
+        }
+        el
+    }
+}

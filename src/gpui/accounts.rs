@@ -34,23 +34,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-/// The account list's width limits, in rem: narrower than `LIST_COLLAPSE`
-/// when let go collapses it to a rail of faces `LIST_RAIL` wide.
-const LIST_MIN: f32 = 12.0;
-const LIST_MAX: f32 = 26.0;
-const LIST_COLLAPSE: f32 = 9.0;
-const LIST_RAIL: f32 = 3.75;
+/// The account list: 17rem, dragged between 12 and 26; let go narrower
+/// than 9 it collapses to a rail of faces.
+const LIST_PANEL: widgets::PanelSpec = widgets::PanelSpec::new("accounts.list", 17., 12., 26.).rail(9., 3.75);
 
-/// Dragging the account list's edge.
-struct ListResize;
+/// The dialog's width: 80% of the window, 50-93rem, never past the window.
+fn dialog_width(window: &Window) -> Pixels {
+    let (w, rem) = (window.viewport_size().width, window.rem_size());
+    (w * 0.8).clamp(rem * 50., rem * 93.).min(w - rem * 2.)
+}
 
-/// What a drag shows under the pointer: nothing.
-struct Blank;
-
-impl Render for Blank {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
+/// The body's height: the room under the dialog's top, capped on tall screens.
+fn body_height(window: &Window) -> Pixels {
+    widgets::dialog_room(window).min(window.rem_size() * 64.).max(window.rem_size() * 20.)
 }
 
 /// The id the view uses for the old single sign-in before it is copied.
@@ -564,8 +560,10 @@ pub struct AccountsView {
     /// Which arms the default skins show.
     default_slim: bool,
     viewer: Entity<SkinViewer>,
-    /// The account list's width while its edge is dragged, in rem.
-    drag_width: Option<f32>,
+    /// The account list's width.
+    list_panel: widgets::SidePanel,
+    /// The 3D preview's width in rem, from the room the dialog has.
+    preview_w: f32,
     /// Skins to browse: found so far, the names in shuffled order, and how
     /// far down that order the lookups have got.
     discover: Vec<(hopper::randomskins::Found, PathBuf)>,
@@ -627,7 +625,8 @@ impl AccountsView {
             defaults: Load::Loading,
             default_slim: false,
             viewer,
-            drag_width: None,
+            list_panel: widgets::SidePanel::new(LIST_PANEL),
+            preview_w: 15.,
             discover: Vec::new(),
             discover_order: Vec::new(),
             discover_next: 0,
@@ -640,10 +639,29 @@ impl AccountsView {
             _check: None,
             _subs: subs,
         };
+        view.adopt_old_width(cx);
         view.load(cx);
         view.load_defaults(cx);
         view.shuffle_discover(cx);
         view
+    }
+
+    /// The list's width from before the shared panel widths, kept once.
+    fn adopt_old_width(&self, cx: &mut Context<Self>) {
+        let s = self.store.read(cx).settings();
+        let (w, folded) = (s.accounts_sidebar_width, s.accounts_sidebar_collapsed);
+        if s.panel_widths.contains_key(LIST_PANEL.key) || (w == LIST_PANEL.default && !folded) {
+            return;
+        }
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| {
+                    let w = w.clamp(LIST_PANEL.min, LIST_PANEL.max);
+                    st.panel_widths.insert(LIST_PANEL.key.into(), if folded { -w } else { w });
+                },
+                cx,
+            )
+        });
     }
 
     /// A new order of players to browse, from the first page.
@@ -1182,69 +1200,23 @@ fn section_title(text: &'static str, cx: &App) -> Div {
 
 impl AccountsView {
     fn set_list_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
-        self.store.update(cx, |s, cx| {
-            s.update_settings(|st| st.accounts_sidebar_collapsed = collapsed, cx)
-        });
-    }
-
-    /// The list's edge was let go: collapse below the threshold, else keep
-    /// the new width.
-    fn end_list_resize(&mut self, cx: &mut Context<Self>) {
-        let Some(w) = self.drag_width.take() else { return };
-        self.store.update(cx, |s, cx| {
-            s.update_settings(
-                |st| {
-                    if w < LIST_COLLAPSE {
-                        st.accounts_sidebar_collapsed = true;
-                    } else {
-                        st.accounts_sidebar_collapsed = false;
-                        st.accounts_sidebar_width = w.clamp(LIST_MIN, LIST_MAX);
-                    }
-                },
-                cx,
-            )
-        });
+        self.list_panel.set_collapsed(collapsed, &self.store, cx);
         cx.notify();
     }
 
-    /// The account list, or a rail of faces when collapsed. Drag its edge to
-    /// resize; below the minimum it collapses.
-    fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let settings = self.store.read(cx).settings();
-        let (collapsed, width) = match self.drag_width {
-            Some(w) if w < LIST_COLLAPSE => (true, LIST_RAIL),
-            Some(w) => (false, w.clamp(LIST_MIN, LIST_MAX)),
-            None if settings.accounts_sidebar_collapsed => (true, LIST_RAIL),
-            None => (false, settings.accounts_sidebar_width.clamp(LIST_MIN, LIST_MAX)),
-        };
+    /// The account list, or a rail of faces when collapsed: the shared
+    /// side panel, so it resizes like every other one.
+    fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let collapsed = self.list_panel.layout(self.store.read(cx).settings(), window).collapsed;
         let inner = if collapsed {
             self.account_rail(cx).into_any_element()
         } else {
             self.account_list(cx).into_any_element()
         };
-        let theme = cx.theme();
-        let (handle_bg, active) = (theme.primary, self.drag_width.is_some());
-        div()
-            .relative()
-            .flex_none()
-            .h_full()
-            .w(rems(width))
+        let border = cx.theme().border;
+        widgets::side_panel("accounts-resize", &self.list_panel, |v| &mut v.list_panel, &self.store, inner, window, cx)
             .border_r_1()
-            .border_color(theme.border)
-            .child(div().size_full().overflow_hidden().child(inner))
-            .child(
-                div()
-                    .id("accounts-resize")
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .right(rems(-0.25))
-                    .w(rems(0.5))
-                    .cursor_col_resize()
-                    .when(active, |d| d.bg(handle_bg.opacity(0.5)))
-                    .hover(move |s| s.bg(handle_bg.opacity(0.35)))
-                    .on_drag(ListResize, |_, _, _, cx| cx.new(|_| Blank)),
-            )
+            .border_color(border)
             .into_any_element()
     }
 
@@ -1595,11 +1567,13 @@ impl AccountsView {
                     // Nothing to apply until a skin is picked below.
                     .child(widgets::caption("Pick a skin to preview it here", cx)),
             });
+        // Sized to the dialog's room (see `render`), 3:5 like a player.
+        let pw = self.preview_w;
         let preview = v_flex()
             .flex_none()
-            .w(rems(15.))
+            .w(rems(pw))
             .gap_2()
-            .child(div().h(rems(25.)).child(self.viewer.clone()))
+            .child(div().h(rems(pw * 5. / 3.)).child(self.viewer.clone()))
             .child(bar);
 
         // The poses as chips in groups; one click switches.
@@ -2320,8 +2294,14 @@ impl AccountsView {
 impl Render for AccountsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let height = (window.viewport_size().height * 0.78).min(rems(38.).to_pixels(window.rem_size()));
-        let list = self.sidebar(cx);
+        let height = body_height(window);
+        // The preview takes ~45% of the right side, and fits its height
+        // under the header and tabs.
+        let rem = window.rem_size();
+        let list_w = self.list_panel.layout(self.store.read(cx).settings(), window).width;
+        let right_w = dialog_width(window) / rem - list_w - 5.;
+        self.preview_w = (right_w * 0.45).min((height / rem - 10.) * 0.6).clamp(14., 24.);
+        let list = self.sidebar(window, cx);
         let right: AnyElement = if self.for_id.is_none() {
             self.empty_state(cx)
         } else {
@@ -2397,12 +2377,6 @@ impl Render for AccountsView {
             .id("accounts-body")
             .h(height)
             .items_start()
-            .on_drag_move(cx.listener(|this, e: &DragMoveEvent<ListResize>, window, cx| {
-                let x = e.event.position.x - e.bounds.left();
-                this.drag_width = Some(x / window.rem_size());
-                cx.notify();
-            }))
-            .on_drop(cx.listener(|this, _: &ListResize, _, cx| this.end_list_resize(cx)))
             .child(list)
             .child(v_flex().h_full().flex_1().min_w_0().pl_5().child(right))
     }
@@ -2415,7 +2389,7 @@ pub fn open(store: Entity<Store>, window: &mut Window, cx: &mut App) {
     window.open_dialog(cx, move |dialog, window, _| {
         dialog
             .title("Accounts")
-            .w(rems(58.).to_pixels(window.rem_size()))
+            .w(dialog_width(window))
             .child(view.clone())
     });
 }

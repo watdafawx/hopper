@@ -348,6 +348,8 @@ enum Note {
 
 pub struct SettingsPage {
     store: Entity<Store>,
+    /// The category list down the side, resizable.
+    nav_panel: widgets::SidePanel,
     category: Category,
     search: Entity<InputState>,
     query: String,
@@ -530,6 +532,7 @@ impl SettingsPage {
         subs.push(cx.observe(&launchers, |_, _, cx| cx.notify()));
         Self {
             store,
+            nav_panel: widgets::SidePanel::new(widgets::PanelSpec::new("settings.nav", 15., 12., 24.)),
             category: Category::General,
             search,
             query: String::new(),
@@ -1135,7 +1138,8 @@ impl SettingsPage {
             Block::card(
                 Some("Java defaults"),
                 vec![
-                    Row::new("memory").control(memory),
+                    // Below, so the slider fills the row.
+                    Row::new("memory").below(memory),
                     Row::new("java").below(java),
                     Row::new("java-args").below(args),
                     Row::new("get-java").below(get_java),
@@ -2010,7 +2014,7 @@ impl SettingsPage {
         }
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let hits = matches(&self.query);
         let searching = !self.query.trim().is_empty();
@@ -2086,14 +2090,9 @@ impl SettingsPage {
                 }))
                 .into_any_element()
         };
-        v_flex()
+        let content = v_flex()
             .id("settings-sidebar")
-            .w(rems(15.))
-            .flex_none()
-            .h_full()
-            .bg(theme.sidebar)
-            .border_r_1()
-            .border_color(theme.sidebar_border)
+            .size_full()
             .child(
                 v_flex()
                     .px_3()
@@ -2127,7 +2126,11 @@ impl SettingsPage {
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(if searching { "Enter opens the first match · Esc clears" } else { "Ctrl+, opens Settings · Ctrl+F searches" }),
-            )
+            );
+        widgets::side_panel("settings-nav-resize", &self.nav_panel, |p| &mut p.nav_panel, &self.store, content, window, cx)
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.sidebar_border)
     }
 }
 
@@ -2216,7 +2219,7 @@ impl Render for SettingsPage {
         h_flex()
             .id("settings-page")
             .size_full()
-            .child(self.sidebar(cx))
+            .child(self.sidebar(window, cx))
             .child(
                 div()
                     .flex_1()

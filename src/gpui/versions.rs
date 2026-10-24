@@ -235,6 +235,10 @@ impl Render for VersionsView {
                     .collect();
                 let cards = entries.iter().enumerate().map(|(i, (e, md))| {
                     let target = i == 0 && !e.installed;
+                    // The same text as a newer card: say so, don't repeat it.
+                    let same = (!md.trim().is_empty())
+                        .then(|| entries[..i].iter().find(|(_, m)| m == md).map(|(n, _)| n.name.clone()))
+                        .flatten();
                     let file = self.all.iter().find(|f| f.display_name == e.name).cloned();
                     let view = cx.entity();
                     // The installed one: the same file again, to get back
@@ -313,11 +317,16 @@ impl Render for VersionsView {
                                     )
                                 }),
                         )
-                        .child(self.changelog(
-                            ElementId::Name(format!("cl:{}", e.name).into()),
-                            md.clone(),
-                            cx,
-                        ))
+                        .child(match same {
+                            Some(n) => widgets::caption(format!("Same notes as {n}"), cx)
+                                .italic()
+                                .into_any_element(),
+                            None => self.changelog(
+                                ElementId::Name(format!("cl:{}", e.name).into()),
+                                md.clone(),
+                                cx,
+                            ),
+                        })
                 });
                 let other_cards = others.into_iter().map(|f| {
                     let older = f.id < self.installed_file;

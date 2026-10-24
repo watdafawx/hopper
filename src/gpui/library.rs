@@ -121,6 +121,7 @@ impl InstTab {
             InstTab::Mods => Some(cf::CLASS_MODS),
             InstTab::ResourcePacks => Some(cf::CLASS_RESOURCE_PACKS),
             InstTab::Shaders => Some(cf::CLASS_SHADERS),
+            InstTab::Datapacks => Some(cf::CLASS_DATAPACKS),
             _ => None,
         }
     }
@@ -226,7 +227,6 @@ pub struct LibraryView {
     addons: Entity<AddonsView>,
     server: Entity<SyncPanel>,
     worlds: Entity<WorldsView>,
-    datapacks: Entity<crate::datapacks::DatapacksView>,
     shots: Entity<ScreenshotsView>,
     settings: Entity<InstanceSettings>,
     logs: Entity<LogsView>,
@@ -253,7 +253,8 @@ impl LibraryView {
             InstTab::ResourcePacks => "resourcepacks",
             InstTab::Shaders => "shaderpacks",
             InstTab::Datapacks => {
-                if let Some(f) = self.datapacks.read(cx).folder() {
+                // The data pack location shown.
+                if let Some(f) = self.addons.read(cx).folder.clone() {
                     return (self.selected.clone(), f);
                 }
                 "mods"
@@ -294,7 +295,7 @@ impl LibraryView {
     }
 
     /// What either table asks of the Library.
-    fn addons_event(event: &AddonsEvent, cx: &mut Context<Self>) {
+    fn addons_event(&mut self, event: &AddonsEvent, cx: &mut Context<Self>) {
         match event {
             AddonsEvent::AddContent { root, class } => cx.emit(LibraryEvent::Browse {
                 root: root.clone(),
@@ -315,6 +316,7 @@ impl LibraryView {
                 project: *project,
             }),
             AddonsEvent::Compare(server) => cx.emit(LibraryEvent::Compare(server.clone())),
+            AddonsEvent::CollapseList => self.set_collapsed(true, cx),
         }
     }
 
@@ -327,11 +329,7 @@ impl LibraryView {
             p
         });
         let worlds = cx.new(|cx| WorldsView::new(store.clone(), window, cx));
-        // Data packs' table opens projects in the same panel as the others.
         let peek = addons.read(cx).peek().clone();
-        let dp_table = cx.new(|cx| AddonsView::with_peek(store.clone(), peek.clone(), window, cx));
-        let datapacks =
-            cx.new(|cx| crate::datapacks::DatapacksView::new(store.clone(), dp_table.clone(), window, cx));
         let shots = cx.new(|cx| ScreenshotsView::new(store.clone(), window, cx));
         let settings = cx.new(|cx| InstanceSettings::new(store.clone(), window, cx));
         let logs = cx.new(|cx| LogsView::new(store.clone(), window, cx));
@@ -340,10 +338,8 @@ impl LibraryView {
         server.update(cx, |s, _| s.set_peek(peek.clone()));
         let subs = vec![
             cx.observe(&peek, |_, _, cx| cx.notify()),
-            cx.subscribe(&dp_table, |_, _, event, cx| Self::addons_event(event, cx)),
-            cx.subscribe(&addons, |_, _, event, cx| Self::addons_event(event, cx)),
+            cx.subscribe(&addons, |this, _, event, cx| this.addons_event(event, cx)),
             cx.subscribe(&worlds, |this, _, event, cx| this.content_event(event, cx)),
-            cx.subscribe(&datapacks, |this, _, event, cx| this.content_event(event, cx)),
             cx.observe(&store, |this, _, cx| {
                 this.ensure_selection(cx);
                 this.follow_paired_server(cx);
@@ -384,7 +380,6 @@ impl LibraryView {
             addons,
             server,
             worlds,
-            datapacks,
             shots,
             settings,
             logs,
@@ -573,10 +568,6 @@ impl LibraryView {
                 class: *class,
                 dest: dest.clone(),
             }),
-            ContentEvent::Find { text } => cx.emit(LibraryEvent::Find {
-                root,
-                text: text.clone(),
-            }),
         }
     }
 
@@ -592,13 +583,6 @@ impl LibraryView {
             }
             InstTab::Worlds => {
                 self.worlds.update(cx, |w, cx| w.show_for(root, cx));
-                return;
-            }
-            InstTab::Datapacks => {
-                // A mod page left open on another tab doesn't follow here.
-                let peek = self.addons.read(cx).peek().clone();
-                peek.update(cx, |p, cx| p.peek_project(root.clone(), None, cx));
-                self.datapacks.update(cx, |w, cx| w.show_for(root, cx));
                 return;
             }
             InstTab::Screenshots => {
@@ -1480,6 +1464,7 @@ impl LibraryView {
         // Running or being changed by a job: hold off other changes.
         let hold = store.hold_reason(&root);
         let busy = store.is_busy(&root);
+        let starting = store.is_launching(&root);
         let primary = cx.theme().primary;
         let pack_update = store.pack_update(inst).cloned().map(|f| {
             let (r1, r2, f1, f2) = (root.clone(), root.clone(), f.clone(), f.clone());
@@ -1557,9 +1542,9 @@ impl LibraryView {
             Button::new("play")
                 .success()
                 .icon(IconName::Play)
-                .label(if busy { "Working…" } else { "Play" })
-                .loading(busy)
-                .disabled(busy)
+                .label(if starting { "Starting…" } else if busy { "Working…" } else { "Play" })
+                .loading(busy || starting)
+                .disabled(busy || starting)
                 .when(busy, |b| b.tooltip("A task is changing this instance"))
                 .on_click(cx.listener(move |this, _, window, cx| this.play(&r_play, window, cx)))
         };
@@ -2075,7 +2060,8 @@ impl LibraryView {
                 .small()
                 .label(format!("More ({})", folded.len()))
                 .dropdown_caret(true)
-                .dropdown_menu(move |menu, _, _| {
+                // Right edges aligned, so it opens inside the window.
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
                     list.iter().fold(menu, |m, t| {
                         let (view, t) = (view.clone(), *t);
                         m.item(PopupMenuItem::new(Self::bar_label(t)).icon(Self::bar_icon(t)).on_click(move |_, _, cx| {
@@ -2140,8 +2126,13 @@ impl LibraryView {
         if !self.tab.is_pack() {
             return None;
         }
-        let count = |t: InstTab| match t.class() {
-            Some(c) => format!(" ({})", inst.addons.iter().filter(|a| in_class(a, c)).count()),
+        // What's in the folder (hand-added packs too). Data packs live in
+        // several places: no one count.
+        let count = |t: InstTab| match t.class().filter(|c| *c != cf::CLASS_DATAPACKS) {
+            Some(c) => {
+                let n: usize = hopper::packs::locations(inst, c).iter().filter(|l| l.key == "instance").map(|l| l.count).sum();
+                format!(" ({n})")
+            }
             None => String::new(),
         };
         let ix = PACKS.iter().position(|t| *t == self.tab).unwrap_or(0);
@@ -2198,7 +2189,6 @@ impl LibraryView {
             None if self.tab == InstTab::Overview => self.overview_body(inst, cx),
             None if self.tab == InstTab::Server => self.server_tab(cx),
             None if self.tab == InstTab::Worlds => cached(self.worlds.clone()),
-            None if self.tab == InstTab::Datapacks => cached(self.datapacks.clone()),
             None if self.tab == InstTab::Screenshots => cached(self.shots.clone()),
             None if self.tab == InstTab::Settings => cached(self.settings.clone()),
             None if self.tab == InstTab::Logs => cached(self.logs.clone()),
@@ -2443,6 +2433,13 @@ impl Render for LibraryView {
             });
         let peek_w = peek.as_ref().map_or(0.0, |p| p.read(cx).panel_width(window, cx));
         self.detail_w = window.viewport_size().width / window.rem_size() - side - peek_w;
+        // The table fits its columns to this; it is re-laid out whenever
+        // the room changes (its bounds change), so no notify is needed.
+        let (room, list_open) = (self.detail_w, side > RAIL);
+        self.addons.update(cx, |a, _| {
+            a.room = Some(room);
+            a.list_open = list_open;
+        });
         h_flex()
             .id("library")
             .size_full()
