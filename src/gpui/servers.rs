@@ -283,6 +283,8 @@ fn server_list(
 
 pub struct ServersView {
     store: Entity<Store>,
+    /// The Overview's modpack description, its GIFs playing.
+    pack_desc: Entity<widgets::DescView>,
     picked: Option<PathBuf>,
     /// Jars in each server's mods folder.
     mods: HashMap<PathBuf, Option<Result<Vec<ModInfo>, String>>>,
@@ -328,8 +330,10 @@ impl ServersView {
                 }
             }),
         ];
+        let pack_desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
         let mut v = Self {
             store,
+            pack_desc,
             picked: None,
             mods: HashMap::new(),
             filter,
@@ -702,6 +706,9 @@ impl ServersView {
             .when(self.tab == 0, |c| {
                 let players = self.control.update(cx, |ctl, cx| ctl.players_view(cx));
                 let cards = self.control.update(cx, |ctl, cx| ctl.stat_cards(cx));
+                if pack_id != 0 {
+                    self.pack_desc.update(cx, |d, _| d.show_pack(pack_id));
+                }
                 let pack = (pack_id != 0).then(|| {
                     let store = self.store.read(cx);
                     let page = store.pack_page(pack_id);
@@ -712,7 +719,7 @@ impl ServersView {
                     v_flex()
                         .gap_3()
                         .child(div().text_base().font_weight(FontWeight::BOLD).child("Modpack"))
-                        .child(widgets::pack_page(page, icon, &self.store, true, cx))
+                        .child(widgets::pack_page(page, icon, &self.pack_desc, true, cx))
                 });
                 c.child(
                     v_flex()

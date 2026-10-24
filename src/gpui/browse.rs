@@ -162,7 +162,7 @@ pub struct BrowseView {
     detail_tab: usize,
     /// The open project's description, a view of its own so its GIFs
     /// redraw it alone.
-    desc: Entity<DescView>,
+    desc: Entity<widgets::DescView>,
     /// The filter and results columns (made on first draw, see [`Part`]).
     parts: Option<(Entity<Part>, Entity<Part>, Entity<Part>)>,
     /// Open the first result when it arrives (`--detail`, for scripted runs).
@@ -204,7 +204,7 @@ impl BrowseView {
     fn build(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let modrinth = store.read(cx).settings().browse_modrinth;
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder(modrinth)));
-        let desc = cx.new(|cx| DescView::new(store.clone(), window, cx));
+        let desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
         let subs = vec![
             cx.observe(&store, |this, _, cx| {
                 this.check_pending(cx);
@@ -3413,80 +3413,6 @@ impl Render for Part {
         // A cached view is laid out on its own: this row gives the column
         // the flex parent it sizes itself by.
         h_flex().size_full().child(part)
-    }
-}
-
-/// A project description (see `widgets::description_view`) whose GIFs play:
-/// it redraws itself when one changes frame, only while it is drawn in a
-/// focused window. GPUI's own GIFs redraw every display frame; these, at
-/// the GIF's pace, and without redrawing the page around them.
-pub struct DescView {
-    store: Entity<Store>,
-    /// The project shown, its description and the description's images.
-    shown: Option<(u64, Rc<Vec<hopper::richtext::Segment>>, Rc<Vec<String>>)>,
-    /// A redraw is set for the next GIF frame.
-    anim_due: bool,
-    _focus: Subscription,
-}
-
-impl DescView {
-    fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self {
-            store,
-            shown: None,
-            anim_due: false,
-            // Paused GIFs pick up again when the window is focused.
-            _focus: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
-        }
-    }
-
-    /// Sets what to show; called as the page draws, so the view draws it
-    /// straight after without being told.
-    fn show(&mut self, id: u64, segments: Rc<Vec<hopper::richtext::Segment>>, images: Rc<Vec<String>>) {
-        self.shown = Some((id, segments, images));
-    }
-
-    fn anim_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Frames replaced last draw are off screen now.
-        // (This window's: `cx.drop_image` would reach into it mid-draw.)
-        for f in self.store.read(cx).take_shown_frames() {
-            window.drop_image(f).ok();
-        }
-        if self.anim_due || !window.is_window_active() {
-            return;
-        }
-        let Some((_, _, images)) = &self.shown else { return };
-        let Some(wait) = widgets::description_wait(images, self.store.read(cx)) else {
-            return;
-        };
-        // At most 25 redraws a second, however many GIFs are out of step.
-        let wait = wait.max(Duration::from_millis(40));
-        self.anim_due = true;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(wait).await;
-            this.update(cx, |this, cx| {
-                this.anim_due = false;
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-}
-
-impl Render for DescView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.anim_tick(window, cx);
-        match &self.shown {
-            Some((id, segments, images)) => widgets::description_view(
-                ElementId::Name(format!("desc:{id}").into()),
-                segments,
-                images,
-                &self.store,
-                cx,
-            ),
-            None => div().into_any_element(),
-        }
     }
 }
 

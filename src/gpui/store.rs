@@ -852,8 +852,9 @@ impl Store {
                         if let Some(u) = m.icon() {
                             self.want_image(&u.to_string());
                         }
+                        // The description's GIFs play (see `widgets::DescView`).
                         for u in &images {
-                            self.want_image(u);
+                            self.want_anim(u);
                         }
                         PackPage::Ready(m, md, images)
                     }

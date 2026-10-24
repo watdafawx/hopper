@@ -467,10 +467,12 @@ pub fn downloads_label(count: f64) -> String {
 /// Modrinth shows it: name, author, summary and the full description, with
 /// a button to the site. `None` while nothing has been asked for yet.
 /// Without `head`, only the description (the instance banner has the rest).
+/// `desc` draws the description, its GIFs playing: give it the pack with
+/// `DescView::show_pack` first.
 pub fn pack_page(
     page: Option<&crate::store::PackPage>,
     icon: Option<&Path>,
-    store: &Entity<crate::store::Store>,
+    desc: &Entity<DescView>,
     head: bool,
     cx: &App,
 ) -> AnyElement {
@@ -478,8 +480,8 @@ pub fn pack_page(
     use gpui_kit::assets::IconName;
     use gpui_kit::component::h_flex;
     let theme = cx.theme();
-    let (m, md, images) = match page {
-        Some(PackPage::Ready(m, md, images)) => (m, md, images),
+    let m = match page {
+        Some(PackPage::Ready(m, ..)) => m,
         Some(PackPage::Failed(e)) => {
             return caption(format!("Couldn't load the pack's page: {e}"), cx).into_any_element();
         }
@@ -530,13 +532,7 @@ pub fn pack_page(
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 ),
         ))
-        .child(div().p_4().child(description_view(
-            ElementId::Name(format!("pack-desc:{}", m.id).into()),
-            md,
-            images,
-            store,
-            cx,
-        )))
+        .child(div().p_4().child(desc.clone()))
         .into_any_element()
 }
 
@@ -948,4 +944,110 @@ pub fn mod_link(
             .hover(move |s| s.text_color(accent))
             .on_click(move |_, window, cx| open(project, window, cx))
     })
+}
+
+/// What a [`DescView`] shows.
+enum Shown {
+    /// A project, its description and the description's images.
+    Desc(u64, Rc<Vec<hopper::richtext::Segment>>, Rc<Vec<String>>),
+    /// The description of the modpack with this project id, from the
+    /// store's pack pages (see [`pack_page`]).
+    Pack(u64),
+}
+
+/// A project description (see [`description_view`]) whose GIFs play:
+/// it redraws itself when one changes frame, only while it is drawn in a
+/// focused window. GPUI's own GIFs redraw every display frame; these, at
+/// the GIF's pace, and without redrawing the page around them.
+pub struct DescView {
+    store: Entity<crate::store::Store>,
+    shown: Option<Shown>,
+    /// A redraw is set for the next GIF frame.
+    anim_due: bool,
+    _focus: Subscription,
+}
+
+impl DescView {
+    pub fn new(store: Entity<crate::store::Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self {
+            store,
+            shown: None,
+            anim_due: false,
+            // Paused GIFs pick up again when the window is focused.
+            _focus: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+        }
+    }
+
+    /// Sets what to show; called as the page draws, so the view draws it
+    /// straight after without being told.
+    pub fn show(&mut self, id: u64, segments: Rc<Vec<hopper::richtext::Segment>>, images: Rc<Vec<String>>) {
+        self.shown = Some(Shown::Desc(id, segments, images));
+    }
+
+    /// Shows the page of modpack `id` once the store has it (see
+    /// `Store::want_pack_page`); like [`Self::show`], called as the page draws.
+    pub fn show_pack(&mut self, id: u64) {
+        self.shown = Some(Shown::Pack(id));
+    }
+
+    fn anim_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Frames replaced last draw are off screen now.
+        // (This window's: `cx.drop_image` would reach into it mid-draw.)
+        for f in self.store.read(cx).take_shown_frames() {
+            window.drop_image(f).ok();
+        }
+        if self.anim_due || !window.is_window_active() {
+            return;
+        }
+        let store = self.store.read(cx);
+        let images: &[String] = match &self.shown {
+            Some(Shown::Desc(_, _, images)) => images,
+            Some(Shown::Pack(id)) => match store.pack_page(*id) {
+                Some(crate::store::PackPage::Ready(_, _, images)) => images,
+                _ => return,
+            },
+            None => return,
+        };
+        let Some(wait) = description_wait(images, store) else {
+            return;
+        };
+        // At most 25 redraws a second, however many GIFs are out of step.
+        let wait = wait.max(Duration::from_millis(40));
+        self.anim_due = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                this.anim_due = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Render for DescView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.anim_tick(window, cx);
+        match &self.shown {
+            Some(Shown::Desc(id, segments, images)) => description_view(
+                ElementId::Name(format!("desc:{id}").into()),
+                segments,
+                images,
+                &self.store,
+                cx,
+            ),
+            Some(Shown::Pack(id)) => match self.store.read(cx).pack_page(*id) {
+                Some(crate::store::PackPage::Ready(m, md, images)) => description_view(
+                    ElementId::Name(format!("pack-desc:{}", m.id).into()),
+                    md,
+                    images,
+                    &self.store,
+                    cx,
+                ),
+                _ => div().into_any_element(),
+            },
+            None => div().into_any_element(),
+        }
+    }
 }

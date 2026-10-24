@@ -18,7 +18,11 @@ pub struct ImageViewer {
     /// Touchpad scroll not yet turned into a step.
     wheel: f32,
     focus: FocusHandle,
+    /// A redraw for an animated image's next frame is on its way.
+    anim_due: bool,
     _store: Subscription,
+    /// A paused GIF picks up again when the window is focused.
+    _focus: Subscription,
 }
 
 impl ImageViewer {
@@ -33,12 +37,41 @@ impl ImageViewer {
             .iter()
             .map(|&i| self.images[i].0.clone())
             .collect();
+        // The one shown plays if it's an animated GIF or WebP (like the
+        // description does); the neighbours just load.
         self.store.update(cx, |s, _| {
-            for u in &want {
+            s.want_anim(&want[0]);
+            for u in &want[1..] {
                 s.want_image(u);
             }
         });
         cx.notify();
+    }
+
+    /// Redraws when the animated image shown has its next frame due, and
+    /// frees the GPU copies of frames already shown.
+    fn anim_tick(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        for f in self.store.read(cx).take_shown_frames() {
+            window.drop_image(f).ok();
+        }
+        if self.anim_due || !window.is_window_active() {
+            return;
+        }
+        let Some(wait) = self.store.read(cx).anim(url).map(|c| c.wait_now()) else {
+            return;
+        };
+        // At most 25 redraws a second.
+        let wait = wait.max(std::time::Duration::from_millis(40));
+        self.anim_due = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |this, cx| {
+                this.anim_due = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The wheel moves like the arrows: down is next, up is previous. A
@@ -78,11 +111,15 @@ impl Render for ImageViewer {
         let theme = cx.theme().clone();
         let n = self.images.len();
         let (url, title) = self.images.get(self.at).cloned().unwrap_or_default();
-        let path = self.store.read(cx).image(&url).map(|p| p.to_path_buf());
+        self.anim_tick(&url, window, cx);
+        let store = self.store.read(cx);
+        let frame = store.anim(&url).map(|c| c.frame_now());
+        let path = store.image(&url).map(|p| p.to_path_buf());
         let h = (window.viewport_size().height - window.rem_size() * 12.).max(window.rem_size() * 12.);
-        let picture: AnyElement = match path {
-            Some(p) => img(p).size_full().object_fit(ObjectFit::Contain).into_any_element(),
-            None => h_flex()
+        let picture: AnyElement = match (frame, path) {
+            (Some(f), _) => img(ImageSource::Render(f)).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            (None, Some(p)) => img(p).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            (None, None) => h_flex()
                 .size_full()
                 .justify_center()
                 .gap_2()
@@ -156,7 +193,17 @@ impl Render for ImageViewer {
 pub fn open(store: Entity<Store>, images: Vec<(String, String)>, at: usize, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| {
         let sub = cx.observe(&store, |_, _, cx| cx.notify());
-        let mut v = ImageViewer { store, images, at: 0, wheel: 0., focus: cx.focus_handle(), _store: sub };
+        let refocus = cx.observe_window_activation(window, |_, _, cx| cx.notify());
+        let mut v = ImageViewer {
+            store,
+            images,
+            at: 0,
+            wheel: 0.,
+            focus: cx.focus_handle(),
+            anim_due: false,
+            _store: sub,
+            _focus: refocus,
+        };
         v.show(at, cx);
         v
     });

@@ -179,6 +179,8 @@ pub struct LibraryView {
     /// Instance groups folded shut.
     folded: std::collections::HashSet<String>,
     store: Entity<Store>,
+    /// The Overview's modpack description, its GIFs playing.
+    pack_desc: Entity<widgets::DescView>,
     selected: Option<PathBuf>,
     tab: InstTab,
     /// The tab before the last switch, and when it happened, for the
@@ -335,10 +337,12 @@ impl LibraryView {
             let old_mods = st.unknown.get("instance_opens_mods").and_then(|v| v.as_bool()) == Some(true);
             InstTab::from_key(key).unwrap_or(if old_mods { InstTab::Mods } else { InstTab::Overview })
         };
+        let pack_desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
         let mut view = Self {
             drag_width: None,
             folded: Default::default(),
             store,
+            pack_desc,
             selected: None,
             tab: first_tab,
             tab_from: first_tab,
@@ -1915,6 +1919,10 @@ impl LibraryView {
     /// Overview: the page of the modpack the instance came from, from
     /// CurseForge or Modrinth.
     fn overview_body(&self, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
+        let pack_id = inst.pack.as_ref().map_or(0, |p| p.project_id);
+        if pack_id != 0 {
+            self.pack_desc.update(cx, |d, _| d.show_pack(pack_id));
+        }
         let store = self.store.read(cx);
         let body = match inst.pack.as_ref().filter(|p| p.project_id != 0) {
             Some(p) => {
@@ -1923,7 +1931,7 @@ impl LibraryView {
                     Some(store::PackPage::Ready(m, ..)) => m.icon().and_then(|u| store.image(u)),
                     _ => None,
                 };
-                widgets::pack_page(page, icon, &self.store, false, cx)
+                widgets::pack_page(page, icon, &self.pack_desc, false, cx)
             }
             None => widgets::caption("This instance wasn't installed from a modpack.", cx).into_any_element(),
         };
