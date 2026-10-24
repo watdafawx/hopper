@@ -891,7 +891,7 @@ impl AppView {
     fn version_chip(&self, cx: &mut Context<Self>) -> AnyElement {
         use crate::store::SelfUpdate;
         let theme = cx.theme();
-        let (muted, hover) = (theme.muted_foreground, theme.list_hover);
+        let (muted, hover, radius) = (theme.muted_foreground, theme.list_hover, theme.radius);
         let state = self.store.read(cx).self_update().cloned();
         // (text, colour, icon, tooltip); no colour is the plain chip.
         let (text, color, icon, tip): (String, Option<Hsla>, Option<IconName>, String) = match &state {
@@ -931,7 +931,7 @@ impl AppView {
             let tip_notes = format!("What's new in {}", r.version);
             return h_flex()
                 .h(rems(1.375))
-                .rounded_full()
+                .rounded(radius)
                 .overflow_hidden()
                 .border_1()
                 .border_color(accent.opacity(0.45))
@@ -945,8 +945,10 @@ impl AppView {
                         .pl_2()
                         .pr_2()
                         // overflow_hidden clips to a rectangle, not the
-                        // pill, so each half rounds its own outer corners.
-                        .rounded_l_full()
+                        // rounded box, so each half rounds its own outer
+                        // corners.
+                        .rounded_tl(radius)
+                        .rounded_bl(radius)
                         .cursor_pointer()
                         .text_color(on_accent)
                         .bg(accent)
@@ -966,7 +968,8 @@ impl AppView {
                         .id("version")
                         .h_full()
                         .px_1p5()
-                        .rounded_r_full()
+                        .rounded_tr(radius)
+                        .rounded_br(radius)
                         .cursor_pointer()
                         .text_color(accent)
                         .bg(tail_bg)
@@ -984,7 +987,7 @@ impl AppView {
             .gap_1()
             .px_2()
             .h(rems(1.375))
-            .rounded_full()
+            .rounded(radius)
             .text_xs()
             .cursor_pointer()
             .map(|c| match color {
@@ -1016,14 +1019,14 @@ impl AppView {
         let store = self.store.read(cx);
         // A name and face that open the Accounts dialog.
         let chip = |id: &'static str, name: String, face: AnyElement, tip: &'static str, cx: &mut Context<Self>| {
-            let hover = cx.theme().list_hover;
+            let (hover, radius) = (cx.theme().list_hover, cx.theme().radius);
             h_flex()
                 .id(id)
                 .gap_2()
                 .pl_2()
                 .pr_1()
                 .py_0p5()
-                .rounded_full()
+                .rounded(radius)
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
@@ -1148,7 +1151,7 @@ impl AppView {
                             h_flex()
                                 .gap_0p5()
                                 .p(px(2.))
-                                .rounded(px(9.))
+                                .rounded(radius)
                                 .border_1()
                                 .border_color(line)
                                 .child(

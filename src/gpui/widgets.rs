@@ -288,7 +288,8 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
         .gap_1p5()
         .h(rems(1.375))
         .px_2p5()
-        .rounded_full()
+        // The theme's button radius (theme.json "radius"), like every chip.
+        .rounded(px(6.))
         .border_1()
         .border_color(color.opacity(0.3))
         .bg(color.opacity(0.1))

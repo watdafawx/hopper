@@ -1900,7 +1900,7 @@ impl BrowseView {
                             .gap_1()
                             .px_1p5()
                             .py_0p5()
-                            .rounded_full()
+                            .rounded(theme.radius)
                             .border_1()
                             .border_color(theme.border)
                             .bg(theme.muted)

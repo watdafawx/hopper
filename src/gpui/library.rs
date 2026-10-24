@@ -1219,10 +1219,10 @@ impl LibraryView {
                                     .child(name),
                             )
                             .when(playing, |r| {
-                                r.child(Tag::success().xsmall().rounded_full().child("Playing"))
+                                r.child(Tag::success().xsmall().child("Playing"))
                             })
                             .when(pack_update, |r| {
-                                r.child(Tag::primary().xsmall().rounded_full().child("Update"))
+                                r.child(Tag::primary().xsmall().child("Update"))
                             }),
                     )
                     .child(

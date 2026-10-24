@@ -32,7 +32,7 @@ impl Render for PickChip {
             .mt_3()
             .px_2p5()
             .py_0p5()
-            .rounded_full()
+            .rounded(theme.radius)
             .bg(theme.primary)
             .text_color(theme.primary_foreground)
             .text_xs()

@@ -547,7 +547,7 @@ impl Render for SkinViewer {
                             .gap_1p5()
                             .px_2()
                             .py_0p5()
-                            .rounded_full()
+                            .rounded(theme.radius)
                             .bg(theme.background.opacity(0.6))
                             .child(Icon::new(IconName::Move).xsmall())
                             .child("Drag to turn")
