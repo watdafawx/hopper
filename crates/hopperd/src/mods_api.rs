@@ -23,6 +23,32 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Mod ids go to the browser as strings: Modrinth ids are mapped to 64-bit
+/// numbers, which JavaScript rounds (it's exact only up to 2^53).
+fn id_str(id: u64) -> String {
+    id.to_string()
+}
+
+/// Takes a mod id as a string or a number.
+fn de_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        N(u64),
+        S(String),
+    }
+    match Id::deserialize(d)? {
+        Id::N(n) => Ok(n),
+        Id::S(s) => s.trim().parse().map_err(serde::de::Error::custom),
+    }
+}
+
+fn de_ids<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u64>, D::Error> {
+    #[derive(Deserialize)]
+    struct W(#[serde(deserialize_with = "de_id")] u64);
+    Ok(Vec::<W>::deserialize(d)?.into_iter().map(|w| w.0).collect())
+}
+
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/v1/servers/{id}/mods/list", get(list))
@@ -93,10 +119,32 @@ fn detect(e: &Entry) -> (String, String) {
 }
 
 /// The server as an instance, made the first time.
+/// Mod files are picked by Minecraft version; without one the newest file
+/// would be picked, whatever version it's for.
+fn known_version(inst: &Instance) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !inst.game_version.is_empty(),
+        "Hopper doesn't know this server's Minecraft version yet. Start it once, or set the version in the Mods tab."
+    );
+    Ok(())
+}
+
 fn instance(e: &Entry) -> anyhow::Result<Instance> {
     if e.root.join(instances::HOPPER_FILE).is_file()
-        && let Some(i) = instances::load(&e.root)
+        && let Some(mut i) = instances::load(&e.root)
     {
+        // Saved before the version was known (a new server that hadn't run):
+        // fill it in now if it can be found.
+        if i.game_version.is_empty() {
+            let (game_version, loader) = detect(e);
+            if !game_version.is_empty() {
+                i.game_version = game_version;
+                if i.loader.is_empty() {
+                    i.loader = loader;
+                }
+                i.save()?;
+            }
+        }
         return Ok(i);
     }
     let (game_version, loader) = detect(e);
@@ -157,7 +205,7 @@ async fn list(
                 "file": a.file_name, "name": if a.name.is_empty() { s.map(|s| s.mod_name.clone()).unwrap_or_default() } else { a.name.clone() },
                 "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": a.icon, "enabled": a.enabled,
                 "side": if a.env.is_empty() { s.map(|s| s.side.clone()).unwrap_or_default() } else { side_label(&a.env).to_string() },
-                "project_id": a.project_id, "source": if a.project_id == 0 { "" } else if modrinth::is_mr(a.project_id) { "modrinth" } else { "curseforge" },
+                "project_id": id_str(a.project_id), "source": if a.project_id == 0 { "" } else if modrinth::is_mr(a.project_id) { "modrinth" } else { "curseforge" },
                 "from_pack": a.from_pack, "page": a.page, "author": a.author,
             }));
         }
@@ -177,7 +225,7 @@ async fn list(
             rows.push(json!({
                 "file": base, "name": s.map(|s| s.mod_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| base.clone()),
                 "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": "", "enabled": enabled,
-                "side": s.map(|s| s.side.clone()).unwrap_or_default(), "project_id": 0, "source": "", "from_pack": false, "page": "", "author": "",
+                "side": s.map(|s| s.side.clone()).unwrap_or_default(), "project_id": "0", "source": "", "from_pack": false, "page": "", "author": "",
             }));
         }
         rows.sort_by_key(|r| r["name"].as_str().unwrap_or("").to_lowercase());
@@ -379,7 +427,7 @@ async fn search(
         Ok(json!(mods
             .iter()
             .map(|m| json!({
-                "id": m.id, "name": m.name, "summary": m.summary, "downloads": m.download_count,
+                "id": id_str(m.id), "name": m.name, "summary": m.summary, "downloads": m.download_count,
                 "icon": m.logo.as_ref().map(|l| l.thumbnail_url.clone()).unwrap_or_default(),
                 "author": m.authors.first().map(|a| a.name.clone()).unwrap_or_default(),
                 "installed": have.contains(&m.id),
@@ -392,6 +440,7 @@ async fn search(
 
 #[derive(Deserialize)]
 struct InstallBody {
+    #[serde(deserialize_with = "de_id")]
     project_id: u64,
 }
 
@@ -405,6 +454,7 @@ async fn install_mod(
     let e = entry(&app, &headers, &method, &id)?;
     let job = crate::pack_api::spawn(&app, format!("Adding a mod to {}", e.name), move |job| {
         let mut inst = instance(&e)?;
+        known_version(&inst)?;
         let m = hopper_core::source::get_mod(b.project_id)?;
         job.detail(format!("Finding {} for Minecraft {}", m.name, inst.game_version));
         let file = install::best_file(m.id, m.class_id, &inst)?
@@ -434,7 +484,7 @@ async fn updates(
             .filter(|u| inst.addons.iter().any(|a| a.project_id == u.project_id && !a.from_pack))
             .map(|u| {
                 let (from, to) = u.versions();
-                json!({ "project_id": u.project_id, "name": u.name, "from": from, "to": to, "file": u.file.file_name })
+                json!({ "project_id": id_str(u.project_id), "name": u.name, "from": from, "to": to, "file": u.file.file_name })
             })
             .collect::<Vec<_>>()))
     })
@@ -444,6 +494,7 @@ async fn updates(
 
 #[derive(Deserialize)]
 struct UpdateBody {
+    #[serde(deserialize_with = "de_ids")]
     project_ids: Vec<u64>,
 }
 

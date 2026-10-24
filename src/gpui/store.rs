@@ -2446,7 +2446,7 @@ impl Store {
         let inst = from.and_then(|r| self.instance(&r).cloned());
         let anyway = self.settings.sync_anyway.clone();
         let title = format!("Creating {}", opts.name);
-        let meta = hosted_meta(&opts);
+        let meta = opts.hosted_meta();
         self.spawn_job(title, move |job| {
             let root = match inst {
                 // The pack author's own server pack: exactly their mod set.
@@ -2496,7 +2496,7 @@ impl Store {
             opts.loader = hopper::hosting::ServerLoader::from_instance(&t.loader)?;
             let r = hopper::hosting::create_from_server_files(&files, &opts, job)?;
             job.note(format!("From {}: {} mods", r.server_pack, r.create.mods_copied));
-            let _ = hosted_meta(&opts).save(&r.create.root);
+            let _ = opts.hosted_meta().save(&r.create.root);
             done(r.create.root);
             Ok(Msg::ServersChanged)
         });
@@ -2540,7 +2540,7 @@ impl Store {
             if let Some(n) = r.note.clone() {
                 job.note(n);
             }
-            let _ = hosted_meta(&used).save(&r.root);
+            let _ = used.hosted_meta().save(&r.root);
             done(r.root);
             Ok(Msg::ServersChanged)
         });
@@ -2948,21 +2948,6 @@ impl Drop for ClearQueue {
         if let Some(r) = self.1.take() {
             self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(&r);
         }
-    }
-}
-
-/// What the Servers page shows for a server Hopper made.
-fn hosted_meta(opts: &hopper::hosting::CreateOptions) -> hopper::hosting::HostedMeta {
-    use hopper::hosting::ServerLoader as L;
-    hopper::hosting::HostedMeta {
-        minecraft: opts.mc_version.clone(),
-        loader: match &opts.loader {
-            L::Vanilla => "Vanilla".into(),
-            L::Fabric(v) | L::Quilt(v) => {
-                format!("{} {}", opts.loader.name(), v.clone().unwrap_or_default()).trim().to_string()
-            }
-            L::NeoForge(v) | L::Forge(v) => format!("{} {v}", opts.loader.name()),
-        },
     }
 }
 

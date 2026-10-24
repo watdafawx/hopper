@@ -660,6 +660,11 @@ impl ServersView {
                 1,
             )
             .item("Port", s.port().to_string(), 1);
+        // Set in Hopper Server (Settings › Address).
+        let route = hopper::hosting::router::RouteSettings::load(&s.root);
+        if !route.addresses.is_empty() {
+            info = info.item("Address", route.addresses.join(", "), 1);
+        }
         if let Some(inst) = &paired {
             let ok = s.loader.as_deref() == Some(inst.loader.replace('-', " ").as_str());
             info = info.item(

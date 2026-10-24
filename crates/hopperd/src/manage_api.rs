@@ -426,6 +426,9 @@ struct CreateBody {
     port: Option<u16>,
     #[serde(default)]
     motd: String,
+    /// Address players join it by ("survival.mc.example.com"); empty: none.
+    #[serde(default)]
+    address: String,
     /// The person creating it agreed to the Minecraft EULA in the form.
     accept_eula: bool,
 }
@@ -459,6 +462,21 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
         "neoforge" => return Err(bad("Pick a NeoForge version.")),
         other => return Err(bad(format!("Hopper Server can't make {other} servers yet."))),
     };
+    let address = match b.address.trim() {
+        "" => None,
+        a => Some(hopper_core::hosting::router::clean_address(a).map_err(bad)?),
+    };
+    if let Some(a) = &address
+        && let Some(other) = app.servers.list().into_iter().find(|e| crate::router::settings(e).addresses.contains(a))
+    {
+        return Err(bad(format!("{} already has {a}.", other.name)));
+    }
+    // Behind the router, a server needs a port other than the router's.
+    let router_port = { let c = app.cfg.read().unwrap(); c.router.enabled.then_some(c.router.port) };
+    let auto_port = match (b.port, router_port) {
+        (None, Some(rp)) => crate::router::free_port(&app, None).filter(|_| hopper_core::hosting::suggest_port(&root) == rp),
+        _ => None,
+    };
     let title = format!("Making {}", b.name.trim());
     let a = app.clone();
     let job = crate::pack_api::spawn(&app, title, move |job| {
@@ -467,7 +485,7 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
         if let Some(m) = b.memory_mb {
             o.memory_mb = m;
         }
-        if let Some(p) = b.port {
+        if let Some(p) = b.port.or(auto_port) {
             o.port = p;
         }
         if !b.motd.trim().is_empty() {
@@ -475,6 +493,10 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
         }
         o.accept_eula = true;
         let folder = hopper_core::hosting::create_server(&o, job)?;
+        if let Some(addr) = address {
+            hopper_core::hosting::router::RouteSettings { addresses: vec![addr], ..Default::default() }.save(&folder)?;
+            a.router.changed();
+        }
         a.rescan();
         a.refresh.notify_one();
         let id = a.servers.list().into_iter().find(|e| e.root == folder).map(|e| e.id.clone());

@@ -24,6 +24,7 @@ mod mods_api;
 mod security;
 mod net;
 mod pack_api;
+mod router;
 mod servers;
 mod service;
 mod sftp;
@@ -78,6 +79,8 @@ pub struct App {
     pub tls: TlsInfo,
     /// The SFTP host key's "SHA256:…".
     pub sftp_fingerprint: Option<String>,
+    /// Server addresses (the Minecraft port shared by every server).
+    pub router: router::Router,
     /// Finished jobs' results, until fetched.
     pub results: std::sync::Mutex<std::collections::HashMap<u64, serde_json::Value>>,
 }
@@ -227,6 +230,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         refresh: Notify::new(),
         jobs: Default::default(),
         results: Default::default(),
+        router: Default::default(),
         scheduler: Default::default(),
         limiter: Default::default(),
         audit: security::Audit::new(&data_dir),
@@ -280,6 +284,7 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::Certified
     });
 
     webhooks::watch(app.clone());
+    router::start(app.clone());
     if cfg.sftp_port != 0 {
         tokio::spawn(sftp::serve(app.clone(), cfg.bind.clone(), cfg.sftp_port));
     }

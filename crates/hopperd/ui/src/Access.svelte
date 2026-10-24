@@ -4,6 +4,7 @@
   import Security from './Security.svelte';
   import Webhooks from './Webhooks.svelte';
   import Users from './Users.svelte';
+  import Addresses from './Addresses.svelte';
   import { pathKind } from './lib/format.js';
 
   const kindOf = (url) => pathKind(url.split('://')[1].split(/[:/]/)[0].replace(/^\[|\]$/g, ''));
@@ -100,6 +101,8 @@
       {/if}
       <p class="tiny muted note">Plain HTTP works from this PC, the LAN and Tailscale; from the internet only HTTPS, and signing in needs two-factor. Browsers warn about the panel's own certificate; set a domain (<span class="mono">acme_domain</span> in hopperd.toml, port 443 forwarded) for a Let's Encrypt one. Announced on the LAN as <span class="mono">_hopperd._tcp</span>.</p>
     </div>
+
+    <Addresses />
 
     <Security />
 

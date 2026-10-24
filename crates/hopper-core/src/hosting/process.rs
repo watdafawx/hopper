@@ -427,6 +427,7 @@ impl LocalServer {
     /// `timeout`. Returns at once.
     pub fn stop(&self, timeout: Duration) -> anyhow::Result<()> {
         if !self.state().is_alive() {
+            self.dismiss_crash();
             return Ok(());
         }
         let run = self.lock().run;
@@ -475,8 +476,23 @@ impl LocalServer {
     /// Ends the process at once (the world isn't saved).
     pub fn kill(&self) -> anyhow::Result<()> {
         let mut g = self.lock();
+        reap(&mut g);
+        if g.proc.is_none() {
+            drop(g);
+            self.dismiss_crash();
+            return Ok(());
+        }
         kill_locked(&mut g);
         Ok(())
+    }
+
+    /// Stop or kill on a server that already crashed: it counts as stopped
+    /// by hand, so a crash restart that hasn't happened yet won't happen.
+    fn dismiss_crash(&self) {
+        let mut g = self.lock();
+        if matches!(state_of(g.proc.is_some(), g.tracker.done, g.stop_requested, g.exit), ServerState::Crashed(_)) {
+            g.stop_requested = true;
+        }
     }
 
     /// The process's CPU (percent of the whole machine) and memory (bytes).
@@ -783,6 +799,10 @@ mod tests {
         assert_eq!(s.state(), ServerState::Crashed(Some(3)));
         assert_eq!(s.players(), ["Alex"]);
         assert!(s.console().iter().any(|l| l.contains("Done (")));
+        assert!(!dir.join(RUN_FILE).exists());
+        // Kill on the crashed server: stopped by hand, so no crash restart.
+        s.kill().unwrap();
+        assert_eq!(s.state(), ServerState::Stopped);
         assert!(!dir.join(RUN_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

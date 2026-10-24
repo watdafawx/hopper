@@ -28,6 +28,8 @@ pub const EVENTS: &[(&str, &str)] = &[
     ("join", "Player joined"),
     ("leave", "Player left"),
     ("backup", "Backup made"),
+    ("wake", "Server woken up by a player joining"),
+    ("sleep", "Server put to sleep (nobody on)"),
     ("schedule", "Scheduled restarts and warnings"),
     ("problem", "Something the panel tried failed"),
 ];
@@ -183,6 +185,13 @@ pub fn emit(app: &Arc<App>, events: Vec<Event>) {
 struct Seen {
     state: &'static str,
     players: Vec<String>,
+    /// Already up when the panel first saw it (the panel restarted and
+    /// picked the server up again). Its "running" isn't a start.
+    picked_up: bool,
+}
+
+fn alive(state: &str) -> bool {
+    matches!(state, "starting" | "running" | "stopping")
 }
 
 /// What changed between two looks at the servers.
@@ -192,7 +201,7 @@ fn changes(before: &HashMap<String, Seen>, s: &crate::servers::Summary) -> Vec<E
     let ev = |event, text: String| Event { event, server_id: s.id.clone(), server: s.name.clone(), text, at: now() };
     if b.state != s.state {
         match (b.state, s.state) {
-            (_, "running") => out.push(ev("start", format!("**{}** is up", s.name))),
+            (_, "running") if !b.picked_up => out.push(ev("start", format!("**{}** is up", s.name))),
             (_, "crashed") => out.push(ev(
                 "crash",
                 format!("**{}** crashed{}", s.name, s.exit_code.map(|c| format!(" (exit code {c})")).unwrap_or_default()),
@@ -239,7 +248,11 @@ pub fn watch(app: Arc<App>) {
                 if !first {
                     events.extend(changes(&before, s));
                 }
-                before.insert(s.id.clone(), Seen { state: s.state, players: s.players.clone() });
+                let picked_up = match before.get(&s.id) {
+                    Some(b) => b.picked_up && alive(s.state),
+                    None => alive(s.state),
+                };
+                before.insert(s.id.clone(), Seen { state: s.state, players: s.players.clone(), picked_up });
             }
             // Servers that just appeared count from the next look.
             first = false;
@@ -409,11 +422,13 @@ mod tests {
             players: players.iter().map(|p| p.to_string()).collect(),
             max_players: 0,
             uptime_secs: None,
+            addresses: Vec::new(),
+            sleep_after_minutes: 0,
         }
     }
 
     fn seen(state: &'static str, players: &[&str]) -> HashMap<String, Seen> {
-        HashMap::from([("s".to_string(), Seen { state, players: players.iter().map(|p| p.to_string()).collect() })])
+        HashMap::from([("s".to_string(), Seen { state, players: players.iter().map(|p| p.to_string()).collect(), picked_up: false })])
     }
 
     #[test]
@@ -426,6 +441,10 @@ mod tests {
         assert_eq!(kinds(seen("running", &["a"]), summary("stopped", &[])), ["stop"], "stopping isn't everyone leaving");
         assert!(kinds(seen("stopped", &[]), summary("starting", &[])).is_empty());
         assert!(changes(&HashMap::new(), &summary("running", &[])).is_empty());
+        // Picked up again after the panel restarted: reaching "running" isn't a start.
+        let mut b = seen("starting", &[]);
+        b.get_mut("s").unwrap().picked_up = true;
+        assert!(kinds(b, summary("running", &[])).is_empty());
     }
 
     #[test]

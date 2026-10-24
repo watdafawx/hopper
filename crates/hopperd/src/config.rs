@@ -38,6 +38,8 @@ pub struct Config {
     pub curseforge_key: String,
     /// SFTP port; 0 turns SFTP off.
     pub sftp_port: u16,
+    /// Server addresses: one Minecraft port for every server.
+    pub router: crate::router::RouterConfig,
 }
 
 impl Default for Config {
@@ -56,6 +58,7 @@ impl Default for Config {
             acme_staging: false,
             curseforge_key: String::new(),
             sftp_port: 8022,
+            router: Default::default(),
         }
     }
 }

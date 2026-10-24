@@ -358,12 +358,15 @@ fn take_locked(root: &Path, reason: Reason, progress: &dyn Fn(usize, usize)) -> 
     let mut new_bytes = 0;
     let all = current(root);
     let total = all.len();
+    // A file changed within the last moments can change again without its
+    // size or time moving (same millisecond), so it's always read.
+    let fresh_after = now_ms().saturating_sub(2000);
     for (i, (rel, path, md)) in all.into_iter().enumerate() {
         if i % 25 == 0 {
             progress(i, total);
         }
         let key = (rel.clone(), md.len(), mtime_ms(&md));
-        let hash = match known.get(&key) {
+        let hash = match known.get(&key).filter(|_| key.2 < fresh_after) {
             Some(h) => h.clone(),
             None => hash_file(&path).with_context(|| format!("reading {rel}"))?,
         };

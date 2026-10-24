@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -120,6 +120,29 @@ Not yet: incremental and off-site backups (see the roadmap).
   the password from anywhere. Saved-over files keep their old version and
   deleted ones go to the trash.
 
+## Server addresses (0.2.0)
+
+Players join `survival.mc.example.com` instead of an IP and port. The panel
+listens on one Minecraft port (25565 by default) for every server, reads
+the address the player typed and passes them to that server's own port.
+
+- Set a server's addresses in its **Settings › Address** card. With a domain
+  set (Access & devices › Server addresses), you type only the name.
+  `*.example.com` wildcards work; an exact address wins over a wildcard.
+- One DNS record covers every server: `A *.mc.example.com → your public IP`.
+  "Check DNS and port" shows the record and tests both from outside.
+- A server can't use the router's port itself; **Move it** gives it a free one.
+- **Sleep when empty:** a server with nobody on for N minutes is stopped.
+  The server list then shows "Sleeping · join to wake it", and joining
+  starts it (the player is told how long it usually takes). Webhooks:
+  `wake`, `sleep`.
+- Stopped, starting and crashed servers answer in the server list instead
+  of "Can't connect"; an address no server has says so (or goes to a server
+  you pick).
+- Settings: `[router]` in `hopperd.toml` (`enabled`, `port`, `domain`,
+  `unknown_server`); per server in `.hopper-route.json` in its folder.
+- Servers see players as coming from 127.0.0.1 (no proxy forwarding yet).
+
 ## Install as a service
 
 From an admin terminal (Windows) or with sudo (Linux):
@@ -195,6 +218,8 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `PUT /settings/curseforge` `{key}` | CurseForge key (owner) |
 | `GET /fs/{id}/history?path=`, `GET /fs/{id}/diff?path=&version=` | earlier versions, line diff against now |
 | `GET /fs/{id}/search?q=&path=[&regex=1]` → `{hits: [{path, line, text}], more}` | text in files and names |
+| `GET` / `PUT /router` `{enabled, port, domain, unknown_server}`, `POST /router/check` | server addresses: settings (owner), DNS and port check |
+| `GET` / `PUT /servers/{id}/address` `{addresses, sleep_after_minutes}`, `POST .../address/move-port` | a server's addresses and sleep |
 | `POST /mcp` | Model Context Protocol (JSON-RPC) |
 | `GET /ws` | live: `snapshot` every second; send `{"op":"console","server":id}` to follow a console |
 

@@ -5,6 +5,7 @@
   import { power } from './lib/power.js';
   import Spark from './Spark.svelte';
   import NewServer from './NewServer.svelte';
+  import Addr from './Addr.svelte';
 
   let making = $state(false);
 
@@ -52,7 +53,7 @@
           <a class="nmw" href="#/server/{encodeURIComponent(s.id)}">
             <div class="nm">{s.name}</div>
             <div class="tiny muted">
-              {s.loader || 'Minecraft'}{s.version ? ` · ${s.version}` : ''} · :{s.port}{alive(s) ? ` · ${uptime(s.uptime_secs)}` : ''}
+              {s.loader || 'Minecraft'}{s.version ? ` · ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{:else}:{s.port}{/if}{alive(s) ? ` · ${uptime(s.uptime_secs)}` : ''}{#if s.sleep_after_minutes && s.state === 'stopped'} · Sleeping{/if}
             </div>
           </a>
           {#if s.managed_by}<span class="chip">{s.managed_by}</span>{/if}

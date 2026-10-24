@@ -22,11 +22,20 @@
   let lv = $state('');
   let memory = $state(6);
   let port = $state('');
+  /** The router's settings, for the address field. */
+  let router = $state(null);
+  /** The address's name part (with a domain) or the whole address; null: follow the server name. */
+  let addrEdit = $state(null);
   let eula = $state(false);
   let busy = $state('');
   let error = $state('');
 
   const options = $derived(loaders[loader] || []);
+  const domain = $derived(router?.config?.enabled ? router.config.domain : '');
+  const slug = (n) => n.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const addrName = $derived(addrEdit ?? (domain ? slug(name) : ''));
+  const address = $derived(!addrName ? '' : domain && !addrName.includes('.') ? `${addrName}.${domain}` : addrName);
+  api('/router').then((r) => (router = r), () => {});
   const canMake = $derived(name.trim() && mc && eula && (loader === 'vanilla' || loader === 'fabric' || loader === 'quilt' || lv) && !busy);
 
   async function loadLoaders() {
@@ -55,7 +64,7 @@
     try {
       const { job } = await post('/servers/create', {
         name: name.trim(), mc_version: mc, loader, loader_version: loader === 'vanilla' ? '' : lv,
-        memory_mb: Math.round(memory * 1024), port: port ? Number(port) : null, accept_eula: eula,
+        memory_mb: Math.round(memory * 1024), port: port ? Number(port) : null, accept_eula: eula, address,
       });
       busy = 'Starting';
       const r = await followJob(job, (st) => (busy = st.detail || 'Working'));
@@ -112,6 +121,13 @@
         <div class="input"><input id="ns-port" type="number" bind:value={port} placeholder="first free" disabled={!!busy} /></div>
       </div>
     </div>
+    {#if router?.config?.enabled}
+      <label class="lbl" for="ns-addr">Address players join</label>
+      <div class="row">
+        <div class="input grow"><input id="ns-addr" class="mono" value={addrName} oninput={(e) => (addrEdit = e.currentTarget.value.trim().toLowerCase())} placeholder={domain ? 'survival' : 'survival.example.com (optional)'} disabled={!!busy} /></div>
+        {#if domain && !addrName.includes('.')}<span class="mono small muted">.{domain}</span>{/if}
+      </div>
+    {/if}
     <label class="eula small"><input type="checkbox" bind:checked={eula} disabled={!!busy} />
       <span>I agree to the <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer">Minecraft EULA</a>.</span></label>
     {#if error}<div class="err">{error}</div>{/if}
@@ -124,6 +140,7 @@
 </div>
 
 <style>
+  .grow { flex: 1; }
   .back { position: fixed; inset: 0; background: #0008; display: grid; place-items: center; z-index: 55; padding: 16px; }
   .box { width: min(480px, 100%); display: flex; flex-direction: column; gap: 8px; box-shadow: 0 24px 60px #000c; }
   .box h3 { margin: 0 0 4px; }

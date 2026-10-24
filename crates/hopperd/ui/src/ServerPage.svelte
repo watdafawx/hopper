@@ -15,6 +15,7 @@
   import Schedule from './Schedule.svelte';
   import Settings from './Settings.svelte';
   import Mods from './Mods.svelte';
+  import Addr from './Addr.svelte';
 
   let { id, tab = 'console', path = '' } = $props();
 
@@ -118,7 +119,7 @@
         <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateLabel[s.state]}{alive ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
         {#if s.managed_by}<span class="chip">Run by {s.managed_by}</span>{/if}
       </div>
-      <div class="small muted ell">{s.loader || 'Minecraft'}{s.version ? ` · Minecraft ${s.version}` : ''} · :{s.port} · <span class="mono">{s.path}</span></div>
+      <div class="small muted ell">{s.loader || 'Minecraft'}{s.version ? ` · Minecraft ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gap={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gap">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
     </div>
     <div class="row acts">
       {#if !alive}
@@ -224,6 +225,8 @@
   .wrap { flex-wrap: wrap; }
   h2 { font-size: 17px; font-weight: 700; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sleep { color: var(--gold); }
+  .gap { margin-left: 6px; }
   .tabs { display: flex; gap: 20px; padding: 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
   .tabs button { padding: 9px 0; color: var(--subtle); font-weight: 500; }
   .tabs button.on { color: var(--text); box-shadow: inset 0 -2px var(--acc); }

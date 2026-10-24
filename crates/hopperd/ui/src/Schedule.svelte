@@ -66,6 +66,11 @@
     <div class="f"><div>Crash restarts allowed per hour</div><div class="input w"><input type="number" min="0" max="20" bind:value={s.max_crash_restarts} /></div></div>
     {#if info?.gave_up}<div class="err small">{info.gave_up}</div>{/if}
 
+    {#if server.sleep_after_minutes}
+      <div class="sec lbl">Sleep</div>
+      <div class="tiny muted">Stops after {server.sleep_after_minutes} min with nobody on, and starts when someone joins. Change it in <a href="#/server/{encodeURIComponent(server.id)}/settings">Settings › Address</a>.</div>
+    {/if}
+
     <div class="sec lbl">Backups</div>
     <div class="f"><div><div>Back up every</div><div class="tiny muted">Hours, while the server runs. 0: off.</div></div>
       <div class="input w"><input type="number" min="0" max="168" bind:value={s.backup_every_hours} /></div></div>

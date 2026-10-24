@@ -2,6 +2,7 @@
   import { SlidersHorizontal, MemoryStick, Save, Search, ChevronDown, ChevronRight } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
+  import Address from './Address.svelte';
 
   let { server } = $props();
   let props = $state(null);
@@ -98,6 +99,8 @@
     {/if}
   </div>
 
+  <div class="stack">
+  <Address {server} />
   <div class="card side">
     <h3><MemoryStick size={14} />Memory &amp; Java</h3>
     {#if jvm}
@@ -118,11 +121,13 @@
       <details class="tiny muted"><summary>Flags ({jvm.flags.length})</summary><div class="mono flags">{jvm.flags.join(' ')}</div></details>
     {/if}
   </div>
+  </div>
 </div>
 
 <style>
   .cols { display: flex; gap: 14px; align-items: flex-start; }
   .cols > .card:first-child { flex: 1; min-width: 0; }
+  .stack { display: flex; flex-direction: column; gap: 14px; flex: none; }
   .side { width: 320px; flex: none; display: flex; flex-direction: column; gap: 8px; }
   .find { padding: 3px 8px; width: 170px; font-weight: 400; }
   .f { display: flex; align-items: center; gap: 16px; justify-content: space-between; padding: 8px 4px; border-bottom: 1px solid var(--line); }
@@ -138,5 +143,5 @@
   .wrap { flex-wrap: wrap; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .flags { word-break: break-all; margin-top: 6px; }
-  @media (max-width: 900px) { .cols { flex-direction: column; } .side { width: auto; } .wide { width: 160px; } }
+  @media (max-width: 900px) { .cols { flex-direction: column; } .stack { align-self: stretch; } .side { width: auto; } .wide { width: 160px; } }
 </style>

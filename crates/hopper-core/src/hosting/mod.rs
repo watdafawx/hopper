@@ -11,6 +11,7 @@ pub mod local_panel;
 pub mod logparse;
 pub mod process;
 pub mod properties;
+pub mod router;
 pub mod schedule;
 pub mod script;
 pub mod server_pack;

@@ -100,6 +100,20 @@ fn text(t: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }] })
 }
 
+/// The tools this caller can use: someone who may only look (a read-only
+/// token, a viewer) isn't offered the ones that change things.
+fn tools_for(who: &Who) -> Vec<Value> {
+    let looks_only = match who {
+        Who::Token { read_only, .. } => *read_only,
+        Who::User { role, .. } => *role == crate::auth::Role::Viewer,
+        _ => false,
+    };
+    tools()
+        .into_iter()
+        .filter(|t| !looks_only || t["annotations"]["readOnlyHint"].as_bool().unwrap_or(false))
+        .collect()
+}
+
 fn tool_error(t: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }], "isError": true })
 }
@@ -151,7 +165,7 @@ async fn one(app: &Arc<App>, who: &Who, msg: Value) -> Option<Value> {
             )
         }
         "ping" => rpc_ok(&id, json!({})),
-        "tools/list" => rpc_ok(&id, json!({ "tools": tools() })),
+        "tools/list" => rpc_ok(&id, json!({ "tools": tools_for(who) })),
         "tools/call" => {
             let name = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("").to_string();
             let args = msg.pointer("/params/arguments").cloned().unwrap_or(json!({}));

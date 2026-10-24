@@ -185,7 +185,9 @@ pub fn make(root: &Path, scope: Scope, kind: Kind, note: &str, server: Option<&L
     }
     files.sort();
 
-    let stamp = chrono_like(now());
+    // Named in the PC's local time, as people read it (the listing's dates
+    // come from the files themselves).
+    let stamp = chrono_like(super::schedule::LocalTime::now().0.max(0) as u64);
     let name = format!(
         "{stamp}-{}-{}.zip",
         match kind {

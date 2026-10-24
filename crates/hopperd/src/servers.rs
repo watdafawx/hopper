@@ -42,6 +42,10 @@ pub struct Summary {
     pub players: Vec<String>,
     pub max_players: u32,
     pub uptime_secs: Option<u64>,
+    /// Addresses players join it by (server addresses / the router).
+    pub addresses: Vec<String>,
+    /// Sleeps after this many minutes with nobody on; 0: never.
+    pub sleep_after_minutes: u32,
 }
 
 pub struct Servers {
@@ -147,6 +151,9 @@ impl Servers {
         let t = e.server.tracker();
         let props = hopper_core::hosting::Properties::load(&e.root.join("server.properties")).unwrap_or_default();
         let (cpu, mem) = if state.is_alive() { e.server.usage().unwrap_or((0.0, 0)) } else { (0.0, 0) };
+        let route = hopper_core::hosting::router::RouteSettings::load(&e.root);
+        // Servers Hopper made know their version before they've run.
+        let meta = hopper_core::hosting::HostedMeta::load(&e.root);
         Summary {
             id: e.id.clone(),
             name: e.name.clone(),
@@ -158,8 +165,8 @@ impl Servers {
                 _ => None,
             },
             managed_by: e.managed_by,
-            loader: e.loader.clone(),
-            version: t.version,
+            loader: e.loader.clone().or_else(|| meta.as_ref().map(|m| m.loader.clone()).filter(|l| !l.is_empty() && l != "Vanilla")),
+            version: if t.version.is_empty() { meta.map(|m| m.minecraft).unwrap_or_default() } else { t.version },
             max_memory: e.max_memory.clone(),
             cpu,
             mem_bytes: mem,
@@ -174,6 +181,8 @@ impl Servers {
                 .filter(|_| state.is_alive())
                 .and_then(|s| s.elapsed().ok())
                 .map(|d| d.as_secs()),
+            addresses: route.addresses,
+            sleep_after_minutes: route.sleep_after_minutes,
         }
     }
 

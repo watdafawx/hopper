@@ -90,6 +90,21 @@ pub struct CreateOptions {
 }
 
 impl CreateOptions {
+    /// What the server lists show for a server Hopper made (Minecraft
+    /// version and loader), saved in the server folder.
+    pub fn hosted_meta(&self) -> super::HostedMeta {
+        super::HostedMeta {
+            minecraft: self.mc_version.clone(),
+            loader: match &self.loader {
+                ServerLoader::Vanilla => "Vanilla".into(),
+                ServerLoader::Fabric(v) | ServerLoader::Quilt(v) => {
+                    format!("{} {}", self.loader.name(), v.clone().unwrap_or_default()).trim().to_string()
+                }
+                ServerLoader::NeoForge(v) | ServerLoader::Forge(v) => format!("{} {v}", self.loader.name()),
+            },
+        }
+    }
+
     pub fn new(name: &str, servers_root: &Path, mc_version: &str, loader: ServerLoader, java: &Path) -> Self {
         let memory_mb = if loader.is_modded() { 6144 } else { 2048 };
         CreateOptions {
@@ -167,6 +182,9 @@ fn fill(root: &Path, opts: &CreateOptions, job: &Job) -> anyhow::Result<()> {
     super::write_eula(root, opts.accept_eula)?;
     super::properties::defaults(opts.port, &opts.motd, opts.loader.is_modded())
         .save(&root.join("server.properties"))?;
+    // Without it, the Minecraft version is only known once the server has
+    // run, and adding mods before that picks files for the wrong version.
+    opts.hosted_meta().save(root)?;
     Ok(())
 }
 
