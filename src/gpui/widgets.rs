@@ -137,11 +137,15 @@ pub fn split(
 /// How wide a row's update pill is, so the changelog button that stands in
 /// for it when there's no update takes the same space.
 pub const SPLIT_W: f32 = 9.45;
+/// The same pill with icons only, for narrow lists.
+pub const SPLIT_W_COMPACT: f32 = 4.5;
 
 /// The changelog half of a split button on its own, as wide as the pill
-/// (`SPLIT_W`), for rows with nothing to do but read what changed.
+/// (`SPLIT_W`, or `SPLIT_W_COMPACT` and icon-only when `compact`), for rows
+/// with nothing to do but read what changed.
 pub fn split_alone(
     id: impl Into<ElementId>,
+    compact: bool,
     size: gpui_kit::component::Size,
     tip: impl Into<SharedString>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -150,7 +154,7 @@ pub fn split_alone(
     let theme = cx.theme();
     Button::new(id)
         .icon(Icon::new(IconName::ScrollText))
-        .label("Changelog")
+        .when(!compact, |b| b.label("Changelog"))
         .custom(
             gpui_kit::component::button::ButtonCustomVariant::new(cx)
                 .color(theme.secondary)
@@ -161,7 +165,7 @@ pub fn split_alone(
         .with_size(size)
         .border_1()
         .border_color(theme.border)
-        .w(rems(SPLIT_W))
+        .w(rems(if compact { SPLIT_W_COMPACT } else { SPLIT_W }))
         .tooltip(tip)
         .on_click(on_click)
 }

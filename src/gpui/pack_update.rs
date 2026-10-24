@@ -106,6 +106,9 @@ pub struct UpdatePreview {
     mc_change: Option<(String, String)>,
     /// Back up every world before updating (on when Minecraft changes).
     backup_worlds: bool,
+    /// Reinstalling the installed version: compared without a base, so
+    /// every file you changed is a conflict you can reset to the pack's.
+    reinstall: bool,
 }
 
 impl UpdatePreview {
@@ -905,7 +908,11 @@ impl Render for UpdatePreview {
                 .py_4()
                 .child(Spinner::new().small())
                 .child(widgets::caption(
-                    "Downloading both pack versions and comparing them with your instance",
+                    if self.reinstall {
+                        "Downloading this pack version and comparing it with your instance"
+                    } else {
+                        "Downloading both pack versions and comparing them with your instance"
+                    },
                     cx,
                 ))
                 .into_any_element(),
@@ -972,12 +979,15 @@ impl Render for UpdatePreview {
                                 .gap_2()
                                 .text_sm()
                                 .text_color(theme.warning)
-                                .child(Icon::new(IconName::TriangleAlert).small())
-                                .child(if server_mode {
+                                .items_start()
+                                .child(Icon::new(IconName::TriangleAlert).small().flex_none().mt(px(2.)))
+                                .child(div().flex_1().min_w_0().child(if server_mode {
                                     "Hopper can't tell which server pack this server came from, so every file that differs counts as both changed."
+                                } else if self.reinstall {
+                                    "Reinstalling this version: every file that differs from the pack's is listed as both changed. Keep yours, or take the pack's to reset it (yours is backed up first)."
                                 } else {
                                     "The installed pack version couldn't be downloaded, so every file that differs counts as both changed."
-                                }),
+                                })),
                         )
                     })
                     .children(self.your_choices(&plan, cx))
@@ -1087,6 +1097,7 @@ fn show(
         .filter(|to| !inst.game_version.is_empty() && *to != inst.game_version)
         .map(|to| (inst.game_version.clone(), to));
     let backup_worlds = mc_change.is_some();
+    let reinstall = inst.pack.as_ref().is_some_and(|p| hopper::packdiff::is_reinstall(p, &file));
     let view = cx.new(|cx| {
         let mut v = UpdatePreview {
             store,
@@ -1102,6 +1113,7 @@ fn show(
             diffs: HashMap::new(),
             mc_change,
             backup_worlds,
+            reinstall,
         };
         match plan {
             Some(r) => {
@@ -1119,7 +1131,7 @@ fn show(
         }
         v
     });
-    let title = format!("Update {}", inst.name);
+    let title = format!("{} {}", if reinstall { "Reinstall" } else { "Update" }, inst.name);
     window.open_dialog(cx, move |dialog, window, cx| {
         let ready = matches!(view.read(cx).plan, Some(Ok(_)));
         let v2 = view.clone();
@@ -1133,8 +1145,8 @@ fn show(
                     .child(DialogAction::new().child(
                         Button::new("upd-go")
                             .primary()
-                            .icon(IconName::Download)
-                            .label("Update")
+                            .icon(if reinstall { IconName::RotateCcw } else { IconName::Download })
+                            .label(if reinstall { "Reinstall" } else { "Update" })
                             .disabled(!ready),
                     )),
             )
@@ -1191,6 +1203,7 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
             diffs: HashMap::new(),
             mc_change: None,
             backup_worlds: false,
+            reinstall: false,
         };
         match job {
             Some(_) => v.follow(cx),

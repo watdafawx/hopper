@@ -84,9 +84,12 @@ pub fn in_class(a: &Addon, class: u32) -> bool {
 fn col_check() -> Div {
     div().w_6().flex_none()
 }
-/// Wide enough for "Updating 100%" and the changelog arrow.
-fn col_action() -> Div {
-    div().w(rems(9.5)).flex_none()
+/// The Update / Changelog column: wide enough for "Updating 100%" and the
+/// changelog half, or with `compact` the icon-only pill.
+fn col_action(compact: bool) -> Div {
+    div()
+        .w(rems(if compact { widgets::SPLIT_W_COMPACT + 0.25 } else { 9.5 }))
+        .flex_none()
 }
 fn col_author() -> Div {
     div().w_40().flex_none()
@@ -440,6 +443,14 @@ pub struct AddonsView {
     pub(crate) move_targets: Vec<(String, String)>,
     /// Whether the Author column fits; set each frame from the window.
     author_fits: bool,
+    /// The list is narrow (the project panel is open, or it's a global or
+    /// Paxi folder beside its folder list): the action column shrinks to
+    /// icon buttons and leaves the name its room.
+    compact: bool,
+    /// Narrower still (a global or Paxi folder with the project panel
+    /// open): the Added column goes, and the changelog column unless a row
+    /// has an update (the open panel lists the files and their changelogs).
+    tight: bool,
     /// Mods just updated, still shown (as Updated) until the user stops
     /// clicking Update, so rows don't move under the pointer.
     recent: HashMap<u64, Update>,
@@ -529,6 +540,8 @@ impl AddonsView {
             scroll: UniformListScrollHandle::new(),
             peek,
             author_fits: true,
+            compact: false,
+            tight: false,
             recent: HashMap::new(),
             settle: Default::default(),
             crashed: HashMap::new(),
@@ -1991,13 +2004,13 @@ impl AddonsView {
             )
             .child(div().w_10().flex_none())
             .child(head(SortCol::Name, "Name", div().flex_1().min_w_0()))
-            .child(col_action())
+            .when(self.action_fits(), |r| r.child(col_action(self.compact)))
             .when(self.author_fits, |r| {
                 r.child(head(SortCol::Author, "Author", col_author()))
             })
             .child(head(SortCol::Env, "Side", col_env()))
             .child(head(SortCol::Active, "On", col_active()))
-            .child(head(SortCol::Added, "Added", col_date()))
+            .when(!self.tight, |r| r.child(head(SortCol::Added, "Added", col_date())))
             .child(col_trash())
     }
 
@@ -2453,7 +2466,9 @@ impl AddonsView {
             .as_ref()
             .filter(|_| updating == Some(true))
             .and_then(|r| store.update_progress(r, a.project_id));
-        let action = col_action().when(done, |c| {
+        let compact = self.compact;
+        let pill_w = rems(if compact { widgets::SPLIT_W_COMPACT } else { widgets::SPLIT_W });
+        let action = col_action(compact).when(done, |c| {
             // Updated: a quiet green mark where the button was, until the
             // row goes.
             c.child(widgets::done_mark(id("updated"), "Updated", false, cx))
@@ -2468,12 +2483,15 @@ impl AddonsView {
                             .small()
                             .outline()
                             .icon(IconName::Download)
-                            .label(match (updating, progress) {
-                                (Some(true), Some(p)) => format!("Updating {}%", (p * 100.0).floor() as u32),
-                                (Some(true), None) => "Updating".to_string(),
-                                (Some(false), _) => "Queued".to_string(),
-                                (None, _) if from_web => "From website".to_string(),
-                                (None, _) => "Update".to_string(),
+                            // Narrow, the icon alone (the tooltip says the rest).
+                            .when(!compact, |b| {
+                                b.label(match (updating, progress) {
+                                    (Some(true), Some(p)) => format!("Updating {}%", (p * 100.0).floor() as u32),
+                                    (Some(true), None) => "Updating".to_string(),
+                                    (Some(false), _) => "Queued".to_string(),
+                                    (None, _) if from_web => "From website".to_string(),
+                                    (None, _) => "Update".to_string(),
+                                })
                             })
                             .loading(updating == Some(true))
                             .tooltip(if from_web && updating.is_none() {
@@ -2502,13 +2520,14 @@ It stays disabled after updating: turn it on in the On column.")
                 cx,
             );
             // The download fills the button from the left.
-            c.child(widgets::progress_fill(split.min_w(rems(widgets::SPLIT_W)), progress, cx))
+            c.child(widgets::progress_fill(split.min_w(pill_w), progress, cx))
         })
         // Nothing to update: the changelog alone, in the pill's place.
         .when(update.is_none() && !done && a.project_id != 0, |c| {
             let (pid, view) = (a.project_id, cx.entity());
             c.child(widgets::split_alone(
                 id("changes"),
+                compact,
                 gpui_kit::component::Size::Small,
                 "Versions and changelogs",
                 move |_, window, cx| view.update(cx, |this, cx| this.versions(pid, None, window, cx)),
@@ -2684,7 +2703,7 @@ It stays disabled after updating: turn it on in the On column.")
                             })
                     })),
             )
-            .child(action)
+            .when(self.action_fits(), |r| r.child(action))
             // Room for the project panel.
             .when(self.author_fits, |r| {
                 r.child(
@@ -2729,7 +2748,7 @@ It stays disabled after updating: turn it on in the On column.")
                         })),
                 ),
             )
-            .child({
+            .when(!self.tight, |r| r.child({
                 let exact = hopper::time::date_of(&a.date_added);
                 col_date()
                     .id(id("added"))
@@ -2739,7 +2758,7 @@ It stays disabled after updating: turn it on in the On column.")
                         d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(exact.clone()).build(w, cx))
                     })
                     .child(hopper::time::relative(&a.date_added))
-            })
+            }))
             .child(
                 col_trash().child(
                     Button::new(id("rm"))
@@ -2865,6 +2884,11 @@ It stays disabled after updating: turn it on in the On column.")
             .into_any_element()
     }
 
+    /// Whether the rows show the Update / Changelog column.
+    fn action_fits(&self) -> bool {
+        !self.tight || !self.table.updates.is_empty()
+    }
+
     fn versions(
         &mut self,
         pid: u64,
@@ -2872,8 +2896,27 @@ It stays disabled after updating: turn it on in the On column.")
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A global or Paxi folder isn't the instance's own content, so its
+        // packs get the one changelog (the update's, else the installed
+        // file's) instead of the versions to switch between.
         if self.global_dir().is_some() {
-            return self.open_peek(pid, cx);
+            let root = self.root.clone();
+            if let Some(f) = update {
+                return crate::versions::open_file(self.store.clone(), root, f, window, cx);
+            }
+            let found = self
+                .table
+                .inst
+                .as_ref()
+                .and_then(|i| i.addons.iter().find(|a| a.project_id == pid))
+                .map(|a| (a.file_id, a.name.clone()));
+            match found {
+                Some((file_id, name)) if file_id != 0 => {
+                    crate::versions::open_file_id(self.store.clone(), root, pid, file_id, name, window, cx)
+                }
+                _ => self.open_peek(pid, cx),
+            }
+            return;
         }
         if let Some(root) = self.root.clone() {
             crate::versions::open(self.store.clone(), root, pid, false, update, window, cx);
@@ -2973,7 +3016,11 @@ impl Picks for AddonsView {
 impl Render for AddonsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // With the project panel open, Author goes only on a narrow window.
-        self.author_fits = !self.peek.read(cx).is_open()
+        let peek_open = self.peek.read(cx).is_open();
+        // A global or Paxi folder sits beside its folder list: narrow too.
+        self.compact = peek_open || self.global_dir().is_some();
+        self.tight = peek_open && self.global_dir().is_some();
+        self.author_fits = !peek_open
             || window.viewport_size().width / window.rem_size() >= 100.0;
         // Built by `sync` when the store changes; here only the filters
         // may need applying again (in memory).

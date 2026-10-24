@@ -236,6 +236,24 @@ impl Render for VersionsView {
                     let target = i == 0 && !e.installed;
                     let file = self.all.iter().find(|f| f.display_name == e.name).cloned();
                     let view = cx.entity();
+                    // The installed one: the same file again, to get back
+                    // what it ships (a pack's configs, a mod's jar).
+                    let pack = self.pack;
+                    let reinstall = file.clone().filter(|_| e.installed).map(|f| {
+                        let view = view.clone();
+                        Button::new(SharedString::from(format!("reinstall:{}", f.id)))
+                            .small()
+                            .outline()
+                            .icon(IconName::RotateCcw)
+                            .label("Reinstall")
+                            .tooltip(if pack {
+                                "Install this version again: lists every config that differs from the pack's so you can reset it, and puts back missing files"
+                            } else {
+                                "Download this version again in place of the installed file"
+                            })
+                            .disabled(locked)
+                            .on_click(move |_, window, cx| VersionsView::install(&view, f.clone(), window, cx))
+                    });
                     let action = file.filter(|_| !e.installed).map(|f| {
                         let b = Button::new(SharedString::from(format!("install:{}", f.id)))
                             .small()
@@ -262,7 +280,8 @@ impl Render for VersionsView {
                                 })
                                 .child(div().flex_1())
                                 .child(widgets::caption(hopper::time::relative(&e.date), cx).text_xs())
-                                .children(action),
+                                .children(action)
+                                .children(reinstall),
                         )
                         .child(self.changelog(
                             ElementId::Name(format!("cl:{}", e.name).into()),
@@ -528,6 +547,61 @@ impl Render for FileLog {
             )
             .child(div().id("file-log-scroll").flex_1().min_h_0().overflow_y_scrollbar().child(body))
     }
+}
+
+/// Opens the changelog of a project's file known only by id (a pack in a
+/// global or Paxi folder, which the instance's versions don't cover): the
+/// dialog opens at once and shows the spinner while the file is looked up.
+pub fn open_file_id(
+    store: Entity<Store>,
+    root: Option<PathBuf>,
+    project_id: u64,
+    file_id: u64,
+    name: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let placeholder = cf::File {
+        id: file_id,
+        mod_id: project_id,
+        display_name: name,
+        ..Default::default()
+    };
+    let view = cx.new(|cx| {
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    let f = hopper::source::file(project_id, file_id)?;
+                    let md = hopper::richtext::to_markdown(&hopper::source::changelog(&f)?);
+                    anyhow::Ok((f, SharedString::from(md)))
+                })
+                .await;
+            this.update(cx, |this: &mut FileLog, cx| {
+                match r {
+                    Ok((f, md)) => {
+                        this.file = f;
+                        this.md = Some(Ok(md));
+                    }
+                    Err(e) => this.md = Some(Err(format!("{e:#}"))),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        FileLog {
+            store,
+            root,
+            file: placeholder,
+            md: None,
+        }
+    });
+    window.open_dialog(cx, move |dialog, window, _| {
+        dialog
+            .title("Changelog")
+            .w(rems(46.).to_pixels(window.rem_size()))
+            .child(view.clone())
+    });
 }
 
 /// Opens one version's changelog.

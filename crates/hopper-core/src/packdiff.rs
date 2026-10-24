@@ -439,6 +439,11 @@ pub fn plan_files_by(
     (changes, same)
 }
 
+/// Whether "updating" to `file` is reinstalling the version the instance has.
+pub fn is_reinstall(pack: &crate::instances::PackRef, file: &cf::File) -> bool {
+    pack.file_id != 0 && pack.file_id == file.id
+}
+
 /// Downloads the new pack version (and the installed one, to compare
 /// against) and works out what updating to `file` would do.
 pub fn plan(inst: &Instance, file: &cf::File, job: &Job) -> anyhow::Result<UpdatePlan> {
@@ -456,12 +461,19 @@ pub fn plan(inst: &Instance, file: &cf::File, job: &Job) -> anyhow::Result<Updat
     };
     job.detail(format!("Downloading {}", file.display_name));
     let new_zip = fetch(file)?;
-    // The installed version, to tell your edits from the pack's.
-    job.detail("Downloading the installed version to compare");
-    let old_zip = crate::source::file(pack.project_id, pack.file_id)
-        .and_then(|f| fetch(&f))
-        .inspect_err(|e| log::warn!("installed pack version: {e:#}"))
-        .ok();
+    // The installed version, to tell your edits from the pack's. Not for a
+    // reinstall of that same version: with it as the base every file you
+    // changed would count as yours and stay, and a reinstall is for getting
+    // the pack's back. Without a base, each one is a conflict to settle.
+    let old_zip = if is_reinstall(&pack, file) {
+        None
+    } else {
+        job.detail("Downloading the installed version to compare");
+        crate::source::file(pack.project_id, pack.file_id)
+            .and_then(|f| fetch(&f))
+            .inspect_err(|e| log::warn!("installed pack version: {e:#}"))
+            .ok()
+    };
 
     let mut updated = Vec::new();
     let (prefixes, mut mods, mut removed) = if mr {
