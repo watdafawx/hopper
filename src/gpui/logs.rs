@@ -921,6 +921,7 @@ impl LogsView {
                                 .on_click(move |_, _, _| open_path(&p)),
                         )
                     })
+                    .child(crate::addons_extra::hunt_button("crash-hunt", root.to_path_buf(), self.store.clone()))
                     .child(
                         Button::new("crash-dismiss")
                             .small()

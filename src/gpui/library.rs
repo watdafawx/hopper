@@ -109,6 +109,12 @@ impl InstTab {
         }
     }
 
+    /// Resource packs, shaders and data packs: one "Packs" tab in the bar,
+    /// with sub-tabs.
+    pub(crate) fn is_pack(self) -> bool {
+        matches!(self, InstTab::ResourcePacks | InstTab::Shaders | InstTab::Datapacks)
+    }
+
     /// The addon class a tab lists, for the tabs that list addons.
     fn class(self) -> Option<u32> {
         match self {
@@ -119,6 +125,21 @@ impl InstTab {
         }
     }
 }
+
+/// The bar's tabs, left to right; `ResourcePacks` stands for "Packs".
+const BAR: [InstTab; 7] = [
+    InstTab::Overview,
+    InstTab::Mods,
+    InstTab::ResourcePacks,
+    InstTab::Worlds,
+    InstTab::Screenshots,
+    InstTab::Logs,
+    InstTab::Performance,
+];
+/// Tools around the pack, as icon buttons at the bar's right end.
+const MANAGE: [InstTab; 3] = [InstTab::Server, InstTab::Peers, InstTab::Settings];
+/// The sub-tabs of "Packs".
+const PACKS: [InstTab; 3] = [InstTab::ResourcePacks, InstTab::Shaders, InstTab::Datapacks];
 
 /// A tab's view, cached: it re-renders when it changes, not on every frame
 /// of the header's and underline's motion.
@@ -190,6 +211,12 @@ pub struct LibraryView {
     /// Where each tab was last laid out, for the underline.
     /// (left, width) of each tab from the first one's left edge.
     tab_bounds: Rc<RefCell<Vec<(Pixels, Pixels)>>>,
+    /// The pack sub-tab "Packs" opens on: the last one shown.
+    last_pack: InstTab,
+    /// The window's width and rem size at the last render, for fitting the
+    /// tab bar.
+    view_w: Pixels,
+    rem: Pixels,
     /// Blurred pack art per icon file (None while it's being made).
     blurs: HashMap<PathBuf, Option<PathBuf>>,
     /// Folder size per instance (None while it's being counted).
@@ -348,6 +375,9 @@ impl LibraryView {
             tab_moved: None,
             tab_serial: 0,
             tab_bounds: Default::default(),
+            last_pack: InstTab::ResourcePacks,
+            view_w: px(1440.),
+            rem: px(16.),
             blurs: HashMap::new(),
             sizes: HashMap::new(),
             detail_w: 80.0,
@@ -509,7 +539,16 @@ impl LibraryView {
         });
     }
 
+    /// Opens `root` on its Mods tab.
+    pub fn open_mods(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.open(root, cx);
+        self.set_tab(InstTab::Mods, cx);
+    }
+
     fn set_tab(&mut self, tab: InstTab, cx: &mut Context<Self>) {
+        if tab.is_pack() {
+            self.last_pack = tab;
+        }
         if tab != self.tab {
             self.tab_from = self.tab;
             self.tab_moved = Some(Instant::now());
@@ -1923,17 +1962,47 @@ impl LibraryView {
         hero.h(rems(if taller { HERO + 1.5 } else { HERO })).into_any_element()
     }
 
-    /// The tab strip, with an underline that slides from the last tab to
-    /// the picked one. Tabs report where they were laid out; the underline
-    /// is placed from that (one frame late the very first time).
+    /// The tab bar: content tabs with an underline that slides from the
+    /// last tab to the picked one, then Server, Peers and Settings as icon
+    /// buttons. Tabs that don't fit the window go in a "More" menu. Tabs
+    /// report where they were laid out; the underline is placed from that
+    /// (one frame late the very first time).
     fn tabs(&self, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let pos = |tab: InstTab| InstTab::ALL.iter().position(|t| *t == tab).unwrap_or(0);
+        let slot = |tab: InstTab| if tab.is_pack() { InstTab::ResourcePacks } else { tab };
+        // Which bar tabs fit: a rough width per tab from its label, against
+        // the room the window leaves beside the instance list.
+        let settings = self.store.read(cx).settings();
+        let side = if settings.sidebar_collapsed { RAIL } else { settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX) };
+        let room = self.view_w - self.rem * (side + 3.5) - px(MANAGE.len() as f32 * 34. + 24.);
+        let want = |t: InstTab| px(46. + Self::bar_label(t).len() as f32 * 7.6 + if t == InstTab::Mods { 30. } else { 0. });
+        let mut used = px(0.);
+        let mut shown: Vec<InstTab> = Vec::new();
+        let mut folded: Vec<InstTab> = Vec::new();
+        for (i, t) in BAR.iter().enumerate() {
+            let more = if i + 1 < BAR.len() { px(84.) } else { px(0.) };
+            if folded.is_empty() && used + want(*t) + more <= room {
+                used += want(*t);
+                shown.push(*t);
+            } else {
+                folded.push(*t);
+            }
+        }
+        // The open tab always shows.
+        if let Some(i) = folded.iter().position(|t| *t == slot(self.tab)) {
+            let t = folded.remove(i);
+            if let Some(last) = shown.pop() {
+                folded.insert(0, last);
+            }
+            shown.push(t);
+        }
+        let pos = |tab: InstTab| shown.iter().position(|t| *t == slot(tab));
         let (to, from) = (pos(self.tab), pos(self.tab_from));
-        let items = InstTab::ALL.iter().enumerate().map(|(i, t)| {
-            let active = *t == self.tab;
+        let items = shown.iter().enumerate().map(|(i, t)| {
+            let active = *t == slot(self.tab);
             let count = t
                 .class()
+                .filter(|_| !t.is_pack())
                 .map(|c| inst.addons.iter().filter(|a| in_class(a, c)).count());
             let tab = *t;
             h_flex()
@@ -1948,27 +2017,16 @@ impl LibraryView {
                 .text_color(if active { theme.foreground } else { theme.muted_foreground })
                 .hover(|s| s.text_color(theme.foreground))
                 .child(
-                    Icon::new(t.icon())
+                    Icon::new(Self::bar_icon(tab))
                         .small()
                         .when(active, |i| i.text_color(theme.primary)),
                 )
-                .child(t.label())
-                .when_some(count, |d, n| {
-                    d.child(
-                        div()
-                            .px_1p5()
-                            .rounded_full()
-                            .text_xs()
-                            .bg(if active {
-                                theme.primary.opacity(0.15)
-                            } else {
-                                theme.foreground.opacity(0.06)
-                            })
-                            .text_color(if active { theme.primary } else { theme.muted_foreground })
-                            .child(n.to_string()),
-                    )
-                })
-                .on_click(cx.listener(move |this, _, _, cx| this.set_tab(tab, cx)))
+                .child(Self::bar_label(tab))
+                .when_some(count, |d, n| d.child(div().text_xs().text_color(theme.muted_foreground).child(n.to_string())))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let to = if tab.is_pack() { this.last_pack } else { tab };
+                    this.set_tab(to, cx)
+                }))
         });
         let (bounds, entity) = (self.tab_bounds.clone(), cx.entity_id());
         let strip = h_flex()
@@ -1987,7 +2045,7 @@ impl LibraryView {
                 }
             });
         let laid = self.tab_bounds.borrow();
-        let place = |i: usize| laid.get(i).copied();
+        let place = |i: Option<usize>| i.and_then(|i| laid.get(i).copied());
         let underline = place(to).map(|(left, width)| {
             let bar = div()
                 .absolute()
@@ -2009,18 +2067,99 @@ impl LibraryView {
                 None => bar.left(left).w(width).into_any_element(),
             }
         });
+        let more = (!folded.is_empty()).then(|| {
+            let view = cx.entity();
+            let list = folded.clone();
+            Button::new("inst-tabs-more")
+                .ghost()
+                .small()
+                .label(format!("More ({})", folded.len()))
+                .dropdown_caret(true)
+                .dropdown_menu(move |menu, _, _| {
+                    list.iter().fold(menu, |m, t| {
+                        let (view, t) = (view.clone(), *t);
+                        m.item(PopupMenuItem::new(Self::bar_label(t)).icon(Self::bar_icon(t)).on_click(move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                let to = if t.is_pack() { this.last_pack } else { t };
+                                this.set_tab(to, cx)
+                            });
+                        }))
+                    })
+                })
+        });
+        let manage = MANAGE.iter().map(|t| {
+            let (tab, active) = (*t, *t == self.tab);
+            div()
+                .id(SharedString::from(format!("inst-manage:{}", t.key())))
+                .size(rems(2.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radius)
+                .clickable(cx)
+                .when(active, |d| d.bg(theme.primary.opacity(widgets::alpha::SELECTED)))
+                .when(!active, |d| d.hover(|s| widgets::row_hover(s, cx)))
+                .child(Icon::new(t.icon()).small().text_color(if active { theme.primary } else { theme.muted_foreground }))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tab.label()).build(w, cx))
+                .on_click(cx.listener(move |this, _, _, cx| this.set_tab(tab, cx)))
+        });
         div()
             .flex_none()
             .px_6()
             .border_b_1()
             .border_color(theme.border)
             .child(
-                div()
-                    .id("inst-tabs")
-                    .overflow_x_scroll()
-                    .child(div().relative().child(strip).children(underline)),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("inst-tabs")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .child(div().relative().child(strip).children(underline)),
+                    )
+                    .children(more)
+                    .child(div().w(px(1.)).h(rems(1.25)).bg(theme.border))
+                    .child(h_flex().gap_0p5().children(manage)),
             )
             .into_any_element()
+    }
+
+    /// A bar tab's name: "Packs" for the pack tabs.
+    fn bar_label(t: InstTab) -> &'static str {
+        if t.is_pack() { "Packs" } else { t.label() }
+    }
+
+    fn bar_icon(t: InstTab) -> IconName {
+        if t.is_pack() { IconName::Layers } else { t.icon() }
+    }
+
+    /// Resource packs · Shaders · Data packs, above a pack tab's list.
+    fn pack_tabs(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.tab.is_pack() {
+            return None;
+        }
+        let count = |t: InstTab| match t.class() {
+            Some(c) => format!(" ({})", inst.addons.iter().filter(|a| in_class(a, c)).count()),
+            None => String::new(),
+        };
+        let ix = PACKS.iter().position(|t| *t == self.tab).unwrap_or(0);
+        Some(
+            div()
+                .flex_none()
+                .px_6()
+                .pt_2()
+                .child(
+                    gpui_kit::component::tab::TabBar::new("pack-tabs")
+                        .underline()
+                        .small()
+                        .selected_index(ix)
+                        .children(PACKS.iter().map(|t| gpui_kit::component::tab::Tab::new().label(format!("{}{}", t.label(), count(*t)))))
+                        .on_click(cx.listener(|this, ix: &usize, _, cx| this.set_tab(PACKS[*ix], cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Overview: the page of the modpack the instance came from, from
@@ -2208,6 +2347,7 @@ impl LibraryView {
         let header = self.header(&inst, cx);
         let pending = self.pending_banner(&inst, cx);
         let tabs = self.tabs(&inst, cx);
+        let pack_tabs = self.pack_tabs(&inst, cx);
         let body = self.tab_body(&inst, cx);
         let anim = format!("{}:{}", inst.root.display(), self.tab.label());
         v_flex()
@@ -2218,6 +2358,7 @@ impl LibraryView {
             ))
             .children(pending)
             .child(tabs)
+            .children(pack_tabs)
             .child(div().flex_1().min_h_0().pt_3().child(widgets::enter(
                 ElementId::Name(anim.into()),
                 div().size_full().child(body),
@@ -2283,6 +2424,8 @@ fn new_group_dialog(store: Entity<Store>, root: PathBuf, window: &mut Window, cx
 
 impl Render for LibraryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.view_w = window.viewport_size().width;
+        self.rem = window.rem_size();
         // The work area's width in rem, for what the header has room for.
         let settings = self.store.read(cx).settings();
         let side = match self.drag_width {

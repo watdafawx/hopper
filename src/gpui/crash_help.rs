@@ -137,16 +137,35 @@ impl Render for CrashHelp {
                     .text_color(crate::widgets::site_color(false))
                     .on_click(|_, _, cx| cx.open_url(CURSEFORGE)),
             );
-        callout(color, cx)
+        let hunt = self.root.clone().map(|root| {
+            let muted = cx.theme().muted_foreground;
+            callout(cx.theme().border, cx)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(Icon::new(IconName::ScanSearch).small().text_color(muted))
+                        .child(div().font_semibold().child("No clear culprit?")),
+                )
+                .child(div().text_sm().text_color(muted).child(
+                    "Crash reports often blame the last mod in the chain, not the cause. Hopper can find the mod by turning mods off in rounds while you play: for crashes and for things that just misbehave.",
+                ))
+                .child(h_flex().child(crate::addons_extra::hunt_button("help-hunt", root, self.store.clone())))
+        });
+        v_flex()
+            .gap_3()
             .child(
-                h_flex()
-                    .gap_2()
-                    .text_color(color)
-                    .child(Icon::new(IconName::Stethoscope).small())
-                    .child(div().font_semibold().child(title)),
+                callout(color, cx)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_color(color)
+                            .child(Icon::new(IconName::Stethoscope).small())
+                            .child(div().font_semibold().child(title)),
+                    )
+                    .child(div().text_sm().text_color(cx.theme().foreground).child(text))
+                    .child(links),
             )
-            .child(div().text_sm().text_color(cx.theme().foreground).child(text))
-            .child(links)
+            .children(hunt)
     }
 }
 

@@ -4132,6 +4132,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1_smol",
+ "sha2 0.10.9",
  "similar",
  "sysinfo 0.37.2",
  "tiny_http",

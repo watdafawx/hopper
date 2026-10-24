@@ -417,6 +417,8 @@ pub struct AddonsView {
     /// the server root and [`marks_key`] it was compared at.
     pub(crate) marks: Option<(PathBuf, u64, HashMap<String, hopper::model::DiffEntry>)>,
     pub(crate) missing: crate::addons_extra::MissingDeps,
+    /// The find-the-broken-mod hunt, when one runs.
+    pub(crate) hunt: crate::addons_extra::HuntUi,
     search: Entity<InputState>,
     query: String,
     show: Show,
@@ -532,6 +534,7 @@ impl AddonsView {
             move_targets: Vec::new(),
             marks: None,
             missing: Default::default(),
+            hunt: Default::default(),
             search,
             query: String::new(),
             show: Show::All,
@@ -620,6 +623,7 @@ impl AddonsView {
     /// always, with `force`). All the disk reads the table needs happen
     /// here, never while rendering.
     fn sync(&mut self, force: bool, cx: &mut Context<Self>) {
+        self.read_hunt(cx);
         // The last crash's mods, for their tag (read once, then cached).
         if let Some(root) = self.root.clone() {
             let c = self.store.update(cx, |s, _| s.crash(&root).cloned());
@@ -1135,6 +1139,15 @@ impl AddonsView {
         if let Some(dir) = self.global_dir() {
             return self.toggle_global(dir, files, on, window, cx);
         }
+        // A hunt owns the on/off state until it ends.
+        if self.hunt_running() {
+            window.push_notification(
+                Notification::info("Finding the broken mod: mark mods known good on their chip, or stop the hunt first."),
+                cx,
+            );
+            cx.notify();
+            return;
+        }
         let Some(root) = self.root.clone() else { return };
         let (related, mode) = {
             let s = self.store.read(cx);
@@ -1609,7 +1622,9 @@ impl AddonsView {
                         }
                         note.dismiss(window, cx);
                     }))
-            });
+            })
+            // The undo stays in Backups; the toast shouldn't cover the header.
+            .autohide(true);
             window.push_notification(note, cx);
         }
         self.selected.clear();
@@ -2564,6 +2579,7 @@ impl AddonsView {
         flags: Flags,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let hunt_chip = self.hunt_chip(&a.file_name, cx);
         let store = self.store.read(cx);
         let theme = cx.theme();
         let hold = self
@@ -2646,6 +2662,7 @@ impl AddonsView {
                     })
                     .child(a.name.clone())
             })
+            .children(hunt_chip)
             .when(a.locked, |r| {
                 r.child(
                     div()
@@ -3596,7 +3613,9 @@ impl Render for UpdateReview {
             .child(
                 v_flex()
                     .gap_2()
-                    .child(widgets::caption("Old files go to .hopper-backups, and you can undo when it's done.", cx))
+                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
+                        "Old files go to .hopper-backups, and you can undo when it's done. A snapshot of the whole set is saved first: restore it from Backups.",
+                    ))
                     .child(summary)
                     .children(bad_note),
             )
@@ -3681,7 +3700,9 @@ impl BulkSum {
                     }
                     note.dismiss(window, cx);
                 }))
-        });
+        })
+        // A snapshot in Backups keeps the undo; the toast shouldn't linger.
+        .autohide(true);
         window.push_notification(note, cx);
     }
 }
@@ -3790,6 +3811,7 @@ impl Render for AddonsView {
         let dups = self.duplicate_banner(&inst, cx);
         let blockers = self.blocker_banner(&inst, cx);
         let shaders = self.shader_notes(&inst, cx);
+        let hunt = self.hunt_strip(&inst, cx);
         let updates = self.table.updates.clone();
         let rows = self.table.rows.clone();
         let toolbar = self.toolbar(&inst, &updates, cx);
@@ -3894,6 +3916,7 @@ impl Render for AddonsView {
             .gap_3()
             .children(tabs)
             .children(global_head)
+            .children(hunt)
             .child(toolbar)
             .children(blockers)
             .children(dups)

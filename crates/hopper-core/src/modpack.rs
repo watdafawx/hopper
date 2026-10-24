@@ -1041,6 +1041,655 @@ pub fn export(
     Ok(())
 }
 
+// ── .mrpack export ──────────────────────────────────────────────────
+
+/// Hosts a `.mrpack`'s `files[].downloads` may point at.
+const MR_ALLOWED_HOSTS: [&str; 4] =
+    ["cdn.modrinth.com", "github.com", "raw.githubusercontent.com", "gitlab.com"];
+
+fn mr_allowed_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    MR_ALLOWED_HOSTS.contains(&host)
+}
+
+/// What happens to one file in a `.mrpack` export.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MrFate {
+    /// Listed in `files[]`, downloaded from this URL on import.
+    Linked { url: String },
+    /// Copied into the pack's overrides.
+    Embedded,
+    /// Not in the pack; the reason says why.
+    LeftOut(String),
+}
+
+/// One mod, resource pack or shader pack file the export decides on.
+#[derive(Clone, Debug)]
+pub struct MrEntry {
+    /// Path in the instance, e.g. "mods/x.jar".
+    pub path: String,
+    pub name: String,
+    /// Project page, when known.
+    pub page: String,
+    /// "client" | "server" | "both" | "".
+    pub env: String,
+    pub sha1: String,
+    pub sha512: String,
+    pub size: u64,
+    pub fate: MrFate,
+    /// Where it came from: "modrinth", "curseforge" or "local".
+    pub source: &'static str,
+}
+
+impl MrEntry {
+    /// The instance folder it sits in ("mods", "resourcepacks", ...).
+    pub fn folder(&self) -> &str {
+        self.path.split('/').next().unwrap_or("")
+    }
+
+    fn file_name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+
+    /// Where an embedded copy goes in the zip: client- or server-only
+    /// files in their own overrides folder.
+    pub fn override_path(&self) -> String {
+        let base = match self.env.as_str() {
+            "client" => "client-overrides",
+            "server" => "server-overrides",
+            _ => "overrides",
+        };
+        format!("{base}/{}", self.path)
+    }
+}
+
+/// The decision for every file, made before anything is written.
+#[derive(Clone, Debug, Default)]
+pub struct MrPlan {
+    pub entries: Vec<MrEntry>,
+}
+
+/// Linked, embedded and left-out counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MrCounts {
+    pub linked: usize,
+    pub embedded: usize,
+    pub left_out: usize,
+    /// Bytes the embedded files add.
+    pub embedded_bytes: u64,
+}
+
+impl MrPlan {
+    /// Entries the export covers: mods always, resource and shader packs
+    /// only when their folder is included.
+    pub fn included<'a>(&'a self, folders: &'a [&str]) -> impl Iterator<Item = &'a MrEntry> + 'a {
+        self.entries
+            .iter()
+            .filter(move |e| e.folder() == "mods" || folders.contains(&e.folder()))
+    }
+
+    pub fn counts(&self, folders: &[&str]) -> MrCounts {
+        let mut c = MrCounts::default();
+        for e in self.included(folders) {
+            match e.fate {
+                MrFate::Linked { .. } => c.linked += 1,
+                MrFate::Embedded => {
+                    c.embedded += 1;
+                    c.embedded_bytes += e.size;
+                }
+                MrFate::LeftOut(_) => c.left_out += 1,
+            }
+        }
+        c
+    }
+
+    pub fn left_out<'a>(&'a self, folders: &'a [&str]) -> Vec<&'a MrEntry> {
+        self.included(folders)
+            .filter(|e| matches!(e.fate, MrFate::LeftOut(_)))
+            .collect()
+    }
+}
+
+/// What an export wrote.
+#[derive(Clone, Debug, Default)]
+pub struct MrReport {
+    pub counts: MrCounts,
+    /// (name, reason, page) of each left-out file.
+    pub left_out: Vec<(String, String, String)>,
+    /// Size of the written file.
+    pub bytes: u64,
+}
+
+/// Where a file Modrinth has no download for came from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MrOrigin {
+    /// A Modrinth project whose file Modrinth doesn't know by hash.
+    Modrinth,
+    /// A CurseForge project and its `allowModDistribution` (None: unknown).
+    Curse(Option<bool>),
+    /// Added by hand, from no site.
+    Local,
+}
+
+/// The fate of a file Modrinth has no download for. Only files the user
+/// added by hand, or CurseForge files whose author allows it, are embedded.
+fn unlinked_fate(origin: MrOrigin) -> MrFate {
+    match origin {
+        MrOrigin::Local | MrOrigin::Curse(Some(true)) => MrFate::Embedded,
+        MrOrigin::Curse(Some(false)) => {
+            MrFate::LeftOut("CurseForge only, and the author forbids redistribution".into())
+        }
+        MrOrigin::Curse(None) => MrFate::LeftOut(
+            "CurseForge only, and Hopper couldn't check whether the author allows redistribution"
+                .into(),
+        ),
+        MrOrigin::Modrinth => {
+            MrFate::LeftOut("Modrinth doesn't know this exact file (changed or removed)".into())
+        }
+    }
+}
+
+/// The `dependencies` of an index: Minecraft and the loader by Modrinth's
+/// names, from Hopper's "neoforge-21.1.256" style loader id.
+fn mr_dependencies(game_version: &str, loader: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut deps = serde_json::Map::new();
+    deps.insert("minecraft".into(), game_version.into());
+    if let Some((kind, ver)) = loader.split_once('-') {
+        let key = match kind {
+            "neoforge" => Some("neoforge"),
+            "forge" => Some("forge"),
+            "fabric" => Some("fabric-loader"),
+            "quilt" => Some("quilt-loader"),
+            _ => None,
+        };
+        if let Some(key) = key
+            && !ver.is_empty()
+        {
+            deps.insert(key.into(), ver.into());
+        }
+    }
+    deps
+}
+
+/// `env` for a side; None for files both sides need (or unknown).
+fn mr_env(side: &str) -> Option<serde_json::Value> {
+    match side {
+        "client" => Some(serde_json::json!({ "client": "required", "server": "unsupported" })),
+        "server" => Some(serde_json::json!({ "client": "unsupported", "server": "required" })),
+        _ => None,
+    }
+}
+
+/// `modrinth.index.json` for the linked entries.
+fn mr_index_json<'a>(
+    name: &str,
+    version: &str,
+    summary: &str,
+    game_version: &str,
+    loader: &str,
+    entries: impl Iterator<Item = &'a MrEntry>,
+) -> serde_json::Value {
+    let files: Vec<serde_json::Value> = entries
+        .filter_map(|e| {
+            let MrFate::Linked { url } = &e.fate else { return None };
+            let mut f = serde_json::json!({
+                "path": e.path,
+                "hashes": { "sha1": e.sha1, "sha512": e.sha512 },
+                "downloads": [url],
+                "fileSize": e.size,
+            });
+            if let Some(env) = mr_env(&e.env) {
+                f["env"] = env;
+            }
+            Some(f)
+        })
+        .collect();
+    let mut index = serde_json::json!({
+        "formatVersion": 1,
+        "game": "minecraft",
+        "versionId": version,
+        "name": name,
+        "files": files,
+        "dependencies": mr_dependencies(game_version, loader),
+    });
+    if !summary.is_empty() {
+        index["summary"] = summary.into();
+    }
+    index
+}
+
+const MISSING_NOTE: &str = "MISSING-MODS.txt";
+
+/// The note listing left-out files, or None when nothing is missing.
+fn missing_note(left_out: &[&MrEntry]) -> Option<String> {
+    if left_out.is_empty() {
+        return None;
+    }
+    let mut s = String::from(
+        "These files are not in this pack. Download them yourself and put them\nin the same folder of the instance.\n\n",
+    );
+    for e in left_out {
+        let MrFate::LeftOut(why) = &e.fate else { continue };
+        s.push_str(&format!("- {} ({})\n  {why}\n", e.name, e.path));
+        if !e.page.is_empty() {
+            s.push_str(&format!("  {}\n", e.page));
+        }
+    }
+    Some(s)
+}
+
+/// sha1 and sha512 of a file, hex.
+fn mr_hashes(bytes: &[u8]) -> (String, String) {
+    use sha2::Digest as _;
+    let sha512 = sha2::Sha512::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    (crate::modrinth::sha1(bytes), sha512)
+}
+
+/// Files the export decides on: enabled jars in mods/, and pack files
+/// directly in resourcepacks/ and shaderpacks/.
+fn mr_candidates(inst: &Instance) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    for (folder, ext) in [("mods", ".jar"), ("resourcepacks", ".zip"), ("shaderpacks", ".zip")] {
+        let Ok(rd) = fs::read_dir(inst.root.join(folder)) else { continue };
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n.to_lowercase().ends_with(ext) && e.path().is_file() {
+                out.push((format!("{folder}/{n}"), e.path()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Decides what happens to every file: hashes each one, looks them up on
+/// Modrinth, and asks CurseForge whether the rest may be redistributed.
+/// Fails only when Modrinth can't be reached.
+pub fn plan_mrpack(inst: &Instance, job: &Job) -> anyhow::Result<MrPlan> {
+    let files = mr_candidates(inst);
+    job.detail(format!("Reading {} files", files.len()));
+    let mut entries = Vec::with_capacity(files.len());
+    for (i, (path, p)) in files.iter().enumerate() {
+        job.check_cancelled()?;
+        job.progress(i, files.len());
+        let bytes = fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+        let (sha1, sha512) = mr_hashes(&bytes);
+        let file_name = path.rsplit('/').next().unwrap_or(path);
+        let addon = inst.addon_by_file(file_name);
+        let source = match addon.map(|a| a.project_id) {
+            Some(id) if id != 0 && crate::modrinth::is_mr(id) => "modrinth",
+            Some(id) if id != 0 => "curseforge",
+            _ => "local",
+        };
+        entries.push(MrEntry {
+            path: path.clone(),
+            name: addon
+                .map(|a| a.name.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| file_name.to_string()),
+            page: addon.map(|a| a.page.clone()).unwrap_or_default(),
+            env: addon.map(|a| a.env.clone()).unwrap_or_default(),
+            sha1,
+            sha512,
+            size: bytes.len() as u64,
+            fate: MrFate::Embedded,
+            source,
+        });
+    }
+
+    job.detail("Looking up files on Modrinth");
+    let hashes: Vec<String> = entries.iter().map(|e| e.sha1.clone()).collect();
+    let mut versions: HashMap<String, crate::modrinth::Version> = HashMap::new();
+    for chunk in hashes.chunks(500) {
+        job.check_cancelled()?;
+        versions.extend(
+            crate::modrinth::versions_by_sha1(chunk).context("looking up mods on Modrinth")?,
+        );
+    }
+    // Sides for files Hopper has none for.
+    let need_side: Vec<String> = entries
+        .iter()
+        .filter(|e| e.env.is_empty())
+        .filter_map(|e| versions.get(&e.sha1).map(|v| v.project_id.clone()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let projects = crate::modrinth::projects(&need_side).unwrap_or_default();
+    let sides: HashMap<&str, &'static str> = projects
+        .iter()
+        .map(|p| (p.id.as_str(), crate::modrinth::env(&p.client_side, &p.server_side)))
+        .collect();
+
+    // Linked when Modrinth has this exact file at an allowed host.
+    for e in &mut entries {
+        let Some(v) = versions.get(&e.sha1) else { continue };
+        let file = v.files.iter().find(|f| {
+            f.hashes.get("sha1").is_some_and(|h| h.eq_ignore_ascii_case(&e.sha1))
+        });
+        if let Some(f) = file
+            && mr_allowed_url(&f.url)
+        {
+            e.fate = MrFate::Linked { url: f.url.clone() };
+            e.source = "modrinth";
+            if e.env.is_empty() {
+                e.env = sides.get(v.project_id.as_str()).copied().unwrap_or("").to_string();
+            }
+        }
+    }
+
+    // CurseForge's redistribution flag for the rest; unknown on failure.
+    let mut curse_ids: Vec<u64> = entries
+        .iter()
+        .filter(|e| e.source == "curseforge" && !matches!(e.fate, MrFate::Linked { .. }))
+        .filter_map(|e| inst.addon_by_file(e.file_name()).map(|a| a.project_id))
+        .collect();
+    curse_ids.sort_unstable();
+    curse_ids.dedup();
+    let mut allowed: HashMap<u64, Option<bool>> = HashMap::new();
+    if !curse_ids.is_empty() {
+        job.detail("Checking CurseForge-only mods");
+        for chunk in curse_ids.chunks(500) {
+            match cf::get_mods(chunk) {
+                Ok(mods) => allowed.extend(mods.into_iter().map(|m| (m.id, m.allow_mod_distribution))),
+                Err(e) => log::warn!("CurseForge redistribution check failed: {e:#}"),
+            }
+        }
+    }
+    for e in &mut entries {
+        if matches!(e.fate, MrFate::Linked { .. }) {
+            continue;
+        }
+        let origin = match e.source {
+            "modrinth" => MrOrigin::Modrinth,
+            "curseforge" => MrOrigin::Curse(
+                inst.addon_by_file(e.file_name())
+                    .and_then(|a| allowed.get(&a.project_id).copied().flatten()),
+            ),
+            _ => MrOrigin::Local,
+        };
+        e.fate = unlinked_fate(origin);
+    }
+    Ok(MrPlan { entries })
+}
+
+/// Writes a `.mrpack` from a plan: linked files in the index, embedded
+/// ones and `folders` under overrides, and a note listing what was left out.
+pub fn write_mrpack(
+    inst: &Instance,
+    plan: &MrPlan,
+    version: &str,
+    summary: &str,
+    folders: &[&str],
+    out: &Path,
+    job: &Job,
+) -> anyhow::Result<MrReport> {
+    let entries: Vec<&MrEntry> = plan.included(folders).collect();
+    let index = mr_index_json(
+        &inst.name,
+        version,
+        summary,
+        &inst.game_version,
+        &inst.loader,
+        entries.iter().copied(),
+    );
+    // Written beside the target and moved in, so a failed export never
+    // leaves half a file under the chosen name.
+    let tmp = out.with_extension("mrpack.part");
+    let write = || -> anyhow::Result<()> {
+        let mut z = zip::ZipWriter::new(fs::File::create(&tmp)?);
+        let opts = zip::write::SimpleFileOptions::default();
+        z.start_file("modrinth.index.json", opts)?;
+        z.write_all(serde_json::to_string_pretty(&index)?.as_bytes())?;
+        let embedded: Vec<&MrEntry> =
+            entries.iter().copied().filter(|e| e.fate == MrFate::Embedded).collect();
+        for (i, e) in embedded.iter().enumerate() {
+            job.check_cancelled()?;
+            job.progress(i, embedded.len());
+            z.start_file(e.override_path(), opts)?;
+            std::io::copy(&mut fs::File::open(inst.root.join(&e.path))?, &mut z)?;
+        }
+        // Planned files are handled above; the rest of each folder rides along.
+        let planned: HashSet<&str> = plan.entries.iter().map(|e| e.path.as_str()).collect();
+        for folder in folders {
+            let base = inst.root.join(folder);
+            if base.is_file() {
+                z.start_file(format!("overrides/{folder}"), opts)?;
+                std::io::copy(&mut fs::File::open(&base)?, &mut z)?;
+                continue;
+            }
+            let mut stack = vec![base];
+            while let Some(dir) = stack.pop() {
+                let Ok(rd) = fs::read_dir(&dir) else { continue };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                        continue;
+                    }
+                    let Ok(rel) = p.strip_prefix(&inst.root) else { continue };
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    if !planned.contains(rel.as_str()) {
+                        z.start_file(format!("overrides/{rel}"), opts)?;
+                        std::io::copy(&mut fs::File::open(&p)?, &mut z)?;
+                    }
+                }
+            }
+        }
+        if let Some(note) = missing_note(&plan.left_out(folders)) {
+            z.start_file(format!("overrides/{MISSING_NOTE}"), opts)?;
+            z.write_all(note.as_bytes())?;
+        }
+        z.finish()?;
+        Ok(())
+    };
+    job.detail("Writing the pack");
+    if let Err(e) = write() {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    fs::rename(&tmp, out).with_context(|| format!("saving {}", out.display()))?;
+    Ok(MrReport {
+        counts: plan.counts(folders),
+        left_out: plan
+            .left_out(folders)
+            .into_iter()
+            .map(|e| {
+                let why = match &e.fate {
+                    MrFate::LeftOut(w) => w.clone(),
+                    _ => String::new(),
+                };
+                (e.name.clone(), why, e.page.clone())
+            })
+            .collect(),
+        bytes: fs::metadata(out).map(|m| m.len()).unwrap_or(0),
+    })
+}
+
+/// Writes a Modrinth `.mrpack`: [`plan_mrpack`] then [`write_mrpack`].
+pub fn export_mrpack(
+    inst: &Instance,
+    version: &str,
+    summary: &str,
+    folders: &[&str],
+    out: &Path,
+    job: &Job,
+) -> anyhow::Result<MrReport> {
+    let plan = plan_mrpack(inst, job)?;
+    write_mrpack(inst, &plan, version, summary, folders, out, job)
+}
+
+#[cfg(test)]
+mod mrpack_export_tests {
+    use super::*;
+
+    fn entry(path: &str, env: &str, fate: MrFate) -> MrEntry {
+        MrEntry {
+            path: path.into(),
+            name: path.rsplit('/').next().unwrap().into(),
+            page: String::new(),
+            env: env.into(),
+            sha1: format!("sha1-{path}"),
+            sha512: format!("sha512-{path}"),
+            size: 1,
+            fate,
+            source: "local",
+        }
+    }
+
+    fn linked(path: &str, env: &str) -> MrEntry {
+        let url = format!("https://cdn.modrinth.com/data/AAA/versions/1/{path}");
+        entry(path, env, MrFate::Linked { url })
+    }
+
+    #[test]
+    fn mrpack_index_lists_linked_files_with_hashes_and_env() {
+        let entries = [
+            linked("mods/a.jar", "both"),
+            linked("mods/zoom.jar", "client"),
+            linked("mods/srv.jar", "server"),
+            entry("mods/local.jar", "", MrFate::Embedded),
+            entry("mods/blocked.jar", "", MrFate::LeftOut("no".into())),
+        ];
+        let idx = mr_index_json("Pack", "1.2.0", "", "1.21.1", "neoforge-21.1.256", entries.iter());
+        assert_eq!(idx["formatVersion"], 1);
+        assert_eq!(idx["game"], "minecraft");
+        assert_eq!(idx["versionId"], "1.2.0");
+        assert_eq!(idx["name"], "Pack");
+        assert!(idx.get("summary").is_none());
+        let files = idx["files"].as_array().unwrap();
+        assert_eq!(files.len(), 3, "only linked files are listed");
+        assert_eq!(files[0]["path"], "mods/a.jar");
+        assert_eq!(files[0]["hashes"]["sha1"], "sha1-mods/a.jar");
+        assert_eq!(files[0]["hashes"]["sha512"], "sha512-mods/a.jar");
+        assert_eq!(files[0]["fileSize"], 1);
+        assert!(files[0]["downloads"][0].as_str().unwrap().starts_with("https://cdn.modrinth.com/"));
+        assert!(files[0].get("env").is_none(), "both sides: no env");
+        assert_eq!(files[1]["env"]["client"], "required");
+        assert_eq!(files[1]["env"]["server"], "unsupported");
+        assert_eq!(files[2]["env"]["client"], "unsupported");
+        assert_eq!(files[2]["env"]["server"], "required");
+        assert_eq!(idx["dependencies"]["minecraft"], "1.21.1");
+        assert_eq!(idx["dependencies"]["neoforge"], "21.1.256");
+
+        // It reads back the way Hopper's import sees it.
+        let back: MrIndex = serde_json::from_value(idx).unwrap();
+        assert_eq!(back.minecraft(), "1.21.1");
+        assert_eq!(back.loader(), "neoforge-21.1.256");
+        assert_eq!(back.files[0].project(), Some("AAA"));
+    }
+
+    #[test]
+    fn mrpack_dependency_keys_use_modrinth_names() {
+        let keys = |loader: &str| {
+            let mut k: Vec<String> = mr_dependencies("1.20.1", loader).keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys("fabric-0.16.5"), ["fabric-loader", "minecraft"]);
+        assert_eq!(keys("quilt-0.26.0"), ["minecraft", "quilt-loader"]);
+        assert_eq!(keys("forge-47.3.0"), ["forge", "minecraft"]);
+        assert_eq!(keys(""), ["minecraft"], "vanilla has only minecraft");
+        assert_eq!(mr_dependencies("1.20.1", "fabric-0.16.5")["fabric-loader"], "0.16.5");
+        assert_eq!(mr_dependencies("1.20.1", "forge-47.3.0")["forge"], "47.3.0");
+    }
+
+    #[test]
+    fn mrpack_overrides_follow_side() {
+        let path = |p: &str, env: &str| entry(p, env, MrFate::Embedded).override_path();
+        assert_eq!(path("mods/x.jar", ""), "overrides/mods/x.jar");
+        assert_eq!(path("mods/x.jar", "both"), "overrides/mods/x.jar");
+        assert_eq!(path("mods/x.jar", "client"), "client-overrides/mods/x.jar");
+        assert_eq!(path("resourcepacks/r.zip", "server"), "server-overrides/resourcepacks/r.zip");
+    }
+
+    #[test]
+    fn mrpack_only_allowed_files_are_embedded() {
+        assert_eq!(unlinked_fate(MrOrigin::Local), MrFate::Embedded);
+        assert_eq!(unlinked_fate(MrOrigin::Curse(Some(true))), MrFate::Embedded);
+        assert!(matches!(unlinked_fate(MrOrigin::Curse(Some(false))), MrFate::LeftOut(_)));
+        assert!(matches!(unlinked_fate(MrOrigin::Curse(None)), MrFate::LeftOut(_)));
+        assert!(matches!(unlinked_fate(MrOrigin::Modrinth), MrFate::LeftOut(_)));
+        assert!(mr_allowed_url("https://cdn.modrinth.com/data/x/versions/y/a.jar"));
+        assert!(mr_allowed_url("https://github.com/o/r/releases/download/v1/a.jar"));
+        assert!(!mr_allowed_url("https://edge.forgecdn.net/files/1/2/a.jar"));
+        assert!(!mr_allowed_url("https://mediafilez.forgecdn.net/files/1/2/a.jar"));
+        assert!(!mr_allowed_url("http://cdn.modrinth.com/a.jar"));
+    }
+
+    #[test]
+    fn mrpack_hashes_are_hex() {
+        let (s1, s512) = mr_hashes(b"abc");
+        assert_eq!(s1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert!(s512.starts_with("ddaf35a193617aba"));
+        assert_eq!(s512.len(), 128);
+    }
+
+    #[test]
+    fn mrpack_writes_index_overrides_and_note() {
+        let t = std::env::temp_dir().join(format!("hopper-mrx-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t);
+        let root = t.join("inst");
+        for d in ["mods", "config", "resourcepacks"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for f in ["linked", "mine", "zoom", "blocked"] {
+            fs::write(root.join(format!("mods/{f}.jar")), b"j").unwrap();
+        }
+        fs::write(root.join("config/a.toml"), b"a=1").unwrap();
+        fs::write(root.join("resourcepacks/rp.zip"), b"r").unwrap();
+        let inst = Instance {
+            name: "Test Pack".into(),
+            root: root.clone(),
+            game_version: "1.21.1".into(),
+            loader: "fabric-0.16.5".into(),
+            ..Default::default()
+        };
+        let plan = MrPlan {
+            entries: vec![
+                linked("mods/linked.jar", ""),
+                entry("mods/mine.jar", "", MrFate::Embedded),
+                entry("mods/zoom.jar", "client", MrFate::Embedded),
+                entry("mods/blocked.jar", "", MrFate::LeftOut("the author forbids it".into())),
+                entry("resourcepacks/rp.zip", "", MrFate::Embedded),
+            ],
+        };
+        let out = t.join("out.mrpack");
+        let jobs = crate::jobs::Jobs::default();
+        // resourcepacks isn't included, so its pack stays out.
+        let r = write_mrpack(&inst, &plan, "1.0", "By me", &["config"], &out, &jobs.start("x")).unwrap();
+        assert_eq!(r.counts, MrCounts { linked: 1, embedded: 2, left_out: 1, embedded_bytes: 2 });
+        assert_eq!(r.left_out[0].0, "blocked.jar");
+        assert!(!t.join("out.mrpack.part").exists());
+
+        let mut z = zip::ZipArchive::new(fs::File::open(&out).unwrap()).unwrap();
+        let names: Vec<String> = z.file_names().map(String::from).collect();
+        let has = |n: &str| names.iter().any(|x| x == n);
+        assert!(has("modrinth.index.json"));
+        assert!(has("overrides/mods/mine.jar"));
+        assert!(has("client-overrides/mods/zoom.jar"));
+        assert!(has("overrides/config/a.toml"));
+        assert!(has(&format!("overrides/{MISSING_NOTE}")));
+        assert!(!names.iter().any(|n| n.contains("linked.jar")), "linked files aren't embedded");
+        assert!(!names.iter().any(|n| n.contains("blocked.jar")));
+        assert!(!names.iter().any(|n| n.contains("rp.zip")));
+        let mut s = String::new();
+        z.by_name("modrinth.index.json").unwrap().read_to_string(&mut s).unwrap();
+        let idx: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(idx["summary"], "By me");
+        assert_eq!(idx["dependencies"]["fabric-loader"], "0.16.5");
+        assert_eq!(idx["files"].as_array().unwrap().len(), 1);
+        assert_eq!(idx["files"][0]["path"], "mods/linked.jar");
+        let mut note = String::new();
+        z.by_name(&format!("overrides/{MISSING_NOTE}")).unwrap().read_to_string(&mut note).unwrap();
+        assert!(note.contains("blocked.jar") && note.contains("forbids"));
+        let _ = fs::remove_dir_all(&t);
+    }
+}
+
 /// A new empty instance with no pack.
 pub fn create(
     instances_root: &Path,

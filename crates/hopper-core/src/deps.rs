@@ -87,6 +87,57 @@ struct JarInfo {
     /// A jar with both files: what its mods.toml declares (the fields
     /// above are its neoforge.mods.toml's).
     forge: Option<Box<TomlDeps>>,
+    /// A Forge/NeoForge jar that also carries fabric.mod.json: what that
+    /// says, for a Fabric or Quilt instance, which reads only it.
+    fabric: Option<Box<FabricSide>>,
+    /// Ids from nested jars (jar-in-jar), whichever metadata is read.
+    nested: Vec<String>,
+    /// Its mods come from a mods.toml (Forge or NeoForge).
+    toml: bool,
+}
+
+/// A jar's fabric.mod.json, read beside its mods.toml.
+#[derive(Default)]
+struct FabricSide {
+    provides: Vec<String>,
+    requires: Vec<(String, String)>,
+    incompatible: Vec<(String, String, String)>,
+}
+
+/// (provides, requires) as the instance's loader reads the jar: a Fabric
+/// or Quilt instance reads fabric.mod.json even where mods.toml is there too.
+fn seen_as(j: &JarInfo, fabric: bool) -> (Vec<String>, &[(String, String)]) {
+    match (&j.fabric, fabric) {
+        (Some(f), true) => (f.provides.iter().chain(&j.nested).cloned().collect(), &f.requires),
+        _ => (j.provides.clone(), &j.requires),
+    }
+}
+
+/// Whether most enabled jars are Fabric-only: a Fabric or Quilt pack.
+fn fabric_pack(on: &[(PathBuf, Arc<JarInfo>)]) -> bool {
+    let fabric = on.iter().filter(|(_, j)| j.meta.fabric && !j.toml).count();
+    fabric > on.iter().filter(|(_, j)| j.toml).count()
+}
+
+/// Mod ids the game sees that no jar's metadata declares: Embeddium
+/// answers to "sodium" while the game loads (ATM10 runs Iris on it), and
+/// Sinytra Connector loads Fabric mods with "-" in their ids as "_".
+fn normalize(id: &str, connector: bool) -> String {
+    if connector { id.replace('-', "_") } else { id.to_string() }
+}
+
+/// What enabled jars provide, plus the stand-ins above.
+fn provided_ids(on: &[(PathBuf, Arc<JarInfo>)], fabric: bool, connector: bool) -> HashSet<String> {
+    let mut set: HashSet<String> = on
+        .iter()
+        .flat_map(|(_, j)| seen_as(j, fabric).0)
+        .chain(BUILTIN.iter().map(|s| s.to_string()))
+        .map(|id| normalize(&id, connector))
+        .collect();
+    if set.contains("embeddium") {
+        set.insert("sodium".into());
+    }
+    set
 }
 
 /// (required, optional, incompatible), as in [`JarInfo`].
@@ -171,6 +222,7 @@ fn inspect(zip: &mut zip::ZipArchive<impl Read + std::io::Seek>, depth: u8) -> J
                 info.name = m.display_name.clone();
             }
         }
+        info.toml = !t.mods.is_empty();
         let (r, o, i) = toml_deps(&t);
         (info.requires, info.optional, info.incompatible) = (r, o, i);
         // Forge, and NeoForge before 1.20.5, read mods.toml instead.
@@ -182,43 +234,39 @@ fn inspect(zip: &mut zip::ZipArchive<impl Read + std::io::Seek>, depth: u8) -> J
         break;
     }
     // Multi-loader jars carry Fabric metadata too; on Forge and NeoForge
-    // only mods.toml counts.
+    // only mods.toml counts, and a Fabric or Quilt instance reads only it.
     let forge_jar = !info.provides.is_empty();
-    if !forge_jar
-        && let Some(text) = read(zip, "fabric.mod.json")
+    if let Some(text) = read(zip, "fabric.mod.json")
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
     {
-        if let Some(id) = v["id"].as_str() {
-            info.provides.push(id.to_lowercase());
-            info.own.push(id.to_lowercase());
-            if let Some(ver) = v["version"].as_str().filter(|x| !x.contains("${")) {
-                info.versions.push((id.to_lowercase(), ver.to_string()));
-            }
+        let mut side = FabricSide::default();
+        let id = v["id"].as_str().map(str::to_lowercase);
+        side.provides.extend(id.clone());
+        for p in v["provides"].as_array().into_iter().flatten().filter_map(|p| p.as_str()) {
+            side.provides.push(p.to_lowercase());
         }
-        for p in v["provides"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|p| p.as_str())
-        {
-            info.provides.push(p.to_lowercase());
-        }
-        if info.name.is_empty() {
-            info.name = v["name"].as_str().unwrap_or_default().to_string();
-        }
-        for (id, range) in v["depends"].as_object().into_iter().flatten() {
-            info.requires.push((
-                id.to_lowercase(),
-                range.to_string().trim_matches('"').to_string(),
-            ));
+        for (dep, range) in v["depends"].as_object().into_iter().flatten() {
+            side.requires.push((dep.to_lowercase(), range.to_string().trim_matches('"').to_string()));
         }
         // "breaks" stops the game; "conflicts" only warns.
-        for (id, range) in v["breaks"].as_object().into_iter().flatten() {
-            info.incompatible.push((
-                id.to_lowercase(),
-                range.to_string().trim_matches('"').to_string(),
-                String::new(),
-            ));
+        for (dep, range) in v["breaks"].as_object().into_iter().flatten() {
+            side.incompatible.push((dep.to_lowercase(), range.to_string().trim_matches('"').to_string(), String::new()));
+        }
+        if forge_jar {
+            info.fabric = Some(Box::new(side));
+        } else {
+            if let Some(id) = &id {
+                info.own.push(id.clone());
+                if let Some(ver) = v["version"].as_str().filter(|x| !x.contains("${")) {
+                    info.versions.push((id.clone(), ver.to_string()));
+                }
+            }
+            if info.name.is_empty() {
+                info.name = v["name"].as_str().unwrap_or_default().to_string();
+            }
+            info.provides = side.provides;
+            info.requires = side.requires;
+            info.incompatible = side.incompatible;
         }
     }
     // Jar-in-jar: NeoForge's jarjar and Fabric's bundled jars provide ids too.
@@ -242,7 +290,8 @@ fn inspect(zip: &mut zip::ZipArchive<impl Read + std::io::Seek>, depth: u8) -> J
             }
             if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(buf)) {
                 let inner = inspect(&mut z, depth + 1);
-                info.provides.extend(inner.provides);
+                info.nested.extend(inner.provides.iter().chain(&inner.nested).cloned());
+                info.provides.extend(inner.provides.into_iter().chain(inner.nested));
             }
         }
     }
@@ -326,11 +375,9 @@ pub fn missing_without(mods_dir: &Path, without: &[String]) -> Vec<Missing> {
     let disabled: Vec<&PathBuf> = entries.iter().filter(|p| is(p, ".jar.disabled")).collect();
     let on = read_all(&enabled);
     let off = read_all(&disabled);
-    let provided: HashSet<&str> = on
-        .iter()
-        .flat_map(|(_, j)| j.provides.iter().map(String::as_str))
-        .chain(BUILTIN.iter().copied())
-        .collect();
+    let fabric = fabric_pack(&on);
+    let connector = on.iter().any(|(_, j)| j.provides.iter().any(|p| p == "connector"));
+    let provided = provided_ids(&on, fabric, connector);
     // Which jar provides each id, and at what version.
     let versions: HashMap<&str, (&PathBuf, &str)> = on
         .iter()
@@ -340,15 +387,18 @@ pub fn missing_without(mods_dir: &Path, without: &[String]) -> Vec<Missing> {
     let mut out = Vec::new();
     for (path, j) in &on {
         let mut seen = HashSet::new();
-        for (id, range) in &j.requires {
+        for (id, range) in seen_as(j, fabric).1 {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            if provided.contains(id.as_str()) {
-                // Installed: is it a version this mod accepts?
+            if provided.contains(&normalize(id, connector)) {
+                // Installed: is it too old for this mod? Like [`blockers`],
+                // only the lower end counts: the loader runs a newer one
+                // (ATMons runs Torchmaster's Cobblemon compat, made for
+                // [1.6.0,1.7.0), on Cobblemon 1.7.3).
                 if let Some((by, have)) = versions.get(id.as_str())
                     && *by != path
-                    && accepts(range, have) == Some(false)
+                    && too_old(range, have)
                 {
                     out.push(Missing {
                         mod_name: if j.name.is_empty() { id.clone() } else { j.name.clone() },
@@ -585,9 +635,13 @@ pub fn blockers(mods_dir: &Path, loader: &str, game: &str) -> Vec<Blocker> {
 
     // Forge, and NeoForge for 1.20.1, read mods.toml over neoforge.mods.toml.
     let reads_mods_toml = !neoforge || !mc_at_least(game, (20, 5));
+    // Fabric and Quilt read a dual jar's fabric.mod.json.
+    let fabric = lv.is_some_and(|(k, _)| k.eq_ignore_ascii_case("fabric") || k.eq_ignore_ascii_case("quilt"));
+    let none: Vec<(String, String)> = Vec::new();
     for (path, j) in &on {
-        let (requires, optional, incompatible) = match &j.forge {
-            Some(f) if reads_mods_toml => (&f.0, &f.1, &f.2),
+        let (requires, optional, incompatible) = match (&j.fabric, &j.forge) {
+            (Some(f), _) if fabric => (&f.requires, &none, &f.incompatible),
+            (_, Some(f)) if reads_mods_toml => (&f.0, &f.1, &f.2),
             _ => (&j.requires, &j.optional, &j.incompatible),
         };
         let mut seen = HashSet::new();
@@ -787,6 +841,41 @@ pub fn accepts(range: &str, have: &str) -> Option<bool> {
     Some(ok)
 }
 
+/// When the game last finished loading with the mods as they are now:
+/// `logs/latest.log` reached the title screen ("Sound engine started")
+/// and nothing in `mods` changed after that run began. A pack that just
+/// worked can't be stopped at loading by what [`missing`] and
+/// [`blockers`] read from metadata (some mods stand in for others while
+/// the game loads), so callers soften their warning then. Seconds since
+/// the epoch.
+pub fn loaded_fine(root: &Path) -> Option<i64> {
+    let log = root.join("logs").join("latest.log");
+    let started = log_started(&log)?;
+    let changed = std::fs::read_dir(root.join("mods"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .chain(std::fs::metadata(root.join("mods")).ok().and_then(|m| m.modified().ok()))
+        .max()?;
+    if changed > started {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(&log).ok()?.take(16 << 20).read_to_string(&mut text).ok()?;
+    if !text.contains("Sound engine started") {
+        return None;
+    }
+    started.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs() as i64)
+}
+
+/// When the run that wrote `log` began: its creation time where the file
+/// system keeps one, else its last write.
+fn log_started(log: &Path) -> Option<std::time::SystemTime> {
+    let m = std::fs::metadata(log).ok()?;
+    m.created().ok().or_else(|| m.modified().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,6 +888,68 @@ mod tests {
             z.write_all(b.as_bytes()).unwrap();
         }
         z.finish().unwrap();
+    }
+
+    #[test]
+    fn stand_ins_and_loader_quirks_are_not_missing() {
+        let dir = std::env::temp_dir().join(format!("hopper-deps-q-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = |id: &str, ver: &str, deps: &str| {
+            format!("modLoader=\"javafml\"\n[[mods]]\nmodId=\"{id}\"\nversion=\"{ver}\"\n{deps}")
+        };
+        let req = |owner: &str, id: &str, range: &str| {
+            format!("[[dependencies.{owner}]]\nmodId=\"{id}\"\ntype=\"required\"\nversionRange=\"{range}\"\nside=\"BOTH\"\n")
+        };
+        // Embeddium answers to "sodium": Iris on it loads (ATM10).
+        jar(&dir.join("embeddium.jar"), &[("META-INF/neoforge.mods.toml", &toml("embeddium", "1.0", ""))]);
+        jar(&dir.join("iris.jar"), &[("META-INF/neoforge.mods.toml", &toml("iris", "1.0", &req("iris", "sodium", "[0.6,)")))]);
+        // A version past a range's upper end still loads.
+        jar(&dir.join("base.jar"), &[("META-INF/neoforge.mods.toml", &toml("base", "2.5", ""))]);
+        jar(&dir.join("addon.jar"), &[("META-INF/neoforge.mods.toml", &toml("addon", "1.0", &req("addon", "base", "[1.0,2.0)")))]);
+        assert_eq!(missing(&dir), vec![]);
+
+        // Connector loads Fabric ids with "-" as "_".
+        jar(&dir.join("connector.jar"), &[("META-INF/neoforge.mods.toml", &toml("connector", "1.0", ""))]);
+        jar(&dir.join("ffapi.jar"), &[("META-INF/neoforge.mods.toml", &toml("fabric_api", "1.0", ""))]);
+        jar(&dir.join("fab.jar"), &[("fabric.mod.json", r#"{"id":"fab","depends":{"fabric-api":"*"}}"#)]);
+        assert_eq!(missing(&dir), vec![]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A Fabric pack reads a dual jar's fabric.mod.json, not its mods.toml.
+        let dir = std::env::temp_dir().join(format!("hopper-deps-f-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["a", "b", "c"] {
+            jar(&dir.join(format!("{n}.jar")), &[("fabric.mod.json", &format!(r#"{{"id":"{n}"}}"#))]);
+        }
+        jar(
+            &dir.join("dual.jar"),
+            &[
+                ("META-INF/mods.toml", &toml("dual", "1.0", &req("dual", "kotlinforforge", "[4,)"))),
+                ("fabric.mod.json", r#"{"id":"dual","depends":{"a":"*"}}"#),
+            ],
+        );
+        assert_eq!(missing(&dir), vec![]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pack_that_just_loaded_is_trusted() {
+        let root = std::env::temp_dir().join(format!("hopper-deps-l-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::write(root.join("mods/a.jar"), "x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::write(root.join("logs/latest.log"), "[Render thread/INFO]: Starting\n").unwrap();
+        assert_eq!(loaded_fine(&root), None, "never reached the title screen");
+        std::fs::write(root.join("logs/latest.log"), "[Render thread/INFO]: Sound engine started\n").unwrap();
+        assert!(loaded_fine(&root).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(root.join("mods/b.jar"), "x").unwrap();
+        assert_eq!(loaded_fine(&root), None, "a mod changed after that run");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

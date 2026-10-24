@@ -1,15 +1,19 @@
 //! An instance's Performance tab: how each recorded run went, and the runs
 //! side by side by Java arguments (one row per preset).
 
-use crate::store::{Store, StoreEvent, open_path};
+use crate::store::{Msg, Store, StoreEvent, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use hopper::perf::advisor::{self, Advice, Change, Fix, Severity, Tone};
 use hopper::perf::{Group, Session};
+use std::collections::HashSet;
+use std::rc::Rc;
 
 /// A group and the name it shows under.
 struct Labeled {
@@ -28,11 +32,27 @@ use std::path::PathBuf;
 /// Runs shorter than this don't count in the comparison.
 const MIN_RUN_SECS: u64 = 60;
 
+/// A change made from a piece of advice, kept so it can be reverted.
+struct Applied {
+    id: u64,
+    root: PathBuf,
+    text: String,
+    before: Change,
+    after: Change,
+}
+
 pub struct PerfView {
     store: Entity<Store>,
     root: Option<PathBuf>,
     sessions: Vec<Session>,
     loading: bool,
+    /// The PC's RAM, MB.
+    ram_mb: u64,
+    /// Changes made this session, newest last.
+    applied: Vec<Applied>,
+    next_id: u64,
+    /// Advice with its "Why" open.
+    why: HashSet<&'static str>,
     _sub: Subscription,
 }
 
@@ -108,6 +128,10 @@ impl PerfView {
             root: None,
             sessions: Vec::new(),
             loading: false,
+            ram_mb: advisor::system_ram_mb(),
+            applied: Vec::new(),
+            next_id: 1,
+            why: HashSet::new(),
             _sub,
         }
     }
@@ -180,6 +204,284 @@ impl PerfView {
                     true
                 })
         });
+    }
+
+    /// The memory limit the instance runs with: -Xmx, else the setting,
+    /// else Hopper's default.
+    fn effective_mb(inst: &hopper::instances::Instance, default_mb: u32) -> u32 {
+        hopper::jvm_args::memory(&inst.settings.java_args)
+            .1
+            .unwrap_or(if inst.settings.memory_mb > 0 { inst.settings.memory_mb } else { default_mb })
+    }
+
+    fn setup(&self, cx: &App) -> Option<advisor::Setup> {
+        let store = self.store.read(cx);
+        let inst = store.instance(self.root.as_ref()?)?;
+        Some(advisor::Setup {
+            xmx_mb: Self::effective_mb(inst, store.settings().default_memory_mb),
+            args: inst.settings.java_args.clone(),
+            ram_mb: self.ram_mb,
+        })
+    }
+
+    /// Saves new memory and arguments the way the Settings page does.
+    fn save_settings(&self, root: &PathBuf, c: &Change, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let store = self.store.read(cx);
+        if let Some(why) = store.edit_hold_reason(root) {
+            window.push_notification(Notification::error(format!("Can't change settings now: {why}.")), cx);
+            return false;
+        }
+        let Some(mut inst) = store.instance(root).cloned() else {
+            window.push_notification(Notification::error("That instance is gone."), cx);
+            return false;
+        };
+        inst.settings.memory_mb = c.memory_mb;
+        inst.settings.java_args = c.java_args.clone();
+        match inst.save() {
+            Ok(()) => {
+                let r = root.clone();
+                store.spawn(move || Msg::InstanceChanged(r));
+                true
+            }
+            Err(e) => {
+                window.push_notification(Notification::error(format!("{e:#}")), cx);
+                false
+            }
+        }
+    }
+
+    /// Applies a piece of advice, then offers Undo.
+    fn apply(&mut self, fix: Fix, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let store = self.store.read(cx);
+        let Some(inst) = store.instance(&root) else { return };
+        let xmx = Self::effective_mb(inst, store.settings().default_memory_mb);
+        let before = Change { memory_mb: inst.settings.memory_mb, java_args: inst.settings.java_args.clone() };
+        let after = advisor::apply(&fix, xmx, &before.java_args, self.ram_mb);
+        if after == before || !self.save_settings(&root, &after, window, cx) {
+            return;
+        }
+        let (text, toast) = match &fix {
+            Fix::SetMemory { .. } => (
+                format!("Memory {} → {}", advisor::gb_text(xmx), advisor::gb_text(after.memory_mb)),
+                format!("Memory is now {} (was {}).", advisor::gb_text(after.memory_mb), advisor::gb_text(xmx)),
+            ),
+            Fix::SwitchPreset { name, .. } => (format!("Preset {name}"), format!("Switched to preset {name}.")),
+        };
+        let id = self.next_id;
+        self.next_id += 1;
+        self.applied.push(Applied { id, root, text, before, after });
+        let view = cx.entity();
+        let undone = Rc::new(std::cell::Cell::new(false));
+        let note = Notification::success(toast).action(move |_, _, cx| {
+            let (view, undone) = (view.clone(), undone.clone());
+            Button::new("perf-undo")
+                .label("Undo")
+                .disabled(undone.get())
+                .on_click(cx.listener(move |note, _, window, cx| {
+                    if !undone.replace(true) {
+                        view.update(cx, |v, cx| v.revert(id, window, cx));
+                    }
+                    note.dismiss(window, cx);
+                }))
+        })
+        // Revert under "Applied changes" keeps the undo.
+        .autohide(true);
+        window.push_notification(note, cx);
+        cx.notify();
+    }
+
+    /// Puts an applied change back, unless the settings moved on since.
+    fn revert(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pos) = self.applied.iter().position(|a| a.id == id) else { return };
+        let a = self.applied.remove(pos);
+        cx.notify();
+        let now = self
+            .store
+            .read(cx)
+            .instance(&a.root)
+            .map(|i| (i.settings.memory_mb, i.settings.java_args.trim().to_string()));
+        if now != Some((a.after.memory_mb, a.after.java_args.trim().to_string())) {
+            window.push_notification(
+                Notification::warning("The settings were changed since, so Hopper left them as they are."),
+                cx,
+            );
+            return;
+        }
+        if self.save_settings(&a.root, &a.before, window, cx) {
+            window.push_notification(Notification::success(format!("Reverted: {}.", a.text)), cx);
+        }
+    }
+
+    fn advice_card(&self, i: usize, a: &Advice, primary: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (color, icon) = match a.severity {
+            Severity::High => (theme.danger, IconName::TriangleAlert),
+            Severity::Warning => (theme.warning, IconName::TriangleAlert),
+            Severity::Tip => (theme.primary, IconName::Sparkles),
+            Severity::Info => (theme.muted_foreground, IconName::Info),
+        };
+        let tone = |t: Tone| match t {
+            Tone::Bad => theme.danger,
+            Tone::Warn => theme.warning,
+            Tone::Good => theme.success,
+            Tone::Plain => theme.muted_foreground,
+        };
+        let open = self.why.contains(a.id);
+        let id = a.id;
+        let apply = a.fix.clone().map(|fix| {
+            let label = match &fix {
+                Fix::SetMemory { to_mb } => format!("Apply: {}", advisor::gb_text(*to_mb)),
+                Fix::SwitchPreset { .. } => "Switch preset".to_string(),
+            };
+            let b = Button::new(("perf-apply", i)).small().label(label);
+            let b = if primary { b.primary() } else { b.outline() };
+            b.on_click(cx.listener(move |this, _, window, cx| this.apply(fix.clone(), window, cx)))
+        });
+        let chips: Vec<_> = a.evidence.iter().map(|e| widgets::chip(tone(e.tone)).child(e.text.clone())).collect();
+        let theme = cx.theme();
+        widgets::row_selected_in(
+            v_flex().id(("perf-advice", i)).gap_2().px_3().py_2p5().rounded(theme.radius_lg),
+            color,
+        )
+        .child(
+            h_flex()
+                .gap_3()
+                .items_start()
+                .child(div().pt_0p5().child(Icon::new(icon).size_4().text_color(color)))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().text_sm().font_semibold().child(a.title.clone()))
+                        .child(div().text_sm().text_color(theme.muted_foreground).child(a.detail.clone()))
+                        .child(h_flex().gap_1p5().flex_wrap().children(chips))
+                        .when_some(a.note.clone(), |c, n| c.child(div().text_xs().text_color(theme.muted_foreground).child(n))),
+                )
+                .child(
+                    Button::new(("perf-why", i))
+                        .ghost()
+                        .small()
+                        .label(if open { "Hide" } else { "Why" })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.why.remove(id) {
+                                this.why.insert(id);
+                            }
+                            cx.notify();
+                        })),
+                )
+                .children(apply),
+        )
+        .when(open, |c| {
+            c.child(
+                v_flex()
+                    .gap_1()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(div().text_xs().text_color(theme.muted_foreground).child(format!("Rule: {}", a.rule)))
+                    .when(a.series.len() > 1, |c| {
+                        c.child(div().text_xs().text_color(theme.muted_foreground).child(a.series_label.clone())).child(
+                            div().h(rems(3.)).w_full().child(widgets::sparkline(
+                                a.series.clone(),
+                                if a.series_label.contains('%') { 100.0 } else { 0.0 },
+                                theme.primary,
+                            )),
+                        )
+                    }),
+            )
+        })
+        .into_any_element()
+    }
+
+    /// The advice cards, or why there are none.
+    fn advice_section(&self, n_runs: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let setup = self.setup(cx)?;
+        let presets = self.store.read(cx).settings().java_presets.clone();
+        let report = advisor::advise(&self.sessions, &presets, &setup);
+        let mine: Vec<&Applied> = self.applied.iter().filter(|a| Some(&a.root) == self.root.as_ref()).collect();
+        let mut out = v_flex().gap_2();
+        if !report.advice.is_empty() {
+            let first_fix = report.advice.iter().position(|a| a.fix.is_some());
+            let cards: Vec<AnyElement> = report
+                .advice
+                .iter()
+                .enumerate()
+                .map(|(i, a)| self.advice_card(i, a, first_fix == Some(i), cx))
+                .collect();
+            out = out
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().font_semibold().child("Advice"))
+                        .child(widgets::chip(cx.theme().primary).child(report.advice.len().to_string()))
+                        .child(widgets::caption(format!("from {} runs", report.runs), cx).text_xs()),
+                )
+                .children(cards);
+        } else if !report.enough && n_runs > 0 && mine.is_empty() {
+            out = out.child(widgets::empty_state(
+                IconName::Sparkles,
+                "Play a few more times for advice",
+                Some(
+                    format!(
+                        "Hopper needs at least {} runs over a minute to judge memory and settings. {} counted so far.",
+                        advisor::MIN_RUNS,
+                        report.runs
+                    )
+                    .into(),
+                ),
+                cx,
+            ));
+        } else if report.enough && mine.is_empty() {
+            out = out.child(
+                h_flex()
+                    .gap_2()
+                    .child(Icon::new(IconName::CircleCheck).size_4().text_color(cx.theme().success))
+                    .child(widgets::caption("Nothing to fix. Memory and settings look right for your recent runs.", cx)),
+            );
+        }
+        if !mine.is_empty() {
+            let rows: Vec<AnyElement> = mine
+                .iter()
+                .rev()
+                .map(|a| {
+                    let id = a.id;
+                    let theme = cx.theme();
+                    h_flex()
+                        .id(("perf-applied", a.id as usize))
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded(theme.radius)
+                        .items_center()
+                        .hover(|s| s.bg(theme.list_hover))
+                        .child(Icon::new(IconName::CircleCheck).size_4().text_color(theme.success))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().font_semibold().child(a.text.clone()))
+                                .child(
+                                    div().text_xs().text_color(theme.muted_foreground).child(
+                                        "Changed in this instance's Java settings. The next run shows if it helped.",
+                                    ),
+                                ),
+                        )
+                        .child(
+                            Button::new(("perf-revert", a.id as usize))
+                                .outline()
+                                .small()
+                                .icon(IconName::Undo2)
+                                .label("Revert")
+                                .on_click(cx.listener(move |this, _, window, cx| this.revert(id, window, cx))),
+                        )
+                        .into_any_element()
+                })
+                .collect();
+            out = out.child(card(cx).gap_1().child(div().font_semibold().pb_1().child("Applied changes")).children(rows));
+        }
+        Some(out.into_any_element())
     }
 
     fn header_row(cx: &App) -> Div {
@@ -375,6 +677,7 @@ impl PerfView {
 
 impl Render for PerfView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let advice = self.advice_section(self.sessions.len(), cx);
         let Some(root) = self.root.clone() else {
             return div().into_any_element();
         };
@@ -436,6 +739,7 @@ impl Render for PerfView {
                     )),
                 )
             })
+            .when_some(advice, |r, a| r.child(a))
             .when(!rows.is_empty(), |r| {
                 r.child(
                     card(cx)

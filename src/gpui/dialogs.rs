@@ -12,8 +12,8 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -392,33 +392,96 @@ pub fn confirm_delete(store: Entity<Store>, root: PathBuf, window: &mut Window, 
 
 // ---- Export --------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq)]
+enum ExportFormat {
+    Modrinth,
+    Curse,
+}
+
+impl ExportFormat {
+    fn ext(self) -> &'static str {
+        match self {
+            ExportFormat::Modrinth => "mrpack",
+            ExportFormat::Curse => "zip",
+        }
+    }
+}
+
+/// The Modrinth lookup behind the summary.
+enum MrCheck {
+    Idle,
+    Checking,
+    Ready(std::sync::Arc<hopper::modpack::MrPlan>),
+    Failed(String),
+}
+
+/// Where the export itself is.
+enum ExportRun {
+    Idle,
+    Running { detail: String, progress: Option<f32> },
+    Done { out: PathBuf, report: Option<hopper::modpack::MrReport> },
+    Failed(String),
+}
+
 pub struct ExportForm {
     root: PathBuf,
+    store: Entity<Store>,
     version: Entity<InputState>,
     author: Entity<InputState>,
     out: Entity<InputState>,
     folders: Vec<(&'static str, bool)>,
+    format: ExportFormat,
+    check: MrCheck,
+    run: ExportRun,
+    show_left_out: bool,
+    copied: bool,
+    _check_task: Option<Task<()>>,
+    _run_task: Option<Task<()>>,
+}
+
+/// "38 MB", "1.2 GB".
+fn size_label(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.;
+    if mb >= 1024. {
+        format!("{:.1} GB", mb / 1024.)
+    } else if mb >= 10. {
+        format!("{mb:.0} MB")
+    } else {
+        format!("{mb:.1} MB")
+    }
 }
 
 impl ExportForm {
-    fn new(inst: &hopper::instances::Instance, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        inst: &hopper::instances::Instance,
+        store: Entity<Store>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let version = inst
             .pack
             .as_ref()
             .map(|p| p.version.clone())
             .unwrap_or("1.0.0".into());
+        // A CurseForge pack goes back out as one; anything else as .mrpack.
+        let format = match &inst.pack {
+            Some(p) if p.project_id != 0 && !hopper::modrinth::is_mr(p.project_id) => ExportFormat::Curse,
+            _ => ExportFormat::Modrinth,
+        };
         let downloads = directories::UserDirs::new()
             .and_then(|u| u.download_dir().map(|d| d.to_path_buf()))
             .unwrap_or_default();
         let out = downloads
             .join(format!(
-                "{}-{version}.zip",
-                hopper::instances::Instance::folder_name(&inst.name)
+                "{}-{version}.{}",
+                hopper::instances::Instance::folder_name(&inst.name),
+                format.ext()
             ))
             .to_string_lossy()
             .into_owned();
-        Self {
+        let mut this = Self {
             root: inst.root.clone(),
+            store,
             version: cx.new(|cx| InputState::new(window, cx).default_value(version)),
             author: cx.new(|cx| InputState::new(window, cx).placeholder("Your name")),
             out: cx.new(|cx| InputState::new(window, cx).default_value(out)),
@@ -426,41 +489,485 @@ impl ExportForm {
                 .iter()
                 .map(|f| (*f, inst.root.join(f).exists()))
                 .collect(),
+            format,
+            check: MrCheck::Idle,
+            run: ExportRun::Idle,
+            show_left_out: false,
+            copied: false,
+            _check_task: None,
+            _run_task: None,
+        };
+        if format == ExportFormat::Modrinth {
+            this.start_check(cx);
+        }
+        this
+    }
+
+    fn folders(&self) -> Vec<&'static str> {
+        self.folders.iter().filter(|(_, on)| *on).map(|(f, _)| *f).collect()
+    }
+
+    /// Looks every mod up on Modrinth, off the UI thread.
+    fn start_check(&mut self, cx: &mut Context<Self>) {
+        let Some(inst) = self.store.read(cx).instance(&self.root).cloned() else {
+            return;
+        };
+        self.check = MrCheck::Checking;
+        self._check_task = Some(cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    // A private job: the check isn't worth a line in Tasks.
+                    let job = hopper::jobs::Jobs::default().start("mrpack check");
+                    hopper::modpack::plan_mrpack(&inst, &job).map_err(|e| format!("{e:#}"))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.check = match r {
+                    Ok(plan) => MrCheck::Ready(std::sync::Arc::new(plan)),
+                    Err(e) => MrCheck::Failed(e),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    fn set_format(&mut self, format: ExportFormat, window: &mut Window, cx: &mut Context<Self>) {
+        if self.format == format {
+            return;
+        }
+        self.format = format;
+        // The file name follows the format.
+        let out = self.out.read(cx).value().to_string();
+        let p = PathBuf::from(&out);
+        let known = p
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("zip") || x.eq_ignore_ascii_case("mrpack"));
+        if known {
+            let p = p.with_extension(format.ext()).to_string_lossy().into_owned();
+            self.out.update(cx, |s, cx| s.set_value(p, window, cx));
+        }
+        if format == ExportFormat::Modrinth && matches!(self.check, MrCheck::Idle | MrCheck::Failed(_)) {
+            self.start_check(cx);
+        }
+        cx.notify();
+    }
+
+    fn ready(&self, cx: &App) -> bool {
+        let has_out = !self.out.read(cx).value().trim().is_empty();
+        has_out && (self.format == ExportFormat::Curse || matches!(self.check, MrCheck::Ready(_)))
+    }
+
+    /// The dialog's OK: starts the export (kept open to show it), or closes
+    /// once it's done.
+    fn ok(form: &Entity<Self>, cx: &mut App) -> bool {
+        if matches!(form.read(cx).run, ExportRun::Done { .. }) {
+            return true;
+        }
+        form.update(cx, |this, cx| this.export(cx));
+        false
+    }
+
+    fn export(&mut self, cx: &mut Context<Self>) {
+        if !self.ready(cx) || matches!(self.run, ExportRun::Running { .. }) {
+            return;
+        }
+        let Some(inst) = self.store.read(cx).instance(&self.root).cloned() else {
+            return;
+        };
+        let folders = self.folders();
+        let version = self.version.read(cx).value().trim().to_string();
+        let author = self.author.read(cx).value().trim().to_string();
+        let out = PathBuf::from(self.out.read(cx).value().trim());
+        let report = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let title = format!("Exporting {}", inst.name);
+        let id = match (&self.check, self.format) {
+            (MrCheck::Ready(plan), ExportFormat::Modrinth) => {
+                let (plan, out, report) = (plan.clone(), out.clone(), report.clone());
+                let summary = if author.is_empty() { String::new() } else { format!("By {author}") };
+                self.store.read(cx).spawn_job_id(title, move |job| {
+                    let r = hopper::modpack::write_mrpack(&inst, &plan, &version, &summary, &folders, &out, job)?;
+                    job.detail(format!("Saved {}", out.display()));
+                    *report.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                    Ok(Msg::Nothing)
+                })
+            }
+            (_, ExportFormat::Curse) => {
+                let out = out.clone();
+                self.store.read(cx).spawn_job_id(title, move |job| {
+                    hopper::modpack::export(&inst, &version, &author, &folders, &out)?;
+                    job.detail(format!("Saved {}", out.display()));
+                    Ok(Msg::Nothing)
+                })
+            }
+            _ => return,
+        };
+        self.run = ExportRun::Running { detail: "Starting".into(), progress: None };
+        self.copied = false;
+        // Follows the job until it ends.
+        self._run_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                let ended = this.update(cx, |this, cx| {
+                    let state = this.store.read(cx).job_state(id);
+                    match state {
+                        Some(s) if !s.done => {
+                            this.run = ExportRun::Running { detail: s.detail, progress: s.progress };
+                        }
+                        Some(s) if s.error.is_some() => {
+                            this.run = ExportRun::Failed(s.error.unwrap_or_default());
+                        }
+                        _ => {
+                            let report = report.lock().unwrap_or_else(|e| e.into_inner()).take();
+                            this.run = ExportRun::Done { out: out.clone(), report };
+                        }
+                    }
+                    cx.notify();
+                    !matches!(this.run, ExportRun::Running { .. })
+                });
+                if ended.unwrap_or(true) {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    fn title(&self, cx: &App) -> String {
+        let name = self.store.read(cx).instance(&self.root).map(|i| i.name.clone()).unwrap_or_default();
+        match self.run {
+            ExportRun::Done { .. } => format!("Exported {name}"),
+            _ => format!("Export {name}"),
         }
     }
 
-    fn export(form: &Entity<Self>, store: &Entity<Store>, cx: &mut App) -> bool {
-        let this = form.read(cx);
-        let Some(inst) = store.read(cx).instance(&this.root).cloned() else {
-            return true;
-        };
-        let folders: Vec<&'static str> =
-            this.folders.iter().filter(|(_, on)| *on).map(|(f, _)| *f).collect();
-        let version = this.version.read(cx).value().trim().to_string();
-        let author = this.author.read(cx).value().trim().to_string();
-        let out = PathBuf::from(this.out.read(cx).value().trim());
-        store.read(cx).spawn_job(format!("Exporting {}", inst.name), move |job| {
-            hopper::modpack::export(&inst, &version, &author, &folders, &out)?;
-            job.detail(format!("Saved {}", out.display()));
-            Ok(Msg::Nothing)
-        });
-        true
+    fn footer(&self, cx: &App) -> DialogFooter {
+        match &self.run {
+            ExportRun::Done { .. } => DialogFooter::new().child(
+                DialogAction::new().child(Button::new("dialog-ok").primary().label("Done")),
+            ),
+            ExportRun::Running { .. } => footer("Exporting…", false),
+            ExportRun::Failed(_) => footer("Try again", self.ready(cx)),
+            ExportRun::Idle => footer(
+                match self.format {
+                    ExportFormat::Modrinth => "Export .mrpack",
+                    ExportFormat::Curse => "Export .zip",
+                },
+                self.ready(cx),
+            ),
+        }
     }
+
+    /// Linked / embedded / left out, for the Modrinth format.
+    fn summary(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let plan = match &self.check {
+            MrCheck::Idle | MrCheck::Checking => {
+                return h_flex()
+                    .gap_2()
+                    .child(gpui_kit::component::spinner::Spinner::new().small())
+                    .child(widgets::caption("Checking every mod against Modrinth", cx))
+                    .into_any_element();
+            }
+            MrCheck::Failed(e) => {
+                return h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(theme.danger)
+                            .child(format!("Couldn't reach Modrinth: {e}")),
+                    )
+                    .child(
+                        Button::new("export-recheck")
+                            .outline()
+                            .small()
+                            .label("Try again")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_check(cx);
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element();
+            }
+            MrCheck::Ready(plan) => plan.clone(),
+        };
+        let folders = self.folders();
+        let c = plan.counts(&folders);
+        let left_out = plan.left_out(&folders);
+        let line = |chip: gpui_kit::component::tag::Tag, n: usize, what: String| {
+            h_flex()
+                .gap_2()
+                .child(div().w(rems(5.5)).flex_none().child(chip))
+                .child(div().w(rems(3.5)).flex_none().font_semibold().child(n.to_string()))
+                .child(div().flex_1().min_w_0().child(widgets::caption(what, cx)))
+        };
+        let embedded = if c.embedded_bytes > 0 {
+            format!("added by you or allowed to redistribute: in overrides, +{}", size_label(c.embedded_bytes))
+        } else {
+            "added by you or allowed to redistribute: in overrides".into()
+        };
+        v_flex()
+            .gap_1p5()
+            .p_3()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.border)
+            .child(widgets::caption("What goes in the pack (checked against Modrinth)", cx).pb_1())
+            .child(line(
+                widgets::chip(theme.success).child("Linked"),
+                c.linked,
+                "found on Modrinth by file hash, downloaded on import".into(),
+            ))
+            .child(line(widgets::chip(theme.primary).child("Embedded"), c.embedded, embedded))
+            .child(
+                line(
+                    widgets::chip(theme.danger).child("Left out"),
+                    c.left_out,
+                    if c.left_out == 0 {
+                        "nothing".into()
+                    } else {
+                        "not allowed to ship; listed in MISSING-MODS.txt".into()
+                    },
+                )
+                .when(c.left_out > 0, |l| {
+                    l.child(
+                        Button::new("export-show-left")
+                            .ghost()
+                            .xsmall()
+                            .label(if self.show_left_out { "Hide" } else { "Show" })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_left_out = !this.show_left_out;
+                                cx.notify();
+                            })),
+                    )
+                }),
+            )
+            .when(self.show_left_out && !left_out.is_empty(), |d| {
+                d.child(left_out_list(
+                    "export-left",
+                    left_out
+                        .iter()
+                        .map(|e| {
+                            let why = match &e.fate {
+                                hopper::modpack::MrFate::LeftOut(w) => w.clone(),
+                                _ => String::new(),
+                            };
+                            (e.name.clone(), e.path.clone(), why, e.page.clone())
+                        })
+                        .collect(),
+                    cx,
+                ))
+            })
+            .into_any_element()
+    }
+
+    /// The export's progress, error or result.
+    fn status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme();
+        Some(match &self.run {
+            ExportRun::Idle => return None,
+            ExportRun::Running { detail, progress } => v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(gpui_kit::component::spinner::Spinner::new().small())
+                        .child(div().text_sm().min_w_0().truncate().child(detail.clone())),
+                )
+                .child(
+                    gpui_kit::component::progress::Progress::new("export-bar")
+                        .loading(progress.is_none())
+                        .value(progress.unwrap_or(0.) * 100.),
+                )
+                .child(widgets::caption(
+                    "You can close this: the export keeps going in Tasks.",
+                    cx,
+                ))
+                .into_any_element(),
+            ExportRun::Failed(e) => div()
+                .text_sm()
+                .text_color(theme.danger)
+                .child(format!("The export failed: {e}"))
+                .into_any_element(),
+            ExportRun::Done { out, report } => {
+                let file = out
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+                let what = match report {
+                    Some(r) => format!(
+                        "{} linked, {} embedded, {} left out. Opens in Modrinth App, Prism and Hopper.",
+                        r.counts.linked, r.counts.embedded, r.counts.left_out
+                    ),
+                    None => "Opens in the CurseForge app, Prism and Hopper.".into(),
+                };
+                let (o1, o2) = (out.clone(), out.display().to_string());
+                let (store, root) = (self.store.clone(), self.root.clone());
+                v_flex()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(Icon::new(IconName::CircleCheck).small().text_color(theme.success))
+                                    .child(div().font_semibold().min_w_0().truncate().child(file))
+                                    .child(widgets::caption(size_label(size), cx)),
+                            )
+                            .child(note(what, cx)),
+                    )
+                    .when_some(report.as_ref().filter(|r| !r.left_out.is_empty()), |d, r| {
+                        d.child(note(
+                            "Left out (the pack includes MISSING-MODS.txt saying where to get them):",
+                            cx,
+                        ))
+                        .child(left_out_list(
+                            "export-done-left",
+                            r.left_out
+                                .iter()
+                                .map(|(n, why, page)| (n.clone(), String::new(), why.clone(), page.clone()))
+                                .collect(),
+                            cx,
+                        ))
+                    })
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(
+                                Button::new("export-reveal")
+                                    .outline()
+                                    .small()
+                                    .icon(IconName::FolderOpen)
+                                    .label("Show in folder")
+                                    .on_click(move |_, _, _| {
+                                        let _ = std::process::Command::new("explorer")
+                                            .arg(format!("/select,{}", o1.display()))
+                                            .spawn();
+                                    }),
+                            )
+                            .child(
+                                Button::new("export-copy")
+                                    .outline()
+                                    .small()
+                                    .icon(IconName::Copy)
+                                    .label(if self.copied { "Copied" } else { "Copy file path" })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(o2.clone()));
+                                        this.copied = true;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("export-share")
+                                    .outline()
+                                    .small()
+                                    .icon(IconName::Share2)
+                                    .label("Share code…")
+                                    .on_click(move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        open_share(store.clone(), root.clone(), window, cx);
+                                    }),
+                            ),
+                    )
+                    .child(note(
+                        "Friends who run Hopper can use a share code instead: no file to send.",
+                        cx,
+                    ))
+                    .into_any_element()
+            }
+        })
+    }
+}
+
+/// Left-out files: name, path, why, and a link to the page when known.
+fn left_out_list(id: &'static str, items: Vec<(String, String, String, String)>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    v_flex()
+        .id(id)
+        .max_h(rems(12.))
+        .overflow_y_scroll()
+        .rounded(theme.radius)
+        .bg(theme.muted)
+        .children(items.into_iter().enumerate().map(|(i, (name, path, why, page))| {
+            h_flex()
+                .id(ElementId::Name(format!("{id}-{i}").into()))
+                .gap_2()
+                .px_2()
+                .py_1()
+                .hover(|s| widgets::row_hover(s, cx))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(div().text_sm().min_w_0().truncate().child(name))
+                                .when(!path.is_empty(), |r| r.child(widgets::caption(path, cx))),
+                        )
+                        .child(widgets::caption(why, cx)),
+                )
+                .when(!page.is_empty(), |r| {
+                    r.child(
+                        Button::new(ElementId::Name(format!("{id}-page-{i}").into()))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::ExternalLink)
+                            .label("Open page")
+                            .on_click(move |_, _, cx| cx.open_url(&page)),
+                    )
+                })
+        }))
+        .into_any_element()
 }
 
 impl Render for ExportForm {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rem = window.rem_size();
+        // Once started, the dialog shows the export instead of the form.
+        if let Some(status) = self.status(cx)
+            && !matches!(self.run, ExportRun::Failed(_))
+        {
+            return v_flex()
+                .id("export-body")
+                .max_h(widgets::dialog_room(window) - rem * 3.)
+                .overflow_y_scroll()
+                .child(status)
+                .into_any_element();
+        }
+        let format_ix = if self.format == ExportFormat::Modrinth { 0 } else { 1 };
         v_flex()
+            .id("export-body")
             .gap_4()
+            .max_h(widgets::dialog_room(window) - rem * 3.)
+            .overflow_y_scroll()
+            .child(
+                TabBar::new("export-format")
+                    .segmented()
+                    .small()
+                    .selected_index(format_ix)
+                    .child(Tab::new().label("Modrinth .mrpack"))
+                    .child(Tab::new().label("CurseForge .zip"))
+                    .on_click(cx.listener(|this, ix: &usize, window, cx| {
+                        let f = if *ix == 0 { ExportFormat::Modrinth } else { ExportFormat::Curse };
+                        this.set_format(f, window, cx);
+                    })),
+            )
             .child(
                 settings_form(rem)
                     .child(Field::new().label("Version").child(Input::new(&self.version)))
                     .child(Field::new().label("Author").child(Input::new(&self.author)))
                     .child(
                         Field::new().label("Include").items_start().child(
-                            v_flex().gap_2().children(self.folders.iter().enumerate().map(
-                                |(i, (f, on))| {
+                            v_flex()
+                                .gap_2()
+                                .children(self.folders.iter().enumerate().map(|(i, (f, on))| {
                                     Checkbox::new(SharedString::from(format!("inc:{f}")))
                                         .label(*f)
                                         .checked(*on)
@@ -468,8 +975,8 @@ impl Render for ExportForm {
                                             this.folders[i].1 = *v;
                                             cx.notify();
                                         }))
-                                },
-                            )),
+                                }))
+                                .child(widgets::caption("Worlds are never exported.", cx)),
                         ),
                     )
                     .child(
@@ -507,10 +1014,15 @@ impl Render for ExportForm {
                         ),
                     ),
             )
-            .child(widgets::caption(
-                "CurseForge mods go in manifest.json; other jars and the folders above go in overrides.",
-                cx,
-            ))
+            .map(|d| match self.format {
+                ExportFormat::Modrinth => d.child(self.summary(cx)),
+                ExportFormat::Curse => d.child(widgets::caption(
+                    "CurseForge mods go in manifest.json; other jars and the folders above go in overrides.",
+                    cx,
+                )),
+            })
+            .when_some(self.status(cx), |d, s| d.child(s))
+            .into_any_element()
     }
 }
 
@@ -518,15 +1030,20 @@ pub fn open_export(store: Entity<Store>, root: PathBuf, window: &mut Window, cx:
     let Some(inst) = store.read(cx).instance(&root).cloned() else {
         return;
     };
-    let form = cx.new(|cx| ExportForm::new(&inst, window, cx));
-    window.open_dialog(cx, move |dialog, window, _| {
-        let (store, f2) = (store.clone(), form.clone());
+    let form = cx.new(|cx| ExportForm::new(&inst, store.clone(), window, cx));
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let f2 = form.clone();
+        let (title, footer) = {
+            let f = form.read(cx);
+            (f.title(cx), f.footer(cx))
+        };
         dialog
-            .title("Export as a CurseForge pack")
+            .title(title)
             .w(rems(40.).to_pixels(window.rem_size()))
+            .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
             .child(form.clone())
-            .footer(footer("Export", true))
-            .on_ok(move |_, _, cx| ExportForm::export(&f2, &store, cx))
+            .footer(footer)
+            .on_ok(move |_, _, cx| ExportForm::ok(&f2, cx))
     });
 }
 

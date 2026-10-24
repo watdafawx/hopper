@@ -56,14 +56,7 @@ pub fn open(entries: Vec<Entry>, title: String, repo: String, window: &mut Windo
         let theme = cx.theme().clone();
         let show_older = *older_open.read(cx);
         let visible: Vec<&Entry> = entries.iter().take(if show_older { entries.len() } else { 1 }).collect();
-        // The body is the release's note; the paragraphs after it are the
-        // commit titles, which only repeat it when there is a real body.
-        let shown = |e: &Entry| -> Vec<String> {
-            match e.paragraphs.split_first() {
-                Some((first, rest)) if !rest.is_empty() && first.len() >= 80 => vec![first.clone()],
-                _ => e.paragraphs.clone(),
-            }
-        };
+        let shown = |e: &Entry| -> Vec<String> { e.paragraphs.clone() };
         // GPUI scrolls only a set height, so a list that may not fit gets
         // the window's height and scrolls; a short one (a rough, generous
         // guess at its height) keeps its own height and never clips.

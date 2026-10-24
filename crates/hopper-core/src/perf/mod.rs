@@ -6,6 +6,7 @@
 //! `sessions/<instance folder>/<id>/session.json`, with the run's `gc.log`
 //! beside them.
 
+pub mod advisor;
 pub mod gclog;
 pub mod gpu;
 pub mod present;

@@ -25,6 +25,8 @@ base64.workspace = true
 flate2.workspace = true
 trash.workspace = true
 sha1_smol.workspace = true
+# sha512 for .mrpack exports.
+sha2 = "0.10"
 sysinfo.workspace = true
 regex.workspace = true
 keyring.workspace = true

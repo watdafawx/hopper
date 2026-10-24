@@ -74,7 +74,7 @@ fn embed_changelog() {
         .unwrap_or_default();
     // (version, paragraphs), newest first; commits before the newest
     // release aren't out yet.
-    let mut releases: Vec<(String, Vec<String>)> = Vec::new();
+    let mut releases: Vec<(String, String, Vec<String>)> = Vec::new();
     for rec in log.split('\x1e') {
         let Some((subject, body)) = rec.trim_start().split_once('\x1f') else { continue };
         let subject = subject.trim();
@@ -90,8 +90,8 @@ fn embed_changelog() {
                 .filter(|l| !l.trim_start().to_lowercase().starts_with("co-authored-by:"))
                 .collect();
             let body = body.join("\n").trim().to_string();
-            releases.push((version.to_string(), if body.is_empty() { vec![] } else { vec![body] }));
-        } else if let Some((_, notes)) = releases.last_mut()
+            releases.push((version.to_string(), body, Vec::new()));
+        } else if let Some((_, _, notes)) = releases.last_mut()
             && !subject.is_empty()
             && !subject.starts_with("Cargo.lock")
             && !subject.starts_with("Merge ")
@@ -99,6 +99,8 @@ fn embed_changelog() {
             notes.push(subject.to_string());
         }
     }
-    let records: Vec<String> = releases.into_iter().map(|(v, n)| format!("{v}\x1f{}", n.join("\n\n"))).collect();
+    // The body, then \x1d and the shipped commits' subjects.
+    let records: Vec<String> =
+        releases.into_iter().map(|(v, body, n)| format!("{v}\x1f{body}\x1d{}", n.join("\n\n"))).collect();
     std::fs::write(out, records.join("\x1e")).unwrap();
 }

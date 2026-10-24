@@ -557,10 +557,34 @@ impl UpdatePreview {
         {
             m.retain(|_, (r, _, _)| *r != root);
         }
-        store.update(cx, |s, cx| {
-            s.update_pack(&root, file, Some(overrides), backup);
-            cx.notify();
-        });
+        // A snapshot first (off the UI thread), then the update.
+        let from = store
+            .read(cx)
+            .instance(&root)
+            .and_then(|i| i.pack.as_ref())
+            .map(|p| p.version.clone())
+            .unwrap_or_default();
+        let reason = hopper::snapshots::Reason::PackUpdate { from, to: file.display_name.clone() };
+        let job = store.read(cx).jobs().start(format!("Snapshot before updating {}", file.display_name));
+        cx.spawn(async move |cx| {
+            let r2 = root.clone();
+            let r = cx
+                .background_spawn(async move {
+                    let r = hopper::snapshots::take_in(&r2, reason, &job);
+                    job.finish(&r);
+                    r
+                })
+                .await;
+            if let Err(e) = &r {
+                // The update still runs: its replaced files go to backups as before.
+                log::warn!("snapshot before pack update failed: {e:#}");
+            }
+            store.update(cx, |s, cx| {
+                s.update_pack(&root, file, Some(overrides), backup);
+                cx.notify();
+            });
+        })
+        .detach();
         true
     }
 
@@ -1096,6 +1120,16 @@ impl Render for UpdatePreview {
                                 } else {
                                     "The installed pack version couldn't be downloaded, so every file that differs counts as both changed."
                                 })),
+                        )
+                    })
+                    .when(!server_mode, |c| {
+                        c.child(
+                            h_flex()
+                                .gap_2()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(Icon::new(IconName::Layers).small().flex_none())
+                                .child("A snapshot of mods and configs is saved first. Restore it any time from Backups."),
                         )
                     })
                     .children(self.conflict_card(&plan, cx))

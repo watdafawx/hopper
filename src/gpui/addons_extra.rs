@@ -14,7 +14,8 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -75,6 +76,9 @@ pub struct MissingDeps {
     pub blockers: Vec<hopper::deps::Blocker>,
     /// Old files a running game holds, leaving when it closes.
     pub queued: usize,
+    /// When the game last loaded fine with these exact mods: the banners
+    /// then say "may", not "will" (metadata misses runtime stand-ins).
+    pub loaded_fine: Option<i64>,
 }
 
 impl AddonsView {
@@ -174,16 +178,18 @@ impl AddonsView {
             dups: if same { std::mem::take(&mut self.missing.dups) } else { Vec::new() },
             blockers: if same { std::mem::take(&mut self.missing.blockers) } else { Vec::new() },
             queued: hopper::locked::list(&inst.root).len(),
+            loaded_fine: if same { self.missing.loaded_fine } else { None },
         };
         let root = inst.root.clone();
         let snapshot = inst.clone();
         cx.spawn(async move |this, cx| {
-            let (list, dups, blockers) = cx
+            let (list, dups, blockers, loaded_fine) = cx
                 .background_spawn(async move {
                     (
                         hopper::deps::missing(&dir),
                         hopper::install::duplicates(&snapshot),
                         hopper::deps::blockers(&dir, &snapshot.loader, &snapshot.game_version),
+                        hopper::deps::loaded_fine(&snapshot.root),
                     )
                 })
                 .await;
@@ -191,6 +197,7 @@ impl AddonsView {
                 if this.missing.root.as_ref() == Some(&root) && this.missing.mtime == mtime {
                     this.missing.dups = dups;
                     this.missing.blockers = blockers;
+                    this.missing.loaded_fine = loaded_fine;
                     // Wrong versions are warned about when an update causes
                     // them; packs often ship a few that run anyway.
                     let list: Vec<_> = list.into_iter().filter(|m| m.wrong_version.is_none()).collect();
@@ -621,6 +628,7 @@ impl AddonsView {
             return None;
         }
         let theme = cx.theme();
+        let loaded_fine = self.missing.loaded_fine;
         let n = self.missing.list.len();
         let mut installable: Vec<String> = self
             .missing
@@ -773,7 +781,7 @@ impl AddonsView {
                 .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
                 .px_6()
                 .child(
-                    callout(theme.warning, cx)
+                    callout(if loaded_fine.is_some() { theme.info } else { theme.warning }, cx)
                         .child(
                             h_flex()
                                 .gap_3()
@@ -781,11 +789,18 @@ impl AddonsView {
                                     div()
                                         .flex_1()
                                         .font_semibold()
-                                        .text_color(theme.warning)
-                                        .child(format!(
-                                            "{n} required mod{} missing: the game will stop at loading",
-                                            if n == 1 { " is" } else { "s are" }
-                                        )),
+                                        .text_color(if loaded_fine.is_some() { theme.info } else { theme.warning })
+                                        .child(match loaded_fine {
+                                            Some(_) => format!(
+                                                "{n} mod{} list{} a requirement that isn't installed",
+                                                if n == 1 { "" } else { "s" },
+                                                if n == 1 { "s" } else { "" }
+                                            ),
+                                            None => format!(
+                                                "{n} required mod{} missing: the game will stop at loading",
+                                                if n == 1 { " is" } else { "s are" }
+                                            ),
+                                        }),
                                 )
                                 .when(installable.len() > 1, |r| {
                                     r.child(
@@ -800,6 +815,7 @@ impl AddonsView {
                                     )
                                 }),
                         )
+                        .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx)))
                         // Past six, the rows scroll so the mods table stays in view.
                         .child(
                             div()
@@ -908,6 +924,7 @@ impl AddonsView {
             return None;
         }
         let theme = cx.theme();
+        let loaded_fine = self.missing.loaded_fine;
         let n = self.missing.blockers.len();
         let mut rows: Vec<AnyElement> = Vec::new();
         for (i, b) in self.missing.blockers.iter().enumerate() {
@@ -981,11 +998,14 @@ impl AddonsView {
             div()
                 .px_6()
                 .child(
-                    callout(theme.danger, cx)
-                        .child(div().font_semibold().text_color(theme.danger).child(format!(
-                            "{n} problem{} will stop the game at loading",
-                            if n == 1 { "" } else { "s" }
-                        )))
+                    callout(if loaded_fine.is_some() { theme.info } else { theme.danger }, cx)
+                        .child(div().font_semibold().text_color(if loaded_fine.is_some() { theme.info } else { theme.danger }).child(
+                            match loaded_fine {
+                                Some(_) => format!("{n} possible problem{} in the mods' own files", if n == 1 { "" } else { "s" }),
+                                None => format!("{n} problem{} will stop the game at loading", if n == 1 { "" } else { "s" }),
+                            },
+                        ))
+                        .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx)))
                         .when(loader_note, |c| {
                             c.child(widgets::caption(
                                 "For a mod that needs a newer loader, pick a newer loader version in this instance's settings.",
@@ -1101,16 +1121,27 @@ impl AddonsView {
                         move |_, _, cx| v.update(cx, |this, cx| this.use_profile(n.clone(), cx)),
                     ));
                 }
-                let v = view.clone();
-                menu.separator().item(
-                    PopupMenuItem::new("Save current as…")
-                        .icon(IconName::Plus)
-                        .on_click(move |_, window, cx| save_profile_dialog(v.clone(), window, cx)),
-                )
+                let (v, v2) = (view.clone(), view.clone());
+                menu.separator()
+                    .item(
+                        PopupMenuItem::new("Save current as…")
+                            .icon(IconName::Plus)
+                            .on_click(move |_, window, cx| save_profile_dialog(v.clone(), window, cx)),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new("Find the mod that breaks it…")
+                            .icon(IconName::ScanSearch)
+                            .on_click(move |_, _, cx| v2.update(cx, |this, cx| this.hunt_setup(cx))),
+                    )
             })
     }
 
     fn use_profile(&mut self, name: String, cx: &mut Context<Self>) {
+        // A hunt owns the on/off state until it ends.
+        if self.hunt_running() {
+            return;
+        }
         let Some(root) = self.root.clone() else { return };
         let store = self.store.read(cx);
         if let Some(mut inst) = store.instance(&root).cloned() {
@@ -1165,4 +1196,477 @@ fn save_profile_dialog(view: Entity<AddonsView>, window: &mut Window, cx: &mut A
                 true
             })
     });
+}
+
+/// Finding the mod that breaks the pack: the hunt's strip above the Mods
+/// list and its row chips (the rounds are in `hopper::bisect`).
+#[derive(Default)]
+pub struct HuntUi {
+    /// The instance `hunt` was read for, and the journal's modified time.
+    pub root: Option<PathBuf>,
+    pub stamp: Option<std::time::SystemTime>,
+    pub hunt: Option<hopper::bisect::Hunt>,
+    /// The start card is open, with what goes wrong.
+    pub setup: Option<hopper::bisect::Kind>,
+    /// Round 1 is being set up.
+    pub starting: bool,
+}
+
+/// An instance whose Logs asked to start a hunt, picked up by its Mods tab.
+static ASKED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Opens the hunt's start card in `root`'s Mods tab, and goes there.
+pub fn ask_hunt(root: PathBuf, store: &Entity<crate::store::Store>, cx: &mut App) {
+    *ASKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(root.clone());
+    store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::ShowMods(root)));
+}
+
+/// The entry point's button, for Logs & crashes.
+pub fn hunt_button(id: &'static str, root: PathBuf, store: Entity<crate::store::Store>) -> Button {
+    Button::new(id)
+        .small()
+        .outline()
+        .icon(IconName::ScanSearch)
+        .label("Find the mod that breaks it")
+        .tooltip("Turns mods off in rounds while you play, to find the one at fault")
+        .on_click(move |_, _, cx| ask_hunt(root.clone(), &store, cx))
+}
+
+impl AddonsView {
+    /// Reads the instance's hunt journal when it changed (from `sync`).
+    pub(crate) fn read_hunt(&mut self, cx: &mut Context<Self>) {
+        let root = self.root.clone().filter(|_| self.class == cf::CLASS_MODS && self.global_dir().is_none());
+        let Some(root) = root else { return };
+        let stamp = std::fs::metadata(hopper::bisect::path(&root)).and_then(|m| m.modified()).ok();
+        let same = self.hunt.root.as_ref() == Some(&root);
+        if !same {
+            self.hunt = HuntUi { root: Some(root.clone()), ..Default::default() };
+        }
+        if !same || stamp != self.hunt.stamp {
+            self.hunt.stamp = stamp;
+            self.hunt.hunt = stamp.and_then(|_| hopper::bisect::load(&root));
+            if self.hunt.hunt.is_some() {
+                self.hunt.setup = None;
+            }
+            cx.notify();
+        }
+        // The start job ended (or failed).
+        if self.hunt.starting && (self.hunt.hunt.is_some() || self.store.read(cx).edit_hold_reason(&root).is_none()) {
+            self.hunt.starting = false;
+            cx.notify();
+        }
+    }
+
+    /// A hunt is running here: the On switches wait.
+    pub(crate) fn hunt_running(&self) -> bool {
+        self.class == cf::CLASS_MODS && self.global_dir().is_none() && self.hunt.hunt.is_some()
+    }
+
+    /// Opens the start card.
+    pub(crate) fn hunt_setup(&mut self, cx: &mut Context<Self>) {
+        if self.hunt.hunt.is_none() {
+            self.hunt.setup = Some(hopper::bisect::Kind::Crash);
+            cx.notify();
+        }
+    }
+
+    fn hunt_start(&mut self, kind: hopper::bisect::Kind, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        // The report's blamed mod, as a hint only.
+        let hint = self.store.update(cx, |s, _| {
+            let file = s.crash(&root)?.suspects.first()?.file_name.trim_end_matches(".disabled").to_string();
+            let name = s.instance(&root)?.addon_by_file(&file).map_or(file, |a| a.name.clone());
+            Some(name)
+        });
+        let store = self.store.read(cx);
+        let Some(mut inst) = store.instance(&root).cloned() else { return };
+        store.spawn_instance_job(&root, format!("Finding the mod that breaks {}", inst.name), move |job| {
+            job.detail("Reading what each mod needs");
+            let h = hopper::bisect::begin(&mut inst, kind, hint)?;
+            job.detail(format!("Round 1: {} mods parked", h.parked.len()));
+            Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
+        });
+        self.hunt.setup = None;
+        self.hunt.starting = true;
+        cx.notify();
+    }
+
+    /// Changes the hunt, saves it, then renames the jars to match.
+    fn hunt_change(&mut self, title: &str, edit: impl FnOnce(&mut hopper::bisect::Hunt) -> bool, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let Some(mut h) = self.hunt.hunt.clone() else { return };
+        if !edit(&mut h) {
+            return;
+        }
+        self.hunt.hunt = Some(h.clone());
+        cx.notify();
+        let store = self.store.read(cx);
+        let Some(mut inst) = store.instance(&root).cloned() else { return };
+        store.spawn_instance_job(&root, title.to_string(), move |job| {
+            hopper::bisect::save(&inst.root, &h)?;
+            let n = hopper::bisect::apply(&mut inst, &h)?;
+            job.detail(format!("{n} mods changed"));
+            Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
+        });
+    }
+
+    /// Ends the hunt: every mod as before round 1 (`keep_off`: but the
+    /// culprit and what needs it).
+    fn hunt_finish(&mut self, keep_off: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let store = self.store.read(cx);
+        let Some(mut inst) = store.instance(&root).cloned() else { return };
+        let title = if keep_off { "Restoring every mod but the culprit" } else { "Restoring every mod" };
+        store.spawn_instance_job(&root, title, move |job| {
+            let n = hopper::bisect::finish(&mut inst, keep_off)?;
+            job.detail(format!("{n} mods changed"));
+            Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
+        });
+    }
+
+    fn hunt_name(inst: &Instance, file: &str) -> String {
+        inst.addon_by_file(file).map_or_else(|| file.trim_end_matches(".jar").to_string(), |a| a.name.clone())
+    }
+
+    fn hunt_names(inst: &Instance, files: &[String], cap: usize) -> String {
+        let mut v: Vec<String> = files.iter().take(cap).map(|f| Self::hunt_name(inst, f)).collect();
+        if files.len() > cap {
+            v.push(format!("{} more", files.len() - cap));
+        }
+        v.join(", ")
+    }
+
+    /// The strip above the Mods list: the start card, or the hunt's round.
+    pub(crate) fn hunt_strip(&mut self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use hopper::bisect::{Answer, Kind, Phase};
+        if self.class != cf::CLASS_MODS || self.global_dir().is_some() {
+            return None;
+        }
+        let asked = {
+            let mut a = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+            if a.as_ref() == Some(&inst.root) { a.take() } else { None }
+        };
+        if asked.is_some() && self.hunt.hunt.is_none() && !self.hunt.starting {
+            self.hunt.setup = Some(Kind::Crash);
+        }
+        let theme = cx.theme().clone();
+        let store = self.store.read(cx);
+        // A running game holds the jars; a task may be changing them.
+        let hold = store.hold_reason(&inst.root);
+        let strip = |color: Hsla| {
+            v_flex()
+                .gap_2()
+                .px_3()
+                .py_2p5()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(color.opacity(widgets::alpha::LINE))
+                .bg(color.opacity(0.06))
+        };
+        let title = |icon: IconName, color: Hsla, text: String| {
+            h_flex()
+                .gap_2()
+                .min_w_0()
+                .child(Icon::new(icon).small().text_color(color))
+                .child(div().font_semibold().truncate().child(text))
+        };
+        let note = |text: String| div().text_sm().text_color(theme.muted_foreground).child(text);
+
+        if self.hunt.starting {
+            return Some(
+                strip(theme.primary)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(gpui_kit::component::spinner::Spinner::new().small())
+                            .child(div().font_semibold().child("Getting round 1 ready")),
+                    )
+                    .child(note("Hopper saves which mods are on, reads what each one needs, then parks the first half.".into()))
+                    .into_any_element(),
+            );
+        }
+
+        let Some(h) = self.hunt.hunt.clone() else {
+            let kind = self.hunt.setup?;
+            let on = inst.addons.iter().filter(|a| a.enabled && a.folder() == "mods").count();
+            let pick = |id: &'static str, label: &'static str, k: Kind| {
+                Button::new(id)
+                    .small()
+                    .ghost()
+                    .label(label)
+                    .selected(kind == k)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.hunt.setup = Some(k);
+                        cx.notify();
+                    }))
+            };
+            return Some(
+                strip(theme.primary)
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(title(IconName::ScanSearch, theme.primary, "Find the mod that breaks it".into()))
+                            .child(div().flex_1())
+                            .child(Button::new("hunt-cancel").small().ghost().label("Cancel").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.hunt.setup = None;
+                                    cx.notify();
+                                },
+                            )))
+                            .child(
+                                Button::new("hunt-start")
+                                    .small()
+                                    .primary()
+                                    .icon(IconName::Play)
+                                    .label("Start")
+                                    .disabled(hold.is_some())
+                                    .when_some(hold, |b, r| b.tooltip(r))
+                                    .on_click(cx.listener(move |this, _, _, cx| this.hunt_start(kind, cx))),
+                            ),
+                    )
+                    .child(note(format!(
+                        "{on} mods are on. Each round Hopper turns about half of them off (always with the mods that need them), you play as usual and say whether it's still broken. About {} rounds. Stop & restore puts every mod back exactly as it is now.",
+                        (usize::BITS - on.saturating_sub(1).leading_zeros()).max(1) + 1
+                    )))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(div().text_sm().mr_1().child("What goes wrong?"))
+                            .child(pick("hunt-k-crash", "It crashes", Kind::Crash))
+                            .child(pick("hunt-k-bad", "It misbehaves (no crash)", Kind::Misbehaves)),
+                    )
+                    .into_any_element(),
+            );
+        };
+
+        let names = |files: &[String], cap: usize| Self::hunt_names(inst, files, cap);
+        let undo = (!h.rounds.is_empty()).then(|| {
+            Button::new("hunt-undo")
+                .small()
+                .ghost()
+                .icon(IconName::Undo)
+                .label("Undo answer")
+                .disabled(hold.is_some())
+                .on_click(cx.listener(|this, _, _, cx| this.hunt_change("Taking back the last answer", |h| h.undo(), cx)))
+        });
+        let restore_all = |primary: bool| {
+            Button::new("hunt-restore")
+                .small()
+                .map(|b| if primary { b.primary() } else { b.outline() })
+                .icon(IconName::RotateCcw)
+                .label("Restore everything")
+                .tooltip("Every mod back on or off as before the hunt")
+                .disabled(hold.is_some())
+                .on_click(cx.listener(|this, _, _, cx| this.hunt_finish(false, cx)))
+        };
+        let el = match h.phase {
+            Phase::Found => {
+                let along: Vec<String> = h.parked.iter().filter(|p| !h.culprits.contains(p)).cloned().collect();
+                let what = names(&h.culprits, 3);
+                strip(theme.success)
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(title(IconName::Target, theme.success, format!("Found it: {what}")))
+                            .child(div().flex_1())
+                            .children(undo)
+                            .child(restore_all(false))
+                            .child(
+                                Button::new("hunt-keep")
+                                    .small()
+                                    .primary()
+                                    .icon(IconName::Check)
+                                    .label("Keep it off, restore the rest")
+                                    .disabled(hold.is_some())
+                                    .when_some(hold, |b, r| b.tooltip(r))
+                                    .on_click(cx.listener(|this, _, _, cx| this.hunt_finish(true, cx))),
+                            ),
+                    )
+                    .child(note(format!(
+                        "After {} rounds. {} off now and everything else is back on, so the game should work.{}",
+                        h.rounds.len(),
+                        if h.culprits.len() == 1 { "It's" } else { "They're" },
+                        if along.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" Off with it, because they need it: {}.", names(&along, 4))
+                        }
+                    )))
+                    .into_any_element()
+            }
+            Phase::NotFound => strip(theme.warning)
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .child(title(IconName::TriangleAlert, theme.warning, "No single mod breaks it".into()))
+                        .child(div().flex_1())
+                        .children(undo)
+                        .child(restore_all(true)),
+                )
+                .child(note(
+                    "It stayed broken with every suspect off. The cause is likely a config, the world, Java or the loader, or mods that only break together."
+                        .into(),
+                ))
+                .into_any_element(),
+            _ => {
+                let crash = h.kind == Kind::Crash;
+                let (_, parked, suspects) = h.counts();
+                // On, and not a suspect, parked, marked fine or a kept library.
+                let out: std::collections::HashSet<&String> = h
+                    .suspects
+                    .iter()
+                    .chain(&h.parked)
+                    .chain(&h.fine)
+                    .chain(h.libraries.iter().filter(|_| h.phase == Phase::Mods))
+                    .collect();
+                let cleared = h.original.iter().filter(|(f, on)| **on && !out.contains(f)).count();
+                let total = h.rounds_estimate().max(h.round());
+                let done = h.rounds.len() as f32 / total as f32;
+                let answer_tip = hold.unwrap_or("Launch and play as usual, then answer");
+                let answer = |id: &'static str, label: &'static str, a: Answer, primary: bool| {
+                    Button::new(id)
+                        .small()
+                        .map(|b| if primary { b.primary() } else { b.outline() })
+                        .label(label)
+                        .tooltip(answer_tip)
+                        .disabled(hold.is_some())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.hunt_change("Next round of the hunt", |h| {
+                                h.answer(a);
+                                true
+                            }, cx)
+                        }))
+                };
+                let s_off = h.suspects.iter().all(|s| h.parked.contains(s));
+                let line = if s_off {
+                    format!("Checking: all {suspects} suspects are off this round. If it works, they hold the cause.")
+                } else if h.phase == Phase::Libraries {
+                    "The other mods are cleared: now testing libraries, the mods others need (with them off, what needs them is off too).".to_string()
+                } else {
+                    format!(
+                        "{suspects} suspects left. Play as usual, then say whether it still {}.",
+                        if crash { "crashes" } else { "misbehaves" }
+                    )
+                };
+                strip(theme.primary)
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(title(
+                                IconName::ScanSearch,
+                                theme.primary,
+                                format!(
+                                    "Finding the {} · round {} of ~{total}",
+                                    if crash { "crash" } else { "problem" },
+                                    h.round()
+                                ),
+                            ))
+                            .child(widgets::chip(theme.warning).child(format!("{parked} parked")))
+                            .child(widgets::chip(theme.success).child(format!("{cleared} cleared")))
+                            .child(div().flex_1())
+                            .children(undo)
+                            .child(
+                                Button::new("hunt-stop")
+                                    .small()
+                                    .outline()
+                                    .danger()
+                                    .label("Stop & restore")
+                                    .tooltip("Ends the hunt: every mod back on or off as before it")
+                                    .disabled(hold.is_some())
+                                    .on_click(cx.listener(|this, _, _, cx| this.hunt_finish(false, cx))),
+                            )
+                            .child(answer("hunt-broken", if crash { "Still crashes" } else { "Still broken" }, Answer::Broken, false))
+                            .child(answer("hunt-works", "Works now", Answer::Works, true)),
+                    )
+                    .child(
+                        div()
+                            .h_1()
+                            .w_full()
+                            .rounded_full()
+                            .bg(theme.muted)
+                            .child(div().h_full().rounded_full().bg(theme.primary).w(relative(done.clamp(0.02, 1.0)))),
+                    )
+                    .child(note(line))
+                    .when_some(h.hint.clone().filter(|_| crash), |s, hint| {
+                        s.child(note(format!(
+                            "The crash report mentions {hint}. That's often not the real cause (reports blame the last mod in the chain), so every mod is tested."
+                        )))
+                    })
+                    .into_any_element()
+            }
+        };
+        Some(el)
+    }
+
+    /// A row's hunt chip: its state, what needs it, and a click to mark it
+    /// known good (or a suspect again).
+    pub(crate) fn hunt_chip(&self, file: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use hopper::bisect::RowState::*;
+        let h = self.hunt.hunt.as_ref().filter(|_| self.hunt_running())?;
+        let inst = self.table.inst.clone()?;
+        let state = h.state(file)?;
+        let theme = cx.theme();
+        let (color, label) = match state {
+            Testing => (theme.primary, "testing"),
+            Parked => (theme.warning, "parked"),
+            Cleared => (theme.success, "cleared"),
+            Library => (theme.info, "library, kept on"),
+            Fine => (theme.success, "known good"),
+            Culprit => (theme.danger, "culprit"),
+        };
+        let by = h.needed_by(file);
+        let needs: Vec<String> = h.requires.get(file).cloned().unwrap_or_default();
+        let mut tip = match state {
+            Testing => "On this round, still a suspect. Click if you know it's fine.".to_string(),
+            Parked if h.suspects.iter().any(|s| s == file) => "Off this round, still a suspect. Click if you know it's fine.".to_string(),
+            Parked if h.culprits.is_empty() => {
+                let why: Vec<String> = needs.iter().filter(|n| h.parked.contains(n)).cloned().collect();
+                format!("Not a suspect: off this round because it needs {}.", Self::hunt_names(&inst, &why, 3))
+            }
+            Parked => "Off with the culprit, because it needs it.".to_string(),
+            Cleared => "Not the cause: ruled out by an earlier round.".to_string(),
+            Library => "Many mods need it, so it stays on. Tested last, only if no other mod is the cause.".to_string(),
+            Fine => "You marked it fine. Click to make it a suspect again.".to_string(),
+            Culprit => "Breaks the game when on.".to_string(),
+        };
+        if !by.is_empty() {
+            tip += &format!("\nNeeded by {}", Self::hunt_names(&inst, &by, 5));
+        }
+        let suspect = h.suspects.iter().any(|s| s == file) && h.suspects.len() > 1;
+        let click = match state {
+            Fine => Some(false),
+            Testing | Parked if suspect => Some(true),
+            _ => None,
+        };
+        let f = file.to_string();
+        let tip: SharedString = tip.into();
+        Some(
+            div()
+                .id(SharedString::from(format!("hunt:{file}")))
+                .flex_none()
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .when_some(click, |d, fine| {
+                    d.clickable(cx).on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        let f = f.clone();
+                        if fine {
+                            this.hunt_change("Marking a mod fine", move |h| h.mark_fine(&f), cx)
+                        } else {
+                            this.hunt_change("Making a mod a suspect again", move |h| h.unmark_fine(&f), cx)
+                        }
+                    }))
+                })
+                .child(widgets::chip(color).child(label))
+                .into_any_element(),
+        )
+    }
+}
+
+/// The line under a softened banner: when the game last loaded with these
+/// mods, so the user can tell the check is likely wrong.
+fn loaded_fine_note(at: i64) -> String {
+    format!(
+        "The game loaded fine with these exact mods {}, so this is probably nothing: some mods stand in for others while the game loads, which their files don't show.",
+        hopper::time::relative_secs(at)
+    )
 }
