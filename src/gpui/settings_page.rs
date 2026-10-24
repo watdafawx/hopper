@@ -182,6 +182,8 @@ const ENTRIES: &[Entry] = &[
     e(C::General, "browse-sort", "Browse sorts by", "How Browse orders results when it opens. Last used keeps the sort you picked last.", "sort order popularity downloads newest updated name featured last"),
     e(C::General, "dependents", "Mods others need", "Turning off a mod that others need, or turning on one that needs mods that are off.", "dependencies deps required library"),
     e(C::General, "delete-permanently", "Skip the Recycle Bin", "Deleted instances, worlds and backups are removed for good, so they don't fill up your C: drive. Off sends them to the Recycle Bin.", "delete recycle bin trash permanent disk space"),
+    e(C::General, "translate", "Translate mod text", "Offer to translate changelogs and descriptions that aren't in English. It runs on this PC: a language's model downloads only when you first translate from it (about 300 MB, 150 MB once stored), and no text is sent anywhere.", "translate translation language english chinese russian japanese korean changelog description offline"),
+    e(C::General, "translate-langs", "Translation models", "Languages downloaded for translation. Remove one to free its space.", "translate translation language model download disk space remove"),
     e(C::Accounts, "account", "Microsoft accounts", "Switch which one starts your games, add another, or sign one out.", "sign in login microsoft profile skin"),
     e(C::Folders, "instances-root", "Instances folder", "Where your instances live. CurseForge's Instances folder works.", "path directory library"),
     e(C::Folders, "launcher-dir", "Launcher folder", "The folder with minecraft.exe. CurseForge keeps one in Curse\\Install.", "minecraft.exe mojang path directory"),
@@ -930,8 +932,44 @@ impl SettingsPage {
                     |st, v| st.delete_permanently = v,
                     cx,
                 )),
+                Row::new("translate").control(self.switch("translate", s.translate, |st, v| st.translate = v, cx)),
+                Row::new("translate-langs").below(self.translate_models(cx)),
             ],
         )]
+    }
+
+    /// The downloaded translation models, each with its size and Remove.
+    fn translate_models(&self, cx: &mut Context<Self>) -> AnyElement {
+        let list = hopper::translate::installed_list();
+        if list.is_empty() {
+            return widgets::caption("None yet. A language downloads the first time you translate from it.", cx)
+                .into_any_element();
+        }
+        let always = self.store.read(cx).settings().translate_always.clone();
+        v_flex()
+            .gap_1()
+            .children(list.into_iter().map(|(lang, bytes)| {
+                let store = self.store.clone();
+                h_flex()
+                    .gap_3()
+                    .child(div().text_sm().child(format!("{} to English", lang.name)))
+                    .when(always.iter().any(|c| c == lang.code), |r| {
+                        r.child(widgets::chip(cx.theme().info).child("Always"))
+                    })
+                    .child(div().flex_1())
+                    .child(widgets::caption(format!("{} MB", bytes >> 20), cx))
+                    .child(
+                        Button::new(SharedString::from(format!("tr-remove-{}", lang.code)))
+                            .label("Remove")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                store.update(cx, |s, cx| s.tr_remove(lang, cx));
+                                cx.notify();
+                            })),
+                    )
+            }))
+            .into_any_element()
     }
 
     fn accounts(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {

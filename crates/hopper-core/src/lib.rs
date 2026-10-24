@@ -78,4 +78,6 @@ pub mod snapshots;
 pub mod source;
 pub mod sync;
 pub mod time;
+#[cfg(feature = "translate")]
+pub mod translate;
 pub mod waker;

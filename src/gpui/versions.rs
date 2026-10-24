@@ -133,6 +133,10 @@ impl VersionsView {
                 .into_any_element();
         }
         let (store, root) = (self.store.clone(), self.root.clone());
+        let (id, md) = match self.store.read(cx).translations().shown(&md) {
+            Some(en) => (ElementId::Name(format!("{id}:en").into()), en),
+            None => (id, md),
+        };
         // The list around it scrolls; the text must not catch the wheel.
         TextView::markdown(id, md)
             .selectable(true)
@@ -438,11 +442,18 @@ impl Render for VersionsView {
         // Once loaded, a column the window's height whose list takes the
         // rest and scrolls (a max height on the scroll area doesn't scroll).
         let loaded = matches!(self.entries, Some(Ok(_)));
+        let mut texts: Vec<SharedString> = match &self.entries {
+            Some(Ok(entries)) => entries.iter().map(|(_, md)| md.clone()).collect(),
+            _ => Vec::new(),
+        };
+        texts.extend(self.others.values().filter_map(|o| o.as_ref()?.as_ref().ok().cloned()));
+        let bar = widgets::translate_bar("versions-tr", "This changelog", texts, &self.store, cx);
         v_flex()
             .when(loaded, |c| c.h(total_h))
             .gap_4()
             .child(header)
             .children(lock_note)
+            .children(bar)
             .child(
                 // Until then the column has no height, and a flex_1 body
                 // would shrink to nothing and hide the spinner or error.
@@ -530,7 +541,9 @@ pub fn open(
     store.update(cx, |s, _| s.want_image(&icon));
     let to = update.as_ref().map(|f| f.file_name.clone());
     let title = "Versions and changelogs";
+    let tick = store.read(cx).tr_tick().clone();
     let view = cx.new(|cx| {
+        cx.observe(&tick, |_, _, cx| cx.notify()).detach();
         let mut v = VersionsView {
             store,
             root,
@@ -582,7 +595,11 @@ impl Render for FileLog {
                 .into_any_element(),
             Some(Ok(md)) => {
                 let (store, root) = (self.store.clone(), self.root.clone());
-                TextView::markdown("file-log", md.clone())
+                let (id, md) = match self.store.read(cx).translations().shown(md) {
+                    Some(en) => ("file-log-en", en),
+                    None => ("file-log", md.clone()),
+                };
+                TextView::markdown(id, md)
                     .selectable(true)
                     .scrollable(false)
                     .on_link_click(move |url, _, window, cx| match &root {
@@ -592,6 +609,11 @@ impl Render for FileLog {
                     .into_any_element()
             }
         };
+        let texts = match &self.md {
+            Some(Ok(md)) => vec![md.clone()],
+            _ => Vec::new(),
+        };
+        let bar = widgets::translate_bar("file-log-tr", "This changelog", texts, &self.store, cx);
         v_flex()
             .h(h)
             .gap_3()
@@ -600,6 +622,7 @@ impl Render for FileLog {
                     .child(div().font_semibold().truncate().child(self.file.display_name.clone()))
                     .child(widgets::caption(self.file.release_name(), cx).text_xs()),
             )
+            .children(bar)
             .child(div().id("file-log-scroll").flex_1().min_h_0().overflow_y_scrollbar().child(body))
     }
 }
@@ -622,7 +645,9 @@ pub fn open_file_id(
         display_name: name,
         ..Default::default()
     };
+    let tick = store.read(cx).tr_tick().clone();
     let view = cx.new(|cx| {
+        cx.observe(&tick, |_, _, cx| cx.notify()).detach();
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
@@ -662,7 +687,9 @@ pub fn open_file_id(
 
 /// Opens one version's changelog.
 pub fn open_file(store: Entity<Store>, root: Option<PathBuf>, file: cf::File, window: &mut Window, cx: &mut App) {
+    let tick = store.read(cx).tr_tick().clone();
     let view = cx.new(|cx| {
+        cx.observe(&tick, |_, _, cx| cx.notify()).detach();
         let f = file.clone();
         cx.spawn(async move |this, cx| {
             let r = cx

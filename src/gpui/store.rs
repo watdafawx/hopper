@@ -86,6 +86,10 @@ pub enum Msg {
     LiveCrash(PathBuf, hopper::crashdetect::Crash),
     /// Mods whose mixins failed while a game runs.
     LiveWarnings(PathBuf, Vec<hopper::crashdetect::Suspect>),
+    /// A translation finished (see `crate::translation`).
+    Translated,
+    /// A translation model finished downloading (by language code).
+    TrDownloaded(&'static str),
     /// A job that reports only through its own progress line.
     Nothing,
 }
@@ -262,6 +266,10 @@ pub struct Store {
     asked: Option<String>,
     /// Instance roots the game watcher looks for.
     watched: Arc<Mutex<Vec<PathBuf>>>,
+    /// Translated changelogs and descriptions.
+    translations: crate::translation::Translations,
+    /// Notified when a translation finishes, for views that are cached.
+    tr_tick: Entity<TrTick>,
     tx: Sender<Msg>,
     wake: hopper::waker::Waker,
     /// Settings as last written, to save only real changes.
@@ -371,6 +379,14 @@ impl Store {
             update_queue: Default::default(),
             recent_updates: Default::default(),
             java_jobs: HashMap::new(),
+            translations: crate::translation::Translations::new({
+                let (tx, wake) = (tx.clone(), wake.clone());
+                Arc::new(move || {
+                    let _ = tx.send(Msg::Translated);
+                    wake();
+                })
+            }),
+            tr_tick: cx.new(|_| TrTick),
             fetch_queue: Default::default(),
             pending: HashMap::new(),
             local: Arc::new(hopper::hosting::LocalPanel::new()),
@@ -881,6 +897,14 @@ impl Store {
                 _ => {}
             },
             Msg::PackUpdates(u) => self.pack_updates = u.into_iter().collect(),
+            Msg::Translated => self.tr_tick.update(cx, |_, cx| cx.notify()),
+            Msg::TrDownloaded(code) => {
+                self.translations.jobs.remove(code);
+                if let (Some(texts), Some(lang)) = (self.translations.after.remove(code), hopper::translate::by_code(code)) {
+                    self.translations.request(texts, lang);
+                }
+                self.tr_tick.update(cx, |_, cx| cx.notify());
+            }
             Msg::PackPage(id, r) => {
                 let page = match r {
                     Ok((m, md, images)) => {
@@ -2536,6 +2560,57 @@ impl Store {
         self.java_jobs.insert(format!("java-{major}"), id);
     }
 
+    pub fn translations(&self) -> &crate::translation::Translations {
+        &self.translations
+    }
+
+    pub fn tr_tick(&self) -> &Entity<TrTick> {
+        &self.tr_tick
+    }
+
+    /// The download of `lang`'s model, while it runs or after it failed.
+    pub fn tr_download(&self, lang: &hopper::translate::Lang) -> Option<hopper::jobs::JobState> {
+        self.job_state(*self.translations.jobs.get(lang.code)?)
+            .filter(|j| !j.done || j.error.is_some())
+    }
+
+    /// Translates `texts` from `lang`, downloading its model first when
+    /// needed (the user asked, with the size in front of them).
+    pub fn tr_start(&mut self, texts: Vec<String>, lang: &'static hopper::translate::Lang, cx: &mut Context<Self>) {
+        self.translations.jobs.remove(lang.code);
+        if hopper::translate::installed(lang) {
+            self.translations.request(texts, lang);
+        } else {
+            self.translations.after.insert(lang.code, texts);
+            let notify = self.translations.notifier();
+            let id = self.spawn_job_id(format!("Downloading the {} translation model", lang.name), move |job| {
+                job.detail(format!("{} MB, once. Translation runs on this PC.", lang.download >> 20));
+                // The bar shows the percentage: redraw it at each new one.
+                let mut shown = u64::MAX;
+                hopper::translate::download(lang, Some(job), |done, total| {
+                    job.progress((done >> 10) as usize, (total >> 10).max(1) as usize);
+                    let pct = done * 100 / total.max(1);
+                    if pct != shown {
+                        shown = pct;
+                        notify();
+                    }
+                })?;
+                Ok(Msg::TrDownloaded(lang.code))
+            });
+            self.translations.jobs.insert(lang.code, id);
+        }
+        cx.notify();
+    }
+
+    /// Deletes `lang`'s model and what was translated with it.
+    pub fn tr_remove(&mut self, lang: &'static hopper::translate::Lang, cx: &mut Context<Self>) {
+        if let Err(e) = hopper::translate::remove(lang) {
+            log::warn!("removing the {} model: {e:#}", lang.name);
+        }
+        self.translations.forget_all();
+        self.update_settings(|st| st.translate_always.retain(|c| c != lang.code), cx);
+    }
+
     /// A Java download running now ("java-21", "graalvm-25"): its job.
     pub fn java_download(&self, key: &str) -> Option<hopper::jobs::JobState> {
         self.job_state(*self.java_jobs.get(key)?).filter(|j| !j.done)
@@ -2893,3 +2968,6 @@ fn hosted_meta(opts: &hopper::hosting::CreateOptions) -> hopper::hosting::Hosted
 
 /// Notified as running jobs' detail and progress move (see `Store::job_ticks`).
 pub struct JobTicks;
+
+/// Notified when a translation finishes (see `Store::tr_tick`).
+pub struct TrTick;

@@ -33,6 +33,16 @@ keyring.workspace = true
 similar.workspace = true
 # Finding Hopper Servers on the LAN.
 mdns-sd.workspace = true
+# Offline translation of changelogs and descriptions (desktop only).
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
+whatlang = { version = "0.18", optional = true }
+# The models' SentencePiece tokenizer (candle-core pulls it in already).
+tokenizers = { version = "0.22", default-features = false, features = ["onig"], optional = true }
+
+[features]
+translate = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:whatlang", "dep:tokenizers"]
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

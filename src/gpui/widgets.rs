@@ -743,6 +743,158 @@ fn image_size(path: &Path) -> Option<(u32, u32)> {
         .or_insert_with(|| image::image_dimensions(path).ok())
 }
 
+/// A bar over author-written text (changelogs, descriptions) that isn't in
+/// English: translate it on this PC, see how far along that is, or go back
+/// to the original. `what` names the text ("This changelog"). Nothing shows
+/// (and nothing is detected) unless translation is on in Settings.
+///
+/// The texts themselves show translated through
+/// `store.translations().shown(md)`.
+pub fn translate_bar(
+    id: impl Into<SharedString>,
+    what: &str,
+    texts: Vec<SharedString>,
+    store: &Entity<crate::store::Store>,
+    cx: &App,
+) -> Option<AnyElement> {
+    use crate::translation::BarState;
+    let s = store.read(cx);
+    if !s.settings().translate || texts.iter().all(|t| t.trim().is_empty()) {
+        return None;
+    }
+    let tr = s.translations();
+    let lang = tr.lang(&texts)?;
+    let installed = hopper::translate::installed(lang);
+    let always = s.settings().translate_always.iter().any(|c| c == lang.code);
+    let download = s.tr_download(lang);
+    // "Always translate": straight to English once the model is here.
+    if always && installed && download.is_none() && !tr.asked(&texts) {
+        tr.request(texts.iter().map(|t| t.to_string()).collect(), lang);
+    }
+    let state = match &download {
+        Some(j) if j.done => BarState::Failed(j.error.clone().unwrap_or_default()),
+        Some(j) => BarState::Downloading(j.progress),
+        None => tr.bar(&texts),
+    };
+    let id: SharedString = id.into();
+    let theme = cx.theme();
+    let color = theme.info;
+    let texts = Rc::new(texts);
+    let start = {
+        let (store, texts) = (store.clone(), texts.clone());
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            store.read(cx).translations().clear_failed(&texts);
+            let t = texts.iter().map(|t| t.to_string()).collect();
+            store.update(cx, |s, cx| s.tr_start(t, lang, cx));
+        }
+    };
+    let busy = |label: String| {
+        h_flex()
+            .gap_2()
+            .child(gpui_kit::component::spinner::Spinner::new().small())
+            .child(div().text_sm().child(label))
+    };
+    // Text first, controls after it; they wrap under it in a narrow panel.
+    let row = || h_flex().flex_1().min_w_0().flex_wrap().gap_x_3().gap_y_1();
+    let text = |t: String| div().flex_1().min_w(rems(12.)).text_sm().child(t);
+    let body = match state {
+        BarState::Idle => row()
+            .child(text(format!("{what} is in {}.", lang.name)))
+            .child(
+                gpui_kit::component::checkbox::Checkbox::new(SharedString::from(format!("{id}-always")))
+                    .label(format!("Always translate {}", lang.name))
+                    .small()
+                    .checked(always)
+                    .on_click({
+                        let (store, texts) = (store.clone(), texts.clone());
+                        move |v: &bool, _, cx| {
+                            let v = *v;
+                            store.update(cx, |s, cx| {
+                                // Ticking it translates what's shown now too.
+                                if v {
+                                    s.tr_start(texts.iter().map(|t| t.to_string()).collect(), lang, cx);
+                                }
+                                s.update_settings(
+                                    |st| {
+                                        st.translate_always.retain(|c| c != lang.code);
+                                        if v {
+                                            st.translate_always.push(lang.code.to_string());
+                                        }
+                                    },
+                                    cx,
+                                )
+                            });
+                        }
+                    }),
+            )
+            .child(
+                Button::new(SharedString::from(format!("{id}-go")))
+                    .label(if installed {
+                        "Translate".to_string()
+                    } else {
+                        format!("Translate ({} MB download)", lang.download >> 20)
+                    })
+                    .when(!installed, |b| {
+                        b.tooltip(format!(
+                            "Downloads the {} to English model once from Hugging Face. Translation runs on this PC; no text is sent anywhere.",
+                            lang.name
+                        ))
+                    })
+                    .outline()
+                    .small()
+                    .on_click(start),
+            )
+            .into_any_element(),
+        BarState::Downloading(p) => busy(match p {
+            Some(p) => format!("Downloading the {} model, {:.0}%", lang.name, p * 100.),
+            None => format!("Downloading the {} model", lang.name),
+        })
+        .into_any_element(),
+        BarState::Working => busy("Translating on this PC".into()).into_any_element(),
+        BarState::Done => row()
+            .child(text(format!(
+                "Translated from {} on this PC. Machine translation can get game terms wrong.",
+                lang.name
+            )))
+            .child(
+                Button::new(SharedString::from(format!("{id}-orig")))
+                    .label("Show original")
+                    .ghost()
+                    .small()
+                    .on_click({
+                        let (store, texts) = (store.clone(), texts.clone());
+                        move |_, _, cx| store.read(cx).translations().show_original(&texts)
+                    }),
+            )
+            .into_any_element(),
+        BarState::Failed(e) => row()
+            .child(text(format!("Couldn't translate: {e}")).text_color(theme.danger))
+            .child(
+                Button::new(SharedString::from(format!("{id}-retry")))
+                    .label("Try again")
+                    .outline()
+                    .small()
+                    .on_click(start),
+            )
+            .into_any_element(),
+    };
+    Some(
+        h_flex()
+            .id(id)
+            .w_full()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(color.opacity(0.3))
+            .bg(color.opacity(0.08))
+            .child(Icon::new(IconName::Languages).small().text_color(color))
+            .child(body)
+            .into_any_element(),
+    )
+}
+
 /// How long until an animated image of this description (one the store
 /// decoded, see `Store::want_anim`) shows its next frame: when the page
 /// showing it should redraw.
@@ -807,17 +959,28 @@ pub fn description_view(
             }
         }
     };
+    let texts: Vec<SharedString> = segments
+        .iter()
+        .filter_map(|s| match s {
+            Segment::Markdown(md) => Some(SharedString::from(md.clone())),
+            _ => None,
+        })
+        .collect();
+    let bar = translate_bar(format!("{id}:tr"), "This description", texts, store, cx);
+    let tr = store.read(cx).translations();
     v_flex()
         .w_full()
+        .when_some(bar, |v, bar| v.child(div().pb_2().child(bar)))
         .children(segments.iter().enumerate().map(|(i, seg)| match seg {
             // GPUI Base's own view: the component wrapper has no image hook.
             Segment::Markdown(md) => {
                 let cached = cached.clone();
                 let clips = clips.clone();
                 let open = open.clone();
+                let shown = tr.shown(md);
                 gpui_kit::base::TextView::markdown(
-                    ElementId::Name(format!("{id}:{i}").into()),
-                    SharedString::from(md.clone()),
+                    ElementId::Name(format!("{id}:{i}{}", if shown.is_some() { ":en" } else { "" }).into()),
+                    shown.unwrap_or_else(|| SharedString::from(md.clone())),
                 )
                 .scrollable(false)
                 .selectable(true)
@@ -1144,16 +1307,20 @@ pub struct DescView {
     /// A redraw is set for the next GIF frame.
     anim_due: bool,
     _focus: Subscription,
+    /// Redraws when a translation of the description finishes.
+    _translated: Subscription,
 }
 
 impl DescView {
     pub fn new(store: Entity<crate::store::Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let tick = store.read(cx).tr_tick().clone();
         Self {
             store,
             shown: None,
             anim_due: false,
             // Paused GIFs pick up again when the window is focused.
             _focus: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
+            _translated: cx.observe(&tick, |_, _, cx| cx.notify()),
         }
     }
 

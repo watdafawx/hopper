@@ -6,7 +6,7 @@ resolver = "3"
 # One version for every crate: release.ps1 and release.yml read the first
 # `version = "..."` line of this file.
 [workspace.package]
-version = "0.11.0"
+version = "0.11.1"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -48,7 +48,7 @@ description = "A native Minecraft modpack and server manager"
 
 [dependencies]
 # Imported as `hopper` so the app's `hopper::...` paths stay as they were.
-hopper = { path = "crates/hopper-core", package = "hopper-core" }
+hopper = { path = "crates/hopper-core", package = "hopper-core", features = ["translate"] }
 anyhow.workspace = true
 serde_json.workspace = true
 zip.workspace = true

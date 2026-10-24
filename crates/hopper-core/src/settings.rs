@@ -155,6 +155,12 @@ pub struct Settings {
     pub setup_done: bool,
     /// "Don't ask again" on moving Hopper's files next to its exe.
     pub data_move_declined: bool,
+    /// Offer to translate changelogs and descriptions into English, on this
+    /// PC. Off until the user turns it on: nothing is detected, shown or
+    /// downloaded before.
+    pub translate: bool,
+    /// Languages (`translate::Lang::code`) translated without asking.
+    pub translate_always: Vec<String>,
     /// Settings this build doesn't know (saved by a newer Hopper), kept as
     /// they are so going back a version and forward again loses none.
     #[serde(flatten)]
@@ -337,6 +343,8 @@ impl Default for Settings {
             // A new user: Hopper shows its setup on the first start.
             setup_done: false,
             data_move_declined: false,
+            translate: false,
+            translate_always: Vec::new(),
             unknown: serde_json::Map::new(),
         }
     }

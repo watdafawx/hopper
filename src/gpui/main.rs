@@ -48,6 +48,7 @@ mod skins;
 mod store;
 mod theme;
 mod tasks;
+mod translation;
 mod tray;
 mod versions;
 mod video;
