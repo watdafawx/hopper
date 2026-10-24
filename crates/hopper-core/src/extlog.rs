@@ -212,10 +212,20 @@ fn resolve(t: &Target, f: &cf::File) -> anyhow::Result<Option<String>> {
         Target::Release { tag, .. } => {
             let v = api(&format!("repos/{repo}/releases/tags/{tag}"))?;
             let body = v["body"].as_str().unwrap_or("").trim();
-            if body.is_empty() {
-                v["name"].as_str().unwrap_or("").to_string()
-            } else {
+            if !body.is_empty() {
                 body.to_string()
+            } else {
+                // GitHub's page shows an annotated tag's message when the
+                // release itself has no notes.
+                match tag_message(repo, tag) {
+                    Ok(Some(m)) => m,
+                    other => {
+                        if let Err(e) = other {
+                            log::warn!("tag {repo} {tag}: {e:#}");
+                        }
+                        v["name"].as_str().unwrap_or("").to_string()
+                    }
+                }
             }
         }
         Target::Pull { number, .. } => {
@@ -243,6 +253,33 @@ fn message(m: &str) -> String {
         Some((title, body)) => format!("**{}**\n\n{}", title.trim(), body.trim()),
         None => format!("**{m}**"),
     }
+}
+
+/// An annotated tag's message as Markdown, `None` for a lightweight tag or
+/// an empty message.
+fn tag_message(repo: &str, tag: &str) -> anyhow::Result<Option<String>> {
+    let r = api(&format!("repos/{repo}/git/ref/tags/{tag}"))?;
+    if r["object"]["type"].as_str() != Some("tag") {
+        return Ok(None);
+    }
+    let Some(sha) = r["object"]["sha"].as_str() else { return Ok(None) };
+    let t = api(&format!("repos/{repo}/git/tags/{sha}"))?;
+    Ok(tag_text(t["message"].as_str().unwrap_or("")))
+}
+
+/// A tag message without its signature, and without a first line that only
+/// says "Changelog" (GitHub puts that beside the tag name as the title).
+fn tag_text(m: &str) -> Option<String> {
+    let m = m.split("-----BEGIN PGP SIGNATURE-----").next().unwrap_or(m);
+    let m = m.split("-----BEGIN SSH SIGNATURE-----").next().unwrap_or(m).trim();
+    let (first, rest) = m.split_once('\n').unwrap_or((m, ""));
+    let plain = first.trim().trim_end_matches(':').trim_start_matches('#').trim();
+    let m = if !rest.trim().is_empty() && plain.eq_ignore_ascii_case("changelog") {
+        rest.trim()
+    } else {
+        m
+    };
+    (!m.is_empty()).then(|| m.to_string())
 }
 
 /// The version numbers in a file's name ("1.11.0" in "Excessive Utilities
@@ -650,6 +687,17 @@ mod tests {
     }
 
     #[test]
+    fn tag_messages() {
+        assert_eq!(tag_text("Changelog\n- Fixed a crash\n- Added x").as_deref(), Some("- Fixed a crash\n- Added x"));
+        assert_eq!(tag_text("v1.2\n\n- Fix").as_deref(), Some("v1.2\n\n- Fix"));
+        assert_eq!(
+            tag_text("- Fix\n-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----\n").as_deref(),
+            Some("- Fix")
+        );
+        assert_eq!(tag_text("  \n"), None);
+    }
+
+    #[test]
     fn links() {
         assert_eq!(
             issue_links("- Fix (#87), see #9 and `#12`, not #abc or a#1", "a/b"),
@@ -675,6 +723,7 @@ mod tests {
             ("https://github.com/Berry-Club/Excessive-Utilities/blob/master/CHANGELOG.md#1110", "Excessive Utilities 1.21.1 1.11.0-build.69"),
             ("https://github.com/Berry-Club/Excessive-Utilities/blob/master/CHANGELOG.md", "Excessive Utilities 1.21.1 1.10.0-build.64"),
             ("https://github.com/FabricMC/fabric-loader/releases/tag/0.16.10", "x"),
+            ("https://github.com/VazkiiMods/Morph-o-Tool/releases/tag/release-1.21.1-1.8-40", "x"),
             ("https://github.com/FabricMC/fabric-loader/compare/0.16.9...0.16.10", "x"),
             ("https://github.com/FabricMC/fabric-loader/commit/a1f9c1c", "x"),
         ] {
