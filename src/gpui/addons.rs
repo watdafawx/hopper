@@ -2464,6 +2464,7 @@ impl AddonsView {
             let split = widgets::split(
                 widgets::split_lead(
                         Button::new(id("update"))
+                            .flex_1()
                             .small()
                             .outline()
                             .icon(IconName::Download)
@@ -2501,7 +2502,18 @@ It stays disabled after updating: turn it on in the On column.")
                 cx,
             );
             // The download fills the button from the left.
-            c.child(widgets::progress_fill(split, progress, cx))
+            c.child(widgets::progress_fill(split.min_w(rems(widgets::SPLIT_W)), progress, cx))
+        })
+        // Nothing to update: the changelog alone, in the pill's place.
+        .when(update.is_none() && !done && a.project_id != 0, |c| {
+            let (pid, view) = (a.project_id, cx.entity());
+            c.child(widgets::split_alone(
+                id("changes"),
+                gpui_kit::component::Size::Small,
+                "Versions and changelogs",
+                move |_, window, cx| view.update(cx, |this, cx| this.versions(pid, None, window, cx)),
+                cx,
+            ))
         });
 
         let view = cx.entity();
