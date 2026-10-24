@@ -381,10 +381,11 @@ impl Render for VersionsView {
             .child(header)
             .children(lock_note)
             .child(
+                // Until then the column has no height, and a flex_1 body
+                // would shrink to nothing and hide the spinner or error.
                 div()
                     .id("versions-body")
-                    .flex_1()
-                    .min_h_0()
+                    .when(loaded, |d| d.flex_1().min_h_0())
                     .overflow_y_scrollbar()
                     .child(body),
             )

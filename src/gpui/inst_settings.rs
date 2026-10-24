@@ -827,7 +827,15 @@ impl Render for LoaderLog {
             .when(loaded, |c| c.h(total_h))
             .gap_3()
             .child(widgets::caption(format!("Installed: {}", loader_label(&self.installed)), cx).text_xs())
-            .child(div().id("loader-log").flex_1().min_h_0().overflow_y_scrollbar().child(body))
+            // Until loaded the column has no height; a flex_1 body would
+            // shrink to nothing and hide the spinner or error.
+            .child(
+                div()
+                    .id("loader-log")
+                    .when(loaded, |d| d.flex_1().min_h_0())
+                    .overflow_y_scrollbar()
+                    .child(body),
+            )
     }
 }
 
