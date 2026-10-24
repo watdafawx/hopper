@@ -92,6 +92,11 @@ impl History {
         Some(loc)
     }
 
+    /// Whether there is a place to go back (or forward) to.
+    pub fn can_step(&self, back: bool) -> bool {
+        if back { !self.back.is_empty() } else { !self.forward.is_empty() }
+    }
+
     /// A Browse project, kept to open it again.
     pub fn remember(&mut self, m: &cf::Mod) {
         self.projects.entry(m.id).or_insert_with(|| m.clone());

@@ -13,7 +13,6 @@ use gpui_kit::component::form::Field;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex,
     v_flex,
@@ -49,6 +48,8 @@ pub struct ServerControl {
     /// This server in the panel.
     id: Option<String>,
     stats: Option<Result<PanelStats, String>>,
+    /// When the panel last answered, for "last seen" when it stops.
+    seen: Option<std::time::Instant>,
     /// Recent (CPU %, memory %) samples while running, oldest first, for
     /// the Overview's sparklines.
     history: std::collections::VecDeque<(f32, f32)>,
@@ -122,6 +123,7 @@ impl ServerControl {
             listed: None,
             id: None,
             stats: None,
+            seen: None,
             history: Default::default(),
             console: Vec::new(),
             console_open: false,
@@ -212,6 +214,7 @@ impl ServerControl {
     fn reload(&mut self, cx: &mut Context<Self>) {
         self.id = None;
         self.stats = None;
+        self.seen = None;
         self.history.clear();
         self.backups = None;
         self.console.clear();
@@ -332,6 +335,9 @@ impl ServerControl {
             Ok(_) => self.history.clear(),
             Err(_) => {}
         }
+        if stats.is_ok() {
+            self.seen = Some(std::time::Instant::now());
+        }
         self.stats = Some(stats);
         cx.notify();
     }
@@ -380,6 +386,18 @@ impl ServerControl {
                 "{} {name}? {online} player{} online.",
                 action.label(),
                 if online == 1 { " is" } else { "s are" }
+            )),
+            // No players, or Hopper can't see the state: still ask, so a
+            // stop is never one stray click.
+            PanelAction::Stop | PanelAction::Restart if !matches!(&self.stats, Some(Ok(_))) => {
+                Some(format!(
+                    "{} {name}? Hopper can't read its state right now, so it can't tell who is online.",
+                    action.label()
+                ))
+            }
+            PanelAction::Stop | PanelAction::Restart => Some(format!(
+                "{} {name}? Nobody is online.",
+                action.label()
             )),
             _ => None,
         };
@@ -497,20 +515,15 @@ impl ServerControl {
         let note = |t: String| widgets::caption(t, &*cx).text_xs().into_any_element();
         match (&self.listed, &self.id) {
             (None, _) => return note(format!("Asking {pname}…")),
-            (Some(Err(e)), _) => {
-                return div()
-                    .id("panel-error")
-                    .max_w(rems(28.))
-                    .text_xs()
-                    .text_color(theme.danger)
-                    .truncate()
-                    .child(e.clone())
-                    .into_any_element();
-            }
+            (Some(Err(e)), _) => return self.unreachable(e, compact, cx),
             (Some(Ok(_)), None) => {
                 return note(format!("{pname} doesn't list this server (folder, port or name)"));
             }
             _ => {}
+        }
+        // Listed once, but the polls fail now: the panel went away.
+        if let Some(Err(e)) = &self.stats {
+            return self.unreachable(e, compact, cx);
         }
         let stats = match &self.stats {
             Some(Ok(s)) => Some(s.clone()),
@@ -520,7 +533,7 @@ impl ServerControl {
         let running = stats.as_ref().is_some_and(|s| s.running);
         let (tag, state) = match (&stats, busy) {
             (_, Some(a)) => (
-                Tag::warning(),
+                widgets::chip(cx.theme().warning),
                 match a {
                     PanelAction::Start => "Starting",
                     PanelAction::Stop => "Stopping",
@@ -529,11 +542,11 @@ impl ServerControl {
                     PanelAction::Backup => "Backing up",
                 },
             ),
-            (Some(s), None) if s.crashed => (Tag::danger(), "Crashed"),
-            (Some(s), None) if s.starting => (Tag::warning(), "Starting"),
-            (Some(s), None) if s.running => (Tag::success(), "Running"),
-            (Some(_), None) => (Tag::secondary(), "Stopped"),
-            (None, None) => (Tag::secondary(), "…"),
+            (Some(s), None) if s.crashed => (widgets::chip(cx.theme().danger), "Crashed"),
+            (Some(s), None) if s.starting => (widgets::chip(cx.theme().warning), "Starting"),
+            (Some(s), None) if s.running => (widgets::chip(cx.theme().success), "Running"),
+            (Some(_), None) => (widgets::chip(cx.theme().muted_foreground), "Stopped"),
+            (None, None) => (widgets::chip(cx.theme().muted_foreground), "…"),
         };
         let menu_view = cx.entity();
         h_flex()
@@ -621,35 +634,70 @@ impl ServerControl {
         }
     }
 
-    /// Live numbers for the Overview: (label, value).
-    pub fn live(&self) -> Vec<(&'static str, String)> {
-        let Some(Ok(s)) = &self.stats else {
-            return Vec::new();
-        };
-        // The state itself shows as Status.
-        let mut rows = Vec::new();
-        if s.running {
-            rows.push(("CPU", format!("{:.0}%", s.cpu)));
-            rows.push((
-                "Memory",
-                if s.mem.is_empty() {
-                    format!("{:.0}%", s.mem_percent)
-                } else {
-                    format!("{} ({:.0}%)", s.mem, s.mem_percent)
-                },
-            ));
-            // Named players get their own section below.
-            if s.players.is_empty() {
-                rows.push(("Players", format!("{}/{}", s.online, s.max)));
+    /// Asks the panel again after it couldn't be reached.
+    fn retry(&mut self, cx: &mut Context<Self>) {
+        self.listed = None;
+        self.reload(cx);
+    }
+
+    /// "Can't reach <panel>": what failed, when it last answered, a Retry
+    /// and the way to the panel's settings.
+    fn unreachable(&self, err: &str, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let pname = self.panel_name(cx);
+        let last = self.seen.map(|t| {
+            let m = t.elapsed().as_secs() / 60;
+            match m {
+                0 => "just now".to_string(),
+                1..=59 => format!("{m} min ago"),
+                _ => format!("{} h ago", m / 60),
             }
-            if !s.started.is_empty() {
-                rows.push(("Started", s.started.clone()));
-            }
-        }
-        if !s.world_size.is_empty() {
-            rows.push(("World size", s.world_size.clone()));
-        }
-        rows
+        });
+        v_flex()
+            .id("panel-error")
+            .gap_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.warning)
+                            .child(gpui_kit::component::Icon::new(IconName::TriangleAlert).small())
+                            .child(format!("Can't reach {pname}")),
+                    )
+                    .child(
+                        Button::new("panel-retry")
+                            .small()
+                            .outline()
+                            .icon(IconName::RefreshCw)
+                            .label("Retry")
+                            .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
+                    )
+                    .child(
+                        Button::new("panel-settings")
+                            .small()
+                            .ghost()
+                            .label("Settings → Servers")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ControlEvent::SetUp))),
+                    ),
+            )
+            .child(
+                widgets::caption(
+                    match last {
+                        Some(t) => format!("Last seen {t}. {err}"),
+                        None => err.to_string(),
+                    },
+                    &*cx,
+                )
+                .text_xs()
+                .max_w(rems(if compact { 16. } else { 32. }))
+                .truncate(),
+            )
+            .into_any_element()
     }
 
     /// The Overview's cards: CPU and memory with sparklines of the last

@@ -6,6 +6,7 @@
 //! save when they lose focus or on Enter, with a "Saved" tick, or say
 //! inline why they didn't. Buttons are only for actions (test, install…).
 
+use crate::widgets::Clickable as _;
 use crate::java_form::JavaForm;
 use crate::store::Store;
 use crate::widgets;
@@ -17,7 +18,7 @@ use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{
+use gpui_kit::component::{Selectable as _, 
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
     h_flex, v_flex,
 };
@@ -31,7 +32,7 @@ use std::time::{Duration, Instant};
 
 const SAVED_KEY: &str = "Saved. Paste a new key to replace it";
 /// How wide the cards get.
-const MAX_W: f32 = 50.;
+const MAX_W: f32 = 48.;
 /// How long a "Saved" tick and a search highlight stay.
 const TICK: Duration = Duration::from_millis(2500);
 const FLASH: Duration = Duration::from_millis(1800);
@@ -1295,8 +1296,9 @@ impl SettingsPage {
                     let current = hopper::hopperd::base_url(&s.panel_url) == hopper::hopperd::base_url(&f.url);
                     Button::new(("found-panel", i))
                         .small()
-                        .when(current, |b| b.primary())
-                        .when(!current, |b| b.outline())
+                        .outline()
+                        .selected(current)
+
                         .icon(IconName::Server)
                         .label(format!("{} · {} · v{}", f.name, f.url, f.version))
                         .on_click(cx.listener(move |this, _, window, cx| this.use_panel_url(url.clone(), window, cx)))
@@ -2012,7 +2014,7 @@ impl SettingsPage {
         let theme = cx.theme().clone();
         let hits = matches(&self.query);
         let searching = !self.query.trim().is_empty();
-        let item = |id: ElementId, icon: IconName, label: SharedString, active: bool| {
+        let item = |id: ElementId, icon: IconName, label: SharedString, active: bool, cx: &App| {
             h_flex()
                 .id(id)
                 .h(rems(2.))
@@ -2020,9 +2022,9 @@ impl SettingsPage {
                 .gap_2p5()
                 .rounded(theme.radius)
                 .text_sm()
-                .cursor_pointer()
-                .when(active, |r| r.bg(theme.list_active).font_medium())
-                .when(!active, |r| r.hover(|s| s.bg(theme.list_hover)))
+                .clickable(cx)
+                .when(active, |r| widgets::row_selected(r, cx).font_medium())
+                .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
                 .child(
                     Icon::new(icon)
                         .small()
@@ -2053,9 +2055,9 @@ impl SettingsPage {
                         .px_2p5()
                         .py_1p5()
                         .rounded(theme.radius)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.list_hover))
-                        .when(i == 0, |r| r.bg(theme.list_hover))
+                        .clickable(cx)
+                        .hover(|s| widgets::row_hover(s, cx))
+                        .when(i == 0, |r| widgets::row_hover(r, cx))
                         .child(div().text_sm().truncate().child(e.label))
                         .child(
                             h_flex()
@@ -2077,7 +2079,9 @@ impl SettingsPage {
                         c.icon(),
                         c.label().into(),
                         c == self.category,
+                        cx,
                     )
+
                     .on_click(cx.listener(move |this, _, _, cx| this.show(c, cx)))
                 }))
                 .into_any_element()
@@ -2230,6 +2234,7 @@ impl Render for SettingsPage {
                             .pb_12()
                             .flex()
                             .flex_col()
+                            .items_center()
                             .children(children),
                     )
                     .vertical_scrollbar(&self.scroll),

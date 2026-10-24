@@ -3,12 +3,11 @@
 //! what going back gives up compared to the newest.
 
 use crate::store::{SelfUpdate, Store};
-use crate::widgets;
+use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -90,7 +89,7 @@ impl HopperVersions {
                     .gap_2()
                     .child(div().font_semibold().child(format!("Hopper {}", r.version)))
                     .child(widgets::caption(day(&r.published), cx).text_xs())
-                    .when(this, |c| c.child(Tag::primary().xsmall().child("You're on this"))),
+                    .when(this, |c| c.child(widgets::chip(theme.primary).child("You're on this"))),
             )
             .child(Self::notes(format!("hv-notes-{}", r.version), r, cx))
     }
@@ -207,7 +206,8 @@ fn day(published: &str) -> String {
 impl Render for HopperVersions {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rem = window.rem_size();
-        let total_h = (window.viewport_size().height - rem * 10.).max(rem * 18.);
+        // Under the same top offset as every dialog (see versions.rs).
+        let total_h = crate::widgets::dialog_room(window).max(rem * 18.);
         let theme = cx.theme().clone();
         let state = self.store.read(cx).self_update().cloned();
         let busy = matches!(state, Some(SelfUpdate::Installing(_)));
@@ -276,7 +276,7 @@ impl Render for HopperVersions {
                 let rows = list.iter().map(|r| {
                     let v = r.version.clone();
                     let picked = v == self.picked;
-                    let (hover, accent) = (theme.list_hover, theme.primary);
+                    let accent = theme.primary;
                     let older = is_newer(CURRENT, &v);
                     h_flex()
                         .id(SharedString::from(format!("hv-row-{v}")))
@@ -284,8 +284,8 @@ impl Render for HopperVersions {
                         .px_2p5()
                         .py_1p5()
                         .rounded(theme.radius)
-                        .cursor_pointer()
-                        .map(|r| if picked { r.bg(accent.opacity(0.14)) } else { r.hover(move |s| s.bg(hover)) })
+                        .clickable(cx)
+                        .map(|r| if picked { widgets::row_selected(r, cx) } else { r.hover(|s| widgets::row_hover(s, cx)) })
                         .child(
                             v_flex()
                                 .flex_1()
@@ -301,9 +301,9 @@ impl Render for HopperVersions {
                                 .child(widgets::caption(day(&r.published), cx).text_xs()),
                         )
                         .when(newest.as_deref() == Some(v.as_str()), |c| {
-                            c.child(Tag::success().xsmall().child("Latest"))
+                            c.child(widgets::chip(theme.success).child("Latest"))
                         })
-                        .when(v == CURRENT, |c| c.child(Tag::primary().xsmall().child("Yours")))
+                        .when(v == CURRENT, |c| c.child(widgets::chip(theme.primary).child("Yours")))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.picked = v.clone();
                             cx.notify();
@@ -362,6 +362,7 @@ pub fn open(store: Entity<Store>, window: &mut Window, cx: &mut App) {
         dialog
             .title("Hopper versions")
             .w(rems(56.).to_pixels(window.rem_size()))
+            .margin_top(rems(crate::widgets::DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())
     });
 }

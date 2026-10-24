@@ -11,8 +11,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{
+use gpui_kit::component::{Selectable as _, 
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -314,7 +313,7 @@ impl PeersView {
                     .px_3()
                     .py_2()
                     .rounded(theme.radius)
-                    .when(active, |r| r.bg(theme.list_active))
+                    .when(active, |r| widgets::row_selected(r, cx))
                     .child(
                         div()
                             .size_2()
@@ -323,7 +322,7 @@ impl PeersView {
                     )
                     .child(div().text_sm().font_semibold().child(p.name.clone()))
                     .when(!p.source.is_empty(), |r| {
-                        r.child(Tag::secondary().xsmall().child(p.source.clone()))
+                        r.child(widgets::chip(cx.theme().muted_foreground).xsmall().child(p.source.clone()))
                     })
                     .child(widgets::caption(p.addr.clone(), cx).text_xs())
                     .child(div().flex_1())
@@ -332,11 +331,13 @@ impl PeersView {
                     })
                     .map(|r| {
                         if p.trusted {
-                            r.child(Tag::success().xsmall().child("Paired"))
+                            r.child(widgets::chip(cx.theme().success).child("Paired"))
+
                                 .child(
                                     Button::new(SharedString::from(format!("sync:{id1}")))
                                         .small()
-                                        .map(|b| if active { b.primary() } else { b.outline() })
+                                        .outline()
+                                        .selected(active)
                                         .label("Sync with")
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select(id1.clone(), cx)
@@ -359,7 +360,7 @@ impl PeersView {
                             r.child(
                                 Button::new(SharedString::from(format!("pair:{id3}")))
                                     .small()
-                                    .primary()
+                                    .outline()
                                     .label("Pair")
                                     .disabled(!online)
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -520,10 +521,10 @@ impl PeersView {
                                 let picked = self.picked.contains(&e.rel);
                                 let rel = e.rel.clone();
                                 let tag = match e.status {
-                                    Status::Differ => Tag::info().xsmall().child("Different"),
-                                    Status::OnlyLocal => Tag::warning().xsmall().child("Only here"),
-                                    Status::OnlyRemote => Tag::primary().xsmall().child("Only theirs"),
-                                    Status::Same => Tag::secondary().xsmall().child("Same"),
+                                    Status::Differ => widgets::chip(cx.theme().info).xsmall().child("Different"),
+                                    Status::OnlyLocal => widgets::chip(cx.theme().warning).xsmall().child("Only here"),
+                                    Status::OnlyRemote => widgets::chip(cx.theme().primary).xsmall().child("Only theirs"),
+                                    Status::Same => widgets::chip(cx.theme().muted_foreground).xsmall().child("Same"),
                                 };
                                 let name = e
                                     .local

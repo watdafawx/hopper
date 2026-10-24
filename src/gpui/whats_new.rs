@@ -48,22 +48,35 @@ pub fn on_start(app: &AppView, window: &mut Window, cx: &mut Context<AppView>) -
     true
 }
 
-/// The notes of `entries` (newest first) as a dialog.
+/// The notes of `entries` (newest first) as a dialog: the newest open,
+/// the rest behind "Older releases".
 pub fn open(entries: Vec<Entry>, title: String, repo: String, window: &mut Window, cx: &mut App) {
+    let older_open = cx.new(|_| false);
     window.open_dialog(cx, move |dialog, window, cx| {
         let theme = cx.theme().clone();
+        let show_older = *older_open.read(cx);
+        let visible: Vec<&Entry> = entries.iter().take(if show_older { entries.len() } else { 1 }).collect();
+        // The body is the release's note; the paragraphs after it are the
+        // commit titles, which only repeat it when there is a real body.
+        let shown = |e: &Entry| -> Vec<String> {
+            match e.paragraphs.split_first() {
+                Some((first, rest)) if !rest.is_empty() && first.len() >= 80 => vec![first.clone()],
+                _ => e.paragraphs.clone(),
+            }
+        };
         // GPUI scrolls only a set height, so a list that may not fit gets
         // the window's height and scrolls; a short one (a rough, generous
         // guess at its height) keeps its own height and never clips.
         let rem = window.rem_size();
         let max_h = (window.viewport_size().height - rem * 12.).max(rem * 12.);
-        let guess: f32 = entries
+        let guess: f32 = visible
             .iter()
-            .map(|e| 5. + e.paragraphs.iter().map(|p| (p.len() as f32 / 70.).ceil() + 0.5).sum::<f32>() * 1.5)
+            .map(|e| 5. + shown(e).iter().map(|p| (p.len() as f32 / 70.).ceil() + 0.5).sum::<f32>() * 1.5)
             .sum();
         let scrolls = rem * guess > max_h;
-        let cards = entries.iter().map(|e| {
+        let cards = visible.iter().map(|e| {
             let this = e.version == CURRENT;
+            let paragraphs = shown(e);
             v_flex()
                 .gap_1p5()
                 .p_3()
@@ -75,11 +88,24 @@ pub fn open(entries: Vec<Entry>, title: String, repo: String, window: &mut Windo
                         .gap_2()
                         .child(div().font_semibold().child(format!("Hopper {}", e.version)))
                         .when(this, |r| {
-                            r.child(gpui_kit::component::tag::Tag::primary().xsmall().child("This version"))
+                            r.child(widgets::chip(cx.theme().primary).xsmall().child("This version"))
                         }),
                 )
-                .when(e.paragraphs.is_empty(), |c| c.child(widgets::caption("No notes for this release.", cx)))
-                .children(e.paragraphs.iter().map(|p| div().text_sm().child(p.clone())))
+                .when(paragraphs.is_empty(), |c| c.child(widgets::caption("No notes for this release.", cx)))
+                .children(paragraphs.into_iter().map(|p| div().text_sm().child(p)))
+        });
+        let older_count = entries.len().saturating_sub(1);
+        let older_toggle = (older_count > 0).then(|| {
+            let o = older_open.clone();
+            Button::new("whats-new-older")
+                .small()
+                .ghost()
+                .icon(if show_older { IconName::ChevronUp } else { IconName::ChevronDown })
+                .label(if show_older { "Hide older releases".to_string() } else { format!("Older releases ({older_count})") })
+                .on_click(move |_, window, cx| {
+                    o.update(cx, |v, _| *v = !*v);
+                    window.refresh();
+                })
         });
         let releases = format!("https://github.com/{}/releases", repo.trim().trim_matches('/'));
         dialog
@@ -89,7 +115,7 @@ pub fn open(entries: Vec<Entry>, title: String, repo: String, window: &mut Windo
                 v_flex()
                     .gap_3()
                     .map(|c| {
-                        let list = v_flex().gap_3().children(cards);
+                        let list = v_flex().gap_3().children(cards).children(older_toggle.map(|b| h_flex().child(b)));
                         if scrolls {
                             // Room on the right so the scrollbar doesn't sit on the cards' border.
                             c.child(

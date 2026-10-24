@@ -42,10 +42,10 @@ pub fn site_icon(modrinth: bool) -> Icon {
 /// A mod loader's icon and color, by name ("NeoForge", "fabric").
 pub fn loader(name: &str) -> Option<crate::widgets::PickIcon> {
     let (path, color) = match name.to_ascii_lowercase().as_str() {
-        "neoforge" => ("brand/neoforge.svg", hsla(20. / 360., 0.75, 0.6, 1.)),
-        "forge" => ("brand/forge.svg", hsla(215. / 360., 0.35, 0.65, 1.)),
-        "fabric" => ("brand/fabric.svg", hsla(38. / 360., 0.45, 0.7, 1.)),
-        "quilt" => ("brand/quilt.svg", hsla(270. / 360., 0.55, 0.7, 1.)),
+        "neoforge" => ("brand/neoforge.svg", crate::theme::palette::NEOFORGE),
+        "forge" => ("brand/forge.svg", crate::theme::palette::FORGE),
+        "fabric" => ("brand/fabric.svg", crate::theme::palette::FABRIC),
+        "quilt" => ("brand/quilt.svg", crate::theme::palette::QUILT),
         _ => return None,
     };
     Some(crate::widgets::PickIcon::Svg(path, color))

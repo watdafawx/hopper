@@ -6,7 +6,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::perf::{Group, Session};
@@ -161,6 +161,27 @@ impl PerfView {
         cx.notify();
     }
 
+    /// Asks before deleting a run: its numbers can't come back.
+    fn ask_delete(&mut self, id: String, what: String, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (view, id) = (view.clone(), id.clone());
+            alert
+                .title("Delete this run?")
+                .description(format!("{what}. Its numbers leave the comparison and can't be brought back."))
+                .button_props(
+                    gpui_kit::component::dialog::DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    view.update(cx, |v, cx| v.delete(id.clone(), cx));
+                    true
+                })
+        });
+    }
+
     fn header_row(cx: &App) -> Div {
         let theme = cx.theme();
         h_flex()
@@ -255,11 +276,23 @@ impl PerfView {
         let presets = &self.store.read(cx).settings().java_presets;
         let name = hopper::perf::args_label(&s.args, presets);
         let mem = memory(s.xms_mb, s.xmx_mb);
+        // No end recorded: the game is running now, or it stopped without
+        // a clean exit (killed or crashed hard).
+        let running_now = self
+            .root
+            .as_ref()
+            .and_then(|r| self.store.read(cx).running(r))
+            .is_some_and(|r| s.started + 5 >= r.started);
         let when = format!(
             "{} · {}",
             hopper::time::relative_secs(s.started as i64),
-            if s.ended == 0 { "still running or cut short".into() } else { duration(s.seconds()) }
+            match (s.ended, running_now) {
+                (0, true) => "running now".to_string(),
+                (0, false) => "length unknown: the game didn't close cleanly".to_string(),
+                _ => duration(s.seconds()),
+            }
         );
+        let what = format!("{name}, {}", hopper::time::relative_secs(s.started as i64));
         let mut facts: Vec<String> = Vec::new();
         match &s.frames {
             Some(f) => facts.push(format!(
@@ -332,7 +365,9 @@ impl PerfView {
                     .xsmall()
                     .icon(IconName::Trash)
                     .tooltip("Delete this run")
-                    .on_click(cx.listener(move |this, _, _, cx| this.delete(id.clone(), cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.ask_delete(id.clone(), what.clone(), window, cx)
+                    })),
             )
             .into_any_element()
     }
@@ -364,7 +399,6 @@ impl Render for PerfView {
             .collect();
         let folder = hopper::perf::sessions_dir().map(|b| hopper::perf::instance_dir(&b, &root));
         let n = self.sessions.len();
-        let theme = cx.theme();
         v_flex()
             .id("perf")
             .size_full()
@@ -419,18 +453,14 @@ impl Render for PerfView {
                         .children(runs),
                 )
             })
+            .when(n == 0 && self.loading, |r| r.child(widgets::skeleton_rows(3, rems(3.), cx)))
             .when(n == 0 && !self.loading, |r| {
-                r.child(
-                    v_flex()
-                        .py_10()
-                        .gap_2()
-                        .items_center()
-                        .child(Icon::new(IconName::Activity).large().text_color(theme.muted_foreground))
-                        .child(widgets::caption(
-                            "Play this instance and each run shows up here: FPS, frame times, GC pauses, load time.",
-                            cx,
-                        )),
-                )
+                r.child(widgets::empty_state(
+                    IconName::Activity,
+                    "No runs yet",
+                    Some("Play this instance and each run shows up here: FPS, frame times, GC pauses, load time.".into()),
+                    cx,
+                ))
             })
             .into_any_element()
     }

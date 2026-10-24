@@ -3,13 +3,13 @@
 
 use crate::drag_pick::{DragPick, PickDrag, Picks};
 use crate::store::{Store, Updates};
-use crate::widgets;
+use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
@@ -103,12 +103,16 @@ fn col_active() -> Div {
 fn col_date() -> Div {
     div().w_24().flex_none()
 }
+/// The row's ⋯ menu and Remove.
 fn col_trash() -> Div {
-    div().w_8().flex_none()
+    h_flex().w_16().flex_none().justify_end()
 }
 
 /// Row height: a 40 px icon plus breathing room.
 const ROW_H: f32 = 3.5;
+
+/// A row's hover group, for controls shown only on the hovered row.
+const ROW_GROUP: &str = "addon-row";
 
 /// What the table shows, built from the store and the disk when the
 /// instance, its updates or the jobs change, and kept between frames: the
@@ -475,6 +479,10 @@ pub struct AddonsView {
     slide_gen: u64,
     /// Redraws while updates run (button progress) and lets rows go.
     _ticker: Option<Task<()>>,
+    /// The row whose ⋯ menu is open (its button stays shown).
+    menu_for: Option<String>,
+    /// Waits for a reviewed Update all to end, then sums it up.
+    _bulk_watch: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -553,6 +561,8 @@ impl AddonsView {
             slide: None,
             slide_gen: 0,
             _ticker: None,
+            menu_for: None,
+            _bulk_watch: None,
             _subscriptions: subs,
         }
     }
@@ -567,6 +577,12 @@ impl AddonsView {
             self.peek
                 .update(cx, |p, cx| p.peek_project(root, Some(project), cx));
         }
+    }
+
+    /// Shows only the mods with an update (the header pill links here).
+    pub fn show_updates(&mut self, cx: &mut Context<Self>) {
+        self.show = Show::Updates;
+        cx.notify();
     }
 
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1201,6 +1217,7 @@ impl AddonsView {
             dialog
                 .title(title)
                 .w(rems(30.).to_pixels(window.rem_size()))
+                .margin_top(rems(crate::widgets::DIALOG_TOP).to_pixels(window.rem_size()))
                 .child(
                     v_flex()
                         .gap_2()
@@ -1422,6 +1439,7 @@ impl AddonsView {
             dialog
                 .title(format!("Remove {what}?"))
                 .w(rems(30.).to_pixels(window.rem_size()))
+                .margin_top(rems(crate::widgets::DIALOG_TOP).to_pixels(window.rem_size()))
                 .overlay(!peeking)
                 .child(
                     // Redraws as Shift goes down or up, for the Delete button.
@@ -1614,6 +1632,172 @@ impl AddonsView {
         cx.notify();
     }
 
+    /// Update all, reviewed first: the updates grouped by how big a jump
+    /// they are, each one skippable.
+    fn review_updates(&mut self, all: Vec<Update>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(inst) = self.table.inst.clone() else { return };
+        let store = self.store.read(cx);
+        let mut skip = HashSet::new();
+        let mut held = HashSet::new();
+        let mut rows: Vec<ReviewRow> = all
+            .into_iter()
+            .map(|u| {
+                let a = inst.addons.iter().find(|a| a.project_id == u.project_id);
+                let risk = Risk::of(&u);
+                // A test version in place of a release is left out at first.
+                if risk == Risk::Pre && a.is_none_or(|a| a.release_type <= 1) {
+                    skip.insert(u.project_id);
+                }
+                let (issues, missing) = load_problems(&inst, &u.file);
+                // So is one whose new file would stop the game loading.
+                if (!issues.is_empty() || !missing.is_empty()) && skip.insert(u.project_id) {
+                    held.insert(u.project_id);
+                }
+                let (from, to) = u.versions();
+                ReviewRow {
+                    icon: a.and_then(|a| store.image(&a.icon)).map(Path::to_path_buf),
+                    name: a.map_or(u.name.clone(), |a| a.name.clone()),
+                    from,
+                    to,
+                    risk,
+                    issues,
+                    missing: missing.into_iter().map(|id| (id, None)).collect(),
+                    update: u,
+                }
+            })
+            .collect();
+        rows.sort_by_key(|r| r.name.to_lowercase());
+        let total = rows.len();
+        // Required mods the instance lacks are known only by id: their
+        // names come from the sites, and one installed from the other site
+        // (another id) turns out fine.
+        let lookup: Vec<u64> = {
+            let mut ids: Vec<u64> = rows.iter().flat_map(|r| r.missing.iter().map(|(id, _)| *id)).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let review = cx.new(|_| UpdateReview { rows, skip, held });
+        if !lookup.is_empty() {
+            let (inst, review) = ((*inst).clone(), review.clone());
+            window
+                .spawn(cx, async move |cx| {
+                    let found = cx
+                        .background_spawn(async move {
+                            lookup
+                                .into_iter()
+                                .map(|id| match hopper::source::get_mod(id) {
+                                    Ok(m) if hopper::browse::installed_addon(&inst, &m).is_some_and(|a| a.enabled) => {
+                                        (id, None)
+                                    }
+                                    Ok(m) => (id, Some(m.name)),
+                                    // Unknown: the warning stays, unnamed.
+                                    Err(_) => (id, Some(String::new())),
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .await;
+                    cx.update(|window, cx| {
+                        review.update(cx, |r, cx| {
+                            r.resolve(&found);
+                            cx.notify();
+                        });
+                        // The footer's count is the dialog's.
+                        window.refresh();
+                    })
+                    .ok();
+                })
+                .detach();
+        }
+        let view = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let n = review.read(cx).chosen().len();
+            let (view, review) = (view.clone(), review.clone());
+            let rem = window.rem_size();
+            dialog
+                .title(if total == 1 { "Review 1 update".to_string() } else { format!("Review {total} updates") })
+                .w(rems(40.).to_pixels(rem))
+                // Under the title bar like every dialog (see versions.rs).
+                .margin_top(rems(crate::widgets::DIALOG_TOP).to_pixels(rem))
+                .child(review.clone())
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().child(Button::new("review-cancel").ghost().label("Cancel")))
+                        .child(DialogAction::new().child(
+                            Button::new("review-go")
+                                .primary()
+                                .icon(IconName::Download)
+                                .label(format!("Update {n}"))
+                                .disabled(n == 0),
+                        )),
+                )
+                .on_ok(move |_, window, cx| {
+                    let chosen = review.read(cx).chosen();
+                    if chosen.is_empty() {
+                        return false;
+                    }
+                    view.update(cx, |v, cx| v.start_bulk(chosen, window, cx));
+                    true
+                })
+        });
+    }
+
+    /// Runs reviewed updates; once they end, says how it went and offers
+    /// Undo (the old files are in `.hopper-backups`).
+    fn start_bulk(&mut self, updates: Vec<Update>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let global = self.global_dir().is_some();
+        // Each mod as it is now, and where its file is.
+        let olds: Vec<(Addon, PathBuf)> = if global {
+            Vec::new()
+        } else {
+            self.store
+                .read(cx)
+                .instance(&root)
+                .map(|inst| {
+                    updates
+                        .iter()
+                        .filter_map(|u| inst.addons.iter().find(|a| a.project_id == u.project_id && !a.locked))
+                        .map(|a| (a.clone(), inst.addon_path(a)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // Backup folders are named by the second; allow for a tick.
+        let since = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+            .saturating_sub(1);
+        self.run_updates(updates, cx);
+        self.pull_recent(cx);
+        if olds.is_empty() || !self.store.read(cx).queues_updates(&root) {
+            return;
+        }
+        let store = self.store.clone();
+        self._bulk_watch = Some(cx.spawn_in(window, async move |this, cx| {
+            // Until the update job (and anything else on the instance) ends.
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+                let Ok(done) = this.update(cx, |this, cx| {
+                    let s = this.store.read(cx);
+                    !s.queues_updates(&root) && !s.is_busy(&root)
+                }) else {
+                    return;
+                };
+                if done {
+                    break;
+                }
+            }
+            // The saved instance says which files changed.
+            let r2 = root.clone();
+            let sum = cx
+                .background_spawn(async move { BulkSum::read(&r2, olds, since) })
+                .await;
+            let Some(sum) = sum else { return };
+            cx.update(|window, cx| sum.notify(store, root, window, cx)).ok();
+        }));
+    }
+
     fn set_sort(&mut self, col: SortCol, cx: &mut Context<Self>) {
         self.sort = if self.sort.0 == col {
             (col, !self.sort.1)
@@ -1679,15 +1863,20 @@ impl AddonsView {
                 let queues = store.queues_updates(&inst.root);
                 let hold = if queues { None } else { store.edit_hold_reason(&inst.root) };
                 let busy = !queues && store.is_busy(&inst.root);
+                // The toolbar's one filled button: opens the review first.
                 Button::new("update-all")
                     .primary()
                     .small()
                     .icon(IconName::Download)
-                    .label(format!("Update all ({})", all.len()))
+                    .label(if all.len() == 1 {
+                        "Review 1 update".to_string()
+                    } else {
+                        format!("Review {} updates", all.len())
+                    })
                     .loading(all.is_empty() || busy)
                     .disabled(hold.is_some())
                     .when_some(hold, |b, why| b.tooltip(why))
-                    .on_click(cx.listener(move |this, _, _, cx| this.run_updates(all.clone(), cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| this.review_updates(all.clone(), window, cx)))
                     .into_any_element()
             }
             None => div().into_any_element(),
@@ -1708,7 +1897,7 @@ impl AddonsView {
             .child(
                 Button::new("add-content")
                     .small()
-                    .primary()
+                    .outline()
                     .icon(IconName::Plus)
                     .label("Add content")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1899,7 +2088,7 @@ impl AddonsView {
                         .icon(IconName::Download)
                         .label(format!("Update {n}"))
                         .on_click(
-                            cx.listener(move |this, _, _, cx| this.run_updates(ups.clone(), cx)),
+                            cx.listener(move |this, _, window, cx| this.review_updates(ups.clone(), window, cx)),
                         ),
                 )
             })
@@ -1959,8 +2148,8 @@ impl AddonsView {
             cell.child(
                 h_flex()
                     .id(label)
+                    .clickable(cx)
                     .gap_1()
-                    .cursor_pointer()
                     .hover(|s| s.text_color(theme.foreground))
                     .when(active, |r| r.text_color(theme.foreground))
                     .child(label)
@@ -2008,8 +2197,29 @@ impl AddonsView {
             .when(self.author_fits, |r| {
                 r.child(head(SortCol::Author, "Author", col_author()))
             })
-            .child(head(SortCol::Env, "Side", col_env()))
-            .child(head(SortCol::Active, "On", col_active()))
+            .child(head(SortCol::Env, "Side", col_env()).id("head-side").tooltip(|w, cx| {
+                gpui_kit::component::tooltip::Tooltip::element(|_, cx| {
+                    let muted = cx.theme().muted_foreground;
+                    let line = |icon: IconName, text: &'static str| {
+                        h_flex().gap_2().child(Icon::new(icon).small().text_color(muted)).child(text)
+                    };
+                    v_flex()
+                        .gap_1()
+                        .text_sm()
+                        .child("Where the mod runs:")
+                        .child(line(IconName::Monitor, "Client only: your game"))
+                        .child(line(IconName::Server, "Server only"))
+                        .child(line(IconName::ArrowLeftRight, "Client and server: both need it"))
+                        .child(div().text_xs().text_color(muted).child("Hover a row's icon for more. Click to sort."))
+                })
+                .build(w, cx)
+            }))
+            .child(head(SortCol::Active, "On", col_active()).id("head-on").tooltip(|w, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    "Off keeps the file but the game doesn't load it (renamed to .disabled). Click to sort.",
+                )
+                .build(w, cx)
+            }))
             .when(!self.tight, |r| r.child(head(SortCol::Added, "Added", col_date())))
             .child(col_trash())
     }
@@ -2032,7 +2242,6 @@ impl AddonsView {
         let active_shader = self.table.shader.as_ref().map(|s| s.to_lowercase());
         let now = hopper::time::parse_iso(&hopper::time::now_iso()).unwrap_or(0);
         let cursor = self.cursor.filter(|_| self.focus.is_focused(window));
-        let ring = cx.theme().ring;
         let start = range.start.min(rows.len());
         rows[start..range.end.min(rows.len())]
             .iter()
@@ -2064,8 +2273,9 @@ impl AddonsView {
                 } else {
                     el
                 };
-                div()
+                let row = div()
                     .relative()
+                    .rounded(cx.theme().radius_lg)
                     // A click puts the keys on this row; with Ctrl it also
                     // picks or unpicks it, with Shift it picks every row
                     // from the last one clicked, like a file explorer.
@@ -2086,19 +2296,9 @@ impl AddonsView {
                             }
                         }),
                     )
-                    .child(el)
-                    .when(cursor == Some(ix), |d| {
-                        // A ring that doesn't move the row.
-                        d.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(ring),
-                        )
-                    })
-                    .into_any_element()
+                    .child(el);
+                // The keys' row: the theme's focus ring, which doesn't move it.
+                widgets::focus_ring(row, cursor == Some(ix), cx).into_any_element()
             })
             .collect()
     }
@@ -2164,7 +2364,7 @@ impl AddonsView {
                         .pr_2()
                         .gap_3()
                         .rounded(cx.theme().radius)
-                        .hover(|s| s.bg(cx.theme().list_hover))
+                        .hover(|s| widgets::row_hover(s, cx))
                         .child(col_check())
                         .child(widgets::thumb(None, rems(2.5), cx))
                         .child(
@@ -2413,7 +2613,8 @@ impl AddonsView {
             widgets::ModTags {
                 key: &file,
                 in_use: flags.in_use,
-                new: flags.new,
+                // One marker: "Yours" says it's new to the pack already.
+                new: flags.new && !flags.added,
                 added: flags.added,
                 env: &a.env,
                 categories: store.categories(a),
@@ -2433,7 +2634,7 @@ impl AddonsView {
                     .font_medium()
                     .truncate()
                     .when(pid != 0, |d| {
-                        d.cursor_pointer()
+                        d.clickable(cx)
                             .hover(|s| s.text_color(theme.primary))
                             .tooltip(|w, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new("Details").build(w, cx)
@@ -2461,6 +2662,11 @@ impl AddonsView {
             });
 
         let done = self.recent.contains_key(&a.project_id);
+        // Hover-only controls stay shown on a picked row, the key cursor's
+        // row and the row whose menu is open.
+        let shown = picked
+            || self.cursor.and_then(|c| self.row_file(c)).as_deref() == Some(file.as_str())
+            || self.menu_for.as_deref() == Some(file.as_str());
         let progress = self
             .root
             .as_ref()
@@ -2522,17 +2728,22 @@ It stays disabled after updating: turn it on in the On column.")
             // The download fills the button from the left.
             c.child(widgets::progress_fill(split.min_w(pill_w), progress, cx))
         })
-        // Nothing to update: the changelog alone, in the pill's place.
+        // Nothing to update: the changelog alone, in the pill's place, only
+        // on the hovered or selected row so the column stays quiet.
         .when(update.is_none() && !done && a.project_id != 0, |c| {
             let (pid, view) = (a.project_id, cx.entity());
-            c.child(widgets::split_alone(
-                id("changes"),
-                compact,
-                gpui_kit::component::Size::Small,
-                "Versions and changelogs",
-                move |_, window, cx| view.update(cx, |this, cx| this.versions(pid, None, window, cx)),
-                cx,
-            ))
+            c.child(
+                div()
+                    .when(!shown, |d| d.invisible().group_hover(ROW_GROUP, |s| s.visible()))
+                    .child(widgets::split_alone(
+                        id("changes"),
+                        compact,
+                        gpui_kit::component::Size::Small,
+                        "Versions and changelogs",
+                        move |_, window, cx| view.update(cx, |this, cx| this.versions(pid, None, window, cx)),
+                        cx,
+                    )),
+            )
         });
 
         let view = cx.entity();
@@ -2549,8 +2760,18 @@ It stays disabled after updating: turn it on in the On column.")
             !a.mr_project.is_empty(),
             a.project_id != 0,
         );
+        let menu_fn = Self::row_menu(
+            view,
+            f_menu,
+            move_targets,
+            page,
+            update_file,
+            reset_cfg,
+            (pid_menu, locked, mr, has_project, global, on),
+        );
         h_flex()
             .id(id("row"))
+            .group(ROW_GROUP)
             .h(rems(ROW_H))
             .w_full()
             .pl_3()
@@ -2558,12 +2779,12 @@ It stays disabled after updating: turn it on in the On column.")
             .gap_3()
             .relative()
             .rounded(theme.radius_lg)
+            // A clear border so a selection's edge doesn't shift the row.
             .border_1()
             .border_color(theme.transparent)
-            .when(picked, |r| r.bg(theme.list_active).border_color(theme.primary.opacity(0.25)))
-            .when(!picked, |r| {
-                r.hover(|s| s.bg(theme.list_hover).border_color(theme.border))
-            })
+            .when(picked, |r| widgets::row_selected(r, cx))
+            // A quiet wash, no outline.
+            .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
             // Additions on top of the pack get a stripe on the leading edge.
             .when(flags.added, |r| {
                 r.child(
@@ -2603,7 +2824,7 @@ It stays disabled after updating: turn it on in the On column.")
                     .id(id("thumb"))
                     .when(dim, |d| d.opacity(0.45))
                     .when(pid != 0, |d| {
-                        d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                        d.clickable(cx).on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.open_peek(pid, cx);
                         }))
@@ -2634,8 +2855,8 @@ It stays disabled after updating: turn it on in the On column.")
                         let chip = match update.map(|u| u.versions()) {
                             // The update inline: installed → offered.
                             Some((old, new)) => Some(
-                                chip.bg(primary.opacity(0.1))
-                                    .group_hover("file", move |s| s.bg(primary.opacity(0.2)))
+                                chip.bg(primary.opacity(widgets::alpha::TINT))
+                                    .group_hover("file", move |s| s.bg(primary.opacity(widgets::alpha::TINT * 2.)))
                                     .child(
                                         div()
                                             .min_w_0()
@@ -2668,25 +2889,36 @@ It stays disabled after updating: turn it on in the On column.")
                                     chip.bg(theme.muted)
                                         .text_color(theme.muted_foreground)
                                         .group_hover("file", move |s| {
-                                            s.bg(primary.opacity(0.1)).text_color(primary)
+                                            s.bg(primary.opacity(widgets::alpha::TINT)).text_color(primary)
                                         })
                                         .child(div().min_w_0().truncate().child(v))
                                 })
                             }
+                        };
+                        // The chip says the version: the file name moves to
+                        // the tooltip rather than repeat it.
+                        let has_chip = chip.is_some();
+                        let tip: SharedString = if has_chip {
+                            format!("{}
+Change version", a.file_name).into()
+                        } else {
+                            "Change version".into()
                         };
                         h_flex()
                             .id(id("file"))
                             .min_w_0()
                             .gap_2()
                             .children(chip)
-                            .child(
-                                widgets::caption(a.file_name.clone(), cx)
-                                    .text_xs()
-                                    .min_w_0()
-                                    .group_hover("file", move |s| s.text_color(primary)),
-                            )
+                            .when(!has_chip, |r| {
+                                r.child(
+                                    widgets::caption(a.file_name.clone(), cx)
+                                        .text_xs()
+                                        .min_w_0()
+                                        .group_hover("file", move |s| s.text_color(primary)),
+                                )
+                            })
                             .when(pid != 0, |d| {
-                                d.cursor_pointer()
+                                d.clickable(cx)
                                     .group("file")
                                     .child(
                                         div()
@@ -2697,9 +2929,8 @@ It stays disabled after updating: turn it on in the On column.")
                                             .text_color(primary)
                                             .child(Icon::new(IconName::ChevronDown).xsmall()),
                                     )
-                                    .tooltip(|w, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new("Change version")
-                                            .build(w, cx)
+                                    .tooltip(move |w, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)
                                     })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
@@ -2728,7 +2959,7 @@ It stays disabled after updating: turn it on in the On column.")
                     .py_0p5()
                     .rounded(theme.radius)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.list_hover))
+                    .hover(|s| widgets::row_hover(s, cx))
                     .child(
                         // A fixed slot, so the server dot lines up on every row.
                         div()
@@ -2765,18 +2996,59 @@ It stays disabled after updating: turn it on in the On column.")
                     .child(hopper::time::relative(&a.date_added))
             }))
             .child(
-                col_trash().child(
-                    Button::new(id("rm"))
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Trash)
-                        .tooltip("Remove (kept in .hopper-backups)")
-                        .on_click(cx.listener(move |this, _, w, cx| {
-                            this.ask_remove(vec![f_rm.clone()], w, cx)
-                        })),
-                ),
+                col_trash()
+                    .child(
+                        // The right-click menu, for those who don't right-click.
+                        div()
+                            .when(!shown, |d| d.invisible().group_hover(ROW_GROUP, |s| s.visible()))
+                            .child({
+                                let (m, v, f) = (menu_fn.clone(), cx.entity(), file.clone());
+                                Button::new(id("more"))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Ellipsis)
+                                    .tooltip("More")
+                                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, w, cx| m(menu, w, cx))
+                                    .on_open_change(move |open, _, cx| {
+                                        let f = f.clone();
+                                        v.update(cx, |this, cx| {
+                                            if *open {
+                                                this.menu_for = Some(f);
+                                            } else if this.menu_for.as_ref() == Some(&f) {
+                                                this.menu_for = None;
+                                            }
+                                            cx.notify();
+                                        })
+                                    })
+                            }),
+                    )
+                    .child(
+                        Button::new(id("rm"))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Trash)
+                            .tooltip("Remove (kept in .hopper-backups)")
+                            .on_click(cx.listener(move |this, _, w, cx| {
+                                this.ask_remove(vec![f_rm.clone()], w, cx)
+                            })),
+                    ),
             )
-            .context_menu(move |menu, _, _| {
+            .context_menu(move |menu, w, cx| menu_fn(menu, w, cx))
+            .into_any_element()
+    }
+
+    /// The row's menu, for right-click and its ⋯ button.
+    #[allow(clippy::too_many_arguments)]
+    fn row_menu(
+        view: Entity<Self>,
+        f_menu: String,
+        move_targets: Vec<(String, String)>,
+        page: String,
+        update_file: Option<hopper::cf::File>,
+        reset_cfg: Option<(Entity<Store>, PathBuf, u64, String)>,
+        (pid_menu, locked, mr, has_project, global, on): (u64, bool, bool, bool, bool, bool),
+    ) -> Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> {
+            Rc::new(move |menu, _, _| {
                 let f = f_menu.clone();
                 let (v1, v2, v3, v4, v5) = (
                     view.clone(),
@@ -2895,7 +3167,6 @@ It stays disabled after updating: turn it on in the On column.")
                     },
                 ))
             })
-            .into_any_element()
     }
 
     /// Whether the rows show the Update / Changelog column.
@@ -3010,6 +3281,477 @@ pub fn set_locks(
         .detach();
 }
 
+/// How big a jump an update is, for the review before Update all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Risk {
+    /// Same major and minor version.
+    Patch,
+    /// A new major or minor version, or one Hopper can't read.
+    Major,
+    /// An alpha or beta file.
+    Pre,
+}
+
+impl Risk {
+    /// Best effort, from the versions in the two file names.
+    fn of(u: &Update) -> Self {
+        if u.file.release_type > 1 {
+            return Risk::Pre;
+        }
+        let (old, new) = u.versions();
+        let (a, b) = (version_nums(&old), version_nums(&new));
+        match (a.len(), b.len()) {
+            (0, _) | (_, 0) => Risk::Major,
+            // A lone build number counts as a patch.
+            (1, 1) => Risk::Patch,
+            _ if a.first() != b.first() || a.get(1) != b.get(1) => Risk::Major,
+            _ => Risk::Patch,
+        }
+    }
+
+    /// A tinted chip, like every chip.
+    fn tag(self, cx: &App) -> gpui_kit::component::tag::Tag {
+        let theme = cx.theme();
+        match self {
+            Risk::Patch => widgets::chip(theme.success).child("Patch"),
+            Risk::Major => widgets::chip(theme.warning).child("Major"),
+            Risk::Pre => widgets::chip(theme.danger).child("Alpha / beta"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Risk::Patch => "fixes within the same version",
+            Risk::Major => "new major or minor versions: worth a look at the changelog",
+            Risk::Pre => "test versions, not marked as releases",
+        }
+    }
+}
+
+/// The numbers at the start of a version: "5.27.26-beta" gives [5, 27, 26].
+fn version_nums(v: &str) -> Vec<u64> {
+    let Some(start) = v.find(|c: char| c.is_ascii_digit()) else {
+        return Vec::new();
+    };
+    v[start..]
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .map_while(|p| p.parse().ok())
+        .collect()
+}
+
+/// What would stop the game loading with `file` in place, known before it
+/// downloads: from the dependencies the site lists for it. Returns the
+/// problems with a name (an installed mod turned off, or one it refuses to
+/// load beside) and the required projects the instance lacks, by id.
+///
+/// A newer loader or Minecraft the file needs is only in the jar, so it
+/// shows after the update, in the "problems will stop the game" banner.
+fn load_problems(inst: &Instance, file: &cf::File) -> (Vec<String>, Vec<u64>) {
+    let required: Vec<u64> = match &file.modrinth {
+        Some(mr) => mr.requires.iter().map(|p| hopper::modrinth::num_id(p)).collect(),
+        None => file
+            .dependencies
+            .iter()
+            .filter(|d| d.relation_type == cf::DEP_REQUIRED)
+            .map(|d| d.mod_id)
+            .collect(),
+    };
+    let (mut issues, mut missing) = (Vec::new(), Vec::new());
+    for dep in required {
+        // Updates don't add mods, nor turn them on.
+        match inst.addons.iter().find(|a| a.project_id == dep) {
+            Some(a) if !a.enabled => issues.push(format!("needs {}, which is turned off", a.name)),
+            Some(_) => {}
+            None if !missing.contains(&dep) => missing.push(dep),
+            None => {}
+        }
+    }
+    for d in file.dependencies.iter().filter(|d| d.relation_type == cf::DEP_INCOMPATIBLE) {
+        if let Some(a) = inst.addons.iter().find(|a| a.project_id == d.mod_id && a.enabled) {
+            issues.push(format!("won't load beside {}", a.name));
+        }
+    }
+    (issues, missing)
+}
+
+/// One update in the review.
+struct ReviewRow {
+    update: Update,
+    risk: Risk,
+    name: String,
+    icon: Option<PathBuf>,
+    from: String,
+    to: String,
+    /// What would stop the game loading, by name (see [`load_problems`]).
+    issues: Vec<String>,
+    /// Required projects the instance lacks: id and, once looked up, the
+    /// name (empty when the lookup failed).
+    missing: Vec<(u64, Option<String>)>,
+}
+
+impl ReviewRow {
+    /// One line on what would stop the game loading, if anything.
+    fn problem(&self) -> Option<String> {
+        let mut parts = self.issues.clone();
+        for (_, name) in &self.missing {
+            parts.push(match name.as_deref() {
+                Some(n) if !n.is_empty() => format!("needs {n}, which isn't installed"),
+                _ => "needs a mod that isn't installed".to_string(),
+            });
+        }
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
+}
+
+/// The review before Update all: every pending update, grouped, with a box
+/// to skip each one or a whole group.
+struct UpdateReview {
+    rows: Vec<ReviewRow>,
+    /// Skipped, by project.
+    skip: HashSet<u64>,
+    /// Skipped only for a problem, and not touched since: ticked again if
+    /// the problem turns out not to be one.
+    held: HashSet<u64>,
+}
+
+impl UpdateReview {
+    /// Names the required projects looked up; `None` is one that's
+    /// installed after all (from the other site).
+    fn resolve(&mut self, found: &[(u64, Option<String>)]) {
+        for r in &mut self.rows {
+            r.missing.retain_mut(|(id, name)| match found.iter().find(|(f, _)| f == id) {
+                Some((_, None)) => false,
+                Some((_, Some(n))) => {
+                    *name = Some(n.clone());
+                    true
+                }
+                None => true,
+            });
+            let pid = r.update.project_id;
+            if r.issues.is_empty() && r.missing.is_empty() && self.held.remove(&pid) {
+                self.skip.remove(&pid);
+            }
+        }
+    }
+
+    fn chosen(&self) -> Vec<Update> {
+        self.rows
+            .iter()
+            .filter(|r| !self.skip.contains(&r.update.project_id))
+            .map(|r| r.update.clone())
+            .collect()
+    }
+
+    fn set_group(&mut self, risk: Risk, on: bool) {
+        for r in self.rows.iter().filter(|r| r.risk == risk) {
+            self.held.remove(&r.update.project_id);
+            if on {
+                self.skip.remove(&r.update.project_id);
+            } else {
+                self.skip.insert(r.update.project_id);
+            }
+        }
+    }
+}
+
+impl Render for UpdateReview {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let rem = window.rem_size();
+        let row_h = rems(2.);
+        let groups: Vec<(Risk, Vec<&ReviewRow>)> = [Risk::Patch, Risk::Major, Risk::Pre]
+            .into_iter()
+            .map(|g| (g, self.rows.iter().filter(|r| r.risk == g).collect::<Vec<_>>()))
+            .filter(|(_, rows)| !rows.is_empty())
+            .collect();
+        // Rows whose new file would stop the game loading.
+        let n_bad = self.rows.iter().filter(|r| r.problem().is_some()).count();
+        // As tall as the list, up to the window less the dialog's top
+        // offset, title and footer (the same math as every dialog, see
+        // versions.rs); then the list scrolls.
+        let want = row_h.to_pixels(rem) * self.rows.len() as f32
+            + rem * (4. + 3. * groups.len() as f32 + n_bad as f32 + if n_bad > 0 { 1.5 } else { 0. });
+        let room = (window.viewport_size().height - rem * crate::widgets::DIALOG_CHROME_FOOTER).max(rem * 12.);
+        let summary = h_flex().gap_2().flex_wrap().children(groups.iter().map(|(g, rows)| {
+            let picked = rows.iter().filter(|r| !self.skip.contains(&r.update.project_id)).count();
+            h_flex()
+                .gap_1()
+                .child(g.tag(cx))
+                .child(widgets::caption(format!("{picked} of {}", rows.len()), cx).text_xs())
+        }));
+        let bad_note = (n_bad > 0).then(|| {
+            h_flex()
+                .gap_1p5()
+                .text_sm()
+                .text_color(theme.danger)
+                .child(Icon::new(IconName::TriangleAlert).small().flex_none())
+                .child(
+                    div().min_w_0().child(if n_bad == 1 {
+                        "1 would stop the game loading: left unticked".to_string()
+                    } else {
+                        format!("{n_bad} would stop the game loading: left unticked")
+                    }),
+                )
+        });
+        let sections = groups.iter().map(|(g, rows)| {
+            let g = *g;
+            let picked = rows.iter().filter(|r| !self.skip.contains(&r.update.project_id)).count();
+            let key = match g {
+                Risk::Patch => "patch",
+                Risk::Major => "major",
+                Risk::Pre => "pre",
+            };
+            v_flex()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .py_1()
+                        .child(
+                            Checkbox::new(ElementId::Name(format!("review-group:{key}").into()))
+                                .checked(picked == rows.len())
+                                .on_click(cx.listener(move |this, v: &bool, window, cx| {
+                                    this.set_group(g, *v);
+                                    // The footer's count is the dialog's.
+                                    window.refresh();
+                                    cx.notify();
+                                })),
+                        )
+                        .child(div().w_8().text_sm().font_semibold().child(rows.len().to_string()))
+                        .child(g.tag(cx))
+                        .child(widgets::caption(g.label(), cx).text_xs().min_w_0()),
+                )
+                .children(rows.iter().map(|r| {
+                    let pid = r.update.project_id;
+                    let on = !self.skip.contains(&pid);
+                    let problem = r.problem();
+                    // Skipped rows fade; their warning stays readable.
+                    let dim = |d: Div| if on { d } else { d.opacity(0.55) };
+                    h_flex()
+                        .min_h(row_h)
+                        .pl_6()
+                        .gap_2()
+                        .child(
+                            Checkbox::new(("review-row", pid as usize))
+                                .checked(on)
+                                .on_click(cx.listener(move |this, v: &bool, window, cx| {
+                                    this.held.remove(&pid);
+                                    if *v {
+                                        this.skip.remove(&pid);
+                                    } else {
+                                        this.skip.insert(pid);
+                                    }
+                                    window.refresh();
+                                    cx.notify();
+                                })),
+                        )
+                        .child(dim(div().flex_none().child(widgets::thumb(r.icon.as_deref(), rems(1.25), cx))))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(dim(div().text_sm().truncate().child(r.name.clone())))
+                                .when_some(problem, |c, p| {
+                                    let tip = SharedString::from(p.clone());
+                                    c.child(
+                                        h_flex()
+                                            .id(("review-problem", pid as usize))
+                                            .gap_1()
+                                            .min_w_0()
+                                            .text_xs()
+                                            .text_color(theme.danger)
+                                            .child(Icon::new(IconName::TriangleAlert).xsmall().flex_none())
+                                            .child(div().min_w_0().truncate().child(p))
+                                            .tooltip(move |w, cx| {
+                                                gpui_kit::component::tooltip::Tooltip::new(format!(
+                                                    "{tip}. Hopper doesn't add or turn on mods with an update."
+                                                ))
+                                                .build(w, cx)
+                                            }),
+                                    )
+                                }),
+                        )
+                        .child(dim(
+                            // The versions on a tinted chip, like the mods list's.
+                            h_flex()
+                                .flex_none()
+                                .max_w(rems(14.))
+                                .min_w_0()
+                                .gap_1()
+                                .px_1p5()
+                                .rounded(px(crate::theme::RADIUS))
+                                .bg(theme.primary.opacity(widgets::alpha::TINT))
+                                .text_xs()
+                                .child(div().min_w_0().truncate().text_color(theme.muted_foreground).child(r.from.clone()))
+                                .child(Icon::new(IconName::ArrowRight).xsmall().flex_none().text_color(theme.primary))
+                                .child(div().min_w_0().truncate().text_color(theme.primary).child(r.to.clone())),
+                        ))
+                }))
+        });
+        v_flex()
+            .h(want.min(room))
+            .gap_3()
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(widgets::caption("Old files go to .hopper-backups, and you can undo when it's done.", cx))
+                    .child(summary)
+                    .children(bad_note),
+            )
+            .child(
+                div()
+                    .id("review-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(v_flex().gap_3().children(sections)),
+            )
+    }
+}
+
+/// A mod an update replaced: its entry and file before, and where the old
+/// file went.
+#[derive(Clone)]
+struct Replaced {
+    old: Addon,
+    original: PathBuf,
+    backup: PathBuf,
+}
+
+/// How a reviewed Update all went.
+struct BulkSum {
+    updated: usize,
+    failed: usize,
+    /// Waiting for Hopper's download window (website-only files).
+    web: usize,
+    replaced: Vec<Replaced>,
+}
+
+impl BulkSum {
+    /// Reads the saved instance and the backups (off the UI thread).
+    fn read(root: &Path, olds: Vec<(Addon, PathBuf)>, since: u64) -> Option<Self> {
+        let after = hopper::instances::load(root)?;
+        let web: HashSet<u64> = hopper::modpack::pending_downloads(&after).iter().map(|p| p.project_id).collect();
+        let mut sum = BulkSum { updated: 0, failed: 0, web: 0, replaced: Vec::new() };
+        for (old, original) in olds {
+            let now = after.addons.iter().find(|a| a.project_id == old.project_id);
+            match now {
+                Some(a) if a.file_id != old.file_id || a.file_name != old.file_name => {
+                    sum.updated += 1;
+                    // None when the new file took the old one's name, or the
+                    // game still holds the old one.
+                    if let Some(backup) = find_backup(root, &original, since) {
+                        sum.replaced.push(Replaced { old, original, backup });
+                    }
+                }
+                _ if web.contains(&old.project_id) => sum.web += 1,
+                _ => sum.failed += 1,
+            }
+        }
+        Some(sum)
+    }
+
+    /// "Updated N, M failed", with Undo when the old files can go back.
+    fn notify(self, store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut App) {
+        let mut text = format!("Updated {}", self.updated);
+        if self.failed > 0 {
+            text.push_str(&format!(", {} failed (the task list says why)", self.failed));
+        }
+        if self.web > 0 {
+            text.push_str(&format!(", {} coming from the website", self.web));
+        }
+        text.push('.');
+        let note = if self.failed > 0 { Notification::warning(text) } else { Notification::success(text) };
+        let replaced = self.replaced;
+        if replaced.is_empty() {
+            window.push_notification(note, cx);
+            return;
+        }
+        let undone = Rc::new(std::cell::Cell::new(false));
+        let note = note.action(move |_, _, cx| {
+            let (store, root, replaced, undone) = (store.clone(), root.clone(), replaced.clone(), undone.clone());
+            Button::new("undo-update")
+                .label("Undo")
+                .disabled(undone.get())
+                .on_click(cx.listener(move |note, _, window, cx| {
+                    if !undone.replace(true) {
+                        undo_update(&store, root.clone(), replaced.clone(), window, cx);
+                    }
+                    note.dismiss(window, cx);
+                }))
+        });
+        window.push_notification(note, cx);
+    }
+}
+
+/// Puts the old files of an Update all back. The new files go to backups
+/// too, so nothing is lost either way.
+fn undo_update(store: &Entity<Store>, root: PathBuf, items: Vec<Replaced>, window: &mut Window, cx: &mut App) {
+    let s = store.read(cx);
+    if let Some(why) = s.edit_hold_reason(&root) {
+        window.push_notification(Notification::error(format!("Can't undo now: {why}.")), cx);
+        return;
+    }
+    let Some(mut inst) = s.instance(&root).cloned() else {
+        window.push_notification(Notification::error("That instance is gone."), cx);
+        return;
+    };
+    s.spawn_instance_job(&root, "Undoing update", move |job| {
+        let mut back = 0;
+        for it in &items {
+            if !it.backup.exists() {
+                job.note(format!("{}: its old file isn't in backups any more", it.old.name));
+                continue;
+            }
+            if let Some(i) = inst.addons.iter().position(|a| a.project_id == it.old.project_id) {
+                let path = inst.addon_path(&inst.addons[i]);
+                if path == it.original {
+                    job.note(format!("{}: the new file has the old one's name; left it", it.old.name));
+                    continue;
+                }
+                if path.exists() {
+                    hopper::sync::backup_into(&inst.root, &path)?;
+                }
+                inst.addons.remove(i);
+            }
+            if it.original.exists() {
+                job.note(format!("{} is back already; left the backup alone", it.original.display()));
+            } else if std::fs::rename(&it.backup, &it.original).is_err() {
+                std::fs::copy(&it.backup, &it.original)?;
+                std::fs::remove_file(&it.backup)?;
+            }
+            inst.addons.retain(|a| !a.file_name.eq_ignore_ascii_case(&it.old.file_name));
+            inst.addons.push(it.old.clone());
+            back += 1;
+        }
+        inst.save()?;
+        job.detail(format!("Put back {back} files"));
+        Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
+    });
+    // Once it's done, look for updates again so the undone ones are offered.
+    let store = store.clone();
+    window
+        .spawn(cx, async move |cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+                let Ok(busy) = cx.update(|_, cx| store.read(cx).is_busy(&root)) else { return };
+                if !busy {
+                    break;
+                }
+            }
+            cx.update(|_, cx| {
+                store.update(cx, |s, cx| {
+                    s.check_updates(&root, true);
+                    cx.notify();
+                })
+            })
+            .ok();
+        })
+        .detach();
+}
+
 /// Badges for a row.
 #[derive(Clone, Copy)]
 struct Flags {
@@ -3055,18 +3797,59 @@ impl Render for AddonsView {
         let header = self.header(&rows, &inst, cx);
         let count = rows.len();
         let body: AnyElement = if count == 0 {
+            let filtered = !(self.query.is_empty() && self.show == Show::All && !self.added_only);
+            // Only the Updates filter on, and nothing to update.
+            let up_to_date = self.show == Show::Updates && self.query.is_empty() && !self.added_only;
+            let state = if up_to_date {
+                widgets::empty_state(
+                    IconName::CircleCheck,
+                    "All up to date",
+                    Some("Every item here is on its newest version.".into()),
+                    cx,
+                )
+                .child(
+                    Button::new("empty-show-all")
+                        .small()
+                        .outline()
+                        .label("Show all")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show = Show::All;
+                            cx.notify();
+                        })),
+                )
+            } else if filtered {
+                widgets::empty_state(
+                    IconName::Search,
+                    "Nothing matches",
+                    Some("No item here fits the search and filters.".into()),
+                    cx,
+                )
+                .child(
+                    Button::new("empty-clear")
+                        .small()
+                        .outline()
+                        .label("Clear search and filters")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.search.update(cx, |s, cx| s.set_value("", window, cx));
+                            this.query.clear();
+                            this.show = Show::All;
+                            this.added_only = false;
+                            cx.notify();
+                        })),
+                )
+            } else {
+                widgets::empty_state(
+                    IconName::Package,
+                    "Nothing installed here yet",
+                    Some("Add content finds mods, packs and shaders for this instance.".into()),
+                    cx,
+                )
+            };
             v_flex()
                 .flex_1()
                 .items_center()
                 .justify_center()
-                .child(widgets::caption(
-                    if self.query.is_empty() && self.show == Show::All && !self.added_only {
-                        "Nothing installed here yet."
-                    } else {
-                        "Nothing matches."
-                    },
-                    cx,
-                ))
+                .child(state)
                 .into_any_element()
         } else {
             div()

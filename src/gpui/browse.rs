@@ -1,6 +1,7 @@
 //! The Browse page: search CurseForge or Modrinth, read a project, and
 //! install it into an instance (or a modpack as a new instance).
 
+use crate::widgets::Clickable as _;
 use crate::store::{Msg, Store, Updates};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -470,7 +471,7 @@ impl BrowseView {
                     }
                 }
                 Err(e) => {
-                    this.error = Some(format!("{e:#}"));
+                    this.error = Some(format!("Couldn't load that project. Check your connection and try again. ({e:#})"));
                     cx.notify();
                 }
             })
@@ -734,7 +735,9 @@ impl BrowseView {
                             .update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
                         this.want_server_files(cx);
                     }
-                    Err(e) => this.error = Some(format!("{e:#}")),
+                    Err(e) => {
+                        this.error = Some(format!("Couldn't load results. Check your connection and try again. ({e:#})"))
+                    }
                 }
                 cx.notify();
             })
@@ -831,7 +834,7 @@ impl BrowseView {
                 .outline()
                 .icon(IconName::Server)
                 .label("Server files")
-                .tooltip("The pack author's server files")
+                .tooltip("The pack author's own server files: download them or host a server from them")
                 .dropdown_menu(move |menu, _, _| {
                     let (s1, f1, n1) = (store.clone(), files.clone(), name.clone());
                     let (s2, f2, n2) = (store.clone(), files.clone(), name.clone());
@@ -877,7 +880,7 @@ impl BrowseView {
                 .ghost()
                 .icon(IconName::ServerCog)
                 .label(if long { "Build a server from this pack" } else { "Build a server" })
-                .tooltip("No official server files: build a server on this PC from this pack, leaving client-only mods out")
+                .tooltip("This pack has no official server files. Click to build a server on this PC from the pack, leaving client-only mods out")
                 .on_click(move |_, window, cx| {
                     // Not a click on the card: the page stays as it is.
                     cx.stop_propagation();
@@ -1056,7 +1059,7 @@ impl BrowseView {
             .flex_none()
             .text_sm()
             .text_color(theme.muted_foreground)
-            .cursor_pointer()
+            .clickable(cx)
             .hover(move |s| s.text_color(hover).underline())
             .child(format!("by {}", m.author()))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1368,7 +1371,7 @@ impl BrowseView {
                 .gap_1p5()
                 .rounded(radius)
                 .text_sm()
-                .cursor_pointer()
+                .clickable(cx)
                 .child(crate::brand::site_icon(modrinth).small().text_color(if on { gpui_kit::white() } else { color }))
                 .child(label)
                 .map(|d| {
@@ -1430,9 +1433,9 @@ impl BrowseView {
                     .py_1p5()
                     .rounded(theme.radius)
                     .text_sm()
-                    .cursor_pointer()
-                    .when(active, |r| r.bg(theme.list_active).font_medium())
-                    .when(!active, |r| r.hover(|s| s.bg(theme.list_hover)))
+                    .clickable(cx)
+                    .when(active, |r| widgets::row_selected(r, cx).font_medium())
+                    .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
                     .child(Icon::new(*icon).small())
                     .child(*name)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1465,9 +1468,9 @@ impl BrowseView {
                     .py_1p5()
                     .rounded(theme.radius)
                     .text_sm()
-                    .cursor_pointer()
-                    .when(active, |r| r.bg(theme.list_active).font_medium())
-                    .when(!active, |r| r.hover(|s| s.bg(theme.list_hover)))
+                    .clickable(cx)
+                    .when(active, |r| widgets::row_selected(r, cx).font_medium())
+                    .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
                     .child(Icon::new(IconName::Bookmark).small())
                     .child(div().flex_1().child("Bookmarked"))
                     .when(n > 0, |r| {
@@ -1620,9 +1623,9 @@ impl BrowseView {
                 .py_1()
                 .rounded(theme.radius)
                 .text_sm()
-                .cursor_pointer()
-                .when(active, |r| r.bg(theme.list_active).font_medium())
-                .when(!active, |r| r.hover(|s| s.bg(theme.list_hover)))
+                .clickable(cx)
+                .when(active, |r| widgets::row_selected(r, cx).font_medium())
+                .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
                 .when_some(icon, |r, p| r.child(img(p).size_4().flex_none()))
                 .child(div().truncate().child(name))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1794,7 +1797,7 @@ impl BrowseView {
                 .gap_2()
                 .map(|r| match pack_update {
                     Some(u) => r.child(u),
-                    None => r.child(Tag::success().outline().small().child("Installed")),
+                    None => r.child(widgets::chip(cx.theme().success).small().child("Installed")),
                 })
                 .child(
                     Button::new(id("open"))
@@ -1881,7 +1884,7 @@ impl BrowseView {
             } else {
                 format!("Installed ({src})")
             };
-            Tag::success().outline().small().child(text).into_any_element()
+            widgets::chip(cx.theme().success).small().child(text).into_any_element()
         } else {
             let m1 = m.clone();
             // What else it downloads, once hovering or the panel worked it out.
@@ -1945,15 +1948,13 @@ impl BrowseView {
             .p_3()
             .rounded(theme.radius_lg)
             .border_1()
-            .cursor_pointer()
+            .clickable(cx)
+            .border_color(theme.border)
             .when(picked, |r| match m.modrinth {
-                Some(_) => r.border_color(theme.success).bg(theme.success.opacity(0.08)),
-                None => r.border_color(theme.primary).bg(theme.list_active),
+                Some(_) => widgets::row_selected_in(r, theme.success),
+                None => widgets::row_selected(r, cx),
             })
-            .when(!picked, |r| {
-                r.border_color(theme.border)
-                    .hover(|s| s.bg(theme.list_hover))
-            })
+            .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
             .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
             .child(widgets::thumb(icon.as_deref(), rems(3.5), cx))
             .child(
@@ -2109,7 +2110,7 @@ impl BrowseView {
                 "No bookmarks yet: click the bookmark beside a project's Install to save it here.".to_string()
             }
             Some(list) => format!("{} bookmarked", list.len()),
-            None => format!("{} results on ", self.total),
+            None => format!("{} results on ", total_label(self.total)),
         };
         // The site's name, in its color, after "results on".
         let site_name = saved.is_none().then(|| {
@@ -2176,7 +2177,22 @@ impl BrowseView {
                             .when_some(sort_bar, |r, b| r.child(div().flex_1()).child(b)),
                     )
                     .when_some(self.error.clone(), |r, e| {
-                        r.child(div().text_sm().text_color(theme.danger).child(e))
+                        let retry = e.starts_with("Couldn't load results");
+                        r.child(
+                            h_flex()
+                                .gap_2()
+                                .child(div().min_w_0().text_sm().text_color(theme.danger).child(e))
+                                .when(retry, |r| {
+                                    r.child(
+                                        Button::new("search-retry")
+                                            .xsmall()
+                                            .outline()
+                                            .icon(IconName::RefreshCw)
+                                            .label("Retry")
+                                            .on_click(cx.listener(|this, _, _, cx| this.run_search(false, cx))),
+                                    )
+                                }),
+                        )
                     })
                     .when_some(off_site, |r, (name, pack_mr)| {
                         let (here, home) = if self.modrinth {
@@ -2329,7 +2345,7 @@ impl BrowseView {
                     .gap_1p5()
                     .rounded(radius)
                     .text_sm()
-                    .cursor_pointer()
+                    .clickable(cx)
                     .child(Icon::new(icon).small())
                     .map(|d| {
                         if on {
@@ -2397,7 +2413,7 @@ impl BrowseView {
                         .h_24()
                         .rounded(theme.radius)
                         .overflow_hidden()
-                        .cursor_pointer()
+                        .clickable(cx)
                         .child(img(p).size_full().object_fit(ObjectFit::Cover))
                         .on_click(move |_, window, cx| {
                             crate::image_viewer::open(store_e.clone(), gallery.clone(), i, window, cx)
@@ -2530,7 +2546,7 @@ impl BrowseView {
                         };
                         let action: AnyElement = if installed_file == Some(f.id) {
                             widgets::split(
-                                widgets::split_lead(Tag::success().xsmall().h_5().child("Installed")),
+                                widgets::split_lead(widgets::chip(cx.theme().success).xsmall().h_5().child("Installed")),
                                 log_id,
                                 widgets::Tint::Success,
                                 gpui_kit::component::Size::XSmall,
@@ -2613,9 +2629,9 @@ impl BrowseView {
                             .as_ref()
                             .is_some_and(|t| installed_as(t, &d).is_some());
                         let tag = match rel {
-                            cf::DEP_REQUIRED => Tag::warning().xsmall().child("Required"),
-                            cf::DEP_INCOMPATIBLE => Tag::danger().xsmall().child("Incompatible"),
-                            _ => Tag::secondary().xsmall().child("Optional"),
+                            cf::DEP_REQUIRED => widgets::chip(cx.theme().warning).xsmall().child("Required"),
+                            cf::DEP_INCOMPATIBLE => widgets::chip(cx.theme().danger).xsmall().child("Incompatible"),
+                            _ => widgets::chip(cx.theme().muted_foreground).xsmall().child("Optional"),
                         };
                         let open = d.clone();
                         h_flex()
@@ -2624,7 +2640,7 @@ impl BrowseView {
                             .px_2()
                             .py_1p5()
                             .rounded(theme.radius)
-                            .cursor_pointer()
+                            .clickable(cx)
                             .hover(|s| s.bg(theme.list_hover))
                             .on_click(
                                 cx.listener(move |this, _, _, cx| {
@@ -2642,7 +2658,7 @@ impl BrowseView {
                             )
                             .child(tag)
                             .when(have, |r| {
-                                r.child(Tag::success().xsmall().child("Installed"))
+                                r.child(widgets::chip(cx.theme().success).xsmall().child("Installed"))
                             })
                     }));
                 let n_files = d.files.len();
@@ -2836,9 +2852,9 @@ impl BrowseView {
                         .gap_3()
                         .p_2()
                         .rounded(theme.radius)
-                        .cursor_pointer()
-                        .when(current, |r| r.bg(theme.list_active))
-                        .hover(|s| s.bg(theme.list_hover))
+                        .clickable(cx)
+                        .when(current, |r| widgets::row_selected(r, cx))
+                        .when(!current, |r| r.hover(|s| widgets::row_hover(s, cx)))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
                         .child(widgets::thumb(icon.as_deref(), rems(2.75), cx))
                         .child(
@@ -2851,7 +2867,7 @@ impl BrowseView {
                                         .gap_2()
                                         .child(div().text_sm().font_semibold().truncate().child(m.name.clone()))
                                         .when(have, |r| {
-                                            r.child(Tag::success().outline().xsmall().child("Installed"))
+                                            r.child(widgets::chip(cx.theme().success).xsmall().child("Installed"))
                                         }),
                                 )
                                 .child(widgets::caption(m.summary.clone(), cx).text_xs())
@@ -2974,7 +2990,7 @@ impl BrowseView {
                         .px_2()
                         .py_1p5()
                         .rounded(theme.radius)
-                        .cursor_pointer()
+                        .clickable(cx)
                         .hover(|s| s.bg(theme.list_hover))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
                         .child(widgets::thumb(icon.as_deref(), rems(1.75), cx))
@@ -3169,7 +3185,7 @@ fn stats(m: &cf::Mod, full: bool, on_cat: Option<OnCategory>, cx: &App) -> Div {
                 div()
                     .id(ElementId::Name(format!("cat:{}:{id}", m.id).into()))
                     .flex_none()
-                    .cursor_pointer()
+                    .clickable(cx)
                     .hover(move |s| s.text_color(fg).underline())
                     .child(text)
                     .on_click(move |_, window, cx| {
@@ -3253,7 +3269,7 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
     const SHOW: usize = 5;
     let more = versions.len().saturating_sub(SHOW);
     let all: String = versions.join(", ");
-    let tag = |t: String| Tag::secondary().xsmall().child(t);
+    let tag = |t: String| widgets::chip(cx.theme().muted_foreground).xsmall().child(t);
     let group = |icon: IconName, tags: Vec<Tag>| {
         // Versions blue, loaders yellow, sides green; the rest muted.
         let color = match icon {
@@ -3615,4 +3631,17 @@ impl BrowseView {
                 .into_any_element(),
         ))
     }
+}
+
+/// The result count with thousands separators; CurseForge stops counting at 10,000.
+fn total_label(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n >= 10_000 { out + "+" } else { out }
 }

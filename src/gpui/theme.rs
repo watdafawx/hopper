@@ -18,6 +18,27 @@ pub fn set_zoom(zoom: u16, cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// The corner radius every theme sets ("radius" in theme.json), for
+/// helpers that have no `cx`.
+pub const RADIUS: f32 = 6.0;
+
+/// Brand, site and loader colors, defined once.
+pub mod palette {
+    use gpui_kit::Hsla;
+
+    /// HSL from degrees, saturation and lightness (all but hue 0-1).
+    const fn hs(deg: f32, s: f32, l: f32) -> Hsla {
+        Hsla { h: deg / 360.0, s, l, a: 1.0 }
+    }
+
+    pub const CURSEFORGE: Hsla = hs(14.0, 0.87, 0.58);
+    pub const MODRINTH: Hsla = hs(145.0, 0.78, 0.48);
+    pub const NEOFORGE: Hsla = hs(20.0, 0.75, 0.6);
+    pub const FORGE: Hsla = hs(215.0, 0.35, 0.65);
+    pub const FABRIC: Hsla = hs(38.0, 0.45, 0.7);
+    pub const QUILT: Hsla = hs(270.0, 0.55, 0.7);
+}
+
 /// What sits behind a theme's colors. Only Opaque is in use: the glass
 /// themes were taken out (Windows' blur didn't hold up), the rest stays for
 /// when they come back.
@@ -366,6 +387,29 @@ fn alpha(c: &str, alpha: f32) -> String {
     hex(Rgba(c.0, c.1, c.2, alpha))
 }
 
+fn lum(c: Rgba) -> f32 {
+    let f = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    0.2126 * f(c.0) + 0.7152 * f(c.1) + 0.0722 * f(c.2)
+}
+
+/// WCAG contrast ratio of two colors.
+fn contrast(a: &str, b: &str) -> f32 {
+    let (x, y) = (lum(parse(a)), lum(parse(b)));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// `c` moved toward `to` just far enough to reach `ratio` against `bg`.
+fn reach(c: &str, to: &str, bg: &str, ratio: f32) -> String {
+    let mut out = c.to_string();
+    for i in 0..=20 {
+        out = mix(c, to, i as f32 * 0.05);
+        if contrast(&out, bg) >= ratio {
+            break;
+        }
+    }
+    out
+}
+
 /// Dark or light text that reads on `bg`.
 fn on(bg: &str) -> &'static str {
     let c = parse(bg);
@@ -383,18 +427,18 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
     // Lighter on dark themes, darker on light ones.
     let lift = if p.dark { white } else { black };
     let pop = p.pop.map(str::to_string).unwrap_or_else(|| mix(p.bg, p.surface, 0.5));
+    // Fill, hover, active and text; the fill is pushed until its text
+    // reads at 4.5:1, and hover/active move further the same way.
     let status = |c: &str| {
-        (
-            c.to_string(),
-            mix(c, lift, 0.12),
-            mix(c, if p.dark { black } else { white }, 0.12),
-            on(c).to_string(),
-        )
+        let text = on(c);
+        let to = if text == "#ffffff" { black } else { white };
+        let fill = reach(c, to, text, 4.5);
+        (fill.clone(), mix(&fill, to, 0.08), mix(&fill, to, 0.16), text.to_string())
     };
     // Glass reads as frosted layers: fills a little stronger so rows and
     // picked items stand out over any backdrop, edges lit, and the accent
     // brightening on hover like a glow.
-    let (hover_a, active_a) = if glass { (0.075, 0.2) } else { (0.045, 0.12) };
+    let (hover_a, active_a) = if glass { (0.075, 0.2) } else { (crate::widgets::alpha::HOVER, crate::widgets::alpha::SELECTED) };
     let primary_hover = if glass { mix(p.accent, white, 0.22) } else { mix(p.accent, lift, 0.12) };
     let edge = if glass { alpha(p.fg, if p.dark { 0.14 } else { 0.12 }) } else { p.border.to_string() };
     let (ok, ok_h, ok_a, ok_f) = status(p.success);
@@ -403,7 +447,7 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
         ("background", p.bg.into()),
         ("foreground", p.fg.into()),
         ("border", p.border.into()),
-        ("input.border", if glass { edge.clone() } else { mix(p.border, p.fg, 0.08) }),
+        ("input.border", if glass { edge.clone() } else { reach(p.border, p.fg, p.bg, 3.0) }),
         ("muted.background", p.surface.into()),
         ("muted.foreground", p.muted.into()),
         ("accent.background", p.raised.into()),
@@ -445,16 +489,16 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
         ("tab_bar.segmented.background", p.surface.into()),
         ("tab.background", "#00000000".into()),
         ("tab.foreground", p.muted.into()),
-        ("tab.active.background", if glass { alpha(p.fg, 0.1) } else { p.raised.into() }),
+        ("tab.active.background", if glass { alpha(p.fg, 0.1) } else { reach(p.raised, p.fg, p.surface, 3.0) }),
         ("tab.active.foreground", p.fg.into()),
         ("table.background", page.into()),
         ("table.head.foreground", p.muted.into()),
         ("table.row.border", alpha(p.fg, 0.05)),
-        ("switch.background", mix(p.raised, p.fg, 0.1)),
+        ("switch.background", reach(p.raised, p.fg, p.bg, 3.0)),
         ("progress_bar.background", p.accent.into()),
         ("slider.bar.background", p.accent.into()),
         ("slider.thumb.background", if p.dark { p.fg.into() } else { white.into() }),
-        ("skeleton.background", p.surface.into()),
+        ("skeleton.background", alpha(p.fg, 0.1)),
         ("scrollbar.background", "#00000000".into()),
         ("scrollbar.thumb.background", alpha(p.fg, 0.15)),
         ("scrollbar.thumb.hover.background", alpha(p.fg, 0.25)),
@@ -487,7 +531,7 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
         "name": p.name,
         "mode": if p.dark { "dark" } else { "light" },
         "font.size": 15,
-        "radius": 6,
+        "radius": RADIUS as usize,
         "radius.lg": 10,
         "colors": colors,
     });

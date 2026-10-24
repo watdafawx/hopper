@@ -1,6 +1,7 @@
 //! The Servers page (what each server is and runs) and the Server sync page
 //! (each server against its pack).
 
+use crate::widgets::Clickable as _;
 use crate::rigsync::SyncPanel;
 use crate::server_control::{ControlEvent, ServerControl};
 use crate::server_settings::ServerSettings;
@@ -10,7 +11,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::description_list::DescriptionList;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -72,6 +73,26 @@ fn status_text(status: Option<&Status>, panel: Option<&PanelStats>) -> String {
     }
 }
 
+/// "No servers yet", with the Host action when the page has one.
+fn no_servers(on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>, cx: &App) -> Div {
+    widgets::empty_state(
+        IconName::Server,
+        "No servers yet",
+        Some("Host one on this PC, or put server folders in the servers folder.".into()),
+        cx,
+    )
+    .when_some(on_host, |c, host| {
+        c.child(
+            Button::new("host-server-empty")
+                .small()
+                .primary()
+                .icon(IconName::Plus)
+                .label("Host a server")
+                .on_click(move |_, window, cx| host(window, cx)),
+        )
+    })
+}
+
 /// The server list down the leading side, shared by both pages.
 fn server_list(
     id: &'static str,
@@ -91,7 +112,16 @@ fn server_list(
         .map(|i| (i.root.clone(), i.name.clone()))
         .collect();
     let mut shown_local = false;
-    let rows = s.servers().iter().map(|srv| {
+    // Running servers first, within the rig's and this PC's.
+    let running = |srv: &ServerInfo| {
+        s.panel_stats(&srv.root).map_or_else(
+            || matches!(s.status(&srv.root), Some(Status::Online { .. })),
+            |p| p.running || p.starting,
+        )
+    };
+    let mut ordered: Vec<&ServerInfo> = s.servers().iter().collect();
+    ordered.sort_by_key(|srv| (s.is_hosted(&srv.root), !running(srv)));
+    let rows = ordered.into_iter().map(|srv| {
         // Servers hosted here come after the rig's, under their own label.
         let local_head = (s.is_hosted(&srv.root) && !std::mem::replace(&mut shown_local, true)).then(|| {
             div()
@@ -107,27 +137,59 @@ fn server_list(
         let root = srv.root.clone();
         let pick = on_pick.clone();
         let paired = s.paired(srv).map(|i| i.name.clone());
-        // Not paired yet: pick its pack right here.
-        let pairing = (with_pairing || paired.is_none()).then(|| {
+        // Not paired yet: a quiet link that lists the packs; a paired
+        // server on the Sync page keeps the full select to change it.
+        let pairing: Option<AnyElement> = if paired.is_none() {
+            let names: Vec<String> = instances.iter().map(|(_, n)| n.clone()).collect();
+            let roots: Vec<PathBuf> = instances.iter().map(|(r, _)| r.clone()).collect();
+            let (store, server_root) = (store.clone(), srv.root.clone());
+            Some(
+                Button::new(ElementId::Name(format!("pair-link:{}", srv.root.display()).into()))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Link)
+                    .label("Pair a pack…")
+                    .tooltip("Choose the instance this server runs, to compare their mods")
+                    .dropdown_menu(move |menu, _, _| {
+                        let mut menu = menu.min_w(rems(13.).to_pixels(rem)).max_h(rems(26.).to_pixels(rem)).scrollable(true);
+                        for (ix, n) in names.iter().enumerate() {
+                            let (store, roots, sr) = (store.clone(), roots.clone(), server_root.clone());
+                            menu = menu.item(PopupMenuItem::new(n.clone()).on_click(move |_, _, cx| {
+                                if let Some(r) = roots.get(ix) {
+                                    let r = r.clone();
+                                    store.update(cx, |s, cx| s.set_pairing(&sr, &r, cx));
+                                }
+                            }));
+                        }
+                        menu
+                    })
+                    .into_any_element(),
+            )
+        } else if with_pairing {
             let items: Vec<(String, bool)> = instances
                 .iter()
                 .map(|(_, n)| (n.clone(), paired.as_deref() == Some(n.as_str())))
                 .collect();
             let roots: Vec<PathBuf> = instances.iter().map(|(r, _)| r.clone()).collect();
             let (store, server_root) = (store.clone(), srv.root.clone());
-            widgets::picker(
-                "pair",
-                paired.clone().unwrap_or("Pick its pack".into()),
-                items,
-                rem,
-                Rc::new(move |ix, _, cx| {
-                    if let Some(r) = roots.get(ix) {
-                        let (r, sr) = (r.clone(), server_root.clone());
-                        store.update(cx, |s, cx| s.set_pairing(&sr, &r, cx));
-                    }
-                }),
+            Some(
+                widgets::picker(
+                    "pair",
+                    paired.clone().unwrap_or_default(),
+                    items,
+                    rem,
+                    Rc::new(move |ix, _, cx| {
+                        if let Some(r) = roots.get(ix) {
+                            let (r, sr) = (r.clone(), server_root.clone());
+                            store.update(cx, |s, cx| s.set_pairing(&sr, &r, cx));
+                        }
+                    }),
+                )
+                .into_any_element(),
             )
-        });
+        } else {
+            None
+        };
         let row = v_flex()
             .id(ElementId::Name(
                 format!("server:{}", srv.root.display()).into(),
@@ -138,16 +200,10 @@ fn server_list(
             .rounded(theme.radius_lg)
             .border_1()
             .border_color(theme.transparent)
-            .cursor_pointer()
-            .when(active, |r| {
-                r.bg(linear_gradient(
-                    90.,
-                    linear_color_stop(theme.primary.opacity(0.12), 0.),
-                    linear_color_stop(theme.primary.opacity(0.03), 1.),
-                ))
-                .border_color(theme.primary.opacity(0.3))
-            })
-            .when(!active, |r| r.hover(|s| s.bg(theme.list_hover).border_color(theme.border)))
+            .clickable(cx)
+            .when(active, |r| widgets::row_selected(r, cx))
+            .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
+
             .on_click(move |_, w, cx| pick(root.clone(), w, cx))
             .context_menu({
                 let (store, root) = (store.clone(), srv.root.clone());
@@ -199,19 +255,16 @@ fn server_list(
                             .truncate()
                             .child(srv.name.clone()),
                     )
-                    .when_some(s.panel_stats(&srv.root), |r, p| {
-                        let live = p.running && !p.starting;
+                    // A stopped server is just its grey dot; pills are for
+                    // running, starting and failing ones.
+                    .when_some(s.panel_stats(&srv.root).filter(|p| p.running || p.starting || p.crashed), |r, p| {
+                        let live = p.running && !p.starting && !p.crashed;
                         let text = if live {
                             format!("{}/{}", p.online, p.max)
                         } else {
                             p.state().to_string()
                         };
-                        let color = if live {
-                            status_color(s.status(&srv.root), Some(p), cx)
-                        } else {
-                            theme.muted_foreground
-                        };
-                        r.child(widgets::pill(text, color, live))
+                        r.child(widgets::pill(text, status_color(s.status(&srv.root), Some(p), cx), live))
                     }),
             )
             .when(!with_pairing && paired.is_some(), |r| {
@@ -259,23 +312,7 @@ fn server_list(
         )
         .children(rows)
         .when(empty, |r| {
-            r.child(
-                v_flex()
-                    .px_2()
-                    .py_4()
-                    .gap_2()
-                    .child(widgets::caption("No servers yet.", cx))
-                    .when_some(on_host, |c, host| {
-                        c.child(
-                            Button::new("host-server-empty")
-                                .small()
-                                .primary()
-                                .icon(IconName::Plus)
-                                .label("Host a server")
-                                .on_click(move |_, window, cx| host(window, cx)),
-                        )
-                    }),
-            )
+            r.child(no_servers(on_host, cx))
         })
 }
 
@@ -297,6 +334,8 @@ pub struct ServersView {
     settings_view: Entity<ServerSettings>,
     /// Overview, Console, Backups, Settings or Mods.
     tab: usize,
+    /// The Overview's modpack readme shows in full.
+    pack_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -342,6 +381,7 @@ impl ServersView {
             control,
             settings_view,
             tab: 0,
+            pack_open: false,
             _subscriptions: subs,
         };
         v.ensure_pick(cx);
@@ -488,7 +528,6 @@ impl ServersView {
         let status = store.status(&s.root);
         let pstats = store.panel_stats(&s.root).cloned();
         let paired = store.paired(s).cloned();
-        let live = self.control.read(cx).live();
         let configured = self.control.read(cx).configured(cx);
         let manager = match s.manager {
             _ if store.is_hosted(&s.root) => "Hopper, on this PC",
@@ -499,9 +538,8 @@ impl ServersView {
         let mut info = DescriptionList::horizontal()
             .columns(2)
             .label_width(rems(8.));
-        for (label, value) in live {
-            info = info.item(label, value, 1);
-        }
+        // Live numbers (CPU, memory, players, world) are the cards' job;
+        // this table is for what stays put.
         if store.is_hosted(&s.root) {
             let sched = hopper::hosting::Schedule::load(&s.root);
             if let Some(n) = hopper::hosting::schedule::describe_next_restart(
@@ -716,10 +754,34 @@ impl ServersView {
                         Some(crate::store::PackPage::Ready(m, ..)) => m.icon().and_then(|u| store.image(u)),
                         _ => None,
                     };
+                    let ready = matches!(page, Some(crate::store::PackPage::Ready(..)));
+                    let open = self.pack_open;
+                    let theme = cx.theme().clone();
                     v_flex()
                         .gap_3()
                         .child(div().text_base().font_weight(FontWeight::BOLD).child("Modpack"))
-                        .child(widgets::pack_page(page, icon, &self.pack_desc, true, cx))
+                        // A long readme is clipped until asked for.
+                        .child(
+                            div()
+                                .when(ready && !open, |d| d.max_h(rems(24.)).overflow_hidden())
+                                .child(widgets::pack_page(page, icon, &self.pack_desc, true, cx)),
+                        )
+                        .when(ready, |c| {
+                            c.child(
+                                h_flex().justify_center().child(
+                                    Button::new("pack-more")
+                                        .ghost()
+                                        .small()
+                                        .text_color(theme.muted_foreground)
+                                        .icon(if open { IconName::ChevronUp } else { IconName::ChevronDown })
+                                        .label(if open { "Show less" } else { "Show more" })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.pack_open = !this.pack_open;
+                                            cx.notify();
+                                        })),
+                                ),
+                            )
+                        })
                 });
                 c.child(
                     v_flex()
@@ -826,6 +888,20 @@ impl Render for ServersView {
                 ElementId::Name(format!("server-detail:{}", s.root.display()).into()),
                 div().size_full().child(self.detail(&s, window, cx)),
             ),
+            None if self.store.read(cx).servers().is_empty() => {
+                let store = self.store.clone();
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(no_servers(
+                        Some(Rc::new(move |window: &mut Window, cx: &mut App| {
+                            crate::host_dialog::open(store.clone(), None, window, cx)
+                        })),
+                        cx,
+                    ))
+                    .into_any_element()
+            }
             None => v_flex()
                 .size_full()
                 .items_center()
@@ -899,7 +975,12 @@ impl Render for SyncPage {
             true,
             window.rem_size(),
             Rc::new(move |root, _, cx| view.update(cx, |v, cx| v.compare(root, cx))),
-            None,
+            {
+                let store = self.store.clone();
+                Some(Rc::new(move |window: &mut Window, cx: &mut App| {
+                    crate::host_dialog::open(store.clone(), None, window, cx)
+                }))
+            },
             cx,
         )
         .overflow_y_scrollbar();

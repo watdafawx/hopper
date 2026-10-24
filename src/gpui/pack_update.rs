@@ -1,6 +1,7 @@
 //! The modpack update preview: what the update will do to mods and config
 //! files, with a choice per file where both you and the pack changed it.
 
+use crate::widgets::Clickable as _;
 use crate::store::Store;
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -24,11 +25,24 @@ use hopper::server_pack_update::ServerPlan;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::widgets::{DIALOG_CHROME_FOOTER as DIALOG_CHROME, DIALOG_TOP};
+
 /// Collapsible groups of the preview.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Group {
     Mods(ModAction),
     Files(FileAction),
+}
+
+/// The bulk choice for files both you and the pack changed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bulk {
+    /// Pack content takes the pack's copy, settings keep yours.
+    Suggested,
+    Mine,
+    Pack,
+    /// Picked per file.
+    Review,
 }
 
 /// Finished comparisons by the job that made them: (instance, pack file,
@@ -93,6 +107,8 @@ pub struct UpdatePreview {
     plan: Option<Result<UpdatePlan, String>>,
     /// Conflicting files where the pack's copy wins.
     take: HashSet<String>,
+    /// How the conflicting files were picked, all at once or per file.
+    bulk: Bulk,
     /// Mods you turned off to turn on, and removed ones to add back (their
     /// keys); the rest stay off or out.
     turn_on: HashSet<String>,
@@ -140,12 +156,9 @@ impl UpdatePreview {
                 .await;
             this.update(cx, |this, cx| {
                 if let Ok(p) = &r {
-                    this.take = p.default_take();
+                    this.set_defaults(p);
                     this.turn_on = p.default_choices();
                     this.want_icons(p, cx);
-                    if p.count(FileAction::Conflict) > 0 {
-                        this.open.insert(Group::Files(FileAction::Conflict));
-                    }
                 }
                 this.plan = Some(r);
                 cx.notify();
@@ -234,10 +247,7 @@ impl UpdatePreview {
     fn take_result(&mut self, id: u64, r: ServerResult) {
         match r {
             Ok((targets, p)) => {
-                self.take = p.plan.default_take();
-                if p.plan.count(FileAction::Conflict) > 0 {
-                    self.open.insert(Group::Files(FileAction::Conflict));
-                }
+                self.set_defaults(&p.plan);
                 self.from = p.base.clone().unwrap_or_else(|| "this server".into());
                 self.plan = Some(Ok(p.plan.clone()));
                 if let Some(t) = self.server.as_mut() {
@@ -385,6 +395,135 @@ impl UpdatePreview {
         Some(c.into_any_element())
     }
 
+    /// The plan's default picks for conflicting files. The per-file list
+    /// starts folded behind the bulk choice.
+    fn set_defaults(&mut self, p: &UpdatePlan) {
+        self.take = p.default_take();
+        let n = p.count(FileAction::Conflict);
+        self.bulk = if self.take.is_empty() {
+            Bulk::Mine
+        } else if self.take.len() == n {
+            Bulk::Pack
+        } else {
+            Bulk::Suggested
+        };
+    }
+
+    /// Picks every conflicting file at once, or unfolds the list to pick
+    /// each.
+    fn pick_bulk(&mut self, b: Bulk, cx: &mut Context<Self>) {
+        let Some(Ok(plan)) = &self.plan else { return };
+        let all: Vec<String> = plan
+            .files
+            .iter()
+            .filter(|f| f.action == FileAction::Conflict)
+            .map(|f| f.rel.clone())
+            .collect();
+        match b {
+            Bulk::Suggested => self.take = plan.default_take(),
+            Bulk::Mine => {
+                for r in &all {
+                    self.take.remove(r);
+                }
+            }
+            Bulk::Pack => self.take.extend(all),
+            Bulk::Review => {
+                self.open.insert(Group::Files(FileAction::Conflict));
+            }
+        }
+        self.bulk = b;
+        cx.notify();
+    }
+
+    /// Files both you and the pack changed: one choice for all of them,
+    /// with the per-file list folded below it.
+    fn conflict_card(&self, plan: &UpdatePlan, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows: Vec<String> = plan
+            .files
+            .iter()
+            .filter(|f| f.action == FileAction::Conflict)
+            .map(|f| f.rel.clone())
+            .collect();
+        let n = rows.len();
+        if n == 0 {
+            return None;
+        }
+        let suggested = plan.default_take().len();
+        // "Suggested" only when it differs from both "all" choices.
+        let mut choices = Vec::new();
+        if suggested > 0 && suggested < n {
+            choices.push((Bulk::Suggested, "Suggested"));
+        }
+        choices.push((Bulk::Mine, "Keep all my changes"));
+        choices.push((Bulk::Pack, "Take all the pack's"));
+        choices.push((Bulk::Review, "Review each"));
+        let selected = choices
+            .iter()
+            .position(|(b, _)| *b == self.bulk)
+            .unwrap_or(choices.len() - 1);
+        let mine = rows.iter().filter(|r| !self.take.contains(*r)).count();
+        let note = match self.bulk {
+            Bulk::Suggested => format!(
+                "Pack content (quests, scripts) takes the pack's copy ({}); settings keep yours ({mine}).",
+                n - mine
+            ),
+            Bulk::Mine => "Your copy of every file stays; the pack's changes to them are skipped.".to_string(),
+            Bulk::Pack => "The pack's copy replaces every file.".to_string(),
+            Bulk::Review => format!("Picked per file: {mine} keep yours, {} take the pack's.", n - mine),
+        };
+        let files = if n == 1 { "file" } else { "files" };
+        let open = self.open.contains(&Group::Files(FileAction::Conflict));
+        let picks: Vec<Bulk> = choices.iter().map(|(b, _)| *b).collect();
+        let theme = cx.theme();
+        let card = v_flex()
+            .gap_2()
+            .px_3()
+            .py_2p5()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(theme.warning.opacity(widgets::alpha::LINE))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(widgets::chip(cx.theme().warning).xsmall().child("Both changed"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .child(format!("{n} {files} you and the pack both changed")),
+                    ),
+            )
+            .child(
+                h_flex().child(
+                    TabBar::new("bulk-pick")
+                        .segmented()
+                        .small()
+                        .selected_index(selected)
+                        .children(choices.iter().map(|(_, l)| Tab::new().label(*l)))
+                        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                            if let Some(b) = picks.get(*ix) {
+                                this.pick_bulk(*b, cx);
+                            }
+                        })),
+                ),
+            )
+            .child(widgets::caption(format!("{note} Replaced files go to .hopper-backups."), cx).text_xs())
+            .child(
+                h_flex()
+                    .id("review-files")
+                    .gap_1()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .clickable(cx)
+                    .hover(|s| s.text_color(theme.primary))
+                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small())
+                    .child(if open { "Hide the files".to_string() } else { format!("Review {n} {files}") })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle(Group::Files(FileAction::Conflict), cx))),
+            )
+            .when(open, |c| c.child(self.conflicts(rows, cx)));
+        Some(card.into_any_element())
+    }
+
     fn toggle(&mut self, g: Group, cx: &mut Context<Self>) {
         if !self.open.remove(&g) {
             self.open.insert(g);
@@ -439,7 +578,7 @@ impl UpdatePreview {
             .id(ElementId::Name(format!("group:{label}").into()))
             .gap_2()
             .py_1()
-            .cursor_pointer()
+            .clickable(cx)
             .when(n > 0, |r| r.hover(|s| s.text_color(theme.primary)))
             .when(n == 0, |r| r.opacity(0.5))
             .child(
@@ -463,10 +602,10 @@ impl UpdatePreview {
 
     fn mods_group(&self, plan: &UpdatePlan, a: ModAction, cx: &mut Context<Self>) -> AnyElement {
         let (tag, label) = match a {
-            ModAction::Add => (Tag::success().xsmall().child("Added"), "mods the pack adds"),
-            ModAction::Update => (Tag::info().xsmall().child("Updated"), "mods updated"),
+            ModAction::Add => (widgets::chip(cx.theme().success).xsmall().child("Added"), "mods the pack adds"),
+            ModAction::Update => (widgets::chip(cx.theme().info).xsmall().child("Updated"), "mods updated"),
             ModAction::Remove => (
-                Tag::danger().xsmall().child("Removed"),
+                widgets::chip(cx.theme().danger).xsmall().child("Removed"),
                 "mods the pack drops (moved to backups)",
             ),
         };
@@ -497,29 +636,29 @@ impl UpdatePreview {
 
     fn files_group(&self, plan: &UpdatePlan, a: FileAction, cx: &mut Context<Self>) -> AnyElement {
         let (tag, label) = match a {
-            FileAction::Add => (Tag::success().xsmall().child("New"), "new files from the pack"),
+            FileAction::Add => (widgets::chip(cx.theme().success).xsmall().child("New"), "new files from the pack"),
             FileAction::Update => (
-                Tag::info().xsmall().child("Updated"),
+                widgets::chip(cx.theme().info).xsmall().child("Updated"),
                 "files the pack changed and you didn't",
             ),
             FileAction::Merge => (
-                Tag::info().xsmall().child("Merged"),
+                widgets::chip(cx.theme().info).xsmall().child("Merged"),
                 "files both changed in different places: combined",
             ),
             FileAction::KeepYours => (
-                Tag::secondary().xsmall().child("Yours"),
+                widgets::chip(cx.theme().muted_foreground).xsmall().child("Yours"),
                 "files only you changed: kept",
             ),
             FileAction::Remove => (
-                Tag::danger().xsmall().child("Removed"),
+                widgets::chip(cx.theme().danger).xsmall().child("Removed"),
                 "files the pack dropped (moved to backups)",
             ),
             FileAction::KeepDropped => (
-                Tag::secondary().xsmall().child("Kept"),
+                widgets::chip(cx.theme().muted_foreground).xsmall().child("Kept"),
                 "files the pack dropped but you changed: kept",
             ),
             FileAction::Conflict => (
-                Tag::warning().xsmall().child("Both changed"),
+                widgets::chip(cx.theme().warning).xsmall().child("Both changed"),
                 "files you and the pack both changed",
             ),
         };
@@ -610,8 +749,9 @@ impl UpdatePreview {
             .child(widgets::thumb(path.as_deref(), rems(1.25), cx))
             .child(div().min_w_0().text_sm().truncate().child(name.to_string()))
             .when(project != 0, |d| {
-                d.cursor_pointer()
+                d.clickable(cx)
                     .hover(|s| s.text_color(theme.primary))
+
                     .on_click(cx.listener(move |this, _, window, cx| this.open_peek(project, window, cx)))
             })
     }
@@ -743,43 +883,9 @@ impl UpdatePreview {
 
     fn conflicts(&self, rows: Vec<String>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let all = rows.clone();
-        let all2 = rows.clone();
         v_flex()
-            .pl(rems(4.25))
-            .pb_2()
+            .pl(rems(1.25))
             .gap_1()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .pb_1()
-                    .child(widgets::caption(
-                        "Pack content folders (quests, scripts) default to the pack's copy; settings default to yours. Replaced files go to .hopper-backups.",
-                        cx,
-                    ).text_xs().flex_1())
-                    .child(
-                        Button::new("keep-all")
-                            .xsmall()
-                            .ghost()
-                            .label("Keep all mine")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                for r in &all {
-                                    this.take.remove(r);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("take-all")
-                            .xsmall()
-                            .ghost()
-                            .label("Take all the pack's")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.take.extend(all2.iter().cloned());
-                                cx.notify();
-                            })),
-                    ),
-            )
             .children(rows.into_iter().map(|rel| {
                 let theirs = self.take.contains(&rel);
                 let diff = self.diffs.get(&rel).cloned();
@@ -819,6 +925,7 @@ impl UpdatePreview {
                                         } else {
                                             this.take.remove(&r2);
                                         }
+                                        this.bulk = Bulk::Review;
                                         cx.notify();
                                     })),
                             ),
@@ -863,9 +970,10 @@ impl UpdatePreview {
 
 impl Render for UpdatePreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Window-tall once loaded; the list takes the rest and scrolls (a
-        // max height on the scroll area alone doesn't scroll).
-        let total_h = (window.viewport_size().height - window.rem_size() * 8.).max(window.rem_size() * 16.);
+        // Window-tall once loaded, less the dialog's top offset, title and
+        // footer; the list takes the rest and scrolls (a max height on the
+        // scroll area alone doesn't scroll).
+        let total_h = (window.viewport_size().height - window.rem_size() * DIALOG_CHROME).max(window.rem_size() * 12.);
         let loaded = matches!(self.plan, Some(Ok(_)));
         let theme = cx.theme();
         let body: AnyElement = match &self.plan {
@@ -928,8 +1036,8 @@ impl Render for UpdatePreview {
                     .into_iter()
                     .map(|a| self.mods_group(&plan, a, cx))
                     .collect();
+                // Conflicts get their own card at the top.
                 let files: Vec<AnyElement> = [
-                    FileAction::Conflict,
                     FileAction::Merge,
                     FileAction::Update,
                     FileAction::Add,
@@ -990,6 +1098,7 @@ impl Render for UpdatePreview {
                                 })),
                         )
                     })
+                    .children(self.conflict_card(&plan, cx))
                     .children(self.your_choices(&plan, cx))
                     .child(
                         v_flex()
@@ -1106,6 +1215,7 @@ fn show(
             from,
             plan: None,
             take: HashSet::new(),
+            bulk: Bulk::Suggested,
             turn_on: HashSet::new(),
             peek: None,
             _peek_watch: None,
@@ -1118,12 +1228,9 @@ fn show(
         match plan {
             Some(r) => {
                 if let Ok(p) = &r {
-                    v.take = p.default_take();
+                    v.set_defaults(p);
                     v.turn_on = p.default_choices();
                     v.want_icons(p, cx);
-                    if p.count(FileAction::Conflict) > 0 {
-                        v.open.insert(Group::Files(FileAction::Conflict));
-                    }
                 }
                 v.plan = Some(r);
             }
@@ -1138,6 +1245,7 @@ fn show(
         dialog
             .title(title.clone())
             .w(rems(if view.read(cx).peek.is_some() { 86. } else { 54. }).to_pixels(window.rem_size()))
+            .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())
             .footer(
                 DialogFooter::new()
@@ -1196,6 +1304,7 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
             from: String::new(),
             plan: None,
             take: HashSet::new(),
+            bulk: Bulk::Suggested,
             turn_on: HashSet::new(),
             peek: None,
             _peek_watch: None,
@@ -1217,6 +1326,7 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
         dialog
             .title(title.clone())
             .w(rems(if view.read(cx).peek.is_some() { 86. } else { 54. }).to_pixels(window.rem_size()))
+            .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())
             .footer(
                 DialogFooter::new()

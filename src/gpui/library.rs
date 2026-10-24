@@ -1,6 +1,7 @@
 //! The Library page: instances on the leading side, the picked instance's
 //! header and tabs in the work area.
 
+use crate::widgets::Clickable as _;
 use crate::addons::{AddonsEvent, AddonsView, in_class};
 use crate::content::{ContentEvent, ScreenshotsView, WorldsView};
 use crate::inst_settings::InstanceSettings;
@@ -14,7 +15,6 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
@@ -837,7 +837,7 @@ impl LibraryView {
                         .p_0p5()
                         .rounded(theme.radius_lg)
                         .border_2()
-                        .cursor_pointer()
+                        .clickable(cx)
                         .border_color(if picked { theme.primary } else { theme.transparent })
                         .when(picked, |d| {
                             d.shadow(vec![
@@ -1012,7 +1012,7 @@ impl LibraryView {
                 .gap_1p5()
                 .rounded(radius)
                 .text_sm()
-                .cursor_pointer()
+                .clickable(cx)
                 .child(Icon::new(icon).small())
                 .child(label)
                 .map(|d| {
@@ -1068,7 +1068,7 @@ impl LibraryView {
                         .gap_2()
                         .text_xs()
                         .font_semibold()
-                        .cursor_pointer()
+                        .clickable(cx)
                         .text_color(theme.muted_foreground)
                         .hover(|s| s.text_color(theme.foreground))
                         .child(
@@ -1097,14 +1097,38 @@ impl LibraryView {
             }
         }
         if empty {
-            list = list.child(div().px_2().py_6().child(widgets::caption(
-                if self.query.is_empty() {
-                    "No instances yet. Make one or install a modpack."
-                } else {
-                    "No instance matches."
-                },
-                cx,
-            )));
+            list = list.child(if self.query.is_empty() {
+                widgets::empty_state(
+                    IconName::Package,
+                    "No instances yet",
+                    Some("Install a modpack, or make an instance of your own.".into()),
+                    cx,
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("empty-browse")
+                                .small()
+                                .primary()
+                                .icon(IconName::Package)
+                                .label("Find a modpack")
+                                .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::BrowsePacks))),
+                        )
+                        .child(
+                            Button::new("empty-new")
+                                .small()
+                                .outline()
+                                .icon(IconName::Plus)
+                                .label("New instance")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    crate::dialogs::open_create(this.store.clone(), window, cx)
+                                })),
+                        ),
+                )
+            } else {
+                widgets::empty_state(IconName::Search, "No instance matches", None, cx)
+            });
         }
         list.overflow_y_scrollbar()
     }
@@ -1139,6 +1163,23 @@ impl LibraryView {
         let name = inst.name.clone();
         let theme = cx.theme();
         let group: SharedString = format!("row:{}", root.display()).into();
+        // One update signal: a pack update covers the mods too.
+        let mods_word = if mod_updates == 1 { "mod update" } else { "mod updates" };
+        let signal = if pack_update {
+            Some((
+                widgets::chip(cx.theme().primary).xsmall().child("Update"),
+                if mod_updates > 0 {
+                    format!("Pack update available, and {mod_updates} {mods_word}")
+                } else {
+                    "Pack update available".to_string()
+                },
+            ))
+        } else if mod_updates > 0 {
+            Some((widgets::chip(cx.theme().info).xsmall().child(format!("{mod_updates}")), format!("{mod_updates} {mods_word}")))
+        } else {
+            None
+        };
+        let sub_tip = SharedString::from(sub.clone());
 
         let thumb = div()
             .relative()
@@ -1158,7 +1199,13 @@ impl LibraryView {
                         .justify_center()
                         .opacity(0.)
                         .group_hover(group.clone(), |s| s.opacity(1.))
-                        .cursor_pointer()
+                        .clickable(cx)
+                        // Shown while focused too, not only on hover.
+                        .focus_visible({
+                            let ring = widgets::focus_shadow(cx);
+                            move |s| s.opacity(1.).shadow(ring)
+                        })
+
                         .tooltip(|window, cx| {
                             gpui_kit::component::tooltip::Tooltip::new("Play").build(window, cx)
                         })
@@ -1181,24 +1228,9 @@ impl LibraryView {
             .px_2()
             .py_1p5()
             .rounded(theme.radius_lg)
-            .cursor_pointer()
-            .when(picked, |r| {
-                // A lit bar on the leading edge marks the open instance.
-                r.bg(theme.list_active).child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_3()
-                        .bottom_3()
-                        .w(px(3.))
-                        .rounded_full()
-                        .bg(theme.primary)
-                        .shadow(vec![
-                            BoxShadow::new(px(0.), px(0.), theme.primary.opacity(0.7)).blur_radius(px(8.)),
-                        ]),
-                )
-            })
-            .when(!picked, |r| r.hover(|s| s.bg(theme.list_hover)))
+            .clickable(cx)
+            .when(picked, |r| widgets::row_selected(r, cx))
+            .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
             .on_click(cx.listener(move |this, _, _, cx| this.select(select_root.clone(), cx)))
             .child(thumb)
             .child(
@@ -1219,25 +1251,31 @@ impl LibraryView {
                                     .child(name),
                             )
                             .when(playing, |r| {
-                                r.child(Tag::success().xsmall().child("Playing"))
+                                r.child(widgets::chip(cx.theme().success).xsmall().child("Playing"))
                             })
-                            .when(pack_update, |r| {
-                                r.child(Tag::primary().xsmall().child("Update"))
+                            .when_some(signal, |r, (tag, tip)| {
+                                let tip = SharedString::from(tip);
+                                r.child(
+                                    div()
+                                        .id(id("row-update", root))
+                                        .flex_none()
+                                        .child(tag)
+                                        .tooltip(move |window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                                        }),
+                                )
                             }),
                     )
                     .child(
-                        h_flex()
-                            .gap_1p5()
+                        // The whole width, so "NeoForge 21.1.x" fits; a
+                        // tooltip has it all when it doesn't.
+                        widgets::caption(sub, cx)
+                            .id(id("row-sub", root))
+                            .text_xs()
                             .min_w_0()
-                            .child(widgets::caption(sub, cx).text_xs())
-                            .when(mod_updates > 0, |r| {
-                                r.child(
-                                    div()
-                                        .flex_none()
-                                        .text_xs()
-                                        .text_color(theme.primary)
-                                        .child(format!("· {mod_updates} mod updates")),
-                                )
+                            .truncate()
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(sub_tip.clone()).build(window, cx)
                             }),
                     ),
             )
@@ -1403,14 +1441,17 @@ impl LibraryView {
         // Running or being changed by a job: hold off other changes.
         let hold = store.hold_reason(&root);
         let busy = store.is_busy(&root);
+        let primary = cx.theme().primary;
         let pack_update = store.pack_update(inst).cloned().map(|f| {
             let (r1, r2, f1, f2) = (root.clone(), root.clone(), f.clone(), f.clone());
             h_flex()
                 .gap_1()
                 .child(widgets::split(
+                    // Outline: Play is the one filled button. The icon keeps
+                    // the update color.
                     widgets::split_lead(Button::new("update-pack")
-                        .primary()
-                        .icon(IconName::Download)
+                        .outline()
+                        .icon(Icon::new(IconName::Download).text_color(primary))
                         .label(format!("Update pack to {}", f.display_name))
                         .disabled(hold.is_some())
                         .when_some(hold, |b, why| b.tooltip(why))
@@ -1424,7 +1465,7 @@ impl LibraryView {
                             )
                         }))),
                     "pack-changes",
-                    widgets::Tint::Primary,
+                    widgets::Tint::Outline,
                     gpui_kit::component::Size::Medium,
                     "What changed in the pack",
                     {
@@ -1519,7 +1560,10 @@ impl LibraryView {
                                     .outline()
                                     .icon(IconName::Ellipsis)
                                     .tooltip("More")
-                                    .dropdown_menu(move |menu, _, cx| instance_menu(menu, &view, &r_more, true, cx)),
+                                    // Right-aligned to the button, off the window edge.
+                                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+                                        instance_menu(menu, &view, &r_more, true, cx)
+                                    }),
                             );
         self.hero(inst, icon, playing, actions, play_big, cx)
     }
@@ -1562,7 +1606,7 @@ impl LibraryView {
         let dark = theme.mode.is_dark();
 
         // State pills.
-        let mut pills: Vec<Div> = Vec::new();
+        let mut pills: Vec<AnyElement> = Vec::new();
         if let Some(r) = store.running(&inst.root) {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1573,37 +1617,65 @@ impl LibraryView {
             } else {
                 format!("{mins}m")
             };
-            pills.push(widgets::pill(format!("Running · {up}"), theme.success, true));
+            pills.push(widgets::pill(format!("Running · {up}"), theme.success, true).into_any_element());
         } else if playing {
-            pills.push(widgets::pill("Running", theme.success, true));
+            pills.push(widgets::pill("Running", theme.success, true).into_any_element());
         }
         if store.is_busy(&inst.root) {
-            pills.push(widgets::pill("Working", theme.warning, true));
+            pills.push(widgets::pill("Working", theme.warning, true).into_any_element());
         }
-        if store.pack_update(inst).is_some() {
-            pills.push(widgets::pill("Pack update", theme.primary, false));
+        // The update pills open what they're about.
+        if let Some(f) = store.pack_update(inst).cloned() {
+            let root = inst.root.clone();
+            let hover = theme.primary.opacity(0.2);
+            pills.push(
+                widgets::pill("Pack update", theme.primary, false)
+                    .id("pill-pack-update")
+                    .clickable(cx)
+                    .hover(move |s| s.bg(hover))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Review the pack update").build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        crate::pack_update::open(this.store.clone(), root.clone(), f.clone(), window, cx)
+                    }))
+                    .into_any_element(),
+            );
         }
         if let Some(store::Updates::Ready(u)) = store.updates(&inst.root)
             && !u.is_empty()
         {
             let n = u.len();
-            pills.push(widgets::pill(
-                format!("{n} mod update{}", if n == 1 { "" } else { "s" }),
-                theme.info,
-                false,
-            ));
+            let hover = theme.info.opacity(0.2);
+            pills.push(
+                widgets::pill(format!("{n} mod update{}", if n == 1 { "" } else { "s" }), theme.info, false)
+                    .id("pill-mod-updates")
+                    .clickable(cx)
+                    .hover(move |s| s.bg(hover))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Show them in Mods").build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_tab(InstTab::Mods, cx);
+                        this.addons.update(cx, |a, cx| a.show_updates(cx));
+                    }))
+                    .into_any_element(),
+            );
         }
         // Another launcher's instance says whose it is.
         if let Some(k) = hopper::launchers::Kind::from_key(&inst.source) {
-            pills.push(widgets::pill(k.name(), theme.accent_foreground, false));
+            pills.push(widgets::pill(k.name(), theme.accent_foreground, false).into_any_element());
         }
-        pills.push(match &inst.pack {
-            Some(p) => {
-                let mr = hopper::modrinth::is_mr(p.project_id);
-                widgets::pill(if mr { "Modrinth" } else { "CurseForge" }, widgets::site_color(mr), false)
+        pills.push(
+            match &inst.pack {
+                Some(p) => {
+                    let mr = hopper::modrinth::is_mr(p.project_id);
+                    widgets::pill(if mr { "Modrinth" } else { "CurseForge" }, widgets::site_color(mr), false)
+                }
+                None => widgets::pill("Custom", theme.muted_foreground, false),
             }
-            None => widgets::pill("Custom", theme.muted_foreground, false),
-        });
+            .into_any_element(),
+        );
 
         // Minecraft, loader, pack version.
         // Each in its own color (Minecraft green, loader yellow, version
@@ -1636,7 +1708,7 @@ impl LibraryView {
                     let root = inst.root.clone();
                     let fg = theme.foreground;
                     f.id("hero-loader")
-                        .cursor_pointer()
+                        .clickable(cx)
                         .hover(move |s| s.text_color(fg))
                         .tooltip(|window, cx| {
                             gpui_kit::component::tooltip::Tooltip::new("Loader versions and changelog")
@@ -1872,7 +1944,7 @@ impl LibraryView {
                 .py_3()
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .cursor_pointer()
+                .clickable(cx)
                 .text_color(if active { theme.foreground } else { theme.muted_foreground })
                 .hover(|s| s.text_color(theme.foreground))
                 .child(
@@ -2036,20 +2108,22 @@ impl LibraryView {
         });
         v_flex()
             .size_full()
-            .items_center()
             .justify_center()
-            .gap_3()
-            .child(widgets::caption(
-                "This pack isn't paired with a rig server yet.",
-                cx,
-            ))
-            .child(div().w_64().child(widgets::picker(
+            .child(
+                widgets::empty_state(
+                    IconName::HardDrive,
+                    "No server paired",
+                    Some("This pack isn't paired with a rig server yet.".into()),
+                    cx,
+                )
+                .child(div().w_64().child(widgets::picker(
                 "pair-server",
                 "Pick its server".into(),
                 items,
                 cx.theme().font_size,
                 pick,
-            )))
+            ))),
+            )
             .into_any_element()
     }
 
@@ -2297,16 +2371,17 @@ fn instance_menu(
                 .on_click(move |_, _, _| store::open_path(&r2)),
         )
     })
-    .item({
+    // The header has the Settings tab right below it.
+    .when(!header, |m| {
         let (v, r) = vr();
-        PopupMenuItem::new("Settings").icon(IconName::SlidersHorizontal).on_click(move |_, _, cx| {
+        m.item(PopupMenuItem::new("Settings").icon(IconName::SlidersHorizontal).on_click(move |_, _, cx| {
             v.update(cx, |this, cx| {
                 this.select(r.clone(), cx);
                 this.set_tab(InstTab::Settings, cx);
             })
-        })
+        }))
+        .separator()
     })
-    .separator()
     .when_some(pack, |m, (pid, upd)| {
         let (s, r) = (st(), r.clone());
         m.item(PopupMenuItem::new("Pack versions").icon(IconName::Clock).on_click(move |_, window, cx| {

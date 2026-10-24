@@ -1,5 +1,6 @@
 //! An instance's Worlds and Screenshots tabs.
 
+use crate::widgets::Clickable as _;
 use crate::store::{Msg, Store, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -302,7 +303,7 @@ impl WorldsView {
                 h_flex()
                     .id(id("w-packs"))
                     .gap_2()
-                    .cursor_pointer()
+                    .clickable(cx)
                     .text_sm()
                     .text_color(theme.muted_foreground)
                     .hover(|s| s.text_color(theme.foreground))
@@ -373,11 +374,13 @@ impl Render for WorldsView {
                             .on_click(move |_, _, _| open_path(&saves)),
                     )
                     .child(
+                        // Only the folder; the instance's Backups dialog is
+                        // in the header's menu.
                         Button::new("world-backups")
                             .outline()
                             .small()
-                            .icon(IconName::Archive)
-                            .label("Backups")
+                            .icon(IconName::ExternalLink)
+                            .label("Open backups folder")
                             .on_click(move |_, _, _| {
                                 let _ = std::fs::create_dir_all(&backups);
                                 open_path(&backups)
@@ -400,14 +403,25 @@ impl Render for WorldsView {
             .children(worlds)
             .when(empty, |r| {
                 r.child(
-                    div()
-                        .py_10()
-                        .flex()
-                        .justify_center()
-                        .child(widgets::caption(
-                            "No worlds yet. Play once to create one.",
-                            cx,
-                        )),
+                    widgets::empty_state(
+                        IconName::Globe,
+                        "No worlds yet",
+                        Some("Play once to create one, or get a world to start from.".into()),
+                        cx,
+                    )
+                    .child(
+                        Button::new("get-worlds-empty")
+                            .outline()
+                            .small()
+                            .icon(IconName::Plus)
+                            .label("Get worlds")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(ContentEvent::Browse {
+                                    class: hopper::cf::CLASS_WORLDS,
+                                    dest: None,
+                                })
+                            })),
+                    ),
                 )
             })
             .overflow_y_scrollbar()
@@ -654,10 +668,11 @@ impl Render for ScreenshotsView {
                 .rounded(theme.radius_lg)
                 .overflow_hidden()
                 .bg(theme.muted)
-                .cursor_pointer()
+                .clickable(cx)
                 .border_1()
                 .border_color(theme.border)
-                .hover(|s| s.border_color(theme.primary))
+                .hover(|s| s.border_color(theme.foreground.opacity(widgets::alpha::LINE)))
+
                 .tooltip({
                     let name = file_name(p);
                     move |w, cx| {
@@ -695,16 +710,12 @@ impl Render for ScreenshotsView {
             )
             .child(h_flex().flex_wrap().gap_3().children(tiles))
             .when(empty, |r| {
-                r.child(
-                    div()
-                        .py_10()
-                        .flex()
-                        .justify_center()
-                        .child(widgets::caption(
-                            "No screenshots yet. Press F2 in game.",
-                            cx,
-                        )),
-                )
+                r.child(widgets::empty_state(
+                    IconName::Image,
+                    "No screenshots yet",
+                    Some("Press F2 in game to take one.".into()),
+                    cx,
+                ))
             })
             .overflow_y_scrollbar()
             .into_any_element()

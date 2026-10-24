@@ -1,6 +1,7 @@
 //! An instance's backups: what was removed or replaced, by when, to restore
 //! or delete for good.
 
+use crate::widgets::Clickable as _;
 use crate::store::{Msg, Store, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -104,6 +105,8 @@ impl BackupsView {
     }
 }
 
+use crate::widgets::DIALOG_TOP;
+
 fn when(secs: i64) -> String {
     hopper::time::relative_secs(secs)
 }
@@ -111,10 +114,17 @@ fn when(secs: i64) -> String {
 impl Render for BackupsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let total_h = (window.viewport_size().height - window.rem_size() * 8.).max(window.rem_size() * 16.);
+        // Window-tall less the dialog's top offset, title and padding.
+        let total_h = (window.viewport_size().height - window.rem_size() * (DIALOG_TOP + 5.5)).max(window.rem_size() * 12.);
         let size = hopper::instance_ops::human_bytes;
         let body: AnyElement = if self.sets.is_empty() {
-            widgets::caption("No backups. Files you remove with Move to backups show up here.", cx).into_any_element()
+            widgets::empty_state(
+                IconName::Archive,
+                "No backups",
+                Some("Files you remove with Move to backups, and files updates replace, show up here.".into()),
+                cx,
+            )
+            .into_any_element()
         } else {
             v_flex()
                 .gap_3()
@@ -133,7 +143,7 @@ impl Render for BackupsView {
                             h_flex()
                                 .id(("backup-set", i))
                                 .gap_2()
-                                .cursor_pointer()
+                                .clickable(cx)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if !this.open.remove(&d1) {
                                         this.open.insert(d1.clone());
@@ -247,6 +257,7 @@ pub fn open(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut A
         dialog
             .title("Backups")
             .w(rems(42.).to_pixels(window.rem_size()))
+            .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())
     });
 }

@@ -4,7 +4,7 @@
 use crate::addons::{AddonsEvent, AddonsView};
 use crate::crash_help::callout;
 use crate::store::open_path;
-use crate::widgets;
+use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
@@ -632,6 +632,9 @@ impl AddonsView {
         installable.dedup();
         // Not what's installing or just installed.
         installable.retain(|i| !self.dep_jobs.contains_key(i) && !self.dep_done.contains(i));
+        // "Install all" is the banner's one filled button; beside it each
+        // line's Install is an outline.
+        let one_primary = installable.len() <= 1;
         // One row per mod, naming everything it lacks.
         let mut groups: Vec<(&str, Vec<&hopper::deps::Missing>)> = Vec::new();
         for m in &self.missing.list {
@@ -693,7 +696,7 @@ impl AddonsView {
                             let id = m.needs.clone();
                             Button::new(SharedString::from(format!("get:{}:{}", name, m.needs)))
                                 .xsmall()
-                                .primary()
+                                .map(|b| if one_primary { b.primary() } else { b.outline() })
                                 .icon(IconName::Download)
                                 .label("Install")
                                 .tooltip("Download it from Modrinth or CurseForge, with what it needs")
@@ -709,7 +712,7 @@ impl AddonsView {
                             div()
                                 .id(SharedString::from(format!("dep:{}:{}", name, m.needs)))
                                 .font_family(theme.mono_font_family.clone())
-                                .cursor_pointer()
+                                .clickable(cx)
                                 .hover(|s| s.text_color(theme.primary))
                                 .tooltip(|w, cx| {
                                     gpui_kit::component::tooltip::Tooltip::new("Details").build(w, cx)
@@ -1127,6 +1130,7 @@ fn save_profile_dialog(view: Entity<AddonsView>, window: &mut Window, cx: &mut A
         dialog
             .title("Save mod profile")
             .w(rems(26.).to_pixels(window.rem_size()))
+            .margin_top(rems(crate::widgets::DIALOG_TOP).to_pixels(window.rem_size()))
             .child(
                 v_flex()
                     .gap_2()

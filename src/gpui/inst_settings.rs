@@ -1,7 +1,7 @@
 //! An instance's Settings tab: name, Minecraft and loader, memory and Java,
 //! window size and which updates to offer.
 
-use crate::java_form::{JavaForm, settings_form};
+use crate::java_form::{FIELD_W, JavaForm, settings_form};
 use crate::store::{Msg, Store, loader_label, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -513,7 +513,7 @@ impl Render for InstanceSettings {
                 }
             });
             div()
-                .w_64()
+                .w(rems(FIELD_W))
                 .child(widgets::picker(
                     "mc",
                     self.game_version.clone(),
@@ -568,8 +568,9 @@ impl Render for InstanceSettings {
                 .gap_1p5()
                 .child(
                     h_flex()
+                        .w(rems(FIELD_W))
                         .gap_2()
-                        .child(div().w_64().child(widgets::picker(
+                        .child(div().flex_1().min_w_0().child(widgets::picker(
                             "loader",
                             loader_label(&self.loader),
                             items,
@@ -643,7 +644,7 @@ impl Render for InstanceSettings {
             .child(
                 Field::new()
                     .label("Name")
-                    .child(div().w_96().child(Input::new(&self.name))),
+                    .child(div().w(rems(FIELD_W)).child(Input::new(&self.name))),
             )
             .child(Field::new().label("Minecraft").child(minecraft))
             .child(Field::new().label("Loader").items_start().child(loader));
@@ -662,7 +663,7 @@ impl Render for InstanceSettings {
                     .label("Updates")
                     .items_start()
                     .description("Least stable files offered as updates. A mod already on a beta still gets newer betas.")
-                    .child(div().w_64().child(widgets::picker(
+                    .child(div().w(rems(FIELD_W)).child(widgets::picker(
                         "channel",
                         channel_label,
                         channel_items,
@@ -742,7 +743,8 @@ struct LoaderLog {
 impl Render for LoaderLog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = gpui_kit::component::ActiveTheme::theme(&**cx).clone();
-        let total_h = (window.viewport_size().height - window.rem_size() * 8.).max(window.rem_size() * 16.);
+        // Window-tall less the dialog's top offset, title and padding.
+        let total_h = (window.viewport_size().height - window.rem_size() * 9.).max(window.rem_size() * 12.);
         let loaded = matches!(self.log, Some(Ok(_)));
         let name = loader_label(&format!("{}-0", self.kind))
             .rsplit_once(' ')
@@ -782,7 +784,7 @@ impl Render for LoaderLog {
                                     .gap_2()
                                     .child(div().font_semibold().child(format!("{name} {}", c.version)))
                                     .when(installed, |r| {
-                                        r.child(gpui_kit::component::tag::Tag::success().xsmall().child("Installed"))
+                                        r.child(widgets::chip(cx.theme().success).xsmall().child("Installed"))
                                     })
                                     .child(div().flex_1())
                                     .when(!installed && usable, |r| {
@@ -880,6 +882,7 @@ fn open_loader_log(form: Entity<InstanceSettings>, window: &mut Window, cx: &mut
         dialog
             .title("Loader versions and changelog")
             .w(rems(42.).to_pixels(window.rem_size()))
+            .margin_top(rems(3.5).to_pixels(window.rem_size()))
             .child(view.clone())
     });
 }

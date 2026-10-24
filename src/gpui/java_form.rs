@@ -71,7 +71,8 @@ impl JavaForm {
         });
         let args = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(3, 8)
+                // Fits the arguments up to 12 rows, then scrolls.
+                .auto_grow(3, 12)
                 .placeholder(if fallback_memory.is_some() {
                     "Blank uses the default arguments from Settings"
                 } else {
@@ -313,10 +314,12 @@ impl JavaForm {
             _ => format!("{gb:.1} GB"),
         };
         let memory = h_flex()
+            .w(rems(FIELD_W))
             .gap_4()
-            .child(div().w_80().child(Slider::new(&self.memory)))
+            .child(div().flex_1().min_w_0().child(Slider::new(&self.memory)))
             .child(
                 div()
+                    .flex_none()
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .child(memory_note),
@@ -387,10 +390,12 @@ impl JavaForm {
             .gap_2()
             .child(
                 h_flex()
+                    .w(rems(FIELD_W))
                     .gap_2()
                     .child(
                         div()
-                            .w_96()
+                            .flex_1()
+                            .min_w_0()
                             .child(widgets::picker("java", current, items, rem, pick)),
                     )
                     .when_some(want, |r, major| {
@@ -664,8 +669,22 @@ impl JavaForm {
 
         let args = v_flex()
             .gap_2()
-            .child(div().max_w(rems(40.)).child(Textarea::new(&self.args)))
-            .child(presets)
+            .child(div().w(rems(FIELD_W)).child(Textarea::new(&self.args)))
+            .child(
+                h_flex()
+                    .w(rems(FIELD_W))
+                    .items_start()
+                    .gap_2()
+                    .child(presets.flex_1().min_w_0())
+                    .when(n_flags > 0, |r| {
+                        r.child(
+                            widgets::caption(format!("{n_flags} flag{}", if n_flags == 1 { "" } else { "s" }), cx)
+                                .text_xs()
+                                .flex_none()
+                                .pt_0p5(),
+                        )
+                    }),
+            )
             .children(naming)
             .children(manage)
             .child(
@@ -689,7 +708,7 @@ impl JavaForm {
                                 .small()
                                 .ghost()
                                 .icon(if self.show_flags { IconName::ChevronDown } else { IconName::ChevronRight })
-                                .label(format!("Explain each ({n_flags})"))
+                                .label("Explain each")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.show_flags = !this.show_flags;
                                     this.explained = None;
@@ -969,6 +988,10 @@ impl Render for JavaForm {
         settings_form(rem).children(fields)
     }
 }
+
+/// The width of a settings form's field column in rems: inputs, pickers
+/// and the arguments box all end at the same edge.
+pub const FIELD_W: f32 = 40.;
 
 /// The label column and rhythm every settings form shares, so stacked
 /// forms line up.

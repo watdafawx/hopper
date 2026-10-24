@@ -4,6 +4,7 @@
 //! top. Nothing destructive is offered here: deleting, stopping and pack
 //! updates keep their own confirmations on their pages.
 
+use crate::widgets::Clickable as _;
 use crate::app::{AppView, Page};
 use crate::store::Store;
 use gpui_kit::assets::IconName;
@@ -612,7 +613,7 @@ impl Palette {
                     .px_2p5()
                     .gap_2p5()
                     .rounded(theme.radius)
-                    .cursor_pointer()
+                    .clickable(cx)
                     .text_sm()
                     .text_color(if on { fg } else { muted })
                     .when(on, |r| r.bg(hover))

@@ -1,12 +1,12 @@
 //! The Mods table's Side hover card: where a mod runs, how it stands on the
 //! paired rig server, and the server actions for it (as in mod-sync).
 
+use crate::widgets;
 use crate::addons::{AddonsEvent, AddonsView};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::hover_card::HoverCard;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
@@ -101,12 +101,12 @@ fn body(c: &SideCard, _: &mut Window, cx: &mut App) -> AnyElement {
     };
 
     let (tag, status) = match d.status {
-        DiffStatus::Same => (Tag::success(), "In sync"),
-        DiffStatus::OnlyClient if d.skip_reason.is_some() => (Tag::secondary(), "Kept off"),
-        DiffStatus::OnlyClient => (Tag::warning(), "Not on the server"),
-        DiffStatus::ClientNewer => (Tag::info(), "Older on the server"),
-        DiffStatus::ServerNewer => (Tag::warning(), "Newer on the server"),
-        s => (Tag::secondary(), rigsync::status_label(s)),
+        DiffStatus::Same => (widgets::chip(cx.theme().success), "In sync"),
+        DiffStatus::OnlyClient if d.skip_reason.is_some() => (widgets::chip(cx.theme().muted_foreground), "Kept off"),
+        DiffStatus::OnlyClient => (widgets::chip(cx.theme().warning), "Not on the server"),
+        DiffStatus::ClientNewer => (widgets::chip(cx.theme().info), "Older on the server"),
+        DiffStatus::ServerNewer => (widgets::chip(cx.theme().warning), "Newer on the server"),
+        s => (widgets::chip(cx.theme().muted_foreground), rigsync::status_label(s)),
     };
     let version = |m: &Option<hopper::model::ModInfo>| {
         m.as_ref().map_or("—".to_string(), |m| {

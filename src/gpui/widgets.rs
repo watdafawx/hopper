@@ -179,6 +179,90 @@ pub fn caption(text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// The dialogs' top offset in rems, clear of the title bar: shared so every
+/// dialog lines up.
+pub const DIALOG_TOP: f32 = 3.5;
+/// Everything around the content of a dialog without a footer, in rems:
+/// the top offset, the title, padding and a bottom margin.
+pub const DIALOG_CHROME: f32 = DIALOG_TOP + 6.;
+/// The same with a footer of buttons.
+pub const DIALOG_CHROME_FOOTER: f32 = DIALOG_TOP + 9.;
+
+/// The tallest a dialog's content may be in this window.
+pub fn dialog_room(window: &Window) -> Pixels {
+    window.viewport_size().height - window.rem_size() * DIALOG_CHROME
+}
+
+/// Shared alpha steps for tints over the theme's colors, so hovers,
+/// selections and tinted chips look the same on every page.
+pub mod alpha {
+    /// Hovered row or control: `foreground.opacity(HOVER)`.
+    pub const HOVER: f32 = 0.06;
+    /// Selected row: `primary.opacity(SELECTED)`.
+    pub const SELECTED: f32 = 0.12;
+    /// Tinted chip fill.
+    pub const TINT: f32 = 0.10;
+    /// Tinted chip or selection border.
+    pub const LINE: f32 = 0.30;
+}
+
+/// A centered empty state: icon, a title, and an optional line saying
+/// what to do next. Add the action button with `.child(...)`.
+pub fn empty_state(icon: IconName, title: impl Into<SharedString>, body: Option<SharedString>, cx: &App) -> Div {
+    let theme = cx.theme();
+    v_flex()
+        .w_full()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .px_4()
+        .py_8()
+        .child(
+            div()
+                .size(rems(2.5))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(theme.foreground.opacity(alpha::HOVER))
+                .child(Icon::new(icon).size_5().text_color(theme.muted_foreground)),
+        )
+        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(title.into()))
+        .when_some(body, |d, b| {
+            d.child(
+                div()
+                    .max_w(rems(28.))
+                    .text_xs()
+                    .text_center()
+                    .text_color(theme.muted_foreground)
+                    .child(b),
+            )
+        })
+}
+
+/// `n` placeholder rows of `height` while a list loads.
+pub fn skeleton_rows(n: usize, height: Rems, cx: &App) -> Div {
+    let theme = cx.theme();
+    let mut col = v_flex().w_full().gap_1();
+    for i in 0..n {
+        col = col.child(
+            h_flex()
+                .h(height)
+                .px_2()
+                .gap_3()
+                .child(div().size(rems(1.5)).rounded(theme.radius).bg(theme.skeleton))
+                .child(
+                    div()
+                        .h(rems(0.625))
+                        .w(relative(0.25 + 0.15 * ((i * 7) % 4) as f32))
+                        .rounded_full()
+                        .bg(theme.skeleton),
+                ),
+        );
+    }
+    col
+}
+
 /// What a mod's badge row says. Anything empty or false is left out.
 #[derive(Clone, Copy, Default)]
 pub struct ModTags<'a> {
@@ -202,12 +286,14 @@ const MOD_TAG_CATEGORIES: usize = 2;
 /// A mod's badges on one line, the same everywhere a mod is listed: new,
 /// added, where it runs, its categories and where it came from.
 pub fn mod_tags(t: ModTags, cx: &App) -> Div {
-    use gpui_kit::component::tag::Tag;
-    let tag = |t: Tag, text: SharedString| t.outline().xsmall().flex_none().child(text);
+    let theme = cx.theme();
+    let (warn, info, ok, bad, muted) =
+        (theme.warning, theme.info, theme.success, theme.danger, theme.muted_foreground);
+    let tag = |c: Hsla, text: SharedString| chip(c).child(text);
     let env = match t.env {
-        "client" => Some(tag(Tag::warning(), "Client only".into())),
-        "server" => Some(tag(Tag::info(), "Server only".into())),
-        "both" => Some(tag(Tag::secondary(), "Client + server".into())),
+        "client" => Some(tag(warn, "Client only".into())),
+        "server" => Some(tag(info, "Server only".into())),
+        "both" => Some(tag(muted, "Client + server".into())),
         _ => None,
     };
     let more = t.categories.len().saturating_sub(MOD_TAG_CATEGORIES);
@@ -216,7 +302,7 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         div()
             .id(ElementId::Name(format!("crashed:{}", t.key).into()))
             .flex_none()
-            .child(Tag::danger().xsmall().child("Crashed"))
+            .child(chip(bad).child("Crashed"))
             .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(why.clone()).build(w, cx))
     });
     h_flex_row()
@@ -224,15 +310,15 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         .min_w_0()
         .overflow_hidden()
         .children(crashed)
-        .when(t.in_use, |r| r.child(tag(Tag::info(), "In use".into())))
-        .when(t.new, |r| r.child(tag(Tag::success(), "New".into())))
-        .when(t.added, |r| r.child(tag(Tag::warning(), "Yours".into())))
+        .when(t.in_use, |r| r.child(tag(info, "In use".into())))
+        .when(t.new, |r| r.child(tag(ok, "New".into())))
+        .when(t.added, |r| r.child(tag(warn, "Yours".into())))
         .children(env)
         .children(
             t.categories
                 .iter()
                 .take(MOD_TAG_CATEGORIES)
-                .map(|c| Tag::secondary().xsmall().flex_none().child(c.clone())),
+                .map(|c| chip(muted).child(c.clone())),
         )
         .when(more > 0, |r| {
             let rest: SharedString = t.categories[MOD_TAG_CATEGORIES..].join(", ").into();
@@ -241,7 +327,7 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
                     .id(ElementId::Name(format!("more-tags:{}", t.key).into()))
                     .flex_none()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(muted)
                     .child(format!("+{more}"))
                     .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(rest.clone()).build(w, cx)),
             )
@@ -251,11 +337,7 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
 
 /// CurseForge's orange or Modrinth's green, wherever a site is named.
 pub fn site_color(modrinth: bool) -> Hsla {
-    if modrinth {
-        hsla(145. / 360., 0.78, 0.48, 1.)
-    } else {
-        hsla(14. / 360., 0.87, 0.58, 1.)
-    }
+    if modrinth { crate::theme::palette::MODRINTH } else { crate::theme::palette::CURSEFORGE }
 }
 
 /// A filled button in a site's color: green for Modrinth, else the theme's.
@@ -265,11 +347,7 @@ pub fn site_button(b: Button, modrinth: bool) -> Button {
 
 /// A small tag naming a site, in its color.
 pub fn site_tag(modrinth: bool) -> gpui_kit::component::tag::Tag {
-    let c = site_color(modrinth);
-    gpui_kit::component::tag::Tag::custom(c.opacity(0.12), c, c.opacity(0.4))
-        .xsmall()
-        .flex_none()
-        .child(if modrinth { "Modrinth" } else { "CurseForge" })
+    chip(site_color(modrinth)).child(if modrinth { "Modrinth" } else { "CurseForge" })
 }
 
 fn h_flex_row() -> Div {
@@ -282,8 +360,8 @@ pub fn glass(cx: &App) -> bool {
     cx.theme().background.a < 0.99
 }
 
-/// A rounded status pill: tinted fill and border in `color`, with a small
-/// glowing dot when `dot`.
+/// A rounded status pill: `color` text on a tinted fill, no border, with a
+/// small glowing dot when `dot`.
 pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
     div()
         .flex()
@@ -293,10 +371,8 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
         .h(rems(1.375))
         .px_2p5()
         // The theme's button radius (theme.json "radius"), like every chip.
-        .rounded(px(6.))
-        .border_1()
-        .border_color(color.opacity(0.3))
-        .bg(color.opacity(0.1))
+        .rounded(px(crate::theme::RADIUS))
+        .bg(color.opacity(alpha::TINT))
         .text_color(color)
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
@@ -321,9 +397,9 @@ pub fn stat_tile(value: impl Into<SharedString>, label: &str, cx: &App) -> Div {
         .px_3p5()
         .py_2p5()
         .rounded(theme.radius_lg)
-        .bg(theme.foreground.opacity(0.045))
+        .bg(theme.foreground.opacity(alpha::HOVER))
         .border_1()
-        .border_color(theme.foreground.opacity(0.08))
+        .border_color(theme.foreground.opacity(alpha::SELECTED))
         .child(
             div()
                 .text_lg()
@@ -338,6 +414,72 @@ pub fn stat_tile(value: impl Into<SharedString>, label: &str, cx: &App) -> Div {
                 .text_color(theme.muted_foreground)
                 .child(label.to_uppercase()),
         )
+}
+
+/// A hovered row, nav item or icon button: the theme's quiet list wash
+/// (about `foreground.opacity(alpha::HOVER)`). Use it inside `.hover(..)`.
+pub fn row_hover<E: Styled>(el: E, cx: &App) -> E {
+    el.bg(cx.theme().list_hover)
+}
+
+/// A selected row in a vertical list: a primary wash with a 3px primary
+/// bar on the left, painted inside so nothing moves.
+pub fn row_selected<E: Styled>(el: E, cx: &App) -> E {
+    let theme = cx.theme();
+    el.bg(theme.list_active).shadow(vec![BoxShadow::new(px(3.), px(0.), theme.primary).inset()])
+}
+
+/// `row_selected` in another color (a site's, say).
+pub fn row_selected_in<E: Styled>(el: E, color: Hsla) -> E {
+    el.bg(color.opacity(alpha::SELECTED)).shadow(vec![BoxShadow::new(px(3.), px(0.), color).inset()])
+}
+
+/// A selected tab or top-nav item: full-strength text and a 2px primary
+/// underline, painted inside so nothing moves. No fill.
+pub fn tab_selected<E: Styled>(el: E, cx: &App) -> E {
+    let theme = cx.theme();
+    el.text_color(theme.foreground).shadow(vec![BoxShadow::new(px(0.), px(-2.), theme.primary).inset()])
+}
+
+/// The focus ring: 2px in the theme's `ring` color, just inside the edge
+/// (an outer shadow would show through see-through elements as a fill).
+/// For a custom `.focus_visible(..)` style; `clickable` already adds it.
+pub fn focus_shadow(cx: &App) -> Vec<BoxShadow> {
+    vec![BoxShadow::new(px(0.), px(0.), cx.theme().ring).spread_radius(px(2.)).inset()]
+}
+
+/// The theme's focus ring on `el` when `focused`.
+pub fn focus_ring<E: Styled>(el: E, focused: bool, cx: &App) -> E {
+    if !focused {
+        return el;
+    }
+    el.shadow(focus_shadow(cx))
+}
+
+/// A hand-built clickable element (a div with an id and `on_click`):
+/// a pointer cursor, a Tab stop, and the focus ring while it has keyboard
+/// focus. GPUI runs its `on_click` on Enter or Space when focused.
+pub fn clickable<E: InteractiveElement + Styled>(el: E, cx: &App) -> E {
+    let ring = focus_shadow(cx);
+    el.cursor_pointer().tab_index(0).focus_visible(move |s| s.shadow(ring))
+}
+
+/// `widgets::clickable` as a method: `div().id(..).clickable(cx).on_click(..)`.
+pub trait Clickable: InteractiveElement + Styled + Sized {
+    fn clickable(self, cx: &App) -> Self {
+        clickable(self, cx)
+    }
+}
+
+impl<E: InteractiveElement + Styled> Clickable for E {}
+
+/// A chip: `color` text on a faint fill of it, no border, the theme's
+/// radius. gpui_kit's xsmall tag size; `.small()` still works.
+pub fn chip(color: Hsla) -> gpui_kit::component::tag::Tag {
+    gpui_kit::component::tag::Tag::custom(color.opacity(alpha::TINT), color, gpui_kit::transparent_black())
+        .xsmall()
+        .flex_none()
+        .rounded(px(crate::theme::RADIUS))
 }
 
 /// A soft colored glow under `el` (a button), stronger on glass themes.
@@ -712,7 +854,7 @@ pub fn description_view(
                         .w(px(w))
                         .h(px(h))
                         .max_w_full()
-                        .cursor_pointer()
+                        .clickable(cx)
                         .hover(|s| s.opacity(0.85))
                         .on_click(move |_, window, cx| open(&target, window, cx))
                         .when_some(path, |d, p| {
@@ -829,7 +971,7 @@ fn video_tile(
         .rounded(theme.radius)
         .overflow_hidden()
         .bg(theme.muted)
-        .cursor_pointer()
+        .clickable(cx)
         .on_click(move |_, window, cx| crate::video::play(&video, window, cx))
         .when_some(poster, |d, p| {
             d.child(
@@ -977,7 +1119,7 @@ pub fn mod_link(
 ) -> Stateful<Div> {
     let accent = cx.theme().primary;
     mod_name(id, name, icon, cx).when(project != 0, |d| {
-        d.cursor_pointer()
+        d.clickable(cx)
             .hover(move |s| s.text_color(accent))
             .on_click(move |_, window, cx| open(project, window, cx))
     })

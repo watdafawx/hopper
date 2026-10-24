@@ -2,6 +2,8 @@
 //! badge while jobs run, a popover listing every job, and a file that flies
 //! into it when a job starts.
 
+use crate::widgets::Clickable as _;
+use crate::widgets;
 use crate::store::Store;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -148,9 +150,9 @@ impl TasksButton {
                 .gap_1()
                 .py_1p5()
                 .when(review, |r| {
-                    r.cursor_pointer()
+                    r.clickable(cx)
                         .rounded(theme.radius)
-                        .hover(|s| s.bg(theme.list_hover))
+                        .hover(|s| widgets::row_hover(s, cx))
                         .on_click(move |_, window, cx| {
                             me.update(cx, |t, cx| {
                                 t.open = false;
@@ -176,26 +178,47 @@ impl TasksButton {
                                         .child(j.error.clone().unwrap_or(j.detail.clone())),
                                 ),
                         )
-                        .child(
-                            Button::new(ElementId::Name(format!("task-x-{id}").into()))
-                                .icon(IconName::X)
-                                .xsmall()
-                                .ghost()
-                                .tooltip(if j.done { "Dismiss" } else { "Cancel (stops at the next safe point)" })
-                                .on_click({
-                                    let done = j.done;
-                                    move |_, _, cx| {
-                                        store.update(cx, |s, cx| {
-                                            if done {
-                                                s.jobs().dismiss(id);
-                                            } else {
-                                                s.jobs().cancel(id);
-                                            }
-                                            cx.notify();
-                                        })
-                                    }
-                                }),
-                        ),
+                        .child({
+                            // Labelled actions: Cancel while it runs; Dismiss
+                            // (and Copy details on a failure) after.
+                            let done = j.done;
+                            let detail = j.error.clone().map(|e| format!("{}: {e}", j.title));
+                            let store_c = store.clone();
+                            h_flex()
+                                .flex_none()
+                                .gap_1()
+                                .when_some(detail, |r, d| {
+                                    r.child(
+                                        Button::new(ElementId::Name(format!("task-copy-{id}").into()))
+                                            .icon(IconName::Copy)
+                                            .xsmall()
+                                            .ghost()
+                                            .label("Copy details")
+                                            .on_click(move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                cx.write_to_clipboard(ClipboardItem::new_string(d.clone()))
+                                            }),
+                                    )
+                                })
+                                .child(
+                                    Button::new(ElementId::Name(format!("task-x-{id}").into()))
+                                        .xsmall()
+                                        .ghost()
+                                        .label(if done { "Dismiss" } else { "Cancel" })
+                                        .tooltip(if done { "Remove from the list" } else { "Stops at the next safe point" })
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            store_c.update(cx, |s, cx| {
+                                                if done {
+                                                    s.jobs().dismiss(id);
+                                                } else {
+                                                    s.jobs().cancel(id);
+                                                }
+                                                cx.notify();
+                                            })
+                                        }),
+                                )
+                        }),
                 )
                 .when(!j.done, |c| {
                     c.child(
@@ -292,7 +315,13 @@ fn note(text: &str, theme: &gpui_kit::component::Theme) -> AnyElement {
         .pl(rems(2.0))
         .text_xs()
         .text_color(theme.warning)
-        .child(div().w_full().child(text.to_string()))
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_start()
+                .child(Icon::new(IconName::TriangleAlert).xsmall().flex_none())
+                .child(div().flex_1().min_w_0().child(text.to_string())),
+        )
         .when_some(url, |r, u| {
             let u2 = u.clone();
             r.child(
@@ -349,7 +378,7 @@ impl Render for TasksButton {
             .items_center()
             .justify_center()
             .rounded(theme.radius)
-            .cursor_pointer()
+            .clickable(cx)
             .text_color(if running.is_empty() { theme.muted_foreground } else { theme.primary })
             .when(open, |d| d.bg(theme.list_active))
             .hover(|s| s.bg(theme.list_hover))
@@ -396,7 +425,7 @@ impl Render for TasksButton {
                         .rounded_full()
                         .bg(bg)
                         .text_color(theme.primary_foreground)
-                        .text_size(px(10.))
+                        .text_xs()
                         .font_semibold()
                         .flex()
                         .items_center()

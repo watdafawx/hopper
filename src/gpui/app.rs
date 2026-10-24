@@ -7,10 +7,11 @@ use crate::servers::{ServersEvent, ServersView, SyncPage};
 use crate::settings_page::SettingsPage;
 use crate::store::{Store, StoreEvent};
 use crate::widgets;
+use crate::widgets::Clickable as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, Selectable as _, Sizable as _, StyledExt as _, TitleBar, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, StyledExt as _, TitleBar, WindowExt as _,
     h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -949,7 +950,7 @@ impl AppView {
                         // corners.
                         .rounded_tl(radius)
                         .rounded_bl(radius)
-                        .cursor_pointer()
+                        .clickable(cx)
                         .text_color(on_accent)
                         .bg(accent)
                         .hover(move |s| s.bg(accent.opacity(0.85)))
@@ -970,7 +971,7 @@ impl AppView {
                         .px_1p5()
                         .rounded_tr(radius)
                         .rounded_br(radius)
-                        .cursor_pointer()
+                        .clickable(cx)
                         .text_color(accent)
                         .bg(tail_bg)
                         .hover(move |s| s.bg(tail_hover))
@@ -989,7 +990,7 @@ impl AppView {
             .h(rems(1.375))
             .rounded(radius)
             .text_xs()
-            .cursor_pointer()
+            .clickable(cx)
             .map(|c| match color {
                 Some(color) => c
                     .font_semibold()
@@ -1027,7 +1028,7 @@ impl AppView {
                 .pr_1()
                 .py_0p5()
                 .rounded(radius)
-                .cursor_pointer()
+                .clickable(cx)
                 .hover(move |s| s.bg(hover))
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
                 .child(div().text_xs().font_semibold().child(name))
@@ -1063,8 +1064,7 @@ impl AppView {
         // Settings sits apart from the page tabs, at the trailing edge.
         let selected = Page::ALL.iter().position(|p| *p == self.page);
         let theme = cx.theme();
-        // The tabs sit in a recessed track, the tools in an outlined one.
-        let track = if theme.mode.is_dark() { hsla(0., 0., 0., 0.28) } else { theme.foreground.opacity(0.05) };
+        // The tools sit in an outlined track.
         let (line, radius) = (theme.border, px(10.));
         TitleBar::new().h(px(42.)).child(
             h_flex()
@@ -1083,37 +1083,51 @@ impl AppView {
                 .child(
                     h_flex()
                         .gap_0p5()
-                        .p(px(3.))
-                        .rounded(radius)
-                        .bg(track)
-                        .border_1()
-                        .border_color(line)
+                        .occlude()
+                        .child(
+                            Button::new("nav-back")
+                                .ghost()
+                                .small()
+                                .icon(IconName::ChevronLeft)
+                                .tooltip("Back (Alt+Left)")
+                                .disabled(!self.history.can_step(true))
+                                .on_click(cx.listener(|this, _, _, cx| this.step(true, cx))),
+                        )
+                        .child(
+                            Button::new("nav-forward")
+                                .ghost()
+                                .small()
+                                .icon(IconName::ChevronRight)
+                                .tooltip("Forward (Alt+Right)")
+                                .disabled(!self.history.can_step(false))
+                                .on_click(cx.listener(|this, _, _, cx| this.step(false, cx))),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .h_full()
+                        .gap_0p5()
                         .occlude()
                         .children(Page::ALL.iter().enumerate().map(|(ix, p)| {
-                            // The page you're on is a raised tile with its
-                            // icon in the accent colour.
+                            // The page you're on: full-strength text, an
+                            // accent icon and an underline.
                             let page = *p;
                             let active = selected == Some(ix);
                             let theme = cx.theme();
                             let (accent, muted, fg) = (theme.primary, theme.muted_foreground, theme.foreground);
-                            let raised = if theme.mode.is_dark() { fg.opacity(0.09) } else { theme.background };
                             h_flex()
                                 .id(SharedString::from(format!("nav:{}", p.label())))
+                                .h(px(30.))
                                 .gap_1p5()
                                 .px_3()
-                                .py(px(3.))
-                                .rounded(px(7.))
+                                .rounded(cx.theme().radius)
                                 .text_sm()
-                                .cursor_pointer()
+                                .clickable(cx)
                                 .map(|r| {
                                     if active {
-                                        r.bg(raised)
-                                            .text_color(fg)
-                                            .font_semibold()
-                                            .shadow(vec![BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.35))
-                                                .blur_radius(px(3.))])
+                                        widgets::tab_selected(r.font_semibold(), cx)
                                     } else {
-                                        r.text_color(muted).hover(move |s| s.text_color(fg))
+                                        r.text_color(muted).hover(|s| widgets::row_hover(s.text_color(fg), cx))
                                     }
                                 })
                                 .child(Icon::new(p.icon()).small().when(active, |i| i.text_color(accent)))
@@ -1140,7 +1154,7 @@ impl AppView {
                                         )
                                         .build(w, cx)
                                     })
-                                    .cursor_pointer()
+                                    .clickable(cx)
                                     .on_click(cx.listener(|this, _, _, cx| this.open_settings_at("cf-key", cx)))
                                     .child("No CurseForge key"),
                             )

@@ -1,6 +1,7 @@
 //! A pack compared with its rig server: what differs, and pushing, pulling
 //! or removing mods. Used by the Server sync page and an instance's Server tab.
 
+use crate::widgets::Clickable as _;
 use crate::drag_pick::{DragPick, PickDrag, Picks};
 use crate::store::{Msg, Store};
 use crate::widgets;
@@ -77,6 +78,8 @@ pub struct SyncPanel {
     _pick_tick: Option<Task<()>>,
     /// Groups showing their rows.
     open: HashSet<Group>,
+    /// The rows deliberately kept off the server show in the list.
+    show_kept: bool,
     /// The list as drawn, rebuilt each frame from the comparison.
     items: Vec<Item>,
     /// A bulk apply runs: every action waits for it.
@@ -169,6 +172,7 @@ impl SyncPanel {
             pick_row_h: px(0.),
             _pick_tick: None,
             open: [Group::Add, Group::Update, Group::ServerOnly, Group::KeptOff].into(),
+            show_kept: false,
             items: Vec::new(),
             running: false,
             comparing: false,
@@ -522,10 +526,10 @@ impl SyncPanel {
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (store, server, inst) = (store.clone(), server.clone(), inst.clone());
             alert
-                .title(format!("Copy this instance's mods to {name}?"))
+                .title(format!("Sync {name} to this pack?"))
                 .description(body.clone())
                 .confirm()
-                .ok_text("Update server")
+                .ok_text("Sync to server")
                 .on_ok(move |_, _, cx| {
                     let s = store.read(cx);
                     let host = s.settings().server_host.clone();
@@ -549,12 +553,64 @@ impl SyncPanel {
         });
     }
 
+    /// Hide asks first: the picked mods leave this comparison until shown
+    /// again from a mod's card.
+    fn confirm_hide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let keys: Vec<String> = self.selected_rows(cx).iter().filter_map(rigsync::blacklist_key).collect();
+        if keys.is_empty() {
+            return;
+        }
+        let n = keys.len();
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (view, keys) = (view.clone(), keys.clone());
+            alert
+                .title(format!("Hide {n} mod{} from this comparison?", if n == 1 { "" } else { "s" }))
+                .description("Nothing is deleted or changed on the server. They stop showing here, and counts leave them out.")
+                .confirm()
+                .ok_text("Hide")
+                .on_ok(move |_, _, cx| {
+                    view.update(cx, |this, cx| {
+                        this.selected.clear();
+                        this.store.update(cx, |s, cx| {
+                            s.update_settings(|st| st.sync_blacklist.extend(keys.clone()), cx)
+                        });
+                    });
+                    true
+                })
+        });
+    }
+
+    /// A sync that removes jars from the server says so first.
+    fn confirm_sync(&mut self, ops: Ops, n_sel: usize, n_remove: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.entity();
+        let up = ops.up.clone();
+        let down = ops.down.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (view, up, down) = (view.clone(), up.clone(), down.clone());
+            alert
+                .title(format!("Sync {n_sel} mod{} to the server?", if n_sel == 1 { "" } else { "s" }))
+                .description(format!(
+                    "{n_remove} will be removed from the server. Removed and replaced jars go to .hopper-backups, and the change log in History can put them back."
+                ))
+                .confirm()
+                .ok_text("Sync to server")
+                .on_ok(move |_, _, cx| {
+                    view.update(cx, |this, cx| {
+                        this.selected.clear();
+                        this.run(Ops { up: up.clone(), down: down.clone() }, cx)
+                    });
+                    true
+                })
+        });
+    }
+
     /// The pick key of list line `ix`: a row whose group can be picked.
     fn line_key(&self, ix: usize) -> Option<String> {
         let Some(Ok(diff)) = &self.diff else { return None };
         match self.items.get(ix)? {
             Item::Row(i) => diff.get(*i).filter(|d| Group::of(d).pickable()).map(row_key),
-            Item::Header(..) => None,
+            _ => None,
         }
     }
 
@@ -964,7 +1020,7 @@ impl SyncPanel {
                                 .child(
                                     widgets::split_lead(
                                         Button::new("nf-match")
-                                            .primary()
+                                            .outline()
                                             .small()
                                             .flex_1()
                                             .icon(IconName::RefreshCw)
@@ -982,13 +1038,13 @@ impl SyncPanel {
                                 )
                                 .child(picker(
                                     Button::new("nf-pick")
-                                        .primary()
+                                        .outline()
                                         .small()
                                         .icon(IconName::ChevronDown)
                                         .rounded_tl(px(0.))
                                         .rounded_bl(px(0.))
-                                        .border_l_1()
-                                        .border_color(black().opacity(0.2)),
+                                        .border_l_0(),
+
                                 )),
                         )
                         .into_any_element(),
@@ -1033,9 +1089,9 @@ impl SyncPanel {
                 .py_1p5()
                 .rounded(theme.radius)
                 .text_sm()
-                .cursor_pointer()
-                .when(on, |r| r.bg(theme.list_active))
-                .when(!on, |r| r.hover(|s| s.bg(theme.list_hover)))
+                .clickable(cx)
+                .when(on, |r| widgets::row_selected(r, cx))
+                .when(!on, |r| r.hover(|s| widgets::row_hover(s, cx)))
                 .when(dim, |r| r.opacity(0.45))
                 .child(Icon::new(icon).small().text_color(color))
                 .child(div().flex_1().text_color(if on { theme.foreground } else { theme.muted_foreground }).child(label))
@@ -1121,7 +1177,7 @@ impl SyncPanel {
             .small()
             .w_full()
             .icon(IconName::ServerCog)
-            .label("Copy my mods to server")
+            .label("Sync to server")
             .map(|b| if to_change > 0 { b.primary() } else { b.ghost() })
             .tooltip("Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. The server must be stopped.")
             .disabled(online || self.running)
@@ -1250,7 +1306,7 @@ impl SyncPanel {
                             .primary()
                             .small()
                             .icon(IconName::ServerCog)
-                            .label("Copy my mods to server")
+                            .label("Sync to server")
                             .tooltip("Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. The server must be stopped.")
                             .disabled(online || self.running)
                             .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)));
@@ -1516,7 +1572,7 @@ impl SyncPanel {
                                 .flex_1()
                                 .min_w_0()
                                 .gap_2()
-                                .cursor_pointer()
+                                .clickable(cx)
                                 .text_color(theme.warning)
                                 .font_semibold()
                                 .child(
@@ -1673,7 +1729,7 @@ impl SyncPanel {
                 .rounded(theme.radius_lg)
                 .border_1()
                 .border_color(theme.border)
-                .cursor_pointer()
+                .clickable(cx)
                 .hover(|s| s.bg(theme.list_hover))
                 .child(
                     div()
@@ -1692,6 +1748,9 @@ impl SyncPanel {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.open.insert(g);
+                    if g == Group::KeptOff {
+                        this.show_kept = true;
+                    }
                     this.build_items(cx);
                     if let Some(ix) = this
                         .items
@@ -1718,23 +1777,19 @@ impl SyncPanel {
                 .filter(|d| Group::of(d) == g && s.is_none_or(|s| d.status == s))
                 .count()
         };
-        let parts: Vec<String> = [
-            ("add", count(Group::Add, None)),
-            ("update", count(Group::Update, None)),
-            ("remove", count(Group::ServerOnly, None)),
-        ]
-        .into_iter()
-        .filter(|(_, n)| *n > 0)
-        .map(|(w, n)| format!("{w} {n}"))
-        .collect();
         let online = self.online(cx);
         let blocked = self.running || (online && !self.allow_online);
         let n_sel = picked.len();
+        let n_remove = count(Group::ServerOnly, None);
+        let parts = action_line(picked.iter());
+        let todo = action_line(self.visible(cx).into_iter());
         let theme = cx.theme();
-        let text = if parts.is_empty() {
-            "Nothing selected. Tick mods, or use Select all on a group.".to_string()
+        let text = if !parts.is_empty() {
+            format!("{parts} on {}", server.name)
+        } else if !todo.is_empty() {
+            format!("{todo} · tick mods to choose")
         } else {
-            format!("Apply will {} on {}", parts.join(", "), server.name)
+            "Nothing to sync.".to_string()
         };
         h_flex()
             .gap_3()
@@ -1775,35 +1830,30 @@ impl SyncPanel {
                     .small()
                     .outline()
                     .label(format!("Hide ({n_sel})"))
-                    .tooltip("Hide the selected mods from this comparison")
+                    .tooltip("Hide the selected mods from this comparison. Show them again from a mod's card.")
                     .disabled(n_sel == 0)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let keys: Vec<String> = this
-                            .selected_rows(cx)
-                            .iter()
-                            .filter_map(rigsync::blacklist_key)
-                            .collect();
-                        this.selected.clear();
-                        this.store.update(cx, |s, cx| {
-                            s.update_settings(|st| st.sync_blacklist.extend(keys), cx)
-                        });
-                    })),
+                    .on_click(cx.listener(|this, _, w, cx| this.confirm_hide(w, cx))),
             )
             .child(
                 Button::new("apply")
                     .small()
                     .primary()
                     .icon(IconName::Upload)
-                    .label("Apply to server")
-                    .tooltip("Replaced and removed jars are kept in .hopper-backups")
+                    .label(if n_sel > 0 { format!("Sync to server ({n_sel})") } else { "Sync to server".to_string() })
+                    .tooltip("Pushes added and updated jars to the server and removes the ones it no longer needs. Replaced and removed jars are kept in .hopper-backups.")
                     .disabled(ops.is_empty() || blocked)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, w, cx| {
                         let ops = Ops {
                             up: ops.up.clone(),
                             down: ops.down.clone(),
                         };
-                        this.selected.clear();
-                        this.run(ops, cx)
+                        // Removing asks first; adding and updating are backed up.
+                        if n_remove > 0 {
+                            this.confirm_sync(ops, n_sel, n_remove, w, cx);
+                        } else {
+                            this.selected.clear();
+                            this.run(ops, cx)
+                        }
                     })),
             )
             .into_any_element()
@@ -1846,14 +1896,26 @@ impl SyncPanel {
             }
         }
         let mut items = Vec::new();
+        let mut kept = 0;
         for (g, rows) in by_group {
             if rows.is_empty() {
                 continue;
+            }
+            // Kept-off rows sit behind one footer row until asked for.
+            if g == Group::KeptOff && !self.show_kept && self.only != Some(g) {
+                kept = rows.len();
+                continue;
+            }
+            if g == Group::KeptOff {
+                kept = rows.len();
             }
             items.push(Item::Header(g, rows.len()));
             if self.open.contains(&g) {
                 items.extend(rows.into_iter().map(Item::Row));
             }
+        }
+        if kept > 0 && self.only.is_none() {
+            items.push(Item::Kept(kept));
         }
         self.items = items;
     }
@@ -1867,7 +1929,7 @@ impl SyncPanel {
             .iter()
             .map(|i| match i {
                 Item::Row(ix) => (*i, diff.get(*ix).cloned()),
-                Item::Header(..) => (*i, None),
+                _ => (*i, None),
             })
             .collect();
         // Badges come from the pack's addons: read them all before drawing.
@@ -1895,6 +1957,7 @@ impl SyncPanel {
             .zip(tags)
             .map(|((item, d), tags)| match (item, d) {
                 (Item::Header(g, n), _) => self.group_header(g, n, cx),
+                (Item::Kept(n), _) => self.kept_row(n, cx),
                 (Item::Row(_), Some(d)) => {
                     let key = row_key(&d);
                     let el = self.row(&d, tags.unwrap_or_default(), cx);
@@ -1925,6 +1988,7 @@ impl SyncPanel {
         let theme = cx.theme();
         h_flex()
             .id(ElementId::Name(format!("group-{g:?}").into()))
+            .clickable(cx)
             .h(rems(ROW_H))
             .w_full()
             .items_end()
@@ -1937,8 +2001,7 @@ impl SyncPanel {
                     .py_2()
                     .rounded(theme.radius_lg)
                     .bg(theme.secondary)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.list_hover))
+                    .hover(|s| widgets::row_hover(s, cx))
                     .child(
                         Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
                             .small()
@@ -1980,6 +2043,54 @@ impl SyncPanel {
                 if !this.open.remove(&g) {
                     this.open.insert(g);
                 }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// "N mods intentionally not synced": client-only or left out by the
+    /// pack's author, folded away until asked for.
+    fn kept_row(&self, n: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let shown = self.show_kept;
+        h_flex()
+            .id("kept-footer")
+            .clickable(cx)
+            .h(rems(ROW_H))
+            .w_full()
+            .items_end()
+            .pb_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded(theme.radius_lg)
+                    .hover(|s| widgets::row_hover(s, cx))
+                    .child(Icon::new(IconName::EyeOff).small().text_color(theme.muted_foreground))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "{n} mod{} intentionally not synced (client-only, or left out by the pack)",
+                                if n == 1 { "" } else { "s" }
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .text_color(theme.primary)
+                            .child(if shown { "Hide" } else { "Show" }),
+                    ),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.show_kept = !this.show_kept;
                 cx.notify();
             }))
             .into_any_element()
@@ -2181,7 +2292,7 @@ impl SyncPanel {
         };
         let link = |el: Stateful<Div>, cx: &mut Context<Self>| {
             el.when(linked, |d| {
-                d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                d.clickable(cx).on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.open_peek(pid, cx);
                 }))
@@ -2222,10 +2333,11 @@ impl SyncPanel {
             .gap_3()
             .border_b_1()
             .border_color(theme.border.opacity(0.4))
-            .when(picked, |r| r.bg(theme.primary.opacity(0.06)))
-            .hover(|s| s.bg(theme.list_hover))
+            .when(picked, |r| widgets::row_selected(r, cx))
+            .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
             .when(pickable, |r| {
-                r.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                r.clickable(cx).on_click(
+cx.listener(move |this, _, _, cx| {
                     if !this.selected.remove(&k2) {
                         this.selected.insert(k2.clone());
                     }
@@ -2241,7 +2353,7 @@ impl SyncPanel {
                         .size_full()
                         .flex()
                         .items_center()
-                        .cursor_pointer()
+                        .clickable(cx)
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, _, cx| {
@@ -2312,6 +2424,8 @@ enum Item {
     Header(Group, usize),
     /// An index into the comparison.
     Row(usize),
+    /// The footer for rows kept off on purpose: how many, and Show / Hide.
+    Kept(usize),
 }
 
 /// What one side of a row shows as badges, read from the pack's addon.
@@ -2353,14 +2467,38 @@ impl Picks for SyncPanel {
 impl Render for SyncPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(root) = self.server.clone() else {
+            // No servers at all is a different page from "none picked".
+            let none = self.store.read(cx).servers().is_empty();
+            let store = self.store.clone();
             return v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
-                .child(widgets::caption(
-                    "Pick a server to compare it with its pack.",
-                    cx,
-                ))
+                .child(if none {
+                    widgets::empty_state(
+                        IconName::Server,
+                        "No servers yet",
+                        Some("Host one on this PC, then compare it with its pack here.".into()),
+                        cx,
+                    )
+                    .child(
+                        Button::new("sync-host")
+                            .small()
+                            .primary()
+                            .icon(IconName::Plus)
+                            .label("Host a server")
+                            .on_click(move |_, window, cx| {
+                                crate::host_dialog::open(store.clone(), None, window, cx)
+                            }),
+                    )
+                } else {
+                    widgets::empty_state(
+                        IconName::ArrowLeftRight,
+                        "Pick a server",
+                        Some("Choose one on the left to compare it with its pack.".into()),
+                        cx,
+                    )
+                })
                 .into_any_element();
         };
         let Some((server, inst)) = self.pair_header(cx) else {
@@ -2374,8 +2512,10 @@ impl Render for SyncPanel {
                 .size_full()
                 .items_center()
                 .justify_center()
-                .child(widgets::caption(
-                    format!("{name} has no paired pack yet. Pick one in its list entry."),
+                .child(widgets::empty_state(
+                    IconName::Link,
+                    format!("{name} has no paired pack"),
+                    Some("Use Pair a pack… under it in the list to compare their mods.".into()),
                     cx,
                 ))
                 .into_any_element();
@@ -2410,11 +2550,23 @@ impl Render for SyncPanel {
                 .child(Spinner::new().small())
                 .child(widgets::caption("Scanning mod folders", cx))
                 .into_any_element(),
-            Some(Err(e)) => div()
-                .text_sm()
-                .text_color(cx.theme().danger)
-                .child(e.clone())
-                .into_any_element(),
+            // The server's folder couldn't be read (often its share is offline).
+            Some(Err(e)) => widgets::empty_state(
+                IconName::TriangleAlert,
+                format!("Can't reach {}", server.name),
+                Some(e.clone().into()),
+                cx,
+            )
+            .child(
+                Button::new("sync-retry")
+                    .small()
+                    .outline()
+                    .icon(IconName::RefreshCw)
+                    .label("Retry")
+                    .loading(self.comparing)
+                    .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
+            )
+            .into_any_element(),
             Some(Ok(_)) => {
                 let count = self.items.len();
                 let toolbar = self.toolbar(cx);
@@ -2506,4 +2658,23 @@ impl Render for SyncPanel {
             .child(v_flex().flex_1().min_h_0().child(body))
             .into_any_element()
     }
+}
+
+/// "1 to push · 1 to update · 1 to remove" for the rows given.
+fn action_line<'a>(rows: impl Iterator<Item = &'a DiffEntry>) -> String {
+    let (mut push, mut update, mut remove) = (0, 0, 0);
+    for d in rows {
+        match Group::of(d) {
+            Group::Add => push += 1,
+            Group::Update => update += 1,
+            Group::ServerOnly => remove += 1,
+            _ => {}
+        }
+    }
+    [("to push", push), ("to update", update), ("to remove", remove)]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(w, n)| format!("{n} {w}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }

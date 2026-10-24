@@ -1,6 +1,7 @@
 //! An instance's Data packs tab: the global loader folders (Paxi,
 //! OpenLoader, Global Packs) and each world's `datapacks/`, side by side.
 
+use crate::widgets::Clickable as _;
 use crate::addons_extra::{is_hopper_file, pack_files};
 use crate::content::ContentEvent;
 use crate::crash_help::callout;
@@ -300,11 +301,12 @@ impl DatapacksView {
             .px_2()
             .py_1p5()
             .rounded(theme.radius)
-            .cursor_pointer()
+            .clickable(cx)
             .text_sm()
-            .when(active, |d| d.bg(theme.primary.opacity(0.12)).text_color(theme.foreground))
-            .when(!active, |d| d.text_color(theme.muted_foreground))
-            .hover(|d| d.bg(theme.list_hover).text_color(theme.foreground))
+            .when(active, |d| widgets::row_selected(d, cx).text_color(theme.foreground))
+            .when(!active, |d| {
+                d.text_color(theme.muted_foreground).hover(|s| widgets::row_hover(s, cx).text_color(theme.foreground))
+            })
             .child(icon)
             .child(div().flex_1().min_w_0().truncate().child(s.name.clone()))
             .child(div().text_xs().text_color(theme.muted_foreground).child(s.count.to_string()))
@@ -381,9 +383,13 @@ impl DatapacksView {
         ) else {
             return v_flex()
                 .flex_1()
-                .items_center()
                 .justify_center()
-                .child(widgets::caption("No data pack folders: install Paxi or play once to make a world.", cx))
+                .child(widgets::empty_state(
+                    IconName::Database,
+                    "No data pack folders",
+                    Some("Install Paxi, or play once to make a world.".into()),
+                    cx,
+                ))
                 .into_any_element();
         };
         let what = if src.rel == PAXI_OPTIONAL {
@@ -423,11 +429,12 @@ impl DatapacksView {
             )
             .child(if empty {
                 let rel = src.rel.clone();
-                v_flex()
-                    .py_10()
-                    .gap_3()
-                    .items_center()
-                    .child(widgets::caption("No data packs here. Add some, or drop .zip files on the window.", cx))
+                widgets::empty_state(
+                    IconName::Database,
+                    "No data packs here",
+                    Some("Add some, or drop .zip files on the window.".into()),
+                    cx,
+                )
                     .child(
                         Button::new("dp-add")
                             .primary()

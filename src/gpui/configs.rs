@@ -11,7 +11,6 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
     h_flex, v_flex,
@@ -397,7 +396,7 @@ impl ConfigsPanel {
                         .map(|r| r.error.clone().unwrap_or_default())
                         .collect();
                     let verb = match act {
-                        Act::Push => "Pushed",
+                        Act::Push => "Synced",
                         Act::Pull => "Pulled",
                         Act::Delete => "Deleted",
                     };
@@ -433,7 +432,7 @@ impl ConfigsPanel {
                 .description("Every replaced file is backed up; undo from History.")
                 .confirm()
                 .ok_text(match act {
-                    Act::Push => "Push",
+                    Act::Push => "Sync to server",
                     Act::Pull => "Pull",
                     Act::Delete => "Delete",
                 })
@@ -1133,7 +1132,7 @@ impl Render for ConfigsPanel {
                         Button::new("cfg-push")
                             .small()
                             .primary()
-                            .label(format!("Push to server ({np})"))
+                            .label(format!("Sync to server ({np})"))
                             .tooltip("Copy the client's file over the server's. The server's copy is backed up first.")
                             .disabled(np == 0 || self.running)
                             .on_click(cx.listener(move |this, _, w, cx| {
@@ -1231,9 +1230,9 @@ impl ConfigsPanel {
         match item {
             Item::Head(status, n) => {
                 let (tag, label) = match status {
-                    FileStatus::Modified => (Tag::info().xsmall().child("Changed"), "changed"),
-                    FileStatus::OnlyClient => (Tag::warning().xsmall().child("Client only"), "only on the client"),
-                    FileStatus::OnlyServer => (Tag::primary().xsmall().child("Server only"), "only on the server"),
+                    FileStatus::Modified => (widgets::chip(cx.theme().info).xsmall().child("Changed"), "changed"),
+                    FileStatus::OnlyClient => (widgets::chip(cx.theme().warning).xsmall().child("Client only"), "only on the client"),
+                    FileStatus::OnlyServer => (widgets::chip(cx.theme().primary).xsmall().child("Server only"), "only on the server"),
                 };
                 let q = self.query.clone();
                 h_flex()
@@ -1453,10 +1452,10 @@ impl Render for HistoryPanel {
                     c.children(list.into_iter().map(|ch| {
                         let tag = match ch.action {
                             hopper::history::Action::Copied if ch.backup.is_some() => {
-                                Tag::info().xsmall().child("Replaced")
+                                widgets::chip(cx.theme().info).xsmall().child("Replaced")
                             }
-                            hopper::history::Action::Copied => Tag::success().xsmall().child("Added"),
-                            hopper::history::Action::Removed => Tag::danger().xsmall().child("Removed"),
+                            hopper::history::Action::Copied => widgets::chip(cx.theme().success).xsmall().child("Added"),
+                            hopper::history::Action::Removed => widgets::chip(cx.theme().danger).xsmall().child("Removed"),
                         };
                         let can_undo = ch.action == hopper::history::Action::Copied || ch.backup.is_some();
                         let id = ch.id;

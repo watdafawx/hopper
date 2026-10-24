@@ -10,6 +10,7 @@ use crate::app::{AppView, Page};
 use crate::launchers_list::LaunchersList;
 use crate::store::Store;
 use crate::widgets;
+use crate::widgets::Clickable as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -638,7 +639,7 @@ impl SetupWizard {
                 v_flex()
                     .gap_1p5()
                     .text_sm()
-                    .child("CurseForge requires every app to use an API key for searching, installing and updating. The downloads themselves come from CurseForge's CDN.")
+                    .child("Optional. A free CurseForge key unlocks searching, installing and updating packs and mods from CurseForge; without one, Hopper uses Modrinth only.")
                     .child(
                         div().text_color(theme.muted_foreground).child(
                             "Hopper doesn't ship a shared key, so you use your own: it's free, takes a minute, stays on this PC (in Windows Credential Manager), and only your Hopper uses it.",
@@ -667,10 +668,10 @@ impl SetupWizard {
                         Button::new("setup-cf-skip")
                             .ghost()
                             .small()
-                            .label("Skip — use Modrinth only for now")
+                            .label("Skip — use Modrinth for now")
                             .on_click(cx.listener(|this, _, _, cx| this.next(cx))),
                     )
-                    .child(note("Modrinth works without a key.", cx)),
+                    .child(note("You can add a key any time in Settings.", cx)),
             )
             .child(
                 h_flex()
@@ -1015,7 +1016,7 @@ impl SetupWizard {
         let (icon, title, sub) = match STEPS[self.step] {
             "Welcome" => (IconName::Sparkles, "Set up Hopper", "About a minute. All of it can change later in Settings."),
             "Files" => (IconName::FolderOpen, "Where Hopper keeps its files", "One folder for everything Hopper needs."),
-            "CurseForge" => (IconName::Lock, "Your CurseForge key", "The one step that matters most."),
+            "CurseForge" => (IconName::Lock, "Your CurseForge key (optional)", "Skip it to use Modrinth only; add it later in Settings."),
             "Instances" => (IconName::LibraryBig, "Your instances", "Where Hopper finds what you play."),
             "Servers" => (IconName::Server, "Servers", "Optional. Skip it if you just play."),
             "Look" => (IconName::Palette, "Make it yours", "A theme for Hopper."),
@@ -1071,10 +1072,7 @@ impl SetupWizard {
                     .id(("setup-dot", i))
                     .p(rems(0.3125))
                     .rounded_full()
-                    .when(!current, |d| {
-                        d.cursor_pointer()
-                            .hover(|d| d.bg(theme.foreground.opacity(0.1)))
-                    })
+                    .when(!current, |d| d.clickable(cx).hover(|s| widgets::row_hover(s, cx)))
                     .tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx)
                     })
@@ -1218,17 +1216,17 @@ fn choice_card(
         .gap_2()
         .p_4()
         .rounded(theme.radius_lg)
-        .cursor_pointer()
+        .clickable(cx)
         .border_1()
         .map(|d| {
             if picked {
                 d.border_color(theme.primary)
-                    .bg(theme.primary.opacity(0.1))
+                    .bg(theme.primary.opacity(widgets::alpha::TINT))
                     .shadow(vec![BoxShadow::new(px(0.), px(4.), theme.primary.opacity(0.25)).blur_radius(px(16.))])
             } else {
                 d.border_color(theme.foreground.opacity(0.1))
                     .bg(theme.foreground.opacity(0.035))
-                    .hover(|d| d.bg(theme.foreground.opacity(0.07)).border_color(theme.foreground.opacity(0.18)))
+                    .hover(|s| widgets::row_hover(s, cx))
             }
         })
         .child(
@@ -1297,16 +1295,16 @@ fn theme_card(name: &str, picked: bool, cx: &App) -> Div {
         .gap_1p5()
         .p_1p5()
         .rounded(theme.radius_lg)
-        .cursor_pointer()
+        .clickable(cx)
         .border_1()
         .map(|d| {
             if picked {
-                d.border_color(theme.primary).bg(theme.primary.opacity(0.1))
+                d.border_color(theme.primary).bg(theme.primary.opacity(widgets::alpha::TINT))
             } else {
-                d.border_color(theme.foreground.opacity(0.08))
-                    .hover(|d| d.bg(theme.foreground.opacity(0.06)))
+                d.border_color(theme.foreground.opacity(0.08)).hover(|s| widgets::row_hover(s, cx))
             }
         })
+
         .child(
             div()
                 .h(rems(3.75))

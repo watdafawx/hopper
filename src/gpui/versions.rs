@@ -3,12 +3,11 @@
 //! switch to.
 
 use crate::store::Store;
-use crate::widgets;
+use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
@@ -19,6 +18,7 @@ use hopper::cf;
 use hopper::install::{ChangelogEntry, Update};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use crate::widgets::{DIALOG_TOP, dialog_room};
 
 pub struct VersionsView {
     store: Entity<Store>,
@@ -146,8 +146,7 @@ impl Render for VersionsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The list scrolls inside what's left of the window under the
         // dialog's title and this header, so every version can be reached.
-        // The dialog's own title and padding take about 6rem of the window.
-        let total_h = (window.viewport_size().height - window.rem_size() * 8.).max(window.rem_size() * 16.);
+        let total_h = dialog_room(window).max(window.rem_size() * 16.);
         let store = self.store.read(cx);
         let theme = cx.theme();
         let icon = store.image(&self.icon).map(Path::to_path_buf);
@@ -155,13 +154,15 @@ impl Render for VersionsView {
             Some(to) => format!("{}  →  {to}", self.from),
             None => format!("Installed: {}", self.from),
         };
+        // The name wraps rather than cut off; the file line may truncate.
         let header = h_flex()
             .gap_3()
             .child(widgets::thumb(icon.as_deref(), rems(2.5), cx))
             .child(
                 v_flex()
+                    .flex_1()
                     .min_w_0()
-                    .child(div().font_semibold().truncate().child(self.name.clone()))
+                    .child(div().font_semibold().child(self.name.clone()))
                     .child(widgets::caption(line, cx).text_xs()),
             );
         let lock_note = self.locked.then(|| {
@@ -254,15 +255,20 @@ impl Render for VersionsView {
                             .disabled(locked)
                             .on_click(move |_, window, cx| VersionsView::install(&view, f.clone(), window, cx))
                     });
+                    // Named by what it does: these are all newer than the
+                    // installed version.
                     let action = file.filter(|_| !e.installed).map(|f| {
                         let b = Button::new(SharedString::from(format!("install:{}", f.id)))
                             .small()
-                            .label(if target { "Update to this" } else { "Install this version" });
-                        let b = if target { b.primary() } else { b.outline() };
-                        b.disabled(locked).on_click(move |_, window, cx| {
+                            .icon(IconName::Download)
+                            .label(format!("Update to {}", version_label(&f)));
+                        // The one filled button is the header's "Update to".
+                        b.outline().disabled(locked).on_click(move |_, window, cx| {
                             VersionsView::install(&view, f.clone(), window, cx)
                         })
                     });
+                    // Two lines: the version's name and tags (wrapping, never
+                    // cut off), then its date and buttons.
                     v_flex()
                         .gap_2()
                         .p_4()
@@ -272,14 +278,23 @@ impl Render for VersionsView {
                         .when(e.installed, |c| c.bg(theme.list_active))
                         .child(
                             h_flex()
+                                .flex_wrap()
+                                .gap_x_2()
+                                .gap_y_1()
+                                .child(div().min_w_0().font_semibold().child(e.name.clone()))
+                                .child(widgets::chip(theme.muted_foreground).child(e.release))
+                                .when(e.installed, |r| r.child(widgets::chip(theme.success).child("Installed"))),
+                        )
+                        .child(
+                            h_flex()
+                                .flex_wrap()
                                 .gap_2()
-                                .child(div().font_semibold().truncate().child(e.name.clone()))
-                                .child(Tag::secondary().xsmall().child(e.release))
-                                .when(e.installed, |r| {
-                                    r.child(Tag::success().xsmall().child("Installed"))
-                                })
+                                .child(
+                                    widgets::caption(hopper::time::relative(&e.date), cx)
+                                        .text_xs()
+                                        .flex_none(),
+                                )
                                 .child(div().flex_1())
-                                .child(widgets::caption(hopper::time::relative(&e.date), cx).text_xs())
                                 .children(action)
                                 .children(reinstall)
                                 .when(e.installed && !pack, |r| {
@@ -341,7 +356,7 @@ impl Render for VersionsView {
                                         .flex_1()
                                         .min_w_0()
                                         .gap_2()
-                                        .cursor_pointer()
+                                        .clickable(cx)
                                         .child(
                                             Icon::new(if open.is_some() {
                                                 IconName::ChevronDown
@@ -352,17 +367,22 @@ impl Render for VersionsView {
                                             .text_color(theme.muted_foreground),
                                         )
                                         .child(div().text_sm().font_medium().truncate().child(f.display_name.clone()))
-                                        .child(Tag::secondary().xsmall().child(f.release_name()))
+                                        .child(widgets::chip(theme.muted_foreground).child(f.release_name()))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.open_other(f1.clone(), cx)
                                         })),
                                 )
-                                .child(widgets::caption(hopper::time::relative(&f.file_date), cx).text_xs())
+                                .child(widgets::caption(hopper::time::relative(&f.file_date), cx).text_xs().flex_none())
                                 .child(
                                     Button::new(SharedString::from(format!("other-install:{}", f.id)))
                                         .xsmall()
                                         .outline()
-                                        .label(if older { "Downgrade to this" } else { "Install this version" })
+                                        .flex_none()
+                                        .label(if older {
+                                            format!("Roll back to {}", version_label(&f))
+                                        } else {
+                                            format!("Update to {}", version_label(&f))
+                                        })
                                         .disabled(locked)
                                         .on_click(move |_, window, cx| {
                                             VersionsView::install(&view, f2.clone(), window, cx)
@@ -390,7 +410,7 @@ impl Render for VersionsView {
                                         .small()
                                         .primary()
                                         .icon(IconName::Download)
-                                        .label("Update")
+                                        .label(format!("Update to {}", version_label(&f)))
                                         .disabled(locked)
                                         .on_click(move |_, window, cx| {
                                             VersionsView::install(&view, f.clone(), window, cx)
@@ -455,6 +475,17 @@ fn open_link(store: &Entity<Store>, root: &Path, url: &str, window: &mut Window,
         .detach();
 }
 
+/// A file's version for a button: from its file name, else its title.
+fn version_label(f: &cf::File) -> String {
+    let v = hopper::scan::short_version(&f.file_name);
+    let v = if v.is_empty() { f.display_name.clone() } else { v };
+    // A long title would push the other buttons off the line.
+    match v.char_indices().nth(24) {
+        Some((i, _)) => format!("{}…", &v[..i]),
+        None => v,
+    }
+}
+
 fn shown_len(entries: &[(ChangelogEntry, SharedString)]) -> usize {
     entries.len()
 }
@@ -513,6 +544,7 @@ pub fn open(
         dialog
             .title(title)
             .w(rems(46.).to_pixels(window.rem_size()))
+            .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())
     });
 }
@@ -528,8 +560,7 @@ struct FileLog {
 
 impl Render for FileLog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let h = (window.viewport_size().height - window.rem_size() * 8.)
-            .clamp(window.rem_size() * 10., window.rem_size() * 32.);
+        let h = dialog_room(window).clamp(window.rem_size() * 10., window.rem_size() * 32.);
         let body: AnyElement = match &self.md {
             None => h_flex()
                 .gap_2()
@@ -615,6 +646,7 @@ pub fn open_file_id(
         dialog
             .title("Changelog")
             .w(rems(46.).to_pixels(window.rem_size()))
+            .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())
     });
 }
@@ -647,6 +679,7 @@ pub fn open_file(store: Entity<Store>, root: Option<PathBuf>, file: cf::File, wi
         dialog
             .title("Changelog")
             .w(rems(46.).to_pixels(window.rem_size()))
+            .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())
     });
 }
@@ -737,6 +770,7 @@ pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, f
         dialog
             .title(title.clone())
             .w(rems(40.).to_pixels(window.rem_size()))
+            .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())
             .footer(
                 gpui_kit::component::dialog::DialogFooter::new()

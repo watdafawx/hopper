@@ -2,6 +2,7 @@
 //! live log, debug.log and crash reports, each log with search and sharing
 //! on mclo.gs.
 
+use crate::widgets::Clickable as _;
 use crate::crash_help::{CrashHelp, callout};
 use crate::line_select::{LineSelect, Lines};
 use crate::store::{Store, open_path};
@@ -427,6 +428,16 @@ impl LogsView {
         cx.notify();
     }
 
+    /// Shows crash report `p` in the Crash reports tab.
+    fn open_crash(&mut self, p: PathBuf, cx: &mut Context<Self>) {
+        self.tab = LogTab::Crashes;
+        self.tab_picked = true;
+        if self.log.as_ref().map(|l| &l.path) != Some(&p) {
+            self.open_log(p, false, cx);
+        }
+        cx.notify();
+    }
+
     fn share(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.shared.insert(path.clone(), None);
         let keep = self.keep_names;
@@ -575,6 +586,22 @@ impl Render for LogsView {
             let warned = self.warnings_card(&root, cx);
             let crash = self.crash.as_ref().filter(|_| card.is_none()).map(|c| {
                 let name = c.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                // The lead: the error line under the description, and the
+                // mods the report suspects.
+                let error = c
+                    .summary
+                    .iter()
+                    .find(|l| !l.starts_with("Description:") && !l.starts_with("Suspected Mod") && !l.starts_with("  "))
+                    .or(c.summary.first())
+                    .map(|l| l.trim_start_matches("java.lang.").to_string());
+                let suspects: Vec<String> = c
+                    .summary
+                    .iter()
+                    .filter_map(|l| l.strip_prefix("  "))
+                    .take(3)
+                    .map(str::to_string)
+                    .collect();
+                let share = self.share_row(&c.path, cx);
                 // When, so an old crash doesn't read as today's.
                 let when = c
                     .mtime
@@ -597,29 +624,99 @@ impl Render for LogsView {
                                 Button::new("show-crash")
                                     .small()
                                     .outline()
-                                    .label("Open")
+                                    .icon(IconName::FileText)
+                                    .label("Open report")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.tab_picked = true;
                                         this.select(LogTab::Crashes, cx)
                                     })),
                             ),
                     )
+                    .children(error.map(|e| div().text_sm().font_medium().line_clamp(2).child(e)))
+                    .when(!suspects.is_empty(), |d| {
+                        d.child(
+                            h_flex()
+                                .gap_1p5()
+                                .text_sm()
+                                .child(widgets::caption("The report suspects:", cx))
+                                .child(div().font_semibold().child(suspects.join(", "))),
+                        )
+                    })
                     .child(
                         v_flex()
                             .font_family(theme.mono_font_family.clone())
                             .text_xs()
+                            .text_color(theme.muted_foreground)
                             .children(c.summary.clone()),
                     )
+                    .child(div().pt_1().child(share))
+            });
+            // No crash: say so, rather than leave the space blank.
+            let calm = (card.is_none() && crash.is_none()).then(|| {
+                widgets::empty_state(
+                    IconName::CircleCheck,
+                    "No crashes",
+                    Some("This instance hasn't crashed. If it does, what went wrong shows up here.".into()),
+                    cx,
+                )
+            });
+            // Older reports, past the one shown above.
+            let featured = self.crash.as_ref().map(|c| c.path.clone());
+            let older: Vec<PathBuf> = self
+                .crashes
+                .iter()
+                .filter(|p| Some(*p) != featured.as_ref())
+                .take(8)
+                .cloned()
+                .collect();
+            let more = self.crashes.len().saturating_sub(older.len() + usize::from(featured.is_some()));
+            let older_list = (!older.is_empty()).then(|| {
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().font_semibold().child("Older crash reports"))
+                    .children(older.into_iter().enumerate().map(|(i, p)| {
+                        let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        h_flex()
+                            .id(("older-crash", i))
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded(theme.radius)
+                            .clickable(cx)
+                            .hover(|s| s.bg(theme.foreground.opacity(widgets::alpha::HOVER)))
+                            .child(Icon::new(IconName::FileText).small().text_color(theme.muted_foreground))
+                            .child(div().text_sm().truncate().child(name))
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_crash(p.clone(), cx)))
+                    }))
+                    .when(more > 0, |c| {
+                        c.child(widgets::caption(format!("{more} more in Crash reports"), cx).text_xs().px_2())
+                    })
             });
             div()
                 .id("logs-diagnosis")
                 .flex_1()
                 .min_h_0()
-                .child(v_flex().gap_4().pb_2().children(card).children(warned).children(crash).child(self.help.clone()))
+                .child(
+                    v_flex()
+                        .gap_4()
+                        .pb_2()
+                        .children(card)
+                        .children(warned)
+                        .children(crash)
+                        .children(calm)
+                        .child(self.help.clone())
+                        .children(older_list),
+                )
                 .overflow_y_scrollbar()
                 .into_any_element()
         } else if self.tab == LogTab::Crashes && self.crashes.is_empty() {
-            widgets::caption("No crash reports.", cx).into_any_element()
+            widgets::empty_state(
+                IconName::CircleCheck,
+                "No crash reports",
+                Some("The game writes one here when it crashes.".into()),
+                cx,
+            )
+            .into_any_element()
         } else {
             self.log_body(&root, window, cx)
         };
@@ -639,7 +736,6 @@ impl LogsView {
     /// The last game crash, as Hopper read it: what happened, and which mods
     /// it names, each with how sure Hopper is and why.
     fn crash_card(&mut self, root: &Path, c: &hopper::crashdetect::Crash, cx: &mut Context<Self>) -> AnyElement {
-        use gpui_kit::component::tag::Tag;
         use hopper::crashdetect::{Certainty, CrashKind};
         let theme = cx.theme().clone();
         let store = self.store.read(cx);
@@ -670,9 +766,9 @@ impl LogsView {
                     why = why.replace(&format!(" {id},"), &format!(" {n},")).replace(&format!(" {id} "), &format!(" {n} "));
                 }
                 let tag = match s.certainty {
-                    Certainty::Certain => Tag::danger(),
-                    Certainty::Likely => Tag::warning(),
-                    Certainty::Possible => Tag::secondary(),
+                    Certainty::Certain => widgets::chip(cx.theme().danger),
+                    Certainty::Likely => widgets::chip(cx.theme().warning),
+                    Certainty::Possible => widgets::chip(cx.theme().muted_foreground),
                 };
                 let (store2, root2) = (self.store.clone(), root.to_path_buf());
                 h_flex()
@@ -760,6 +856,19 @@ impl LogsView {
             CrashKind::Native => Some("Java itself crashed. Try another Java in Settings › Java, or update your graphics driver."),
             CrashKind::Unknown => Some("Hopper couldn't tell which mod. The crash report has the details."),
         };
+        // The lead: what broke, and the mods most likely behind it.
+        let likely: Vec<String> = c
+            .suspects
+            .iter()
+            .filter(|s| s.certainty <= Certainty::Likely)
+            .take(3)
+            .map(|s| {
+                addon(&s.file_name)
+                    .map(|a| a.name.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| s.file_name.trim_end_matches(".disabled").to_string())
+            })
+            .collect();
         let has_report = c.source.extension().is_some_and(|e| e == "txt") && c.source.starts_with(root.join("crash-reports"));
         // Caught while this game runs: it's sitting on its error screen.
         let still_open = self.store.read(cx).running(root).is_some_and(|r| c.when >= r.started as i64);
@@ -794,7 +903,8 @@ impl LogsView {
                             Button::new("crash-open-report")
                                 .small()
                                 .outline()
-                                .label("Crash report")
+                                .icon(IconName::FileText)
+                                .label("Open report")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.tab_picked = true;
                                     this.select(LogTab::Crashes, cx)
@@ -826,12 +936,15 @@ impl LogsView {
                     ),
             )
             .when(!c.headline.is_empty(), |d| {
+                d.child(div().text_sm().font_medium().line_clamp(2).child(c.headline.clone()))
+            })
+            .when(!likely.is_empty(), |d| {
                 d.child(
-                    div()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(c.headline.clone()),
+                    h_flex()
+                        .gap_1p5()
+                        .text_sm()
+                        .child(widgets::caption(if likely.len() == 1 { "Likely cause:" } else { "Likely causes:" }, cx))
+                        .child(div().font_semibold().child(likely.join(", "))),
                 )
             })
             .when(!rows.is_empty(), |d| {
@@ -840,6 +953,7 @@ impl LogsView {
             })
             .when_some(note, |d, n| d.child(div().text_sm().child(n)))
             .children(self.crash_actions(root, c, cx))
+            .when(source.is_file(), |d| d.child(div().pt_1().child(self.share_row(&source, cx))))
             .into_any_element()
     }
 

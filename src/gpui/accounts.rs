@@ -8,15 +8,16 @@ use crate::skin_viewer::{CapeChoice, SkinViewer, ViewerEvent};
 use crate::skins::{self, View};
 use crate::store::Store;
 use crate::widgets;
+use crate::widgets::Clickable as _;
 use anyhow::{Context as _, bail};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
     v_flex,
@@ -1275,8 +1276,8 @@ impl AccountsView {
                     .border_2()
                     .border_color(if active { theme.primary } else { theme.primary.opacity(0.) })
                     .when(!active && !busy, |d| {
-                        d.cursor_pointer()
-                            .hover(|s| s.bg(theme.list_hover))
+                        d.clickable(cx)
+                            .hover(|s| widgets::row_hover(s, cx))
                             .on_click(cx.listener(move |this, _, window, cx| this.switch_to(id.clone(), window, cx)))
                     })
                     .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx))
@@ -1343,8 +1344,8 @@ impl AccountsView {
                     .px_2()
                     .py_1p5()
                     .rounded(theme.radius)
-                    .when(active, |r| r.bg(theme.primary.opacity(0.12)))
-                    .when(!active, |r| r.hover(|s| s.bg(theme.list_hover)))
+                    .when(active, |r| widgets::row_selected(r, cx))
+                    .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
                     .child(head)
                     .child(
                         v_flex()
@@ -1355,7 +1356,7 @@ impl AccountsView {
                                     .gap_1p5()
                                     .child(div().text_sm().font_semibold().truncate().child(a.name.clone()))
                                     .when(active, |r| {
-                                        r.child(Tag::primary().outline().xsmall().child("Active"))
+                                        r.child(widgets::chip(theme.primary).child("Active"))
                                     }),
                             )
                             .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(sub)),
@@ -1377,6 +1378,7 @@ impl AccountsView {
                             .xsmall()
                             .ghost()
                             .icon(IconName::LogOut)
+                            .label("Sign out")
                             .tooltip("Sign out")
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1412,7 +1414,7 @@ impl AccountsView {
                         .px_2()
                         .py_1p5()
                         .rounded(theme.radius)
-                        .bg(theme.primary.opacity(0.12))
+                        .map(|r| widgets::row_selected(r, cx))
                         .child(
                             div()
                                 .size(rems(2.25))
@@ -1558,7 +1560,7 @@ impl AccountsView {
                             .min_w_0()
                             .child(div().text_sm().font_semibold().truncate().child(pend.label.clone()))
                             .child(widgets::caption(
-                                format!("Preview · {} arms", pend.variant.label().to_lowercase()),
+                                format!("Previewing, not applied · {} arms", pend.variant.label().to_lowercase()),
                                 cx,
                             )),
                     )
@@ -1590,7 +1592,8 @@ impl AccountsView {
                             .child(div().text_sm().font_semibold().truncate().child(p.name.clone()))
                             .child(widgets::caption("The skin you wear", cx)),
                     )
-                    .child(Button::new("apply-skin").small().primary().label("Apply").disabled(true)),
+                    // Nothing to apply until a skin is picked below.
+                    .child(widgets::caption("Pick a skin to preview it here", cx)),
             });
         let preview = v_flex()
             .flex_none()
@@ -1619,47 +1622,32 @@ impl AccountsView {
             Pose::LookAround => IconName::Eye,
             Pose::Cycle => IconName::Repeat,
         };
-        let poses = v_flex().gap_1p5().children(Pose::GROUPS.iter().map(|(group, list)| {
-            let chips = list.iter().map(|&p| {
-                let on = p == pose;
-                let viewer = self.viewer.clone();
-                h_flex()
-                    .id(SharedString::from(format!("pose:{}", p.label())))
-                    .gap_1()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .text_xs()
-                    .map(|d| {
-                        if on {
-                            d.bg(theme.primary)
-                                .border_color(theme.primary)
-                                .text_color(theme.primary_foreground)
-                        } else {
-                            d.border_color(theme.border)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.list_hover))
+        // One menu of poses, so the animation doesn't dominate the tab.
+        let poses = {
+            let viewer = self.viewer.clone();
+            Button::new("pose-menu")
+                .small()
+                .outline()
+                .icon(pose_icon(pose))
+                .label(pose.label())
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu;
+                    for (i, (_, list)) in Pose::GROUPS.iter().enumerate() {
+                        if i > 0 {
+                            menu = menu.separator();
                         }
-                    })
-                    .child(Icon::new(pose_icon(p)).xsmall())
-                    .child(p.label())
-                    .on_click(move |_, _, cx| viewer.update(cx, |v, cx| v.set_pose(p, cx)))
-            });
-            h_flex()
-                .gap_1()
-                .items_start()
-                .child(
-                    div()
-                        .w(rems(4.25))
-                        .flex_none()
-                        .pt_0p5()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(*group),
-                )
-                .child(h_flex().flex_1().min_w_0().gap_1().flex_wrap().children(chips))
-        }));
+                        for &p in list.iter() {
+                            let viewer = viewer.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(p.label())
+                                    .icon(pose_icon(p))
+                                    .on_click(move |_, _, cx| viewer.update(cx, |v, cx| v.set_pose(p, cx))),
+                            );
+                        }
+                    }
+                    menu
+                })
+        };
 
         // The worn skin beside the previewed one.
         let compare = self.pending.as_ref().map(|pend| {
@@ -1698,7 +1686,7 @@ impl AccountsView {
             .flex_1()
             .min_w_0()
             .gap_4()
-            .child(v_flex().gap_1p5().child(section_title("Animation", cx)).child(poses))
+            .child(v_flex().gap_1p5().child(section_title("Preview", cx)).child(h_flex().child(poses)))
             .child(
                 v_flex()
                     .gap_1p5()
@@ -1778,7 +1766,8 @@ impl AccountsView {
                                 .child(
                                     Button::new("apply-url")
                                         .small()
-                                        .primary()
+                                        .outline()
+
                                         .label("Preview")
                                         .disabled(busy)
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -1828,11 +1817,11 @@ impl AccountsView {
             .border_1()
             .map(|d| {
                 if previewing {
-                    d.border_color(theme.primary).bg(theme.primary.opacity(0.1))
+                    d.border_color(theme.primary).bg(theme.primary.opacity(widgets::alpha::SELECTED))
                 } else {
                     d.border_color(theme.border)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.list_hover))
+                        .clickable(cx)
+                        .hover(|s| widgets::row_hover(s, cx))
                 }
             })
             .child(
@@ -2109,10 +2098,11 @@ impl AccountsView {
                 .border_1()
                 .map(|d| {
                     if active {
-                        d.border_color(theme.primary).bg(theme.primary.opacity(0.1))
+                        d.border_color(theme.primary).bg(theme.primary.opacity(widgets::alpha::SELECTED))
                     } else {
                         d.border_color(theme.border)
-                            .when(!busy, |d| d.cursor_pointer().hover(|s| s.bg(theme.list_hover)))
+                            .when(!busy, |d| d.clickable(cx).hover(|s| widgets::row_hover(s, cx)))
+
                     }
                 })
                 .child(
@@ -2341,7 +2331,7 @@ impl Render for AccountsView {
                     .items_center()
                     .justify_center()
                     .gap_2()
-                    .child(Spinner::new())
+                    .child(widgets::skeleton_rows(4, rems(2.), cx).w(rems(20.)))
                     .child(widgets::caption("Reading your Minecraft profile…", cx))
                     .into_any_element(),
                 Load::Failed(e) => v_flex()
