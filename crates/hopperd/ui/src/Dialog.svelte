@@ -35,6 +35,7 @@
       {/if}
       <div class="row end">
         <button type="button" class="btn" onclick={() => answer(dialog.input ? null : false)}>Cancel</button>
+        {#if dialog.alt}<button type="button" class="btn" onclick={() => answer('alt')}>{dialog.alt}</button>{/if}
         <button class="btn" class:pri={!dialog.danger} class:bad={dialog.danger} bind:this={okBtn}>{dialog.ok}</button>
       </div>
     </form>

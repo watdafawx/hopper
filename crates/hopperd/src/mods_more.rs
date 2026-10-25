@@ -157,7 +157,6 @@ async fn lock(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, P
         Ok(())
     })
     .await?;
-    crate::mods_api::forget_updates(&id);
     Ok(Json(json!({ "ok": true })))
 }
 

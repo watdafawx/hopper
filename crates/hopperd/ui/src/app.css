@@ -35,13 +35,14 @@ a.btn { color: var(--text); }
 .btn.ghost { background: none; border-color: transparent; color: var(--subtle); }
 .btn.sm { padding: 3px 8px; font-size: 12px; }
 .btn.icon { padding: 5px 6px; }
-.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line2); color: var(--subtle); white-space: nowrap; }
-.chip.running { color: var(--green); border-color: #22c55e55; background: var(--green-dim); }
-.chip.starting, .chip.stopping { color: var(--gold); border-color: #eab30855; background: var(--gold-dim); }
-.chip.crashed { color: var(--red); border-color: #ef444455; background: var(--red-dim); }
-.chip.lan { color: var(--blue); border-color: #60a5fa55; background: var(--blue-dim); }
-.chip.ts { color: var(--violet); border-color: #a78bfa55; background: var(--violet-dim); }
-.chip.acc, .chip.on { color: var(--acc); border-color: #f9731655; background: var(--acc-dim); }
+/* Tinted, no border: the same rule as Hopper desktop's chips. */
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid transparent; background: #ffffff0d; color: var(--subtle); white-space: nowrap; }
+.chip.running { color: var(--green); border-color: transparent; background: var(--green-dim); }
+.chip.starting, .chip.stopping { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
+.chip.crashed { color: var(--red); border-color: transparent; background: var(--red-dim); }
+.chip.lan { color: var(--blue); border-color: transparent; background: var(--blue-dim); }
+.chip.ts { color: var(--violet); border-color: transparent; background: var(--violet-dim); }
+.chip.acc, .chip.on { color: var(--acc); border-color: transparent; background: var(--acc-dim); }
 .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted); }
 .dot.running { background: var(--green); box-shadow: 0 0 0 3px var(--green-dim); }
 .dot.starting, .dot.stopping { background: var(--gold); }

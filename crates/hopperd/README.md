@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages. 0.7.0: Mods table like Hopper desktop.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -142,6 +142,16 @@ the address the player typed and passes them to that server's own port.
 - Settings: `[router]` in `hopperd.toml` (`enabled`, `port`, `domain`,
   `unknown_server`); per server in `.hopper-route.json` in its folder.
 - Servers see players as coming from 127.0.0.1 (no proxy forwarding yet).
+
+## Mods table like Hopper desktop (0.7.0)
+
+- The Mods tab is desktop's table: Name with tags, Update / What changed (or Changelog on hover), Author, Side, On and Added columns that sort, Updates first and Only yours.
+- Versions and changelogs (dialog and side panel): every version from the installed one to the newest with its changelog, Update to newest, Reinstall, Reset config, and older versions to roll back to.
+- Review updates groups Patch / Major / Alpha-beta; updates whose new file would stop the server loading start unticked.
+- Checkboxes (shift for a range) and a bulk bar: on, off, update, ignore / allow updates, remove. Right-click or ⋯ for the row menu, including switching between CurseForge and Modrinth.
+- Turning off or removing a mod others need asks first. Mods in twice get "Keep newest".
+- The update check is kept in the data folder (`update-checks.json`) across restarts, and one update no longer re-checks the whole server.
+- API: `GET mods/changelogs?file=`, `POST mods/related`, `mods/toggle-many`, `mods/remove-many`, `mods/lock-many`, `mods/switch` (job).
 
 ## Files explorer and Settings pages (0.6.0)
 

@@ -639,6 +639,93 @@ impl Update {
     }
 }
 
+/// How big a jump an update is, for the review before updating several.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Risk {
+    /// Same major and minor version.
+    Patch,
+    /// A new major or minor version, or one Hopper can't read.
+    Major,
+    /// An alpha or beta file.
+    Pre,
+}
+
+impl Risk {
+    /// Best effort, from the versions in the two file names.
+    pub fn of(u: &Update) -> Self {
+        if u.file.release_type > 1 {
+            return Risk::Pre;
+        }
+        let (old, new) = u.versions();
+        let (a, b) = (version_nums(&old), version_nums(&new));
+        match (a.len(), b.len()) {
+            (0, _) | (_, 0) => Risk::Major,
+            // A lone build number counts as a patch.
+            (1, 1) => Risk::Patch,
+            _ if a.first() != b.first() || a.get(1) != b.get(1) => Risk::Major,
+            _ => Risk::Patch,
+        }
+    }
+
+    /// "patch", "major" or "pre".
+    pub fn key(self) -> &'static str {
+        match self {
+            Risk::Patch => "patch",
+            Risk::Major => "major",
+            Risk::Pre => "pre",
+        }
+    }
+}
+
+/// The numbers at the start of a version: "5.27.26-beta" gives [5, 27, 26].
+pub fn version_nums(v: &str) -> Vec<u64> {
+    let Some(start) = v.find(|c: char| c.is_ascii_digit()) else {
+        return Vec::new();
+    };
+    v[start..]
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .map_while(|p| p.parse().ok())
+        .collect()
+}
+
+/// What would stop the game loading with `file` in place, known before it
+/// downloads: from the dependencies the site lists for it. Returns the
+/// problems with a name (an installed mod turned off, or one it refuses to
+/// load beside) and the required projects the instance lacks, by id.
+///
+/// A newer loader or Minecraft the file needs is only in the jar, so it
+/// shows after the update.
+pub fn load_problems(inst: &Instance, file: &cf::File) -> (Vec<String>, Vec<u64>) {
+    let required: Vec<u64> = match &file.modrinth {
+        Some(mr) => mr.requires.iter().map(|p| crate::modrinth::num_id(p)).collect(),
+        None => file
+            .dependencies
+            .iter()
+            .filter(|d| d.relation_type == cf::DEP_REQUIRED)
+            .map(|d| d.mod_id)
+            .collect(),
+    };
+    let (mut issues, mut missing) = (Vec::new(), Vec::new());
+    for dep in required {
+        // Updates don't add mods, nor turn them on.
+        match inst.addons.iter().find(|a| a.project_id == dep) {
+            Some(a) if !a.enabled => issues.push(format!("needs {}, which is turned off", a.name)),
+            Some(_) => {}
+            None if !missing.contains(&dep) => missing.push(dep),
+            None => {}
+        }
+    }
+    for d in file.dependencies.iter().filter(|d| d.relation_type == cf::DEP_INCOMPATIBLE) {
+        if let Some(a) = inst.addons.iter().find(|a| a.project_id == d.mod_id && a.enabled) {
+            issues.push(format!("won't load beside {}", a.name));
+        }
+    }
+    (issues, missing)
+}
+
 /// The part of two file names that differs, widened to whole
 /// version-looking pieces: "create-1.21.1-6.0.4.jar" and
 /// "create-1.21.1-6.0.6.jar" give ("6.0.4", "6.0.6"). Names with nothing

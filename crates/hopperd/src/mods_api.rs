@@ -134,28 +134,117 @@ pub(crate) fn instance_of(e: &Entry) -> anyhow::Result<Instance> {
     instance(e)
 }
 
-/// Update checks per server: (when, rows by project id). They ask
-/// CurseForge and Modrinth about every mod, so a check is kept for a while.
-static UPDATES: std::sync::Mutex<Option<HashMap<String, (std::time::Instant, Vec<Value>)>>> = std::sync::Mutex::new(None);
-const UPDATES_FOR: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+/// Each server's last update check: when (unix seconds) and the offers.
+/// Kept in the data folder too, so a restart doesn't mean a new check (it
+/// takes a while on a big pack).
+type Checks = HashMap<String, (u64, Vec<Value>)>;
+static UPDATES: std::sync::Mutex<Option<Checks>> = std::sync::Mutex::new(None);
+static UPDATES_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+const UPDATES_FOR: u64 = 6 * 3600;
 
-/// Drops a server's update check (after its mods changed).
-pub(crate) fn forget_updates(id: &str) {
-    if let Some(m) = UPDATES.lock().unwrap().as_mut() {
-        m.remove(id);
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Where the checks are saved; set once at start.
+pub fn keep_updates_in(data_dir: &std::path::Path) {
+    let _ = UPDATES_FILE.set(data_dir.join("update-checks.json"));
+}
+
+fn checks() -> std::sync::MutexGuard<'static, Option<Checks>> {
+    let mut g = UPDATES.lock().unwrap();
+    if g.is_none() {
+        *g = Some(
+            UPDATES_FILE
+                .get()
+                .and_then(|f| std::fs::read(f).ok())
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default(),
+        );
+    }
+    g
+}
+
+fn save_checks(m: &Checks) {
+    if let Some(f) = UPDATES_FILE.get()
+        && let Ok(b) = serde_json::to_vec(m)
+    {
+        let _ = std::fs::write(f, b);
     }
 }
 
-fn cached_updates(id: &str) -> Option<Vec<Value>> {
-    let g = UPDATES.lock().unwrap();
+/// Drops a server's update check (after its mods changed).
+pub(crate) fn forget_updates(id: &str) {
+    let mut g = checks();
+    if let Some(m) = g.as_mut()
+        && m.remove(id).is_some()
+    {
+        save_checks(m);
+    }
+}
+
+/// Drops the offers for these files from a server's update check (they were
+/// removed, updated or switched), keeping the rest: a new check takes long
+/// on a big pack.
+pub(crate) fn drop_updates_for(id: &str, files: &[String]) {
+    let mut g = checks();
+    let Some(m) = g.as_mut() else { return };
+    if let Some((_, v)) = m.get_mut(id) {
+        v.retain(|u| {
+            let f = u["from_file"].as_str().unwrap_or("");
+            !files.iter().any(|x| x.trim_end_matches(".disabled").eq_ignore_ascii_case(f.trim_end_matches(".disabled")))
+        });
+        save_checks(m);
+    }
+}
+
+fn keep_updates(id: &str, v: Vec<Value>) {
+    let mut g = checks();
+    let m = g.get_or_insert_with(HashMap::new);
+    m.insert(id.to_string(), (now_secs(), v));
+    save_checks(m);
+}
+
+pub(crate) fn cached_updates(id: &str) -> Option<Vec<Value>> {
+    let g = checks();
     let (at, v) = g.as_ref()?.get(id)?;
-    (at.elapsed() < UPDATES_FOR).then(|| v.clone())
+    (now_secs().saturating_sub(*at) < UPDATES_FOR).then(|| v.clone())
+}
+
+/// Fixes entries older panels saved wrong: a jar that was off saved as
+/// "x.jar.disabled" and marked on, and the second entry identifying it again
+/// added for the same jar. The jar on disk says whether it's on. True when
+/// anything changed.
+fn heal(i: &mut Instance) -> bool {
+    let dir = i.mods_dir();
+    let mut changed = false;
+    for a in i.addons.iter_mut().filter(|a| a.folder() == "mods") {
+        if let Some(base) = a.file_name.strip_suffix(".disabled") {
+            a.file_name = base.to_string();
+            changed = true;
+        }
+        let on = dir.join(&a.file_name).is_file();
+        let off = dir.join(format!("{}.disabled", a.file_name)).is_file();
+        if on != off && a.enabled != on {
+            a.enabled = on;
+            changed = true;
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    let before = i.addons.len();
+    i.addons.retain(|a| a.folder() != "mods" || seen.insert(a.file_name.to_lowercase()));
+    changed || i.addons.len() != before
 }
 
 fn instance(e: &Entry) -> anyhow::Result<Instance> {
     if e.root.join(instances::HOPPER_FILE).is_file()
         && let Some(mut i) = instances::load(&e.root)
     {
+        if heal(&mut i) {
+            log::info!("{}: fixed the mod list's entries for jars that are off", e.name);
+            i.save()?;
+            forget_updates(&e.id);
+        }
         // Saved before the version was known (a new server that hadn't run):
         // fill it in now if it can be found.
         if i.game_version.is_empty() {
@@ -211,10 +300,12 @@ async fn list(
         let inst = instance(&e)?;
         let dir = inst.mods_dir();
         // The last update check's results, by project id.
+        // By the file each offer is for: a mod in twice (an old jar kept
+        // off beside the new one) gets it on the right row only.
         let ups: HashMap<String, Value> = cached_updates(&e.id)
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|u| Some((u["project_id"].as_str()?.to_string(), u)))
+            .filter_map(|u| Some((u["from_file"].as_str()?.trim_end_matches(".disabled").to_lowercase(), u)))
             .collect();
         // What the jars say about themselves (name, version, side).
         let scanned: HashMap<String, hopper_core::model::ModInfo> = if dir.is_dir() {
@@ -222,6 +313,7 @@ async fn list(
         } else {
             HashMap::new()
         };
+        let (cats, cats_pending) = crate::mods_table::categories(&inst);
         let mut rows: Vec<Value> = Vec::new();
         let mut known = std::collections::HashSet::new();
         for a in &inst.addons {
@@ -237,7 +329,10 @@ async fn list(
                 "project_id": id_str(a.project_id), "source": if a.project_id == 0 { "" } else if modrinth::is_mr(a.project_id) { "modrinth" } else { "curseforge" },
                 "from_pack": a.from_pack, "page": a.page, "author": a.author,
                 "locked": a.locked, "file_id": id_str(a.file_id), "release_type": a.release_type,
-                "update": ups.get(&id_str(a.project_id)).cloned(),
+                "update": ups.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).cloned(),
+                "date_added": a.date_added, "file_date": a.file_date,
+                "categories": cats.get(&a.file_name.to_lowercase()).cloned().unwrap_or_default(),
+                "requires": a.requires.iter().map(|r| id_str(*r)).collect::<Vec<_>>(),
             }));
         }
         // Jars Hopper doesn't know yet.
@@ -264,6 +359,7 @@ async fn list(
             "game_version": inst.game_version, "loader": inst.loader,
             "pack": inst.pack.as_ref().map(|p| p.name.clone()),
             "curseforge": cf::api_key().is_some(),
+            "categories_pending": cats_pending,
             "mods": rows,
         }))
     })
@@ -307,7 +403,7 @@ async fn identify(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    forget_updates(&id);
+    let sid = id.clone();
     let job = crate::pack_api::spawn(&app, format!("Identifying {}'s mods", e.name), move |job| {
         let mut inst = instance(&e)?;
         let first = inst.addons.is_empty();
@@ -335,9 +431,11 @@ async fn identify(
                 let (Some(name), Some(p)) = (by_hash.get(&hash), projects.iter().find(|p| p.id == v.project_id)) else { continue };
                 let m = modrinth::project_to_mod(p, "");
                 let mut f = modrinth::version_to_file(&v);
-                f.file_name = name.clone();
+                // A jar that's off is "x.jar.disabled" on disk; the entry
+                // names the jar ("x.jar") and says it's off.
+                f.file_name = name.trim_end_matches(".disabled").to_string();
                 let mut a = install::addon_from(&m, &f, false);
-                a.enabled = true;
+                a.enabled = !name.ends_with(".disabled");
                 inst.addons.push(a);
             }
         }
@@ -347,6 +445,10 @@ async fn identify(
             }
         }
         inst.save()?;
+        // Newly known mods need checking; nothing new keeps the last check.
+        if inst.addons.len() > before {
+            forget_updates(&sid);
+        }
         Ok(json!({ "identified": inst.addons.len() - before, "unknown": install::loose_jars(&inst).len() }))
     });
     Ok(Json(json!({ "job": job })))
@@ -361,7 +463,7 @@ struct FileBody {
 
 /// The mod's index in the instance, adding an unknown jar as a bare entry
 /// so it can be turned off or removed too.
-fn index_of(inst: &mut Instance, file: &str) -> anyhow::Result<usize> {
+pub(crate) fn index_of(inst: &mut Instance, file: &str) -> anyhow::Result<usize> {
     if let Some(i) = inst.addons.iter().position(|a| a.file_name.eq_ignore_ascii_case(file) && a.folder() == "mods") {
         return Ok(i);
     }
@@ -386,7 +488,6 @@ async fn toggle(
     Json(b): Json<FileBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    forget_updates(&id);
     let running = e.server.state().is_alive();
     blocking(move || {
         let mut inst = instance(&e)?;
@@ -405,7 +506,7 @@ async fn remove(
     Json(b): Json<FileBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    forget_updates(&id);
+    drop_updates_for(&id, std::slice::from_ref(&b.file));
     let running = e.server.state().is_alive();
     log::info!("{}: removing {}", e.name, b.file);
     blocking(move || {
@@ -516,20 +617,45 @@ async fn updates(
     let v = blocking(move || {
         let inst = instance(&e)?;
         let ups = install::check_updates(&inst)?;
+        // Names of required mods the server lacks, looked up once; `None`
+        // is one that's installed after all (from the other site).
+        let mut names: HashMap<u64, Option<String>> = HashMap::new();
         Ok(ups
             .iter()
-            .filter(|u| inst.addons.iter().any(|a| a.project_id == u.project_id && !a.from_pack))
-            .map(|u| {
+            .filter_map(|u| {
+                // The entry it was checked for (by file: a mod can be in twice).
+                let a = inst.addons.iter().find(|a| a.file_name == u.from).or_else(|| inst.addons.iter().find(|a| a.project_id == u.project_id))?;
+                (!a.from_pack).then_some((u, a))
+            })
+            .map(|(u, a)| {
                 let (from, to) = u.versions();
+                let risk = install::Risk::of(u);
+                let (mut issues, missing) = install::load_problems(&inst, &u.file);
+                for id in missing {
+                    let name = names.entry(id).or_insert_with(|| match hopper_core::source::get_mod(id) {
+                        Ok(m) if hopper_core::browse::installed_addon(&inst, &m).is_some_and(|a| a.enabled) => None,
+                        Ok(m) => Some(m.name),
+                        Err(_) => Some(String::new()),
+                    });
+                    match name {
+                        None => {}
+                        Some(n) if !n.is_empty() => issues.push(format!("needs {n}, which isn't installed")),
+                        Some(_) => issues.push("needs a mod that isn't installed".to_string()),
+                    }
+                }
                 json!({
                     "project_id": id_str(u.project_id), "name": u.name, "from": from, "to": to, "file": u.file.file_name,
-                    "file_id": id_str(u.file.id), "date": u.file.file_date,
+                    "file_id": id_str(u.file.id), "date": u.file.file_date, "release_type": u.file.release_type,
+                    "from_file": a.file_name,
+                    "risk": risk.key(), "issues": issues,
+                    // A test version in place of a release starts unticked.
+                    "pre_skip": risk == install::Risk::Pre && a.release_type <= 1,
                 })
             })
             .collect::<Vec<_>>())
     })
     .await?;
-    UPDATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(id.clone(), (std::time::Instant::now(), v.clone()));
+    keep_updates(&id, v.clone());
     Ok(Json(json!({ "updates": v, "cached": false, "curseforge": cf::api_key().is_some() })))
 }
 
@@ -547,16 +673,42 @@ async fn update(
     Json(b): Json<UpdateBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    forget_updates(&id);
+    let sid = id.clone();
     let job = crate::pack_api::spawn(&app, format!("Updating {}'s mods", e.name), move |job| {
         let mut inst = instance(&e)?;
-        let ups: Vec<install::Update> = install::check_updates(&inst)?
-            .into_iter()
-            .filter(|u| b.project_ids.contains(&u.project_id))
-            .filter(|u| inst.addons.iter().any(|a| a.project_id == u.project_id && !a.from_pack))
-            .collect();
-        let done = install::apply_updates(&mut inst, &ups, job)?;
-        Ok(json!({ "updated": done }))
+        // The offers the last check found; only a mod it didn't cover is
+        // checked again (a whole check takes long on a big pack).
+        let cached = cached_updates(&sid).unwrap_or_default();
+        let mut ups: Vec<install::Update> = Vec::new();
+        let mut unknown = Vec::new();
+        for pid in &b.project_ids {
+            let offer = cached.iter().find(|u| u["project_id"].as_str() == Some(id_str(*pid).as_str()));
+            let a = offer
+                .and_then(|u| u["from_file"].as_str())
+                .and_then(|f| inst.addons.iter().find(|a| a.file_name == f))
+                .or_else(|| inst.addons.iter().find(|a| a.project_id == *pid));
+            let Some(a) = a.filter(|a| !a.from_pack) else { continue };
+            match offer.and_then(|u| u["file_id"].as_str()?.parse::<u64>().ok()).and_then(|f| hopper_core::source::file(*pid, f).ok()) {
+                Some(file) => ups.push(install::Update { project_id: *pid, name: a.name.clone(), from: a.file_name.clone(), file }),
+                None => unknown.push(*pid),
+            }
+        }
+        if !unknown.is_empty() {
+            ups.extend(install::check_updates(&inst)?.into_iter().filter(|u| {
+                unknown.contains(&u.project_id) && inst.addons.iter().any(|a| a.file_name == u.from && !a.from_pack)
+            }));
+        }
+        let froms: Vec<String> = ups.iter().map(|u| u.from.clone()).collect();
+        // Website-only files go to the download list (not here).
+        let web = install::apply_updates(&mut inst, &ups, job)?;
+        drop_updates_for(&sid, &froms);
+        // What changed, read back: an update that failed left its file.
+        let (mut updated, mut failed) = (Vec::new(), Vec::new());
+        for u in &ups {
+            let now = inst.addons.iter().any(|a| a.project_id == u.project_id && a.file_name == u.file.file_name);
+            if now { updated.push(u.name.clone()) } else { failed.push(u.name.clone()) }
+        }
+        Ok(json!({ "updated": updated, "failed": failed, "web": web.len() }))
     });
     Ok(Json(json!({ "job": job })))
 }
@@ -605,5 +757,28 @@ mod tests {
         assert_eq!(mc_for_neoforge("26.3.0.95").as_deref(), Some("26.3"));
         assert_eq!(mc_for_neoforge("26.1.2.5").as_deref(), Some("26.1.2"));
         assert_eq!(mc_for_neoforge("x"), None);
+    }
+
+    #[test]
+    fn heals_jars_that_are_off_tracked_twice() {
+        use hopper_core::cf;
+        use hopper_core::instances::{Addon, Instance};
+        let dir = std::env::temp_dir().join(format!("hopperd-heal-{}", std::process::id()));
+        let mods = dir.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::write(mods.join("dh-3.2.0.jar.disabled"), b"x").unwrap();
+        std::fs::write(mods.join("jei.jar"), b"x").unwrap();
+        let mk = |file: &str, id: u64, on: bool| Addon { file_name: file.into(), project_id: id, enabled: on, class_id: cf::CLASS_MODS, ..Default::default() };
+        let mut i = Instance {
+            root: dir.clone(),
+            // As an older panel saved it, then identify added the jar again.
+            addons: vec![mk("dh-3.2.0.jar.disabled", 1, true), mk("dh-3.2.0.jar", 2, false), mk("jei.jar", 3, true)],
+            ..Default::default()
+        };
+        assert!(super::heal(&mut i));
+        let files: Vec<(&str, u64, bool)> = i.addons.iter().map(|a| (a.file_name.as_str(), a.project_id, a.enabled)).collect();
+        assert_eq!(files, vec![("dh-3.2.0.jar", 1, false), ("jei.jar", 3, true)]);
+        assert!(!super::heal(&mut i));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

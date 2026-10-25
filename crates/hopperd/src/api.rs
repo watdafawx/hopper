@@ -146,6 +146,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::mcp::routes())
         .merge(crate::router::routes())
         .merge(crate::mods_more::routes())
+        .merge(crate::mods_table::routes())
         .merge(crate::fs_zip::routes())
         .fallback(crate::ui::serve)
         .layer(axum::middleware::from_fn_with_state(app.clone(), crate::security::guard))

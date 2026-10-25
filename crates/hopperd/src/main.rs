@@ -23,6 +23,7 @@ mod manage_api;
 mod mcp;
 mod mods_api;
 mod mods_more;
+mod mods_table;
 mod security;
 mod net;
 mod pack_api;
@@ -178,6 +179,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     let data_dir = args.data.unwrap_or_else(config::data_dir);
     std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
     let mut cfg = Config::load_or_create(&data_dir)?;
+    mods_api::keep_updates_in(&data_dir);
     let mut changed = false;
     if let Some(p) = args.port {
         cfg.port = p;

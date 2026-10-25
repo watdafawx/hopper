@@ -22,7 +22,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::cf;
-use hopper::install::Update;
+use hopper::install::{Risk, Update, load_problems};
 use hopper::instances::{Addon, Instance};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -3628,34 +3628,13 @@ pub fn set_locks(
         .detach();
 }
 
-/// How big a jump an update is, for the review before Update all.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Risk {
-    /// Same major and minor version.
-    Patch,
-    /// A new major or minor version, or one Hopper can't read.
-    Major,
-    /// An alpha or beta file.
-    Pre,
+/// How Risk shows in the review (the kind itself is hopper::install::Risk).
+trait RiskUi {
+    fn tag(self, cx: &App) -> gpui_kit::component::tag::Tag;
+    fn label(self) -> &'static str;
 }
 
-impl Risk {
-    /// Best effort, from the versions in the two file names.
-    fn of(u: &Update) -> Self {
-        if u.file.release_type > 1 {
-            return Risk::Pre;
-        }
-        let (old, new) = u.versions();
-        let (a, b) = (version_nums(&old), version_nums(&new));
-        match (a.len(), b.len()) {
-            (0, _) | (_, 0) => Risk::Major,
-            // A lone build number counts as a patch.
-            (1, 1) => Risk::Patch,
-            _ if a.first() != b.first() || a.get(1) != b.get(1) => Risk::Major,
-            _ => Risk::Patch,
-        }
-    }
-
+impl RiskUi for Risk {
     /// A tinted chip, like every chip.
     fn tag(self, cx: &App) -> gpui_kit::component::tag::Tag {
         let theme = cx.theme();
@@ -3673,55 +3652,6 @@ impl Risk {
             Risk::Pre => "test versions, not marked as releases",
         }
     }
-}
-
-/// The numbers at the start of a version: "5.27.26-beta" gives [5, 27, 26].
-fn version_nums(v: &str) -> Vec<u64> {
-    let Some(start) = v.find(|c: char| c.is_ascii_digit()) else {
-        return Vec::new();
-    };
-    v[start..]
-        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .next()
-        .unwrap_or("")
-        .split('.')
-        .map_while(|p| p.parse().ok())
-        .collect()
-}
-
-/// What would stop the game loading with `file` in place, known before it
-/// downloads: from the dependencies the site lists for it. Returns the
-/// problems with a name (an installed mod turned off, or one it refuses to
-/// load beside) and the required projects the instance lacks, by id.
-///
-/// A newer loader or Minecraft the file needs is only in the jar, so it
-/// shows after the update, in the "problems will stop the game" banner.
-fn load_problems(inst: &Instance, file: &cf::File) -> (Vec<String>, Vec<u64>) {
-    let required: Vec<u64> = match &file.modrinth {
-        Some(mr) => mr.requires.iter().map(|p| hopper::modrinth::num_id(p)).collect(),
-        None => file
-            .dependencies
-            .iter()
-            .filter(|d| d.relation_type == cf::DEP_REQUIRED)
-            .map(|d| d.mod_id)
-            .collect(),
-    };
-    let (mut issues, mut missing) = (Vec::new(), Vec::new());
-    for dep in required {
-        // Updates don't add mods, nor turn them on.
-        match inst.addons.iter().find(|a| a.project_id == dep) {
-            Some(a) if !a.enabled => issues.push(format!("needs {}, which is turned off", a.name)),
-            Some(_) => {}
-            None if !missing.contains(&dep) => missing.push(dep),
-            None => {}
-        }
-    }
-    for d in file.dependencies.iter().filter(|d| d.relation_type == cf::DEP_INCOMPATIBLE) {
-        if let Some(a) = inst.addons.iter().find(|a| a.project_id == d.mod_id && a.enabled) {
-            issues.push(format!("won't load beside {}", a.name));
-        }
-    }
-    (issues, missing)
 }
 
 /// One update in the review.
