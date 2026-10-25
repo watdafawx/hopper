@@ -114,11 +114,10 @@
       </div>
     {/each}
     <button class="btn sm ghost add" onclick={() => (addrs = [...addrs, ''])}><Plus size={13} />Add another address</button>
-    <label class="row small"><input type="checkbox" bind:checked={sleepOn} disabled={!!server.managed_by} />Sleep when empty for
+    <label class="row small"><input type="checkbox" bind:checked={sleepOn} />Sleep when empty for
       <span class="input mins"><input type="number" min="1" max="1440" bind:value={minutes} disabled={!sleepOn} /></span>min</label>
     <div class="tiny muted">
-      {#if server.managed_by}{server.managed_by} runs this server, so Hopper can't start it when someone joins.
-      {:else if sleepOn}Joining starts it again; the server list shows "Sleeping" meanwhile.
+      {#if sleepOn}Joining starts it again; the server list shows "Sleeping" meanwhile.
       {:else}Off: it runs until someone stops it.{/if}
     </div>
     {#if !router.config.enabled}

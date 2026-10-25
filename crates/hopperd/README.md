@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.3.0: taking servers over from Crafty.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -143,28 +143,18 @@ the address the player typed and passes them to that server's own port.
   `unknown_server`); per server in `.hopper-route.json` in its folder.
 - Servers see players as coming from 127.0.0.1 (no proxy forwarding yet).
 
-## Taking servers over from Crafty (0.3.0)
+## Servers other panels know (0.4.0)
 
-Servers Crafty Controller manages are listed with "Run by Crafty", and
-hopperd won't start them. To move one over:
+Any server folder runs here in place, also ones Crafty or MCSS know: their
+files are left alone and nothing in the folder is rewritten, so you can
+keep moving between panels. Such servers show "Also in Crafty" (or MCSS).
 
-- Stop it in Crafty, then open it here: **Take over…** in the strip under
-  its name. The dialog shows what Hopper will use before anything changes.
-- Its `run.bat` gets Crafty's exact start command (memory, arguments, its
-  Java); an old `run.bat` is kept as `run.bat.before-hopper`. Crafty's
-  `crafty_managed.txt` is set aside. Nothing in the world or mods changes.
-- Where Crafty's command says plain `java` (whatever Java is first on PATH,
-  which changes when a new one is installed), the right installed Java for
-  the server's Minecraft version is written in instead.
-- Crafty's settings are read from a copy of its database
-  (`crafty\app\config\db\crafty.sqlite` at the top of a drive or in
-  Program Files; `CRAFTY_DIR` to point elsewhere). Hopper never writes to
-  Crafty.
-- Refused while Crafty runs the server (its port is in use or its world is
-  locked). Remove the server from Crafty afterwards, or never start it
-  there, so both panels don't run it.
-- **Give back to Crafty** (Settings) puts the old run.bat and the marker
-  back.
+- Starting one that's already running elsewhere is refused: its port is in
+  use, or its world's `session.lock` is held.
+- The start script is `run.bat`, else `start.bat`, else the server jar.
+  When it says plain `java` (whatever Java is first on PATH, which changes
+  when a new one is installed), the installed Java that fits the server's
+  Minecraft version is used, and the console says so.
 
 ## Install as a service
 
@@ -243,7 +233,6 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `GET /fs/{id}/search?q=&path=[&regex=1]` → `{hits: [{path, line, text}], more}` | text in files and names |
 | `GET` / `PUT /router` `{enabled, port, domain, unknown_server}`, `POST /router/check` | server addresses: settings (owner), DNS and port check |
 | `GET` / `PUT /servers/{id}/address` `{addresses, sleep_after_minutes}`, `POST .../address/move-port` | a server's addresses and sleep |
-| `GET` / `POST /servers/{id}/takeover`, `POST /servers/{id}/give-back` | take a Crafty server over (`GET` shows the plan: Java, memory), give it back |
 | `POST /mcp` | Model Context Protocol (JSON-RPC) |
 | `GET /ws` | live: `snapshot` every second; send `{"op":"console","server":id}` to follow a console |
 

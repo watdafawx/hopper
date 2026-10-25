@@ -88,10 +88,12 @@ fn launch_line(text: &str) -> Option<&str> {
 }
 
 /// A java command line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Launch {
     pub java: PathBuf,
     pub args: Vec<String>,
+    /// Why Hopper changed something about it (shown in the console).
+    pub note: Option<String>,
 }
 
 /// The command `run.bat` would run, with `user_jvm_args.txt` expanded into
@@ -112,33 +114,91 @@ pub fn parse_launch(text: &str, jvm: &JvmArgs) -> Option<Launch> {
     if !args.iter().any(|a| a.eq_ignore_ascii_case("nogui")) {
         args.push("nogui".into());
     }
-    Some(Launch { java, args })
+    Some(Launch { java, args, note: None })
 }
 
-/// How to start the server in `root`: its run.bat, else `server.jar` with
-/// `java` from PATH.
+/// Start scripts Hopper reads, in order (run.bat is NeoForge's and
+/// Hopper's; start.bat is common in packs and other panels).
+pub const SCRIPTS: [&str; 2] = [RUN_BAT, "start.bat"];
+
+/// How to start the server in `root`: its run.bat (or start.bat), else
+/// `server.jar` with `java` from PATH. The folder is used as it is; when the
+/// script says plain `java` (whatever is first on PATH, which changes when
+/// a new Java is installed), the installed Java that fits its Minecraft
+/// version is used instead.
 pub fn launch_command(root: &Path) -> anyhow::Result<Launch> {
     let jvm = JvmArgs::load(root)?;
-    if let Ok(text) = fs::read_to_string(root.join(RUN_BAT))
-        && let Some(mut l) = parse_launch(&text, &jvm)
-    {
-        l.java = console_java(&l.java);
-        return Ok(l);
-    }
-    for jar in ["server.jar", "fabric-server-launch.jar", "quilt-server-launch.jar"] {
-        if root.join(jar).is_file() {
-            let mut args = jvm.args();
-            args.extend(["-jar".into(), jar.into(), "nogui".into()]);
-            return Ok(Launch {
-                java: "java".into(),
-                args,
-            });
+    let mut found = None;
+    for script in SCRIPTS {
+        if let Ok(text) = fs::read_to_string(root.join(script))
+            && let Some(l) = parse_launch(&text, &jvm)
+        {
+            found = Some((l, text));
+            break;
         }
     }
-    anyhow::bail!(
-        "{} has no run.bat or server.jar to start",
-        root.display()
-    )
+    let (mut l, text) = match found {
+        Some(f) => f,
+        None => {
+            let jar = ["server.jar", "fabric-server-launch.jar", "quilt-server-launch.jar"]
+                .into_iter()
+                .find(|j| root.join(j).is_file())
+                .with_context(|| format!("{} has no run.bat, start.bat or server.jar to start", root.display()))?;
+            let mut args = jvm.args();
+            args.extend(["-jar".into(), jar.into(), "nogui".into()]);
+            (Launch { java: "java".into(), args, note: None }, String::new())
+        }
+    };
+    if is_bare_java(&l.java)
+        && let Some(mc) = minecraft_version(root, &text)
+        && let Some(best) = crate::java::best(&crate::java::detect(Path::new("")), &mc, crate::java::Side::Server)
+    {
+        let exe = console_java(&best.install.exe);
+        l.note = Some(format!(
+            "The start script says plain \"java\"; using {} (Java {}) for Minecraft {mc}.",
+            exe.display(),
+            best.install.major
+        ));
+        l.java = exe;
+    }
+    l.java = console_java(&l.java);
+    Ok(l)
+}
+
+/// Whether `java` is plain `java` (looked up on PATH).
+pub fn is_bare_java(java: &Path) -> bool {
+    matches!(java.to_string_lossy().to_ascii_lowercase().as_str(), "java" | "java.exe" | "javaw" | "javaw.exe")
+}
+
+/// The Minecraft version a server folder is for: from Forge's or
+/// NeoForge's library path in its start script, Fabric's server jar, or
+/// what Hopper noted when it made the server.
+pub fn minecraft_version(root: &Path, script: &str) -> Option<String> {
+    let re_forge = regex::Regex::new(r"minecraftforge/forge/(\d+\.\d+(?:\.\d+)?)-").ok()?;
+    if let Some(c) = re_forge.captures(script) {
+        return Some(c[1].to_string());
+    }
+    let re_neo = regex::Regex::new(r"neoforged/neoforge/(\d+)\.(\d+)\.").ok()?;
+    if let Some(c) = re_neo.captures(script) {
+        let (a, b): (u32, u32) = (c[1].parse().ok()?, c[2].parse().ok()?);
+        // 21.1.x is for 1.21.1; from 26.1 on the versions match Minecraft's.
+        return Some(if a >= 26 {
+            format!("{a}.{b}")
+        } else if b == 0 {
+            format!("1.{a}")
+        } else {
+            format!("1.{a}.{b}")
+        });
+    }
+    for e in fs::read_dir(root.join(".fabric").join("server")).into_iter().flatten().flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if let Some(v) = n.strip_suffix("-server.jar")
+            && v.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            return Some(v.to_string());
+        }
+    }
+    super::HostedMeta::load(root).map(|m| m.minecraft).filter(|v| !v.is_empty())
 }
 
 /// Points the launch line at another java, keeping everything else.
@@ -206,5 +266,37 @@ mod tests {
         assert!(out.contains("\"C:\\j\\bin\\java.exe\" @user_jvm_args.txt -jar server.jar nogui %*"));
         let again = rewrite_java(&out, Path::new("java")).unwrap();
         assert!(again.contains("\"java\" @user_jvm_args.txt -jar"));
+    }
+
+    #[test]
+    fn finds_minecraft_versions() {
+        let r = Path::new("Z:/nowhere");
+        let v = |c: &str| minecraft_version(r, c);
+        assert_eq!(v("java @libraries/net/minecraftforge/forge/1.20.1-47.4.10/win_args.txt").as_deref(), Some("1.20.1"));
+        assert_eq!(v("java @libraries/net/neoforged/neoforge/21.1.219/win_args.txt").as_deref(), Some("1.21.1"));
+        assert_eq!(v("java @libraries/net/neoforged/neoforge/20.4.237/win_args.txt").as_deref(), Some("1.20.4"));
+        assert_eq!(v("java @libraries/net/neoforged/neoforge/21.0.167/win_args.txt").as_deref(), Some("1.21"));
+        assert_eq!(v("java @libraries/net/neoforged/neoforge/26.3.0.97/win_args.txt").as_deref(), Some("26.3"));
+        assert_eq!(v("java -jar server.jar"), None);
+        assert!(is_bare_java(Path::new("java")) && is_bare_java(Path::new("JAVA.EXE")));
+        assert!(!is_bare_java(Path::new(r"G:\jdk\bin\java.exe")));
+    }
+
+    #[test]
+    fn reads_start_bat_and_fabric_versions() {
+        let root = std::env::temp_dir().join(format!("hopper-script-start-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".fabric/server")).unwrap();
+        fs::write(root.join(".fabric/server/1.20.1-server.jar"), "").unwrap();
+        // A pack's own script, as another panel or the pack left it.
+        fs::write(root.join("start.bat"), "java -Dfabric.log.level=DEBUG -Xmx8G -jar fabric-server-launch.jar nogui\r\npause\r\n").unwrap();
+        let l = launch_command(&root).unwrap();
+        assert!(l.args.contains(&"-Xmx8G".to_string()) && l.args.contains(&"fabric-server-launch.jar".to_string()), "{:?}", l.args);
+        assert_eq!(minecraft_version(&root, ""), Some("1.20.1".into()));
+        // With a Java for 1.20.1 installed, plain java was swapped for it.
+        if l.note.is_some() {
+            assert!(!is_bare_java(&l.java), "{:?}", l.java);
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -56,7 +56,7 @@
               {s.loader || 'Minecraft'}{s.version ? ` · ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{:else}:{s.port}{/if}{alive(s) ? ` · ${uptime(s.uptime_secs)}` : ''}{#if s.sleep_after_minutes && s.state === 'stopped'} · Sleeping{/if}
             </div>
           </a>
-          {#if s.managed_by}<span class="chip">{s.managed_by}</span>{/if}
+          {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder">Also in {s.managed_by}</span>{/if}
           <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateLabel[s.state]}{s.exit_code != null ? ` (${s.exit_code})` : ''}</span>
         </div>
         <div class="meters">
@@ -77,7 +77,7 @@
           <span class="small subtle ell">{s.players.join(', ') || (alive(s) ? 'Nobody online' : '')}</span>
           <span class="sp"></span>
           {#if !alive(s)}
-            <button class="btn sm go" disabled={!!s.managed_by} onclick={() => power(s, 'start')}><Play size={13} />Start</button>
+            <button class="btn sm go" onclick={() => power(s, 'start')}><Play size={13} />Start</button>
           {:else}
             <button class="btn sm icon" title="Restart" onclick={() => power(s, 'restart')}><RotateCw size={13} /></button>
             <button class="btn sm icon bad" title="Stop" onclick={() => power(s, 'stop')}><Square size={13} /></button>

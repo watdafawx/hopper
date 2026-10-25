@@ -262,7 +262,20 @@ impl LocalServer {
         let props = super::properties::Properties::load(&self.root.join("server.properties"))?;
         let port = props.port();
         if !super::port_free(port) {
-            bail!("Port {port} is in use. Stop whatever uses it or change the server's port.");
+            bail!("Port {port} is in use: the server may already be running in another panel (Crafty, MCSS), or something else has the port.");
+        }
+        // Minecraft locks its world's session.lock while it runs.
+        let world = props.get("level-name").filter(|w| !w.trim().is_empty()).unwrap_or("world");
+        if let Ok(f) = OpenOptions::new().read(true).write(true).open(self.root.join(world).join("session.lock")) {
+            match f.try_lock() {
+                Ok(()) => {
+                    let _ = f.unlock();
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    bail!("Its world ({world}) is open in another program: the server may already be running in another panel (Crafty, MCSS).");
+                }
+                Err(_) => {}
+            }
         }
         let launch = launch_command(&self.root)?;
         self.spawn(&launch)
@@ -277,6 +290,9 @@ impl LocalServer {
         // without overwriting each other.
         let append = || OpenOptions::new().append(true).open(&path);
         let mut log = append()?;
+        if let Some(n) = &launch.note {
+            let _ = writeln!(log, "[Hopper] {n}");
+        }
         let _ = writeln!(log, "[Hopper] Starting: {} {}", launch.java.display(), launch.args.join(" "));
         let (stdin_r, stdin_w) = stdin_pipe()?;
         let mut cmd = Command::new(&launch.java);
@@ -784,6 +800,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let s = LocalServer::new(&dir);
         s.spawn(&Launch {
+            note: None,
             java: "cmd".into(),
             args: vec![
                 "/c".into(),
@@ -830,6 +847,7 @@ mod tests {
         let echo = "while (($l = [Console]::In.ReadLine()) -ne $null) { [Console]::Out.WriteLine('got ' + $l); [Console]::Out.Flush() }";
         first
             .spawn(&Launch {
+                note: None,
                 java: "powershell".into(),
                 args: vec!["-NoProfile".into(), "-Command".into(), echo.into()],
             })

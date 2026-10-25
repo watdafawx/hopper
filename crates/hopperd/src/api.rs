@@ -144,7 +144,6 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::webhooks::routes())
         .merge(crate::mcp::routes())
         .merge(crate::router::routes())
-        .merge(crate::takeover::routes())
         .fallback(crate::ui::serve)
         .layer(axum::middleware::from_fn_with_state(app.clone(), crate::security::guard))
         .with_state(app)

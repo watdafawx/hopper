@@ -18,7 +18,7 @@ pub struct Entry {
     pub name: String,
     pub loader: Option<String>,
     pub max_memory: Option<String>,
-    /// Crafty or MCSS runs this folder: hopperd leaves it alone.
+    /// Crafty or MCSS also knows this folder (it runs here in place too).
     pub managed_by: Option<&'static str>,
     pub server: Arc<LocalServer>,
 }
@@ -46,8 +46,6 @@ pub struct Summary {
     pub addresses: Vec<String>,
     /// Sleeps after this many minutes with nobody on; 0: never.
     pub sleep_after_minutes: u32,
-    /// Taken over from another panel ("Crafty"): Hopper runs it now.
-    pub taken_over_from: Option<String>,
 }
 
 pub struct Servers {
@@ -135,29 +133,6 @@ impl Servers {
         entries.sort_by_key(|e| e.name.to_lowercase());
     }
 
-    /// Reads a server's folder again (who manages it, its loader), keeping
-    /// its id and running state; after a takeover or give-back.
-    pub fn reload(&self, root: &Path) {
-        let mut entries = self.entries.write().unwrap();
-        let Some(i) = entries.iter().position(|e| e.root == root) else { return };
-        let info = server::load(root);
-        let old = &entries[i];
-        entries[i] = Arc::new(Entry {
-            id: old.id.clone(),
-            panel_id: old.panel_id.clone(),
-            root: old.root.clone(),
-            name: old.name.clone(),
-            loader: info.loader.clone(),
-            max_memory: info.max_memory.clone(),
-            managed_by: match info.manager {
-                Manager::Crafty => Some("Crafty"),
-                Manager::Mcss => Some("MCSS"),
-                Manager::Unknown => None,
-            },
-            server: old.server.clone(),
-        });
-    }
-
     /// The panel the scheduler runs over.
     pub fn panel(&self) -> Arc<LocalPanel> {
         self.panel.clone()
@@ -179,7 +154,6 @@ impl Servers {
         let route = hopper_core::hosting::router::RouteSettings::load(&e.root);
         // Servers Hopper made know their version before they've run.
         let meta = hopper_core::hosting::HostedMeta::load(&e.root);
-        let takeover = hopper_core::hosting::crafty::Takeover::load(&e.root);
         Summary {
             id: e.id.clone(),
             name: e.name.clone(),
@@ -192,13 +166,7 @@ impl Servers {
             },
             managed_by: e.managed_by,
             loader: e.loader.clone().or_else(|| meta.as_ref().map(|m| m.loader.clone()).filter(|l| !l.is_empty() && l != "Vanilla")),
-            version: if !t.version.is_empty() {
-                t.version
-            } else if let Some(m) = meta.map(|m| m.minecraft).filter(|v| !v.is_empty()) {
-                m
-            } else {
-                takeover.as_ref().and_then(|t| t.minecraft.clone()).unwrap_or_default()
-            },
+            version: if t.version.is_empty() { meta.map(|m| m.minecraft).unwrap_or_default() } else { t.version },
             max_memory: e.max_memory.clone(),
             cpu,
             mem_bytes: mem,
@@ -215,20 +183,13 @@ impl Servers {
                 .map(|d| d.as_secs()),
             addresses: route.addresses,
             sleep_after_minutes: route.sleep_after_minutes,
-            taken_over_from: takeover.map(|t| t.from),
         }
     }
 
-    /// Start, stop, restart or kill. Refused for servers Crafty or MCSS run.
+    /// Start, stop, restart or kill. Servers other panels (Crafty, MCSS)
+    /// also know run here in place too; starting one that's already running
+    /// somewhere is refused by the start itself (its port or world is taken).
     pub fn act(&self, e: &Entry, action: PanelAction) -> anyhow::Result<()> {
-        if let Some(m) = e.managed_by
-            && matches!(action, PanelAction::Start | PanelAction::Restart)
-        {
-            if m == "Crafty" {
-                anyhow::bail!("Crafty manages {}. Start it from Crafty, or take it over from Crafty here first.", e.name);
-            }
-            anyhow::bail!("{m} manages {}. Start it from {m}.", e.name);
-        }
         self.panel.act(&e.panel_id, action)
     }
 
@@ -272,8 +233,9 @@ mod tests {
         assert!(ids.contains(&"my-pack".to_string()) && ids.contains(&"my-pack-2".to_string()));
         let crafty = s.get("crafty-one").unwrap();
         assert_eq!(crafty.managed_by, Some("Crafty"));
+        // Another panel's folder still starts here (this one fails on its EULA).
         let e = s.act(&crafty, PanelAction::Start).unwrap_err().to_string();
-        assert!(e.contains("Crafty manages"), "{e}");
+        assert!(!e.contains("manages") && e.contains("EULA"), "{e}");
         let sum = s.summary(&s.get("my-pack").unwrap());
         assert_eq!((sum.state, sum.port, sum.max_players), ("stopped", 25599, 6));
         // Rescanning keeps ids stable.

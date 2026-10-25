@@ -5,7 +5,6 @@
 //! and that keeps running when Hopper restarts.
 
 pub mod backup;
-pub mod crafty;
 pub mod create;
 pub mod jvm;
 pub mod local_panel;

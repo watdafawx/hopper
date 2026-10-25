@@ -424,7 +424,6 @@ mod tests {
             uptime_secs: None,
             addresses: Vec::new(),
             sleep_after_minutes: 0,
-            taken_over_from: None,
         }
     }
 

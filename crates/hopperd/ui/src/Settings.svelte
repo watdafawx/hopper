@@ -3,7 +3,6 @@
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import Address from './Address.svelte';
-  import TakenOver from './TakenOver.svelte';
 
   let { server } = $props();
   let props = $state(null);
@@ -102,7 +101,6 @@
 
   <div class="stack">
   <Address {server} />
-  {#if server.taken_over_from}<TakenOver {server} />{/if}
   <div class="card side">
     <h3><MemoryStick size={14} />Memory &amp; Java</h3>
     {#if jvm}

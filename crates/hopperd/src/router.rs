@@ -172,7 +172,7 @@ fn sleep_and_time(app: &Arc<App>) {
         // Sleep.
         let s = settings(&e);
         let mut active = app.router.active.lock().unwrap();
-        if s.sleep_after_minutes == 0 || state != ServerState::Running || e.managed_by.is_some() {
+        if s.sleep_after_minutes == 0 || state != ServerState::Running {
             active.remove(&e.id);
             continue;
         }
@@ -279,7 +279,6 @@ async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow
         ServerState::Starting => Standin::Starting,
         ServerState::Stopping => Standin::Stopping,
         ServerState::Crashed(_) => Standin::Crashed,
-        _ if e.managed_by.is_some() => Standin::Offline,
         _ if s.sleep_after_minutes > 0 => Standin::Sleeping,
         _ => Standin::Stopped,
     };

@@ -16,7 +16,6 @@
   import Settings from './Settings.svelte';
   import Mods from './Mods.svelte';
   import Addr from './Addr.svelte';
-  import TakeOver from './TakeOver.svelte';
 
   let { id, tab = 'console', path = '' } = $props();
 
@@ -118,13 +117,13 @@
       <div class="row wrap">
         <h2>{s.name}</h2>
         <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateLabel[s.state]}{alive ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
-        {#if s.managed_by}<span class="chip">Run by {s.managed_by}</span>{:else if s.taken_over_from}<span class="chip ts" title="Taken over from {s.taken_over_from}; give it back in Settings">From {s.taken_over_from}</span>{/if}
+        {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}
       </div>
       <div class="small muted ell">{s.loader || 'Minecraft'}{s.version ? ` · Minecraft ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gap={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gap">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
     </div>
     <div class="row acts">
       {#if !alive}
-        <button class="btn go" disabled={!!s.managed_by} onclick={() => power(s, 'start')}><Play size={14} />Start</button>
+        <button class="btn go" onclick={() => power(s, 'start')}><Play size={14} />Start</button>
       {:else}
         <button class="btn" onclick={() => power(s, 'restart')}><RotateCw size={14} />Restart</button>
         <button class="btn bad" disabled={s.state === 'stopping'} onclick={() => power(s, 'stop')}><Square size={14} />Stop</button>
@@ -133,7 +132,6 @@
     </div>
   </div>
 
-  {#if s.managed_by === 'Crafty'}<TakeOver server={s} />{/if}
   <nav class="tabs">
     <button class:on={tab === 'console'} onclick={() => nav('console')}>Console</button>
     <button class:on={filesTab} onclick={() => nav('files')}>Files</button>
