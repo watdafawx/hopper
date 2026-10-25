@@ -136,7 +136,7 @@
 </div>
 
 <style>
-  .side { width: 320px; flex: none; gap: 8px; }
+  .side { gap: 8px; }
   .side h3 { margin-bottom: 2px; }
   .name { width: 120px; padding: 4px 8px; flex: none; }
   .full { flex: 1; padding: 4px 8px; min-width: 0; }
@@ -147,5 +147,4 @@
   .warn { display: flex; gap: 8px; align-items: flex-start; color: var(--gold); background: var(--gold-dim); border: 1px solid #eab30855; border-radius: 8px; padding: 8px 10px; }
   .warn > div { display: flex; flex-direction: column; gap: 6px; color: var(--text); }
   label.row input[type='checkbox'] { width: 15px; height: 15px; accent-color: var(--acc); }
-  @media (max-width: 900px) { .side { width: auto; } }
 </style>

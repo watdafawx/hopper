@@ -683,13 +683,17 @@ pub fn version_change(from: &str, to: &str) -> (String, String) {
 
 /// Newer files for installed projects that fit the instance.
 pub fn check_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
-    let ids: Vec<u64> = inst
-        .addons
-        .iter()
-        .filter(|a| a.project_id != 0 && !crate::modrinth::is_mr(a.project_id))
-        .map(|a| a.project_id)
-        .collect();
-    let mods = cf::get_mods(&ids)?;
+    // Without a CurseForge key only Modrinth's mods can be checked.
+    let ids: Vec<u64> = if cf::api_key().is_some() {
+        inst.addons
+            .iter()
+            .filter(|a| a.project_id != 0 && !crate::modrinth::is_mr(a.project_id))
+            .map(|a| a.project_id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mods = if ids.is_empty() { Vec::new() } else { cf::get_mods(&ids)? };
     let loader = loader_of(inst).api_id();
     let mut newest: HashMap<u64, u64> = HashMap::new();
     for m in &mods {
@@ -707,7 +711,7 @@ pub fn check_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
             newest.insert(m.id, b);
         }
     }
-    let files = cf::get_files(&newest.values().copied().collect::<Vec<_>>())?;
+    let files = if newest.is_empty() { Vec::new() } else { cf::get_files(&newest.values().copied().collect::<Vec<_>>())? };
     let mut out: Vec<Update> = files
         .into_iter()
         .filter_map(|f| {

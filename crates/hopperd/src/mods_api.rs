@@ -129,6 +129,29 @@ fn known_version(inst: &Instance) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The server as an instance (for the other mod routes).
+pub(crate) fn instance_of(e: &Entry) -> anyhow::Result<Instance> {
+    instance(e)
+}
+
+/// Update checks per server: (when, rows by project id). They ask
+/// CurseForge and Modrinth about every mod, so a check is kept for a while.
+static UPDATES: std::sync::Mutex<Option<HashMap<String, (std::time::Instant, Vec<Value>)>>> = std::sync::Mutex::new(None);
+const UPDATES_FOR: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+/// Drops a server's update check (after its mods changed).
+pub(crate) fn forget_updates(id: &str) {
+    if let Some(m) = UPDATES.lock().unwrap().as_mut() {
+        m.remove(id);
+    }
+}
+
+fn cached_updates(id: &str) -> Option<Vec<Value>> {
+    let g = UPDATES.lock().unwrap();
+    let (at, v) = g.as_ref()?.get(id)?;
+    (at.elapsed() < UPDATES_FOR).then(|| v.clone())
+}
+
 fn instance(e: &Entry) -> anyhow::Result<Instance> {
     if e.root.join(instances::HOPPER_FILE).is_file()
         && let Some(mut i) = instances::load(&e.root)
@@ -187,6 +210,12 @@ async fn list(
     let v = blocking(move || {
         let inst = instance(&e)?;
         let dir = inst.mods_dir();
+        // The last update check's results, by project id.
+        let ups: HashMap<String, Value> = cached_updates(&e.id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|u| Some((u["project_id"].as_str()?.to_string(), u)))
+            .collect();
         // What the jars say about themselves (name, version, side).
         let scanned: HashMap<String, hopper_core::model::ModInfo> = if dir.is_dir() {
             hopper_core::scan::scan_folder(&dir)?.into_iter().map(|m| (m.file_name.to_lowercase(), m)).collect()
@@ -207,6 +236,8 @@ async fn list(
                 "side": if a.env.is_empty() { s.map(|s| s.side.clone()).unwrap_or_default() } else { side_label(&a.env).to_string() },
                 "project_id": id_str(a.project_id), "source": if a.project_id == 0 { "" } else if modrinth::is_mr(a.project_id) { "modrinth" } else { "curseforge" },
                 "from_pack": a.from_pack, "page": a.page, "author": a.author,
+                "locked": a.locked, "file_id": id_str(a.file_id), "release_type": a.release_type,
+                "update": ups.get(&id_str(a.project_id)).cloned(),
             }));
         }
         // Jars Hopper doesn't know yet.
@@ -276,6 +307,7 @@ async fn identify(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
+    forget_updates(&id);
     let job = crate::pack_api::spawn(&app, format!("Identifying {}'s mods", e.name), move |job| {
         let mut inst = instance(&e)?;
         let first = inst.addons.is_empty();
@@ -354,6 +386,7 @@ async fn toggle(
     Json(b): Json<FileBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
+    forget_updates(&id);
     let running = e.server.state().is_alive();
     blocking(move || {
         let mut inst = instance(&e)?;
@@ -372,6 +405,7 @@ async fn remove(
     Json(b): Json<FileBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
+    forget_updates(&id);
     let running = e.server.state().is_alive();
     log::info!("{}: removing {}", e.name, b.file);
     blocking(move || {
@@ -452,6 +486,7 @@ async fn install_mod(
     Json(b): Json<InstallBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
+    forget_updates(&id);
     let job = crate::pack_api::spawn(&app, format!("Adding a mod to {}", e.name), move |job| {
         let mut inst = instance(&e)?;
         known_version(&inst)?;
@@ -471,25 +506,31 @@ async fn updates(
     headers: HeaderMap,
     method: Method,
     Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
+    let force = q.get("force").is_some_and(|f| f == "1");
+    if !force && let Some(v) = cached_updates(&id) {
+        return Ok(Json(json!({ "updates": v, "cached": true, "curseforge": cf::api_key().is_some() })));
+    }
     let v = blocking(move || {
-        if cf::api_key().is_none() {
-            anyhow::bail!("Checking updates needs a CurseForge API key (Access & devices).");
-        }
         let inst = instance(&e)?;
         let ups = install::check_updates(&inst)?;
-        Ok(json!(ups
+        Ok(ups
             .iter()
             .filter(|u| inst.addons.iter().any(|a| a.project_id == u.project_id && !a.from_pack))
             .map(|u| {
                 let (from, to) = u.versions();
-                json!({ "project_id": id_str(u.project_id), "name": u.name, "from": from, "to": to, "file": u.file.file_name })
+                json!({
+                    "project_id": id_str(u.project_id), "name": u.name, "from": from, "to": to, "file": u.file.file_name,
+                    "file_id": id_str(u.file.id), "date": u.file.file_date,
+                })
             })
-            .collect::<Vec<_>>()))
+            .collect::<Vec<_>>())
     })
     .await?;
-    Ok(Json(json!({ "updates": v })))
+    UPDATES.lock().unwrap().get_or_insert_with(HashMap::new).insert(id.clone(), (std::time::Instant::now(), v.clone()));
+    Ok(Json(json!({ "updates": v, "cached": false, "curseforge": cf::api_key().is_some() })))
 }
 
 #[derive(Deserialize)]
@@ -506,6 +547,7 @@ async fn update(
     Json(b): Json<UpdateBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
+    forget_updates(&id);
     let job = crate::pack_api::spawn(&app, format!("Updating {}'s mods", e.name), move |job| {
         let mut inst = instance(&e)?;
         let ups: Vec<install::Update> = install::check_updates(&inst)?

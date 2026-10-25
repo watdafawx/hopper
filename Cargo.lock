@@ -4444,7 +4444,7 @@ dependencies = [
 
 [[package]]
 name = "hopper"
-version = "0.11.6"
+version = "0.11.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4468,7 +4468,7 @@ dependencies = [
 
 [[package]]
 name = "hopper-core"
-version = "0.11.6"
+version = "0.11.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4501,7 +4501,7 @@ dependencies = [
 
 [[package]]
 name = "hopperd"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",

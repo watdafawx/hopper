@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -143,6 +143,14 @@ the address the player typed and passes them to that server's own port.
   `unknown_server`); per server in `.hopper-route.json` in its folder.
 - Servers see players as coming from 127.0.0.1 (no proxy forwarding yet).
 
+## Mods like Hopper desktop (0.5.0)
+
+- Mods tab: unknown jars are identified on CurseForge and Modrinth on their own (names, icons, links), and updates are checked on both (Modrinth needs no key). Filter chips: On, Off, Only yours, Client-only, Updates, Unknown.
+- Click a mod for its details: versions for the server's Minecraft and loader with changelogs, update / install another / roll back, lock (updates skip it), reset its config, remove.
+- "Review N updates" lists every update with its changelog; untick what to skip.
+- Mods › Backups shows `.hopper-backups` (from Hopper desktop or the panel): restore a jar (the current one of the same mod is set aside first) or delete old backups.
+- Settings has sections (General, Players, World, Network, Address, Memory & Java, Other keys) with a list to jump between them.
+
 ## Servers other panels know (0.4.0)
 
 Any server folder runs here in place, also ones Crafty or MCSS know: their
@@ -233,6 +241,9 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `GET /fs/{id}/search?q=&path=[&regex=1]` → `{hits: [{path, line, text}], more}` | text in files and names |
 | `GET` / `PUT /router` `{enabled, port, domain, unknown_server}`, `POST /router/check` | server addresses: settings (owner), DNS and port check |
 | `GET` / `PUT /servers/{id}/address` `{addresses, sleep_after_minutes}`, `POST .../address/move-port` | a server's addresses and sleep |
+| `GET /servers/{id}/mods/versions?file=`, `GET .../mods/changelog?project=&file=`, `POST .../mods/version` `{file, file_id}` (job), `POST .../mods/lock` `{file, locked}`, `GET .../mods/config?file=`, `POST .../mods/config-reset` `{file}` | a mod's details |
+| `GET /servers/{id}/mod-backups`, `POST .../mod-backups/restore` `{when, name?}`, `POST .../mod-backups/delete` `{when}` | `.hopper-backups` |
+| `GET` / `PUT /settings/curseforge` `{key}` | CurseForge key (set: owner) |
 | `POST /mcp` | Model Context Protocol (JSON-RPC) |
 | `GET /ws` | live: `snapshot` every second; send `{"op":"console","server":id}` to follow a console |
 

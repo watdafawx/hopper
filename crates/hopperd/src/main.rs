@@ -21,6 +21,7 @@ mod host;
 mod manage_api;
 mod mcp;
 mod mods_api;
+mod mods_more;
 mod security;
 mod net;
 mod pack_api;
