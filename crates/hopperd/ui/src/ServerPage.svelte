@@ -16,6 +16,7 @@
   import Settings from './Settings.svelte';
   import Mods from './Mods.svelte';
   import Addr from './Addr.svelte';
+  import TakeOver from './TakeOver.svelte';
 
   let { id, tab = 'console', path = '' } = $props();
 
@@ -117,7 +118,7 @@
       <div class="row wrap">
         <h2>{s.name}</h2>
         <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateLabel[s.state]}{alive ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
-        {#if s.managed_by}<span class="chip">Run by {s.managed_by}</span>{/if}
+        {#if s.managed_by}<span class="chip">Run by {s.managed_by}</span>{:else if s.taken_over_from}<span class="chip ts" title="Taken over from {s.taken_over_from}; give it back in Settings">From {s.taken_over_from}</span>{/if}
       </div>
       <div class="small muted ell">{s.loader || 'Minecraft'}{s.version ? ` · Minecraft ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gap={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gap">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
     </div>
@@ -132,6 +133,7 @@
     </div>
   </div>
 
+  {#if s.managed_by === 'Crafty'}<TakeOver server={s} />{/if}
   <nav class="tabs">
     <button class:on={tab === 'console'} onclick={() => nav('console')}>Console</button>
     <button class:on={filesTab} onclick={() => nav('files')}>Files</button>

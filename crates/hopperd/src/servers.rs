@@ -46,6 +46,8 @@ pub struct Summary {
     pub addresses: Vec<String>,
     /// Sleeps after this many minutes with nobody on; 0: never.
     pub sleep_after_minutes: u32,
+    /// Taken over from another panel ("Crafty"): Hopper runs it now.
+    pub taken_over_from: Option<String>,
 }
 
 pub struct Servers {
@@ -133,6 +135,29 @@ impl Servers {
         entries.sort_by_key(|e| e.name.to_lowercase());
     }
 
+    /// Reads a server's folder again (who manages it, its loader), keeping
+    /// its id and running state; after a takeover or give-back.
+    pub fn reload(&self, root: &Path) {
+        let mut entries = self.entries.write().unwrap();
+        let Some(i) = entries.iter().position(|e| e.root == root) else { return };
+        let info = server::load(root);
+        let old = &entries[i];
+        entries[i] = Arc::new(Entry {
+            id: old.id.clone(),
+            panel_id: old.panel_id.clone(),
+            root: old.root.clone(),
+            name: old.name.clone(),
+            loader: info.loader.clone(),
+            max_memory: info.max_memory.clone(),
+            managed_by: match info.manager {
+                Manager::Crafty => Some("Crafty"),
+                Manager::Mcss => Some("MCSS"),
+                Manager::Unknown => None,
+            },
+            server: old.server.clone(),
+        });
+    }
+
     /// The panel the scheduler runs over.
     pub fn panel(&self) -> Arc<LocalPanel> {
         self.panel.clone()
@@ -154,6 +179,7 @@ impl Servers {
         let route = hopper_core::hosting::router::RouteSettings::load(&e.root);
         // Servers Hopper made know their version before they've run.
         let meta = hopper_core::hosting::HostedMeta::load(&e.root);
+        let takeover = hopper_core::hosting::crafty::Takeover::load(&e.root);
         Summary {
             id: e.id.clone(),
             name: e.name.clone(),
@@ -166,7 +192,13 @@ impl Servers {
             },
             managed_by: e.managed_by,
             loader: e.loader.clone().or_else(|| meta.as_ref().map(|m| m.loader.clone()).filter(|l| !l.is_empty() && l != "Vanilla")),
-            version: if t.version.is_empty() { meta.map(|m| m.minecraft).unwrap_or_default() } else { t.version },
+            version: if !t.version.is_empty() {
+                t.version
+            } else if let Some(m) = meta.map(|m| m.minecraft).filter(|v| !v.is_empty()) {
+                m
+            } else {
+                takeover.as_ref().and_then(|t| t.minecraft.clone()).unwrap_or_default()
+            },
             max_memory: e.max_memory.clone(),
             cpu,
             mem_bytes: mem,
@@ -183,6 +215,7 @@ impl Servers {
                 .map(|d| d.as_secs()),
             addresses: route.addresses,
             sleep_after_minutes: route.sleep_after_minutes,
+            taken_over_from: takeover.map(|t| t.from),
         }
     }
 
@@ -191,7 +224,10 @@ impl Servers {
         if let Some(m) = e.managed_by
             && matches!(action, PanelAction::Start | PanelAction::Restart)
         {
-            anyhow::bail!("{m} manages {}. Start it from {m}, or import it into hopperd first.", e.name);
+            if m == "Crafty" {
+                anyhow::bail!("Crafty manages {}. Start it from Crafty, or take it over from Crafty here first.", e.name);
+            }
+            anyhow::bail!("{m} manages {}. Start it from {m}.", e.name);
         }
         self.panel.act(&e.panel_id, action)
     }

@@ -28,6 +28,7 @@ mod router;
 mod servers;
 mod service;
 mod sftp;
+mod takeover;
 mod tls;
 mod ui;
 mod webhooks;
