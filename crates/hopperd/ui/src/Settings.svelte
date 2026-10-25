@@ -1,10 +1,13 @@
 <script>
-  import { SlidersHorizontal, MemoryStick, Save, Search, ChevronDown, ChevronRight } from '@lucide/svelte';
+  import { SlidersHorizontal, MemoryStick, Save, Search, ChevronDown, ChevronRight, FileCode } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import Address from './Address.svelte';
 
   let { server } = $props();
+  // The live feed hands over a new `server` object every second; effects
+  // that should run once per server key on the id alone.
+  const sid = $derived(server.id);
   let props = $state(null);
   let values = $state({});
   /** What the form started with (file values, else Minecraft's defaults). */
@@ -64,7 +67,7 @@
   const gb = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(mb % 1024 ? 1 : 0)} GB` : `${mb} MB`);
 
   $effect(() => {
-    server.id;
+    sid;
     load();
   });
 </script>
@@ -117,7 +120,11 @@
       </div>
       <div class="lbl gap">Java</div>
       <div class="small mono ell" title={jvm.java || ''}>{jvm.java || 'java on PATH'}</div>
-      <div class="tiny muted">{jvm.java_major ? `Java ${jvm.java_major}` : 'Version unknown'} · from run.bat</div>
+      <div class="tiny muted">{jvm.java_major ? `Java ${jvm.java_major}` : 'Version unknown'}</div>
+      {#if jvm.files?.length}
+        <div class="lbl gap">Start files</div>
+        <div class="row wrap">{#each jvm.files as f (f)}<a class="btn sm" href="#/server/{encodeURIComponent(server.id)}/edit/{encodeURIComponent(f)}"><FileCode size={13} />Edit {f}</a>{/each}</div>
+      {/if}
       <details class="tiny muted"><summary>Flags ({jvm.flags.length})</summary><div class="mono flags">{jvm.flags.join(' ')}</div></details>
     {/if}
   </div>

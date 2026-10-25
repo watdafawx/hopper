@@ -60,7 +60,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mods/install", post(install_mod))
         .route("/api/v1/servers/{id}/mods/updates", get(updates))
         .route("/api/v1/servers/{id}/mods/update", post(update))
-        .route("/api/v1/settings/curseforge", put(set_cf_key))
+        .route("/api/v1/settings/curseforge", get(cf_key_status).put(set_cf_key))
 }
 
 fn entry(app: &App, headers: &HeaderMap, method: &Method, id: &str) -> ApiResult<Arc<Entry>> {
@@ -525,6 +525,13 @@ struct KeyBody {
 }
 
 /// The CurseForge key the panel uses (kept in hopperd.toml).
+/// Whether the panel has a CurseForge key (never the key itself).
+async fn cf_key_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    crate::api::require(&app, &headers, &method)?;
+    let saved = !app.cfg.read().unwrap().curseforge_key.trim().is_empty();
+    Ok(Json(json!({ "set": cf::api_key().is_some(), "saved": saved })))
+}
+
 async fn set_cf_key(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<KeyBody>) -> ApiResult<Json<Value>> {
     crate::api::require_owner(&app, &headers, &method)?;
     let key = b.key.trim().to_string();

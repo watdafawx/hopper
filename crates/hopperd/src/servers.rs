@@ -46,6 +46,9 @@ pub struct Summary {
     pub addresses: Vec<String>,
     /// Sleeps after this many minutes with nobody on; 0: never.
     pub sleep_after_minutes: u32,
+    /// `server-icon.png`'s modified time (Unix seconds), when it has one;
+    /// part of the icon's URL so a new icon shows at once.
+    pub icon: Option<u64>,
 }
 
 pub struct Servers {
@@ -183,6 +186,11 @@ impl Servers {
                 .map(|d| d.as_secs()),
             addresses: route.addresses,
             sleep_after_minutes: route.sleep_after_minutes,
+            icon: std::fs::metadata(e.root.join("server-icon.png"))
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()),
         }
     }
 

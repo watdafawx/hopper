@@ -136,6 +136,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/servers/{id}/power", post(power))
         .route("/api/v1/servers/{id}/command", post(command))
         .route("/api/v1/servers/{id}/console", get(console))
+        .route("/api/v1/servers/{id}/icon", get(icon))
         .route("/api/v1/ws", get(ws))
         .merge(crate::fs_api::routes())
         .merge(crate::pack_api::routes())
@@ -634,6 +635,15 @@ async fn command(
         .command(&e, &b.line)
         .map_err(|e| ApiError(StatusCode::CONFLICT, format!("{e:#}")))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// The server's `server-icon.png` (what the multiplayer list shows).
+async fn icon(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Response> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let png = tokio::fs::read(e.root.join("server-icon.png")).await.map_err(|_| not_found("icon"))?;
+    // The URL carries the file's time, so it can be kept for long.
+    Ok(([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "private, max-age=604800")], png).into_response())
 }
 
 async fn console(

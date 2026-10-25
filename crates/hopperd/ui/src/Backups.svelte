@@ -8,6 +8,9 @@
   import { download } from './lib/transfers.svelte.js';
 
   let { server, openSchedule } = $props();
+  // The live feed hands over a new `server` object every second; effects
+  // that should run once per server key on the id alone.
+  const sid = $derived(server.id);
   let data = $state(null);
   let busy = $state('');
   let browsing = $state(null);
@@ -105,7 +108,7 @@
   const when = (t) => new Date(t * 1000).toLocaleString();
 
   $effect(() => {
-    server.id;
+    sid;
     load();
   });
 </script>

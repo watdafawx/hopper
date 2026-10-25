@@ -1,4 +1,5 @@
 <script>
+  import CfKey from './CfKey.svelte';
   import { Package, Search, Plus, ScanSearch, RefreshCw, Trash2, ArrowUpCircle, X, Settings2 } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -6,6 +7,9 @@
   import { followJob } from './lib/jobs.js';
 
   let { server } = $props();
+  // The live feed hands over a new `server` object every second; effects
+  // that should run once per server key on the id alone.
+  const sid = $derived(server.id);
   let data = $state(null);
   let filter = $state('');
   let busy = $state('');
@@ -127,7 +131,7 @@
   }
 
   $effect(() => {
-    server.id;
+    sid;
     load();
   });
 </script>
@@ -145,6 +149,7 @@
     <button class="btn sm pri" disabled={!!busy} onclick={() => (adding = !adding)}><Plus size={13} />Add mods</button>
   </h3>
   {#if busy}<div class="busy small"><span class="spin"></span>{busy}</div>{/if}
+  {#if data && !data.curseforge}<CfKey inline onSaved={load} />{/if}
   {#if clientOnly}<div class="small warn">{clientOnly} client-only mod{clientOnly === 1 ? '' : 's'} on: servers usually don't need {clientOnly === 1 ? 'it' : 'them'}, and some won't start with them.</div>{/if}
 
   {#if updates?.length}

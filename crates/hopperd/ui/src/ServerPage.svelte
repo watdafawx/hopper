@@ -1,4 +1,5 @@
 <script>
+  import Avatar from './Avatar.svelte';
   import { onMount, onDestroy, tick } from 'svelte';
   import { Play, Square, RotateCw, Skull, CornerDownLeft, Search, ArrowDown, Gauge, Users, Info } from '@lucide/svelte';
   import { live, consoles, history, follow, unfollow } from './lib/live.svelte.js';
@@ -112,7 +113,7 @@
   <div class="pad muted">{live.servers.length ? 'No server with that id.' : 'Loading…'}</div>
 {:else}
   <div class="head">
-    <div class="ic big" style:background={color(s.name)}>{s.name[0]?.toUpperCase()}</div>
+    <Avatar server={s} cls="ic big" />
     <div class="ttl">
       <div class="row wrap">
         <h2>{s.name}</h2>
@@ -220,7 +221,6 @@
 <style>
   .pad { padding: 18px; }
   .head { display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; flex-wrap: wrap; }
-  .big { width: 40px; height: 40px; font-size: 16px; }
   .ttl { flex: 1; min-width: 220px; }
   .wrap { flex-wrap: wrap; }
   h2 { font-size: 17px; font-weight: 700; }

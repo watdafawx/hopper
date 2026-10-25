@@ -114,10 +114,25 @@ async fn put_props(
 
 // ---- Java memory and flags -------------------------------------------------------
 
+/// The Java the server starts with (what the start script says, or the
+/// one Hopper puts in place of a plain `java`), and its major version.
 fn java_of(e: &Entry) -> (Option<String>, Option<u32>) {
-    let java = hopper_core::server::load(&e.root).java;
+    let java = hopper_core::hosting::script::launch_command(&e.root)
+        .ok()
+        .map(|l| l.java.to_string_lossy().into_owned())
+        .or_else(|| hopper_core::server::load(&e.root).java);
     let major = java.as_deref().and_then(|j| hopper_core::java::inspect(std::path::Path::new(j))).map(|j| j.major);
     (java, major)
+}
+
+/// The files that decide how the server starts and that exist: start
+/// scripts and the JVM arguments file.
+fn start_files(e: &Entry) -> Vec<&'static str> {
+    hopper_core::hosting::script::SCRIPTS
+        .into_iter()
+        .chain([hopper_core::hosting::jvm::ARGS_FILE])
+        .filter(|f| e.root.join(f).is_file())
+        .collect()
 }
 
 async fn get_jvm(
@@ -131,6 +146,7 @@ async fn get_jvm(
     let v = blocking(move || {
         let a = JvmArgs::load(&e.root)?;
         let (java, major) = java_of(&e);
+        let files = start_files(&e);
         let major_n = major.unwrap_or(21);
         let presets: Vec<Value> = [JvmPreset::Aikar, JvmPreset::Zgc, JvmPreset::Plain]
             .into_iter()
@@ -139,6 +155,7 @@ async fn get_jvm(
         Ok(json!({
             "memory_mb": a.xmx_mb, "preset": format!("{:?}", a.preset()).to_lowercase(), "flags": a.flags,
             "presets": presets, "java": java, "java_major": major, "host_memory_mb": total / (1024 * 1024),
+            "files": files,
         }))
     })
     .await?;

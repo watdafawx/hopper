@@ -1,4 +1,5 @@
 <script>
+  import Avatar from './Avatar.svelte';
   import { onMount, onDestroy } from 'svelte';
   import { Server, LayoutDashboard, Shield, LogOut, Wifi, WifiOff, Globe, Waypoints, RefreshCw } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
@@ -85,7 +86,7 @@
     </div>
     {#each live.servers as s (s.id)}
       <button class="srv" class:on={serverId === s.id} onclick={() => go(`/server/${encodeURIComponent(s.id)}`)}>
-        <span class="sic" style:background={color(s.name)}>{s.name[0]?.toUpperCase()}</span>
+        <Avatar server={s} cls="sic" />
         <span class="nm">{s.name}</span>
         <span class="dot {s.state}"></span>
       </button>
@@ -140,7 +141,6 @@
   .navsec { padding: 14px 4px 5px 9px; }
   .srv { display: flex; align-items: center; gap: 9px; padding: 6px 9px; border-radius: 7px; color: var(--subtle); width: 100%; text-align: left; }
   .srv .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sic { width: 20px; height: 20px; border-radius: 5px; flex: none; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #1a1a1f; }
   .pad { padding: 4px 9px; }
   .badge { margin-left: auto; background: var(--acc); color: #1a1a1f; border-radius: 99px; font-size: 11px; font-weight: 700; padding: 0 6px; }
   .foot { margin-top: auto; border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 2px; }

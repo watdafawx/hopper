@@ -1,4 +1,5 @@
 <script>
+  import Avatar from './Avatar.svelte';
   import { Play, Square, RotateCw, Terminal, Plus } from '@lucide/svelte';
   import { live, history } from './lib/live.svelte.js';
   import { bytes, uptime, color, xmx, stateLabel } from './lib/format.js';
@@ -49,7 +50,7 @@
       {@const cap = xmx(s.max_memory)}
       <div class="scard">
         <div class="row">
-          <a class="ic" style:background={color(s.name)} href="#/server/{encodeURIComponent(s.id)}">{s.name[0]?.toUpperCase()}</a>
+          <a class="icl" href="#/server/{encodeURIComponent(s.id)}"><Avatar server={s} cls="ic" /></a>
           <a class="nmw" href="#/server/{encodeURIComponent(s.id)}">
             <div class="nm">{s.name}</div>
             <div class="tiny muted">
@@ -97,6 +98,7 @@
 {#if making}<NewServer close={() => (making = false)} />{/if}
 
 <style>
+  .icl { display: flex; flex: none; }
   .pad { padding: 18px; }
   h2 { font-size: 17px; }
   .hd { margin-bottom: 14px; }

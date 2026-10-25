@@ -1,4 +1,5 @@
 <script>
+  import CfKey from './CfKey.svelte';
   import { onMount } from 'svelte';
   import { Link, Check, X, Network, Wifi, Globe, Waypoints, Lock, MonitorSmartphone, Trash2, FolderTree } from '@lucide/svelte';
   import Security from './Security.svelte';
@@ -103,6 +104,8 @@
     </div>
 
     <Addresses />
+
+    <CfKey />
 
     <Security />
 

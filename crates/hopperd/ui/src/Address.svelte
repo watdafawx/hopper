@@ -6,6 +6,9 @@
   import { say } from './lib/toast.svelte.js';
 
   let { server } = $props();
+  // The live feed hands over a new `server` object every second; effects
+  // that should run once per server key on the id alone.
+  const sid = $derived(server.id);
   let info = $state(null);
   let router = $state(null);
   let addrs = $state([]);
@@ -85,7 +88,7 @@
   const dnsOf = (a) => dns && (dns[a] || (suffix && a.endsWith(suffix) ? dns[`*.${domain}`] : null));
 
   $effect(() => {
-    server.id;
+    sid;
     load();
   });
 </script>

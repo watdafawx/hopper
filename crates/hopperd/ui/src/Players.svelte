@@ -5,6 +5,10 @@
   import { ask } from './lib/dialog.svelte.js';
 
   let { server } = $props();
+  // The live feed hands over a new `server` object every second; effects
+  // that should run once per server key on the id alone.
+  const sid = $derived(server.id);
+  const online = $derived(server.players.length);
   let data = $state(null);
   let name = $state('');
 
@@ -45,8 +49,8 @@
   }
 
   $effect(() => {
-    server.id;
-    server.players.length;
+    sid;
+    online;
     load();
   });
 

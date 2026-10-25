@@ -11,6 +11,9 @@
   import { queueUploads, onUploaded, download } from './lib/transfers.svelte.js';
 
   let { server, path = '', go, openFile, openTrash } = $props();
+  // The live feed hands over a new `server` object every second; effects
+  // that should run once per server key on the id alone.
+  const sid = $derived(server.id);
 
   const ROW = 34;
   const TEXT = /\.(toml|json5?|properties|txt|cfg|conf|ini|ya?ml|js|ts|mcmeta|snbt|log|md|mcfunction|csv|bat|sh|cmd|ps1|xml|zs|nbt\.txt|lang|secret)$/i;
@@ -85,7 +88,7 @@
 
   $effect(() => {
     path;
-    server.id;
+    sid;
     selected = new Set();
     filter = '';
     found = null;

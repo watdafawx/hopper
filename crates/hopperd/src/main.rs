@@ -238,6 +238,20 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         sftp_fingerprint: sftp::fingerprint(&data_dir),
     });
     app.rescan();
+    // Read every server's mod jars once in the background; the Mods tab
+    // then opens from the scan cache instead of opening hundreds of jars.
+    {
+        let roots: Vec<PathBuf> = app.servers.list().iter().map(|e| e.root.join("mods")).filter(|d| d.is_dir()).collect();
+        std::thread::Builder::new().name("warm-mod-scan".into()).spawn(move || {
+            for d in roots {
+                let t = std::time::Instant::now();
+                match hopper_core::scan::scan_folder(&d) {
+                    Ok(m) => log::info!("read {} mods in {} ({:.1}s)", m.len(), d.display(), t.elapsed().as_secs_f32()),
+                    Err(e) => log::warn!("reading {}: {e:#}", d.display()),
+                }
+            }
+        }).ok();
+    }
     // Schedules: daily restarts, crash restarts, backups; and servers set
     // to start with the panel.
     let sched = hopper_core::hosting::Scheduler::start(app.servers.panel());

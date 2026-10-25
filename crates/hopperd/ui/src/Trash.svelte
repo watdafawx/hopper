@@ -6,6 +6,9 @@
   import { confirmIt } from './lib/dialog.svelte.js';
 
   let { server, close } = $props();
+  // The live feed hands over a new `server` object every second; effects
+  // that should run once per server key on the id alone.
+  const sid = $derived(server.id);
 
   let items = $state([]);
   let loading = $state(true);
@@ -52,7 +55,7 @@
   const when = (t) => new Date(t * 1000).toLocaleString();
 
   $effect(() => {
-    server.id;
+    sid;
     load();
   });
 </script>
