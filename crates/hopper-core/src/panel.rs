@@ -67,6 +67,10 @@ pub struct PanelStats {
     pub world_size: String,
     /// When it started, as the panel writes it.
     pub started: String,
+    /// Addresses players join it by (Hopper Server's router).
+    pub addresses: Vec<String>,
+    /// Sleeps after this many minutes with nobody on (Hopper Server); 0: never.
+    pub sleep_minutes: u32,
 }
 
 impl PanelStats {
@@ -306,6 +310,28 @@ pub fn set_hopperd_token(token: &str) -> anyhow::Result<()> {
     crate::secrets::set(crate::secrets::HOPPERD_KEY, token)
 }
 
+/// The token of paired panel `id` ("" is the first; HOPPER_PANEL_TOKEN wins
+/// for it, for tests).
+pub fn hopperd_token_for(id: &str) -> Option<String> {
+    if id.is_empty() {
+        return hopperd_token();
+    }
+    crate::secrets::get(&crate::secrets::hopperd_key(id))
+}
+
+pub fn set_hopperd_token_for(id: &str, token: &str) -> anyhow::Result<()> {
+    crate::secrets::set(&crate::secrets::hopperd_key(id), token)
+}
+
+/// The panel that runs `server`: its Hopper Server when it's on one, else
+/// the panel set up in Settings.
+pub fn for_server(s: &crate::settings::Settings, server: &crate::server::ServerInfo) -> Option<Box<dyn ServerPanel>> {
+    match &server.remote {
+        Some(r) => Some(Box::new(HopperServer::from_client(crate::hopperd::Client::for_remote(r).ok()?))),
+        None => from_settings(s),
+    }
+}
+
 // ---- Crafty Controller 4 ---------------------------------------------------
 
 /// Crafty Controller 4's API (v2), with an API key from Crafty's user
@@ -451,6 +477,7 @@ fn parse_stats(d: &Value) -> PanelStats {
         version: text("version"),
         world_size: text("world_size"),
         started: text("started"),
+        ..Default::default()
     }
 }
 

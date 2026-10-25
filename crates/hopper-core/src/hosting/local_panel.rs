@@ -182,6 +182,7 @@ impl ServerPanel for LocalPanel {
             version: t.version,
             world_size: String::new(),
             started,
+            ..Default::default()
         })
     }
 

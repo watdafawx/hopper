@@ -165,9 +165,19 @@ impl ServerControl {
         self.root.as_ref().is_some_and(|r| self.store.read(cx).is_hosted(r))
     }
 
+    /// The shown server's Hopper Server, when it's on one.
+    fn remote(&self, cx: &App) -> Option<hopper::hopperd::Remote> {
+        let root = self.root.as_ref()?;
+        self.store.read(cx).server(root)?.remote.clone()
+    }
+
     fn panel_key(&self, cx: &App) -> Option<String> {
         if self.hosted(cx) {
             return Some("local".into());
+        }
+        if let Some(r) = self.remote(cx) {
+            hopper::panel::hopperd_token_for(&r.panel)?;
+            return Some(format!("hopperd|{}|{}", r.panel, r.base));
         }
         let s = self.store.read(cx).settings();
         let token = hopper::panel::token()?;
@@ -182,6 +192,8 @@ impl ServerControl {
             let key = self.panel_key(cx)?;
             let p: Arc<dyn ServerPanel> = if self.hosted(cx) {
                 self.store.read(cx).local_panel()
+            } else if let Some(r) = self.remote(cx) {
+                Arc::new(hopper::panel::HopperServer::from_client(hopper::hopperd::Client::for_remote(&r).ok()?))
             } else {
                 hopper::panel::from_settings(self.store.read(cx).settings())?.into()
             };
@@ -194,6 +206,9 @@ impl ServerControl {
     pub fn panel_name(&self, cx: &App) -> &'static str {
         if self.hosted(cx) {
             return "Hopper";
+        }
+        if self.remote(cx).is_some() {
+            return "Hopper Server";
         }
         hopper::panel::short_name(&self.store.read(cx).settings().panel_kind)
     }
@@ -265,6 +280,8 @@ impl ServerControl {
                         .and_then(|r| this.store.read(cx).server(r))
                         .cloned();
                     this.id = match (&this.listed, server) {
+                        // A Hopper Server says which of its servers it is.
+                        (_, Some(server)) if server.remote.is_some() => server.remote.map(|r| r.id),
                         (Some(Ok(list)), Some(server)) => {
                             hopper::panel::match_server(list, &server).map(|s| s.id.clone())
                         }

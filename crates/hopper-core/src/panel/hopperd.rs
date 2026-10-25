@@ -14,6 +14,22 @@ impl HopperServer {
     pub fn new(url: &str, token: &str, ca: &str) -> Self {
         HopperServer { client: Client::new(url, token, ca) }
     }
+
+    pub fn from_client(client: Client) -> Self {
+        HopperServer { client }
+    }
+
+    /// Every server's stats in two calls (the list and the host), by id.
+    pub fn all_stats(&self) -> anyhow::Result<Vec<(String, PanelStats)>> {
+        let list = self.client.get("/servers")?;
+        let total = self.client.get("/host").ok().and_then(|h| h["mem_total"].as_u64()).unwrap_or(0);
+        Ok(list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|v| (v["id"].as_str().unwrap_or("").to_string(), stats_from(v, total)))
+            .collect())
+    }
 }
 
 fn enc(id: &str) -> String {
@@ -49,6 +65,8 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
         online: players.len() as u32,
         max: v["max_players"].as_u64().unwrap_or(20) as u32,
         players,
+        addresses: v["addresses"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect(),
+        sleep_minutes: v["sleep_after_minutes"].as_u64().unwrap_or(0) as u32,
         version: v["version"].as_str().unwrap_or("").to_string(),
         world_size: String::new(),
         started: v["uptime_secs"]

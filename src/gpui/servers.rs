@@ -1,7 +1,9 @@
 //! The Servers page: what each server is and runs, and (its Sync tab) the
 //! server against its pack. With server tools off, an intro to them.
 
+use crate::panel_tabs;
 use crate::widgets::Clickable as _;
+use hopper::hopperd::is_remote_root;
 use crate::rigsync::SyncPanel;
 use crate::server_control::{ControlEvent, ServerControl};
 use crate::server_settings::ServerSettings;
@@ -118,28 +120,14 @@ fn server_list(
         .iter()
         .map(|i| (i.root.clone(), i.name.clone()))
         .collect();
-    let mut shown_local = false;
-    // Running servers first, within the rig's and this PC's.
+    // Running servers first within each group.
     let running = |srv: &ServerInfo| {
         s.panel_stats(&srv.root).map_or_else(
             || matches!(s.status(&srv.root), Some(Status::Online { .. })),
             |p| p.running || p.starting,
         )
     };
-    let mut ordered: Vec<&ServerInfo> = s.servers().iter().collect();
-    ordered.sort_by_key(|srv| (s.is_hosted(&srv.root), !running(srv)));
-    let rows = ordered.into_iter().map(|srv| {
-        // Servers hosted here come after the rig's, under their own label.
-        let local_head = (s.is_hosted(&srv.root) && !std::mem::replace(&mut shown_local, true)).then(|| {
-            div()
-                .px_3()
-                .pt_4()
-                .pb_1()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.muted_foreground)
-                .child("THIS PC")
-        });
+    let row_for = |srv: &ServerInfo| {
         let active = picked == Some(&srv.root);
         let root = srv.root.clone();
         let pick = on_pick.clone();
@@ -252,6 +240,7 @@ fn server_list(
                         r.child(widgets::pill(text, status_color(s.status(&srv.root), Some(p), cx), live))
                     }),
             )
+            .when_some(caption_for(s, srv), |r, c| r.child(widgets::caption(c, cx).text_xs().pl_4().truncate()))
             .when(paired.is_some(), |r| {
                 r.child(
                     widgets::caption(paired.clone().unwrap_or_default(), cx)
@@ -260,8 +249,21 @@ fn server_list(
                 )
             })
             .children(pairing.map(|p| div().pl_4().child(p)));
-        v_flex().children(local_head).child(row)
-    });
+        row.into_any_element()
+    };
+    let mut rows: Vec<AnyElement> = Vec::new();
+    for g in groups(s) {
+        let folded = s.settings().collapsed_groups.contains(&g.key);
+        let mut members: Vec<&ServerInfo> = s.servers().iter().filter(|x| g.has(s, x)).collect();
+        if members.is_empty() && matches!(g.kind, GroupKind::Folder) {
+            continue;
+        }
+        members.sort_by_key(|srv| !running(srv));
+        rows.push(group_head(&g, members.len(), folded, store, on_host.clone(), cx));
+        if !folded {
+            rows.extend(members.into_iter().map(|srv| row_for(srv)));
+        }
+    }
     let empty = s.servers().is_empty();
     let collapse = {
         let store = store.clone();
@@ -286,24 +288,216 @@ fn server_list(
                 .child(
                     h_flex()
                         .child(div().flex_1().min_w_0().truncate().text_lg().font_semibold().child("Servers"))
-                        .when_some(on_host.clone(), |r, host| {
-                            r.child(
-                                Button::new("host-server")
-                                    .ghost()
-                                    .small()
-                                    .icon(IconName::Plus)
-                                    .tooltip("Host a server on this PC")
-                                    .on_click(move |_, window, cx| host(window, cx)),
-                            )
+                        .child({
+                            let store = store.clone();
+                            Button::new("new-server")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Plus)
+                                .tooltip("New server")
+                                .on_click(move |_, window, cx| crate::host_dialog::open_on(store.clone(), None, None, window, cx))
                         })
                         .child(collapse),
-                )
-                .child(widgets::caption(s.settings().servers_root.clone(), cx).text_xs()),
+                ),
         )
         .children(rows)
         .when(empty, |r| {
             r.child(no_servers(on_host, cx))
         })
+}
+
+/// Where a group of servers in the list comes from.
+enum GroupKind {
+    /// A paired Hopper Server, by id.
+    Panel(String),
+    /// The servers folder (and the Crafty / MCSS panel that runs it).
+    Folder,
+    /// Servers Hopper hosts on this PC.
+    Local,
+}
+
+struct Group {
+    kind: GroupKind,
+    /// For `collapsed_groups`.
+    key: String,
+    name: String,
+    /// What it is ("Hopper Server", "Crafty").
+    what: String,
+}
+
+impl Group {
+    fn has(&self, s: &Store, x: &ServerInfo) -> bool {
+        match &self.kind {
+            GroupKind::Panel(id) => x.remote.as_ref().is_some_and(|r| &r.panel == id),
+            GroupKind::Local => s.is_hosted(&x.root),
+            GroupKind::Folder => x.remote.is_none() && !s.is_hosted(&x.root),
+        }
+    }
+}
+
+/// The list's groups: each paired Hopper Server, then the servers folder,
+/// then this PC.
+fn groups(s: &Store) -> Vec<Group> {
+    let st = s.settings();
+    let mut out: Vec<Group> = st
+        .hopper_panels
+        .iter()
+        .map(|p| Group {
+            kind: GroupKind::Panel(p.id.clone()),
+            key: format!("panel:{}", p.id),
+            name: p.name.clone(),
+            what: "Hopper Server".into(),
+        })
+        .collect();
+    let folder = st.servers_root.trim();
+    out.push(Group {
+        kind: GroupKind::Folder,
+        key: "folder".into(),
+        name: if folder.is_empty() { "Server folder".into() } else { folder.to_string() },
+        what: if st.panel_url.trim().is_empty() { String::new() } else { hopper::panel::short_name(&st.panel_kind).to_string() },
+    });
+    out.push(Group { kind: GroupKind::Local, key: "local".into(), name: "This PC".into(), what: "hosted by Hopper".into() });
+    out
+}
+
+/// A group's header: fold chevron, state light, name, what it is, and a +
+/// to make a server there.
+fn group_head(
+    g: &Group,
+    n: usize,
+    folded: bool,
+    store: &Entity<Store>,
+    on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let s = store.read(cx);
+    let (light, error) = match &g.kind {
+        GroupKind::Panel(id) => match s.panel_error(id) {
+            Some(e) => (Some(theme.danger), Some(e.to_string())),
+            None if s.panel_listed(id) => (Some(theme.success), None),
+            None => (Some(theme.warning), None),
+        },
+        _ => (None, None),
+    };
+    let key = g.key.clone();
+    let fold = {
+        let store = store.clone();
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            let key = key.clone();
+            store.update(cx, |s, cx| {
+                s.update_settings(
+                    |st| {
+                        if !st.collapsed_groups.remove(&key) {
+                            st.collapsed_groups.insert(key);
+                        }
+                    },
+                    cx,
+                )
+            })
+        }
+    };
+    let what = if g.what.is_empty() { format!("{n}") } else { format!("{} · {n}", g.what) };
+    let add: Option<AnyElement> = match &g.kind {
+        GroupKind::Panel(id) => {
+            let (store, id) = (store.clone(), id.clone());
+            Some(
+                Button::new(ElementId::Name(format!("group-new:{}", g.key).into()))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .tooltip(format!("New server on {}", g.name))
+                    .on_click(move |_, window, cx| {
+                        // Not a click on the header too (that folds it).
+                        cx.stop_propagation();
+                        crate::host_dialog::open_on(store.clone(), Some(id.clone()), None, window, cx)
+                    })
+                    .into_any_element(),
+            )
+        }
+        GroupKind::Local => on_host.map(|host| {
+            Button::new("group-new:local")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("Host a server on this PC")
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    host(window, cx)
+                })
+                .into_any_element()
+        }),
+        GroupKind::Folder => None,
+    };
+    let web = match &g.kind {
+        GroupKind::Panel(id) => s.settings().hopper_panels.iter().find(|p| &p.id == id).map(|p| p.url.clone()),
+        _ => None,
+    };
+    v_flex()
+        .child(
+            h_flex()
+                .id(ElementId::Name(format!("group:{}", g.key).into()))
+                .px_2()
+                .pt_3()
+                .pb_1()
+                .gap_1p5()
+                .rounded(theme.radius)
+                .clickable(cx)
+                .hover(|st| widgets::row_hover(st, cx))
+                .on_click(fold)
+                .context_menu(move |menu, _, _| match web.clone() {
+                    Some(url) => menu.item(
+                        PopupMenuItem::new("Open in browser")
+                            .icon(IconName::ExternalLink)
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    ),
+                    None => menu,
+                })
+                .child(
+                    Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown })
+                        .xsmall()
+                        .text_color(theme.muted_foreground),
+                )
+                .when_some(light, |r, c| r.child(div().size_1p5().flex_none().rounded_full().bg(c)))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(theme.foreground)
+                        .child(g.name.clone()),
+                )
+                .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(what))
+                .children(add),
+        )
+        .when_some(error.filter(|_| !folded), |c, e| {
+            c.child(div().px_3().pb_1().text_xs().text_color(theme.danger).child(e))
+        })
+        .into_any_element()
+}
+
+/// The quiet line under a server's name: its address on a Hopper Server,
+/// and whether the servers folder's panel runs it too.
+fn caption_for(s: &Store, srv: &ServerInfo) -> Option<String> {
+    srv.remote.as_ref()?;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(l) = &srv.loader {
+        parts.push(l.clone());
+    }
+    if let Some(a) = s.panel_stats(&srv.root).and_then(|p| p.addresses.first()) {
+        parts.push(a.clone());
+    }
+    if s.also_in_folder(srv) || !matches!(srv.manager, Manager::Unknown) {
+        parts.push(format!(
+            "also in {}",
+            match srv.manager {
+                Manager::Mcss => "MCSS",
+                _ => "Crafty",
+            }
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// The collapsed server list: a tile per server with its status light,
@@ -399,7 +593,18 @@ pub struct ServersView {
     settings_view: Entity<ServerSettings>,
     /// The Sync tab: the server against its pack.
     sync: Entity<SyncPanel>,
-    /// Overview, Console, Backups, Settings, Mods or Sync.
+    /// The tabs only a Hopper Server's servers have.
+    p_files: Entity<panel_tabs::files::FilesTab>,
+    p_mods: Entity<panel_tabs::mods::ModsTab>,
+    p_players: Entity<panel_tabs::players::PlayersTab>,
+    p_backups: Entity<panel_tabs::backups::BackupsTab>,
+    p_schedule: Entity<panel_tabs::schedule::ScheduleTab>,
+    p_settings: Entity<panel_tabs::settings::SettingsTab>,
+    /// The picked server's panel, when it's on a Hopper Server.
+    target: Option<Result<panel_tabs::Target, String>>,
+    /// The (server, tab) a panel tab was last shown for.
+    p_shown: Option<(PathBuf, usize)>,
+    /// Which tab (one of the `TAB_*` codes).
     tab: usize,
     /// The Sync tab was open when the page was left.
     sync_away: bool,
@@ -408,9 +613,54 @@ pub struct ServersView {
     _subscriptions: Vec<Subscription>,
 }
 
-/// The Sync tab's index among a server's tabs.
+/// The Sync tab's code (see [`tabs_for`]).
 pub const TAB_SYNC: usize = 5;
+const TAB_OVERVIEW: usize = 0;
 const TAB_CONSOLE: usize = 1;
+const TAB_BACKUPS: usize = 2;
+const TAB_SETTINGS: usize = 3;
+const TAB_MODS: usize = 4;
+const TAB_FILES: usize = 6;
+const TAB_PLAYERS: usize = 7;
+const TAB_SCHEDULE: usize = 8;
+
+/// A server's tabs, in order, as codes: a Hopper Server's servers have the
+/// panel's tabs (in the panel's order), others the ones Hopper reads itself.
+fn tabs_for(remote: bool) -> &'static [usize] {
+    if remote {
+        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_FILES, TAB_MODS, TAB_PLAYERS, TAB_BACKUPS, TAB_SCHEDULE, TAB_SETTINGS, TAB_SYNC]
+    } else {
+        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_BACKUPS, TAB_SETTINGS, TAB_MODS, TAB_SYNC]
+    }
+}
+
+fn tab_icon(code: usize) -> IconName {
+    match code {
+        TAB_OVERVIEW => IconName::Info,
+        TAB_CONSOLE => IconName::SquareTerminal,
+        TAB_BACKUPS => IconName::Archive,
+        TAB_SETTINGS => IconName::Settings2,
+        TAB_MODS => IconName::Puzzle,
+        TAB_FILES => IconName::FolderOpen,
+        TAB_PLAYERS => IconName::Users,
+        TAB_SCHEDULE => IconName::Clock,
+        _ => IconName::ArrowLeftRight,
+    }
+}
+
+fn tab_name(code: usize) -> &'static str {
+    match code {
+        TAB_OVERVIEW => "Overview",
+        TAB_CONSOLE => "Console",
+        TAB_BACKUPS => "Backups",
+        TAB_SETTINGS => "Settings",
+        TAB_MODS => "Mods",
+        TAB_FILES => "Files",
+        TAB_PLAYERS => "Players",
+        TAB_SCHEDULE => "Schedule",
+        _ => "Sync",
+    }
+}
 
 /// What the Servers page asks the app to do.
 pub enum ServersEvent {
@@ -448,6 +698,7 @@ impl ServersView {
             }),
             cx.observe(&store, |this, _, cx| {
                 this.ensure_pick(cx);
+                this.retarget(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&filter, window, |this, state, e, _, cx| {
@@ -458,6 +709,12 @@ impl ServersView {
             }),
         ];
         let pack_desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
+        let p_files = cx.new(|cx| panel_tabs::files::FilesTab::new(store.clone(), window, cx));
+        let p_mods = cx.new(|cx| panel_tabs::mods::ModsTab::new(store.clone(), window, cx));
+        let p_players = cx.new(|cx| panel_tabs::players::PlayersTab::new(store.clone(), window, cx));
+        let p_backups = cx.new(|cx| panel_tabs::backups::BackupsTab::new(store.clone(), window, cx));
+        let p_schedule = cx.new(|cx| panel_tabs::schedule::ScheduleTab::new(store.clone(), window, cx));
+        let p_settings = cx.new(|cx| panel_tabs::settings::SettingsTab::new(store.clone(), window, cx));
         let mut v = Self {
             store,
             list_panel: widgets::SidePanel::new(LIST_PANEL),
@@ -470,6 +727,14 @@ impl ServersView {
             control,
             settings_view,
             sync,
+            p_files,
+            p_mods,
+            p_players,
+            p_backups,
+            p_schedule,
+            p_settings,
+            target: None,
+            p_shown: None,
             tab: 0,
             sync_away: false,
             pack_open: false,
@@ -510,6 +775,7 @@ impl ServersView {
 
     pub(crate) fn pick(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.picked = Some(root.clone());
+        self.retarget(cx);
         self.scan(root.clone(), false, cx);
         self.control.update(cx, |c, cx| c.show(root.clone(), cx));
         if self.tab == TAB_SYNC {
@@ -541,6 +807,7 @@ impl ServersView {
             && self.picked.as_ref() != Some(&r)
         {
             self.picked = Some(r.clone());
+            self.retarget(cx);
             self.scan(r.clone(), false, cx);
             self.control.update(cx, |c, cx| c.show(r, cx));
         }
@@ -565,7 +832,44 @@ impl ServersView {
         }
     }
 
+    /// The picked server's panel, made again when it changes.
+    fn retarget(&mut self, cx: &mut Context<Self>) {
+        let remote = self.picked.as_ref().and_then(|r| self.store.read(cx).server(r)).and_then(|s| s.remote.clone());
+        let same = matches!((&self.target, &remote), (Some(Ok(t)), Some(r)) if &t.remote == r);
+        if !tabs_for(remote.is_some()).contains(&self.tab) {
+            self.tab = TAB_OVERVIEW;
+        }
+        if !same {
+            self.target = remote.map(panel_tabs::Target::new);
+            self.p_shown = None;
+        }
+    }
+
+    /// The picked server on a Hopper Server shows a panel tab: tell the tab
+    /// (once per server and tab, so it loads on opening).
+    fn show_panel_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Ok(t)) = self.target.clone() else { return };
+        let Some(root) = self.picked.clone() else { return };
+        let key = (root, self.tab);
+        if self.p_shown.as_ref() == Some(&key) {
+            return;
+        }
+        self.p_shown = Some(key);
+        match self.tab {
+            TAB_FILES => self.p_files.update(cx, |v, cx| v.show(t, window, cx)),
+            TAB_MODS => self.p_mods.update(cx, |v, cx| v.show(t, window, cx)),
+            TAB_PLAYERS => self.p_players.update(cx, |v, cx| v.show(t, window, cx)),
+            TAB_BACKUPS => self.p_backups.update(cx, |v, cx| v.show(t, window, cx)),
+            TAB_SCHEDULE => self.p_schedule.update(cx, |v, cx| v.show(t, window, cx)),
+            TAB_SETTINGS => self.p_settings.update(cx, |v, cx| v.show(t, window, cx)),
+            _ => {}
+        }
+    }
+
     fn scan(&mut self, root: PathBuf, again: bool, cx: &mut Context<Self>) {
+        if is_remote_root(&root) {
+            return;
+        }
         if !again && self.mods.contains_key(&root) {
             return;
         }
@@ -669,8 +973,11 @@ impl ServersView {
         let pstats = store.panel_stats(&s.root).cloned();
         let paired = store.paired(s).cloned();
         let configured = self.control.read(cx).configured(cx);
+        let remote = s.remote.is_some();
+        let also = remote && (store.also_in_folder(s) || !matches!(s.manager, Manager::Unknown));
         let manager = match s.manager {
             _ if store.is_hosted(&s.root) => "Hopper, on this PC",
+            _ if remote => "Hopper Server",
             Manager::Crafty => "Crafty",
             Manager::Mcss => "MCSS",
             Manager::Unknown => "Unknown",
@@ -711,9 +1018,12 @@ impl ServersView {
             )
             .item("Port", s.port().to_string(), 1);
         // Set in Hopper Server (Settings › Address).
-        let route = hopper::hosting::router::RouteSettings::load(&s.root);
-        if !route.addresses.is_empty() {
-            info = info.item("Address", route.addresses.join(", "), 1);
+        let addresses = match &pstats {
+            Some(p) if remote => p.addresses.clone(),
+            _ => hopper::hosting::router::RouteSettings::load(&s.root).addresses,
+        };
+        if !addresses.is_empty() {
+            info = info.item("Address", addresses.join(", "), 1);
         }
         if let Some(inst) = &paired {
             let ok = s.loader.as_deref() == Some(inst.loader.replace('-', " ").as_str());
@@ -805,7 +1115,14 @@ impl ServersView {
                                                 manager,
                                                 cx.theme().muted_foreground,
                                                 false,
-                                            )),
+                                            ))
+                                            .when(also, |r| {
+                                                r.child(widgets::pill(
+                                                    if matches!(s.manager, Manager::Mcss) { "Also in MCSS" } else { "Also in Crafty" },
+                                                    cx.theme().muted_foreground,
+                                                    false,
+                                                ))
+                                            }),
                                     )
                                     .child(
                                         div()
@@ -837,8 +1154,8 @@ impl ServersView {
                         Button::new("open-server")
                             .outline()
                             .small()
-                            .icon(IconName::FolderOpen)
-                            .label("Folder")
+                            .icon(if remote { IconName::ExternalLink } else { IconName::FolderOpen })
+                            .label(if remote { "Open in browser" } else { "Folder" })
                             .on_click(move |_, _, _| crate::store::open_path(&root)),
                     )
                     .child(
@@ -854,23 +1171,42 @@ impl ServersView {
                             ),
                     )
             )
-            .child(
+            .child({
+                let codes = tabs_for(remote);
+                let online = pstats.as_ref().filter(|p| p.running).map(|p| p.online);
                 TabBar::new("server-tabs")
                     .underline()
-                    .selected_index(self.tab)
-                    .child(Tab::new().prefix(Icon::new(IconName::Info).small()).label("Overview"))
-                    .child(Tab::new().prefix(Icon::new(IconName::SquareTerminal).small()).label("Console"))
-                    .child(Tab::new().prefix(Icon::new(IconName::Archive).small()).label("Backups"))
-                    .child(Tab::new().prefix(Icon::new(IconName::Settings2).small()).label("Settings"))
-                    .child(
-                        Tab::new()
-                            .prefix(Icon::new(IconName::Puzzle).small())
-                            .label(format!("Mods {n_jars}")),
-                    )
-                    .child(Tab::new().prefix(Icon::new(IconName::ArrowLeftRight).small()).label("Sync"))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| this.set_tab(*ix, cx))),
-            )
-            .when(self.tab == 0, |c| {
+                    .selected_index(codes.iter().position(|c| *c == self.tab).unwrap_or(0))
+                    .children(codes.iter().map(|&code| {
+                        let label = match code {
+                            TAB_MODS if !remote => format!("Mods {n_jars}"),
+                            TAB_PLAYERS => online.map_or("Players".to_string(), |n| format!("Players {n}")),
+                            _ => tab_name(code).to_string(),
+                        };
+                        Tab::new().prefix(Icon::new(tab_icon(code)).small()).label(label)
+                    }))
+                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                        if let Some(code) = codes.get(*ix) {
+                            this.set_tab(*code, cx)
+                        }
+                    }))
+            })
+            .when(remote && matches!(self.tab, TAB_FILES | TAB_MODS | TAB_PLAYERS | TAB_BACKUPS | TAB_SCHEDULE | TAB_SETTINGS), |c| {
+                let body: AnyElement = match &self.target {
+                    Some(Err(e)) => widgets::empty_state(IconName::TriangleAlert, "Can't reach this panel", Some(e.clone().into()), cx)
+                        .into_any_element(),
+                    _ => match self.tab {
+                        TAB_FILES => self.p_files.clone().into_any_element(),
+                        TAB_MODS => self.p_mods.clone().into_any_element(),
+                        TAB_PLAYERS => self.p_players.clone().into_any_element(),
+                        TAB_BACKUPS => self.p_backups.clone().into_any_element(),
+                        TAB_SCHEDULE => self.p_schedule.clone().into_any_element(),
+                        _ => self.p_settings.clone().into_any_element(),
+                    },
+                };
+                c.child(div().flex_1().min_h_0().child(body))
+            })
+            .when(self.tab == TAB_OVERVIEW, |c| {
                 let players = self.control.update(cx, |ctl, cx| ctl.players_view(cx));
                 let cards = self.control.update(cx, |ctl, cx| ctl.stat_cards(cx));
                 if pack_id != 0 {
@@ -925,10 +1261,10 @@ impl ServersView {
                         .overflow_y_scrollbar(),
                 )
             })
-            .when(self.tab == 1, |c| {
+            .when(self.tab == TAB_CONSOLE, |c| {
                 c.child(self.control.update(cx, |ctl, cx| ctl.console_view(window, cx)))
             })
-            .when(self.tab == 2, |c| {
+            .when(self.tab == TAB_BACKUPS && !remote, |c| {
                 c.child(
                     div()
                         .id("server-backups")
@@ -938,7 +1274,7 @@ impl ServersView {
                         .overflow_y_scrollbar(),
                 )
             })
-            .when(self.tab == 3, |c| {
+            .when(self.tab == TAB_SETTINGS && !remote, |c| {
                 let root = s.root.clone();
                 self.settings_view.update(cx, |v, cx| v.show(root, window, cx));
                 let panel = self.control.update(cx, |ctl, cx| ctl.options_view(window, cx));
@@ -956,7 +1292,7 @@ impl ServersView {
                         .overflow_y_scrollbar(),
                 )
             })
-            .when(self.tab == 4, |c| c.child(
+            .when(self.tab == TAB_MODS && !remote, |c| c.child(
                 v_flex()
                     .flex_1()
                     .min_h_0()
@@ -1154,6 +1490,7 @@ impl Render for ServersView {
             .as_ref()
             .and_then(|p| self.store.read(cx).server(p))
             .cloned();
+        self.show_panel_tab(window, cx);
         let detail: AnyElement = match server {
             Some(s) => widgets::enter(
                 ElementId::Name(format!("server-detail:{}", s.root.display()).into()),

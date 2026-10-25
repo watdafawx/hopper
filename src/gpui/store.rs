@@ -39,6 +39,8 @@ pub enum Msg {
     Forget(PathBuf),
     /// The rig's servers, read off the UI thread (it's a network share).
     RigServers(Vec<ServerInfo>),
+    /// A Hopper Server's servers (by panel id), or why it couldn't list them.
+    PanelServers(String, Result<Vec<ServerInfo>, String>),
     /// An instance changed on disk; reload it.
     InstanceChanged(PathBuf),
     /// Mods were updated: the instance is read again, and only those
@@ -227,6 +229,10 @@ pub struct Store {
     statuses: HashMap<PathBuf, Status>,
     /// Each server's state in the server panel, when one is set up.
     panel_stats: HashMap<PathBuf, hopper::panel::PanelStats>,
+    /// The servers folder's servers, before merging.
+    folder_servers: Vec<ServerInfo>,
+    /// Each Hopper Server's servers (by panel id), or why it couldn't list them.
+    panel_servers: HashMap<String, Result<Vec<ServerInfo>, String>>,
     /// Pack files that couldn't be downloaded automatically, per instance.
     pending: HashMap<PathBuf, Vec<hopper::modpack::Pending>>,
     /// Servers Hopper hosts on this PC, and the panel that runs them.
@@ -378,6 +384,8 @@ impl Store {
             javas_asked: false,
             statuses: HashMap::new(),
             panel_stats: HashMap::new(),
+            folder_servers: Vec::new(),
+            panel_servers: HashMap::new(),
             busy: Default::default(),
             launching: Default::default(),
             update_queue: Default::default(),
@@ -560,10 +568,40 @@ impl Store {
                         s.settings.panel_self_signed,
                         hopper::panel::token().map_or(0, |t| t.len())
                     );
-                    Some((panel, key, s.servers.clone()))
+                    // Servers on a Hopper Server are asked their own panel.
+                    let servers: Vec<ServerInfo> = s.servers.iter().filter(|x| x.remote.is_none()).cloned().collect();
+                    Some((panel, key, servers))
                 }) else {
                     return;
                 };
+                let remotes: Vec<(hopper::hopperd::Remote, Vec<(String, PathBuf)>)> = this
+                    .update(cx, |s, _| {
+                        let mut by: Vec<(hopper::hopperd::Remote, Vec<(String, PathBuf)>)> = Vec::new();
+                        for x in &s.servers {
+                            let Some(r) = &x.remote else { continue };
+                            match by.iter_mut().find(|(k, _)| k.panel == r.panel) {
+                                Some((_, v)) => v.push((r.id.clone(), x.root.clone())),
+                                None => by.push((r.clone(), vec![(r.id.clone(), x.root.clone())])),
+                            }
+                        }
+                        by
+                    })
+                    .unwrap_or_default();
+                let remote_found: Vec<(PathBuf, hopper::panel::PanelStats)> = cx
+                    .background_spawn(async move {
+                        let mut out = Vec::new();
+                        for (r, ids) in remotes {
+                            let Ok(c) = hopper::hopperd::Client::for_remote(&r) else { continue };
+                            let Ok(all) = hopper::panel::HopperServer::from_client(c).all_stats() else { continue };
+                            for (id, root) in ids {
+                                if let Some((_, st)) = all.iter().find(|(i, _)| *i == id) {
+                                    out.push((root, st.clone()));
+                                }
+                            }
+                        }
+                        out
+                    })
+                    .await;
                 let found = match setup {
                     None => Vec::new(),
                     Some((panel, key, servers)) => {
@@ -609,7 +647,7 @@ impl Store {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let found: Vec<_> = found.into_iter().chain(local).collect();
+                let found: Vec<_> = found.into_iter().chain(local).chain(remote_found).collect();
                 let alive = this.update(cx, |s, cx| {
                     let events = s.scheduler.as_ref().map(|x| x.events()).unwrap_or_default();
                     for e in events {
@@ -931,20 +969,15 @@ impl Store {
             Msg::RecheckPacks => self.check_pack_updates(),
             Msg::Forget(root) => self.forget(&root),
             Msg::RigServers(rig) => {
-                // Keep hosted ones; the rig's come first.
-                let hosted_root = self.hosted_root();
-                let hosted_root = hosted_root.trim();
-                let hosted: Vec<ServerInfo> = std::mem::take(&mut self.servers)
-                    .into_iter()
-                    .filter(|s| !hosted_root.is_empty() && s.root.starts_with(hosted_root))
-                    .collect();
-                self.servers = rig;
-                self.servers.extend(hosted);
-                self.server_rev += 1;
-                for s in self.servers.clone() {
-                    self.ping(&s);
+                self.folder_servers = rig;
+                self.merge_servers(cx);
+            }
+            Msg::PanelServers(panel, list) => {
+                if let Err(e) = &list {
+                    log::warn!("Hopper Server {panel:?}: {e}");
                 }
-                self.settle_server_tools(cx);
+                self.panel_servers.insert(panel, list);
+                self.merge_servers(cx);
             }
             Msg::SessionSaved(root) => cx.emit(StoreEvent::SessionSaved(root)),
             Msg::Nothing => {}
@@ -1419,6 +1452,11 @@ impl Store {
         self.run_job(Some(root.to_path_buf()), title.into(), work)
     }
 
+    /// A progress job the caller runs and finishes itself (shows in Tasks).
+    pub fn start_job(&self, title: impl Into<String>) -> Job {
+        self.jobs.start(title)
+    }
+
     /// A job's progress (0..=1, when known) and whether it ended (and how).
     pub fn job_state(&self, id: u64) -> Option<hopper::jobs::JobState> {
         self.jobs.snapshot().into_iter().find(|j| j.id == id)
@@ -1728,7 +1766,10 @@ impl Store {
         let host = self.settings.server_host.clone();
         let anyway = self.settings.sync_anyway.clone();
         let java = hopper::launch::installer_java(Path::new(&self.settings.launcher_dir));
-        let panel = hopper::panel::from_settings(&self.settings);
+        let panel = match &server {
+            Some(s) => hopper::panel::for_server(&self.settings, s),
+            None => hopper::panel::from_settings(&self.settings),
+        };
         // The panel knows a server is up even while it's still loading and
         // doesn't answer pings yet.
         let server_up = server
@@ -2402,17 +2443,94 @@ impl Store {
                 self.servers.push(s);
             }
         }
-        // A Hopper Server lists its servers itself; no shared drive needed.
-        if let Some(client) = hopper::hopperd::Client::from_settings(&self.settings) {
-            self.spawn(move || {
-                Msg::RigServers(client.server_infos().unwrap_or_else(|e| {
-                    log::warn!("Hopper Server at {}: {e:#}", client.base);
-                    Vec::new()
-                }))
-            });
+        // Each Hopper Server lists its servers itself; no shared drive needed.
+        let ids: Vec<String> = self.settings.hopper_panels.iter().map(|p| p.id.clone()).collect();
+        self.panel_servers.retain(|k, _| ids.contains(k));
+        for p in self.settings.hopper_panels.clone() {
+            let id = p.id.clone();
+            match hopper::hopperd::Client::for_panel(&p) {
+                Some(client) => self.spawn(move || {
+                    Msg::PanelServers(id, client.server_infos().map_err(|e| format!("{e:#}")))
+                }),
+                None => {
+                    self.panel_servers.insert(id, Err("Not paired. Pair it again in Settings â€º Servers.".into()));
+                }
+            }
+        }
+        if rig_root.as_os_str().is_empty() {
+            self.folder_servers.clear();
+            self.merge_servers_quiet();
             return;
         }
         self.spawn(move || Msg::RigServers(hopper::server::discover(&rig_root)));
+    }
+
+    /// The server list from its sources: each Hopper Server's, then the
+    /// servers folder's (minus the ones a Hopper Server also lists: the same
+    /// folder shows once, under the panel), then the hosted ones.
+    fn merge_servers(&mut self, cx: &mut Context<Self>) {
+        self.merge_servers_quiet();
+        for s in self.servers.clone() {
+            self.ping(&s);
+        }
+        self.settle_server_tools(cx);
+    }
+
+    fn merge_servers_quiet(&mut self) {
+        let hosted_root = self.hosted_root();
+        let hosted_root = hosted_root.trim().to_string();
+        let hosted: Vec<ServerInfo> = std::mem::take(&mut self.servers)
+            .into_iter()
+            .filter(|s| !hosted_root.is_empty() && s.root.starts_with(&hosted_root))
+            .collect();
+        let mut out: Vec<ServerInfo> = Vec::new();
+        for p in &self.settings.hopper_panels {
+            if let Some(Ok(list)) = self.panel_servers.get(&p.id) {
+                out.extend(list.iter().cloned());
+            }
+        }
+        let folder_of = |s: &ServerInfo| s.root.file_name().map(|f| f.to_string_lossy().to_lowercase());
+        let mut moved: Vec<(String, String)> = Vec::new();
+        for f in &self.folder_servers {
+            let twin = out.iter().find(|r| r.remote.is_some() && folder_of(r) == folder_of(f) && r.port() == f.port());
+            match twin {
+                // Its pairing goes with it.
+                Some(r) => moved.push((f.root.to_string_lossy().to_string(), r.root.to_string_lossy().to_string())),
+                None => out.push(f.clone()),
+            }
+        }
+        for (from, to) in moved {
+            if let Some(inst) = self.settings.pairings.get(&from).cloned()
+                && !self.settings.pairings.contains_key(&to)
+            {
+                self.update_settings_quietly(|st| {
+                    st.pairings.insert(to, inst);
+                });
+            }
+        }
+        out.extend(hosted);
+        self.servers = out;
+        self.server_rev += 1;
+    }
+
+    /// The servers folder's servers that a Hopper Server also lists are
+    /// shown once; this says whether `s` (on a panel) is also in that folder.
+    pub fn also_in_folder(&self, s: &ServerInfo) -> bool {
+        s.remote.is_some()
+            && self.folder_servers.iter().any(|f| f.root.file_name() == s.root.file_name() && f.port() == s.port())
+    }
+
+    /// Why a paired Hopper Server couldn't list its servers, if it couldn't.
+    pub fn panel_error(&self, panel: &str) -> Option<&str> {
+        match self.panel_servers.get(panel) {
+            Some(Err(e)) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Whether a paired panel's list has come back (either way).
+    pub fn panel_listed(&self, panel: &str) -> bool {
+        self.panel_servers.contains_key(panel)
     }
 
     /// Where hosted servers live (HOPPER_HOSTED_ROOT wins, for tests).
@@ -2651,6 +2769,9 @@ impl Store {
         // Hosted servers answer on this PC.
         let host = if self.is_hosted(&s.root) {
             "127.0.0.1".to_string()
+        } else if let Some(r) = &s.remote {
+            // On a Hopper Server: the machine the panel runs on.
+            hopper::hopperd::host_name(&r.base)
         } else {
             self.settings.server_host.clone()
         };
@@ -2836,6 +2957,7 @@ impl Store {
         !self.servers.is_empty()
             || !s.servers_root.trim().is_empty()
             || !s.panel_url.trim().is_empty()
+            || !s.hopper_panels.is_empty()
             || !s.pairings.is_empty()
             || s.peer_sync
     }

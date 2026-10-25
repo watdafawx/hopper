@@ -289,7 +289,7 @@ impl UpdatePreview {
         let s = v.store.read(cx);
         let host = s.settings().server_host.clone();
         let java = hopper::launch::installer_java(std::path::Path::new(&s.settings().launcher_dir));
-        let panel = hopper::panel::from_settings(s.settings());
+        let panel = hopper::panel::for_server(s.settings(), &server);
         s.spawn_job(format!("{} → {}", server.name, p.plan.file.display_name), move |job| {
             job.announce();
             let r = hopper::server_pack_update::apply(&server, &p, &take, &host, &java, panel.as_deref(), job)?;

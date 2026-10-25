@@ -32,6 +32,8 @@ pub struct Remote {
     pub id: String,
     /// The panel's certificate authority (PEM), pinned at pairing.
     pub ca: String,
+    /// Which paired panel ([`crate::settings::HopperPanel::id`]).
+    pub panel: String,
 }
 
 /// Stand-in roots and the panels they're on, so code given only a path
@@ -81,9 +83,23 @@ pub fn web_url(p: &Path) -> Option<String> {
     Some(url)
 }
 
-/// The stand-in root for a server on a Hopper Server.
+/// The stand-in root for a server on a Hopper Server. The first panel's
+/// servers keep `hopperd:\<folder>` (pairings are saved by it); others get
+/// their panel's id in between (see [`panel_root`]).
 pub fn remote_root(folder: &str) -> PathBuf {
     PathBuf::from(format!("hopperd:\\{folder}"))
+}
+
+/// [`remote_root`] for a server on panel `panel`.
+pub fn panel_root(panel: &str, folder: &str) -> PathBuf {
+    if panel.is_empty() { remote_root(folder) } else { PathBuf::from(format!("hopperd:\\@{panel}\\{folder}")) }
+}
+
+/// "rig" from "https://rig:8790", for a panel's default name.
+pub fn host_name(base: &str) -> String {
+    let host = base.split("://").nth(1).unwrap_or(base).split('/').next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    host.trim_matches(['[', ']']).to_string()
 }
 
 pub fn is_remote_root(p: &Path) -> bool {
@@ -162,6 +178,8 @@ pub fn fingerprint_of(pem: &str) -> Option<String> {
 /// A paired Hopper Server.
 pub struct Client {
     pub base: String,
+    /// Which paired panel ([`crate::settings::HopperPanel::id`]).
+    pub panel: String,
     token: String,
     ca: String,
     agent: ureq::Agent,
@@ -191,27 +209,48 @@ impl Client {
             agent: agent_with(Duration::from_secs(15), &trust),
             slow: agent_with(Duration::from_secs(3600), &trust),
             base,
+            panel: String::new(),
             token: token.to_string(),
             ca: ca.to_string(),
         }
     }
 
-    /// The Hopper Server set up in Settings, when it is the panel kind.
-    pub fn from_settings(s: &crate::settings::Settings) -> Option<Client> {
-        if s.panel_kind != "hopperd" {
-            return None;
-        }
-        let url = std::env::var("HOPPER_PANEL_URL").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| s.panel_url.clone());
+    /// A paired panel, when its token is saved.
+    pub fn for_panel(p: &crate::settings::HopperPanel) -> Option<Client> {
+        let url = if p.id.is_empty() {
+            std::env::var("HOPPER_PANEL_URL").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| p.url.clone())
+        } else {
+            p.url.clone()
+        };
         if url.trim().is_empty() {
             return None;
         }
-        Some(Client::new(&url, &crate::panel::hopperd_token()?, &s.panel_ca))
+        let mut c = Client::new(&url, &crate::panel::hopperd_token_for(&p.id)?, &p.ca);
+        c.panel = p.id.clone();
+        Some(c)
+    }
+
+    /// The token, to make a [`crate::panel::HopperServer`] from this client.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn ca(&self) -> &str {
+        &self.ca
+    }
+
+    /// The first paired panel.
+    pub fn from_settings(s: &crate::settings::Settings) -> Option<Client> {
+        s.hopper_panels.first().and_then(Client::for_panel)
     }
 
     /// For a server on this panel.
     pub fn for_remote(r: &Remote) -> anyhow::Result<Client> {
-        let token = crate::panel::hopperd_token().context("Pair with the Hopper Server first (Settings → Server panel).")?;
-        Ok(Client::new(&r.base, &token, &r.ca))
+        let token =
+            crate::panel::hopperd_token_for(&r.panel).context("Pair with the Hopper Server first (Settings → Servers).")?;
+        let mut c = Client::new(&r.base, &token, &r.ca);
+        c.panel = r.panel.clone();
+        Ok(c)
     }
 
     fn url(&self, path: &str) -> String {
@@ -230,6 +269,31 @@ impl Client {
         reply(self.agent.post(&self.url(path)).header("Authorization", &self.auth()).send_json(body), &self.base)
     }
 
+    pub fn put(&self, path: &str, body: Value) -> anyhow::Result<Value> {
+        reply(self.agent.put(&self.url(path)).header("Authorization", &self.auth()).send_json(body), &self.base)
+    }
+
+    pub fn delete(&self, path: &str) -> anyhow::Result<Value> {
+        reply(self.agent.delete(&self.url(path)).header("Authorization", &self.auth()).call(), &self.base)
+    }
+
+    /// Starts a job with a POST and follows it to the end (see [`Client::follow`]).
+    pub fn run_job(&self, path: &str, body: Value, job: &crate::jobs::Job) -> anyhow::Result<Value> {
+        let v = self.post(path, body)?;
+        let id = v["job"].as_u64().context("the panel didn't start a job")?;
+        self.follow(id, job)
+    }
+
+    /// `/servers/{id}` + `rest`, with the id encoded.
+    pub fn server_path(id: &str, rest: &str) -> String {
+        format!("/servers/{}{rest}", enc(id))
+    }
+
+    /// `/fs/{id}` + `rest`, with the id encoded.
+    pub fn fs_path(id: &str, rest: &str) -> String {
+        format!("/fs/{}{rest}", enc(id))
+    }
+
     // ---- servers -------------------------------------------------------------
 
     /// Every server on the panel, as Hopper's [`ServerInfo`].
@@ -239,7 +303,7 @@ impl Client {
             .as_array()
             .into_iter()
             .flatten()
-            .map(|v| info_from(v, &self.base, &self.ca))
+            .map(|v| info_from(v, &self.base, &self.ca, &self.panel))
             .collect())
     }
 
@@ -288,7 +352,7 @@ impl Client {
 
     /// Follows a job the panel runs until it ends, showing its detail and
     /// progress in `job`; cancelling `job` cancels it there. Returns its result.
-    fn follow(&self, remote_job: u64, job: &crate::jobs::Job) -> anyhow::Result<Value> {
+    pub fn follow(&self, remote_job: u64, job: &crate::jobs::Job) -> anyhow::Result<Value> {
         let mut cancelled = false;
         loop {
             std::thread::sleep(Duration::from_millis(400));
@@ -420,7 +484,8 @@ fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(n)
 }
 
-fn enc(s: &str) -> String {
+/// `s` percent-encoded for a URL path segment or query value.
+pub fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
@@ -429,7 +494,7 @@ fn enc(s: &str) -> String {
         .collect()
 }
 
-fn info_from(v: &Value, base: &str, ca: &str) -> ServerInfo {
+fn info_from(v: &Value, base: &str, ca: &str, panel: &str) -> ServerInfo {
     let s = |k: &str| v[k].as_str().map(str::to_string);
     let name = s("name").unwrap_or_default();
     let folder = s("path")
@@ -437,8 +502,8 @@ fn info_from(v: &Value, base: &str, ca: &str) -> ServerInfo {
         .filter(|f| !f.is_empty())
         .unwrap_or_else(|| name.clone());
     let properties: BTreeMap<String, String> = serde_json::from_value(v["properties"].clone()).unwrap_or_default();
-    let root = remote_root(&folder);
-    let remote = Remote { base: base.to_string(), id: s("id").unwrap_or_default(), ca: ca.to_string() };
+    let root = panel_root(panel, &folder);
+    let remote = Remote { base: base.to_string(), id: s("id").unwrap_or_default(), ca: ca.to_string(), panel: panel.to_string() };
     register(&root, &remote);
     ServerInfo {
         name,
@@ -715,7 +780,7 @@ mod tests {
     #[test]
     fn web_urls() {
         let root = remote_root("Web Test");
-        register(&root, &Remote { base: "http://rig:8790".into(), id: "web-test".into(), ca: String::new() });
+        register(&root, &Remote { base: "http://rig:8790".into(), id: "web-test".into(), ca: String::new(), panel: String::new() });
         assert_eq!(
             web_url(&root.join("config").join("a b.toml")).unwrap(),
             "http://rig:8790/#/server/web-test/edit/config/a%20b.toml"
@@ -751,8 +816,12 @@ mod tests {
             "managed_by": null, "loader": "neoforge 21.1.172", "java": null, "max_memory": "12G",
             "properties": { "server-port": "25565", "motd": "hi" }
         });
-        let i = info_from(&v, "https://rig:8790", "");
+        let i = info_from(&v, "https://rig:8790", "", "");
         assert_eq!(i.root, remote_root("TNP Limitless 8"));
+        let j = info_from(&v, "https://vps:8790", "", "p2");
+        assert_eq!(j.root, panel_root("p2", "TNP Limitless 8"));
+        assert_eq!(j.root.file_name().unwrap(), "TNP Limitless 8");
+        assert_eq!(host_name("https://rig:8790"), "rig");
         assert_eq!(i.port(), 25565);
         assert_eq!(i.remote.as_ref().unwrap().id, "tnp-limitless-8");
         assert_eq!(i.max_memory.as_deref(), Some("12G"));

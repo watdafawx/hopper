@@ -173,6 +173,10 @@ enum Source {
 
 pub struct HostForm {
     store: Entity<Store>,
+    /// Where it's made: None on this PC, else a paired Hopper Server's id.
+    place: Option<String>,
+    /// Players join by this name (Hopper Server's addresses); optional.
+    address: Entity<InputState>,
     source: Source,
     base: Entity<CreateForm>,
     memory: Entity<SliderState>,
@@ -192,7 +196,9 @@ impl HostForm {
         let root = PathBuf::from(store.read(cx).hosted_root());
         let port = hopper::hosting::suggest_port(&root).to_string();
         let port = cx.new(|cx| InputState::new(window, cx).default_value(port));
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder("Optional, like survival"));
         let subs = vec![
+            cx.subscribe(&address, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.observe(&base, |_, _, cx| cx.notify()),
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&memory, |_, _, _: &SliderEvent, cx| cx.notify()),
@@ -208,6 +214,8 @@ impl HostForm {
         };
         Self {
             store,
+            place: None,
+            address,
             source,
             base,
             memory,
@@ -238,6 +246,50 @@ impl HostForm {
             Source::Instance(r) => self.store.read(cx).instance(r).map(|i| i.game_version.clone()),
             Source::Fresh => Some(self.base.read(cx).game_version().to_string()).filter(|v| !v.is_empty()),
             Source::Files(p) => Some(p.game_version.clone()).filter(|v| !v.is_empty()),
+        }
+    }
+
+    /// What to ask a Hopper Server to make (`POST /servers/create`).
+    fn panel_body(&self, cx: &App) -> Result<serde_json::Value, String> {
+        let store = self.store.read(cx);
+        let (name, gv, loader) = match &self.source {
+            Source::Instance(r) => {
+                let inst = store.instance(r).ok_or("That instance is gone.")?;
+                (format!("{} server", inst.name), inst.game_version.clone(), inst.loader.clone())
+            }
+            Source::Fresh => self.base.read(cx).choice(cx).ok_or("Pick a version and loader.")?,
+            Source::Files(_) => return Err("A pack's server files can only be hosted on this PC for now.".into()),
+        };
+        let (kind, version) = match ServerLoader::from_instance(&loader).map_err(|e| format!("{e:#}"))? {
+            ServerLoader::Vanilla => ("vanilla", String::new()),
+            ServerLoader::Fabric(v) => ("fabric", v.unwrap_or_default()),
+            ServerLoader::Quilt(v) => ("quilt", v.unwrap_or_default()),
+            ServerLoader::NeoForge(v) => ("neoforge", v),
+            ServerLoader::Forge(_) => return Err("Hopper Server can't make Forge servers yet.".into()),
+        };
+        let port = self.port.read(cx).value().trim().to_string();
+        let port: Option<u16> = if port.is_empty() { None } else { Some(port.parse().map_err(|_| "The port must be a number.")?) };
+        if !self.eula {
+            return Err("Agree to the Minecraft EULA to make a server.".into());
+        }
+        Ok(serde_json::json!({
+            "name": name,
+            "mc_version": gv,
+            "loader": kind,
+            "loader_version": version,
+            "memory_mb": (self.memory.read(cx).value().start() * 1024.0).round() as u32,
+            "port": port,
+            "motd": name,
+            "address": self.address.read(cx).value().trim(),
+            "accept_eula": true,
+        }))
+    }
+
+    /// Ready to create, or why not.
+    fn problem(&self, cx: &App) -> Option<String> {
+        match &self.place {
+            Some(_) => self.panel_body(cx).err(),
+            None => self.options(cx).err(),
         }
     }
 
@@ -299,8 +351,69 @@ impl HostForm {
         Ok(o)
     }
 
+    /// Makes it on the Hopper Server: a job there, followed in Tasks. A
+    /// server made from an instance is paired with it, ready for Sync.
+    fn create_on_panel(form: &Entity<Self>, panel: &str, window: &mut Window, cx: &mut App) -> bool {
+        let this = form.read(cx);
+        let Ok(body) = this.panel_body(cx) else { return false };
+        let inst = match &this.source {
+            Source::Instance(r) => Some(r.clone()),
+            _ => None,
+        };
+        let store_entity = this.store.clone();
+        let store = store_entity.read(cx);
+        let Some(p) = store.settings().hopper_panels.iter().find(|p| p.id == panel).cloned() else { return false };
+        let Some(client) = hopper::hopperd::Client::for_panel(&p) else {
+            window.push_notification(
+                gpui_kit::component::notification::Notification::error(format!("Pair with {} again first.", p.name)),
+                cx,
+            );
+            return false;
+        };
+        let name = body["name"].as_str().unwrap_or("server").to_string();
+        let job = store.start_job(format!("Making {name} on {}", p.name));
+        let store = store_entity;
+        cx.spawn(async move |cx| {
+            let r = cx
+                .background_spawn(async move {
+                    let r = client.run_job("/servers/create", body, &job);
+                    job.finish(&r);
+                    r.map(|v| (v, client.panel.clone()))
+                })
+                .await;
+            if let Ok((v, panel)) = r {
+                let folder = v["path"]
+                    .as_str()
+                    .and_then(|p| p.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next())
+                    .unwrap_or("")
+                    .to_string();
+                store
+                    .update(cx, |s, cx| {
+                        if let Some(inst) = inst
+                            && !folder.is_empty()
+                        {
+                            s.set_pairing(&hopper::hopperd::panel_root(&panel, &folder), &inst, cx);
+                        }
+                        s.rediscover_servers();
+                    });
+            }
+        })
+        .detach();
+        window.push_notification(
+            gpui_kit::component::notification::Notification::info(format!(
+                "Making the server on {}. It shows up in its group when it's ready.",
+                p.name
+            )),
+            cx,
+        );
+        true
+    }
+
     fn create(form: &Entity<Self>, window: &mut Window, cx: &mut App) -> bool {
         let this = form.read(cx);
+        if let Some(panel) = this.place.clone() {
+            return Self::create_on_panel(form, &panel, window, cx);
+        }
         let opts = match this.options(cx) {
             Ok(o) => o,
             Err(_) => return false,
@@ -470,11 +583,53 @@ impl Render for HostForm {
             }),
             cx,
         );
-        let problem = self.options(cx).err();
+        let problem = self.problem(cx);
         let hosted_root = self.store.read(cx).hosted_root();
+        let on_panel = self.place.is_some();
+        // This PC, then each paired Hopper Server (not for a pack's files).
+        let panels: Vec<(String, String)> = self
+            .store
+            .read(cx)
+            .settings()
+            .hopper_panels
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        let place_field = (!panels.is_empty() && files.is_none()).then(|| {
+            let current = match &self.place {
+                Some(id) => panels.iter().find(|(i, _)| i == id).map_or("Hopper Server".to_string(), |(_, n)| format!("{n} · Hopper Server")),
+                None => "This PC".to_string(),
+            };
+            let mut items = vec![("This PC".to_string(), self.place.is_none())];
+            items.extend(panels.iter().map(|(i, n)| (format!("{n} · Hopper Server"), self.place.as_ref() == Some(i))));
+            let ids: Vec<Option<String>> = std::iter::once(None).chain(panels.iter().map(|(i, _)| Some(i.clone()))).collect();
+            let view = cx.entity();
+            Field::new()
+                .label("Where")
+                .description(if on_panel {
+                    "The panel downloads the server and Java itself. Mods from an instance go over on the Sync tab after."
+                } else {
+                    "Runs on this PC while Hopper is open."
+                })
+                .child(widgets::picker(
+                    "host-place",
+                    current,
+                    items,
+                    rem,
+                    Rc::new(move |ix, _, cx| {
+                        if let Some(p) = ids.get(ix) {
+                            let p = p.clone();
+                            view.update(cx, |this, cx| {
+                                this.place = p;
+                                cx.notify();
+                            });
+                        }
+                    }),
+                ))
+        });
         v_flex()
             .gap_4()
-            .child(settings_form(rem).child(source_field).children(pack_field))
+            .child(settings_form(rem).children(place_field).child(source_field).when(!on_panel, |f| f.children(pack_field)))
             .when(!from_instance && files.is_none(), |c| c.child(self.base.clone()))
             .child(
                 settings_form(rem)
@@ -491,10 +646,22 @@ impl Render for HostForm {
                     .child(
                         Field::new()
                             .label("Port")
-                            .description("Players join on this port; forward it on your router for friends outside your network.")
+                            .description(if on_panel {
+                                "Empty: the panel picks a free one."
+                            } else {
+                                "Players join on this port; forward it on your router for friends outside your network."
+                            })
                             .child(div().w_32().child(Input::new(&self.port).small())),
                     )
-                    .child(java)
+                    .when(on_panel, |f| {
+                        f.child(
+                            Field::new()
+                                .label("Address")
+                                .description("A name players join by, when the panel's server addresses are on.")
+                                .child(div().w_56().child(Input::new(&self.address).small())),
+                        )
+                    })
+                    .when(!on_panel, |f| f.child(java))
                     .child(
                         Field::new().label("EULA").child(
                             h_flex()
@@ -518,7 +685,7 @@ impl Render for HostForm {
                         ),
                     ),
             )
-            .child(widgets::caption(format!("Goes in {hosted_root}"), cx).text_xs())
+            .when(!on_panel, |c| c.child(widgets::caption(format!("Goes in {hosted_root}"), cx).text_xs()))
             .when_some(problem, |c, p| {
                 c.child(div().text_sm().text_color(theme.muted_foreground).child(p))
             })
@@ -526,6 +693,21 @@ impl Render for HostForm {
 }
 
 /// Opens the New server dialog, starting from `from` if given.
+/// The New server dialog, making it on a paired Hopper Server (`panel`, by
+/// id) or, with None, asking where.
+pub fn open_on(store: Entity<Store>, panel: Option<String>, from: Option<PathBuf>, window: &mut Window, cx: &mut App) {
+    let form = cx.new(|cx| {
+        let mut f = HostForm::new(store, from, window, cx);
+        if panel.is_some() {
+            f.place = panel;
+            // The panel picks a free port.
+            f.port.update(cx, |p, cx| p.set_value("", window, cx));
+        }
+        f
+    });
+    open_form(form, window, cx);
+}
+
 pub fn open(store: Entity<Store>, from: Option<PathBuf>, window: &mut Window, cx: &mut App) {
     let form = cx.new(|cx| HostForm::new(store, from, window, cx));
     open_form(form, window, cx);
@@ -604,9 +786,10 @@ fn open_form(form: Entity<HostForm>, window: &mut Window, cx: &mut App) {
 
     window.open_dialog(cx, move |dialog, window, cx| {
         let f2 = form.clone();
-        let ready = form.read(cx).options(cx).is_ok();
+        let ready = form.read(cx).problem(cx).is_none();
+        let title = if form.read(cx).place.is_some() { "New server" } else { "Host a server on this PC" };
         dialog
-            .title("Host a server on this PC")
+            .title(title)
             .w(rems(44.).to_pixels(window.rem_size()))
             .child(form.clone())
             .footer(crate::dialogs::footer("Create server", ready))

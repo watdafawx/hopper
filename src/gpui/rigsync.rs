@@ -751,7 +751,7 @@ impl SyncPanel {
                     let anyway = s.settings().sync_anyway.clone();
                     let java =
                         hopper::launch::installer_java(Path::new(&s.settings().launcher_dir));
-                    let panel = hopper::panel::from_settings(s.settings());
+                    let panel = hopper::panel::for_server(s.settings(), &server);
                     let (server, inst) = (server.clone(), inst.clone());
                     s.spawn_job(format!("Updating {}", server.name), move |job| {
                         let r = hopper::server_update::update_server(
@@ -975,7 +975,7 @@ impl SyncPanel {
                     let s = store.read(cx);
                     let host = s.settings().server_host.clone();
                     let java = hopper::launch::installer_java(Path::new(&s.settings().launcher_dir));
-                    let panel = hopper::panel::from_settings(s.settings());
+                    let panel = hopper::panel::for_server(s.settings(), &server);
                     let (server, want) = (server.clone(), want.clone());
                     s.spawn_job(format!("NeoForge {want} on {}", server.name), move |job| {
                         let r = hopper::server_update::set_server_neoforge(

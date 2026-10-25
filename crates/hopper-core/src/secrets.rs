@@ -12,6 +12,11 @@ pub const PANEL_KEY: &str = "panel_api_key";
 /// The token a Hopper Server gave this PC when it was paired.
 pub const HOPPERD_KEY: &str = "hopperd_token";
 
+/// The token key of a paired Hopper Server (`id` "" is the first one).
+pub fn hopperd_key(id: &str) -> String {
+    if id.is_empty() { HOPPERD_KEY.to_string() } else { format!("{HOPPERD_KEY}.{id}") }
+}
+
 fn entry(name: &str) -> anyhow::Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, name).context("Credential Manager")
 }

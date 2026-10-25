@@ -102,6 +102,10 @@ pub struct Settings {
     pub panel_self_signed: bool,
     /// Hopper Server's certificate authority (PEM), pinned when pairing.
     pub panel_ca: String,
+    /// Paired Hopper Server panels, each a group in the Servers list.
+    pub hopper_panels: Vec<HopperPanel>,
+    /// Server list groups folded shut (panel ids, "local", "folder").
+    pub collapsed_groups: HashSet<String>,
     /// Where the GPUI window was last, to open there again.
     pub window: Option<SavedWindow>,
     /// The GPUI theme by name; empty follows Windows (Hopper Dark or Light).
@@ -178,6 +182,27 @@ pub struct Settings {
 
 fn yes() -> bool {
     true
+}
+
+/// A paired Hopper Server.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HopperPanel {
+    /// Stable id; "" for the one paired before several panels were
+    /// possible (its token and server roots keep their old names).
+    pub id: String,
+    /// What the list calls it ("rig").
+    pub name: String,
+    pub url: String,
+    /// Its certificate authority (PEM), pinned when pairing.
+    pub ca: String,
+}
+
+impl HopperPanel {
+    /// Where its token is kept in Credential Manager.
+    pub fn token_key(&self) -> String {
+        crate::secrets::hopperd_key(&self.id)
+    }
 }
 
 /// Another launcher's folder Hopper reads instances from.
@@ -330,6 +355,8 @@ impl Default for Settings {
             panel_url: String::new(),
             panel_self_signed: true,
             panel_ca: String::new(),
+            hopper_panels: Vec::new(),
+            collapsed_groups: HashSet::new(),
             window: None,
             theme_name: String::new(),
             update_repo: DEFAULT_UPDATE_REPO.into(),
@@ -410,8 +437,11 @@ impl Settings {
                 return None;
             }
         };
-        match serde_json::from_slice(&b) {
-            Ok(s) => Some(s),
+        match serde_json::from_slice::<Settings>(&b) {
+            Ok(mut s) => {
+                s.migrate_panels();
+                Some(s)
+            }
             Err(e) => {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -435,6 +465,24 @@ impl Settings {
                 None
             }
         }
+    }
+
+    /// The single Hopper Server of older builds becomes the first entry of
+    /// [`Settings::hopper_panels`]; the Panel setting goes back to Crafty.
+    pub fn migrate_panels(&mut self) {
+        if self.panel_kind != "hopperd" {
+            return;
+        }
+        if !self.panel_url.trim().is_empty() && !self.hopper_panels.iter().any(|p| p.id.is_empty()) {
+            let base = crate::hopperd::base_url(&self.panel_url);
+            self.hopper_panels.insert(
+                0,
+                HopperPanel { id: String::new(), name: crate::hopperd::host_name(&base), url: base, ca: self.panel_ca.clone() },
+            );
+        }
+        self.panel_kind = "crafty".into();
+        self.panel_url.clear();
+        self.panel_ca.clear();
     }
 
     /// Why the settings file couldn't be used on this run, if it couldn't:
