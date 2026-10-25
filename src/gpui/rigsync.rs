@@ -208,7 +208,7 @@ pub struct SyncPanel {
 impl SyncPanel {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search mods"));
-        let subs = vec![
+        let mut subs = vec![
             cx.observe(&store, |this, _, cx| {
                 // The server or the pack's mods changed elsewhere: compare again.
                 let rev = this.compare_key(cx);
@@ -226,11 +226,16 @@ impl SyncPanel {
             }),
         ];
         let seen_rev = 0;
-        let configs = cx.new(|cx| crate::configs::ConfigsPanel::new(store.clone(), window, cx));
         let history = cx.new(|cx| crate::configs::HistoryPanel::new(window, cx));
         let control =
             cx.new(|cx| crate::server_control::ServerControl::new(store.clone(), window, cx));
-        let mut subs = subs;
+        let configs = cx.new(|cx| {
+            let mut c = crate::configs::ConfigsPanel::new(store.clone(), window, cx);
+            c.set_control(control.clone(), cx);
+            c
+        });
+        // The Configs tab shows how many files need syncing.
+        subs.push(cx.subscribe(&configs, |_, _, _: &crate::configs::NeedsChanged, cx| cx.notify()));
         subs.push(cx.observe(&control, |_, _, cx| cx.notify()));
         subs.push(cx.subscribe(&control, |this, _, e: &crate::server_control::ControlEvent, cx| {
             if let crate::server_control::ControlEvent::Console = e {
@@ -394,6 +399,20 @@ impl SyncPanel {
             c.set_console_open(false, cx);
             c.set_active(false, cx);
         });
+    }
+
+    /// Tells Configs which mods the server won't run (client-only, or kept
+    /// off for another reason), so their config files count as not needed.
+    fn share_client_mods(&self, cx: &mut Context<Self>) {
+        let Some(Ok(diff)) = &self.diff else { return };
+        let mods: HashSet<String> = diff
+            .iter()
+            .filter(|d| d.server.is_none())
+            .filter_map(|d| d.client.as_ref().filter(|c| c.side == "client" || d.skip_reason.is_some()))
+            .flat_map(|c| [hopper::configdiff::mod_key(&c.mod_id), hopper::configdiff::mod_key(&c.mod_name)])
+            .filter(|k| k.len() >= 3)
+            .collect();
+        self.configs.update(cx, |c, cx| c.set_client_mods(mods, cx));
     }
 
     fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
@@ -584,13 +603,7 @@ impl SyncPanel {
     /// starting and doesn't answer pings yet).
     fn online(&self, cx: &App) -> bool {
         let Some(r) = self.server.as_ref() else { return false };
-        // The panel's state this view polls is the freshest.
-        if let Some(up) = self.control.read(cx).running() {
-            return up;
-        }
-        let store = self.store.read(cx);
-        store.status(r).is_some_and(|s| matches!(s, Status::Online { .. }))
-            || store.panel_stats(r).is_some_and(|p| p.running || p.starting)
+        server_online(self.store.read(cx), Some(self.control.read(cx)), r)
     }
 
     fn run(&mut self, ops: Ops, cx: &mut Context<Self>) {
@@ -1524,7 +1537,7 @@ impl SyncPanel {
         use hopper::configdiff::{DriftGroup, FileStatus};
         let d = self.drift.as_ref().filter(|d| !d.is_empty())?;
         let sig = d.signature();
-        if self.drift_hidden == Some(sig) || self.section == Section::Configs {
+        if self.drift_hidden == Some(sig) || self.section != Section::Mods {
             return None;
         }
         let theme = cx.theme().clone();
@@ -2621,6 +2634,7 @@ impl Render for SyncPanel {
                 )
                 .into_any_element();
         };
+        self.share_client_mods(cx);
         let side = self.in_instance;
         let header = (!side).then(|| self.header(&server, &inst, cx));
         let sidebar = side.then(|| self.sidebar(&server, &inst, window, cx));
@@ -2638,11 +2652,27 @@ impl Render for SyncPanel {
             Section::History => 2,
             Section::Console => 3,
         };
+        // What each section has left to sync, like the instance tabs' counts.
+        let count = |n: usize, cx: &App| {
+            (n > 0).then(|| div().text_xs().text_color(cx.theme().muted_foreground).child(n.to_string()))
+        };
+        let mods_n = count(self.whole(cx).iter().filter(|g| Show::Needs.has(**g)).count(), cx);
+        let cfg_n = count(self.configs.read(cx).needs_count().unwrap_or(0), cx);
         let sections = TabBar::new("sync-section")
             .underline()
             .selected_index(section_ix)
-            .child(Tab::new().prefix(Icon::new(IconName::Puzzle).small()).label("Mods"))
-            .child(Tab::new().prefix(Icon::new(IconName::Settings).small()).label("Configs"))
+            .child(
+                Tab::new()
+                    .prefix(Icon::new(IconName::Puzzle).small())
+                    .label("Mods")
+                    .when_some(mods_n, |t, n| t.suffix(n)),
+            )
+            .child(
+                Tab::new()
+                    .prefix(Icon::new(IconName::Settings).small())
+                    .label("Configs")
+                    .when_some(cfg_n, |t, n| t.suffix(n)),
+            )
             .child(Tab::new().prefix(Icon::new(IconName::Clock).small()).label("History"))
             .when(console, |t| {
                 t.child(Tab::new().prefix(Icon::new(IconName::SquareTerminal).small()).label("Console"))
@@ -2777,6 +2807,22 @@ impl Render for SyncPanel {
             .child(v_flex().flex_1().min_h_0().child(body))
             .into_any_element()
     }
+}
+
+/// Whether the server at `root` is up: its panel's state when the panel
+/// controls know it (the freshest, and it counts a server still starting),
+/// else the ping or the panel's polled stats. The status card and the
+/// Configs section both ask this, so they agree.
+pub(crate) fn server_online(
+    store: &Store,
+    control: Option<&crate::server_control::ServerControl>,
+    root: &Path,
+) -> bool {
+    if let Some(up) = control.and_then(|c| c.running()) {
+        return up;
+    }
+    store.status(root).is_some_and(|s| matches!(s, Status::Online { .. }))
+        || store.panel_stats(root).is_some_and(|p| p.running || p.starting)
 }
 
 /// One line for why the last start crashed ("smallships failed to load"),

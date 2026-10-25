@@ -565,10 +565,34 @@ fn copy_instance_files(inst: &Instance, root: &Path, mods: &[String], job: &Job)
     for d in SERVER_DIRS {
         let src = inst.root.join(d);
         if src.is_dir() {
-            files += copy_tree(&src, &root.join(d))?;
+            files += copy_server_tree(&src, &root.join(d), d)?;
         }
     }
     Ok((mods.len(), files))
+}
+
+/// Copies instance folder `rel` to the server, leaving client-only content
+/// out ([`crate::configdiff::client_only`]); returns the number of files.
+fn copy_server_tree(src: &Path, dst: &Path, rel: &str) -> anyhow::Result<usize> {
+    if crate::configdiff::client_only(&format!("{rel}/x")) {
+        return Ok(0);
+    }
+    fs::create_dir_all(dst)?;
+    let mut n = 0;
+    for e in fs::read_dir(src)? {
+        let e = e?;
+        let t = e.file_type()?;
+        let name = e.file_name();
+        let sub = format!("{rel}/{}", name.to_string_lossy());
+        let to = dst.join(&name);
+        if t.is_dir() {
+            n += copy_server_tree(&e.path(), &to, &sub)?;
+        } else if t.is_file() && !crate::configdiff::client_only(&sub) {
+            fs::copy(e.path(), &to).with_context(|| format!("copying {}", e.path().display()))?;
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// Copies a folder recursively; returns the number of files.
@@ -647,6 +671,23 @@ mod tests {
         assert_eq!(first_stable(&loaders).as_deref(), Some("0.16.5"));
         let installers = serde_json::json!([{ "version": "1.1.0", "stable": true }]);
         assert_eq!(first_stable(&installers).as_deref(), Some("1.1.0"));
+    }
+
+    #[test]
+    fn server_copy_leaves_paxi_resource_packs_out() {
+        let dir = std::env::temp_dir().join(format!("hopper-paxi-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let src = dir.join("config");
+        fs::create_dir_all(src.join("paxi/resourcepacks")).unwrap();
+        fs::create_dir_all(src.join("paxi/datapacks")).unwrap();
+        fs::write(src.join("paxi/resourcepacks/rp.zip"), "r").unwrap();
+        fs::write(src.join("paxi/datapacks/dp.zip"), "d").unwrap();
+        fs::write(src.join("a.toml"), "a").unwrap();
+        assert_eq!(copy_server_tree(&src, &dir.join("out"), "config").unwrap(), 2);
+        assert!(dir.join("out/paxi/datapacks/dp.zip").is_file());
+        assert!(dir.join("out/a.toml").is_file());
+        assert!(!dir.join("out/paxi/resourcepacks/rp.zip").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

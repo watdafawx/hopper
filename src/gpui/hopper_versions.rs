@@ -23,8 +23,14 @@ pub struct HopperVersions {
     releases: Option<Result<Vec<Release>, String>>,
     /// The version whose notes show on the right.
     picked: String,
+    /// How many releases the list shows (newest first); "Show more" adds
+    /// [`PAGE`] at a time.
+    shown: usize,
     _watch: Subscription,
 }
+
+/// Releases the list shows at first, and adds per "Show more".
+const PAGE: usize = 10;
 
 impl HopperVersions {
     fn load(&mut self, cx: &mut Context<Self>) {
@@ -273,7 +279,11 @@ impl Render for HopperVersions {
             Some(Ok(list)) => {
                 let list = list.clone();
                 let newest = list.first().map(|r| r.version.clone());
-                let rows = list.iter().map(|r| {
+                // The running version stays in reach even when it's old.
+                let need = list.iter().position(|r| r.version == CURRENT || r.version == self.picked).map_or(0, |i| i + 1);
+                let shown = self.shown.max(need).min(list.len());
+                let more = list.len() - shown;
+                let rows = list.iter().take(shown).map(|r| {
                     let v = r.version.clone();
                     let picked = v == self.picked;
                     let accent = theme.primary;
@@ -321,7 +331,21 @@ impl Render for HopperVersions {
                             .h_full()
                             .flex_none()
                             .overflow_y_scrollbar()
-                            .child(v_flex().gap_0p5().pr_3().children(rows)),
+                            .child(v_flex().gap_0p5().pr_3().children(rows).when(more > 0, |c| {
+                                c.child(
+                                    Button::new("hv-more")
+                                        .small()
+                                        .ghost()
+                                        .mt_1()
+                                        .icon(IconName::ChevronDown)
+                                        .label(format!("Show {} more", more.min(PAGE)))
+                                        .tooltip(format!("{more} older releases"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.shown = shown + PAGE;
+                                            cx.notify();
+                                        })),
+                                )
+                            })),
                     )
                     .child(div().w_px().h_full().bg(theme.border))
                     .child(
@@ -353,6 +377,7 @@ pub fn open(store: Entity<Store>, window: &mut Window, cx: &mut App) {
             store,
             releases: None,
             picked: CURRENT.to_string(),
+            shown: PAGE,
             _watch: watch,
         };
         v.load(cx);

@@ -83,9 +83,15 @@ fn pick(assets: &[GhAsset]) -> Option<(&GhAsset, bool)> {
         .or_else(|| assets.iter().filter(named).find(|a| ext(a, ".zip")).map(|a| (a, true)))
 }
 
+/// Hopper's own release tags are "v0.12.0"; the same repository also has
+/// Hopper Server's ("hopperd-v0.7.0"), which aren't Hopper versions.
+fn is_hopper_tag(tag: &str) -> bool {
+    tag.strip_prefix(['v', 'V']).unwrap_or(tag).starts_with(|c: char| c.is_ascii_digit())
+}
+
 /// A published release with something to install.
 fn installable(r: GhRelease) -> Option<Release> {
-    if r.draft || r.prerelease {
+    if r.draft || r.prerelease || !is_hopper_tag(&r.tag_name) {
         return None;
     }
     let (asset, zipped) = pick(&r.assets)?;
@@ -120,11 +126,13 @@ fn api(repo: &str, path: &str) -> anyhow::Result<ureq::http::Response<ureq::Body
 /// The newest release of `repo` ("owner/name") if it is newer than this
 /// build and has something to install.
 pub fn check(repo: &str) -> anyhow::Result<Option<Release>> {
-    let r: GhRelease = api(repo, "releases/latest")?
+    // Not "releases/latest": that is the newest release of any kind, which
+    // can be a Hopper Server one and would hide a newer Hopper.
+    let all: Vec<GhRelease> = api(repo, "releases?per_page=30")?
         .body_mut()
         .read_json()
-        .context("reading the release")?;
-    Ok(parse_release(r))
+        .context("reading the releases")?;
+    Ok(sorted(all.into_iter().filter_map(parse_release).collect()).into_iter().next())
 }
 
 /// Every release of `repo` that can be installed, newest first.
@@ -345,6 +353,11 @@ mod tests {
         assert!(parse_release(r("v99.0.0", false)).is_some());
         assert!(parse_release(r("v99.0.0", true)).is_none());
         assert!(parse_release(r("v0.0.1", false)).is_none());
+        // Hopper Server's releases share the repository, not Hopper's versions.
+        let mut server = r("hopperd-v99.0.0", false);
+        server.assets = vec![asset("hopperd-99.0.0-windows-x64.zip")];
+        assert!(parse_release(server).is_none());
+        assert!(super::is_hopper_tag("v0.12.0") && super::is_hopper_tag("0.12.0") && !super::is_hopper_tag("hopperd-v0.7.0"));
     }
 
     fn rel(v: &str) -> Release {

@@ -33,12 +33,48 @@ pub enum FileStatus {
     Modified,
 }
 
+/// Whether a differing file matters to the server, once [`classify`] has
+/// looked at it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// Settings or a file the server may use.
+    #[default]
+    Needed,
+    /// Client settings or client resources: a server never reads them.
+    ClientSide,
+    /// Written by a mod for itself (caches, lists, benchmarks).
+    Generated,
+    /// Both sides hold the same settings; only comments, blank lines or
+    /// indentation differ.
+    FormatOnly,
+}
+
 #[derive(Clone, Debug)]
 pub struct FileDiff {
     pub rel: String,
     pub status: FileStatus,
     pub client_size: u64,
     pub server_size: u64,
+    pub kind: Kind,
+    /// How many settings differ, for a changed file whose settings could be
+    /// read (see [`classify`]).
+    pub settings: Option<usize>,
+    /// Not text: no preview, no settings.
+    pub binary: bool,
+}
+
+impl FileDiff {
+    pub fn new(rel: String, status: FileStatus, client_size: u64, server_size: u64) -> Self {
+        Self {
+            rel,
+            status,
+            client_size,
+            server_size,
+            kind: Kind::Needed,
+            settings: None,
+            binary: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -50,6 +86,10 @@ pub struct ConfigDiff {
     pub deep: bool,
     pub client_files: usize,
     pub server_files: usize,
+    /// The files that matched, sorted.
+    pub same_files: Vec<String>,
+    /// Whether [`classify`] has run.
+    pub classified: bool,
 }
 
 /// Files that aren't hand-edited config: backups, logs, locks, indexes.
@@ -75,6 +115,18 @@ pub fn is_noise(rel: &str) -> bool {
     ]
     .iter()
     .any(|s| l.ends_with(s))
+}
+
+/// Client-only content inside folders that otherwise go to the server, so
+/// server sync never offers it: Paxi's resource packs (Paxi's data packs do
+/// belong on the server). `rel` is relative to the instance, with `/`
+/// (`config/paxi/resourcepacks/x.zip`, or `paxi/resourcepacks/...`).
+pub fn client_only(rel: &str) -> bool {
+    let l = rel.to_ascii_lowercase();
+    let parts: Vec<&str> = l.split('/').collect();
+    // Something inside the folder, not the folder itself.
+    let dirs = &parts[..parts.len() - 1];
+    dirs.windows(2).any(|w| w == ["paxi", "resourcepacks"])
 }
 
 #[derive(Clone, Copy)]
@@ -241,33 +293,23 @@ pub fn compare(
         let b = walk_cached(&s_root);
         (a.join().unwrap_or_default(), b)
     });
+    let keep = |rel: &String| !client_only(&format!("{folder}/{rel}"));
+    let c: Walk = c.into_iter().filter(|(rel, _)| keep(rel)).collect();
+    let s: Walk = s.into_iter().filter(|(rel, _)| keep(rel)).collect();
     let mut files = Vec::new();
     let mut equal = Vec::new();
     for (rel, cs) in &c {
         match s.get(rel) {
-            None => files.push(FileDiff {
-                rel: rel.clone(),
-                status: FileStatus::OnlyClient,
-                client_size: cs.size,
-                server_size: 0,
-            }),
-            Some(ss) if ss.size != cs.size => files.push(FileDiff {
-                rel: rel.clone(),
-                status: FileStatus::Modified,
-                client_size: cs.size,
-                server_size: ss.size,
-            }),
+            None => files.push(FileDiff::new(rel.clone(), FileStatus::OnlyClient, cs.size, 0)),
+            Some(ss) if ss.size != cs.size => {
+                files.push(FileDiff::new(rel.clone(), FileStatus::Modified, cs.size, ss.size))
+            }
             Some(ss) => equal.push((rel.clone(), *cs, *ss)),
         }
     }
     for (rel, ss) in &s {
         if !c.contains_key(rel) {
-            files.push(FileDiff {
-                rel: rel.clone(),
-                status: FileStatus::OnlyServer,
-                client_size: 0,
-                server_size: ss.size,
-            });
+            files.push(FileDiff::new(rel.clone(), FileStatus::OnlyServer, 0, ss.size));
         }
     }
     let mut same = equal.len();
@@ -295,12 +337,10 @@ pub fn compare(
                             None => hash(&s_root.join(rel), *ss),
                         };
                         if matches!((&a, &b), (Some(a), Some(b)) if a != b) {
-                            changed.lock().unwrap().push(FileDiff {
-                                rel: rel.clone(),
-                                status: FileStatus::Modified,
-                                client_size: cs.size,
-                                server_size: ss.size,
-                            });
+                            changed
+                                .lock()
+                                .unwrap()
+                                .push(FileDiff::new(rel.clone(), FileStatus::Modified, cs.size, ss.size));
                         }
                         let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         if n % 50 == 0 {
@@ -315,6 +355,13 @@ pub fn compare(
         files.extend(changed);
         save_hashes();
     }
+    let differs: HashSet<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+    let mut same_files: Vec<String> = equal
+        .iter()
+        .map(|(rel, _, _)| rel.clone())
+        .filter(|r| !differs.contains(r.as_str()))
+        .collect();
+    same_files.sort();
     files.sort_by(|a, b| {
         rank(a.status)
             .cmp(&rank(b.status))
@@ -327,7 +374,201 @@ pub fn compare(
         deep,
         client_files: c.len(),
         server_files: s.len(),
+        same_files,
+        classified: false,
     }
+}
+
+// ── which differences matter to a server ───────────────────────────
+
+/// Config files and folders only a client reads (shaders, minimaps, JEI,
+/// HUD and menu mods), matched on the path's first part.
+const CLIENT_TOPS: &[&str] = &[
+    "jei",
+    "emi",
+    "iris",
+    "oculus",
+    "sodium",
+    "embeddium",
+    "xaerominimap",
+    "xaeroworldmap",
+    "fancymenu",
+    "drippyloadingscreen",
+    "loadingbackgrounds",
+    "betterf3",
+    "entityculling",
+    "controlling",
+    "mousetweaks",
+    "resourcepacks",
+    "shaderpacks",
+];
+
+/// Client settings or client resources: `rel` is inside the compared
+/// folder (`ars_nouveau-client.toml`, `Mekanism/client.toml`). A name that
+/// also says server or common isn't, nor is anything in defaultconfigs
+/// (that folder seeds per-world server configs).
+pub fn client_side(folder: &str, rel: &str) -> bool {
+    if folder == "defaultconfigs" {
+        return false;
+    }
+    if client_only(&format!("{folder}/{rel}")) {
+        return true;
+    }
+    let l = rel.to_ascii_lowercase();
+    let words: Vec<&str> = l.split(['/', '-', '_', '.', ' ']).filter(|w| !w.is_empty()).collect();
+    if words.iter().any(|w| matches!(*w, "server" | "common" | "startup" | "world")) {
+        return false;
+    }
+    if words.iter().any(|w| matches!(*w, "client" | "clientside" | "clientconfig" | "hud" | "keybinds")) {
+        return true;
+    }
+    let top = l.split('/').next().unwrap_or_default();
+    let stem = top.split(['.', '-', '_']).next().unwrap_or(top);
+    folder == "config" && CLIENT_TOPS.contains(&stem)
+}
+
+/// Files a mod writes for itself, not settings anyone picked: caches,
+/// benchmarks, error copies, generated mod lists.
+pub fn generated(rel: &str) -> bool {
+    let l = rel.to_ascii_lowercase();
+    drift_noise(rel) || l.ends_with("modlist.json") || l.ends_with(".cache")
+}
+
+/// Extensions read as settings files.
+fn settings_file(rel: &str) -> bool {
+    let l = rel.to_ascii_lowercase();
+    [
+        ".toml", ".json", ".json5", ".jsonc", ".cfg", ".conf", ".properties", ".ini", ".yml", ".yaml", ".snbt", ".txt",
+    ]
+    .iter()
+    .any(|e| l.ends_with(e))
+}
+
+/// The text with full-line comments, blank lines and indentation dropped:
+/// two files with the same skeleton hold the same settings.
+fn skeleton(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("//") && !l.starts_with(';'))
+        .collect()
+}
+
+/// What [`read_change`] found in one changed file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reading {
+    pub format_only: bool,
+    pub settings: Option<usize>,
+    pub binary: bool,
+}
+
+/// Reads both copies of a changed settings file: whether only formatting
+/// differs, and how many settings differ.
+pub fn read_change(client: &Path, server: &Path) -> Reading {
+    let (c, s) = (read_text(client), read_text(server));
+    let binary = |r: &Result<String, String>| r.as_ref().is_err_and(|e| e.contains("binary"));
+    if binary(&c) || binary(&s) {
+        return Reading { format_only: false, settings: None, binary: true };
+    }
+    let (Ok(c), Ok(s)) = (c, s) else {
+        return Reading { format_only: false, settings: None, binary: false };
+    };
+    let format_only = skeleton(&c) == skeleton(&s);
+    let fields = merge_fields(&c, &s);
+    let changed = fields.iter().filter(|f| f.changed()).count();
+    Reading {
+        format_only,
+        // Only when the file reads as settings: else the count means little.
+        settings: (!fields.is_empty() && !format_only).then_some(changed),
+        binary: false,
+    }
+}
+
+/// At most this many changed files are read per classify: past it, the
+/// rest stay Needed (the server share can be slow).
+const READ_CAP: usize = 600;
+
+/// A mod's id or name as config files are matched to it (letters and
+/// digits, lowercase), for [`classify`]'s client mods.
+pub fn mod_key(id_or_name: &str) -> String {
+    squash(id_or_name)
+}
+
+/// Marks files named after a mod in `client_mods` ([`mod_key`]s of mods the
+/// server doesn't run, like client-only ones) as client-side.
+pub fn mark_client_mods(diff: &mut ConfigDiff, client_mods: &HashSet<String>) {
+    if client_mods.is_empty() || !MOD_CONFIG_FOLDERS.contains(&diff.folder.as_str()) {
+        return;
+    }
+    for f in &mut diff.files {
+        if f.kind != Kind::ClientSide && config_owner(&f.rel).is_some_and(|k| client_mods.contains(&k)) {
+            f.kind = Kind::ClientSide;
+        }
+    }
+}
+
+/// Sorts each difference into needed, client-side, generated or format
+/// only. `client_mods`: see [`mark_client_mods`]. Reads changed settings files on both sides (in parallel), so it
+/// runs off the UI thread. `progress(done, total)` reports the reading.
+pub fn classify(
+    client_root: &Path,
+    server_root: &Path,
+    diff: &mut ConfigDiff,
+    client_mods: &HashSet<String>,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) {
+    let folder = diff.folder.clone();
+    for f in &mut diff.files {
+        f.kind = if client_side(&folder, &f.rel) {
+            Kind::ClientSide
+        } else if generated(&f.rel) {
+            Kind::Generated
+        } else {
+            Kind::Needed
+        };
+    }
+    mark_client_mods(diff, client_mods);
+    let (c_dir, s_dir) = (client_root.join(&folder), server_root.join(&folder));
+    let todo: Vec<usize> = diff
+        .files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.status == FileStatus::Modified && f.kind == Kind::Needed && settings_file(&f.rel))
+        .map(|(i, _)| i)
+        .take(READ_CAP)
+        .collect();
+    let total = todo.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let out: Mutex<Vec<(usize, Reading)>> = Mutex::new(Vec::new());
+    if total > 0 {
+        progress(0, total);
+        let chunk = total.div_ceil(8);
+        let files = &diff.files;
+        std::thread::scope(|sc| {
+            for part in todo.chunks(chunk) {
+                let (done, out, c_dir, s_dir) = (&done, &out, &c_dir, &s_dir);
+                sc.spawn(move || {
+                    for &i in part {
+                        let rel = &files[i].rel;
+                        let r = read_change(&c_dir.join(rel), &s_dir.join(rel));
+                        out.lock().unwrap().push((i, r));
+                        let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if n % 10 == 0 || n == total {
+                            progress(n, total);
+                        }
+                    }
+                });
+            }
+        });
+    }
+    for (i, r) in out.into_inner().unwrap() {
+        let f = &mut diff.files[i];
+        f.settings = r.settings;
+        f.binary = r.binary;
+        if r.format_only {
+            f.kind = Kind::FormatOnly;
+        }
+    }
+    diff.classified = true;
 }
 
 /// Folders from `FOLDERS` that exist on either side.
@@ -816,6 +1057,14 @@ pub fn drift(client_root: &Path, server_root: &Path, mods: &[(String, String)]) 
             let Some(name) = config_owner(&f.rel).and_then(|k| owners.get(&k).copied()) else {
                 continue;
             };
+            // Same settings, other comments: nothing to bring along.
+            if f.status == FileStatus::Modified
+                && settings_file(&f.rel)
+                && read_change(&client_root.join(folder).join(&f.rel), &server_root.join(folder).join(&f.rel))
+                    .format_only
+            {
+                continue;
+            }
             // A missing file counts when the server has none of the mod's
             // config: a mod new to the pack. Inside a folder the server
             // already has, missing files are mostly ones the mod generates.
@@ -852,6 +1101,73 @@ pub fn drift(client_root: &Path, server_root: &Path, mods: &[(String, String)]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorts_client_side_generated_and_format_only() {
+        assert!(client_side("config", "ars_nouveau-client.toml"));
+        assert!(client_side("config", "Mekanism/client.toml"));
+        assert!(client_side("config", "jei/jei-client.ini"));
+        assert!(client_side("config", "xaerominimap.txt"));
+        assert!(client_side("config", "paxi/resourcepacks/a.zip"));
+        assert!(!client_side("config", "ars_nouveau-server.toml"));
+        assert!(!client_side("config", "mekanism/general.toml"));
+        assert!(!client_side("config", "client-server-sync-common.toml"));
+        assert!(!client_side("defaultconfigs", "foo-client.toml"));
+        assert!(generated("crash_assistant/modlist.json"));
+        assert!(generated("foo/cache/x.json"));
+        assert!(!generated("cobblemon/main.json"));
+
+        let root = std::env::temp_dir().join(format!("hopper-cfgdiff-kind-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (c, s) = (root.join("c/config"), root.join("s/config"));
+        for d in [&c, &s] {
+            fs::create_dir_all(d).unwrap();
+        }
+        // Only a comment and indentation differ.
+        fs::write(c.join("a-common.toml"), "# new comment\n[general]\n  x = 1\n\ny = 2\n").unwrap();
+        fs::write(s.join("a-common.toml"), "[general]\nx = 1\ny = 2\n").unwrap();
+        // A value differs.
+        fs::write(c.join("b-common.toml"), "[general]\nx = 1\ny = 3\n# pad\n").unwrap();
+        fs::write(s.join("b-common.toml"), "[general]\nx = 1\ny = 2\n").unwrap();
+        fs::write(c.join("c-client.toml"), "z = 1\n").unwrap();
+        fs::write(s.join("same.toml"), "q = 1\n").unwrap();
+        fs::write(c.join("same.toml"), "q = 1\n").unwrap();
+        let mut d = compare(&root.join("c"), &root.join("s"), "config", false, &|_, _| {});
+        assert_eq!(d.same_files, ["same.toml"]);
+        classify(&root.join("c"), &root.join("s"), &mut d, &HashSet::new(), &|_, _| {});
+        let kind = |r: &str| d.files.iter().find(|f| f.rel == r).map(|f| (f.kind, f.settings));
+        assert_eq!(kind("a-common.toml"), Some((Kind::FormatOnly, None)));
+        assert_eq!(kind("b-common.toml"), Some((Kind::Needed, Some(1))));
+        assert_eq!(kind("c-client.toml"), Some((Kind::ClientSide, None)));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn paxi_resource_packs_stay_off_the_server() {
+        assert!(client_only("config/paxi/resourcepacks/Fancy_Beds-v4.2.zip"));
+        assert!(client_only("config/paxi/resourcepacks/Icons v.1.14.zip.rpo"));
+        assert!(client_only("paxi/resourcepacks/x.zip"));
+        assert!(!client_only("config/paxi/datapacks/x.zip"));
+        assert!(!client_only("config/paxi/datapack_load_order.json"));
+        assert!(!client_only("config/paxi/resourcepacks"));
+
+        let root = std::env::temp_dir().join(format!("hopper-cfgdiff-paxi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (c, s) = (root.join("c"), root.join("s"));
+        for d in [&c, &s] {
+            fs::create_dir_all(d.join("config/paxi/resourcepacks")).unwrap();
+            fs::create_dir_all(d.join("config/paxi/datapacks")).unwrap();
+        }
+        fs::write(c.join("config/paxi/resourcepacks/rp.zip"), "rp").unwrap();
+        fs::write(c.join("config/paxi/resourcepacks/rp.zip.rpo"), "{}").unwrap();
+        fs::write(s.join("config/paxi/resourcepacks/old.zip"), "old").unwrap();
+        fs::write(c.join("config/paxi/datapacks/dp.zip"), "dp").unwrap();
+        let d = compare(&c, &s, "config", true, &|_, _| {});
+        let rels: Vec<&str> = d.files.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels, ["paxi/datapacks/dp.zip"]);
+        assert_eq!((d.client_files, d.server_files), (1, 0));
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn compares_by_size_then_content() {

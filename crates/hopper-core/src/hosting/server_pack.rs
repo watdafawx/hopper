@@ -173,7 +173,7 @@ pub fn create_from_server_files(
 }
 
 /// Refuses a nameless server and a folder that has something in it.
-fn check_folder(opts: &CreateOptions) -> anyhow::Result<()> {
+pub(crate) fn check_folder(opts: &CreateOptions) -> anyhow::Result<()> {
     let root = opts.folder();
     anyhow::ensure!(!opts.name.trim().is_empty(), "Give the server a name.");
     if root.exists()
@@ -194,16 +194,28 @@ fn create_from_zip(
     opts: &CreateOptions,
     job: &Job,
 ) -> anyhow::Result<ServerPackReport> {
-    let root = opts.folder();
     // Server pack file ids are CurseForge file ids too, so they share the
     // pack cache (and its pruning) without colliding.
     let zip_path = crate::modpack::fetch_pack_zip(&file, job)?;
     job.check_cancelled()?;
+    build_from_zip(&zip_path, &file.file_name, inst, opts, job)
+}
 
+/// The server from the server pack zip at `zip_path` (named `label` in
+/// notes): the loader `opts` says, with the zip's content laid over it.
+pub(crate) fn build_from_zip(
+    zip_path: &Path,
+    label: &str,
+    inst: Option<&Instance>,
+    opts: &CreateOptions,
+    job: &Job,
+) -> anyhow::Result<ServerPackReport> {
+    let root = opts.folder();
+    let zip_path = zip_path.to_path_buf();
     let names = zip_names(&zip_path)?;
     let plan = plan(&names);
     let mut out = ServerPackReport {
-        server_pack: file.file_name.clone(),
+        server_pack: label.to_string(),
         ..Default::default()
     };
 
@@ -211,14 +223,14 @@ fn create_from_zip(
         let Some(inst) = inst else {
             bail!(
                 "{} {why}, so Hopper can't build the server from it alone. Install the pack, then host it from that instance (its ⋯ menu → Host a server on this PC).",
-                file.file_name
+                label
             );
         };
         let mut create = create_from_instance(inst, opts, &HashSet::new(), job)?;
 
         let note = format!(
             "{} {why}, so Hopper copied the pack's mods from this instance and left client-only ones out.",
-            file.file_name
+            label
         );
         create.note = Some(match create.note.take() {
             Some(n) => format!("{note} {n}"),
@@ -324,6 +336,7 @@ const WHY_STARTER: &str = "ServerStarter config: Hopper sets up the server";
 const WHY_MANIFEST: &str = "CurseForge pack manifest";
 const WHY_LOGS: &str = "Logs from the author's test runs";
 const WHY_UNSAFE: &str = "Unsafe path in the zip";
+const WHY_CLIENT: &str = "Client-only resource packs";
 
 /// Top folders that are server content, never a wrapping folder.
 const CONTENT_DIRS: &[&str] = &[
@@ -411,6 +424,9 @@ fn classify(rel: &str) -> Action {
     }
     let low = rel.to_ascii_lowercase();
     let skip = |why| Action::Skip(rel.to_string(), why);
+    if crate::configdiff::client_only(&low) {
+        return skip(WHY_CLIENT);
+    }
     match low.split_once('/') {
         Some((top, _)) => match top {
             "libraries" | "versions" | ".fabric" | ".quilt" => skip(WHY_LOADER),
@@ -649,6 +665,12 @@ mod tests {
         ),
         ("__MACOSX/ATM10 Server/._run.bat", "junk"),
     ];
+
+    #[test]
+    fn skips_paxi_resource_packs() {
+        assert!(matches!(classify("config/paxi/resourcepacks/rp.zip"), Action::Skip(_, WHY_CLIENT)));
+        assert!(matches!(classify("config/paxi/datapacks/dp.zip"), Action::Copy(_)));
+    }
 
     #[test]
     fn strips_the_wrapping_folder_only() {
