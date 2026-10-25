@@ -4,11 +4,14 @@
   // columns that sort, checkboxes for bulk work, a ⋯ / right-click menu,
   // and the side panel for the picked mod. Unknown jars are identified in
   // the background and updates are checked on CurseForge and Modrinth.
+  import { untrack } from 'svelte';
   import CfKey from './CfKey.svelte';
   import ModPeek from './ModPeek.svelte';
   import ModVersions from './ModVersions.svelte';
   import ReviewUpdates from './ReviewUpdates.svelte';
   import ModBackups from './ModBackups.svelte';
+  import ModProfiles from './ModProfiles.svelte';
+  import ModHunt from './ModHunt.svelte';
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
@@ -46,6 +49,13 @@
   let updating = $state(new Set());
   let done = $state(new Set());
   let catTries = 0;
+  // Finding the mod that breaks it: its state, and the start card's kind.
+  let hunt = $state(null);
+  let huntSetup = $state(null);
+  const hunting = $derived(!!hunt?.hunt);
+  const huntActive = $derived(!!hunt?.active);
+  const HUNT_CHIP = { testing: 'acc', parked: 'starting', cleared: 'running', library: 'lan', fine: 'running', culprit: 'crashed' };
+  const HUNT_LABEL = { testing: 'testing', parked: 'parked', cleared: 'cleared', library: 'library, kept on', fine: 'known good', culprit: 'culprit' };
 
   const pref = (k, d) => {
     try {
@@ -137,6 +147,46 @@
       if (data.categories_pending && catTries++ < 6) setTimeout(() => sid && load(), 4000);
     } catch (e) {
       say(e.message, true);
+    }
+  }
+
+  async function loadHunt() {
+    try {
+      const was = hunt?.hunt ? `${hunt.hunt.round}/${hunt.hunt.phase}/${hunt.hunt.parked}` : '';
+      hunt = await api(`${base}/mods/hunt`);
+      const is = hunt?.hunt ? `${hunt.hunt.round}/${hunt.hunt.phase}/${hunt.hunt.parked}` : '';
+      // Hopper's rounds moved on: the switches changed.
+      return was !== is;
+    } catch {
+      hunt = null;
+      return false;
+    }
+  }
+
+  async function huntChanged() {
+    await loadHunt();
+    await load();
+  }
+
+  // While Hopper runs the rounds, follow them.
+  $effect(() => {
+    if (!huntActive) return;
+    const t = setInterval(async () => {
+      if (await loadHunt()) load();
+    }, 3000);
+    return () => clearInterval(t);
+  });
+
+  async function markFine(m, hc) {
+    try {
+      const { job } = await post(`${base}/mods/hunt/fine`, { file: m.file, fine: hc.click === 'fine' });
+      busy = hc.click === 'fine' ? 'Marking a mod fine' : 'Making a mod a suspect again';
+      await followJob(job, (st) => (busy = st.detail || busy));
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      busy = '';
+      huntChanged();
     }
   }
 
@@ -319,6 +369,9 @@
     selected = new Set();
     done = new Set();
     catTries = 0;
+    hunt = null;
+    huntSetup = null;
+    loadHunt();
     await load();
     loadBackupCount();
     const key = `hopperd-identified-${sid}`;
@@ -333,9 +386,11 @@
     else checkUpdates(false);
   }
 
+  // Once per server: first() reads state (the hunt's too), which must not
+  // make this run again.
   $effect(() => {
     sid;
-    first();
+    untrack(first);
   });
 
   const SIDE = { client: [Monitor, 'Client only: players need it, the server usually doesn\'t'], server: [ServerIcon, 'Server only'], both: [ArrowLeftRight, 'Client + server'] };
@@ -368,6 +423,7 @@
       {#if hasPack}<label class="cbl" title="Only what you added on top of the modpack"><input type="checkbox" bind:checked={onlyYours} />Only yours ({counts.yours})</label>{/if}
       <label class="cbl"><input type="checkbox" bind:checked={updatesFirst} />Updates first</label>
       <span class="sp"></span>
+      <ModProfiles {base} {alive} {hunting} onChanged={() => changed(false)} onHunt={() => (huntSetup = 'crash')} />
       {#if counts.unknown}<button class="btn sm ghost" disabled={!!identifying} onclick={() => identify(false)} title="Match them by fingerprint on CurseForge and Modrinth"><ScanSearch size={13} />Identify {counts.unknown}</button>{/if}
       {#if checking}<span class="small muted row"><span class="spin b"></span>Checking for updates</span>
       {:else if pendingUpdates.length}<button class="btn sm pri" disabled={!!busy} onclick={() => (reviewing = true)}><Download size={13} />Review {pendingUpdates.length} update{pendingUpdates.length === 1 ? '' : 's'}</button>
@@ -378,6 +434,7 @@
     {#if busy}<div class="busy small"><span class="spin"></span>{busy}</div>{/if}
     {#if data && !data.curseforge}<CfKey inline onSaved={() => { load(); checkUpdates(true); }} />{/if}
     {#if twice.length}<div class="small warn row wrap">{twice.length} mod{twice.length === 1 ? ' is' : 's are'} in twice: {twice.map((l) => l[0].name).join(', ')}. <button class="link" onclick={async () => (await removeMods(base, older, alive)) && changed(true)}>Keep newest</button><span class="muted">(the older jars go to Backups)</span></div>{/if}
+    {#if hunt && (hunting || huntSetup)}<ModHunt {base} {server} st={hunt} bind:setup={huntSetup} onChanged={huntChanged} />{/if}
     {#if clientOn}<div class="small warn">{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on: servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them. <button class="link" onclick={() => (chip = 'client')}>Show</button></div>{/if}
 
     {#if adding}
@@ -408,8 +465,8 @@
     {#if selected.size}
       <div class="bulk row">
         <b>{selected.size} selected</b>
-        <button class="btn sm" onclick={() => bulk('on')}>Turn on</button>
-        <button class="btn sm" onclick={() => bulk('off')}>Turn off</button>
+        <button class="btn sm" disabled={hunting} onclick={() => bulk('on')}>Turn on</button>
+        <button class="btn sm" disabled={hunting} onclick={() => bulk('off')}>Turn off</button>
         {#if selUpdates.length}<button class="btn sm" disabled={!!busy} onclick={() => bulk('update')}><Download size={13} />Update {selUpdates.length}</button>{/if}
         {#if selMods.some((m) => m.source && !m.locked)}<button class="btn sm" onclick={() => bulk('lock')}><Lock size={13} />Ignore updates</button>{/if}
         {#if selMods.some((m) => m.locked)}<button class="btn sm" onclick={() => bulk('unlock')}><LockOpen size={13} />Allow updates again</button>{/if}
@@ -442,7 +499,7 @@
             <span class="c-ck"><input type="checkbox" checked={selected.has(m.file)} onclick={(e) => check(m, e)} /></span>
             {#if m.icon}<img src={m.icon} alt="" width="30" height="30" loading="lazy" />{:else}<span class="ph sm"></span>{/if}
             <div class="c-name">
-              <div class="nm"><span class="ell" title={m.author ? `by ${m.author}` : m.file}>{m.name}</span>{#if m.locked}<span class="lk" title="Updates ignored. Right-click to allow them."><Lock size={11} /></span>{/if}</div>
+              <div class="nm"><span class="ell" title={m.author ? `by ${m.author}` : m.file}>{m.name}</span>{#if m.locked}<span class="lk" title="Updates ignored. Right-click to allow them."><Lock size={11} /></span>{/if}{#if hunting}{@const hc = hunt.hunt.rows[m.file.toLowerCase()]}{#if hc}{#if hc.click}<button class="chip hc {HUNT_CHIP[hc.state]}" title={hc.tip} onclick={(e) => { e.stopPropagation(); markFine(m, hc); }}>{HUNT_LABEL[hc.state]}</button>{:else}<span class="chip hc {HUNT_CHIP[hc.state]}" title={hc.tip}>{HUNT_LABEL[hc.state]}</span>{/if}{/if}{/if}</div>
               <div class="tags">
                 {#if yours(m)}<span class="chip tag gold">Yours</span>{/if}
                 {#if m.source === 'modrinth'}<span class="chip tag running">Modrinth</span>{/if}
@@ -466,7 +523,7 @@
             </div>
             <span class="c-author muted ell" title={m.author}>{m.author}</span>
             <span class="c-side muted" title={SIDE[m.side]?.[1] || 'Not known'}>{#if SIDE[m.side]}{@const I = SIDE[m.side][0]}<I size={13} />{/if}</span>
-            <span class="c-on"><label class="sw" title={m.enabled ? 'Turn off' : 'Turn on'}><input type="checkbox" checked={m.enabled} onclick={(e) => toggle(m, e)} /><span></span></label></span>
+            <span class="c-on"><label class="sw" class:dis={hunting} title={hunting ? 'The hunt decides which mods are on until it ends' : m.enabled ? 'Turn off' : 'Turn on'}><input type="checkbox" checked={m.enabled} disabled={hunting} onclick={(e) => toggle(m, e)} /><span></span></label></span>
             <span class="c-added muted" title={m.date_added ? new Date(m.date_added).toLocaleString() : ''}>{ago(m.date_added)}</span>
             <span class="c-end row">
               <button class="ib more" title="More" onclick={(e) => openMenu(m, e)}><Ellipsis size={14} /></button>
@@ -491,7 +548,7 @@
     {#if m.source}<button onclick={() => act(async (m) => (await setLocked(base, [m], !m.locked)) && changed(true))}>{#if m.locked}<LockOpen size={13} />Allow updates{:else}<Lock size={13} />Ignore updates{/if}</button>{/if}
     {#if m.source}<button onclick={() => act((m) => resetConfig(base, m))}><Settings2 size={13} />Reset config…</button>{/if}
     <button onclick={() => act(() => (location.hash = `/server/${encodeURIComponent(server.id)}/files/mods`))}><FolderOpen size={13} />Show in Files</button>
-    <button onclick={() => act((m) => toggle(m))}><span class="noi"></span>{m.enabled ? 'Disable' : 'Enable'}</button>
+    <button disabled={hunting} onclick={() => act((m) => toggle(m))}><span class="noi"></span>{m.enabled ? 'Disable' : 'Enable'}</button>
     <hr />
     <button class="bad" onclick={() => act(async (m) => (await removeMods(base, [m], alive)) && changed(true))}><Trash2 size={13} />Remove</button>
   </div>
@@ -589,4 +646,8 @@
   .ctx .bad { color: var(--red); }
   .ctx hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
   .noi { width: 13px; }
+  .ctx button:disabled { opacity: 0.5; }
+  .hc { font-size: 10.5px; padding: 0 7px; flex: none; font-weight: 500; }
+  button.hc:hover { filter: brightness(1.25); }
+  .sw.dis { cursor: default; opacity: 0.6; }
 </style>

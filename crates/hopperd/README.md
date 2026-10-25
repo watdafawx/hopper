@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages. 0.7.0: Mods table like Hopper desktop.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages. 0.7.0: Mods table like Hopper desktop. 0.8.0: mod profiles and finding the mod that breaks a server.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -142,6 +142,17 @@ the address the player typed and passes them to that server's own port.
 - Settings: `[router]` in `hopperd.toml` (`enabled`, `port`, `domain`,
   `unknown_server`); per server in `.hopper-route.json` in its folder.
 - Servers see players as coming from 127.0.0.1 (no proxy forwarding yet).
+
+## Mod profiles and finding the mod that breaks it (0.8.0)
+
+- Profiles (Mods toolbar): switch to a saved set of mods that are off, save the current one, delete one. Each shows what switching would turn on and off.
+- Find the mod that breaks it: hopper-core's `bisect` rounds (half the suspects off, always with what needs them), with the strip, row chips and answers from Hopper desktop. The On switches wait until the hunt ends.
+- "Run rounds for me" (when it won't start or crashes): hopperd stops the server, parks the round's mods, starts it, and answers by itself: reaching "Done" works, a crash, an exit or 10 minutes is still broken. Warns when players are online. Pause / resume; after a hopperd restart the rounds show as paused.
+- When the loader refuses a round because a mod needs one that's parked ("Mod X requires Y"), the hunt learns that pair and plays the round again instead of taking the answer.
+- Rounds play on a throwaway world by default (`level-name` is switched to `hopper-hunt-world` and put back, and that world deleted, when the hunt ends), so the real world never saves with mods missing.
+- Schedules (crash restarts, scheduled restarts, autostart) skip a server while a hunt runs.
+- Files: `hopper-bisect.json` (core's journal) and `hopper-bisect-server.json` (auto rounds, log, world) in the server folder.
+- API: `GET mods/profiles`, `POST mods/profiles/save|use|delete` `{name}`; `GET mods/hunt`, `POST mods/hunt/start` `{kind, auto, scratch_world}` (job), `.../answer` `{answer}` (job), `.../undo` (job), `.../fine` `{file, fine}` (job), `.../finish` `{keep_off}` (job), `.../auto` `{run}`. Capabilities `mods.profiles`, `mods.hunt`.
 
 ## Mods table like Hopper desktop (0.7.0)
 

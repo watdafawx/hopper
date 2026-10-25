@@ -22,6 +22,7 @@ mod host;
 mod manage_api;
 mod mcp;
 mod mods_api;
+mod mods_hunt;
 mod mods_more;
 mod mods_table;
 mod security;
@@ -258,6 +259,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     }
     // Schedules: daily restarts, crash restarts, backups; and servers set
     // to start with the panel.
+    crate::mods_hunt::resume_note(&app);
     let sched = hopper_core::hosting::Scheduler::start(app.servers.panel());
     sched.start_autostart(&app.servers.panel());
     *app.scheduler.lock().unwrap() = Some(sched);
