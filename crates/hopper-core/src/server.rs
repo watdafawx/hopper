@@ -23,10 +23,12 @@ pub struct ServerInfo {
     pub root: PathBuf,
     pub manager: Manager,
     pub properties: BTreeMap<String, String>,
-    /// e.g. "neoforge 21.1.256", from the run script.
+    /// e.g. "neoforge 21.1.256", "fabric 0.18.1": what the start script
+    /// runs ([`crate::hosting::script::start_info`]).
     pub loader: Option<String>,
     pub java: Option<String>,
-    /// -Xmx from user_jvm_args.txt.
+    /// The -Xmx the server starts with (last on its command line, so
+    /// user_jvm_args.txt's or the start script's). None: the JVM default.
     pub max_memory: Option<String>,
     /// On a Hopper Server: reached through its API, not the file system.
     pub remote: Option<crate::hopperd::Remote>,
@@ -68,7 +70,7 @@ pub fn load(root: &Path) -> ServerInfo {
     } else {
         Manager::Unknown
     };
-    let (loader, java) = read_run_script(&root.join("run.bat"));
+    let start = crate::hosting::script::start_info(root);
     ServerInfo {
         name: root
             .file_name()
@@ -77,14 +79,9 @@ pub fn load(root: &Path) -> ServerInfo {
         root: root.to_path_buf(),
         manager,
         properties: read_properties(&root.join("server.properties")),
-        loader,
-        java,
-        max_memory: fs::read_to_string(root.join("user_jvm_args.txt"))
-            .ok()
-            .and_then(|t| {
-                t.lines()
-                    .find_map(|l| l.trim().strip_prefix("-Xmx").map(str::to_string))
-            }),
+        loader: start.loader,
+        java: start.java,
+        max_memory: start.max_memory,
         remote: None,
     }
 }
@@ -97,36 +94,6 @@ fn read_properties(path: &Path) -> BTreeMap<String, String> {
         .filter_map(|l| l.split_once('='))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect()
-}
-
-/// Finds `@libraries/net/neoforged/neoforge/<ver>/win_args.txt` (or the Forge
-/// equivalent) and the java executable on the launch line.
-fn read_run_script(path: &Path) -> (Option<String>, Option<String>) {
-    let Ok(text) = fs::read_to_string(path) else {
-        return (None, None);
-    };
-    for line in text.lines().map(str::trim) {
-        let low = line.to_ascii_lowercase();
-        if low.starts_with("rem") || low.starts_with("::") || !low.contains("java") {
-            continue;
-        }
-        let java = if let Some(rest) = line.strip_prefix('"') {
-            rest.split('"').next().map(str::to_string)
-        } else {
-            line.split_whitespace().next().map(str::to_string)
-        };
-        for (needle, name) in [
-            ("net/neoforged/neoforge/", "neoforge"),
-            ("net/minecraftforge/forge/", "forge"),
-        ] {
-            if let Some(i) = line.find(needle) {
-                let ver = line[i + needle.len()..].split('/').next().unwrap_or("");
-                return (Some(format!("{name} {ver}")), java);
-            }
-        }
-        return (None, java);
-    }
-    (None, None)
 }
 
 #[derive(Clone, Debug)]
@@ -220,19 +187,130 @@ mod tests {
         }
     }
 
+    /// A temp server folder with `files` (path, text); "" makes an empty file.
+    fn folder(tag: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hopper-srv-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for (p, text) in files {
+            let p = dir.join(p);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            if p.extension().is_some() || !text.is_empty() {
+                fs::write(&p, text).unwrap();
+            } else {
+                fs::create_dir_all(&p).unwrap();
+            }
+        }
+        dir
+    }
+
+    const FORGE_HEADER: &str = "@echo off\r\nREM Forge requires a configured set of both JVM and program arguments.\r\nREM Add custom JVM arguments to the user_jvm_args.txt\r\n";
+
     #[test]
     fn reads_neoforge_run_bat() {
-        let dir = std::env::temp_dir().join(format!("hopper-run-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let bat = dir.join("run.bat");
-        fs::write(
-            &bat,
-            "@echo off\nREM java stuff\n\"G:\\jdk\\bin\\java.exe\" @user_jvm_args.txt @libraries/net/neoforged/neoforge/21.1.256/win_args.txt nogui%*\n",
-        )
-        .unwrap();
-        let (loader, java) = read_run_script(&bat);
-        assert_eq!(loader.as_deref(), Some("neoforge 21.1.256"));
-        assert_eq!(java.as_deref(), Some("G:\\jdk\\bin\\java.exe"));
+        let dir = folder("neo", &[
+            ("server.properties", ""),
+            ("run.bat", "@echo off\nREM java stuff\n\"G:\\jdk\\bin\\java.exe\" @user_jvm_args.txt @libraries/net/neoforged/neoforge/21.1.256/win_args.txt nogui%*\n"),
+            ("user_jvm_args.txt", "-Xms12G\n-Xmx16G\n-XX:+UseG1GC\n"),
+        ]);
+        let i = load(&dir);
+        assert_eq!(i.loader.as_deref(), Some("neoforge 21.1.256"));
+        assert_eq!(i.java.as_deref(), Some("G:\\jdk\\bin\\java.exe"));
+        assert_eq!(i.max_memory.as_deref(), Some("16G"));
+        assert_eq!(crate::hosting::script::start_info(&dir).minecraft.as_deref(), Some("1.21.1"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// BCG: Fabric started by start.bat with -Xmx in it, no user_jvm_args.txt.
+    #[test]
+    fn fabric_start_bat_server() {
+        let dir = folder("fabric", &[
+            ("server.properties", ""),
+            ("start.bat", "java -Dfabric.log.level=DEBUG -Xmx8G -jar fabric-server-launch.jar nogui\r\npause"),
+            ("fabric-server-launch.jar", ""),
+            (".fabric/server/1.20.1-server.jar", ""),
+            (".fabric/server/fabric-loader-server-0.18.1-minecraft-1.20.1.jar", ""),
+            ("versions/1.20.1/server-1.20.1.jar", ""),
+            ("libraries/net/fabricmc/fabric-loader/0.16.9/fabric-loader-0.16.9.jar", ""),
+            ("libraries/net/fabricmc/fabric-loader/0.18.1/fabric-loader-0.18.1.jar", ""),
+        ]);
+        let i = load(&dir);
+        assert_eq!(i.loader.as_deref(), Some("fabric 0.18.1"));
+        assert_eq!(i.max_memory.as_deref(), Some("8G"));
+        assert_eq!(i.java.as_deref(), Some("java"));
+        let s = crate::hosting::script::start_info(&dir);
+        assert_eq!((s.minecraft.as_deref(), s.max_memory_mb), (Some("1.20.1"), Some(8192)));
+        // Without Fabric's cache: the newest loader in libraries, the
+        // version from versions/.
+        fs::remove_dir_all(dir.join(".fabric")).unwrap();
+        let s = crate::hosting::script::start_info(&dir);
+        assert_eq!((s.loader.as_deref(), s.minecraft.as_deref()), (Some("fabric 0.18.1"), Some("1.20.1")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Linggango: two Forge versions in libraries; the one run.bat names
+    /// wins. A second java line (a leftover) is ignored, as cmd never gets
+    /// past the first while the server runs.
+    #[test]
+    fn forge_version_is_the_one_the_script_names() {
+        for (named, other) in [("47.4.15", "47.4.10"), ("47.4.10", "47.4.15")] {
+            let bat = format!("{FORGE_HEADER}java @user_jvm_args.txt @libraries/net/minecraftforge/forge/1.20.1-{named}/win_args.txt %*\r\njava -Xmx10024M -Xms10024M -jar server.jar nogui\r\npause\r\n");
+            let lib = |v: &str| format!("libraries/net/minecraftforge/forge/1.20.1-{v}/win_args.txt");
+            let (a, b) = (lib(named), lib(other));
+            let dir = folder(&format!("forge-{named}"), &[
+                ("server.properties", ""),
+                ("run.bat", &bat),
+                ("user_jvm_args.txt", "# A good default for linggango server is 10GB.\n# Uncomment the next line to set it.\n-Xmx10G"),
+                (&a, "x"),
+                (&b, "x"),
+            ]);
+            let i = load(&dir);
+            assert_eq!(i.loader, Some(format!("forge 1.20.1-{named}")));
+            assert_eq!(i.max_memory.as_deref(), Some("10G"));
+            assert_eq!(crate::hosting::script::start_info(&dir).minecraft.as_deref(), Some("1.20.1"));
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Val: several -Xmx lines in user_jvm_args.txt (Java uses the last);
+    /// only commented ones: no -Xmx at all, the JVM's default.
+    #[test]
+    fn memory_is_the_last_xmx() {
+        let bat = format!("{FORGE_HEADER}java @user_jvm_args.txt @libraries/net/minecraftforge/forge/1.20.1-47.4.10/win_args.txt %*\r\npause\r\n");
+        let dir = folder("xmx", &[
+            ("server.properties", ""),
+            ("run.bat", &bat),
+            ("user_jvm_args.txt", "# For example, to set the maximum to 3GB: -Xmx3G\n-Xmx3G\n-Xmx4G\n"),
+        ]);
+        let i = load(&dir);
+        assert_eq!((i.loader.as_deref(), i.max_memory.as_deref()), (Some("forge 1.20.1-47.4.10"), Some("4G")));
+        fs::write(dir.join("user_jvm_args.txt"), "# Uncomment the next line to set it.\n# -Xmx4G").unwrap();
+        assert_eq!(load(&dir).max_memory, None);
+        // The script's own -Xmx after @user_jvm_args.txt beats the file's.
+        fs::write(dir.join("user_jvm_args.txt"), "-Xmx4G\n").unwrap();
+        fs::write(dir.join("run.bat"), "java @user_jvm_args.txt -Xmx6G -jar server.jar nogui\r\n").unwrap();
+        assert_eq!(load(&dir).max_memory.as_deref(), Some("6G"));
+        // No start script: user_jvm_args.txt alone.
+        fs::remove_file(dir.join("run.bat")).unwrap();
+        assert_eq!(load(&dir).max_memory.as_deref(), Some("4G"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_forge_and_quilt() {
+        let dir = folder("old", &[
+            ("server.properties", ""),
+            ("start.bat", "\"C:\\jre8\\bin\\java.exe\" -Xmx6G -jar forge-1.12.2-14.23.5.2860.jar nogui\r\n"),
+        ]);
+        let s = crate::hosting::script::start_info(&dir);
+        assert_eq!(s.loader.as_deref(), Some("forge 1.12.2-14.23.5.2860"));
+        assert_eq!(s.minecraft.as_deref(), Some("1.12.2"));
+        let _ = fs::remove_dir_all(&dir);
+        let dir = folder("quilt", &[
+            ("server.properties", ""),
+            ("quilt-server-launch.jar", ""),
+            ("libraries/org/quiltmc/quilt-loader/0.26.4/quilt-loader-0.26.4.jar", ""),
+        ]);
+        assert_eq!(load(&dir).loader.as_deref(), Some("quilt 0.26.4"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
@@ -247,5 +325,16 @@ fn real_ping() {
             "rig:{port} -> {:?}",
             ping_inner("rig", port).map_err(|e| format!("{e:#}"))
         );
+    }
+}
+
+/// What every server under G:\Minecraft\packs on rig starts as (read only).
+/// `cargo test -p hopper-core real_start_info -- --ignored --nocapture`
+#[cfg(test)]
+#[test]
+#[ignore]
+fn real_start_info() {
+    for s in discover(Path::new(r"G:\Minecraft\packs")) {
+        println!("{}: {:?}", s.name, crate::hosting::script::start_info(&s.root));
     }
 }

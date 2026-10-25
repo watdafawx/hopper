@@ -49,6 +49,9 @@ pub struct Config {
     pub sftp_port: u16,
     /// Server addresses: one Minecraft port for every server.
     pub router: crate::router::RouterConfig,
+    /// Until there's an owner, a browser on this PC itself sets the owner
+    /// password without the setup code. Off in Docker regardless.
+    pub trust_local_setup: bool,
 }
 
 impl Default for Config {
@@ -71,6 +74,7 @@ impl Default for Config {
             curseforge_key: String::new(),
             sftp_port: 8022,
             router: Default::default(),
+            trust_local_setup: true,
         }
     }
 }

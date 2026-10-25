@@ -17,6 +17,8 @@ pub struct Entry {
     pub root: PathBuf,
     pub name: String,
     pub loader: Option<String>,
+    /// Minecraft version, from the folder's files (before it has run).
+    pub minecraft: Option<String>,
     pub max_memory: Option<String>,
     /// Crafty or MCSS also knows this folder (it runs here in place too).
     pub managed_by: Option<&'static str>,
@@ -117,6 +119,7 @@ impl Servers {
             }
             let server = self.panel.add(&root);
             let info = server::load(&root);
+            let minecraft = hopper_core::hosting::script::start_info(&root).minecraft;
             let panel_id = self
                 .panel
                 .servers()
@@ -137,6 +140,7 @@ impl Servers {
                 panel_id,
                 name: info.name.clone(),
                 loader: info.loader.clone(),
+                minecraft,
                 max_memory: info.max_memory.clone(),
                 managed_by: match info.manager {
                     Manager::Crafty => Some("Crafty"),
@@ -183,7 +187,11 @@ impl Servers {
             },
             managed_by: e.managed_by,
             loader: e.loader.clone().or_else(|| meta.as_ref().map(|m| m.loader.clone()).filter(|l| !l.is_empty() && l != "Vanilla")),
-            version: if t.version.is_empty() { meta.map(|m| m.minecraft).unwrap_or_default() } else { t.version },
+            version: if t.version.is_empty() {
+                meta.map(|m| m.minecraft).filter(|v| !v.is_empty()).or_else(|| e.minecraft.clone()).unwrap_or_default()
+            } else {
+                t.version
+            },
             max_memory: e.max_memory.clone(),
             cpu,
             mem_bytes: mem,
@@ -260,10 +268,33 @@ mod tests {
         assert!(!e.contains("manages") && e.contains("EULA"), "{e}");
         let sum = s.summary(&s.get("my-pack").unwrap());
         assert_eq!((sum.state, sum.port, sum.max_players), ("stopped", 25599, 6));
+        assert_eq!((sum.loader, sum.version.as_str(), sum.max_memory), (None, "", None));
         // Rescanning keeps ids stable.
         s.scan(Some(&base), &[]);
         assert_eq!(s.list().len(), 3);
         assert!(s.get("my-pack-2").is_some());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A Fabric server started by start.bat (as Crafty left BCG): loader,
+    /// version and memory come from its files before it has ever run here.
+    #[test]
+    fn summary_of_a_fabric_start_bat_server() {
+        let base = std::env::temp_dir().join(format!("hopperd-servers-fabric-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let d = base.join("BCG");
+        std::fs::create_dir_all(d.join(".fabric/server")).unwrap();
+        std::fs::create_dir_all(d.join("libraries/net/fabricmc/fabric-loader/0.18.1")).unwrap();
+        std::fs::write(d.join("server.properties"), "server-port=25598\n").unwrap();
+        std::fs::write(d.join("start.bat"), "java -Dfabric.log.level=DEBUG -Xmx8G -jar fabric-server-launch.jar nogui\r\npause").unwrap();
+        std::fs::write(d.join("fabric-server-launch.jar"), "").unwrap();
+        std::fs::write(d.join(".fabric/server/1.20.1-server.jar"), "").unwrap();
+        let s = Servers::new();
+        s.scan(Some(&base), &[]);
+        let sum = s.summary(&s.get("bcg").unwrap());
+        assert_eq!(sum.loader.as_deref(), Some("fabric 0.18.1"));
+        assert_eq!(sum.version, "1.20.1");
+        assert_eq!(sum.max_memory.as_deref(), Some("8G"));
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -151,6 +151,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::home::routes())
         .merge(crate::mods_hunt::routes())
         .merge(crate::fs_zip::routes())
+        .merge(crate::control::routes())
         .fallback(crate::ui::serve)
         .layer(axum::middleware::from_fn_with_state(app.clone(), crate::security::guard))
         .with_state(app)
@@ -158,14 +159,17 @@ pub fn router(app: Arc<App>) -> Router {
 
 // ---- hello and auth ----------------------------------------------------
 
-async fn hello(State(app): State<Arc<App>>) -> Json<Value> {
+async fn hello(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Json<Value> {
     let cfg = app.cfg.read().unwrap();
+    let setup_needed = app.auth.needs_setup();
     Json(json!({
         "panel": "hopperd",
         "name": cfg.name,
         "version": env!("CARGO_PKG_VERSION"),
         "api": API_VERSION,
-        "setup_needed": app.auth.needs_setup(),
+        "setup_needed": setup_needed,
+        // A browser on this PC sets the owner password without the code.
+        "local_setup": setup_needed && crate::auth::trusted_local(cfg.trust_local_setup, addr.ip(), &headers),
         "addresses": app.addresses,
         "port": cfg.port,
         "capabilities": CAPABILITIES,
@@ -184,14 +188,16 @@ async fn setup(
     State(app): State<Arc<App>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     t: Option<axum::Extension<crate::net::Transport>>,
+    headers: HeaderMap,
     Json(b): Json<SetupBody>,
 ) -> ApiResult<Response> {
     if !crate::net::Net::of(addr.ip()).private() {
         return Err(ApiError(StatusCode::FORBIDDEN, "Set the panel up from its own LAN first.".into()));
     }
-    let token = app.auth.setup(&b.code, &b.password, addr.ip()).map_err(bad)?;
+    let local = crate::auth::trusted_local(app.cfg.read().unwrap().trust_local_setup, addr.ip(), &headers);
+    let token = app.auth.setup_as(&b.code, &b.password, addr.ip(), local).map_err(bad)?;
     let _ = std::fs::remove_file(app.data_dir.join(crate::SETUP_FILE));
-    log::info!("owner set up from {}", addr.ip());
+    log::info!("owner set up from {}{}", addr.ip(), if local && b.code.trim().is_empty() { " (this PC, no setup code)" } else { "" });
     let mut r = ([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response();
     r.extensions_mut().insert(crate::security::SignedIn("owner".into()));
     Ok(r)

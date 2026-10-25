@@ -1,5 +1,5 @@
 <script>
-  import { Server, KeyRound, Lock, User } from '@lucide/svelte';
+  import { KeyRound, Lock, User, CircleCheck } from '@lucide/svelte';
   import { post } from './lib/api.js';
 
   let { hello, onDone } = $props();
@@ -13,6 +13,15 @@
   let needCode = $state(false);
 
   const setup = $derived(hello.setup_needed);
+  // Opened by Hopper Server on this PC (tray, first-run dialog): the setup
+  // code comes in the link. Taken out of the address bar right away.
+  const linked = (location.hash.match(/[#&]setup=([A-Za-z0-9]+)/) || [])[1] || '';
+  if (linked) {
+    code = linked;
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+  // A browser on the server PC itself needs no setup code.
+  const noCode = $derived(setup && (!!linked || hello.local_setup));
 
   async function submit(e) {
     e.preventDefault();
@@ -42,16 +51,20 @@
 <div class="wrap">
   <form class="card box" onsubmit={submit}>
     <div class="brand">
-      <div class="logo"><Server size={18} strokeWidth={2.5} /></div>
+      <img class="logo" src="/logo.svg" alt="" />
       <div>
         <div class="title">Hopper Server</div>
         <div class="small muted">{hello.name} · v{hello.version}</div>
       </div>
     </div>
-    {#if setup}
+    {#if noCode}
+      <span class="pill"><CircleCheck size={13} /> {linked ? 'Opened from Hopper Server on this PC' : 'On this PC, no setup code needed'}</span>
+      <p class="small subtle">Pick the owner password. You'll use it to sign in from any device.</p>
+    {:else if setup}
       <p class="small subtle">
-        Set the owner password. The setup code is in hopperd's log and in <span class="mono">setup-code.txt</span> in
-        its data folder.
+        Set the owner password. Easiest: open <span class="mono">http://localhost:{hello.port}</span> on the server PC
+        itself. From here you need the setup code: it's in <span class="mono">setup-code.txt</span> in the panel's data
+        folder, and in its log.
       </p>
       <label class="lbl" for="code">Setup code</label>
       <div class="input">
@@ -79,7 +92,7 @@
       <p class="tiny muted">Not encrypted. Fine on your own LAN; from elsewhere use https://{location.host}.</p>
     {/if}
     {#if error}<p class="err">{error}</p>{/if}
-    <button class="btn pri big" disabled={busy || !password || (setup && !code)}>
+    <button class="btn pri big" disabled={busy || !password || (setup && !code && !noCode)}>
       {setup ? 'Set up the panel' : 'Sign in'}
     </button>
   </form>
@@ -90,7 +103,8 @@
   .box { width: min(380px, 100%); display: flex; flex-direction: column; gap: 10px; padding: 22px; }
   .brand { display: flex; align-items: center; gap: 11px; margin-bottom: 6px; }
   .title { font-weight: 700; font-size: 16px; }
-  .logo { width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(135deg, #fb923c, #ea580c); display: grid; place-items: center; color: #1a1a1f; }
+  .logo { width: 34px; height: 34px; image-rendering: pixelated; flex: none; }
   label { margin-top: 4px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; font-size: 12px; padding: 3px 10px; border-radius: 99px; background: #22c55e1c; color: #22c55e; }
   .big { justify-content: center; padding: 9px; margin-top: 6px; font-size: 13px; }
 </style>

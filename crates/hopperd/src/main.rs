@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! hopperd                         run the panel (port 8790 by default)
+//! hopperd --portable              the same (Windows: no first-run dialog)
 //! hopperd --servers-root <dir>    set the servers folder and run
 //! hopperd --port <n>              set the port and run
 //! hopperd --data <dir>            keep config and accounts in <dir>
@@ -10,16 +11,23 @@
 //! hopperd service uninstall|status
 //! hopperd --version
 //! ```
+//!
+//! On Windows, double-clicking hopperd.exe asks how to run it (just run it,
+//! start with Windows, or install as a service) and runs a tray icon: see
+//! `launcher`.
 
 mod api;
 mod auth;
 mod config;
+mod control;
 mod discovery;
 mod files;
 mod fs_api;
 mod fs_zip;
 mod home;
 mod host;
+#[cfg(windows)]
+mod launcher;
 mod manage_api;
 mod mcp;
 mod mods_api;
@@ -35,6 +43,8 @@ mod servers_admin;
 mod service;
 mod sftp;
 mod tls;
+#[cfg(windows)]
+mod tray;
 mod ui;
 mod webhooks;
 mod zipstream;
@@ -141,11 +151,13 @@ fn parse_args() -> anyhow::Result<Option<Args>> {
             }
             "--data" => a.data = Some(val()?.into()),
             "--service" => a.service = true,
+            // Run as today, without the first-run dialog.
+            "--portable" => {}
             "--port" => a.port = Some(val()?.parse().context("--port takes a number")?),
             "--servers-root" => a.servers_root = Some(val()?.into()),
             "--home" => a.home = Some(val()?.into()),
             "--help" | "-h" => {
-                println!("{}", include_str!("main.rs").lines().skip(4).take(7).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
+                println!("{}", include_str!("main.rs").lines().skip(4).take(8).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
                 return Ok(None);
             }
             other => anyhow::bail!("Unknown argument {other}. Try --help."),
@@ -158,7 +170,17 @@ type Shutdown = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
+    control::init();
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Double-clicked (not from a terminal): the first-run dialog and tray.
+    #[cfg(windows)]
+    if argv.is_empty() && launcher::double_clicked() {
+        return launcher::start();
+    }
+    #[cfg(windows)]
+    if argv.first().map(String::as_str) == Some("--tray") {
+        return launcher::tray_only();
+    }
     let mut log = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,mdns_sd=warn"));
     if argv.first().map(String::as_str) == Some("service") {
         log.init();
@@ -177,9 +199,17 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("--service is for the Windows service manager. Use hopperd service install.");
     }
     log.init();
-    run_main(Box::pin(async {
-        let _ = tokio::signal::ctrl_c().await;
-    }))
+    let r = run_main(Box::pin(async {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = control::quitting() => {}
+        }
+    }));
+    control::withdraw();
+    match control::exit_code() {
+        0 => r,
+        code => std::process::exit(code),
+    }
 }
 
 /// Runs the panel until `shutdown` finishes.
@@ -221,7 +251,16 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     let auth = auth::Auth::load(&data_dir)?;
     if let Some(code) = auth.setup_code() {
         let _ = std::fs::write(data_dir.join(SETUP_FILE), &code);
-        log::warn!("No owner yet. Open the panel and use setup code {code} (also in {}).", data_dir.join(SETUP_FILE).display());
+        let file = data_dir.join(SETUP_FILE);
+        if auth::local_setup_possible(cfg.trust_local_setup) {
+            log::warn!(
+                "No owner yet. On this PC, open http://localhost:{} to set the owner password. From another device use setup code {code} (also in {}).",
+                cfg.port,
+                file.display()
+            );
+        } else {
+            log::warn!("No owner yet. Open the panel and use setup code {code} (also in {}).", file.display());
+        }
     }
 
     let lan = discovery::lan_addresses();
@@ -335,6 +374,7 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::Certified
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("listening on {addr} (is another hopperd running?)"))?;
+    control::announce(cfg.port);
     // Let's Encrypt, when a domain is set.
     let acme = cfg.acme_domain.clone().filter(|d| !d.trim().is_empty()).map(|domain| {
         use futures_util::StreamExt as _;

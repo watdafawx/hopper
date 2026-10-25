@@ -4,3 +4,6 @@ crates/hopperd/ui/dist
 .git
 .claude
 mockups
+.env
+dist/*
+!dist/docker

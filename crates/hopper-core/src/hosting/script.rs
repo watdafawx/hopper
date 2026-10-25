@@ -127,28 +127,7 @@ pub const SCRIPTS: [&str; 2] = [RUN_BAT, "start.bat"];
 /// a new Java is installed), the installed Java that fits its Minecraft
 /// version is used instead.
 pub fn launch_command(root: &Path) -> anyhow::Result<Launch> {
-    let jvm = JvmArgs::load(root)?;
-    let mut found = None;
-    for script in SCRIPTS {
-        if let Ok(text) = fs::read_to_string(root.join(script))
-            && let Some(l) = parse_launch(&text, &jvm)
-        {
-            found = Some((l, text));
-            break;
-        }
-    }
-    let (mut l, text) = match found {
-        Some(f) => f,
-        None => {
-            let jar = ["server.jar", "fabric-server-launch.jar", "quilt-server-launch.jar"]
-                .into_iter()
-                .find(|j| root.join(j).is_file())
-                .with_context(|| format!("{} has no run.bat, start.bat or server.jar to start", root.display()))?;
-            let mut args = jvm.args();
-            args.extend(["-jar".into(), jar.into(), "nogui".into()]);
-            (Launch { java: "java".into(), args, note: None }, String::new())
-        }
-    };
+    let (mut l, text) = read_launch(root)?;
     if is_bare_java(&l.java)
         && let Some(mc) = minecraft_version(root, &text)
         && let Some(best) = crate::java::best(&crate::java::detect(Path::new("")), &mc, crate::java::Side::Server)
@@ -163,6 +142,140 @@ pub fn launch_command(root: &Path) -> anyhow::Result<Launch> {
     }
     l.java = console_java(&l.java);
     Ok(l)
+}
+
+/// The command the server's start script runs (run.bat, else start.bat,
+/// else a server jar with `user_jvm_args.txt`), as written: java not
+/// swapped. Also the script's text ("" without one).
+pub fn read_launch(root: &Path) -> anyhow::Result<(Launch, String)> {
+    let jvm = JvmArgs::load(root)?;
+    for script in SCRIPTS {
+        if let Ok(text) = fs::read_to_string(root.join(script))
+            && let Some(l) = parse_launch(&text, &jvm)
+        {
+            return Ok((l, text));
+        }
+    }
+    let jar = ["server.jar", "fabric-server-launch.jar", "quilt-server-launch.jar"]
+        .into_iter()
+        .find(|j| root.join(j).is_file())
+        .with_context(|| format!("{} has no run.bat, start.bat or server.jar to start", root.display()))?;
+    let mut args = jvm.args();
+    args.extend(["-jar".into(), jar.into(), "nogui".into()]);
+    Ok((Launch { java: "java".into(), args, note: None }, String::new()))
+}
+
+/// The heap java gets (MB): the last `-Xmx` on its command line, which is
+/// the one Java uses (so `user_jvm_args.txt`'s or the script's, whichever
+/// comes later on the line). None: the JVM's default.
+pub fn max_memory_mb(l: &Launch) -> Option<u32> {
+    l.args.iter().rev().find_map(|a| a.strip_prefix("-Xmx").and_then(super::jvm::parse_mb))
+}
+
+/// The jar a launch runs (`-jar <name>`).
+fn launch_jar(l: &Launch) -> Option<&str> {
+    let i = l.args.iter().position(|a| a == "-jar")?;
+    l.args.get(i + 1).map(String::as_str)
+}
+
+/// Numeric parts of a version, for ordering ("0.18.1" < "0.18.10").
+fn version_key(v: &str) -> Vec<u64> {
+    v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()
+}
+
+/// The newest version-named folder in `dir`.
+fn newest_dir(dir: &Path) -> Option<String> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(|c: char| c.is_ascii_digit()))
+        .max_by_key(|n| version_key(n))
+}
+
+/// The loader and its version ("forge 1.20.1-47.4.10", "fabric 0.18.1"):
+/// Forge and NeoForge from the library path the start script names (not
+/// whatever else is in `libraries`), old Forge from its jar, Fabric and
+/// Quilt from their launcher and libraries.
+pub fn loader(root: &Path, l: &Launch, script: &str) -> Option<String> {
+    let line = launch_line(script).unwrap_or("");
+    let in_args = |needle: &str| {
+        std::iter::once(line).chain(l.args.iter().map(String::as_str)).find_map(|s| {
+            let s = s.replace('\\', "/");
+            let i = s.find(needle)?;
+            let v = s[i + needle.len()..].split('/').next()?.to_string();
+            (!v.is_empty() && !v.contains('%')).then_some(v)
+        })
+    };
+    for (needle, name) in [("net/neoforged/neoforge/", "neoforge"), ("net/neoforged/forge/", "neoforge"), ("net/minecraftforge/forge/", "forge")] {
+        if let Some(v) = in_args(needle) {
+            return Some(format!("{name} {v}"));
+        }
+    }
+    let jar = launch_jar(l).unwrap_or("").to_ascii_lowercase();
+    // Old Forge: forge-1.12.2-14.23.5.2860.jar (or -universal).
+    if let Some(c) = regex::Regex::new(r"^(?:minecraft)?forge-(\d+\.\d+(?:\.\d+)?-[\d.]+)(?:-universal|-server)?\.jar$").ok()?.captures(&jar) {
+        return Some(format!("forge {}", &c[1]));
+    }
+    // Fabric's installer jar: fabric-server-mc.1.20.1-loader.0.18.1-launcher.1.1.0.jar.
+    if let Some(c) = regex::Regex::new(r"^fabric-server-mc\.[^-]+-loader\.([^-]+)-launcher").ok()?.captures(&jar) {
+        return Some(format!("fabric {}", &c[1]));
+    }
+    let fabric_libs = root.join("libraries/net/fabricmc/fabric-loader");
+    if jar.starts_with("fabric-server-launch") || root.join(".fabric").is_dir() || fabric_libs.is_dir() {
+        // The loader Fabric's launcher unpacked, else the newest in libraries.
+        let re = regex::Regex::new(r"^fabric-loader-server-(.+)-minecraft-.+\.jar$").ok()?;
+        let cached = fs::read_dir(root.join(".fabric/server"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| re.captures(&e.file_name().to_string_lossy()).map(|c| c[1].to_string()))
+            .max_by_key(|v| version_key(v));
+        if let Some(v) = cached.or_else(|| newest_dir(&fabric_libs)) {
+            return Some(format!("fabric {v}"));
+        }
+    }
+    let quilt_libs = root.join("libraries/org/quiltmc/quilt-loader");
+    if jar.starts_with("quilt-server-launch") || quilt_libs.is_dir() {
+        return Some(newest_dir(&quilt_libs).map_or("quilt".into(), |v| format!("quilt {v}")));
+    }
+    None
+}
+
+/// What a server folder starts as, read from its files: loader, Minecraft
+/// version, java and memory. Every view of a server (Hopper Server's list
+/// and summary, the desktop's servers page) uses this.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartInfo {
+    pub loader: Option<String>,
+    pub minecraft: Option<String>,
+    /// The java on the launch line, as written ("java" for plain java).
+    pub java: Option<String>,
+    /// "8G", "10024M"; None: no -Xmx (the JVM's default).
+    pub max_memory: Option<String>,
+    pub max_memory_mb: Option<u32>,
+}
+
+pub fn start_info(root: &Path) -> StartInfo {
+    let Ok((l, text)) = read_launch(root) else {
+        let mb = JvmArgs::load(root).ok().and_then(|a| a.xmx_mb);
+        return StartInfo {
+            minecraft: minecraft_version(root, ""),
+            max_memory: mb.map(super::jvm::format_mb),
+            max_memory_mb: mb,
+            ..Default::default()
+        };
+    };
+    let mb = max_memory_mb(&l);
+    StartInfo {
+        loader: loader(root, &l, &text),
+        minecraft: minecraft_version(root, &format!("{text}\n{}", l.args.join(" "))),
+        java: Some(l.java.to_string_lossy().into_owned()),
+        max_memory: mb.map(super::jvm::format_mb),
+        max_memory_mb: mb,
+    }
 }
 
 /// Whether `java` is plain `java` (looked up on PATH).
@@ -190,6 +303,13 @@ pub fn minecraft_version(root: &Path, script: &str) -> Option<String> {
             format!("1.{a}.{b}")
         });
     }
+    // Old Forge's jar (forge-1.12.2-14.23.5.2860.jar) and Fabric's
+    // installer jar (fabric-server-mc.1.20.1-loader.0.18.1-launcher...).
+    let script = script.replace('\\', "/");
+    let re_jar = regex::Regex::new(r"(?i)(?:^|[\s/])(?:minecraft)?forge-(\d+\.\d+(?:\.\d+)?)-\d|fabric-server-mc\.(\d+\.\d+(?:\.\d+)?)-loader").ok()?;
+    if let Some(c) = re_jar.captures(&script) {
+        return c.get(1).or(c.get(2)).map(|m| m.as_str().to_string());
+    }
     for e in fs::read_dir(root.join(".fabric").join("server")).into_iter().flatten().flatten() {
         let n = e.file_name().to_string_lossy().into_owned();
         if let Some(v) = n.strip_suffix("-server.jar")
@@ -198,7 +318,21 @@ pub fn minecraft_version(root: &Path, script: &str) -> Option<String> {
             return Some(v.to_string());
         }
     }
-    super::HostedMeta::load(root).map(|m| m.minecraft).filter(|v| !v.is_empty())
+    if let Some(m) = super::HostedMeta::load(root).map(|m| m.minecraft).filter(|v| !v.is_empty()) {
+        return Some(m);
+    }
+    // The vanilla server jar unpacks itself into versions/<version>/.
+    let mut found = fs::read_dir(root.join("versions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| regex::Regex::new(r"^\d+\.\d+(\.\d+)?$").is_ok_and(|re| re.is_match(n)));
+    match (found.next(), found.next()) {
+        (Some(v), None) => Some(v),
+        _ => None,
+    }
 }
 
 /// Points the launch line at another java, keeping everything else.

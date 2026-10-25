@@ -1,6 +1,6 @@
 [package]
 name = "hopperd"
-version = "0.9.1"
+version = "0.10.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -52,9 +52,25 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
+# The first-run dialog, the tray icon, Start with Windows (the Run key).
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 flate2.workspace = true
+# The exe's icon and manifest (Windows).
+winresource = "0.1"
 
 [dev-dependencies]
 zip.workspace = true

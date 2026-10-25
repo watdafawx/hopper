@@ -152,8 +152,12 @@ async fn get_jvm(
             .into_iter()
             .map(|p| json!({ "id": format!("{p:?}").to_lowercase(), "label": p.label(), "supported": p.supported(major_n) }))
             .collect();
+        // The heap the server starts with: the last -Xmx on its command
+        // line, from user_jvm_args.txt or the start script (BCG's start.bat
+        // says -Xmx8G and has no args file). None: the JVM's default.
+        let memory = hopper_core::hosting::script::start_info(&e.root).max_memory_mb.or(a.xmx_mb);
         Ok(json!({
-            "memory_mb": a.xmx_mb, "preset": format!("{:?}", a.preset()).to_lowercase(), "flags": a.flags,
+            "memory_mb": memory, "preset": format!("{:?}", a.preset()).to_lowercase(), "flags": a.flags,
             "presets": presets, "java": java, "java_major": major, "host_memory_mb": total / (1024 * 1024),
             "files": files,
         }))

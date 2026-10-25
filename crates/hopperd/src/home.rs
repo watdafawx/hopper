@@ -107,6 +107,20 @@ pub fn settle(boot: &Path, mut cfg: Config) -> anyhow::Result<(PathBuf, Config)>
         pointer(boot, &home)?;
     }
     let data = home.join(PANEL_DIR);
+    if not_ours(boot, &data) {
+        // Another panel's data (its folder picked by mistake, or --home):
+        // never run as that panel. Stay where we are, without its folder.
+        log::error!(
+            "{} holds another Hopper Server's data; not using it as this panel's folder. Pick another panel folder in the panel.",
+            home.display()
+        );
+        if cfg.servers_root.as_deref().is_some_and(|r| inside(&home, r)) {
+            cfg.servers_root = None;
+        }
+        cfg.home = None;
+        cfg.save(boot)?;
+        return Ok((boot.to_path_buf(), cfg));
+    }
     if !data.join(FILE).is_file() {
         // First start with a panel folder: the data moves in.
         log::info!("moving the panel's data from {} to {}", boot.display(), data.display());
@@ -142,6 +156,57 @@ pub fn settle(boot: &Path, mut cfg: Config) -> anyhow::Result<(PathBuf, Config)>
         let _ = std::fs::create_dir_all(r);
     }
     Ok((data, inner))
+}
+
+/// Another panel's data in `dir`'s `.hopper-server` (not `ours`): its port.
+fn panel_in(dir: &Path, ours: &Path) -> Option<u16> {
+    let data = dir.join(PANEL_DIR);
+    if norm(&data) == norm(ours) || !(data.join(FILE).is_file() || data.join("auth.json").is_file()) {
+        return None;
+    }
+    let cfg = std::fs::read_to_string(data.join(FILE)).ok().and_then(|t| toml::from_str::<Config>(&t).ok());
+    Some(cfg.map_or(crate::config::DEFAULT_PORT, |c| c.port))
+}
+
+/// Another panel's folder that `dir` is, is inside, or holds (up to three
+/// folders down): where it is and its port. Two panels must never share
+/// files.
+pub fn foreign_panel(dir: &Path, ours: &Path) -> Option<(PathBuf, u16)> {
+    for a in dir.ancestors() {
+        if let Some(port) = panel_in(a, ours) {
+            return Some((a.to_path_buf(), port));
+        }
+    }
+    let mut level = vec![dir.to_path_buf()];
+    let mut seen = 0;
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for d in &level {
+            for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+                let name = e.file_name();
+                if name.to_string_lossy().starts_with('.') || !e.file_type().is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                seen += 1;
+                if seen > 5000 {
+                    return None;
+                }
+                if let Some(port) = panel_in(&e.path(), ours) {
+                    return Some((e.path(), port));
+                }
+                next.push(e.path());
+            }
+        }
+        level = next;
+    }
+    None
+}
+
+/// `data` already holds a panel's logins, and they aren't the ones still
+/// waiting in `boot` to move in: another panel's.
+fn not_ours(boot: &Path, data: &Path) -> bool {
+    let Ok(mine) = std::fs::read(boot.join("auth.json")) else { return false };
+    std::fs::read(data.join("auth.json")).is_ok_and(|theirs| theirs != mine)
 }
 
 /// The start-up data folder keeps only where the panel folder is (and a
@@ -193,6 +258,16 @@ async fn set(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Js
     let dir = crate::absolute(Path::new(b.path.trim()));
     if b.path.trim().is_empty() || dir.parent().is_none() {
         return Err(bad("Pick a folder, not a whole drive."));
+    }
+    if let Some((other, port)) = foreign_panel(&dir, &app.data_dir) {
+        let what = if norm(&other) == norm(&dir) {
+            format!("{} is another Hopper Server's panel folder (port {port})", dir.display())
+        } else if inside(&other, &dir) {
+            format!("{} is inside another Hopper Server's panel folder, {} (port {port})", dir.display(), other.display())
+        } else {
+            format!("{} holds another Hopper Server's panel folder, {} (port {port})", dir.display(), other.display())
+        };
+        return Err(bad(format!("{what}. Two panels can't share files: pick a folder outside it.")));
     }
     std::fs::create_dir_all(&dir).map_err(|e| bad(format!("creating {}: {e}", dir.display())))?;
     {
@@ -278,6 +353,34 @@ mod tests {
         assert!(!inside(h, Path::new("E:\\Minecraft2\\x")));
         assert!(!inside(h, Path::new("G:\\Minecraft\\packs\\TNP-LL8")));
         assert_eq!(rebase(Path::new("E:\\Minecraft\\servers\\A"), h, Path::new("E:\\Games\\MC")), PathBuf::from("E:\\Games\\MC").join("servers\\A"));
+    }
+
+    #[test]
+    fn another_panels_folder_is_never_adopted() {
+        let base = std::env::temp_dir().join(format!("hopperd-foreign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // The real panel: its data in G:\Minecraft\packs\.hopper-server, port 8791.
+        let theirs = base.join("packs");
+        Config { port: 8791, home: Some(theirs.clone()), ..Config::default() }.save(&theirs.join(PANEL_DIR)).unwrap();
+        std::fs::write(theirs.join(PANEL_DIR).join("auth.json"), r#"{"owner":"theirs"}"#).unwrap();
+        // A second panel, set up, picks it.
+        let boot = base.join("boot");
+        std::fs::create_dir_all(&boot).unwrap();
+        std::fs::write(boot.join("auth.json"), r#"{"owner":"mine"}"#).unwrap();
+        assert_eq!(foreign_panel(&theirs, &boot), Some((theirs.clone(), 8791)));
+        assert_eq!(foreign_panel(&theirs.join("sub"), &boot), Some((theirs.clone(), 8791)), "inside it");
+        assert_eq!(foreign_panel(&base, &boot), Some((theirs.clone(), 8791)), "holds it (a parent folder)");
+        assert_eq!(foreign_panel(&theirs, &theirs.join(PANEL_DIR)), None, "its own folder");
+        std::fs::create_dir_all(base.join("fresh")).unwrap();
+        assert_eq!(foreign_panel(&base.join("fresh"), &boot), None);
+        // Picked anyway (older panel, --home): start-up refuses it.
+        let cfg = Config { port: 8796, home: Some(theirs.clone()), servers_root: Some(theirs.clone()), ..Config::default() };
+        cfg.save(&boot).unwrap();
+        let (data, c) = settle(&boot, cfg).unwrap();
+        assert_eq!((data, c.port, c.home, c.servers_root), (boot.clone(), 8796, None, None));
+        assert!(boot.join("auth.json").is_file(), "our logins stay ours");
+        assert_eq!(std::fs::read_to_string(theirs.join(PANEL_DIR).join("auth.json")).unwrap(), r#"{"owner":"theirs"}"#);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

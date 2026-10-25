@@ -4,17 +4,35 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages. 0.7.0: Mods table like Hopper desktop. 0.8.0: mod profiles and finding the mod that breaks a server. 0.9.0: panel folder, importing and deleting servers.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages. 0.7.0: Mods table like Hopper desktop. 0.8.0: mod profiles and finding the mod that breaks a server. 0.9.0: panel folder, importing and deleting servers. 0.10.0: double-click on Windows (portable, start with Windows or service, tray), Docker image on GHCR.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
+
+**Windows:** double-click `hopperd.exe`. The first time, it asks how to run:
+
+- **Just run it**: runs from where it is, as you, with a tray icon. It
+  stops when you quit or sign out.
+- **Start with Windows**: the same, and it starts again when you sign in
+  (your own startup entry, no admin).
+- **Install as a service**: copies itself to `C:\Program Files\Hopper Server`
+  and installs the `hopperd` Windows service (one admin prompt). It runs
+  without anyone signed in and restarts after a crash.
+
+The browser then opens the panel. The tray icon's menu has Open panel,
+Copy address for other devices, Open panel folder, Start with Windows,
+Install as a service… and Quit (it asks before leaving servers running).
+Running `hopperd.exe` again while it runs offers Open panel, Update (when
+the file is newer) and Uninstall instead of a second copy. From a
+terminal, or with `--portable`, it just runs, as on Linux:
 
 ```
 hopperd
 ```
 
-- First start: the log prints a one-time **setup code** (also in
-  `setup-code.txt` in the data folder). Use it in the browser to set the
-  owner password, then pick the **panel folder**: servers go in its
+- First start: on the server PC itself, open `http://localhost:8790` and
+  set the owner password; no code needed. From another device you need the
+  one-time **setup code** from the log (also in `setup-code.txt` in the data
+  folder). Then pick the **panel folder**: servers go in its
   `servers` folder and the panel's own data in `.hopper-server`, and the
   panel never shows anything outside it. `--home <folder>` sets it from the
   command line.
@@ -28,6 +46,13 @@ hopperd
 - Servers keep running when hopperd stops or restarts; it reconnects to
   them on start (Windows; Linux follows).
 - Folders Crafty or MCSS manage are listed but hopperd won't start them.
+- Setting up without the code trusts only a direct connection from
+  127.0.0.1/::1 with a `localhost` Host and no proxy headers, and only until
+  there's an owner. Anyone or any program on that PC can claim the panel in
+  that window. A reverse proxy or tunnel on the same PC that strips
+  `X-Forwarded-For` and rewrites Host to localhost would let the internet
+  through too: set `trust_local_setup = false` in `hopperd.toml` if you run
+  one. It's always off in Docker.
 
 ## What works (M1)
 
@@ -206,29 +231,77 @@ keep moving between panels. Such servers show "Also in Crafty" (or MCSS).
 
 ## Install as a service
 
-From an admin terminal (Windows) or with sudo (Linux):
+On Windows the first-run dialog or the tray does this for you. By hand,
+from an admin terminal (Windows) or with sudo (Linux):
 
 ```
-hopperd service install [--data <dir>]
+hopperd service install [--data <dir>] [--copy]
 hopperd service status
-hopperd service uninstall
+hopperd service update        (Windows: put this exe in the service's place)
+hopperd service uninstall [--remove-files]
 ```
 
 Windows: a service that starts with the machine (as LocalSystem; to run
-as a user, change Log On in services.msc). Logs go to `hopperd.log` in the
-data folder. Linux: a systemd unit running as the user behind sudo, with
+as a user, change Log On in services.msc). `--copy` copies the exe to
+`C:\Program Files\Hopper Server` first; `--remove-files` deletes that copy.
+Logs go to `hopperd.log` in the data folder. `install` prints where to
+open the panel (the port from the panel folder's settings, once there is
+one). Linux: a systemd unit running as the user behind sudo, with
 `KillMode=process` so servers survive restarts. On Linux hopperd starts
 servers but doesn't yet reattach to them after it restarts.
 
-Docker (Java 21 included), from the repository root:
+Releases: pushing a `hopperd-v<version>` tag builds Windows and Linux
+downloads and the Docker image.
+
+## Docker
+
+The image (amd64 and arm64) has Java 8, 17 and 21, so it runs servers for
+every Minecraft version (1.16 and older need 8, 1.17 to 1.20.4 need 17,
+1.20.5 and newer need 21). Everything lives in one volume, `/hopper`, the
+panel folder: servers in `/hopper/servers`, the panel's data (logins,
+certificates, settings) in `/hopper/.hopper-server`. Setup doesn't ask for
+a panel folder in the container.
 
 ```
-docker build -f crates/hopperd/Dockerfile -t hopperd .
-docker run -d -p 8790:8790 -p 8022:8022 -p 25565:25565 -v hopperd-data:/data -v /srv/minecraft:/servers hopperd
+docker run -d --name hopperd --hostname hopper --restart unless-stopped --stop-timeout 120 \
+  -p 8790:8790 -p 8022:8022 -p 25565:25565 \
+  -v hopperd:/hopper ghcr.io/watdafawx/hopperd:latest
+docker logs hopperd
 ```
 
-or `crates/hopperd/packaging/docker-compose.yml`. Releases: pushing a
-`hopperd-v<version>` tag builds Windows and Linux downloads.
+Open `http://<host>:8790` and use the setup code from the log. Ports:
+
+| Port | |
+|---|---|
+| 8790 | the panel (web UI and API) |
+| 8022 | SFTP |
+| 25565 | server addresses: every server joined by its address on one port |
+| each server's own port | add `-p 25566:25566` and so on for servers joined by port |
+
+- LAN discovery (Hopper desktop finding the panel by itself) needs
+  `--network host` (Linux hosts) instead of `-p`.
+- `docker stop` stops the panel, then the servers (they save their worlds),
+  so give it time: `--stop-timeout 120`.
+- A folder instead of a volume works too: `-v /srv/hopper:/hopper`. Servers
+  you already have go in its `servers` folder.
+- Or with Compose: `crates/hopperd/packaging/docker-compose.yml`.
+
+Build it yourself, from the repository root:
+`docker build -f crates/hopperd/Dockerfile -t hopperd .`
+
+**From the older image (`/data` and `/servers`).** A container started with
+those two volumes keeps working as before: the image notices `/data` and
+runs the old way. To move to `/hopper` (one volume, no panel folder step):
+
+1. Make a backup of both, then `docker stop hopperd`.
+2. Copy the servers into the new volume's `servers` folder and the panel's
+   data into `.hopper-server`:
+   ```
+   docker run --rm -v hopperd-data:/data -v /srv/minecraft:/servers -v hopperd:/hopper ubuntu:24.04 \
+     sh -c 'mkdir -p /hopper/servers /hopper/.hopper-server && cp -a /servers/. /hopper/servers/ && cp -a /data/. /hopper/.hopper-server/ && sed -i "s#\"/servers#\"/hopper/servers#g" /hopper/.hopper-server/hopperd.toml'
+   ```
+3. Start the new container with only `-v hopperd:/hopper` (as above) and
+   check the servers are listed, then remove the old volumes.
 
 ## API (v1)
 

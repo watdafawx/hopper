@@ -82,7 +82,7 @@
 <div class="win">
   <aside class="side">
     <div class="brand">
-      <div class="logo"><Server size={15} strokeWidth={2.5} /></div>
+      <img class="logo" src="/logo.svg" alt="" />
       Hopper Server
       <span class="chip tiny host">{hello.name}</span>
     </div>
@@ -142,7 +142,7 @@
   .win { height: 100%; display: flex; }
   .side { width: 224px; flex: none; border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 12px 10px; gap: 2px; background: var(--side); overflow: auto; }
   .brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 14px; font-weight: 700; font-size: 14px; }
-  .logo { width: 26px; height: 26px; border-radius: 7px; background: linear-gradient(135deg, #fb923c, #ea580c); display: grid; place-items: center; color: #1a1a1f; }
+  .logo { width: 26px; height: 26px; image-rendering: pixelated; flex: none; }
   .host { margin-left: auto; max-width: 70px; overflow: hidden; text-overflow: ellipsis; }
   .nav { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: 7px; color: var(--subtle); font-weight: 500; text-align: left; width: 100%; }
   .nav:hover, .srv:hover { background: var(--surface); }

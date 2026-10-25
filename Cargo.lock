@@ -4501,7 +4501,7 @@ dependencies = [
 
 [[package]]
 name = "hopperd"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -4542,7 +4542,9 @@ dependencies = [
  "tower",
  "tower-http",
  "ureq",
+ "windows 0.62.2",
  "windows-service",
+ "winresource",
  "zip 2.4.2",
 ]
 

@@ -43,6 +43,42 @@ fn hash_token(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Whether a request comes from a browser on this PC itself, for setting
+/// the owner password without the setup code. Only a direct connection
+/// from 127.0.0.1/::1 counts: one a proxy or tunnel on this PC forwards
+/// (it adds Forwarded/X-Forwarded-For or sends the public name as Host),
+/// a page on another site (Origin), or anything in Docker (where other
+/// containers can look local) needs the code.
+pub fn trusted_local(enabled: bool, peer: IpAddr, headers: &axum::http::HeaderMap) -> bool {
+    const PROXY: &[&str] = &["forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip", "cf-connecting-ip", "true-client-ip", "via"];
+    let loopback = match peer {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(v6.is_loopback(), |v4| v4.is_loopback()),
+        IpAddr::V4(v4) => v4.is_loopback(),
+    };
+    let local_name = |h: &str| {
+        let h = h.trim().to_ascii_lowercase();
+        let host = if h.starts_with('[') { h.split(']').next().map(|x| format!("{x}]")).unwrap_or_default() } else { h.split(':').next().unwrap_or("").to_string() };
+        matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+    };
+    let header = |n: &str| headers.get(n).and_then(|v| v.to_str().ok());
+    let origin_ok = header("origin").is_none_or(|o| local_name(o.split("://").nth(1).unwrap_or("")));
+    enabled
+        && loopback
+        && !in_docker()
+        && PROXY.iter().all(|h| !headers.contains_key(*h))
+        && header("host").is_some_and(local_name)
+        && origin_ok
+}
+
+/// Whether setting up from this PC without the code can happen at all.
+pub fn local_setup_possible(enabled: bool) -> bool {
+    enabled && !in_docker()
+}
+
+fn in_docker() -> bool {
+    Path::new("/.dockerenv").exists() || std::env::var_os("HOPPERD_DOCKER").is_some()
+}
+
 /// A code people read and type: no 0/O, 1/I.
 fn readable_code(len: usize) -> String {
     const ABC: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -336,11 +372,16 @@ impl Auth {
     }
 
     /// Sets the owner's password with the setup code; returns a session.
+    /// `local` (see [`trusted_local`]) skips the code.
     pub fn setup(&self, code: &str, password: &str, ip: IpAddr) -> anyhow::Result<String> {
+        self.setup_as(code, password, ip, false)
+    }
+
+    pub fn setup_as(&self, code: &str, password: &str, ip: IpAddr, local: bool) -> anyhow::Result<String> {
         self.check_lockout(ip)?;
         let mut sc = self.setup_code.lock().unwrap();
         let Some(expected) = sc.as_deref() else { bail!("This panel already has an owner.") };
-        if !code.trim().eq_ignore_ascii_case(expected) {
+        if !(local && code.trim().is_empty()) && !code.trim().eq_ignore_ascii_case(expected) {
             drop(sc);
             self.failed(ip);
             bail!("That setup code isn't right. It's in hopperd's log and in setup-code.txt.");
@@ -916,6 +957,36 @@ mod tests {
     }
 
     const IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 50, 21));
+
+    #[test]
+    fn same_pc_setup() {
+        use axum::http::{HeaderMap, HeaderValue};
+        let lo: IpAddr = [127, 0, 0, 1].into();
+        let h = |pairs: &[(&'static str, &str)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(*k, HeaderValue::from_str(v).unwrap());
+            }
+            m
+        };
+        assert!(trusted_local(true, lo, &h(&[("host", "localhost:8790")])));
+        assert!(trusted_local(true, "::1".parse().unwrap(), &h(&[("host", "[::1]:8790"), ("origin", "http://[::1]:8790")])));
+        assert!(!trusted_local(false, lo, &h(&[("host", "localhost:8790")])), "turned off");
+        assert!(!trusted_local(true, IP, &h(&[("host", "localhost:8790")])), "another device");
+        assert!(!trusted_local(true, lo, &h(&[("host", "mc.example.com")])), "a tunnel sends the public name");
+        assert!(!trusted_local(true, lo, &h(&[("host", "localhost"), ("x-forwarded-for", "8.8.8.8")])), "a proxy");
+        assert!(!trusted_local(true, lo, &h(&[("host", "localhost"), ("origin", "https://evil.example")])), "another site's page");
+        assert!(!trusted_local(true, lo, &h(&[])), "no Host");
+
+        let dir = std::env::temp_dir().join(format!("hopperd-local-setup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = Auth::load(&dir).unwrap();
+        assert!(a.setup_as("", "password1", lo, false).is_err(), "the code is needed unless local");
+        assert!(a.setup_as("", "password1", lo, true).is_ok());
+        assert!(a.setup_as("", "password2", lo, true).is_err(), "only once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn setup_login_and_sessions() {

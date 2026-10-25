@@ -1,8 +1,9 @@
 name: Hopper Server release
 
 # Push a tag like hopperd-v0.1.0 (matching crates/hopperd/Cargo.toml's
-# version) to build hopperd for Windows and Linux and attach both to that
-# release.
+# version) to build hopperd for Windows and Linux (x64 and arm64), attach
+# them to that release, and push the Docker image
+# ghcr.io/watdafawx/hopperd:<version> and :latest (amd64 and arm64).
 on:
   push:
     tags: ["hopperd-v*"]
@@ -21,9 +22,22 @@ jobs:
           - os: ubuntu-latest
             exe: hopperd
             asset: linux-x64.tar.gz
+            docker: amd64
+          - os: ubuntu-24.04-arm
+            exe: hopperd
+            asset: linux-arm64.tar.gz
+            docker: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: rustup (the arm64 runner may not have it)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          command -v rustup >/dev/null || {
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          }
       - name: Rust (from rust-toolchain.toml)
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
@@ -67,3 +81,58 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "Hopper Server $v" --notes "Hopper Server $v. Run hopperd, open http://localhost:8790, and see the README for setup, services and Docker."
           gh release upload "$GITHUB_REF_NAME" "hopperd-$v-${{ matrix.asset }}" --clobber
+      - name: Keep the binary for the Docker image
+        if: matrix.docker
+        uses: actions/upload-artifact@v4
+        with:
+          name: hopperd-linux-${{ matrix.docker }}
+          path: target/release/hopperd
+          retention-days: 1
+
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: hopperd-linux-amd64
+          path: dist/docker/amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: hopperd-linux-arm64
+          path: dist/docker/arm64
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Tags
+        id: tags
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#hopperd-v}"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/hopperd"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tags=$image:$v,$image:latest" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/hopperd/Dockerfile
+          target: prebuilt
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=Hopper Server
+            org.opencontainers.image.description=Minecraft server panel, with Java 8, 17 and 21
+            org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
