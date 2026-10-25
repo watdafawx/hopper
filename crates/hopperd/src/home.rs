@@ -127,7 +127,7 @@ pub fn settle(boot: &Path, mut cfg: Config) -> anyhow::Result<(PathBuf, Config)>
             moved.push(e.path());
         }
         if cfg.servers_root.is_none() {
-            cfg.servers_root = Some(home.join(SERVERS_DIR));
+            cfg.servers_root = Some(if has_servers(&home) { home.clone() } else { home.join(SERVERS_DIR) });
         }
         cfg.save(&data)?;
         pointer(boot, &home)?;
@@ -171,6 +171,11 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/panel/restart", post(restart))
 }
 
+/// Whether a folder right inside `dir` is a server (has server.properties).
+fn has_servers(dir: &Path) -> bool {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| e.path().join("server.properties").is_file())
+}
+
 #[derive(Deserialize)]
 struct SetBody {
     path: String,
@@ -200,7 +205,9 @@ async fn set(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Js
                     }
                 }
             }
-            let root = dir.join(SERVERS_DIR);
+            // A folder that has servers in it already is the servers
+            // folder; else new servers go in its `servers` folder.
+            let root = if has_servers(&dir) { dir.clone() } else { dir.join(SERVERS_DIR) };
             std::fs::create_dir_all(&root).map_err(|e| bad(format!("creating {}: {e}", root.display())))?;
             c.servers_root = Some(root);
         }

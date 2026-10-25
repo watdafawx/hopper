@@ -4,7 +4,7 @@
   import { ArrowUp, Folder, FolderCheck, FileArchive, HardDrive } from '@lucide/svelte';
   import { api } from './lib/api.js';
 
-  let { start = '', zips = false, allowNew = false, pickLabel = 'Use this folder', onPick, onCancel } = $props();
+  let { start = '', zips = false, allowNew = false, pickLabel = 'Use this folder', hideButton = false, onPick, onCancel, onPath = () => {} } = $props();
   let path = $state('');
   let parent = $state(null);
   let entries = $state([]);
@@ -21,8 +21,10 @@
       parent = r.parent;
       entries = r.entries.filter((e) => e.dir || zips);
       typed = path;
+      onPath(path, entries);
     } catch (e) {
       error = e.message;
+      onPath('', []);
     } finally {
       loading = false;
     }
@@ -60,7 +62,7 @@
   <div class="row">
     <span class="tiny muted ell grow mono">{path}</span>
     {#if onCancel}<button class="btn sm ghost" onclick={onCancel}>Cancel</button>{/if}
-    {#if !zips}<button class="btn sm" disabled={!path} onclick={() => onPick(path)}>{pickLabel}</button>{/if}
+    {#if !zips && !hideButton}<button class="btn sm" disabled={!path} onclick={() => onPick(path)}>{pickLabel}</button>{/if}
   </div>
 </div>
 
