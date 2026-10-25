@@ -16,7 +16,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -137,8 +137,17 @@ const BAR: [InstTab; 7] = [
     InstTab::Logs,
     InstTab::Performance,
 ];
-/// Tools around the pack, as icon buttons at the bar's right end.
-const MANAGE: [InstTab; 3] = [InstTab::Server, InstTab::Peers, InstTab::Settings];
+/// Tools around the pack, as icon buttons at the bar's right end. Server
+/// isn't one: the header's server button opens it (also Ctrl+K and MCP).
+const MANAGE: [InstTab; 2] = [InstTab::Peers, InstTab::Settings];
+
+/// Where the header's server menu goes on the Server tab.
+#[derive(Clone, Copy)]
+enum ServerPlace {
+    Page,
+    Sync,
+    Console,
+}
 /// The sub-tabs of "Packs".
 const PACKS: [InstTab; 3] = [InstTab::ResourcePacks, InstTab::Shaders, InstTab::Datapacks];
 
@@ -222,6 +231,9 @@ pub struct LibraryView {
     blurs: HashMap<PathBuf, Option<PathBuf>>,
     /// Folder size per instance (None while it's being counted).
     sizes: HashMap<PathBuf, Option<u64>>,
+    /// Each paired server's last start crash, read when its instance is
+    /// picked (the header's status dot); the Server tab's own read wins.
+    crashes: HashMap<PathBuf, Option<hopper::crashscan::ServerCrash>>,
     /// The work area's width in rem, as of the last render.
     detail_w: f32,
     addons: Entity<AddonsView>,
@@ -336,13 +348,19 @@ impl LibraryView {
         let perf = cx.new(|cx| crate::perf_view::PerfView::new(store.clone(), window, cx));
         let peers = cx.new(|cx| PeersView::new(store.clone(), window, cx));
         server.update(cx, |s, _| s.set_peek(peek.clone()));
+        let control = server.read(cx).control().clone();
         let subs = vec![
+            // The header's server dot follows the panel's polls and the
+            // Server tab's crash read.
+            cx.observe(&control, |_, _, cx| cx.notify()),
+            cx.subscribe(&server, |_, _, _: &crate::rigsync::SyncEvent, cx| cx.notify()),
             cx.observe(&peek, |_, _, cx| cx.notify()),
             cx.subscribe(&addons, |this, _, event, cx| this.addons_event(event, cx)),
             cx.subscribe(&worlds, |this, _, event, cx| this.content_event(event, cx)),
             cx.observe(&store, |this, _, cx| {
                 this.ensure_selection(cx);
                 this.follow_paired_server(cx);
+                this.watch_paired(false, cx);
                 cx.notify();
             }),
             cx.subscribe_in(&search, window, |this, state, event, _, cx| {
@@ -360,6 +378,13 @@ impl LibraryView {
             InstTab::from_key(key).unwrap_or(if old_mods { InstTab::Mods } else { InstTab::Overview })
         };
         let pack_desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
+        // Back in the window: the header's server dot is read once.
+        let mut subs = subs;
+        subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.server.update(cx, |p, cx| p.refresh_state(cx));
+            }
+        }));
         let mut view = Self {
             drag_width: None,
             folded: Default::default(),
@@ -376,6 +401,7 @@ impl LibraryView {
             rem: px(16.),
             blurs: HashMap::new(),
             sizes: HashMap::new(),
+            crashes: HashMap::new(),
             detail_w: 80.0,
             addons,
             server,
@@ -447,6 +473,72 @@ impl LibraryView {
         }
     }
 
+    /// Points the server control at the picked instance's server (for the
+    /// header's Start / Stop) and reads its last start's crash, off the UI
+    /// thread: once, or again when `again`.
+    fn watch_paired(&mut self, again: bool, cx: &mut Context<Self>) {
+        let Some(root) = self.selected.as_ref() else { return };
+        let Some(server) = self.store.read(cx).server_of(root).map(|s| s.root.clone()) else {
+            return;
+        };
+        self.server.update(cx, |p, cx| {
+            p.watch(server.clone(), cx);
+            if again {
+                p.refresh_state(cx);
+            }
+        });
+        if !again && self.crashes.contains_key(&server) {
+            return;
+        }
+        self.crashes.entry(server.clone()).or_insert(None);
+        cx.spawn(async move |this, cx| {
+            let r = server.clone();
+            let crash = cx
+                .background_spawn(async move { hopper::crashscan::last_crash(&r) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.crashes.insert(server, crash);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A server's dot color, state word and, when its last start crashed,
+    /// why: the Server tab's reading when it has one, else the header's.
+    fn server_state(&self, root: &Path, cx: &App) -> (Hsla, &'static str, Option<String>) {
+        let panel = self.server.read(cx);
+        let crash = match panel.crash_of(root) {
+            Some(c) => c.cloned(),
+            None => self.crashes.get(root).cloned().flatten(),
+        };
+        let ctl = panel.control().read(cx);
+        // The panel didn't answer: no state to show.
+        if ctl.cant_reach(root) {
+            return (cx.theme().muted_foreground, "unreachable", Some(format!("Can't reach {}", ctl.panel_name(cx))));
+        }
+        let store = self.store.read(cx);
+        let stats = ctl.stats_of(root).or_else(|| store.panel_stats(root));
+        let pinged = store.status(root).map(|s| matches!(s, hopper::server::Status::Online { .. }));
+        let busy = ctl.stats_of(root).and(ctl.busy());
+        let (color, word) = crate::server_control::state_of(stats, pinged, crash.is_some(), busy, cx);
+        let reason = crash
+            .filter(|_| word.starts_with("crashed"))
+            .map(|c| crate::rigsync::crash_reason(&c));
+        (color, word, reason)
+    }
+
+    /// The Server tab, on the part the header's server menu asked for.
+    fn open_server_tab(&mut self, to: ServerPlace, cx: &mut Context<Self>) {
+        self.set_tab(InstTab::Server, cx);
+        match to {
+            ServerPlace::Page => {}
+            ServerPlace::Sync => self.server.update(cx, |p, cx| p.open_sync(cx)),
+            ServerPlace::Console => self.server.update(cx, |p, cx| p.open_console(cx)),
+        }
+    }
+
     fn ensure_selection(&mut self, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
         if self
@@ -470,6 +562,7 @@ impl LibraryView {
 
     fn select(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.selected = Some(root.clone());
+        self.watch_paired(true, cx);
         let key = root.to_string_lossy().to_string();
         self.store.update(cx, |s, cx| {
             if s.settings().last_instance != key {
@@ -543,6 +636,9 @@ impl LibraryView {
     fn set_tab(&mut self, tab: InstTab, cx: &mut Context<Self>) {
         if tab.is_pack() {
             self.last_pack = tab;
+        }
+        if self.tab == InstTab::Server && tab != InstTab::Server {
+            self.server.update(cx, |p, cx| p.hidden(cx));
         }
         if tab != self.tab {
             self.tab_from = self.tab;
@@ -1506,28 +1602,65 @@ impl LibraryView {
                     cx,
                 ))
         });
-        let sync_to = store
-            .server_of(&inst.root)
-            .map(|s| {
-                // The server's state from the panel, when there is one.
-                let state = store.panel_stats(&s.root).map(|p| {
-                    if p.running && !p.starting {
-                        format!("{} is running, {}/{} players. ", s.name, p.online, p.max)
-                    } else {
-                        format!("{}: {}. ", s.name, p.state().to_lowercase())
-                    }
-                });
-                (s.root.clone(), s.name.clone(), state.unwrap_or_default())
-            })
-            .map(|(_server, name, state)| {
-                // Same place as the Server tab: open it.
-                Button::new("sync-to")
+        // The paired server: its name and a state dot (green running, grey
+        // stopped, red when its last start crashed). The name opens the
+        // Server tab, ▾ the server's actions. Unpaired: "Pair a server…".
+        let paired = store.server_of(&inst.root).map(|s| {
+            let players = store
+                .panel_stats(&s.root)
+                .filter(|p| p.running && !p.starting && p.max > 0)
+                .map(|p| format!(", {}/{} players", p.online, p.max));
+            (s.root.clone(), s.name.clone(), players.unwrap_or_default())
+        });
+        let can_pair = paired.is_none() && !store.servers().is_empty();
+        let on_server_tab = self.tab == InstTab::Server;
+        let sync_to: Option<AnyElement> = match paired {
+            Some((sroot, name, players)) => {
+                let (dot, word, reason) = self.server_state(&sroot, cx);
+                let tip = match (&reason, word) {
+                    (Some(r), "unreachable") => r.clone(),
+                    (Some(r), _) => format!("{name}: {word}, {r}. Opens the Server tab."),
+                    (None, "") => format!("{name}: its mods compared with this instance's (the Server tab)"),
+                    (None, w) => format!("{name} is {w}{players}. Opens the Server tab."),
+                };
+                let lead = Button::new("sync-to")
                     .outline()
+                    .selected(on_server_tab)
+                    .child(h_flex().gap_2().items_center().child(widgets::status_dot(dot)).child(name))
+                    .tooltip(tip)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Server, cx)));
+                let view = cx.entity();
+                let menu = Button::new("server-menu")
+                    .outline()
+                    .icon(IconName::ChevronDown)
+                    .tooltip("Server actions")
+                    .rounded_tl(px(0.))
+                    .rounded_bl(px(0.))
+                    .border_l_0()
+                    // Right edges aligned, under the button.
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, cx| {
+                        server_menu(menu, &view, &sroot, cx)
+                    });
+                Some(
+                    h_flex()
+                        .flex_none()
+                        .child(widgets::split_lead(lead))
+                        .child(menu)
+                        .into_any_element(),
+                )
+            }
+            None if can_pair => Some(
+                Button::new("pair-server")
+                    .outline()
+                    .selected(on_server_tab)
                     .icon(IconName::Server)
-                    .label(name)
-                    .tooltip(format!("{state}Its mods compared with this instance's (the Server tab)"))
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_tab(InstTab::Server, cx)))
-            });
+                    .label("Pair a server…")
+                    .tooltip("Pick the server that runs this pack, to compare and sync their mods")
+                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Server, cx)))
+                    .into_any_element(),
+            ),
+            None => None,
+        };
         let view = cx.entity();
 
         let play = if playing {
@@ -1948,7 +2081,7 @@ impl LibraryView {
     }
 
     /// The tab bar: content tabs with an underline that slides from the
-    /// last tab to the picked one, then Server, Peers and Settings as icon
+    /// last tab to the picked one, then Peers and Settings as icon
     /// buttons. Tabs that don't fit the window go in a "More" menu. Tabs
     /// report where they were laid out; the underline is placed from that
     /// (one frame late the very first time).
@@ -2440,6 +2573,7 @@ impl Render for LibraryView {
             a.room = Some(room);
             a.list_open = list_open;
         });
+        self.server.update(cx, |p, _| p.room = Some(room));
         h_flex()
             .id("library")
             .size_full()
@@ -2463,6 +2597,55 @@ impl Render for LibraryView {
             .child(div().flex_1().min_w_0().h_full().child(self.detail(cx)))
             .children(peek)
     }
+}
+
+/// The header's server ▾, read when it opens: Start, or Stop and Restart,
+/// where a panel is set up (they ask first as on the Server tab), then the
+/// Server tab's places.
+fn server_menu(menu: PopupMenu, view: &Entity<LibraryView>, root: &Path, cx: &App) -> PopupMenu {
+    use hopper::panel::PanelAction;
+    let control = view.read(cx).server.read(cx).control().clone();
+    let ctl = control.read(cx);
+    let configured = ctl.configured(cx);
+    let stats = ctl.stats_of(root);
+    // The panel lists this server and answered: actions can be sent.
+    let ready = ctl.ready() && stats.is_some();
+    let running = stats.is_some_and(|s| s.running || s.starting);
+    let busy = ctl.busy().is_some();
+    let pname = ctl.panel_name(cx);
+    let mut menu = menu;
+    if configured {
+        let act = |label: &'static str, icon: IconName, a: PanelAction| {
+            let c = control.clone();
+            PopupMenuItem::new(label)
+                .icon(icon)
+                .disabled(!ready || busy)
+                .on_click(move |_, window, cx| c.update(cx, |c, cx| c.request(a, window, cx)))
+        };
+        menu = if running {
+            menu.item(act("Stop", IconName::Square, PanelAction::Stop))
+                .item(act("Restart", IconName::RotateCcw, PanelAction::Restart))
+        } else {
+            menu.item(act("Start", IconName::Play, PanelAction::Start))
+        };
+        if !ready {
+            menu = menu.item(PopupMenuItem::new(format!("Waiting for {pname}…")).disabled(true));
+        }
+        menu = menu.separator();
+    }
+    let go = |label: &'static str, icon: IconName, to: ServerPlace| {
+        let v = view.clone();
+        PopupMenuItem::new(label)
+            .icon(icon)
+            .on_click(move |_, _, cx| v.update(cx, |this, cx| this.open_server_tab(to, cx)))
+    };
+    menu = menu
+        .item(go("Open server page", IconName::Server, ServerPlace::Page))
+        .item(go("Sync to server…", IconName::ServerCog, ServerPlace::Sync));
+    if configured {
+        menu = menu.item(go("Console", IconName::SquareTerminal, ServerPlace::Console));
+    }
+    menu
 }
 
 /// An instance's menu, the same wherever it opens: right-click in the list

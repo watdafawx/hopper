@@ -30,13 +30,95 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 const ROW_H: f32 = 3.5;
+/// The mod name's least width in rem: other cells give way first.
+const NAME_MIN: f32 = 14.0;
+/// The action cell: "Update server", its changelog half, the ⋯ slot and
+/// the gaps, with a little to spare.
+const ACTION_W: f32 = 15.5;
+/// The same with icon-only buttons (their words in the tooltip).
+const ACTION_W_COMPACT: f32 = 7.5;
+
+/// How the row's cells fit the list's width: the tags column's width
+/// (none: the side shows as an icon by the name), the version cell's, and
+/// the action cell's (compact: icon-only buttons).
+#[derive(Clone, Copy)]
+struct Fit {
+    tags: Option<f32>,
+    version: f32,
+    compact: bool,
+    action: f32,
+}
+
+impl Fit {
+    /// From the list's width in rem. Only from widths known before layout,
+    /// so it never flips back and forth. In order, as room runs out: the
+    /// version cell narrows, the tags go, then the buttons lose their words.
+    fn of(list: f32) -> Fit {
+        // Row padding, tick, icon, a scrollbar, a margin, and the gaps
+        // between six cells.
+        let fixed = 1.5 + 1.5 + 2.0 + 1.0 + 1.0 + 0.75 * 5.0;
+        let free = list - fixed;
+        let version = if free - ACTION_W - 10.0 - 6.0 >= NAME_MIN { 10.0 } else { 7.0 };
+        let tags = free - ACTION_W - version - NAME_MIN;
+        let compact = free - ACTION_W - version < NAME_MIN;
+        let action = if compact { ACTION_W_COMPACT } else { ACTION_W };
+        Fit {
+            tags: (tags >= 6.0).then_some(tags.min(22.0)),
+            version: if compact { 6.0 } else { version },
+            compact,
+            action,
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Mods,
     Configs,
     History,
+    /// The server panel's console (only when a panel is set up).
+    Console,
 }
+
+/// Which rows the list shows: the filter above it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Show {
+    /// To add, updates and only on the server.
+    Needs,
+    Kept,
+    InSync,
+    All,
+}
+
+impl Show {
+    const ALL: [Show; 4] = [Show::Needs, Show::Kept, Show::InSync, Show::All];
+
+    fn label(self) -> &'static str {
+        match self {
+            Show::Needs => "Needs action",
+            Show::Kept => "Kept off",
+            Show::InSync => "In sync",
+            Show::All => "All",
+        }
+    }
+
+    fn has(self, g: Group) -> bool {
+        match self {
+            Show::Needs => matches!(g, Group::Add | Group::Update | Group::ServerOnly),
+            Show::Kept => g == Group::KeptOff,
+            Show::InSync => g == Group::InSync,
+            Show::All => true,
+        }
+    }
+}
+
+/// What the panel tells its page.
+pub enum SyncEvent {
+    /// The last start's crash was read again (the header's status dot).
+    Crash,
+}
+
+impl EventEmitter<SyncEvent> for SyncPanel {}
 
 pub struct SyncPanel {
     store: Entity<Store>,
@@ -67,8 +149,9 @@ pub struct SyncPanel {
     /// the loader picker: (Minecraft version, builds).
     nf_versions: Option<(String, Result<Vec<String>, String>)>,
     nf_loading: bool,
-    /// The sidebar's pick: only this group's rows.
-    only: Option<Group>,
+    /// The filter's pick; None picks Needs action when something does,
+    /// else All.
+    show: Option<Show>,
     filters: Filters,
     search: Entity<InputState>,
     selected: HashSet<String>,
@@ -105,6 +188,13 @@ pub struct SyncPanel {
     /// The store's server revision this comparison is for.
     seen_rev: u64,
     scroll: UniformListScrollHandle,
+    /// The work area's width in rem (set by the Library), for fitting the
+    /// row's cells; None: the window's.
+    pub room: Option<f32>,
+    fit: Fit,
+    /// The list shows one group: its header skips the count the filter
+    /// already shows.
+    one_group: bool,
     /// The Library's mod panel, opened by a mod's name or icon.
     peek: Option<Entity<crate::browse::BrowseView>>,
     _task: Option<Task<()>>,
@@ -138,6 +228,11 @@ impl SyncPanel {
             cx.new(|cx| crate::server_control::ServerControl::new(store.clone(), window, cx));
         let mut subs = subs;
         subs.push(cx.observe(&control, |_, _, cx| cx.notify()));
+        subs.push(cx.subscribe(&control, |this, _, e: &crate::server_control::ControlEvent, cx| {
+            if let crate::server_control::ControlEvent::Console = e {
+                this.open_console(cx);
+            }
+        }));
         Self {
             store,
             side_panel: widgets::SidePanel::new(widgets::PanelSpec::new("sync.side", 18., 15., 28.)),
@@ -166,7 +261,7 @@ impl SyncPanel {
             server_nf: None,
             nf_versions: None,
             nf_loading: false,
-            only: None,
+            show: None,
             filters: Filters::default(),
             search,
             selected: HashSet::new(),
@@ -189,6 +284,9 @@ impl SyncPanel {
             allow_online: false,
             seen_rev,
             scroll: UniformListScrollHandle::new(),
+            room: None,
+            fit: Fit::of(80.0),
+            one_group: false,
             peek: None,
             _task: None,
             _subscriptions: subs,
@@ -217,13 +315,91 @@ impl SyncPanel {
         self.server.as_deref()
     }
 
+    /// The start / stop control (the instance header's server menu uses it).
+    pub fn control(&self) -> &Entity<crate::server_control::ServerControl> {
+        &self.control
+    }
+
+    /// Points the start / stop control at `root` without comparing, so the
+    /// header's menu can act before the tab is opened.
+    pub fn watch(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.control.update(cx, |c, cx| c.show(root, cx));
+    }
+
+    /// One poll of the server's state now (instance picked, window focused).
+    pub fn refresh_state(&mut self, cx: &mut Context<Self>) {
+        self.control.update(cx, |c, cx| c.refresh(cx));
+    }
+
+    /// The last start's crash of `root`, once this panel has compared it
+    /// (Some(None): no crash).
+    pub fn crash_of(&self, root: &Path) -> Option<Option<&ServerCrash>> {
+        (self.server.as_deref() == Some(root) && self.diff.is_some()).then_some(self.crash.as_ref())
+    }
+
+    /// The Mods list on what needs syncing.
+    pub fn open_sync(&mut self, cx: &mut Context<Self>) {
+        self.set_section(Section::Mods, cx);
+        self.show = Some(Show::Needs);
+        self.open.extend([Group::Add, Group::Update, Group::ServerOnly]);
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// The server's console, when a panel is set up.
+    pub fn open_console(&mut self, cx: &mut Context<Self>) {
+        let section = if self.control.read(cx).configured(cx) { Section::Console } else { Section::Mods };
+        self.set_section(section, cx);
+    }
+
+    /// The tab went out of view: the console stops, and polls slow down to
+    /// the header dot's rate.
+    pub fn hidden(&mut self, cx: &mut Context<Self>) {
+        self.control.update(cx, |c, cx| {
+            c.set_console_open(false, cx);
+            c.set_active(false, cx);
+        });
+    }
+
+    fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.section = section;
+        let open = section == Section::Console;
+        self.control.update(cx, |c, cx| c.set_console_open(open, cx));
+        cx.notify();
+    }
+
+    /// The filter as it applies now.
+    fn shown(&self, cx: &App) -> Show {
+        self.show.unwrap_or_else(|| {
+            let needs = self.whole(cx).iter().any(|g| Show::Needs.has(*g));
+            if needs { Show::Needs } else { Show::All }
+        })
+    }
+
+    /// Every row's group, whatever the filters (blacklisted rows left out).
+    fn whole(&self, cx: &App) -> Vec<Group> {
+        let blacklist = &self.store.read(cx).settings().sync_blacklist;
+        let unfiltered = Filters::default();
+        match &self.diff {
+            Some(Ok(d)) => d.iter().filter(|d| unfiltered.passes(d, blacklist)).map(Group::of).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Compares `root`'s server with its pack (again when it is the same, so
     /// coming back to the tab picks up mods changed meanwhile).
     pub fn show(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let r2 = root.clone();
         self.configs.update(cx, |c, cx| c.show(r2.clone(), cx));
         self.history.update(cx, |h, cx| h.show(r2.clone(), cx));
-        self.control.update(cx, |c, cx| c.show(r2, cx));
+        self.control.update(cx, |c, cx| {
+            c.show(r2, cx);
+            c.set_active(true, cx);
+        });
+        // Back on the tab with the console open: it polls again.
+        if self.section == Section::Console {
+            self.control.update(cx, |c, cx| c.set_console_open(true, cx));
+        }
         let moved = self.server.as_ref() != Some(&root);
         if moved {
             self.server = Some(root);
@@ -236,7 +412,7 @@ impl SyncPanel {
             self.drift = None;
             self.drift_hidden = None;
             self.server_nf = None;
-            self.only = None;
+            self.show = None;
         }
         // Same server mid-sync: the sync rescans when it ends.
         if moved || !self.running {
@@ -305,6 +481,7 @@ impl SyncPanel {
                 }
                 this.comparing = false;
                 this.crash = crash;
+                cx.emit(SyncEvent::Crash);
                 if let Ok((d, _)) = &diff {
                     this.check_drift(d, cx);
                 }
@@ -815,8 +992,21 @@ impl SyncPanel {
         }
     }
 
-    /// The Server tab's left column: the server and its controls, whether
-    /// the mods match, the loader, which group to show, and the big actions.
+    /// The server's state dot and word: the panel's state, else a ping,
+    /// and red when its last start crashed.
+    fn state(&self, cx: &App) -> (Hsla, &'static str) {
+        let Some(root) = self.server.as_deref() else {
+            return (cx.theme().muted_foreground, "");
+        };
+        let ctl = self.control.read(cx);
+        let store = self.store.read(cx);
+        let stats = ctl.stats_of(root).or_else(|| store.panel_stats(root));
+        let pinged = store.status(root).map(|s| matches!(s, Status::Online { .. }));
+        crate::server_control::state_of(stats, pinged, self.crash.is_some(), ctl.busy(), cx)
+    }
+
+    /// The Server tab's left column: the server with its state and
+    /// controls, the loader, and the pack's server pack.
     fn sidebar(&self, server: &ServerInfo, inst: &Instance, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let controls = self
             .control
@@ -824,24 +1014,7 @@ impl SyncPanel {
             .configured(cx)
             .then(|| self.control.update(cx, |c, cx| c.controls_compact(cx)));
         let online = self.online(cx);
-        let counts: Vec<(Group, usize)> = {
-            let groups: Vec<Group> = self.counted(cx).into_iter().map(Group::of).collect();
-            Group::ALL.map(|g| (g, groups.iter().filter(|x| **x == g).count())).into()
-        };
-        let n = |g: Group| counts.iter().find(|(x, _)| *x == g).map_or(0, |(_, n)| *n);
-        // Whether the mods match goes by the whole comparison, not the search.
-        let all: Vec<(Group, usize)> = {
-            let blacklist = &self.store.read(cx).settings().sync_blacklist;
-            let unfiltered = Filters::default();
-            let groups: Vec<Group> = match &self.diff {
-                Some(Ok(d)) => d.iter().filter(|d| unfiltered.passes(d, blacklist)).map(Group::of).collect(),
-                _ => Vec::new(),
-            };
-            Group::ALL.map(|g| (g, groups.iter().filter(|x| **x == g).count())).into()
-        };
-        let n_all = |g: Group| all.iter().find(|(x, _)| *x == g).map_or(0, |(_, n)| *n);
-        let to_change = n_all(Group::Add) + n_all(Group::Update) + n_all(Group::ServerOnly);
-        let scanned = matches!(self.diff, Some(Ok(_)));
+        let (dot, word) = self.state(cx);
         let view = cx.entity();
         let theme = cx.theme().clone();
         let card = || {
@@ -853,26 +1026,20 @@ impl SyncPanel {
                 .border_color(theme.border)
                 .bg(theme.secondary.opacity(0.5))
         };
-        let heading = |t: &'static str| {
-            div()
-                .text_xs()
-                .font_semibold()
-                .text_color(theme.muted_foreground)
-                .child(t.to_uppercase())
-        };
 
-        // The server, its state and controls.
-        let pack_line = match self.note.as_ref().map(|a| (a.server_pack_jars, &a.note)) {
-            Some((Some(n), _)) => Some(format!("The pack's server pack lists {n} mods")),
-            Some((None, Some(note))) => Some(note.clone()),
-            _ => None,
-        };
+        // The server: its name and state, why its last start crashed, and
+        // its controls.
+        let reason = self.crash.as_ref().filter(|_| !online).map(crash_reason);
         let server_card = card()
             .child(
                 h_flex()
                     .gap_2()
-                    .child(Icon::new(IconName::Server).small().text_color(theme.muted_foreground))
-                    .child(div().flex_1().min_w_0().font_semibold().truncate().child(server.name.clone()))
+                    .child(widgets::status_dot(dot))
+                    .child(div().min_w_0().font_semibold().truncate().child(server.name.clone()))
+                    .when(!word.is_empty(), |r| {
+                        r.child(widgets::caption(format!("· {word}"), cx).text_xs().flex_none().text_color(dot))
+                    })
+                    .child(div().flex_1())
                     .child(
                         Button::new("rescan")
                             .ghost()
@@ -884,104 +1051,18 @@ impl SyncPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
                     ),
             )
+            .when_some(reason, |c, r| c.child(div().text_xs().text_color(theme.danger).child(r)))
             .children(controls)
-            .when_some(pack_line, |c, t| c.child(widgets::caption(t, cx).text_xs()));
-
-        // Whether the mods match, with the split as a bar.
-        let total: usize = counts.iter().map(|(_, n)| n).sum();
-        let total_all: usize = all.iter().map(|(_, n)| n).sum();
-        let bar = h_flex()
-            .h_1p5()
-            .w_full()
-            .rounded_full()
-            .overflow_hidden()
-            .bg(theme.muted)
-            .children(all.iter().filter(|(_, n)| *n > 0).map(|(g, k)| {
-                div()
-                    .h_full()
-                    .w(relative(*k as f32 / total_all.max(1) as f32))
-                    .bg(Self::group_color(*g, cx))
-            }));
-        let status = if !scanned {
-            card()
-                .child(
+            .when(online, |c| {
+                c.child(
                     h_flex()
-                        .gap_2()
-                        .child(Spinner::new().small())
-                        .child(widgets::caption("Comparing mod folders", cx)),
-                )
-                .into_any_element()
-        } else {
-            let (color, icon, title, sub) = if to_change == 0 {
-                (
-                    theme.success,
-                    IconName::Check,
-                    "Mods match".to_string(),
-                    "Nothing to add, update or remove".to_string(),
-                )
-            } else {
-                let parts: Vec<String> = [Group::Add, Group::Update, Group::ServerOnly]
-                    .into_iter()
-                    .filter(|g| n_all(*g) > 0)
-                    .map(|g| count_words(g, n_all(g)))
-                    .collect();
-                (
-                    theme.primary,
-                    IconName::ArrowLeftRight,
-                    format!("{to_change} to sync"),
-                    parts.join(" · "),
-                )
-            };
-            card()
-                .border_color(color.opacity(0.35))
-                .bg(color.opacity(0.07))
-                .child(
-                    h_flex()
-                        .gap_2p5()
-                        .child(
-                            div()
-                                .flex_none()
-                                .size_8()
-                                .rounded_full()
-                                .bg(color.opacity(0.16))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(Icon::new(icon).small().text_color(color)),
-                        )
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .child(div().font_semibold().child(title))
-                                .child(widgets::caption(sub, cx).text_xs()),
-                        ),
-                )
-                .child(bar)
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .flex_wrap()
+                        .gap_1p5()
                         .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .children(all.iter().filter(|(_, n)| *n > 0).map(|(g, k)| {
-                            h_flex()
-                                .gap_1p5()
-                                .child(div().size_2().rounded_full().bg(Self::group_color(*g, cx)))
-                                .child(count_words(*g, *k))
-                        })),
+                        .text_color(theme.warning)
+                        .child(Icon::new(IconName::TriangleAlert).xsmall())
+                        .child("Running: stop it before syncing"),
                 )
-                .when(online, |c| {
-                    c.child(
-                        h_flex()
-                            .gap_1p5()
-                            .text_xs()
-                            .text_color(theme.warning)
-                            .child(Icon::new(IconName::TriangleAlert).xsmall())
-                            .child("Running: stop it before syncing"),
-                    )
-                })
-                .into_any_element()
-        };
+            });
 
         // The loader: a fix when it differs from the pack, else a quiet line.
         let pack_nf = inst.loader.strip_prefix("neoforge-").map(str::to_string);
@@ -1082,86 +1163,17 @@ impl SyncPanel {
             _ => None,
         };
 
-        // Which group the list shows.
-        let row = |key: &'static str, icon: IconName, color: Hsla, label: &'static str, count: usize, on: bool, pick: Option<Group>| {
-            let dim = count == 0 && pick.is_some();
-            h_flex()
-                .id(key)
-                .gap_2()
-                .px_2()
-                .py_1p5()
-                .rounded(theme.radius)
-                .text_sm()
-                .clickable(cx)
-                .when(on, |r| widgets::row_selected(r, cx))
-                .when(!on, |r| r.hover(|s| widgets::row_hover(s, cx)))
-                .when(dim, |r| r.opacity(0.45))
-                .child(Icon::new(icon).small().text_color(color))
-                .child(div().flex_1().text_color(if on { theme.foreground } else { theme.muted_foreground }).child(label))
-                .child(
-                    div()
-                        .font_semibold()
-                        .text_color(if count == 0 { theme.muted_foreground } else { color })
-                        .child(count.to_string()),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.only = if this.only == pick { None } else { pick };
-                    if let Some(g) = pick {
-                        this.open.insert(g);
-                    }
-                    this.scroll.scroll_to_item(0, ScrollStrategy::Top);
-                    cx.notify();
-                }))
-        };
-        let label = |g: Group| match g {
-            Group::Add => "To add",
-            Group::Update => "Updates",
-            Group::ServerOnly => "Only on server",
-            Group::KeptOff => "Kept off",
-            Group::InSync => "In sync",
-        };
-        let ids = |g: Group| match g {
-            Group::Add => "show-add",
-            Group::Update => "show-update",
-            Group::ServerOnly => "show-only-server",
-            Group::KeptOff => "show-kept-off",
-            Group::InSync => "show-in-sync",
-        };
-        let mut rows: Vec<AnyElement> = vec![
-            row("show-all", IconName::List, theme.foreground, "Everything", total, self.only.is_none(), None)
-                .into_any_element(),
-        ];
-        for g in Group::ALL {
-            let k = n(g);
-            let actionable = matches!(g, Group::Add | Group::Update | Group::ServerOnly);
-            if k == 0 && actionable && to_change == 0 {
-                continue;
-            }
-            rows.push(
-                row(ids(g), Self::group_icon(g), Self::group_color(g, cx), label(g), k, self.only == Some(g), Some(g))
-                    .into_any_element(),
-            );
-        }
-        if scanned && to_change == 0 {
-            rows.push(
-                h_flex()
-                    .gap_2()
-                    .px_2()
-                    .py_1p5()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::CircleCheck).xsmall())
-                    .child("Nothing to add, update or remove")
-                    .into_any_element(),
-            );
-        }
-        let show = card().gap_0p5().child(div().pb_1().child(heading("Show"))).children(rows);
-
-        // The big actions, last.
+        // The pack author's server pack: what it lists, and taking its mods
+        // and configs.
         let cf_pack = inst
             .pack
             .as_ref()
             .is_some_and(|p| p.project_id != 0 && !hopper::modrinth::is_mr(p.project_id));
+        let pack_line = match self.note.as_ref().map(|a| (a.server_pack_jars, &a.note)) {
+            Some((Some(n), _)) => Some(format!("Lists {n} mods")),
+            Some((None, Some(note))) => Some(note.clone()),
+            _ => None,
+        };
         let pack_btn = cf_pack.then(|| {
             let (server, inst) = (server.clone(), inst.clone());
             Button::new("server-pack-update")
@@ -1176,15 +1188,19 @@ impl SyncPanel {
                     crate::pack_update::open_server(this.store.clone(), server.clone(), inst.clone(), w, cx)
                 }))
         });
-        let copy = Button::new("update-server")
-            .small()
-            .w_full()
-            .icon(IconName::ServerCog)
-            .label("Sync to server")
-            .map(|b| if to_change > 0 { b.primary() } else { b.ghost() })
-            .tooltip("Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. The server must be stopped.")
-            .disabled(online || self.running)
-            .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)));
+        let pack_card = (pack_line.is_some() || pack_btn.is_some()).then(|| {
+            card()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .text_sm()
+                        .font_semibold()
+                        .child(Icon::new(IconName::Package).small().text_color(theme.muted_foreground))
+                        .child("Server pack"),
+                )
+                .when_some(pack_line, |c, t| c.child(widgets::caption(t, cx).text_xs()))
+                .children(pack_btn)
+        });
 
         let border = theme.border;
         let content = v_flex()
@@ -1194,11 +1210,8 @@ impl SyncPanel {
             .p_4()
             .overflow_y_scroll()
             .child(server_card)
-            .child(status)
             .children(loader)
-            .child(show)
-            .child(div().flex_1())
-            .child(v_flex().gap_1p5().children(pack_btn).child(copy));
+            .children(pack_card);
         widgets::side_panel("sync-side-resize", &self.side_panel, |p| &mut p.side_panel, &self.store, content, window, cx)
             .border_r_1()
             .border_color(border)
@@ -1559,13 +1572,16 @@ impl SyncPanel {
         let open = self.drift_open;
         // The first group's folder, unfiltered: the rest are a tab away.
         let first = groups.first().map(|(g, _)| g.folder.clone());
+        // One line (a tint like the mock's), its groups below when opened.
         Some(
             v_flex()
                 .gap_2()
-                .p_3()
+                .px_3()
+                .py_2()
                 .rounded(theme.radius_lg)
                 .border_1()
-                .border_color(theme.warning)
+                .border_color(theme.warning.opacity(0.45))
+                .bg(theme.warning.opacity(0.05))
                 .child(
                     h_flex()
                         .gap_2()
@@ -1586,8 +1602,16 @@ impl SyncPanel {
                                 .child(
                                     div()
                                         .truncate()
-                                        .child(format!("Not synced with the pack: {}", d.summary())),
+                                        .child(format!("Also differs: {}", d.summary())),
                                 )
+                                // The why, which used to be a paragraph.
+                                .tooltip(|w, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        "Pack and server updates don't always bring these along. Check global datapacks \
+                                         and server scripts after every update, and the configs of mods new to the pack.",
+                                    )
+                                    .build(w, cx)
+                                })
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.drift_open = !this.drift_open;
                                     cx.notify();
@@ -1597,7 +1621,7 @@ impl SyncPanel {
                             r.child(
                                 Button::new("drift-review-all")
                                     .xsmall()
-                                    .primary()
+                                    .outline()
                                     .label("Review in Configs")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.review_drift(&folder, "", window, cx)
@@ -1616,11 +1640,6 @@ impl SyncPanel {
                                 })),
                         ),
                 )
-                .child(widgets::caption(
-                    "Pack and server updates don't always bring these along. Check global datapacks and \
-                     server scripts after every update, and the configs of mods new to the pack.",
-                    cx,
-                ))
                 .children(rows)
                 .when(open && more > 0, |r| {
                     r.child(widgets::caption(format!("And {more} more in Configs."), cx))
@@ -1640,17 +1659,9 @@ impl SyncPanel {
         }
     }
 
-    fn group_icon(g: Group) -> IconName {
-        match g {
-            Group::Add => IconName::Plus,
-            Group::Update => IconName::ArrowUp,
-            Group::ServerOnly => IconName::Server,
-            Group::KeptOff => IconName::ShieldCheck,
-            Group::InSync => IconName::Check,
-        }
-    }
-
-    /// Search, which side a mod runs on, and pack or added.
+    /// Search; the counts as one filter (Needs action · Kept off · In sync
+    /// · All); side and source as two small menus; and, in an instance, the
+    /// one filled button: Sync N to server.
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         const ENVS: [(EnvFilter, &str); 4] = [
             (EnvFilter::Any, "Any side"),
@@ -1666,11 +1677,66 @@ impl SyncPanel {
             .position(|(s, _)| *s == self.filters.source)
             .unwrap_or(0);
         let n_sel = self.selected_rows(cx).len();
+        // Counts go by the search and the side and source menus.
+        let groups: Vec<Group> = self.counted(cx).into_iter().map(Group::of).collect();
+        let shown = self.shown(cx);
+        // Empty choices hide, except the one picked.
+        let choices: Vec<(Show, usize)> = Show::ALL
+            .into_iter()
+            .map(|s| (s, groups.iter().filter(|g| s.has(**g)).count()))
+            .filter(|(s, n)| *n > 0 || *s == shown)
+            .collect();
+        let show_ix = choices.iter().position(|(s, _)| *s == shown).unwrap_or(0);
+        let picks: Vec<Show> = choices.iter().map(|(s, _)| *s).collect();
+        let view = cx.entity();
+        let (v1, v2) = (view.clone(), view.clone());
+        let side = widgets::filter_menu(
+            "sync-env",
+            "Side",
+            ENVS.iter().map(|(_, l)| *l).collect(),
+            env_ix,
+            std::rc::Rc::new(move |ix, _, cx| {
+                v1.update(cx, |this, cx| {
+                    this.filters.env = ENVS[ix].0;
+                    cx.notify();
+                })
+            }),
+        );
+        let source = widgets::filter_menu(
+            "sync-source",
+            "Source",
+            SOURCES.iter().map(|(_, l)| *l).collect(),
+            src_ix,
+            std::rc::Rc::new(move |ix, _, cx| {
+                v2.update(cx, |this, cx| {
+                    this.filters.source = SOURCES[ix].0;
+                    cx.notify();
+                })
+            }),
+        );
+        // What Sync changes: the whole comparison, whatever the filters.
+        let to_change = self.whole(cx).iter().filter(|g| Show::Needs.has(**g)).count();
+        let online = self.online(cx);
+        let sync = self.in_instance.then(|| {
+            Button::new("update-server")
+                .small()
+                .icon(IconName::ServerCog)
+                .label(if to_change > 0 { format!("Sync {to_change} to server") } else { "Sync to server".to_string() })
+                // Picked rows have their own filled button below.
+                .map(|b| if to_change > 0 && n_sel == 0 { b.primary() } else { b.outline() })
+                .tooltip(if online {
+                    "Stop the server first: mods load at startup."
+                } else {
+                    "Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. Asks first; replaced files go to .hopper-backups."
+                })
+                .disabled(online || self.running)
+                .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)))
+        });
         h_flex()
-            .gap_3()
+            .gap_2()
             .flex_wrap()
             .child(
-                div().w_56().child(
+                div().w_48().child(
                     Input::new(&self.search)
                         .small()
                         .prefix(Icon::new(IconName::Search).small())
@@ -1678,27 +1744,25 @@ impl SyncPanel {
                 ),
             )
             .child(
-                TabBar::new("sync-env")
+                TabBar::new("sync-show")
                     .segmented()
                     .small()
-                    .selected_index(env_ix)
-                    .children(ENVS.iter().map(|(_, l)| Tab::new().label(*l)))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.filters.env = ENVS[*ix].0;
+                    .selected_index(show_ix)
+                    .children(choices.iter().map(|(s, n)| Tab::new().label(format!("{} {n}", s.label()))))
+                    .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                        if let Some(s) = picks.get(*ix) {
+                            this.show = Some(*s);
+                            // A pick shows its rows, not folded headers.
+                            if *s != Show::All {
+                                this.open.extend(Group::ALL.into_iter().filter(|g| s.has(*g)));
+                            }
+                            this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                        }
                         cx.notify();
                     })),
             )
-            .child(
-                TabBar::new("sync-source")
-                    .segmented()
-                    .small()
-                    .selected_index(src_ix)
-                    .children(SOURCES.iter().map(|(_, l)| Tab::new().label(*l)))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.filters.source = SOURCES[*ix].0;
-                        cx.notify();
-                    })),
-            )
+            .child(side)
+            .child(source)
             .child(div().flex_1())
             .when(n_sel > 0, |r| {
                 r.child(
@@ -1712,59 +1776,28 @@ impl SyncPanel {
                         })),
                 )
             })
+            .children(sync)
     }
 
-    /// A card per group with its count; a click opens the group and
-    /// scrolls to it.
-    fn summary(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme().clone();
-        // The rows the filters show, so a card matches its group's count.
-        let groups: Vec<Group> = self.visible(cx).into_iter().map(Group::of).collect();
-        h_flex().gap_2().children(Group::ALL.map(|g| {
-            let n = groups.iter().filter(|x| **x == g).count();
-            let color = Self::group_color(g, cx);
-            div()
-                .id(ElementId::Name(format!("card-{g:?}").into()))
-                .flex_1()
-                .min_w_0()
-                .px_3()
-                .py_2()
-                .rounded(theme.radius_lg)
-                .border_1()
-                .border_color(theme.border)
-                .clickable(cx)
-                .hover(|s| s.bg(theme.list_hover))
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(if n == 0 { theme.muted_foreground } else { color })
-                        .child(n.to_string()),
-                )
-                .child(
-                    h_flex()
-                        .gap_1p5()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(Icon::new(Self::group_icon(g)).xsmall())
-                        .child(g.short()),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open.insert(g);
-                    if g == Group::KeptOff {
-                        this.show_kept = true;
-                    }
-                    this.build_items(cx);
-                    if let Some(ix) = this
-                        .items
-                        .iter()
-                        .position(|i| matches!(i, Item::Header(h, _) if *h == g))
-                    {
-                        this.scroll.scroll_to_item(ix, ScrollStrategy::Top);
-                    }
-                    cx.notify();
-                }))
-        }))
+    /// "Server → Pack" over the version column, lined up with the rows.
+    fn column_header(&self, cx: &App) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        h_flex()
+            .w_full()
+            .px_3()
+            .gap_3()
+            .pb_1()
+            .text_xs()
+            .font_semibold()
+            .text_color(theme.muted_foreground)
+            .border_b_1()
+            .border_color(theme.border.opacity(0.4))
+            .child(div().w_6().flex_none())
+            .child(div().w(rems(2.)).flex_none())
+            .child(div().flex_1().min_w(rems(NAME_MIN)).child("Mod"))
+            .when_some(self.fit.tags, |r, w| r.child(div().w(rems(w)).flex_none()))
+            .child(div().w(rems(self.fit.version)).flex_none().truncate().child("Server → Pack"))
+            .child(div().w(rems(self.fit.action)).flex_none())
     }
 
     /// What Apply will do, and the buttons for the picked rows.
@@ -1864,14 +1897,15 @@ impl SyncPanel {
 
     /// The rows the filters let through.
     fn visible(&self, cx: &App) -> Vec<&DiffEntry> {
+        let show = self.shown(cx);
         self.counted(cx)
             .into_iter()
-            .filter(|d| self.only.is_none_or(|g| Group::of(d) == g))
+            .filter(|d| show.has(Group::of(d)))
             .collect()
     }
 
-    /// The rows the search and side filters let through, whatever group the
-    /// sidebar picked: what its counts count.
+    /// The rows the search, side and source filters let through, whatever
+    /// the Needs action / Kept off / … pick: what its counts count.
     fn counted(&self, cx: &App) -> Vec<&DiffEntry> {
         let Some(Ok(diff)) = &self.diff else {
             return Vec::new();
@@ -1884,14 +1918,16 @@ impl SyncPanel {
 
     /// The list: each group's header, then its rows when it's open.
     fn build_items(&mut self, cx: &App) {
-        let Some(Ok(diff)) = &self.diff else {
+        if !matches!(self.diff, Some(Ok(_))) {
             self.items.clear();
             return;
-        };
+        }
+        let show = self.shown(cx);
+        let Some(Ok(diff)) = &self.diff else { return };
         let blacklist = &self.store.read(cx).settings().sync_blacklist;
         let mut by_group: Vec<(Group, Vec<usize>)> = Group::ALL.map(|g| (g, Vec::new())).into();
         for (i, d) in diff.iter().enumerate() {
-            if self.filters.passes(d, blacklist) && self.only.is_none_or(|g| Group::of(d) == g) {
+            if self.filters.passes(d, blacklist) && show.has(Group::of(d)) {
                 let g = Group::of(d);
                 if let Some((_, v)) = by_group.iter_mut().find(|(x, _)| *x == g) {
                     v.push(i);
@@ -1900,12 +1936,13 @@ impl SyncPanel {
         }
         let mut items = Vec::new();
         let mut kept = 0;
+        self.one_group = by_group.iter().filter(|(_, r)| !r.is_empty()).count() == 1;
         for (g, rows) in by_group {
             if rows.is_empty() {
                 continue;
             }
             // Kept-off rows sit behind one footer row until asked for.
-            if g == Group::KeptOff && !self.show_kept && self.only != Some(g) {
+            if g == Group::KeptOff && !self.show_kept && show != Show::Kept {
                 kept = rows.len();
                 continue;
             }
@@ -1917,7 +1954,7 @@ impl SyncPanel {
                 items.extend(rows.into_iter().map(Item::Row));
             }
         }
-        if kept > 0 && self.only.is_none() {
+        if kept > 0 && show == Show::All {
             items.push(Item::Kept(kept));
         }
         self.items = items;
@@ -2012,7 +2049,9 @@ impl SyncPanel {
                     )
                     .child(div().size_2().rounded_full().bg(color))
                     .child(div().text_sm().font_semibold().child(g.title()))
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(n.to_string()))
+                    .when(!self.one_group, |r| {
+                        r.child(div().text_sm().text_color(theme.muted_foreground).child(n.to_string()))
+                    })
                     .child(
                         widgets::caption(format!("· {}", g.hint()), cx)
                             .text_xs()
@@ -2133,25 +2172,28 @@ impl SyncPanel {
             }
             _ => None,
         };
+        // Each side's version, under "Server → Pack" ("–": not there).
         let version = match (g, &d.client, &d.server) {
             (Group::Update, Some(c), Some(s)) => format!("{} → {}", s.version, c.version),
+            (Group::Add, Some(c), _) => format!("– → {}", c.version),
+            (Group::ServerOnly, _, Some(s)) => format!("{} → –", s.version),
             _ => m.version.clone(),
         };
-        // One action per row, named for what it does.
-        let act = |label: &'static str, icon: IconName, a: RowAct, danger: bool| {
+        // One action per row, named for what it does to the server.
+        let compact = self.fit.compact;
+        let act = |key_id: &'static str,
+                   label: &'static str,
+                   icon: IconName,
+                   words: (&'static str, &'static str),
+                   a: RowAct,
+                   danger: bool| {
             let (d2, pair2, key2) = (d.clone(), pair.clone(), key.clone());
-            let words = match label {
-                "Add" => ("Adding", "Added"),
-                "Replace" => ("Replacing", "Replaced"),
-                "Update" => ("Updating", "Updated"),
-                "Remove" => ("Removing", "Removed"),
-                _ => ("Sending", "Sent"),
-            };
-            Button::new(id(label))
+            Button::new(id(key_id))
                 .small()
                 .outline()
                 .icon(icon)
-                .label(label)
+                // Tight: the icon alone, its words in the tooltip.
+                .map(|b| if compact { b.tooltip(label) } else { b.label(label) })
                 .when(danger, |b| b.with_variant(ButtonVariant::Danger))
                 .disabled(blocked)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2161,40 +2203,65 @@ impl SyncPanel {
                     }
                 }))
         };
-        let theme = cx.theme().clone();
-        let action: AnyElement = match g {
-            Group::Add => act("Add", IconName::Plus, RowAct::Push, false).into_any_element(),
-            Group::Update => {
-                let lead = act(
-                    if d.status == DiffStatus::ServerNewer { "Replace" } else { "Update" },
-                    IconName::ArrowUp,
-                    RowAct::Push,
-                    false,
-                );
-                // The other way: the server's build into this instance.
-                let down = (d.client.is_some() && d.server.is_some()).then(|| {
-                    let (d2, pair2, key2) = (d.clone(), pair.clone(), key.clone());
-                    let (from, to) = (
-                        d.server.as_ref().map(|m| m.version.clone()).unwrap_or_default(),
-                        d.client.as_ref().map(|m| m.version.clone()).unwrap_or_default(),
-                    );
-                    Button::new(id("pull-update"))
+        // The rarer direction, server to pack, sits in the row's ⋯.
+        let pull: Option<(String, (&'static str, &'static str))> = match g {
+            Group::Update if d.client.is_some() && d.server.is_some() => Some((
+                format!(
+                    "Use server's version ({})",
+                    d.server.as_ref().map(|m| m.version.clone()).unwrap_or_default()
+                ),
+                ("Pulling", "Pulled"),
+            )),
+            Group::ServerOnly if d.status == DiffStatus::OnlyServer => {
+                Some(("Copy to pack".to_string(), ("Copying", "Copied")))
+            }
+            _ => None,
+        };
+        let more = pull.map(|(label, words)| {
+            let (d2, pair2, key2, view) = (d.clone(), pair.clone(), key.clone(), cx.entity());
+            let running = self.running;
+            div()
+                .id(id("row-more-wrap"))
+                // The row's click picks it; this button doesn't.
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new(id("row-more"))
                         .small()
                         .ghost()
-                        .icon(IconName::Download)
-                        .label("Pull to pack")
-                        .tooltip(format!(
-                            "Copy the server's {from} into this instance in place of {to} (the old jar goes to .hopper-backups)"
-                        ))
-                        .disabled(self.running)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            if let Some((s, i)) = &pair2 {
-                                this.act_row(key2.clone(), ("Pulling", "Pulled"), rigsync::chip_ops(RowAct::Pull, &d2, i, s), cx);
-                            }
-                        }))
-                });
-                let lead: AnyElement = match pair.as_ref().filter(|_| pid != 0 && d.client.is_some()) {
+                        .icon(IconName::Ellipsis)
+                        .tooltip("More")
+                        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                            let (d2, pair2, key2, view, label) =
+                                (d2.clone(), pair2.clone(), key2.clone(), view.clone(), label.clone());
+                            menu.item(
+                                PopupMenuItem::new(label)
+                                    .icon(IconName::Download)
+                                    .disabled(running)
+                                    .on_click(move |_, _, cx| {
+                                        if let Some((s, i)) = &pair2 {
+                                            let ops = rigsync::chip_ops(RowAct::Pull, &d2, i, s);
+                                            view.update(cx, |this, cx| this.act_row(key2.clone(), words, ops, cx));
+                                        }
+                                    }),
+                            )
+                        }),
+                )
+        });
+        let theme = cx.theme().clone();
+        let action: AnyElement = match g {
+            Group::Add => act("Add", "Add to server", IconName::Plus, ("Adding", "Added"), RowAct::Push, false)
+                .into_any_element(),
+            Group::Update => {
+                let lead = if d.status == DiffStatus::ServerNewer {
+                    act("Replace", "Replace on server", IconName::ArrowUp, ("Replacing", "Replaced"), RowAct::Push, false)
+                        .when(!compact, |b| b.tooltip("The server has a newer version: this puts the pack's on it"))
+                } else {
+                    act("Update", "Update server", IconName::ArrowUp, ("Updating", "Updated"), RowAct::Push, false)
+                        .when(!compact, |b| {
+                            b.tooltip("Puts the pack's version on the server (the old jar goes to .hopper-backups)")
+                        })
+                };
+                match pair.as_ref().filter(|_| pid != 0 && d.client.is_some()) {
                     Some((_, inst)) => {
                         let (store, root) = (self.store.clone(), inst.root.clone());
                         widgets::split(
@@ -2212,36 +2279,26 @@ impl SyncPanel {
                         .into_any_element()
                     }
                     None => lead.into_any_element(),
-                };
-                h_flex().gap_1().children(down).child(lead).into_any_element()
+                }
             }
-            Group::ServerOnly => h_flex()
-                .gap_1()
-                .when(d.status == DiffStatus::OnlyServer, |r| {
-                    let (d2, pair2, key2) = (d.clone(), pair.clone(), key.clone());
-                    r.child(
-                        Button::new(id("pull"))
-                            .small()
-                            .ghost()
-                            .icon(IconName::Download)
-                            .label("Copy to pack")
-                            .tooltip("Copy this jar from the server into this instance")
-                            .disabled(self.running)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                if let Some((s, i)) = &pair2 {
-                                    this.act_row(key2.clone(), ("Copying", "Copied"), rigsync::chip_ops(RowAct::Pull, &d2, i, s), cx);
-                                }
-                            })),
-                    )
-                })
-                .child(act("Remove", IconName::Trash, RowAct::Remove, true))
-                .into_any_element(),
+            Group::ServerOnly => act(
+                "Remove",
+                "Remove from server",
+                IconName::Trash,
+                ("Removing", "Removed"),
+                RowAct::Remove,
+                true,
+            )
+            .when(!compact, |b| b.tooltip("Moves the jar to the server's .hopper-backups (undo from History)"))
+            .into_any_element(),
             Group::KeptOff => h_flex()
                 .gap_3()
-                .child(act("Send once", IconName::Upload, RowAct::Push, false).tooltip(
-                    "Copy it to the server this time; the next comparison still keeps it off",
-                ))
+                .child(
+                    act("Send once", "Send once", IconName::Upload, ("Sending", "Sent"), RowAct::Push, false)
+                        .when(!compact, |b| {
+                            b.tooltip("Copy it to the server this time; the next comparison still keeps it off")
+                        }),
+                )
                 .when(pid != 0, |r| {
                     r.child(
                         Checkbox::new(id("always"))
@@ -2326,6 +2383,12 @@ impl SyncPanel {
             cx,
         );
         let sub = why.clone().unwrap_or_else(|| m.file_name.clone());
+        let fit = self.fit;
+        let side_icon = fit
+            .tags
+            .is_none()
+            .then(|| crate::side_card::side_of(&tags.env))
+            .flatten();
         let k2 = key.clone();
         let pickable = g.pickable();
         h_flex()
@@ -2372,8 +2435,26 @@ cx.listener(move |this, _, _, cx| {
             .child(
                 v_flex()
                     .flex_1()
-                    .min_w_0()
-                    .child(name)
+                    .min_w(rems(NAME_MIN))
+                    .child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_1p5()
+                            .child(name)
+                            // No tags column: the side as an icon by the name.
+                            .when_some(side_icon, |r, (icon, what)| {
+                                r.child(
+                                    div()
+                                        .id(id("side-icon"))
+                                        .flex_none()
+                                        .text_color(theme.muted_foreground)
+                                        .child(Icon::new(icon).xsmall())
+                                        .tooltip(move |w, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(what).build(w, cx)
+                                        }),
+                                )
+                            }),
+                    )
                     .child(
                         widgets::caption(sub, cx)
                             .text_xs()
@@ -2381,8 +2462,8 @@ cx.listener(move |this, _, _, cx| {
                             .when(why.is_none(), |c| c.opacity(0.75)),
                     ),
             )
-            .child(
-                div().flex_1().min_w_0().child(widgets::mod_tags(
+            .when_some(fit.tags, |r, w| r.child(
+                div().w(rems(w)).flex_none().min_w_0().child(widgets::mod_tags(
                     widgets::ModTags {
                         key: &m.file_name,
                         new: tags.new,
@@ -2399,24 +2480,24 @@ cx.listener(move |this, _, _, cx| {
                     },
                     cx,
                 )),
-            )
+            ))
             .child(
                 widgets::caption(version, cx)
-                    .w(rems(10.))
+                    .w(rems(fit.version))
                     .flex_none()
                     .text_xs()
                     .truncate(),
             )
-            .child(h_flex().w(rems(14.)).flex_none().justify_end().child(action))
+            .child(
+                h_flex()
+                    .w(rems(fit.action))
+                    .flex_none()
+                    .gap_1()
+                    .justify_end()
+                    .child(action)
+                    .child(div().w_8().flex_none().children(more)),
+            )
             .into_any_element()
-    }
-}
-
-/// "1 update", "3 to add", "120 kept off".
-fn count_words(g: Group, n: usize) -> String {
-    match g {
-        Group::Update if n == 1 => "1 update".into(),
-        _ => format!("{n} {}", g.short()),
     }
 }
 
@@ -2528,10 +2609,17 @@ impl Render for SyncPanel {
         let sidebar = side.then(|| self.sidebar(&server, &inst, window, cx));
         let crash = self.crash_banner(cx);
         let drift = self.drift_banner(cx);
+        // The console is a section where the panel is set up (in an
+        // instance; the Servers page has its own).
+        let console = side && self.control.read(cx).configured(cx);
+        if self.section == Section::Console && !console {
+            self.section = Section::Mods;
+        }
         let section_ix = match self.section {
             Section::Mods => 0,
             Section::Configs => 1,
             Section::History => 2,
+            Section::Console => 3,
         };
         let sections = TabBar::new("sync-section")
             .underline()
@@ -2539,14 +2627,26 @@ impl Render for SyncPanel {
             .child(Tab::new().prefix(Icon::new(IconName::Puzzle).small()).label("Mods"))
             .child(Tab::new().prefix(Icon::new(IconName::Settings).small()).label("Configs"))
             .child(Tab::new().prefix(Icon::new(IconName::Clock).small()).label("History"))
+            .when(console, |t| {
+                t.child(Tab::new().prefix(Icon::new(IconName::SquareTerminal).small()).label("Console"))
+            })
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                this.section = [Section::Mods, Section::Configs, Section::History][*ix];
-                cx.notify();
+                let s = [Section::Mods, Section::Configs, Section::History, Section::Console][(*ix).min(3)];
+                this.set_section(s, cx);
             }));
+        // The list's width: the work area less the side column and padding.
+        let room = self.room.unwrap_or_else(|| window.viewport_size().width / window.rem_size());
+        let side_w = if side {
+            self.side_panel.layout(self.store.read(cx).settings(), window).width
+        } else {
+            0.0
+        };
+        self.fit = Fit::of(room - side_w - if side { 2.5 } else { 3.0 });
         self.build_items(cx);
         let body: AnyElement = match (self.section, &self.diff) {
             (Section::Configs, _) => self.configs.clone().into_any_element(),
             (Section::History, _) => self.history.clone().into_any_element(),
+            (Section::Console, _) => self.control.update(cx, |c, cx| c.console_view(window, cx)),
             (Section::Mods, d) => match d {
             None => h_flex()
                 .gap_2()
@@ -2573,7 +2673,7 @@ impl Render for SyncPanel {
             Some(Ok(_)) => {
                 let count = self.items.len();
                 let toolbar = self.toolbar(cx);
-                let summary = (!side).then(|| self.summary(cx));
+                let columns = self.column_header(cx);
                 // Beside the sidebar, the apply bar shows once something is picked.
                 let footer = (!side || !self.selected_rows(cx).is_empty()).then(|| self.footer(&server, cx));
                 let theme = cx.theme();
@@ -2595,9 +2695,8 @@ impl Render for SyncPanel {
                     .flex_1()
                     .min_h_0()
                     .gap_3()
-                    .children(summary)
                     .child(toolbar)
-                    .child(
+                    .child(v_flex().flex_1().min_h_0().child(columns).child(
                         div()
                             .id("sync-rows-area")
                             .on_drag_move::<PickDrag>(cx.listener(|this, e: &DragMoveEvent<PickDrag>, window, cx| {
@@ -2621,7 +2720,7 @@ impl Render for SyncPanel {
                                 .size_full(),
                             )
                             .vertical_scrollbar(&self.scroll),
-                    )
+                    ))
                     .children(footer)
                     .children(result)
                     .into_any_element()
@@ -2660,6 +2759,19 @@ impl Render for SyncPanel {
             .child(sections)
             .child(v_flex().flex_1().min_h_0().child(body))
             .into_any_element()
+    }
+}
+
+/// One line for why the last start crashed ("smallships failed to load"),
+/// else the crash's headline.
+pub(crate) fn crash_reason(c: &ServerCrash) -> String {
+    let Some(h) = c.hits.first() else {
+        return c.headline.clone();
+    };
+    let name = if h.mod_id.is_empty() { &h.file_name } else { &h.mod_id };
+    match c.hits.len() {
+        1 => format!("{name} failed to load"),
+        n => format!("{name} and {} more failed to load", n - 1),
     }
 }
 

@@ -24,8 +24,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// How often the stats (and the console, while it shows) refresh.
+/// How often the stats (and the console, while it shows) refresh while a
+/// page about the server shows.
 const POLL: Duration = Duration::from_secs(2);
+/// The same for only the instance header's dot.
+const POLL_IDLE: Duration = Duration::from_secs(30);
+/// After the panel couldn't be reached.
+const POLL_BACKOFF: Duration = Duration::from_secs(60);
 
 /// Samples kept for the sparklines (a minute and a half at [`POLL`]).
 const HISTORY: usize = 45;
@@ -34,6 +39,8 @@ const HISTORY: usize = 45;
 pub enum ControlEvent {
     /// Open Settings to set up the panel.
     SetUp,
+    /// Show the console (the compact controls' Console button).
+    Console,
 }
 
 impl EventEmitter<ControlEvent> for ServerControl {}
@@ -82,6 +89,10 @@ pub struct ServerControl {
     delay_input: Entity<InputState>,
     log_days_input: Entity<InputState>,
     _poll: Option<Task<()>>,
+    /// A page about the server shows: poll at [`POLL`], else [`POLL_IDLE`].
+    active: bool,
+    /// When the last poll was sent.
+    polled: std::time::Instant,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -142,6 +153,8 @@ impl ServerControl {
             delay_input,
             log_days_input,
             _poll: None,
+            active: false,
+            polled: std::time::Instant::now(),
             _subscriptions: subs,
         }
     }
@@ -271,6 +284,7 @@ impl ServerControl {
                     return;
                 };
                 let p = panel.clone();
+                this.update(cx, |this, _| this.polled = std::time::Instant::now()).ok();
                 let (stats, lines) = cx
                     .background_spawn(async move {
                         let stats = p.stats(&id).map_err(|e| format!("{e:#}"));
@@ -284,14 +298,17 @@ impl ServerControl {
                 {
                     return;
                 }
-                // Faster while the console shows, so it reads as live.
-                // The whole file is bigger: read it less often.
-                let wait = match (console, full) {
-                    (true, false) => Duration::from_secs(1),
-                    (true, true) => Duration::from_secs(5),
-                    _ => POLL,
-                };
-                cx.background_executor().timer(wait).await;
+                // Waits in short steps, so turning the page on (or off)
+                // changes the rate at once.
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    let Ok(due) = this.update(cx, |this, _| this.polled.elapsed() >= this.wait()) else {
+                        return;
+                    };
+                    if due {
+                        break;
+                    }
+                }
             }
         }));
         cx.notify();
@@ -342,12 +359,49 @@ impl ServerControl {
         cx.notify();
     }
 
+    /// How long until the next poll: faster while the console shows (the
+    /// whole log file less often), slow for only the header's dot, slower
+    /// still when the panel didn't answer.
+    fn wait(&self) -> Duration {
+        if matches!(self.stats, Some(Err(_))) {
+            return POLL_BACKOFF;
+        }
+        match (self.active && self.console_open, self.console_full) {
+            (true, false) => Duration::from_secs(1),
+            (true, true) => Duration::from_secs(5),
+            _ if self.active => POLL,
+            _ => POLL_IDLE,
+        }
+    }
+
+    /// A page about the server shows (fast polls) or went away (slow).
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.active != active {
+            self.active = active;
+            if active {
+                self.poll_now(cx);
+            }
+        }
+    }
+
+    /// One poll now (an instance picked, the window focused).
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.poll_now(cx);
+    }
+
+    /// The panel couldn't be reached for `root` (listing or polling).
+    pub fn cant_reach(&self, root: &std::path::Path) -> bool {
+        self.root.as_deref() == Some(root)
+            && (matches!(self.listed, Some(Err(_))) || matches!(self.stats, Some(Err(_))))
+    }
+
     /// One poll now, between the regular ones.
     fn poll_now(&mut self, cx: &mut Context<Self>) {
         let (Some(panel), Some(id)) = (self.the_panel(cx), self.id.clone()) else {
             return;
         };
         let (console, full) = (self.console_open, self.console_full);
+        self.polled = std::time::Instant::now();
         cx.spawn(async move |this, cx| {
             let (stats, lines) = cx
                 .background_spawn(async move {
@@ -372,7 +426,7 @@ impl ServerControl {
 
     /// Asks first where it costs something: a kill always, a stop or
     /// restart while players are on.
-    fn request(&mut self, action: PanelAction, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request(&mut self, action: PanelAction, window: &mut Window, cx: &mut Context<Self>) {
         let online = match &self.stats {
             Some(Ok(s)) => s.online,
             _ => 0,
@@ -431,6 +485,12 @@ impl ServerControl {
 
     fn run(&mut self, action: PanelAction, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(panel), Some(id)) = (self.the_panel(cx), self.id.clone()) else {
+            // Asked before the panel listed this server (or it can't).
+            let pname = self.panel_name(cx);
+            window.push_notification(
+                Notification::error(format!("{pname} isn't connected to this server yet. Try again in a moment.")),
+                cx,
+            );
             return;
         };
         self.busy = Some(action);
@@ -549,16 +609,20 @@ impl ServerControl {
             (None, None) => (widgets::chip(cx.theme().muted_foreground), "…"),
         };
         let menu_view = cx.entity();
+        let success = theme.success;
         h_flex()
             .gap_2()
-            .child(
-                h_flex()
-                    .gap_1p5()
-                    .when(busy.is_some(), |r| r.child(Spinner::new().xsmall()))
-                    .child(tag.small().child(state)),
-            )
+            // Compact (a card that names the state already): only a
+            // transition shows.
+            .when(!compact || busy.is_some(), |r| {
+                r.child(
+                    h_flex()
+                        .gap_1p5()
+                        .when(busy.is_some(), |r| r.child(Spinner::new().xsmall()))
+                        .child(tag.small().child(state)),
+                )
+            })
             .when(!compact, |r| r.child(div().w_px().h_5().bg(theme.border)))
-            .when(compact, |r| r.child(div().flex_1()))
             .map(|r| {
                 if running {
                     r.child(
@@ -584,11 +648,13 @@ impl ServerControl {
                             })),
                     )
                 } else {
+                    // Outline: Play is the only green button. The icon
+                    // keeps the color.
                     r.child(
                         Button::new("panel-start")
                             .small()
-                            .success()
-                            .icon(IconName::Play)
+                            .outline()
+                            .icon(gpui_kit::component::Icon::new(IconName::Play).text_color(success))
                             .label("Start")
                             .disabled(busy.is_some())
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -596,6 +662,16 @@ impl ServerControl {
                             })),
                     )
                 }
+            })
+            .when(compact, |r| {
+                r.child(
+                    Button::new("panel-console")
+                        .small()
+                        .outline()
+                        .icon(IconName::SquareTerminal)
+                        .label("Console")
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ControlEvent::Console))),
+                )
             })
             .child(
                 Button::new("panel-more")
@@ -624,6 +700,24 @@ impl ServerControl {
                     }),
             )
             .into_any_element()
+    }
+
+    /// The panel's last stats for `root`, when this control shows it.
+    pub fn stats_of(&self, root: &std::path::Path) -> Option<&PanelStats> {
+        match &self.stats {
+            Some(Ok(s)) if self.id.is_some() && self.root.as_deref() == Some(root) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The action on its way, if any.
+    pub fn busy(&self) -> Option<PanelAction> {
+        self.busy
+    }
+
+    /// The panel lists this server, so Start / Stop can be sent.
+    pub fn ready(&self) -> bool {
+        self.id.is_some()
     }
 
     /// Up or starting, by the panel's last poll; None before one came back.
@@ -1655,5 +1749,33 @@ impl Render for ServerControl {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         // Its parts render inside the Servers page.
         div()
+    }
+}
+
+/// A server's state for its status dot: the dot's color and a word
+/// (`pinged`: whether it answered a ping, when one was tried).
+/// Green running, grey stopped, red when the panel or its last start's
+/// crash report says it crashed; amber while something changes.
+pub fn state_of(
+    stats: Option<&PanelStats>,
+    pinged: Option<bool>,
+    crashed_start: bool,
+    busy: Option<PanelAction>,
+    cx: &App,
+) -> (Hsla, &'static str) {
+    let theme = cx.theme();
+    match (busy, stats) {
+        (Some(PanelAction::Start), _) => (theme.warning, "starting"),
+        (Some(PanelAction::Stop | PanelAction::Kill), _) => (theme.warning, "stopping"),
+        (Some(PanelAction::Restart), _) => (theme.warning, "restarting"),
+        (_, Some(s)) if s.starting => (theme.warning, "starting"),
+        (_, Some(s)) if s.running => (theme.success, "running"),
+        (_, None) if pinged == Some(true) => (theme.success, "running"),
+        (_, Some(s)) if s.crashed => (theme.danger, "crashed"),
+        _ if crashed_start => (theme.danger, "crashed at start"),
+        (_, Some(_)) => (theme.muted_foreground, "stopped"),
+        _ if pinged == Some(false) => (theme.muted_foreground, "stopped"),
+        // No panel and no ping yet: nothing to say.
+        _ => (theme.muted_foreground, ""),
     }
 }

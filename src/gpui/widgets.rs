@@ -482,6 +482,12 @@ pub fn chip(color: Hsla) -> gpui_kit::component::tag::Tag {
         .rounded(px(crate::theme::RADIUS))
 }
 
+/// A small round status dot (a server's state: green running, grey
+/// stopped, red crashed).
+pub fn status_dot(color: Hsla) -> Div {
+    div().flex_none().size_2().rounded_full().bg(color)
+}
+
 /// A soft colored glow under `el` (a button), stronger on glass themes.
 pub fn glow(el: impl IntoElement, color: Hsla, cx: &App) -> Div {
     let strength = if glass(cx) { 0.55 } else { 0.3 };
@@ -630,6 +636,32 @@ pub fn picker_with(
                 menu = menu.item(item.checked(*checked).on_click(move |_, w, cx| f(ix, w, cx)));
             }
             menu
+        })
+}
+
+/// A small filter dropdown ("Side ▾"): `name` while the first (no filter)
+/// option is picked, else the picked option; a check by the picked one.
+pub fn filter_menu(
+    id: impl Into<ElementId>,
+    name: &'static str,
+    options: Vec<&'static str>,
+    picked: usize,
+    on_pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+) -> impl IntoElement {
+    let label = match options.get(picked).filter(|_| picked != 0) {
+        Some(o) => o.to_string(),
+        None => name.to_string(),
+    };
+    Button::new(id)
+        .small()
+        .outline()
+        .label(label)
+        .dropdown_caret(true)
+        .dropdown_menu(move |menu: PopupMenu, _, _| {
+            options.iter().enumerate().fold(menu.label(name), |m, (ix, l)| {
+                let f = on_pick.clone();
+                m.item(PopupMenuItem::new(*l).checked(ix == picked).on_click(move |_, w, cx| f(ix, w, cx)))
+            })
         })
 }
 

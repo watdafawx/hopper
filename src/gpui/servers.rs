@@ -440,12 +440,23 @@ impl EventEmitter<ServersEvent> for ServersView {}
 impl ServersView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter jars"));
-        let control = cx.new(|cx| ServerControl::new(store.clone(), window, cx));
+        let control = cx.new(|cx| {
+            let mut c = ServerControl::new(store.clone(), window, cx);
+            // The Servers page is about the server: the full rate.
+            c.set_active(true, cx);
+            c
+        });
         let settings_view = cx.new(|cx| ServerSettings::new(store.clone(), window, cx));
         let subs = vec![
             cx.observe(&control, |_, _, cx| cx.notify()),
-            cx.subscribe(&control, |_, _, e: &ControlEvent, cx| match e {
+            cx.subscribe(&control, |this, _, e: &ControlEvent, cx| match e {
                 ControlEvent::SetUp => cx.emit(ServersEvent::OpenSettings),
+                // This page has a Console tab of its own.
+                ControlEvent::Console => {
+                    this.tab = 1;
+                    this.control.update(cx, |c, cx| c.set_console_open(true, cx));
+                    cx.notify();
+                }
             }),
             cx.observe(&store, |this, _, cx| {
                 this.ensure_pick(cx);
