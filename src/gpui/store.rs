@@ -2161,6 +2161,16 @@ impl Store {
         install::save_profile(inst, name).map_err(|e| format!("{e:#}"))
     }
 
+    /// Forgets a saved profile (no mod changes).
+    pub fn delete_profile(&mut self, root: &Path, name: &str) -> Result<(), String> {
+        let inst = self
+            .instances
+            .iter_mut()
+            .find(|i| i.root == root)
+            .ok_or("That instance is gone.")?;
+        install::delete_profile(inst, name).map(|_| ()).map_err(|e| format!("{e:#}"))
+    }
+
     /// Keeps files out of (or back in) update offers.
     pub fn set_locked_many(
         &mut self,

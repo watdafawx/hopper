@@ -1422,6 +1422,34 @@ pub fn apply_profile(inst: &mut Instance, name: &str) -> anyhow::Result<usize> {
     Ok(changed)
 }
 
+/// Forgets profile `name`; false when there was none by that name.
+pub fn delete_profile(inst: &mut Instance, name: &str) -> anyhow::Result<bool> {
+    let before = inst.mod_profiles.len();
+    inst.mod_profiles.retain(|p| p.name != name);
+    if inst.mod_profiles.len() == before {
+        return Ok(false);
+    }
+    inst.save()?;
+    Ok(true)
+}
+
+/// What switching to `p` would do now: the addons it turns on, then the
+/// ones it turns off.
+pub fn profile_changes<'a>(
+    inst: &'a Instance,
+    p: &crate::instances::ModProfile,
+) -> (Vec<&'a crate::instances::Addon>, Vec<&'a crate::instances::Addon>) {
+    let off: HashSet<String> = p.disabled.iter().map(|f| f.to_lowercase()).collect();
+    let (mut on, mut offs) = (Vec::new(), Vec::new());
+    for a in &inst.addons {
+        let want = !off.contains(&a.file_name.to_lowercase());
+        if a.enabled != want {
+            if want { on.push(a) } else { offs.push(a) }
+        }
+    }
+    (on, offs)
+}
+
 #[cfg(test)]
 mod version_change_tests {
     use super::version_change;
@@ -1470,8 +1498,17 @@ mod profile_tests {
         save_profile(&mut inst, "no b").unwrap();
         assert_eq!(apply_profile(&mut inst, "all on").unwrap(), 1);
         assert!(inst.mods_dir().join("b.jar").exists());
+        let all_on = inst.mod_profiles.iter().find(|p| p.name == "all on").unwrap().clone();
+        let (on, off) = profile_changes(&inst, &all_on);
+        assert_eq!((on.len(), off.len()), (0, 0));
+        let no_b = inst.mod_profiles.iter().find(|p| p.name == "no b").unwrap().clone();
+        let (on, off) = profile_changes(&inst, &no_b);
+        assert_eq!((on.len(), off.len()), (0, 1));
         assert_eq!(apply_profile(&mut inst, "no b").unwrap(), 1);
         assert!(inst.mods_dir().join("b.jar.disabled").exists());
+        assert!(delete_profile(&mut inst, "no b").unwrap());
+        assert!(!delete_profile(&mut inst, "no b").unwrap());
+        assert_eq!(inst.mod_profiles.len(), 1);
         let _ = fs::remove_dir_all(&root);
     }
 }

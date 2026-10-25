@@ -280,6 +280,30 @@ impl Hunt {
         matches!(self.phase, Phase::Found | Phase::NotFound)
     }
 
+    /// Learns what a round showed the jars' metadata missed: `(file,
+    /// needs)` pairs of mods that are on, from the loader refusing to
+    /// start. Plans the round again, so it isn't answered with a broken
+    /// set of mods. False when it knew every pair already.
+    pub fn learn(&mut self, edges: &[(String, String)]) -> bool {
+        let on: Set = self.on().cloned().collect();
+        let mut new = false;
+        for (file, needs) in edges {
+            if file == needs || !on.contains(file) || !on.contains(needs) {
+                continue;
+            }
+            let v = self.requires.entry(file.clone()).or_default();
+            if !v.contains(needs) {
+                v.push(needs.clone());
+                v.sort();
+                new = true;
+            }
+        }
+        if new && !self.done() {
+            self.plan();
+        }
+        new
+    }
+
     /// Takes the player's answer for the round being played.
     pub fn answer(&mut self, a: Answer) {
         if self.done() {
@@ -528,6 +552,50 @@ fn set_files(inst: &mut Instance, files: Vec<(String, bool)>) -> anyhow::Result<
     }
 }
 
+/// What the loader's refusal in a round's log ("Mod X requires Y …")
+/// shows the metadata missed: `(file, needs)` pairs where X is in a jar
+/// that's on and Y only in jars parked this round. What [`Hunt::learn`]
+/// takes; empty when the round failed for another reason.
+pub fn needs_from_log(mods_dir: &Path, h: &Hunt, lines: &[String]) -> Vec<(String, String)> {
+    let mut asked = BTreeSet::new();
+    for l in lines {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        for i in 0..w.len().saturating_sub(3) {
+            if w[i] == "Mod" && w[i + 2] == "requires" {
+                asked.insert((w[i + 1].to_lowercase(), w[i + 3].to_lowercase()));
+            }
+        }
+    }
+    if asked.is_empty() {
+        return Vec::new();
+    }
+    let off = h.wanted_off();
+    let path = |f: &str| {
+        let p = mods_dir.join(f);
+        if p.is_file() { p } else { mods_dir.join(format!("{f}.disabled")) }
+    };
+    let mut ids: HashMap<String, Vec<&String>> = HashMap::new();
+    for f in h.original.keys() {
+        for id in crate::deps::provides(&path(f)) {
+            ids.entry(id.to_lowercase()).or_default().push(f);
+        }
+    }
+    let mut out = BTreeSet::new();
+    for (x, y) in asked {
+        let (Some(xf), Some(yf)) = (ids.get(&x), ids.get(&y)) else { continue };
+        // Something on provides it: not what was missing.
+        if yf.iter().any(|f| !off.contains(*f)) {
+            continue;
+        }
+        for a in xf.iter().filter(|f| !off.contains(**f)) {
+            for b in yf {
+                out.insert(((*a).clone(), (*b).clone()));
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// Puts the folder in this round's state.
 pub fn apply(inst: &mut Instance, h: &Hunt) -> anyhow::Result<usize> {
     let off = h.wanted_off();
@@ -767,5 +835,24 @@ mod tests {
         assert_eq!(mod_files(&mods), before);
         assert!(load(&root).is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn learns_what_the_metadata_missed() {
+        let names = ["a", "b", "c", "d", "e", "f"];
+        let mut h = Hunt::new(Kind::Crash, orig(&names), BTreeMap::new(), None);
+        // Something on this round needs something parked.
+        let off = h.wanted_off();
+        let on: Vec<&str> = names.iter().copied().filter(|n| !off.contains(*n)).collect();
+        let parked = off.iter().next().unwrap().clone();
+        let edge = (on[0].to_string(), parked.clone());
+        assert!(h.learn(std::slice::from_ref(&edge)));
+        consistent(&h);
+        assert!(!h.learn(&[edge]), "known already");
+        // Only mods that were on count.
+        assert!(!h.learn(&[("zz".into(), "a".into())]));
+        // Still finds the culprit with the new edge.
+        let h = play(h, |on| on.contains("e"));
+        assert_eq!(h.phase, Phase::Found);
+        assert!(h.culprits.iter().any(|c| c == "e"), "{:?}", h.culprits);
     }
 }

@@ -370,6 +370,10 @@ fn tick_server(
     events: &mut Vec<ScheduleEvent>,
 ) {
     let root = s.root().to_path_buf();
+    // Finding the mod that breaks it starts and stops the server itself.
+    if crate::bisect::path(&root).is_file() {
+        return;
+    }
     let state = s.state();
 
     // A scheduled restart in progress: start once the server is down.
@@ -486,7 +490,7 @@ fn local_offset() -> i64 {
 fn autostart(servers: &[(&dyn ScheduledServer, Schedule)]) -> Vec<ScheduleEvent> {
     let mut events = Vec::new();
     for (s, schedule) in servers {
-        if !schedule.start_with_hopper || s.state().is_alive() {
+        if !schedule.start_with_hopper || s.state().is_alive() || crate::bisect::path(s.root()).is_file() {
             continue;
         }
         let root = s.root().to_path_buf();

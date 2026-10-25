@@ -986,7 +986,7 @@ impl AddonsView {
             .icon(IconName::Layers)
             .label("Profiles")
             .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
+            .dropdown_menu(move |menu, window, cx| {
                 let mut menu = menu.label("Switch which mods are enabled");
                 for n in &names {
                     let (v, n) = (view.clone(), n.clone());
@@ -995,12 +995,24 @@ impl AddonsView {
                     ));
                 }
                 let (v, v2) = (view.clone(), view.clone());
-                menu.separator()
-                    .item(
-                        PopupMenuItem::new("Save current as…")
-                            .icon(IconName::Plus)
-                            .on_click(move |_, window, cx| save_profile_dialog(v.clone(), window, cx)),
-                    )
+                let mut menu = menu.separator().item(
+                    PopupMenuItem::new("Save current as…")
+                        .icon(IconName::Plus)
+                        .on_click(move |_, window, cx| save_profile_dialog(v.clone(), window, cx)),
+                );
+                if !names.is_empty() {
+                    let (names, v3) = (names.clone(), view.clone());
+                    menu = menu.submenu("Delete a profile", window, cx, move |mut sub, _, _| {
+                        for n in &names {
+                            let (v, n) = (v3.clone(), n.clone());
+                            sub = sub.item(PopupMenuItem::new(format!("Delete “{n}”")).icon(IconName::Trash).on_click(
+                                move |_, window, cx| delete_profile(v.clone(), n.clone(), window, cx),
+                            ));
+                        }
+                        sub
+                    });
+                }
+                menu
                     .separator()
                     .item(
                         PopupMenuItem::new("Find the mod that breaks it…")
@@ -1024,6 +1036,24 @@ impl AddonsView {
                 Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
             });
         }
+    }
+}
+
+/// Forgets a saved profile; which mods are on stays as it is.
+fn delete_profile(view: Entity<AddonsView>, name: String, window: &mut Window, cx: &mut App) {
+    let (store, root) = {
+        let v = view.read(cx);
+        (v.store.clone(), v.root.clone())
+    };
+    let Some(root) = root else { return };
+    let r = store.update(cx, |s, cx| {
+        let r = s.delete_profile(&root, &name);
+        cx.notify();
+        r
+    });
+    match r {
+        Ok(()) => window.push_notification(Notification::success(format!("Deleted profile “{name}”")), cx),
+        Err(e) => window.push_notification(Notification::error(e), cx),
     }
 }
 

@@ -151,7 +151,11 @@ fn toml_deps(t: &Toml) -> TomlDeps {
                 continue;
             }
             let id = d.mod_id.to_lowercase();
-            let required = d.kind.eq_ignore_ascii_case("required") || d.mandatory == Some(true);
+            // NeoForge reads a dependency without `type` as required (ATMons'
+            // Ars Technica needs Ars Nouveau that way).
+            let required = d.kind.eq_ignore_ascii_case("required")
+                || d.mandatory == Some(true)
+                || (d.kind.is_empty() && d.mandatory.is_none());
             if required {
                 out.0.push((id, d.version_range.clone()));
             } else if d.kind.eq_ignore_ascii_case("incompatible") {
@@ -1053,7 +1057,9 @@ version=\"4.5\"
                     &(req("addon", "base")
                         + &req("addon", "lib")
                         + &req("addon", "neoforge")
-                        + &req("addon", "gone")),
+                        + &req("addon", "gone")
+                        // No `type`: NeoForge still requires it.
+                        + "[[dependencies.addon]]\nmodId=\"untyped\"\nversionRange=\"[1,)\"\n"),
                 )),
             )],
         );
@@ -1085,8 +1091,10 @@ version=\"4.5\"
             &[("META-INF/neoforge.mods.toml", &toml("gone", ""))],
         );
 
-        let m = missing(&dir);
-        assert_eq!(m.len(), 1, "{m:?}");
+        let mut m = missing(&dir);
+        assert_eq!(m.len(), 2, "{m:?}");
+        assert!(m.iter().any(|x| x.needs == "untyped" && x.disabled_provider.is_none()));
+        m.retain(|x| x.needs != "untyped");
         assert_eq!(m[0].needs, "gone");
         assert_eq!(m[0].mod_name, "addon mod");
         assert_eq!(m[0].disabled_provider.as_deref(), Some("gone.jar.disabled"));
