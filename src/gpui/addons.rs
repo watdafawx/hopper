@@ -58,6 +58,9 @@ pub(crate) enum Row {
     Section(&'static str, &'static str),
     /// Shaders' "Off" choice, above the packs.
     ShaderOff,
+    /// Resource packs a global folder (Paxi…) also has and loads itself,
+    /// folded away: how many, whether shown, and where.
+    Copies(usize, bool, String),
 }
 
 gpui_kit::actions!(
@@ -177,6 +180,9 @@ pub(crate) struct RowsKey {
     query: String,
     show: Show,
     added_only: bool,
+    show_copies: bool,
+    /// The "also in" map changed (copies to fold).
+    also: usize,
     updates_first: bool,
     sort: (SortCol, bool),
 }
@@ -464,6 +470,9 @@ pub struct AddonsView {
     updates_first: bool,
     sort: (SortCol, bool),
     pub(crate) selected: HashSet<String>,
+    /// Resource packs Paxi (or another global folder) also has: shown,
+    /// rather than folded into one row.
+    pub(crate) show_copies: bool,
     /// A drag across the tick boxes, while the button is down.
     pick: Option<DragPick>,
     /// The row a tick box was last pressed on, for Shift.
@@ -597,6 +606,7 @@ impl AddonsView {
             query: String::new(),
             show: Show::All,
             added_only: false,
+            show_copies: false,
             updates_first: true,
             sort: (SortCol::Added, false),
             selected: HashSet::new(),
@@ -793,6 +803,8 @@ impl AddonsView {
             query: self.query.clone(),
             show: self.show,
             added_only: self.added_only,
+            show_copies: self.show_copies,
+            also: self.table.also.len(),
             updates_first: self.updates_first,
             sort: self.sort,
         }
@@ -1136,11 +1148,38 @@ impl AddonsView {
             lead.then(if asc { ord } else { ord.reverse() })
                 .then_with(|| na.cmp(nb))
         });
+        // The instance's resource packs that Paxi (or another global
+        // folder) also has: packs ship them so CurseForge updates them,
+        // and Paxi loads its own copy. Folded away unless asked for or in
+        // use here.
+        let mut copies = 0usize;
+        let mut where_: Vec<String> = Vec::new();
+        if self.order_mode() && q.is_empty() && self.show == Show::All {
+            rows.retain(|(i, _)| {
+                let a = &inst.addons[*i];
+                let key = a.file_name.trim_end_matches(".disabled").to_lowercase();
+                match self.table.also.get(&key) {
+                    Some(at) if !self.row_on(a) => {
+                        copies += 1;
+                        for w in at.split(", ") {
+                            if !where_.iter().any(|x| x == w) {
+                                where_.push(w.to_string());
+                            }
+                        }
+                        self.show_copies
+                    }
+                    _ => true,
+                }
+            });
+        }
         let mut out: Vec<Row> = if self.order_mode() {
             self.order_rows(inst, rows.into_iter().map(|(i, _)| i).collect())
         } else {
             rows.into_iter().map(|(i, _)| Row::Addon(i)).collect()
         };
+        if copies > 0 {
+            out.push(Row::Copies(copies, self.show_copies, where_.join(", ")));
+        }
         // Shaders: one choice, "Off" first.
         if self.class == cf::CLASS_SHADERS && self.show == Show::All && q.is_empty() && !out.is_empty() {
             out.insert(0, Row::ShaderOff);
@@ -2507,6 +2546,32 @@ impl AddonsView {
                 }
                 Row::Section(title, hint) => self.section_row(title, hint, cx),
                 Row::ShaderOff => self.shader_off_row(cx),
+                Row::Copies(n, shown, at) => h_flex()
+                    .h(rems(ROW_H))
+                    .w_full()
+                    .px_3()
+                    .gap_3()
+                    .child(widgets::caption(
+                        format!(
+                            "{n} pack{} also in {at}, which loads {} into every world",
+                            if *n == 1 { "" } else { "s" },
+                            if *n == 1 { "it" } else { "them" }
+                        ),
+                        cx,
+                    ))
+                    .child(
+                        Button::new("show-copies")
+                            .small()
+                            .ghost()
+                            .icon(if *shown { IconName::ChevronUp } else { IconName::ChevronDown })
+                            .label(if *shown { "Hide" } else { "Show" })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_copies = !this.show_copies;
+                                this.ensure_rows();
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
                 Row::LooseHeader(n) => h_flex()
                     .h(rems(ROW_H))
                     .w_full()
@@ -2575,7 +2640,7 @@ impl AddonsView {
         match self.table.rows.get(ix)? {
             Row::Addon(i) => Some(inst.addons.get(*i)?.file_name.clone()),
             Row::Loose(name) => Some(name.clone()),
-            Row::LooseHeader(_) | Row::Section(..) | Row::ShaderOff => None,
+            Row::LooseHeader(_) | Row::Section(..) | Row::ShaderOff | Row::Copies(..) => None,
         }
     }
 
