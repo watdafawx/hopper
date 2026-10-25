@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -143,6 +143,13 @@ the address the player typed and passes them to that server's own port.
   `unknown_server`); per server in `.hopper-route.json` in its folder.
 - Servers see players as coming from 127.0.0.1 (no proxy forwarding yet).
 
+## Files explorer and Settings pages (0.6.0)
+
+- Files works like a file explorer: Back / Forward / Up (also Alt+arrows and the mouse side buttons), a path you can type, a folder tree, list or tiles with image thumbnails, and a preview pane (text, images, a jar's mod name and contents).
+- Double-click opens by type: text in the editor, images in a viewer, zips and jars browsed like folders (nothing is unpacked), anything else downloads.
+- Right-click menu, Ctrl+X / C / V across folders, drag onto a folder, the tree or the path to move (Ctrl copies), drop files from your PC onto a folder to upload into it, drag on empty space to select. Chrome and Edge can drag a file out to the desktop.
+- Settings is one page per section (General, Players & access, World, Network & address, Memory & Java, Start files, All properties), one column each, with search across all pages and a server icon picker.
+
 ## Mods like Hopper desktop (0.5.0)
 
 - Mods tab: unknown jars are identified on CurseForge and Modrinth on their own (names, icons, links), and updates are checked on both (Modrinth needs no key). Filter chips: On, Off, Only yours, Client-only, Updates, Unknown.
@@ -242,6 +249,7 @@ All under `/api/v1`. Browsers use the session cookie and must send
 | `GET` / `PUT /router` `{enabled, port, domain, unknown_server}`, `POST /router/check` | server addresses: settings (owner), DNS and port check |
 | `GET` / `PUT /servers/{id}/address` `{addresses, sleep_after_minutes}`, `POST .../address/move-port` | a server's addresses and sleep |
 | `GET /servers/{id}/mods/versions?file=`, `GET .../mods/changelog?project=&file=`, `POST .../mods/version` `{file, file_id}` (job), `POST .../mods/lock` `{file, locked}`, `GET .../mods/config?file=`, `POST .../mods/config-reset` `{file}` | a mod's details |
+| `GET /fs/{id}/zip-list?path=&inner=`, `GET /fs/{id}/zip-entry?path=&entry=[&inline=1]` | inside a zip or jar |
 | `GET /servers/{id}/mod-backups`, `POST .../mod-backups/restore` `{when, name?}`, `POST .../mod-backups/delete` `{when}` | `.hopper-backups` |
 | `GET` / `PUT /settings/curseforge` `{key}` | CurseForge key (set: owner) |
 | `POST /mcp` | Model Context Protocol (JSON-RPC) |

@@ -17,6 +17,7 @@ mod config;
 mod discovery;
 mod files;
 mod fs_api;
+mod fs_zip;
 mod host;
 mod manage_api;
 mod mcp;

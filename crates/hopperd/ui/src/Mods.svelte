@@ -215,7 +215,7 @@
   {#if sub === 'backups'}
     <ModBackups {server} onChanged={() => { load(); loadBackupCount(); }} />
   {:else}
-    <div class="row wrap bar">
+    <div class="row wrap toolbar">
       {#each CHIPS as [k, label] (k)}
         {#if k === 'all' || counts[k]}<button class="fchip" class:on={chip === k} onclick={() => (chip = k)}>{label} {counts[k]}</button>{/if}
       {/each}
@@ -293,7 +293,7 @@
   .subtabs { display: flex; align-items: center; gap: 4px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
   .subtabs > button:not(.chip) { padding: 4px 12px; border-radius: 99px; color: var(--subtle); border: 1px solid transparent; }
   .subtabs > button.on { background: var(--raise); color: var(--text); border-color: var(--line2); font-weight: 600; }
-  .bar { gap: 6px; }
+  .toolbar { gap: 6px; }
   .fchip { padding: 3px 10px; border-radius: 99px; border: 1px solid var(--line2); color: var(--subtle); font-size: 12px; }
   .fchip.on { background: var(--raise); color: var(--text); border-color: #f9731688; }
   .meta { gap: 4px; }
