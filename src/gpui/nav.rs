@@ -20,9 +20,8 @@ pub enum Loc {
     Library(Option<PathBuf>, InstTab, Option<u64>),
     /// The type shown, and the project open.
     Browse(u32, Option<u64>),
-    /// A server and its tab.
+    /// A server and its tab (Sync among them).
     Servers(Option<PathBuf>, usize),
-    Sync(Option<PathBuf>),
     Settings(Category),
 }
 
@@ -32,7 +31,6 @@ impl Loc {
             Loc::Library(..) => Page::Library,
             Loc::Browse(..) => Page::Browse,
             Loc::Servers(..) => Page::Servers,
-            Loc::Sync(_) => Page::Sync,
             Loc::Settings(_) => Page::Settings,
         }
     }

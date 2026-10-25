@@ -195,6 +195,8 @@ const ENTRIES: &[Entry] = &[
     e(C::Java, "java", "Java", "The Java instances use unless they pick one.", "jdk jre runtime path"),
     e(C::Java, "java-args", "Java arguments", "Extra arguments for instances that leave theirs blank.", "jvm flags aikar g1 zgc generator presets xms xmx graalvm"),
     e(C::Java, "get-java", "Get Java", "Downloads into Hopper's own folder; they show in every Java list. GraalVM comes under Oracle's free terms (GraalVM Free Terms and Conditions).", "download temurin graalvm jdk"),
+    e(C::Servers, "server-tools", "Server tools", "The Servers page, server buttons on instances, and Peers. Off hides them; Servers stays as a quiet item in the top bar unless you also hide that.", "servers host hosting panel peers opt in turn on off hide"),
+    e(C::Servers, "hide-servers", "Hide the Servers item completely", "With server tools off, the top bar shows only Library and Browse. Ctrl+K and the ⋯ menus still reach servers.", "servers top bar nav hide"),
     e(C::Servers, "servers-root", "Server packs", "The folder your server folders are in (a shared folder for a server on another PC).", "folder rig path directory"),
     e(C::Servers, "hosted-root", "Hosted servers", "Servers Hopper runs on this PC live here.", "folder host path directory"),
     e(C::Servers, "server-host", "Server host", "The server PC's name or address, for status pings.", "hostname ping address rig"),
@@ -1230,7 +1232,23 @@ impl SettingsPage {
         };
         let configured =
             !s.panel_url.trim().is_empty() && if kind == "hopperd" { self.hopperd_paired } else { self.panel_key_saved };
+        let tools = self.store.read(cx).server_tools();
+        let mut tool_rows = vec![Row::new("server-tools").control(self.switch(
+            "server-tools",
+            tools,
+            |st, v| st.server_tools = Some(v),
+            cx,
+        ))];
+        if !tools {
+            tool_rows.push(Row::new("hide-servers").control(self.switch(
+                "hide-servers",
+                s.hide_servers_item,
+                |st, v| st.hide_servers_item = v,
+                cx,
+            )));
+        }
         vec![
+            Block::card(None, tool_rows),
             Block::card(
                 Some("Server packs and hosting"),
                 vec![

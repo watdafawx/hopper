@@ -3,7 +3,7 @@
 
 use crate::browse::{BrowseEvent, BrowseView};
 use crate::library::{LibraryEvent, LibraryView};
-use crate::servers::{ServersEvent, ServersView, SyncPage};
+use crate::servers::{ServersEvent, ServersView};
 use crate::settings_page::SettingsPage;
 use crate::store::{Store, StoreEvent};
 use crate::widgets;
@@ -88,20 +88,19 @@ pub fn bind_keys(cx: &mut App) {
 pub enum Page {
     Library,
     Browse,
+    /// Servers, each with its Sync tab (once a page of its own).
     Servers,
-    Sync,
     Settings,
 }
 
 impl Page {
-    pub(crate) const ALL: [Page; 4] = [Page::Library, Page::Browse, Page::Servers, Page::Sync];
+    pub(crate) const ALL: [Page; 3] = [Page::Library, Page::Browse, Page::Servers];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Page::Library => "Library",
             Page::Browse => "Browse",
             Page::Servers => "Servers",
-            Page::Sync => "Server sync",
             Page::Settings => "Settings",
         }
     }
@@ -112,13 +111,16 @@ impl Page {
             Page::Library => "library",
             Page::Browse => "browse",
             Page::Servers => "servers",
-            Page::Sync => "sync",
             Page::Settings => "settings",
         }
     }
 
     /// A start page from settings (Settings itself isn't one).
     pub(crate) fn from_key(key: &str) -> Option<Page> {
+        // Server sync is a server's Sync tab now.
+        if key == "sync" {
+            return Some(Page::Servers);
+        }
         Self::ALL.into_iter().find(|p| p.key() == key)
     }
 
@@ -127,7 +129,6 @@ impl Page {
             Page::Library => IconName::LibraryBig,
             Page::Browse => IconName::Compass,
             Page::Servers => IconName::Server,
-            Page::Sync => IconName::ArrowLeftRight,
             Page::Settings => IconName::Settings,
         }
     }
@@ -139,7 +140,6 @@ pub struct AppView {
     pub(crate) library: Entity<LibraryView>,
     pub(crate) browse: Entity<BrowseView>,
     servers: Entity<ServersView>,
-    pub(crate) sync: Entity<SyncPage>,
     settings: Entity<SettingsPage>,
     focus: FocusHandle,
     /// The tasks button and its popover.
@@ -164,7 +164,6 @@ impl AppView {
         let library = cx.new(|cx| LibraryView::new(store.clone(), window, cx));
         let browse = cx.new(|cx| BrowseView::new(store.clone(), window, cx));
         let servers = cx.new(|cx| ServersView::new(store.clone(), window, cx));
-        let sync = cx.new(|cx| SyncPage::new(store.clone(), window, cx));
         let settings = cx.new(|cx| SettingsPage::new(store.clone(), window, cx));
         let tasks = cx.new(|cx| crate::tasks::TasksButton::new(store.clone(), cx));
         let peek = library.read(cx).peek_view(cx);
@@ -174,7 +173,6 @@ impl AppView {
             cx.observe(&peek, |this, _, cx| this.track(cx)),
             cx.observe(&browse, |this, _, cx| this.track(cx)),
             cx.observe(&servers, |this, _, cx| this.track(cx)),
-            cx.observe(&sync, |this, _, cx| this.track(cx)),
             cx.observe(&settings, |this, _, cx| this.track(cx)),
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.observe(&tasks, |_, _, cx| cx.notify()),
@@ -248,8 +246,7 @@ impl AppView {
                 StoreEvent::ShowServer { root, compare } => {
                     let root = root.clone();
                     if *compare {
-                        this.sync.update(cx, |p, cx| p.compare(root, cx));
-                        this.go(Page::Sync, cx);
+                        this.open_sync(Some(root), cx);
                     } else {
                         this.servers.update(cx, |s, cx| s.pick(root, cx));
                         this.go(Page::Servers, cx);
@@ -299,8 +296,7 @@ impl AppView {
                 }
                 LibraryEvent::Compare(server) => {
                     let server = server.clone();
-                    this.sync.update(cx, |p, cx| p.compare(server, cx));
-                    this.go(Page::Sync, cx);
+                    this.open_sync(Some(server), cx);
                 }
                 LibraryEvent::BrowsePacks => {
                     this.browse
@@ -309,12 +305,15 @@ impl AppView {
                 }
             }),
             cx.subscribe(&servers, |this, _, event, cx| match event {
-                ServersEvent::Compare(root) => {
-                    let root = root.clone();
-                    this.sync.update(cx, |p, cx| p.compare(root, cx));
-                    this.go(Page::Sync, cx);
+                ServersEvent::OpenSettings(id) => this.open_settings_at(id, cx),
+                // "Not now" on the servers intro: back where the user was.
+                ServersEvent::Leave => {
+                    if this.history.can_step(true) {
+                        this.step(true, cx);
+                    } else {
+                        this.go(Page::Library, cx);
+                    }
                 }
-                ServersEvent::OpenSettings => this.open_settings_at("panel-url", cx),
             }),
             cx.subscribe(&browse, |this, _, event, cx| match event {
                 BrowseEvent::OpenInstance(root) => {
@@ -340,7 +339,6 @@ impl AppView {
             library,
             browse,
             servers,
-            sync,
             settings,
             focus: cx.focus_handle(),
             tasks,
@@ -420,7 +418,8 @@ impl AppView {
         view
     }
 
-    /// `--page browse|servers|sync`, `--search text` and `--server name`,
+    /// `--page browse|servers|sync`, `--search text` and `--server name`
+    /// (its Sync tab),
     /// for scripted runs; a curseforge:// link opens in Browse.
     fn apply_args(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let args: Vec<String> = std::env::args().collect();
@@ -457,7 +456,7 @@ impl AppView {
                                 .find(|s| s.name.eq_ignore_ascii_case(&name))
                                 .map(|s| s.root.clone());
                             if let Some(root) = root {
-                                this.sync.update(cx, |p, cx| p.compare(root, cx));
+                                this.open_sync(Some(root), cx);
                                 true
                             } else {
                                 false
@@ -579,7 +578,7 @@ impl AppView {
             let page = match p.as_str() {
                 "browse" => Page::Browse,
                 "servers" => Page::Servers,
-                "sync" => Page::Sync,
+                "sync" => return self.open_sync(None, cx),
                 "settings" => Page::Settings,
                 _ => Page::Library,
             };
@@ -657,9 +656,7 @@ impl AppView {
     }
 
     pub(crate) fn go(&mut self, page: Page, cx: &mut Context<Self>) {
-        if self.page == Page::Browse && page != Page::Browse {
-            self.browse.update(cx, |b, _| b.hidden());
-        }
+        self.leaving(page, cx);
         self.page = page;
         if page == Page::Browse {
             let fallback = self.library.read(cx).drop_target(cx).0;
@@ -668,6 +665,19 @@ impl AppView {
         self.remember_page(cx);
         self.track(cx);
         cx.notify();
+    }
+
+    /// The page shown is about to change to `page`: the one left slows down.
+    fn leaving(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page == Page::Browse && page != Page::Browse {
+            self.browse.update(cx, |b, _| b.hidden());
+        }
+        if self.page == Page::Servers && page != Page::Servers {
+            self.servers.update(cx, |s, cx| s.hidden(cx));
+        }
+        if page == Page::Servers && self.page != Page::Servers {
+            self.servers.update(cx, |s, cx| s.shown(cx));
+        }
     }
 
     /// Saves the page shown, to start on it next time (not Settings).
@@ -702,7 +712,6 @@ impl AppView {
                 let (r, t) = self.servers.read(cx).nav_loc();
                 Loc::Servers(r, t)
             }
-            Page::Sync => Loc::Sync(self.sync.read(cx).nav_loc(cx)),
             Page::Settings => Loc::Settings(self.settings.read(cx).category()),
         };
         self.history.saw(loc);
@@ -733,9 +742,7 @@ impl AppView {
         use crate::nav::Loc;
         let Some(loc) = self.history.step(back) else { return };
         if self.page != loc.page() {
-            if self.page == Page::Browse {
-                self.browse.update(cx, |b, _| b.hidden());
-            }
+            self.leaving(loc.page(), cx);
             self.page = loc.page();
             if self.page == Page::Browse {
                 let fallback = self.library.read(cx).drop_target(cx).0;
@@ -752,8 +759,6 @@ impl AppView {
                 }
             }
             Loc::Servers(r, t) => self.servers.update(cx, |s, cx| s.nav_restore(r, t, cx)),
-            Loc::Sync(Some(r)) => self.sync.update(cx, |s, cx| s.compare(r, cx)),
-            Loc::Sync(None) => {}
             Loc::Settings(c) => self.settings.update(cx, |s, cx| s.show(c, cx)),
         }
         self.track(cx);
@@ -785,6 +790,14 @@ impl AppView {
     /// Shows a server on the Servers page.
     pub(crate) fn open_server(&mut self, root: std::path::PathBuf, cx: &mut Context<Self>) {
         self.servers.update(cx, |s, cx| s.pick(root, cx));
+        self.go(Page::Servers, cx);
+    }
+
+    /// A server's Sync tab on the Servers page: the server against its
+    /// pack (the picked server's when `root` is None). What the Server
+    /// sync page was.
+    pub(crate) fn open_sync(&mut self, root: Option<std::path::PathBuf>, cx: &mut Context<Self>) {
+        self.servers.update(cx, |s, cx| s.open_sync(root, cx));
         self.go(Page::Servers, cx);
     }
 
@@ -1070,6 +1083,9 @@ impl AppView {
         let version = self.version_chip(cx);
         // Settings sits apart from the page tabs, at the trailing edge.
         let selected = Page::ALL.iter().position(|p| *p == self.page);
+        // Server tools off: Servers is a quiet word (or gone, if asked).
+        let tools = self.store.read(cx).server_tools();
+        let hide_servers = !tools && self.store.read(cx).settings().hide_servers_item;
         let theme = cx.theme();
         // The tools sit in an outlined track.
         let (line, radius) = (theme.border, px(10.));
@@ -1115,13 +1131,15 @@ impl AppView {
                         .h_full()
                         .gap_0p5()
                         .occlude()
-                        .children(Page::ALL.iter().enumerate().map(|(ix, p)| {
+                        .children(Page::ALL.iter().enumerate().filter(|(_, p)| !(hide_servers && **p == Page::Servers)).map(|(ix, p)| {
                             // The page you're on: full-strength text, an
                             // accent icon and an underline.
                             let page = *p;
                             let active = selected == Some(ix);
+                            let quiet = page == Page::Servers && !tools;
                             let theme = cx.theme();
-                            let (accent, muted, fg) = (theme.primary, theme.muted_foreground, theme.foreground);
+                            let (accent, fg) = (theme.primary, theme.foreground);
+                            let muted = if quiet { theme.muted_foreground.opacity(0.6) } else { theme.muted_foreground };
                             h_flex()
                                 .id(SharedString::from(format!("nav:{}", p.label())))
                                 .h(px(30.))
@@ -1137,8 +1155,13 @@ impl AppView {
                                         r.text_color(muted).hover(|s| widgets::row_hover(s.text_color(fg), cx))
                                     }
                                 })
-                                .child(Icon::new(p.icon()).small().when(active, |i| i.text_color(accent)))
+                                .child(Icon::new(p.icon()).small().when(active && !quiet, |i| i.text_color(accent)))
                                 .child(p.label())
+                                .when(quiet && !dialog, |r| {
+                                    r.tooltip(|w, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new("Run a server for one of your packs").build(w, cx)
+                                    })
+                                })
                                 .on_click(cx.listener(move |this, _, window, cx| this.nav(page, window, cx)))
                         })),
                 )
@@ -1223,7 +1246,6 @@ impl Render for AppView {
             Page::Library => self.library.clone().into(),
             Page::Browse => self.browse.clone().into(),
             Page::Servers => self.servers.clone().into(),
-            Page::Sync => self.sync.clone().into(),
             Page::Settings => self.settings.clone().into(),
         };
         let page = match self.page {
@@ -1261,7 +1283,7 @@ impl Render for AppView {
                 this.nav(Page::Browse, window, cx)
             }))
             .on_action(cx.listener(|this, _: &GoServers, _, cx| this.go(Page::Servers, cx)))
-            .on_action(cx.listener(|this, _: &GoSync, _, cx| this.go(Page::Sync, cx)))
+            .on_action(cx.listener(|this, _: &GoSync, _, cx| this.open_sync(None, cx)))
             .on_action(cx.listener(|this, _: &PrevInstance, _, cx| {
                 this.go(Page::Library, cx);
                 this.library.update(cx, |l, cx| l.step_instance(-1, cx));

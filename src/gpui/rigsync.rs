@@ -28,6 +28,7 @@ use hopper::serverpack::Annotation;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 const ROW_H: f32 = 3.5;
 /// The mod name's least width in rem: other cells give way first.
@@ -131,6 +132,9 @@ pub struct SyncPanel {
     control: Entity<crate::server_control::ServerControl>,
     /// Inside an instance, whose header already shows the pack.
     in_instance: bool,
+    /// The Sync tab of a server's page, whose header already shows the
+    /// server and its start / stop.
+    in_server_page: bool,
     server: Option<PathBuf>,
     diff: Option<Result<Vec<DiffEntry>, String>>,
     note: Option<Annotation>,
@@ -250,6 +254,7 @@ impl SyncPanel {
             history,
             control,
             in_instance: false,
+            in_server_page: false,
             server: None,
             diff: None,
             note: None,
@@ -295,6 +300,36 @@ impl SyncPanel {
 
     pub fn set_in_instance(&mut self, on: bool) {
         self.in_instance = on;
+    }
+
+    /// Shown as a server page's Sync tab.
+    pub fn set_in_server_page(&mut self, on: bool) {
+        self.in_server_page = on;
+    }
+
+    /// The instances to pair a server with: a picker that pairs on pick.
+    fn pair_picker(&self, server: &Path, label: String, current: Option<&Path>, cx: &App) -> AnyElement {
+        let store = self.store.read(cx);
+        let roots: Vec<PathBuf> = store.instances().iter().map(|i| i.root.clone()).collect();
+        let items = store
+            .instances()
+            .iter()
+            .map(|i| (i.name.clone(), current == Some(i.root.as_path())))
+            .collect();
+        let (store, server) = (self.store.clone(), server.to_path_buf());
+        widgets::picker(
+            "sync-pair",
+            label,
+            items,
+            cx.theme().font_size,
+            Rc::new(move |ix, _, cx| {
+                if let Some(r) = roots.get(ix) {
+                    let r = r.clone();
+                    store.update(cx, |s, cx| s.set_pairing(&server, &r, cx));
+                }
+            }),
+        )
+        .into_any_element()
     }
 
     pub fn set_peek(&mut self, peek: Entity<crate::browse::BrowseView>) {
@@ -1227,12 +1262,16 @@ impl SyncPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         // Quick start / stop when a panel is set up; Servers sets one up.
-        let controls = self
-            .control
-            .read(cx)
-            .configured(cx)
+        let in_server_page = self.in_server_page;
+        let controls = (!in_server_page && self.control.read(cx).configured(cx))
             .then(|| self.control.update(cx, |c, cx| c.controls(cx)));
-        let stop_where = if controls.is_some() { "stop it here" } else { "stop it in Crafty/MCSS" };
+        // The server's page has start / stop above: the pack is what to pick.
+        let repair = in_server_page.then(|| {
+            div()
+                .w(rems(14.))
+                .child(self.pair_picker(&server.root, inst.name.clone(), Some(&inst.root), cx))
+        });
+        let stop_where = if self.control.read(cx).configured(cx) { "stop it here" } else { "stop it in Crafty/MCSS" };
         let in_instance = self.in_instance;
         let store = self.store.read(cx);
         let theme = cx.theme();
@@ -1272,7 +1311,11 @@ impl SyncPanel {
             .gap_2()
             .text_lg()
             .font_semibold()
-            .when(!in_instance, |r| {
+            .when(in_server_page, |r| {
+                r.child(div().text_sm().font_normal().text_color(theme.muted_foreground).child("Paired with"))
+                    .children(repair)
+            })
+            .when(!in_instance && !in_server_page, |r| {
                 r.child(div().truncate().child(inst.name.clone())).child(
                     Icon::new(IconName::ArrowRight)
                         .small()
@@ -1282,13 +1325,13 @@ impl SyncPanel {
             .when(in_instance, |r| {
                 r.child(Icon::new(IconName::Server).text_color(theme.muted_foreground))
             })
-            .child(div().truncate().child(server.name.clone()));
+            .when(!in_server_page, |r| r.child(div().truncate().child(server.name.clone())));
         v_flex()
             .gap_2()
             .child(
                 h_flex()
                     .gap_3()
-                    .when(!in_instance, |r| r.child(widgets::thumb(icon.as_deref(), rems(2.5), cx)))
+                    .when(!in_instance, |r| r.child(widgets::thumb(icon.as_deref(), rems(if in_server_page { 2. } else { 2.5 }), cx)))
                     .child(title)
                     .children(controls)
                     .when(
@@ -1317,38 +1360,7 @@ impl SyncPanel {
                             )
                         },
                     )
-                    .child({
-                        let lead = Button::new("update-server")
-                            .primary()
-                            .small()
-                            .icon(IconName::ServerCog)
-                            .label("Sync to server")
-                            .tooltip("Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. The server must be stopped.")
-                            .disabled(online || self.running)
-                            .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)));
-                        match inst.pack.as_ref().map(|p| p.project_id) {
-                            Some(pid) => {
-                                let (store, root) = (self.store.clone(), inst.root.clone());
-                                widgets::split(
-                                    widgets::split_lead(lead),
-                                    "update-server-notes",
-                                    widgets::Tint::Primary,
-                                    gpui_kit::component::Size::Small,
-                                    "Pack versions and changelogs",
-                                    move |_, window, cx| {
-                                        let upd = store
-                                            .read(cx)
-                                            .instance(&root)
-                                            .and_then(|i| store.read(cx).pack_update(i).cloned());
-                                        crate::versions::open(store.clone(), root.clone(), pid, true, upd, window, cx)
-                                    },
-                                    cx,
-                                )
-                                .into_any_element()
-                            }
-                            None => lead.into_any_element(),
-                        }
-                    })
+                    // Sync is the filter row's button, as on the instance's Server tab.
                     .child(
                         Button::new("rescan")
                             .ghost()
@@ -1717,7 +1729,7 @@ impl SyncPanel {
         // What Sync changes: the whole comparison, whatever the filters.
         let to_change = self.whole(cx).iter().filter(|g| Show::Needs.has(**g)).count();
         let online = self.online(cx);
-        let sync = self.in_instance.then(|| {
+        let sync = Some(()).map(|_| {
             Button::new("update-server")
                 .small()
                 .icon(IconName::ServerCog)
@@ -1873,7 +1885,8 @@ impl SyncPanel {
             .child(
                 Button::new("apply")
                     .small()
-                    .primary()
+                    // Filled only with rows ticked: else the filter row's Sync is the one.
+                    .map(|b| if n_sel > 0 { b.primary() } else { b.outline() })
                     .icon(IconName::Upload)
                     .label(if n_sel > 0 { format!("Sync to server ({n_sel})") } else { "Sync to server".to_string() })
                     .tooltip("Pushes added and updated jars to the server and removes the ones it no longer needs. Replaced and removed jars are kept in .hopper-backups.")
@@ -2592,16 +2605,20 @@ impl Render for SyncPanel {
                 .server(&root)
                 .map(|s| s.name.clone())
                 .unwrap_or_default();
+            let pick = self.pair_picker(&root, "Pair a pack…".into(), None, cx);
             return v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
-                .child(widgets::empty_state(
-                    IconName::Link,
-                    format!("{name} has no paired pack"),
-                    Some("Use Pair a pack… under it in the list to compare their mods.".into()),
-                    cx,
-                ))
+                .child(
+                    widgets::empty_state(
+                        IconName::Link,
+                        format!("{name} has no paired pack"),
+                        Some("Pick the instance this server runs, to compare and sync their mods.".into()),
+                        cx,
+                    )
+                    .child(div().w_64().child(pick)),
+                )
                 .into_any_element();
         };
         let side = self.in_instance;
@@ -2748,10 +2765,10 @@ impl Render for SyncPanel {
                 )
                 .into_any_element();
         }
+        let pad = !self.in_server_page;
         v_flex()
             .size_full()
-            .px_6()
-            .py_5()
+            .when(pad, |c| c.px_6().py_5())
             .gap_4()
             .children(header)
             .children(crash)

@@ -237,7 +237,24 @@ impl SetupWizard {
                     });
                 }
             }
+            // The servers choice sets server tools: on when any servers are
+            // picked; off for "None for now" only on a first run that hasn't
+            // chosen yet (running the setup again never hides them).
+            "Servers" if self.servers == Servers::None => {
+                if !self.preview && !s.setup_done && s.server_tools.is_none() {
+                    self.store
+                        .update(cx, |st, cx| st.update_settings(|s| s.server_tools = Some(false), cx));
+                }
+            }
+            "Servers" if self.servers == Servers::ThisPc => {
+                if !self.preview {
+                    self.store.update(cx, |st, cx| st.set_server_tools(true, cx));
+                }
+            }
             "Servers" if self.servers == Servers::OtherPc => {
+                if !self.preview {
+                    self.store.update(cx, |st, cx| st.set_server_tools(true, cx));
+                }
                 let root = Self::typed(&self.servers_root, cx);
                 let host = Self::typed(&self.server_host, cx);
                 let host = if host.is_empty() { s.server_host.clone() } else { host };
@@ -801,14 +818,14 @@ impl SetupWizard {
         let hosted = self.store.read(cx).hosted_root();
         let detail: AnyElement = match pick {
             Servers::None => note(
-                "Nothing to set up. The Servers page and Settings → Library & folders are there when you want them.",
+                "Nothing to set up. Servers stays a quiet item in the top bar: click it, or ⋯ → Host a server from this pack, when you want one.",
                 cx,
             )
             .into_any_element(),
             Servers::ThisPc => v_flex()
                 .gap_1()
                 .text_sm()
-                .child("Create a server from any instance later: open it, then ⋯ → Host a server on this PC, or + on the Servers page.")
+                .child("Create a server from any instance later: open it, then ⋯ → Host a server from this pack, or + on the Servers page.")
                 .child(note(format!("Hosted servers go in {hosted}."), cx))
                 .into_any_element(),
             Servers::OtherPc => {

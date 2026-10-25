@@ -113,8 +113,8 @@ pub enum StoreEvent {
     SessionSaved(PathBuf),
     /// Show a project's page beside an instance (a link in a changelog).
     Peek { root: PathBuf, project: u64 },
-    /// Open a server's page (`compare`: its Server sync instead), from a
-    /// menu that isn't on that page.
+    /// Open a server's page (`compare`: on its Sync tab), from a menu
+    /// that isn't on that page.
     ShowServer { root: PathBuf, compare: bool },
     /// Open an instance in the Library.
     ShowInstance(PathBuf),
@@ -264,6 +264,10 @@ pub struct Store {
     shared_sig: u64,
     /// The pair request already shown.
     asked: Option<String>,
+    /// Another Hopper asked to pair this run: a sign the user runs servers.
+    pair_asked: bool,
+    /// Modpacks (project ids) whose server files were downloaded this run.
+    server_files_got: std::collections::HashSet<u64>,
     /// Instance roots the game watcher looks for.
     watched: Arc<Mutex<Vec<PathBuf>>>,
     /// Translated changelogs and descriptions.
@@ -402,6 +406,8 @@ impl Store {
             peer_error: None,
             shared_sig: 0,
             asked: None,
+            pair_asked: false,
+            server_files_got: Default::default(),
             watched,
             tx,
             wake,
@@ -882,6 +888,7 @@ impl Store {
             Msg::ServersChanged => {
                 self.discover_servers();
                 self.server_rev += 1;
+                self.settle_server_tools(cx);
             }
             Msg::Javas(j) => self.javas = Some(j),
             Msg::SelfUpdate(u) => self.self_update = Some(u),
@@ -937,6 +944,7 @@ impl Store {
                 for s in self.servers.clone() {
                     self.ping(&s);
                 }
+                self.settle_server_tools(cx);
             }
             Msg::SessionSaved(root) => cx.emit(StoreEvent::SessionSaved(root)),
             Msg::Nothing => {}
@@ -2242,6 +2250,7 @@ impl Store {
         match hub.pending() {
             Some(req) if self.asked.as_deref() != Some(req.code.as_str()) => {
                 self.asked = Some(req.code.clone());
+                self.pair_asked = true;
                 cx.emit(StoreEvent::PairRequest(req));
             }
             None => self.asked = None,
@@ -2807,6 +2816,86 @@ impl Store {
         self.update_settings(
             |st| {
                 st.pairings.insert(k, v);
+                // Pairing is using server tools.
+                st.server_tools = Some(true);
+            },
+            cx,
+        );
+    }
+
+    /// Whether server tools show (the Servers page, server buttons on
+    /// instances, Peers): the user's choice, else on when anything
+    /// server-related is set up and off for a fresh install.
+    pub fn server_tools(&self) -> bool {
+        self.settings.server_tools.unwrap_or_else(|| self.server_tools_used())
+    }
+
+    /// Servers, a panel, a servers folder, pairings or peers are set up.
+    fn server_tools_used(&self) -> bool {
+        let s = &self.settings;
+        !self.servers.is_empty()
+            || !s.servers_root.trim().is_empty()
+            || !s.panel_url.trim().is_empty()
+            || !s.pairings.is_empty()
+            || s.peer_sync
+    }
+
+    /// Not chosen yet but in use: remembered as on, so it stays on if the
+    /// servers later go.
+    fn settle_server_tools(&mut self, cx: &mut Context<Self>) {
+        if self.settings.server_tools.is_none() && self.server_tools_used() {
+            self.update_settings(|st| st.server_tools = Some(true), cx);
+        }
+    }
+
+    /// Turns server tools on or off (the Settings switch, and every server
+    /// action used while they are off).
+    pub fn set_server_tools(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_settings(|st| st.server_tools = Some(on), cx);
+    }
+
+    /// Notes that a modpack's server files were downloaded (a sign for the
+    /// instance's server hint).
+    pub fn note_server_files(&mut self, project_id: u64) {
+        if project_id != 0 {
+            self.server_files_got.insert(project_id);
+        }
+    }
+
+    /// Whether the "Running a server for this pack?" hint shows for an
+    /// instance: server tools are off, it wasn't dismissed, and there is a
+    /// clear sign: its server files were downloaded, a server hosted here
+    /// is for it, or another Hopper asked to pair.
+    pub fn server_hint(&self, inst: &Instance) -> bool {
+        if self.server_tools() {
+            return false;
+        }
+        let key = inst.root.to_string_lossy();
+        if self.settings.server_hint_dismissed.iter().any(|k| *k == key) {
+            return false;
+        }
+        let files = inst
+            .pack
+            .as_ref()
+            .is_some_and(|p| self.server_files_got.contains(&p.project_id));
+        let name = inst.name.to_lowercase();
+        let hosted = self.server_of(&inst.root).is_some_and(|s| self.is_hosted(&s.root))
+            || (!name.is_empty()
+                && self
+                    .servers
+                    .iter()
+                    .any(|s| self.is_hosted(&s.root) && s.name.to_lowercase().contains(&name)));
+        files || hosted || self.pair_asked
+    }
+
+    /// Hides an instance's server hint for good.
+    pub fn dismiss_server_hint(&mut self, root: &Path, cx: &mut Context<Self>) {
+        let key = root.to_string_lossy().into_owned();
+        self.update_settings(
+            |st| {
+                if !st.server_hint_dismissed.contains(&key) {
+                    st.server_hint_dismissed.push(key);
+                }
             },
             cx,
         );

@@ -178,7 +178,7 @@ pub enum LibraryEvent {
     Find { root: PathBuf, text: String },
     /// Show a project's page in Browse, installing into `root`.
     OpenProject { root: PathBuf, project: u64 },
-    /// Compare a server with its pack in Server sync.
+    /// Compare a server with its pack (its Sync tab on the Servers page).
     Compare(PathBuf),
 }
 
@@ -1439,6 +1439,58 @@ impl LibraryView {
     // ---- detail --------------------------------------------------------
 
     /// "N files to download by hand", with the list and a retry.
+    /// With server tools off, once per instance when there's a sign the
+    /// user runs a server for it: an offer to set them up.
+    fn server_hint(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.store.read(cx).server_hint(inst) {
+            return None;
+        }
+        let (r1, r2, r3) = (inst.root.clone(), inst.root.clone(), inst.root.clone());
+        Some(
+            widgets::notice_bar(cx.theme().info, IconName::Server, cx)
+                .mx_6()
+                .mt_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .child("Running a server for this pack? Hopper can host it, keep its mods in step and start it from here."),
+                )
+                .child(
+                    Button::new("server-hint-go")
+                        .small()
+                        .outline()
+                        .label("Set it up")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                            this.select(r1.clone(), cx);
+                            this.set_tab(InstTab::Server, cx);
+                        })),
+                )
+                .child(
+                    Button::new("server-hint-later")
+                        .small()
+                        .ghost()
+                        .label("Not now")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.store.update(cx, |s, cx| s.dismiss_server_hint(&r2, cx))
+                        })),
+                )
+                .child(
+                    Button::new("server-hint-close")
+                        .small()
+                        .ghost()
+                        .icon(IconName::X)
+                        .tooltip("Don't show this again for this pack")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.store.update(cx, |s, cx| s.dismiss_server_hint(&r3, cx))
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn pending_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
         let pending = self.store.read(cx).pending(&inst.root).to_vec();
         if pending.is_empty() {
@@ -1614,6 +1666,9 @@ impl LibraryView {
         });
         let can_pair = paired.is_none() && !store.servers().is_empty();
         let on_server_tab = self.tab == InstTab::Server;
+        // Server tools off: no server button (the ⋯ menu still has them).
+        let paired = paired.filter(|_| store.server_tools());
+        let can_pair = can_pair && store.server_tools();
         let sync_to: Option<AnyElement> = match paired {
             Some((sroot, name, players)) => {
                 let (dot, word, reason) = self.server_state(&sroot, cx);
@@ -2206,7 +2261,9 @@ impl LibraryView {
                     })
                 })
         });
-        let manage = MANAGE.iter().map(|t| {
+        // Peers is a server tool: hidden with them off (unless it's open).
+        let tools = self.store.read(cx).server_tools();
+        let manage = MANAGE.iter().filter(|t| tools || **t != InstTab::Peers || self.tab == InstTab::Peers).map(|t| {
             let (tab, active) = (*t, *t == self.tab);
             div()
                 .id(SharedString::from(format!("inst-manage:{}", t.key())))
@@ -2360,6 +2417,7 @@ impl LibraryView {
             .map(|s| (s.root.clone(), s.name.clone()))
             .collect();
         let items = servers.iter().map(|(_, n)| (n.clone(), false)).collect();
+        let no_servers = servers.is_empty();
         let (store, view) = (self.store.clone(), cx.entity());
         let pick = std::rc::Rc::new(move |ix: usize, _: &mut Window, cx: &mut App| {
             if let Some((s, _)) = servers.get(ix) {
@@ -2368,6 +2426,33 @@ impl LibraryView {
                 view.update(cx, |v, cx| v.want_tab_images(cx));
             }
         });
+        // No servers yet: host one from this pack instead.
+        if no_servers {
+            let (store, root) = (self.store.clone(), self.selected.clone());
+            return v_flex()
+                .size_full()
+                .justify_center()
+                .child(
+                    widgets::empty_state(
+                        IconName::HardDrive,
+                        "No servers yet",
+                        Some("Host one on this PC from this pack, or add your servers in Settings › Servers.".into()),
+                        cx,
+                    )
+                    .child(
+                        Button::new("server-tab-host")
+                            .small()
+                            .primary()
+                            .icon(IconName::Plus)
+                            .label("Host a server from this pack…")
+                            .on_click(move |_, window, cx| {
+                                store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                                crate::host_dialog::open(store.clone(), root.clone(), window, cx)
+                            }),
+                    ),
+                )
+                .into_any_element();
+        }
         v_flex()
             .size_full()
             .justify_center()
@@ -2375,7 +2460,7 @@ impl LibraryView {
                 widgets::empty_state(
                     IconName::HardDrive,
                     "No server paired",
-                    Some("This pack isn't paired with a rig server yet.".into()),
+                    Some("This pack isn't paired with a server yet.".into()),
                     cx,
                 )
                 .child(div().w_64().child(widgets::picker(
@@ -2468,6 +2553,7 @@ impl LibraryView {
         }
         self.want_size(&inst.root, cx);
         let header = self.header(&inst, cx);
+        let hint = self.server_hint(&inst, cx);
         let pending = self.pending_banner(&inst, cx);
         let tabs = self.tabs(&inst, cx);
         let pack_tabs = self.pack_tabs(&inst, cx);
@@ -2479,6 +2565,7 @@ impl LibraryView {
                 id("detail", &inst.root),
                 div().flex_none().child(header),
             ))
+            .children(hint)
             .children(pending)
             .child(tabs)
             .children(pack_tabs)
@@ -2723,22 +2810,40 @@ fn instance_menu(
             .icon(IconName::Share2)
             .on_click(move |_, window, cx| crate::dialogs::open_share(s.clone(), r.clone(), window, cx))
     })
-    .when_some(server_pack.clone(), |m, (pid, fid, name)| {
-        let s = st();
-        m.item(PopupMenuItem::new("Download server pack…").icon(IconName::Server).on_click(
-            move |_, _, cx| crate::dialogs::save_server_pack(s.clone(), pid, fid, name.clone(), cx),
-        ))
-    })
+    // Always here, server tools on or off: using one turns them on.
+    .separator()
+    .label("Server")
     .item({
         let (s, r) = (st(), r.clone());
-        // A pack with a server pack builds from it.
-        PopupMenuItem::new(if server_pack.is_some() {
-            "Host a server from its server pack…"
-        } else {
-            "Host a server on this PC…"
-        })
-        .icon(IconName::Server)
-        .on_click(move |_, window, cx| crate::host_dialog::open(s.clone(), Some(r.clone()), window, cx))
+        // A pack with a server pack builds from it (the dialog says so).
+        PopupMenuItem::new("Host a server from this pack…")
+            .icon(IconName::Server)
+            .on_click(move |_, window, cx| {
+                s.update(cx, |s, cx| s.set_server_tools(true, cx));
+                crate::host_dialog::open(s.clone(), Some(r.clone()), window, cx)
+            })
+    })
+    .item({
+        let (v, s) = vr();
+        let st2 = st();
+        PopupMenuItem::new("Pair with a server…")
+            .icon(IconName::ArrowLeftRight)
+            .on_click(move |_, _, cx| {
+                st2.update(cx, |st, cx| st.set_server_tools(true, cx));
+                v.update(cx, |this, cx| {
+                    this.select(s.clone(), cx);
+                    this.set_tab(InstTab::Server, cx);
+                })
+            })
+    })
+    .when_some(server_pack.clone(), |m, (pid, fid, name)| {
+        let s = st();
+        m.item(PopupMenuItem::new("Download server pack…").icon(IconName::Download).on_click(
+            move |_, _, cx| {
+                s.update(cx, |s, _| s.note_server_files(pid));
+                crate::dialogs::save_server_pack(s.clone(), pid, fid, name.clone(), cx)
+            },
+        ))
     })
     .separator()
     .item({

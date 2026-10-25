@@ -482,6 +482,21 @@ pub fn chip(color: Hsla) -> gpui_kit::component::tag::Tag {
         .rounded(px(crate::theme::RADIUS))
 }
 
+/// A tinted bar across a page with an icon at its start, for a notice or
+/// an offer (`color`: info blue, warning…); add its text and buttons.
+pub fn notice_bar(color: Hsla, icon: IconName, cx: &App) -> Div {
+    let theme = cx.theme();
+    h_flex()
+        .px_4()
+        .py_2()
+        .gap_3()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(color.opacity(0.3))
+        .bg(color.opacity(0.08))
+        .child(Icon::new(icon).small().flex_none().text_color(color))
+}
+
 /// A small round status dot (a server's state: green running, grey
 /// stopped, red crashed).
 pub fn status_dot(color: Hsla) -> Div {

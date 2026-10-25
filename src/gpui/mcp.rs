@@ -309,7 +309,14 @@ fn key_name(name: &str) -> Option<&'static str> {
 /// `{tab, instance, view, search, server}`, like the dev arguments.
 fn navigate(app: &mut AppView, v: &Value, window: &mut Window, cx: &mut Context<AppView>) {
     let s = |k: &str| v[k].as_str().map(str::to_string);
-    if let Some(tab) = s("tab") {
+    // Server sync is a server's Sync tab now: "sync" still goes there.
+    let sync_tab = s("tab").is_some_and(|t| {
+        let t = t.to_lowercase().replace(' ', "");
+        t == "sync" || t == "serversync"
+    });
+    if sync_tab {
+        app.open_sync(None, cx);
+    } else if let Some(tab) = s("tab") {
         let page = std::iter::once(Page::Settings)
             .chain(Page::ALL)
             .into_iter()
@@ -356,8 +363,7 @@ fn navigate(app: &mut AppView, v: &Value, window: &mut Window, cx: &mut Context<
             .find(|s| s.name.to_lowercase().contains(&name))
             .map(|s| s.root.clone());
         if let Some(root) = root {
-            app.sync.update(cx, |p, cx| p.compare(root, cx));
-            app.go(Page::Sync, cx);
+            app.open_sync(Some(root), cx);
         }
     }
 }

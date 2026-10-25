@@ -842,10 +842,13 @@ impl BrowseView {
                     let (s1, f1, n1) = (store.clone(), files.clone(), name.clone());
                     let (s2, f2, n2) = (store.clone(), files.clone(), name.clone());
                     let (s3, p3) = (store.clone(), pack.clone());
+                    let pid = pack.id;
+                    // Hosting is using server tools: it turns them on.
                     menu.item(
                         PopupMenuItem::new("Download the server pack…")
                             .icon(IconName::Download)
                             .on_click(move |_, _, cx| {
+                                s1.update(cx, |s, _| s.note_server_files(pid));
                                 crate::dialogs::save_server_files(s1.clone(), f1.clone(), n1.clone(), cx)
                             }),
                     )
@@ -853,6 +856,7 @@ impl BrowseView {
                         PopupMenuItem::new("Host a server on this PC…")
                             .icon(IconName::Server)
                             .on_click(move |_, window, cx| {
+                                s2.update(cx, |s, cx| s.set_server_tools(true, cx));
                                 crate::host_dialog::open_for_files(s2.clone(), f2.clone(), n2.clone(), window, cx)
                             }),
                     )
@@ -861,6 +865,7 @@ impl BrowseView {
                         PopupMenuItem::new("Build a server from this pack instead…")
                             .icon(IconName::ServerCog)
                             .on_click(move |_, window, cx| {
+                                s3.update(cx, |s, cx| s.set_server_tools(true, cx));
                                 crate::host_dialog::open_for_client_pack(s3.clone(), p3.clone(), window, cx)
                             }),
                     )
@@ -887,6 +892,7 @@ impl BrowseView {
                 .on_click(move |_, window, cx| {
                     // Not a click on the card: the page stays as it is.
                     cx.stop_propagation();
+                    store.update(cx, |s, cx| s.set_server_tools(true, cx));
                     crate::host_dialog::open_for_client_pack(store.clone(), pack.clone(), window, cx)
                 })
                 .into_any_element(),

@@ -155,6 +155,15 @@ pub struct Settings {
     pub setup_done: bool,
     /// "Don't ask again" on moving Hopper's files next to its exe.
     pub data_move_declined: bool,
+    /// Server tools (the Servers page, server buttons on instances, Peers):
+    /// `None` until chosen, which reads as on when servers, a panel or
+    /// peers are set up and off for a fresh install.
+    pub server_tools: Option<bool>,
+    /// With server tools off, the quiet Servers item in the top bar goes too.
+    pub hide_servers_item: bool,
+    /// Instances (their folders) whose "Running a server for this pack?"
+    /// hint was dismissed.
+    pub server_hint_dismissed: Vec<String>,
     /// Offer to translate changelogs and descriptions into English, on this
     /// PC. Off until the user turns it on: nothing is detected, shown or
     /// downloaded before.
@@ -343,6 +352,9 @@ impl Default for Settings {
             // A new user: Hopper shows its setup on the first start.
             setup_done: false,
             data_move_declined: false,
+            server_tools: None,
+            hide_servers_item: false,
+            server_hint_dismissed: Vec::new(),
             translate: false,
             translate_always: Vec::new(),
             unknown: serde_json::Map::new(),
@@ -464,6 +476,23 @@ mod tests {
         s.panel_widths.insert("servers.list".into(), -20.0);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.panel_widths, s.panel_widths);
+    }
+
+    #[test]
+    fn server_tools_settings_load_and_round_trip() {
+        // Settings from before the switch existed: not chosen yet.
+        let old: Settings = serde_json::from_str(r#"{"servers_root":"S:\\servers"}"#).unwrap();
+        assert_eq!(old.server_tools, None);
+        assert!(!old.hide_servers_item);
+        assert!(old.server_hint_dismissed.is_empty());
+        let mut s = old;
+        s.server_tools = Some(false);
+        s.hide_servers_item = true;
+        s.server_hint_dismissed.push("C:\\inst\\ATM".into());
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.server_tools, Some(false));
+        assert!(back.hide_servers_item);
+        assert_eq!(back.server_hint_dismissed, s.server_hint_dismissed);
     }
 
     #[test]

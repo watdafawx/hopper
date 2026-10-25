@@ -99,6 +99,8 @@ pub enum InstAct {
     CheckUpdates,
     Logs,
     Host,
+    /// Pair it with a server (its Server tab).
+    Pair,
     Share,
 }
 
@@ -116,6 +118,10 @@ pub enum Act {
     ZoomOut,
     ZoomReset,
     Setup,
+    /// Host a server on this PC, from a pack picked in the dialog.
+    HostServer,
+    /// Settings › Servers, at the panel.
+    ConnectPanel,
 }
 
 /// What a pick does.
@@ -243,7 +249,8 @@ fn build(app: &AppView, cx: &App) -> (Vec<Item>, Option<SharedString>) {
         v.push(Item::new(S::Actions, IconName::FolderOpen, "Open instance folder", Target::Inst(r(), InstAct::Folder)).words("explorer files").browse());
         v.push(Item::new(S::Actions, IconName::CircleArrowUp, "Check for mod updates", Target::Inst(r(), InstAct::CheckUpdates)).words("upgrade").browse());
         v.push(Item::new(S::Actions, IconName::ScrollText, "Open logs", Target::Inst(r(), InstAct::Logs)).words("latest.log crash reports crash help crash assistant"));
-        v.push(Item::new(S::Actions, IconName::Server, "Host a server", Target::Inst(r(), InstAct::Host)).words("create server multiplayer"));
+        v.push(Item::new(S::Actions, IconName::Server, "Host a server…", Target::Inst(r(), InstAct::Host)).words("create server multiplayer host this pc"));
+        v.push(Item::new(S::Actions, IconName::Link, "Pair with a server…", Target::Inst(r(), InstAct::Pair)).words("server pair link sync rig compare"));
         v.push(Item::new(S::Actions, IconName::Share2, "Share code", Target::Inst(r(), InstAct::Share)).words("share friend send code copy"));
     }
     // App-wide actions.
@@ -253,6 +260,10 @@ fn build(app: &AppView, cx: &App) -> (Vec<Item>, Option<SharedString>) {
     v.push(Item::new(S::Actions, IconName::SunMoon, "Toggle light / dark theme", Target::Act(Act::ToggleTheme)).words("dark light mode appearance").browse());
     v.push(Item::new(S::Actions, IconName::Package, "Check for modpack updates", Target::Act(Act::PackUpdates)).words("upgrade packs"));
     v.push(Item::new(S::Actions, IconName::Download, "Check for a Hopper update", Target::Act(Act::SelfUpdate)).words("upgrade version"));
+    if picked.is_none() {
+        v.push(Item::new(S::Actions, IconName::Server, "Host a server…", Target::Act(Act::HostServer)).words("create server multiplayer host this pc"));
+    }
+    v.push(Item::new(S::Actions, IconName::SquareTerminal, "Connect a server panel…", Target::Act(Act::ConnectPanel)).words("server panel crafty mcss pterodactyl pelican hopper server hopperd connect"));
     v.push(Item::new(S::Actions, IconName::Sparkles, "Run setup again", Target::Act(Act::Setup)).words("first run wizard welcome onboarding curseforge api key install"));
     v.push(Item::new(S::Actions, IconName::RefreshCw, "Re-read instances and servers", Target::Act(Act::Refresh)).words("refresh reload rescan").key("f5"));
     v.push(Item::new(S::Actions, IconName::ZoomIn, "Zoom in", Target::Act(Act::ZoomIn)).words("bigger larger scale").key("ctrl-="));
@@ -264,20 +275,18 @@ fn build(app: &AppView, cx: &App) -> (Vec<Item>, Option<SharedString>) {
         (Page::Library, "ctrl-1"),
         (Page::Browse, "ctrl-2"),
         (Page::Servers, "ctrl-3"),
-        (Page::Sync, "ctrl-4"),
         (Page::Settings, "ctrl-,"),
     ] {
         let icon = match p {
             Page::Library => IconName::LibraryBig,
             Page::Browse => IconName::Compass,
             Page::Servers => IconName::Server,
-            Page::Sync => IconName::ArrowLeftRight,
             Page::Settings => IconName::Settings,
         };
         let words = match p {
             Page::Browse => "curseforge modrinth find download",
             Page::Settings => "preferences options",
-            Page::Sync => "rig compare",
+            Page::Servers => "server sync rig compare host panel",
             _ => "",
         };
         v.push(Item::new(S::Navigation, icon, p.label(), Target::Page(p)).key(key).words(words).browse());
@@ -307,7 +316,7 @@ fn build(app: &AppView, cx: &App) -> (Vec<Item>, Option<SharedString>) {
     // Servers.
     for s in store.servers() {
         v.push(Item::new(S::Servers, IconName::Server, format!("Servers › {}", s.name), Target::Server(s.root.clone())).hint(s.loader.clone().unwrap_or_default()));
-        v.push(Item::new(S::Servers, IconName::GitCompare, format!("{} › Compare with pack", s.name), Target::Compare(s.root.clone())).words("server sync rig sync diff"));
+        v.push(Item::new(S::Servers, IconName::GitCompare, format!("Servers › {} › Sync", s.name), Target::Compare(s.root.clone())).words("server sync rig sync diff compare with pack"));
     }
 
     // The picked instance's mods.
@@ -843,10 +852,7 @@ fn run(app: &mut AppView, target: Target, window: &mut Window, cx: &mut Context<
         Target::Page(p) => app.nav(p, window, cx),
         Target::Instance(root, tab) => open_instance(app, root, tab, cx),
         Target::Server(root) => app.open_server(root, cx),
-        Target::Compare(root) => {
-            app.sync.update(cx, |p, cx| p.compare(root, cx));
-            app.go(Page::Sync, cx);
-        }
+        Target::Compare(root) => app.open_sync(Some(root), cx),
         Target::Mod(root, name) => {
             open_instance(app, root, Some("mods"), cx);
             let addons = app.library.read(cx).addons().clone();
@@ -878,7 +884,15 @@ fn run(app: &mut AppView, target: Target, window: &mut Window, cx: &mut Context<
                 open_instance(app, root, Some("mods"), cx);
             }
             InstAct::Logs => open_instance(app, root, Some("logs"), cx),
-            InstAct::Host => crate::host_dialog::open(store, Some(root), window, cx),
+            // Using a server action turns server tools on.
+            InstAct::Host => {
+                store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                crate::host_dialog::open(store, Some(root), window, cx)
+            }
+            InstAct::Pair => {
+                store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                open_instance(app, root, Some("server"), cx);
+            }
             InstAct::Share => crate::dialogs::open_share(store, root, window, cx),
         },
         Target::Act(act) => match act {
@@ -910,6 +924,14 @@ fn run(app: &mut AppView, target: Target, window: &mut Window, cx: &mut Context<
             Act::ZoomOut => window.defer(cx, |w, cx| w.dispatch_action(Box::new(crate::app::ZoomOut), cx)),
             Act::ZoomReset => window.defer(cx, |w, cx| w.dispatch_action(Box::new(crate::app::ZoomReset), cx)),
             Act::Setup => crate::setup_wizard::open(store, cx.entity().downgrade(), false, window, cx),
+            Act::HostServer => {
+                store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                crate::host_dialog::open(store, None, window, cx)
+            }
+            Act::ConnectPanel => {
+                store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                app.open_settings_at("panel-kind", cx);
+            }
         },
     }
 }

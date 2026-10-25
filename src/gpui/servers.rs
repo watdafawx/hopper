@@ -1,5 +1,5 @@
-//! The Servers page (what each server is and runs) and the Server sync page
-//! (each server against its pack).
+//! The Servers page: what each server is and runs, and (its Sync tab) the
+//! server against its pack. With server tools off, an intro to them.
 
 use crate::widgets::Clickable as _;
 use crate::rigsync::SyncPanel;
@@ -23,7 +23,7 @@ use hopper::panel::PanelStats;
 use hopper::server::{Manager, ServerInfo, Status};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 /// A small round status light: the panel's state when there is one, else
@@ -93,17 +93,15 @@ fn no_servers(on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>, cx: &App) -> D
     })
 }
 
-/// The server list's width, shared by both pages: a rail of status tiles
-/// when dragged narrow.
+/// The server list's width: a rail of status tiles when dragged narrow.
 const LIST_PANEL: widgets::PanelSpec = widgets::PanelSpec::new("servers.list", 18., 14., 30.).rail(10., 4.5);
 
-/// The server list down the leading side, shared by both pages, or a
-/// rail of tiles when `collapsed`.
+/// The server list down the leading side, or a rail of tiles when
+/// `collapsed`.
 fn server_list(
     id: &'static str,
     store: &Entity<Store>,
     picked: Option<&PathBuf>,
-    with_pairing: bool,
     collapsed: bool,
     rem: Pixels,
     on_pick: Rc<dyn Fn(PathBuf, &mut Window, &mut App)>,
@@ -146,8 +144,8 @@ fn server_list(
         let root = srv.root.clone();
         let pick = on_pick.clone();
         let paired = s.paired(srv).map(|i| i.name.clone());
-        // Not paired yet: a quiet link that lists the packs; a paired
-        // server on the Sync page keeps the full select to change it.
+        // Not paired yet: a quiet link that lists the packs (a paired
+        // server changes its pack on its Sync tab).
         let pairing: Option<AnyElement> = if paired.is_none() {
             let names: Vec<String> = instances.iter().map(|(_, n)| n.clone()).collect();
             let roots: Vec<PathBuf> = instances.iter().map(|(r, _)| r.clone()).collect();
@@ -173,28 +171,6 @@ fn server_list(
                         menu
                     })
                     .into_any_element(),
-            )
-        } else if with_pairing {
-            let items: Vec<(String, bool)> = instances
-                .iter()
-                .map(|(_, n)| (n.clone(), paired.as_deref() == Some(n.as_str())))
-                .collect();
-            let roots: Vec<PathBuf> = instances.iter().map(|(r, _)| r.clone()).collect();
-            let (store, server_root) = (store.clone(), srv.root.clone());
-            Some(
-                widgets::picker(
-                    "pair",
-                    paired.clone().unwrap_or_default(),
-                    items,
-                    rem,
-                    Rc::new(move |ix, _, cx| {
-                        if let Some(r) = roots.get(ix) {
-                            let (r, sr) = (r.clone(), server_root.clone());
-                            store.update(cx, |s, cx| s.set_pairing(&sr, &r, cx));
-                        }
-                    }),
-                )
-                .into_any_element(),
             )
         } else {
             None
@@ -231,7 +207,7 @@ fn server_list(
                         .when(pack.is_some(), |m| {
                             let (store, pack) = (store.clone(), pack.clone().unwrap_or_default());
                             m.item(
-                                PopupMenuItem::new("Compare with pack")
+                                PopupMenuItem::new("Sync with pack")
                                     .icon(IconName::ArrowLeftRight)
                                     .on_click(go(true)),
                             )
@@ -276,7 +252,7 @@ fn server_list(
                         r.child(widgets::pill(text, status_color(s.status(&srv.root), Some(p), cx), live))
                     }),
             )
-            .when(!with_pairing && paired.is_some(), |r| {
+            .when(paired.is_some(), |r| {
                 r.child(
                     widgets::caption(paired.clone().unwrap_or_default(), cx)
                         .text_xs()
@@ -421,18 +397,28 @@ pub struct ServersView {
     control: Entity<ServerControl>,
     /// server.properties and JVM settings.
     settings_view: Entity<ServerSettings>,
-    /// Overview, Console, Backups, Settings or Mods.
+    /// The Sync tab: the server against its pack.
+    sync: Entity<SyncPanel>,
+    /// Overview, Console, Backups, Settings, Mods or Sync.
     tab: usize,
+    /// The Sync tab was open when the page was left.
+    sync_away: bool,
     /// The Overview's modpack readme shows in full.
     pack_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
+/// The Sync tab's index among a server's tabs.
+pub const TAB_SYNC: usize = 5;
+const TAB_CONSOLE: usize = 1;
+
 /// What the Servers page asks the app to do.
 pub enum ServersEvent {
-    Compare(PathBuf),
-    /// Set up the server panel.
-    OpenSettings,
+    /// Settings › Servers, at one setting (the panel's address, the
+    /// servers folder).
+    OpenSettings(&'static str),
+    /// "Not now" on the intro: back to where the user was.
+    Leave,
 }
 
 impl EventEmitter<ServersEvent> for ServersView {}
@@ -447,16 +433,18 @@ impl ServersView {
             c
         });
         let settings_view = cx.new(|cx| ServerSettings::new(store.clone(), window, cx));
+        let sync = cx.new(|cx| {
+            let mut p = SyncPanel::new(store.clone(), window, cx);
+            p.set_in_server_page(true);
+            p
+        });
         let subs = vec![
             cx.observe(&control, |_, _, cx| cx.notify()),
+            cx.observe(&sync, |_, _, cx| cx.notify()),
             cx.subscribe(&control, |this, _, e: &ControlEvent, cx| match e {
-                ControlEvent::SetUp => cx.emit(ServersEvent::OpenSettings),
+                ControlEvent::SetUp => cx.emit(ServersEvent::OpenSettings("panel-url")),
                 // This page has a Console tab of its own.
-                ControlEvent::Console => {
-                    this.tab = 1;
-                    this.control.update(cx, |c, cx| c.set_console_open(true, cx));
-                    cx.notify();
-                }
+                ControlEvent::Console => this.set_tab(TAB_CONSOLE, cx),
             }),
             cx.observe(&store, |this, _, cx| {
                 this.ensure_pick(cx);
@@ -481,7 +469,9 @@ impl ServersView {
             scroll: UniformListScrollHandle::new(),
             control,
             settings_view,
+            sync,
             tab: 0,
+            sync_away: false,
             pack_open: false,
             _subscriptions: subs,
         };
@@ -515,15 +505,64 @@ impl ServersView {
         {
             self.pick(r, cx);
         }
-        self.tab = tab;
-        cx.notify();
+        self.set_tab(tab, cx);
     }
 
     pub(crate) fn pick(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.picked = Some(root.clone());
         self.scan(root.clone(), false, cx);
         self.control.update(cx, |c, cx| c.show(root.clone(), cx));
+        if self.tab == TAB_SYNC {
+            self.sync.update(cx, |p, cx| p.show(root, cx));
+        }
         cx.notify();
+    }
+
+    /// Shows one of the server's tabs: the console polls only on its own,
+    /// and Sync compares again each time it opens.
+    pub(crate) fn set_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
+        let was = self.tab;
+        self.tab = tab;
+        self.control.update(cx, |c, cx| c.set_console_open(tab == TAB_CONSOLE, cx));
+        if tab == TAB_SYNC {
+            self.sync_away = false;
+            if let Some(r) = self.picked.clone() {
+                self.sync.update(cx, |p, cx| p.show(r, cx));
+            }
+        } else if was == TAB_SYNC {
+            self.sync.update(cx, |p, cx| p.hidden(cx));
+        }
+        cx.notify();
+    }
+
+    /// A server's Sync tab (the picked one's when `root` is None).
+    pub(crate) fn open_sync(&mut self, root: Option<PathBuf>, cx: &mut Context<Self>) {
+        if let Some(r) = root
+            && self.picked.as_ref() != Some(&r)
+        {
+            self.picked = Some(r.clone());
+            self.scan(r.clone(), false, cx);
+            self.control.update(cx, |c, cx| c.show(r, cx));
+        }
+        self.set_tab(TAB_SYNC, cx);
+    }
+
+    /// The page went out of view: the Sync tab's polls slow down.
+    pub(crate) fn hidden(&mut self, cx: &mut Context<Self>) {
+        if self.tab == TAB_SYNC {
+            self.sync.update(cx, |p, cx| p.hidden(cx));
+            self.sync_away = true;
+        }
+    }
+
+    /// Back in view: an open Sync tab compares again.
+    pub(crate) fn shown(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.sync_away)
+            && self.tab == TAB_SYNC
+            && let Some(r) = self.picked.clone()
+        {
+            self.sync.update(cx, |p, cx| p.show(r, cx));
+        }
     }
 
     fn scan(&mut self, root: PathBuf, again: bool, cx: &mut Context<Self>) {
@@ -702,7 +741,7 @@ impl ServersView {
                 info = info.item(key, hopper::instance_ops::strip_formatting(v), 1);
             }
         }
-        let (root, root2, server) = (s.root.clone(), s.root.clone(), s.clone());
+        let (root, server) = (s.root.clone(), s.clone());
         let jars: AnyElement = match self.mods.get(&s.root) {
             None | Some(None) => h_flex()
                 .gap_2()
@@ -781,7 +820,7 @@ impl ServersView {
                     .child(widgets::caption(
                         if configured {
                             format!(
-                                "Runs through {}. Files sync from Server sync.",
+                                "Runs through {}. Its mods sync with its pack on the Sync tab.",
                                 self.control.read(cx).panel_name(cx)
                             )
                         } else {
@@ -814,18 +853,6 @@ impl ServersView {
                                 }),
                             ),
                     )
-                    .when(paired.is_some(), |r| {
-                        r.child(
-                            Button::new("compare")
-                                .primary()
-                                .small()
-                                .icon(IconName::ArrowLeftRight)
-                                .label("Compare with pack")
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.emit(ServersEvent::Compare(root2.clone()))
-                                })),
-                        )
-                    }),
             )
             .child(
                 TabBar::new("server-tabs")
@@ -840,12 +867,8 @@ impl ServersView {
                             .prefix(Icon::new(IconName::Puzzle).small())
                             .label(format!("Mods {n_jars}")),
                     )
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                        this.tab = *ix;
-                        let open = *ix == 1;
-                        this.control.update(cx, |c, cx| c.set_console_open(open, cx));
-                        cx.notify();
-                    })),
+                    .child(Tab::new().prefix(Icon::new(IconName::ArrowLeftRight).small()).label("Sync"))
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| this.set_tab(*ix, cx))),
             )
             .when(self.tab == 0, |c| {
                 let players = self.control.update(cx, |ctl, cx| ctl.players_view(cx));
@@ -961,19 +984,153 @@ impl ServersView {
                     )
                     .child(jars),
             ))
+            .when(self.tab == TAB_SYNC, |c| {
+                c.child(div().flex_1().min_h_0().child(self.sync.clone()))
+            })
+            .into_any_element()
+    }
+}
+
+impl ServersView {
+    /// Server tools are off: what they do and three ways in. Each way turns
+    /// them on and carries on with the job; "Not now" leaves them off.
+    fn intro(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let way = |id: &'static str, icon: IconName, title: &'static str, text: &'static str, button: Button| {
+            v_flex()
+                .id(id)
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .p_4()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.secondary.opacity(0.4))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(Icon::new(icon).small().text_color(theme.muted_foreground))
+                        .child(div().text_sm().font_semibold().child(title)),
+                )
+                .child(div().flex_1().text_xs().text_color(theme.muted_foreground).pb_2().child(text))
+                .child(h_flex().child(button))
+        };
+        let host = Button::new("intro-host")
+            .small()
+            .primary()
+            .label("Pick a pack…")
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                crate::host_dialog::open(this.store.clone(), None, window, cx)
+            }));
+        let panel = Button::new("intro-panel")
+            .small()
+            .outline()
+            .label("Connect…")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                cx.emit(ServersEvent::OpenSettings("panel-kind"))
+            }));
+        let folder = Button::new("intro-folder")
+            .small()
+            .outline()
+            .label("Choose folder…")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                cx.emit(ServersEvent::OpenSettings("servers-root"))
+            }));
+        v_flex()
+            .id("servers-intro")
+            .size_full()
+            .items_center()
+            .overflow_y_scrollbar()
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(rems(44.))
+                    .px_6()
+                    .pt(rems(5.))
+                    .pb_6()
+                    .gap_5()
+                    .items_center()
+                    .child(
+                        div()
+                            .size_12()
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(theme.muted)
+                            .child(Icon::new(IconName::Server).text_color(theme.muted_foreground)),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(div().text_lg().font_semibold().child("Run a server for your packs"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_center()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Host one on this PC, connect a server panel you already use, or keep a server's mods in step with its pack."),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_3()
+                            .items_stretch()
+                            .child(way(
+                                "intro-way-host",
+                                IconName::Monitor,
+                                "Host on this PC",
+                                "From a pack's server files, Java picked for you.",
+                                host,
+                            ))
+                            .child(way(
+                                "intro-way-panel",
+                                IconName::SquareTerminal,
+                                "Connect a panel",
+                                "Crafty, Pterodactyl / Pelican, MCSS or Hopper Server.",
+                                panel,
+                            ))
+                            .child(way(
+                                "intro-way-folder",
+                                IconName::FolderOpen,
+                                "Add a server folder",
+                                "A server you run yourself, to sync with its pack.",
+                                folder,
+                            )),
+                    )
+                    .child(
+                        Button::new("intro-not-now")
+                            .ghost()
+                            .small()
+                            .label("Not now")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ServersEvent::Leave))),
+                    ),
+            )
             .into_any_element()
     }
 }
 
 impl Render for ServersView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.store.read(cx).server_tools() {
+            return self.intro(cx);
+        }
         let view = cx.entity();
-        let collapsed = self.list_panel.layout(self.store.read(cx).settings(), window).collapsed;
+        let layout = self.list_panel.layout(self.store.read(cx).settings(), window);
+        let collapsed = layout.collapsed;
+        // The Sync tab fits its rows to the room beside the list.
+        let room = window.viewport_size().width / window.rem_size() - layout.width;
+        self.sync.update(cx, |p, _| p.room = Some(room));
         let list = server_list(
             "servers-list",
             &self.store,
             self.picked.as_ref(),
-            false,
             collapsed,
             window.rem_size(),
             Rc::new(move |root, _, cx| view.update(cx, |v, cx| v.pick(root, cx))),
@@ -1028,91 +1185,6 @@ impl Render for ServersView {
             .items_stretch()
             .child(list)
             .child(div().flex_1().min_w_0().h_full().child(detail))
-    }
-}
-
-// ---- Server sync page -------------------------------------------------------
-
-pub struct SyncPage {
-    store: Entity<Store>,
-    /// The server list's width.
-    list_panel: widgets::SidePanel,
-    panel: Entity<SyncPanel>,
-    /// The first paired server was opened on its own, once.
-    auto_picked: bool,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl SyncPage {
-    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let panel = cx.new(|cx| SyncPanel::new(store.clone(), window, cx));
-        let subs = vec![cx.observe(&store, |_, _, cx| cx.notify())];
-        Self {
-            store,
-            list_panel: widgets::SidePanel::new(LIST_PANEL),
-            panel,
-            auto_picked: false,
-            _subscriptions: subs,
-        }
-    }
-
-    pub fn compare(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        self.panel.update(cx, |p, cx| p.show(root, cx));
-        cx.notify();
-    }
-
-    /// The server compared, for back and forward.
-    pub(crate) fn nav_loc(&self, cx: &App) -> Option<PathBuf> {
-        self.panel.read(cx).server().map(Path::to_path_buf)
-    }
-}
-
-impl Render for SyncPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = cx.entity();
-        let picked = self.panel.read(cx).server().map(|p| p.to_path_buf());
-        // Nothing picked yet: open the first server that has a pack.
-        if picked.is_none() && !self.auto_picked {
-            let store = self.store.read(cx);
-            let first = store
-                .servers()
-                .iter()
-                .find(|s| store.paired(s).is_some())
-                .map(|s| s.root.clone());
-            if let Some(root) = first {
-                self.auto_picked = true;
-                let view = view.clone();
-                window.defer(cx, move |_, cx| view.update(cx, |v, cx| v.compare(root, cx)));
-            }
-        }
-        let collapsed = self.list_panel.layout(self.store.read(cx).settings(), window).collapsed;
-        let list = server_list(
-            "sync-list",
-            &self.store,
-            picked.as_ref(),
-            true,
-            collapsed,
-            window.rem_size(),
-            Rc::new(move |root, _, cx| view.update(cx, |v, cx| v.compare(root, cx))),
-            {
-                let store = self.store.clone();
-                Some(Rc::new(move |window: &mut Window, cx: &mut App| {
-                    crate::host_dialog::open(store.clone(), None, window, cx)
-                }))
-            },
-            cx,
-        )
-        .overflow_y_scrollbar();
-        let theme = cx.theme();
-        let (bg, border) = (theme.sidebar, theme.sidebar_border);
-        let list = widgets::side_panel("sync-list-resize", &self.list_panel, |p| &mut p.list_panel, &self.store, list, window, cx)
-            .bg(bg)
-            .border_r_1()
-            .border_color(border);
-        h_flex()
-            .size_full()
-            .items_stretch()
-            .child(list)
-            .child(div().flex_1().min_w_0().h_full().child(self.panel.clone()))
+            .into_any_element()
     }
 }
