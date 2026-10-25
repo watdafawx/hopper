@@ -1896,7 +1896,7 @@ fn real_end_to_end() {
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct MrIndex {
-    name: String,
+    pub(crate) name: String,
     version_id: String,
     pub(crate) files: Vec<MrIndexFile>,
     dependencies: HashMap<String, String>,

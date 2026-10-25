@@ -89,7 +89,21 @@ impl Servers {
     /// already known keep their state; folders that are gone are dropped
     /// unless their server still runs.
     pub fn scan(&self, root: Option<&Path>, extra: &[PathBuf]) {
-        let mut found: Vec<PathBuf> = root.map(server::discover).unwrap_or_default().into_iter().map(|s| s.root).collect();
+        self.scan_except(root, extra, &[]);
+    }
+
+    /// [`Self::scan`], leaving out the folders in `hidden` (removed from
+    /// the panel).
+    pub fn scan_except(&self, root: Option<&Path>, extra: &[PathBuf], hidden: &[PathBuf]) {
+        let low = |p: &Path| p.to_string_lossy().trim_end_matches(['\\', '/']).replace('\\', "/").to_lowercase();
+        let hidden: Vec<String> = hidden.iter().map(|h| low(h)).collect();
+        let mut found: Vec<PathBuf> = root
+            .map(server::discover)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.root)
+            .filter(|r| !hidden.contains(&low(r)))
+            .collect();
         for p in extra {
             if p.join("server.properties").is_file() && !found.contains(p) {
                 found.push(p.clone());

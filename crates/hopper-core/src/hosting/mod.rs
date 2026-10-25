@@ -15,6 +15,7 @@ pub mod router;
 pub mod schedule;
 pub mod script;
 pub mod server_pack;
+pub mod zip_import;
 
 pub use create::{
     CreateOptions, CreateReport, ServerLoader, create_from_client_pack, create_from_instance,

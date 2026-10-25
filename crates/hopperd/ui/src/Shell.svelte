@@ -1,7 +1,7 @@
 <script>
   import Avatar from './Avatar.svelte';
   import { onMount, onDestroy } from 'svelte';
-  import { Server, LayoutDashboard, Shield, LogOut, Wifi, WifiOff, Globe, Waypoints, RefreshCw } from '@lucide/svelte';
+  import { Server, LayoutDashboard, Shield, LogOut, Wifi, WifiOff, Globe, Waypoints, RefreshCw, FolderCog } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { live, connect, disconnect, startPing } from './lib/live.svelte.js';
   import { color, pathKind } from './lib/format.js';
@@ -9,17 +9,23 @@
   import Overview from './Overview.svelte';
   import ServerPage from './ServerPage.svelte';
   import Access from './Access.svelte';
+  import ServersFolder from './ServersFolder.svelte';
+  import { session } from './lib/me.svelte.js';
   import Dialog from './Dialog.svelte';
   import Transfers from './Transfers.svelte';
 
   let { hello, me, onSignOut } = $props();
   const owner = $derived(me?.role === 'owner');
+  $effect(() => {
+    session.owner = owner;
+    session.home = me?.panel_folder || '';
+  });
 
   let route = $state(location.hash.slice(1) || '/');
   let pending = $state([]);
   let pingTimer, pendTimer;
 
-  const page = $derived(route.startsWith('/server/') ? 'server' : route === '/access' ? 'access' : 'overview');
+  const page = $derived(route.startsWith('/server/') ? 'server' : route === '/access' ? 'access' : (route === '/panel-folder' || route === '/servers-folder') && owner ? 'folder' : 'overview');
   // #/server/<id>/<tab>/<path...>
   const segs = $derived(route.split('/').slice(2).map(decodeURIComponent));
   const serverId = $derived(page === 'server' ? segs[0] : null);
@@ -91,9 +97,10 @@
         <span class="dot {s.state}"></span>
       </button>
     {:else}
-      <div class="tiny muted pad">No servers yet. Start hopperd with <span class="mono">--servers-root</span>.</div>
+      <div class="tiny muted pad">No servers yet: New server on Overview{owner ? ', or pick a servers folder' : ''}.</div>
     {/each}
     <div class="foot">
+      {#if owner}<button class="nav" class:on={page === 'folder'} onclick={() => go('/panel-folder')}><FolderCog size={14} />Panel folder</button>{/if}
       <button class="nav" class:on={page === 'access'} onclick={() => go('/access')}>
         <Shield size={14} />{owner ? 'Access & devices' : `Account · ${me?.name}`}
         {#if pending.length}<span class="badge">{pending.length}</span>{/if}
@@ -118,6 +125,8 @@
         {#key serverId}<ServerPage id={serverId} {tab} path={subpath} />{/key}
       {:else if page === 'access'}
         <Access {hello} {me} bind:pending />
+      {:else if page === 'folder'}
+        <ServersFolder />
       {:else}
         <Overview />
       {/if}

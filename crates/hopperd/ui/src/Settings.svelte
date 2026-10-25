@@ -1,4 +1,6 @@
 <script>
+  import RemoveServer from './RemoveServer.svelte';
+  import { session } from './lib/me.svelte.js';
   // Settings, one section per page like Hopper desktop's settings: a list
   // on the left switches the page, each page is one column (label left,
   // control right). Search finds a setting on any page. Changes to
@@ -173,6 +175,9 @@
         {/if}
       {/each}
 
+      {#if page === 'general' && session.owner}
+        <RemoveServer {server} />
+      {/if}
       {#if page === 'network'}
         <h4>Address players join by</h4>
         <Address {server} />

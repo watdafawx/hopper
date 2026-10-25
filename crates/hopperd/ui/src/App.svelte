@@ -3,11 +3,14 @@
   import { api } from './lib/api.js';
   import Auth from './Auth.svelte';
   import Shell from './Shell.svelte';
+  import PanelSetup from './PanelSetup.svelte';
 
   let hello = $state(null);
   let signedIn = $state(null);
   let failed = $state('');
   let me = $state(null);
+  // An owner whose panel has no panel folder yet picks one first.
+  let later = $state(false);
 
   async function load() {
     try {
@@ -31,6 +34,8 @@
   <div class="center"><p class="err">Can't reach the panel: {failed}</p></div>
 {:else if hello && signedIn === false}
   <Auth {hello} onDone={() => { hello.setup_needed = false; load(); }} />
+{:else if hello && signedIn && me?.role === 'owner' && !me.panel_folder && !later}
+  <PanelSetup onLater={() => (later = true)} />
 {:else if hello && signedIn}
   <Shell {hello} {me} onSignOut={() => (signedIn = false)} />
 {/if}

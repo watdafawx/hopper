@@ -4,21 +4,24 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages. 0.7.0: Mods table like Hopper desktop. 0.8.0: mod profiles and finding the mod that breaks a server.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages. 0.7.0: Mods table like Hopper desktop. 0.8.0: mod profiles and finding the mod that breaks a server. 0.9.0: panel folder, importing and deleting servers.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
 ```
-hopperd --servers-root G:\Minecraft\packs
+hopperd
 ```
 
+- First start: the log prints a one-time **setup code** (also in
+  `setup-code.txt` in the data folder). Use it in the browser to set the
+  owner password, then pick the **panel folder**: servers go in its
+  `servers` folder and the panel's own data in `.hopper-server`, and the
+  panel never shows anything outside it. `--home <folder>` sets it from the
+  command line.
 - Every folder in the servers folder with a `server.properties` is a server.
 - The panel listens on port **8790** (`--port` to change). Open
   `http://<this-machine>:8790` from any device on the LAN.
-- First start: the log prints a one-time **setup code** (also in
-  `setup-code.txt` in the data folder). Use it in the browser to set the
-  owner password.
-- Settings and accounts are in the data folder: `%APPDATA%\hopperd\data` on
+- Before a panel folder is picked, settings and accounts are in the data folder: `%APPDATA%\hopperd\data` on
   Windows, `~/.local/share/hopperd` on Linux, or `--data <dir>`.
   `hopperd.toml` holds the port, bind address, servers folder and extra
   server folders.
@@ -142,6 +145,15 @@ the address the player typed and passes them to that server's own port.
 - Settings: `[router]` in `hopperd.toml` (`enabled`, `port`, `domain`,
   `unknown_server`); per server in `.hopper-route.json` in its folder.
 - Servers see players as coming from 127.0.0.1 (no proxy forwarding yet).
+
+## Panel folder, importing and deleting servers (0.9.0)
+
+- Setup asks for the panel folder (older panels ask the owner on sign-in, "Not now" skips). On the next start the panel moves its data into `<folder>\.hopper-server`; the start-up data folder keeps only a pointer (`home = ...`). Picking it restarts the panel (exit code 75; the Windows service and systemd start it again).
+- Folder pickers, scans and imports refuse paths outside the panel folder. Servers already listed outside it keep running, marked "Outside the panel folder".
+- Panel folder page (sidebar): Move… renames the whole folder at the next start (same drive; servers in it stopped), and the servers folder inside it can be changed: what's in a picked folder is listed to add (server folders run where they are, server pack and client pack zips become servers).
+- New server › Start from: Fresh, Folder (run where it is or copy in), Server pack zip (upload or a zip in the panel folder; Minecraft and loader read from variables.txt, a ServerStarter config, the installer jar or libraries), CurseForge / Modrinth (server files when the pack has them, else built from the client pack with client-only mods left out).
+- Settings › General › Remove this server: Remove from panel (folder kept), or Delete (type the name; the folder moves to `.hopper-deleted` in the servers folder for 30 days, restore or delete for good from the Panel folder page). Servers that run where they are can only be removed from the panel.
+- API: `GET host/browse`, `GET host/scan`, `PUT settings/panel-folder`, `POST settings/panel-folder/move`, `POST panel/restart`, `GET|PUT settings/servers-folder`, `POST servers/import-folder`, `incoming/uploads` (chunked, like file uploads), `GET servers/zip-info`, `POST servers/import-zip`, `GET packs/search`, `GET packs/versions`, `POST servers/create-from-pack`, `POST servers/{id}/remove`, `PUT deleted/{name}/restore`, `DELETE deleted/{name}`.
 
 ## Mod profiles and finding the mod that breaks it (0.8.0)
 

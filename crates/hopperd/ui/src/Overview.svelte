@@ -1,4 +1,5 @@
 <script>
+  import { session, outside } from './lib/me.svelte.js';
   import Avatar from './Avatar.svelte';
   import { Play, Square, RotateCw, Terminal, Plus } from '@lucide/svelte';
   import { live, history } from './lib/live.svelte.js';
@@ -57,7 +58,7 @@
               {s.loader || 'Minecraft'}{s.version ? ` · ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{:else}:{s.port}{/if}{alive(s) ? ` · ${uptime(s.uptime_secs)}` : ''}{#if s.sleep_after_minutes && s.state === 'stopped'} · Sleeping{/if}
             </div>
           </a>
-          {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder">Also in {s.managed_by}</span>{/if}
+          {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}
           <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateLabel[s.state]}{s.exit_code != null ? ` (${s.exit_code})` : ''}</span>
         </div>
         <div class="meters">

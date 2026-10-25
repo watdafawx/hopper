@@ -11,6 +11,12 @@ pub const DEFAULT_PORT: u16 = 8790;
 pub struct Config {
     /// Shown in the UI and in LAN discovery ("rig").
     pub name: String,
+    /// The panel folder: servers and the panel's own data live in it, and
+    /// the panel never shows anything outside it. Picked at setup.
+    pub home: Option<PathBuf>,
+    /// Move the panel folder here at the next start (Settings › Panel
+    /// folder › Move).
+    pub move_to: Option<PathBuf>,
     pub port: u16,
     /// Address to listen on; 0.0.0.0 is every network.
     pub bind: String,
@@ -18,6 +24,9 @@ pub struct Config {
     pub servers_root: Option<PathBuf>,
     /// Server folders outside `servers_root`.
     pub servers: Vec<PathBuf>,
+    /// Server folders in `servers_root` the panel leaves out (removed from
+    /// the panel, the folder kept).
+    pub hidden: Vec<PathBuf>,
     /// Announce the panel on the LAN (mDNS).
     pub discovery: bool,
     /// Plain HTTP from the LAN and Tailscale too is refused (it always is
@@ -46,10 +55,13 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             name: hostname(),
+            home: None,
+            move_to: None,
             port: DEFAULT_PORT,
             bind: "0.0.0.0".into(),
             servers_root: None,
             servers: Vec::new(),
+            hidden: Vec::new(),
             discovery: true,
             require_tls: false,
             public_names: Vec::new(),

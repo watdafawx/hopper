@@ -451,7 +451,7 @@ struct CreateBody {
 }
 
 /// A Java that runs `mc`'s server: an installed one, else Temurin downloaded.
-fn java_for(mc: &str, job: &hopper_core::jobs::Job) -> anyhow::Result<PathBuf> {
+pub(crate) fn java_for(mc: &str, job: &hopper_core::jobs::Job) -> anyhow::Result<PathBuf> {
     use hopper_core::java;
     job.detail("Finding Java");
     let installs = java::detect(std::path::Path::new(""));

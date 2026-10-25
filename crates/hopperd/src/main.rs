@@ -18,6 +18,7 @@ mod discovery;
 mod files;
 mod fs_api;
 mod fs_zip;
+mod home;
 mod host;
 mod manage_api;
 mod mcp;
@@ -30,6 +31,7 @@ mod net;
 mod pack_api;
 mod router;
 mod servers;
+mod servers_admin;
 mod service;
 mod sftp;
 mod tls;
@@ -66,6 +68,9 @@ pub struct TlsInfo {
 pub struct App {
     pub cfg: RwLock<Config>,
     pub data_dir: PathBuf,
+    /// The folder hopperd starts from (`--data`); with a panel folder it
+    /// only points there.
+    pub boot_dir: PathBuf,
     pub auth: auth::Auth,
     pub servers: servers::Servers,
     pub host: host::Shared,
@@ -92,7 +97,7 @@ pub struct App {
 impl App {
     pub fn rescan(&self) {
         let cfg = self.cfg.read().unwrap().clone();
-        self.servers.scan(cfg.servers_root.as_deref(), &cfg.servers);
+        self.servers.scan_except(cfg.servers_root.as_deref(), &cfg.servers, &cfg.hidden);
     }
 
     fn take_snapshot(&self) -> Snapshot {
@@ -120,10 +125,12 @@ struct Args {
     data: Option<PathBuf>,
     port: Option<u16>,
     servers_root: Option<PathBuf>,
+    /// The panel folder (normally picked at setup).
+    home: Option<PathBuf>,
 }
 
 fn parse_args() -> anyhow::Result<Option<Args>> {
-    let mut a = Args { service: false, data: None, port: None, servers_root: None };
+    let mut a = Args { service: false, data: None, port: None, servers_root: None, home: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = || it.next().with_context(|| format!("{arg} needs a value"));
@@ -136,6 +143,7 @@ fn parse_args() -> anyhow::Result<Option<Args>> {
             "--service" => a.service = true,
             "--port" => a.port = Some(val()?.parse().context("--port takes a number")?),
             "--servers-root" => a.servers_root = Some(val()?.into()),
+            "--home" => a.home = Some(val()?.into()),
             "--help" | "-h" => {
                 println!("{}", include_str!("main.rs").lines().skip(4).take(7).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
                 return Ok(None);
@@ -177,10 +185,23 @@ fn main() -> anyhow::Result<()> {
 /// Runs the panel until `shutdown` finishes.
 pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     let Some(args) = parse_args()? else { return Ok(()) };
-    let data_dir = args.data.unwrap_or_else(config::data_dir);
-    std::fs::create_dir_all(&data_dir).with_context(|| format!("creating {}", data_dir.display()))?;
-    let mut cfg = Config::load_or_create(&data_dir)?;
+    let boot_dir = args.data.unwrap_or_else(config::data_dir);
+    std::fs::create_dir_all(&boot_dir).with_context(|| format!("creating {}", boot_dir.display()))?;
+    let mut cfg = Config::load_or_create(&boot_dir)?;
+    if let Some(h) = &args.home {
+        let h = absolute(h);
+        std::fs::create_dir_all(&h).with_context(|| format!("creating {}", h.display()))?;
+        if cfg.home.as_ref() != Some(&h) {
+            cfg.home = Some(h);
+            cfg.save(&boot_dir)?;
+        }
+    }
+    // With a panel folder, the panel's data lives in it (moved in the
+    // first time); the start-up folder only points there.
+    let (data_dir, loaded) = home::settle(&boot_dir, cfg)?;
+    let mut cfg = loaded;
     mods_api::keep_updates_in(&data_dir);
+    servers_admin::purge_old(cfg.servers_root.as_deref());
     let mut changed = false;
     if let Some(p) = args.port {
         cfg.port = p;
@@ -227,6 +248,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     let app = Arc::new(App {
         cfg: RwLock::new(cfg.clone()),
         data_dir: data_dir.clone(),
+        boot_dir: boot_dir.clone(),
         auth,
         servers: servers::Servers::new(),
         host,

@@ -147,6 +147,8 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::router::routes())
         .merge(crate::mods_more::routes())
         .merge(crate::mods_table::routes())
+        .merge(crate::servers_admin::routes())
+        .merge(crate::home::routes())
         .merge(crate::mods_hunt::routes())
         .merge(crate::fs_zip::routes())
         .fallback(crate::ui::serve)
@@ -408,7 +410,7 @@ async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
 
 async fn me(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
     Ok(Json(match require(&app, &headers, &method)? {
-        Who::Owner => json!({ "role": "owner", "min_password": MIN_PASSWORD }),
+        Who::Owner => json!({ "role": "owner", "min_password": MIN_PASSWORD, "panel_folder": app.cfg.read().unwrap().home }),
         Who::Device { id, name } => json!({ "role": "device", "id": id, "name": name }),
         Who::Token { id, name, read_only, servers } => json!({ "role": "token", "id": id, "name": name, "read_only": read_only, "servers": servers }),
         Who::User { id, name, role, servers } => json!({ "role": role, "user": true, "id": id, "name": name, "servers": servers, "min_password": MIN_PASSWORD }),
