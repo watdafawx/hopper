@@ -133,11 +133,16 @@ static MOD_FILE: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)^\s*Mod file:\s*.*?
 /// `at TRANSFORMER/somemod@1.0/com.x.Y.z(Y.java:1) ~[somemod-1.0.jar%23123!/:1.0]`
 static FRAME: LazyLock<Regex> =
     LazyLock::new(|| re(r"^\s*at\s+(?:[\w-]+/)?(?:([\w.-]+)@[^/\s]+/)?\S+\(.*?\)\s*~?\[([^\]%!]+?\.jar)"));
+/// NeoForge's list under `ModLoadingException: Loading errors encountered:`
+/// `- Mystical Agriculture Plus (mysticalagricultureplus) encountered an error while dispatching the …Event event`
+static LOADING_ERROR: LazyLock<Regex> =
+    LazyLock::new(|| re(r"^\s*-\s+.+?\s\(([a-z][\w.-]*)\)\s+encountered an error\b(?:.*?\b(\w+?)(?:Event)? event)?"));
+
 /// Mixin's own message.
 static MIXIN_FAILED: LazyLock<Regex> = LazyLock::new(|| re(r"Mixin apply for mod ([\w.-]+) failed"));
 
 /// Mod ids that are the game or the loader, not a mod someone installed.
-const NOT_MODS: [&str; 6] = ["minecraft", "neoforge", "forge", "fml", "fabricloader", "java"];
+const NOT_MODS: [&str; 7] = ["minecraft", "neoforge", "forge", "fml", "fml_loader", "fabricloader", "java"];
 
 /// One finding in a crash text, before it's matched to the instance.
 #[derive(Clone, Debug, PartialEq)]
@@ -205,11 +210,37 @@ pub fn signals(text: &str) -> Vec<Raw> {
         );
     }
 
+    // NeoForge's list of mods whose own event handlers threw: the loader
+    // names them, so the stack below is only how the event got there.
+    let mut named = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        let Some(m) = LOADING_ERROR.captures(l) else { continue };
+        let id = m[1].to_string();
+        let error = lines
+            .get(i + 1)
+            .map(|n| n.trim())
+            .filter(|n| !n.is_empty() && !n.starts_with("at ") && !n.starts_with("- "))
+            .map(|n| cut(n.strip_prefix("java.lang.").unwrap_or(n), 200))
+            .unwrap_or_default();
+        let during = m.get(2).map(|e| format!(" while the game ran its {} step", e.as_str())).unwrap_or_default();
+        let why = if error.is_empty() {
+            format!("The loader says it failed{during}.")
+        } else {
+            format!("The loader says it failed{during}: {error}")
+        };
+        if named.is_empty() {
+            named = id.clone();
+        }
+        add(&mut out, Raw { mod_id: id, jar: String::new(), certainty: Certainty::Certain, why, class: String::new(), needs: Vec::new() });
+    }
+
     // The exception's own trace: the first stack, up to the first blank
     // line or the report's details.
     if let Some(start) = lines.iter().position(|l| FRAME.is_match(l)) {
-        let mut first = true;
-        let mut first_name = String::new();
+        // With a mod already named by the loader, the mods in the stack
+        // only set the event off.
+        let mut first = named.is_empty();
+        let mut first_name = named.clone();
         for l in lines[start..].iter().take_while(|l| !l.trim().is_empty() && !l.starts_with("A detailed")) {
             let Some(m) = FRAME.captures(l) else { continue };
             let id = m.get(1).map_or("", |g| g.as_str()).to_string();
@@ -225,7 +256,11 @@ pub fn signals(text: &str) -> Vec<Raw> {
                     } else {
                         (
                             Certainty::Possible,
-                            format!("Its change to the game's code (a mixin) called {first_name}, where the error happened."),
+                            if named.is_empty() {
+                                format!("Its change to the game's code (a mixin) called {first_name}, where the error happened.")
+                            } else {
+                                format!("Its change to the game's code (a mixin) was in the step where {named} failed.")
+                            },
                         )
                     };
                     first = false;
@@ -244,7 +279,12 @@ pub fn signals(text: &str) -> Vec<Raw> {
                 first_name = name;
                 (Certainty::Likely, "The error happened in its code.".to_string())
             } else {
-                (Certainty::Possible, format!("Its code called {first_name}, where the error happened."))
+                let why = if named.is_empty() {
+                    format!("Its code called {first_name}, where the error happened.")
+                } else {
+                    format!("Its code set off the step where {named} failed.")
+                };
+                (Certainty::Possible, why)
             };
             first = false;
             add(&mut out, Raw { mod_id: id, jar, certainty, why, class: String::new(), needs: Vec::new() });
@@ -502,7 +542,15 @@ pub fn headline(text: &str) -> String {
     let Some(desc) = lines.find_map(|l| l.strip_prefix("Description:")) else {
         return String::new();
     };
-    let err = lines.find(|l| !l.is_empty()).unwrap_or_default();
+    let mut err = lines.find(|l| !l.is_empty()).unwrap_or_default();
+    // NeoForge's "Loading errors encountered:" says what only in its list:
+    // the first error under it.
+    if err.ends_with("encountered:") {
+        let mut rest = lines.take_while(|l| !l.starts_with("at "));
+        if let Some(e) = rest.find(|l| !l.is_empty() && !l.starts_with("- ")) {
+            err = e;
+        }
+    }
     let err = err.strip_prefix("java.lang.").unwrap_or(err);
     if err.is_empty() { desc.trim().to_string() } else { format!("{} · {}", desc.trim(), cut(err, 200)) }
 }
@@ -602,6 +650,39 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
         return None;
     }
     Some(Crash { suspects, stopped, ..saved.clone() })
+}
+
+/// What a crash report names, for a report Hopper didn't see the game
+/// write (the game ran from another launcher, or Hopper was closed).
+/// The game log counts only when it is from the same run.
+pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&str) -> Vec<String>) -> Option<Crash> {
+    let written = modified_secs(report)?;
+    let text = tail(report, 2 << 20);
+    if headline(&text).is_empty() {
+        return None;
+    }
+    let log_path = root.join("logs").join("latest.log");
+    let same_run = modified_secs(&log_path).is_some_and(|t| (t - written).abs() < 300);
+    let (log, loading) = if same_run { (tail(&log_path, 2 << 20), loading_lines(&log_path)) } else { (String::new(), String::new()) };
+    let (suspects, stopped) = analyze(root, &text, &log, &loading, written, mods, &ids);
+    let kind = if !suspects.is_empty() {
+        CrashKind::Mods
+    } else if text.contains("OutOfMemoryError") {
+        CrashKind::Memory
+    } else {
+        CrashKind::Unknown
+    };
+    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped })
+}
+
+/// Whether `report` was written after the crash `saved` came from, so the
+/// saved card is out of date.
+pub fn is_newer(report: &Path, saved: &Crash) -> bool {
+    if report == saved.source {
+        return false;
+    }
+    let old = modified_secs(&saved.source).unwrap_or(saved.when);
+    modified_secs(report).is_some_and(|t| t > old)
 }
 
 /// The mods a crash report (and the game log) points at, most likely first.
@@ -1099,6 +1180,30 @@ mod tests {
         let mut s = vec![sus("architectury.jar", "architectury", Certainty::Certain)];
         demote_libraries(&mut s, &deps, &ids);
         assert_eq!(s[0].certainty, Certainty::Certain);
+    }
+
+    #[test]
+    fn the_loader_s_named_mod_beats_the_stack() {
+        let report = "Description: Exception in server tick loop\n\n\
+net.neoforged.fml.ModLoadingException: Loading errors encountered:\n\
+\t- Mystical Agriculture Plus (mysticalagricultureplus) encountered an error while dispatching the net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent event\n\
+\t  java.lang.IllegalArgumentException: Itemstack 1 mysticalagricultureplus:fe_seeds does not exist in tab's list\n\n\
+\tat MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:181) ~[loader-4.0.45.jar%23107!/:4.0] {re:mixin}\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.tryRebuildTabContents(CreativeModeTabs.java:2177) ~[client-1.21.1-20240808.144430-srg.jar%231295!/:?] {}\n\
+\tat TRANSFORMER/computercraft@1.120.2/dan200.computercraft.shared.CommonHooks.onServerStarted(CommonHooks.java:97) ~[cc-tweaked-1.21.1-forge-1.120.2.jar%231486!/:1.120.2] {re:classloading}\n\
+\tat java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {}\n";
+        let s = signals(report);
+        assert_eq!((s[0].mod_id.as_str(), s[0].certainty), ("mysticalagricultureplus", Certainty::Certain));
+        assert!(!s.iter().any(|r| r.mod_id == "fml_loader"));
+        assert_eq!(
+            headline(report),
+            "Exception in server tick loop · IllegalArgumentException: Itemstack 1 mysticalagricultureplus:fe_seeds does not exist in tab's list"
+        );
+        assert!(s[0].why.contains("BuildCreativeModeTabContents"), "{}", s[0].why);
+        assert!(s[0].why.contains("IllegalArgumentException: Itemstack 1"), "{}", s[0].why);
+        let cc = s.iter().find(|r| r.mod_id == "computercraft").unwrap();
+        assert_eq!(cc.certainty, Certainty::Possible);
+        assert!(cc.why.contains("mysticalagricultureplus failed"), "{}", cc.why);
     }
 
     /// The newest crash of the instance in `HOPPER_CRASH_ROOT`, read again

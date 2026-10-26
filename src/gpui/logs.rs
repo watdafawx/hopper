@@ -271,6 +271,7 @@ impl LogsView {
                             this.crashes.clear();
                         }
                         Some(Some((c, all))) => {
+                            this.store.update(cx, |s, _| s.newest_crash_report(&root, &c.path));
                             this.crash = Some(c);
                             this.crashes = all;
                         }
@@ -584,6 +585,7 @@ impl Render for LogsView {
             // What Hopper read from the last crash, when it was one of
             // Hopper's games; else the newest crash report as it is.
             let detected = self.store.update(cx, |s, _| s.crash(&root).cloned());
+            let card_source = detected.as_ref().map(|c| c.source.clone());
             let card = detected.map(|c| self.crash_card(&root, &c, cx));
             let warned = self.warnings_card(&root, cx);
             let crash = self.crash.as_ref().filter(|_| card.is_none()).map(|c| {
@@ -662,7 +664,7 @@ impl Render for LogsView {
                 )
             });
             // Older reports, past the one shown above.
-            let featured = self.crash.as_ref().map(|c| c.path.clone());
+            let featured = card_source.or_else(|| self.crash.as_ref().map(|c| c.path.clone()));
             let older: Vec<PathBuf> = self
                 .crashes
                 .iter()

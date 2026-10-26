@@ -1198,9 +1198,16 @@ impl Store {
     pub fn crash(&mut self, root: &Path) -> Option<&hopper::crashdetect::Crash> {
         if !self.crashes.contains_key(root) {
             let saved = hopper::crashdetect::load(root);
-            // Read its report again in the background with today's rules,
-            // so an older card doesn't keep an old guess.
-            if let Some(c) = saved.clone()
+            // A newer report than the saved one: the game crashed again
+            // while Hopper wasn't watching. Read that one instead.
+            let latest = hopper::logs::crash_reports(root).into_iter().next();
+            let newer = match (&saved, &latest) {
+                (Some(c), Some(l)) => hopper::crashdetect::is_newer(l, c),
+                _ => false,
+            };
+            // Else read its report again in the background with today's
+            // rules, so an older card doesn't keep an old guess.
+            if let Some(c) = saved.clone().filter(|_| !newer)
                 && let Some(i) = self.instance(root)
             {
                 let (tx, wake, root, dir) = (self.tx.clone(), self.wake.clone(), root.to_path_buf(), i.mods_dir());
@@ -1221,8 +1228,36 @@ impl Store {
                 });
             }
             self.crashes.insert(root.to_path_buf(), saved);
+            if let Some(l) = latest.filter(|_| newer) {
+                self.newest_crash_report(root, &l);
+            }
         }
         self.crashes.get(root).and_then(Option::as_ref)
+    }
+
+    /// The instance's newest crash report is `latest`: when it is newer than
+    /// the saved crash (the game crashed again outside Hopper's watch), read
+    /// it in the background so the card shows that crash, not the old one.
+    pub fn newest_crash_report(&mut self, root: &Path, latest: &Path) {
+        let Some(saved) = self.crash(root).cloned() else { return };
+        if !hopper::crashdetect::is_newer(latest, &saved) {
+            return;
+        }
+        let Some(i) = self.instance(root) else { return };
+        let (tx, wake, root, dir, latest) = (self.tx.clone(), self.wake.clone(), root.to_path_buf(), i.mods_dir(), latest.to_path_buf());
+        std::thread::spawn(move || {
+            let mods: Vec<String> = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+                .collect();
+            if let Some(c) = hopper::crashdetect::from_report(&root, &latest, &mods, |f| hopper::deps::own_ids(&dir.join(f)).0) {
+                let _ = tx.send(Msg::CrashReread(root, c));
+                wake();
+            }
+        });
     }
 
     /// The name of the mod a crash suspects most.
