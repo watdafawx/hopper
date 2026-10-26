@@ -31,6 +31,9 @@ pub struct BackupsView {
     store: Entity<Store>,
     root: PathBuf,
     sets: Vec<Set>,
+    /// The loose files are read (they're read in the background: a big
+    /// pack has hundreds of sets).
+    sets_loaded: bool,
     /// Backups shown open (by folder).
     open: HashSet<PathBuf>,
     mode: Mode,
@@ -53,8 +56,17 @@ pub struct BackupsView {
 
 impl BackupsView {
     fn reload(&mut self, cx: &mut Context<Self>) {
-        self.sets = hopper::backups::list(&self.root);
-        cx.notify();
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let sets = cx.background_spawn(async move { hopper::backups::list(&root) }).await;
+            this.update(cx, |this, cx| {
+                this.sets = sets;
+                this.sets_loaded = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn reload_snaps(&mut self, cx: &mut Context<Self>) {
@@ -572,6 +584,9 @@ impl BackupsView {
     fn loose_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let size = hopper::instance_ops::human_bytes;
+        if !self.sets_loaded {
+            return widgets::skeleton_rows(3, rems(3.), cx).into_any_element();
+        }
         if self.sets.is_empty() {
             return widgets::empty_state(
                 IconName::Archive,
@@ -707,7 +722,11 @@ impl Render for BackupsView {
                             .small()
                             .selected_index(if snaps_mode { 0 } else { 1 })
                             .child(Tab::new().label(format!("Snapshots {n_snaps}")))
-                            .child(Tab::new().label(format!("Loose files {}", self.sets.len())))
+                            .child(Tab::new().label(if self.sets_loaded {
+                                format!("Loose files {}", self.sets.len())
+                            } else {
+                                "Loose files".to_string()
+                            }))
                             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                                 this.mode = if *ix == 0 { Mode::Snapshots } else { Mode::Loose };
                                 cx.notify();
@@ -747,7 +766,8 @@ pub fn open(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut A
 pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| {
         let mut v = BackupsView {
-            sets: hopper::backups::list(&root),
+            sets: Vec::new(),
+            sets_loaded: false,
             store,
             root,
             open: HashSet::new(),
@@ -762,6 +782,7 @@ pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window
             focus: snap,
         };
         v.reload_snaps(cx);
+        v.reload(cx);
         v
     });
     window.open_dialog(cx, move |dialog, window, _| {

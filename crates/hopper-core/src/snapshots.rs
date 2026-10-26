@@ -616,7 +616,9 @@ fn mod_key(file: &str, names: &HashMap<String, (String, String)>) -> (String, St
 pub fn compare(root: &Path, snap: &Snapshot) -> anyhow::Result<Changes> {
     let known = cache(std::slice::from_ref(snap)).into_iter().chain(cache(&list(root))).collect();
     let now = now_hashes(root, &known)?;
-    let then: HashMap<&str, &str> = snap.files.iter().map(|f| (f.rel.as_str(), f.hash.as_str())).collect();
+    // Older snapshots still hold what's left out now: not a change.
+    let then: HashMap<&str, &str> =
+        snap.files.iter().filter(|f| !skipped(&f.rel)).map(|f| (f.rel.as_str(), f.hash.as_str())).collect();
     let base = base(root);
     let hopper = crate::instances::HOPPER_FILE;
     let names_then = addon_names(then.get(hopper).and_then(|h| fs::read(blob(&base, h)).ok()));
@@ -709,7 +711,8 @@ pub fn restore(root: &Path, id: &str) -> anyhow::Result<Restored> {
         e.context(format!("Restore stopped partway. \"{}\" in Backups has the instance as it was", safety.reason.label()))
     };
     let now: HashMap<&str, &str> = safety.files.iter().map(|f| (f.rel.as_str(), f.hash.as_str())).collect();
-    let want: HashMap<&str, &str> = snap.files.iter().map(|f| (f.rel.as_str(), f.hash.as_str())).collect();
+    let want: HashMap<&str, &str> =
+        snap.files.iter().filter(|f| !skipped(&f.rel)).map(|f| (f.rel.as_str(), f.hash.as_str())).collect();
     let mut changed = 0;
 
     // Off: files not in the snapshot or different (metadata is replaced, not removed).
@@ -743,7 +746,7 @@ pub fn restore(root: &Path, id: &str) -> anyhow::Result<Restored> {
     let hopper = crate::instances::HOPPER_FILE;
     let old_json: Option<serde_json::Value> =
         fs::read(root.join(hopper)).ok().and_then(|b| serde_json::from_slice(&b).ok());
-    for f in &snap.files {
+    for f in snap.files.iter().filter(|f| !skipped(&f.rel)) {
         if now.get(f.rel.as_str()) == Some(&f.hash.as_str()) {
             continue;
         }
@@ -888,6 +891,42 @@ mod tests {
         take(&root, Reason::Manual).unwrap();
         println!("second: {:.1}s", t.elapsed().as_secs_f64());
         let _ = fs::remove_dir_all(base(&root));
+    }
+
+    /// Times what opening Backups does on the instance in
+    /// `HOPPER_SNAPSHOT_OPEN` (read only).
+    #[test]
+    #[ignore]
+    fn time_open() {
+        let Ok(root) = std::env::var("HOPPER_SNAPSHOT_OPEN") else { return };
+        let root = PathBuf::from(root);
+        let t = std::time::Instant::now();
+        let l = list(&root);
+        println!("list: {} in {:.0} ms", l.len(), t.elapsed().as_secs_f64() * 1000.);
+        let t = std::time::Instant::now();
+        let u = used_bytes(&root);
+        println!("used_bytes: {u} in {:.0} ms", t.elapsed().as_secs_f64() * 1000.);
+        let t = std::time::Instant::now();
+        let c = compare(&root, &l[0]).unwrap();
+        println!("compare: {} mods {} files in {:.0} ms", c.mods.len(), c.files.len(), t.elapsed().as_secs_f64() * 1000.);
+        let t = std::time::Instant::now();
+        let _ = current(&root);
+        println!("walk: {:.0} ms", t.elapsed().as_secs_f64() * 1000.);
+        let t = std::time::Instant::now();
+        let b = crate::backups::list(&root);
+        println!("backups::list: {} sets in {:.0} ms", b.len(), t.elapsed().as_secs_f64() * 1000.);
+    }
+
+    #[test]
+    fn older_snapshots_with_spark_output_compare_clean() {
+        let root = temp("spark-old");
+        write(&root, "config/a.toml", "a=1");
+        write(&root, "config/spark/mat/a.bin", "dump");
+        let mut s = take(&root, Reason::Manual).unwrap();
+        // As a snapshot from before spark was left out would have it.
+        s.files.push(Entry { rel: "config/spark/mat/old.bin".into(), size: 3, mtime: 1, hash: "x".into() });
+        let c = compare(&root, &s).unwrap();
+        assert!(c.files.is_empty(), "{:?}", c.files.iter().map(|f| &f.rel).collect::<Vec<_>>());
     }
 
     #[test]
