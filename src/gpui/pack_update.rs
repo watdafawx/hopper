@@ -105,6 +105,8 @@ struct ServerTarget {
 
 pub struct UpdatePreview {
     store: Entity<Store>,
+    /// A choice dragged down a list (Keep mine… on several rows).
+    paint: crate::drag_pick::Paint,
     /// The folder being updated: the instance, or the server.
     root: PathBuf,
     server: Option<ServerTarget>,
@@ -861,7 +863,27 @@ impl UpdatePreview {
                     } else {
                         detail
                     };
-                    h_flex()
+                    // Pressed and dragged down the list: the same choice on each row.
+                    let view = cx.entity();
+                    let set = {
+                        let key = key.clone();
+                        std::rc::Rc::new(move |v: usize, _: &mut Window, cx: &mut App| {
+                            let key = key.clone();
+                            view.update(cx, |this, cx| {
+                                let changed = if v == 1 { this.turn_on.insert(key) } else { this.turn_on.remove(&key) };
+                                if changed {
+                                    cx.notify();
+                                }
+                            })
+                        })
+                    };
+                    let paint = &this.paint;
+                    let opt = |ix: usize, label: &'static str| {
+                        let set = set.clone();
+                        crate::drag_pick::paint_option(Tab::new().label(label), paint, title, ix, move |v, w, cx| set(v, w, cx))
+                    };
+                    let row_set = set.clone();
+                    crate::drag_pick::paint_row(h_flex(), paint, title, move |v, w, cx| row_set(v, w, cx))
                         .gap_3()
                         .py_0p5()
                         .child(this.mod_cell(format!("cell:{}", m.key), &m.name, &m.icon, m.project, cx))
@@ -871,8 +893,8 @@ impl UpdatePreview {
                                 .segmented()
                                 .xsmall()
                                 .selected_index(usize::from(on))
-                                .child(Tab::new().label(labels[0]))
-                                .child(Tab::new().label(labels[1]))
+                                .child(opt(0, labels[0]))
+                                .child(opt(1, labels[1]))
                                 .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                                     if *ix == 1 {
                                         this.turn_on.insert(key.clone());
@@ -931,9 +953,30 @@ impl UpdatePreview {
                 let theirs = self.take.contains(&rel);
                 let diff = self.diffs.get(&rel).cloned();
                 let (r1, r2) = (rel.clone(), rel.clone());
+                // Pressed and dragged down the list: the same side on each file.
+                let view = cx.entity();
+                let set = {
+                    let rel = rel.clone();
+                    std::rc::Rc::new(move |v: usize, _: &mut Window, cx: &mut App| {
+                        let rel = rel.clone();
+                        view.update(cx, |this, cx| {
+                            let changed = if v == 1 { this.take.insert(rel) } else { this.take.remove(&rel) };
+                            if changed {
+                                this.bulk = Bulk::Review;
+                                cx.notify();
+                            }
+                        })
+                    })
+                };
+                let paint = &self.paint;
+                let opt = |ix: usize, label: &'static str| {
+                    let set = set.clone();
+                    crate::drag_pick::paint_option(Tab::new().label(label), paint, "conflicts", ix, move |v, w, cx| set(v, w, cx))
+                };
+                let row_set = set.clone();
                 v_flex()
                     .child(
-                        h_flex()
+                        crate::drag_pick::paint_row(h_flex(), paint, "conflicts", move |v, w, cx| row_set(v, w, cx))
                             .gap_2()
                             .py_0p5()
                             .child(
@@ -958,8 +1001,8 @@ impl UpdatePreview {
                                     .segmented()
                                     .xsmall()
                                     .selected_index(usize::from(theirs))
-                                    .child(Tab::new().label("Mine"))
-                                    .child(Tab::new().label("Pack's"))
+                                    .child(opt(0, "Mine"))
+                                    .child(opt(1, "Pack's"))
                                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                                         if *ix == 1 {
                                             this.take.insert(r2.clone());
@@ -1268,6 +1311,7 @@ fn show(
             take: HashSet::new(),
             bulk: Bulk::Suggested,
             turn_on: HashSet::new(),
+            paint: Default::default(),
             peek: None,
             _peek_watch: None,
             open: HashSet::new(),
@@ -1358,6 +1402,7 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
             take: HashSet::new(),
             bulk: Bulk::Suggested,
             turn_on: HashSet::new(),
+            paint: Default::default(),
             peek: None,
             _peek_watch: None,
             open: HashSet::new(),

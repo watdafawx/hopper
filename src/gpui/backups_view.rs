@@ -34,6 +34,8 @@ pub struct BackupsView {
     /// The loose files are read (they're read in the background: a big
     /// pack has hundreds of sets).
     sets_loaded: bool,
+    /// Projects the instance has had, by file name, for backed-up files.
+    projects: HashMap<String, (u64, String)>,
     /// Backups shown open (by folder).
     open: HashSet<PathBuf>,
     mode: Mode,
@@ -52,15 +54,23 @@ pub struct BackupsView {
     /// The snapshot to show open the first time the list loads, instead of
     /// the newest (a task's "View snapshot").
     focus: Option<String>,
+    /// A mod's page beside the lists (the dialog stays open).
+    peek: Option<Entity<crate::browse::BrowseView>>,
+    _peek_watch: Option<Subscription>,
+    /// Redraws when icons arrive.
+    _store_watch: Option<Subscription>,
 }
 
 impl BackupsView {
     fn reload(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let sets = cx.background_spawn(async move { hopper::backups::list(&root) }).await;
+            let (sets, projects) = cx
+                .background_spawn(async move { (hopper::backups::list(&root), hopper::snapshots::projects_seen(&root)) })
+                .await;
             this.update(cx, |this, cx| {
                 this.sets = sets;
+                this.projects = projects;
                 this.sets_loaded = true;
                 cx.notify();
             })
@@ -96,6 +106,75 @@ impl BackupsView {
             .ok();
         })
         .detach();
+    }
+
+    /// Opens a mod's page beside the lists, leaving the dialog open.
+    fn open_peek(&mut self, project: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if project == 0 {
+            return;
+        }
+        if self.peek.is_none() {
+            let store = self.store.clone();
+            let p = cx.new(|cx| crate::browse::BrowseView::peek(store, window, cx));
+            // Its own close button empties it: then the panel goes (once
+            // it showed one: it's empty while the first loads).
+            let mut shown = false;
+            self._peek_watch = Some(cx.observe(&p, move |this, p, cx| match p.read(cx).selected_id() {
+                Some(_) => shown = true,
+                None if shown => {
+                    this.peek = None;
+                    this._peek_watch = None;
+                    cx.notify();
+                }
+                None => {}
+            }));
+            self.peek = Some(p);
+        }
+        let Some(peek) = self.peek.clone() else { return };
+        let root = self.root.clone();
+        peek.update(cx, |p, cx| p.peek_project(root, Some(project), cx));
+        window.refresh();
+        cx.notify();
+    }
+
+    /// The instance's project and icon for a backed-up file, by its name
+    /// (or, for another version of it, its name without the version).
+    fn project_of(&self, file: &str, _: &App) -> Option<(u64, String)> {
+        let lower = file.to_lowercase();
+        let bare = lower.strip_suffix(".disabled").unwrap_or(&lower).to_string();
+        if let Some(p) = self.projects.get(&bare) {
+            return Some(p.clone());
+        }
+        let stem = hopper::scan::strip_version_suffix(&bare);
+        self.projects
+            .iter()
+            .find(|(f, _)| hopper::scan::strip_version_suffix(f) == stem)
+            .map(|(_, p)| p.clone())
+    }
+
+    /// A mod's icon and name (or file name) that opens its page, when its
+    /// project is known; asks for icons not loaded yet.
+    fn mod_cell(&self, id: ElementId, text: String, project: u64, icon: &str, small: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let path = self.store.read(cx).image(icon).map(std::path::Path::to_path_buf);
+        if path.is_none() && !icon.is_empty() {
+            let icon = icon.to_string();
+            self.store.update(cx, |s, _| s.want_image(&icon));
+        }
+        let primary = cx.theme().primary;
+        h_flex()
+            .id(id)
+            .min_w_0()
+            .gap_2()
+            .child(widgets::thumb(path.as_deref(), rems(if small { 1. } else { 1.5 }), cx))
+            .child(div().min_w_0().truncate().child(text))
+            .when(project != 0, |d| {
+                d.clickable(cx)
+                    .hover(move |s| s.text_color(primary))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_peek(project, window, cx)
+                    }))
+            })
     }
 
     fn snap(&self, id: &str) -> Option<Snapshot> {
@@ -511,23 +590,27 @@ impl BackupsView {
         }
         let (changed, added, removed) = (c.mods_of(Kind::Changed), c.mods_of(Kind::Added), c.mods_of(Kind::Removed));
         let show_all = self.all.contains(id);
-        // One line per change: (mark, color, text).
-        let mut lines: Vec<(&str, Hsla, String)> = c
+        // One line per change: (mark, color, text, and for a mod its
+        // project and icon).
+        let mut lines: Vec<(&str, Hsla, String, Option<(u64, String)>)> = c
             .mods
             .iter()
-            .map(|m| match m.kind() {
-                Kind::Changed => {
-                    let (a, b) = m.versions();
-                    ("~", theme.warning, format!("{} {a} → {b}", m.name))
+            .map(|m| {
+                let p = Some((m.project, m.icon.clone()));
+                match m.kind() {
+                    Kind::Changed => {
+                        let (a, b) = m.versions();
+                        ("~", theme.warning, format!("{} {a} → {b}", m.name), p)
+                    }
+                    Kind::Added => ("+", theme.success, format!("{} added", m.name), p),
+                    Kind::Removed => ("−", theme.danger, format!("{} removed", m.name), p),
                 }
-                Kind::Added => ("+", theme.success, format!("{} added", m.name)),
-                Kind::Removed => ("−", theme.danger, format!("{} removed", m.name)),
             })
             .collect();
         lines.extend(c.files.iter().map(|f| match f.kind {
-            Kind::Changed => ("~", theme.warning, format!("{} changed", f.rel)),
-            Kind::Added => ("+", theme.success, format!("{} added", f.rel)),
-            Kind::Removed => ("−", theme.danger, format!("{} removed", f.rel)),
+            Kind::Changed => ("~", theme.warning, format!("{} changed", f.rel), None),
+            Kind::Added => ("+", theme.success, format!("{} added", f.rel), None),
+            Kind::Removed => ("−", theme.danger, format!("{} removed", f.rel), None),
         }));
         let more = lines.len().saturating_sub(SHOWN);
         if !show_all {
@@ -554,12 +637,16 @@ impl BackupsView {
                     })
                     .when(c.meta, |r| r.child(widgets::chip(theme.muted_foreground).child("hopper.json"))),
             )
-            .children(lines.into_iter().map(|(mark, color, text)| {
-                h_flex()
-                    .gap_2()
-                    .text_xs()
-                    .child(div().w(rems(0.75)).flex_none().text_color(color).child(mark))
-                    .child(div().flex_1().min_w_0().truncate().child(text))
+            .children(lines.into_iter().enumerate().map(|(k, (mark, color, text, project))| {
+                let row = h_flex().gap_2().text_xs().child(div().w(rems(0.75)).flex_none().text_color(color).child(mark));
+                match project {
+                    // A mod: its icon, and its page on click.
+                    Some((pid, icon)) => row.child(
+                        self.mod_cell(ElementId::Name(format!("snap-mod:{id}:{k}").into()), text, pid, &icon, true, cx)
+                            .flex_1(),
+                    ),
+                    None => row.child(div().flex_1().min_w_0().truncate().child(text)),
+                }
             }))
             .when(more > 0, |c| {
                 c.child(
@@ -658,18 +745,30 @@ impl BackupsView {
                     .when(open, |c| {
                         c.children(set.files.iter().enumerate().map(|(j, f)| {
                             let file = f.clone();
+                            // A mod or pack the instance knows: its icon and page.
+                            let (pid, icon) = self.project_of(&f.name, cx).unwrap_or_default();
                             h_flex()
                                 .id(("backup-file", i * 10_000 + j))
                                 .gap_2()
                                 .pl_6()
                                 .py_1()
                                 .rounded(theme.radius)
-                                .hover(|s| s.bg(theme.list_hover))
+                                .hover(|s| widgets::row_hover(s, cx))
                                 .child(
                                     v_flex()
                                         .flex_1()
                                         .min_w_0()
-                                        .child(div().text_sm().truncate().child(f.name.clone()))
+                                        .child(
+                                            self.mod_cell(
+                                                ElementId::Name(format!("backup-mod:{i}:{j}").into()),
+                                                f.name.clone(),
+                                                pid,
+                                                &icon,
+                                                false,
+                                                cx,
+                                            )
+                                            .text_sm(),
+                                        )
                                         .child(
                                             widgets::caption(format!("back to {} · {}", f.restore_to, size(f.size)), cx)
                                                 .text_xs()
@@ -710,8 +809,13 @@ impl Render for BackupsView {
             }
         };
         let body = if snaps_mode { self.snapshots_body(cx) } else { self.loose_body(cx) };
-        v_flex()
-            .when(filled, |c| c.h(widgets::dialog_room(window).max(window.rem_size() * 12.)))
+        let room = widgets::dialog_room(window).max(window.rem_size() * 12.);
+        // A mod's page, beside the lists.
+        let peek = self.peek.clone().map(|p| v_flex().w(rems(30.)).flex_none().h(room).child(div().flex_1().min_h_0().child(p)));
+        let main = v_flex()
+            .flex_1()
+            .min_w_0()
+            .when(filled || peek.is_some(), |c| c.h(room))
             .gap_3()
             .child(
                 h_flex()
@@ -752,7 +856,8 @@ impl Render for BackupsView {
                     format!("{} on disk for snapshots", hopper::instance_ops::human_bytes(self.used)),
                     cx,
                 ).text_xs())
-            })
+            });
+        h_flex().items_start().gap_4().child(main).children(peek)
     }
 }
 
@@ -768,6 +873,7 @@ pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window
         let mut v = BackupsView {
             sets: Vec::new(),
             sets_loaded: false,
+            projects: HashMap::new(),
             store,
             root,
             open: HashSet::new(),
@@ -780,15 +886,19 @@ pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window
             comparing: HashSet::new(),
             busy: None,
             focus: snap,
+            peek: None,
+            _peek_watch: None,
+            _store_watch: None,
         };
+        v._store_watch = Some(cx.observe(&v.store, |_, _, cx| cx.notify()));
         v.reload_snaps(cx);
         v.reload(cx);
         v
     });
-    window.open_dialog(cx, move |dialog, window, _| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         dialog
             .title("Backups")
-            .w(rems(42.).to_pixels(window.rem_size()))
+            .w(rems(if view.read(cx).peek.is_some() { 74. } else { 42. }).to_pixels(window.rem_size()))
             .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())
     });

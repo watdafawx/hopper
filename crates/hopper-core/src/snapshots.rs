@@ -122,6 +122,10 @@ pub enum Kind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModChange {
     pub name: String,
+    /// Its CurseForge project (0 when unknown) and icon URL, for the list's
+    /// icon and its mod page.
+    pub project: u64,
+    pub icon: String,
     /// File name in the snapshot.
     pub then: Option<String>,
     /// File name now.
@@ -581,6 +585,44 @@ fn now_hashes(root: &Path, known: &Cache) -> anyhow::Result<HashMap<String, Stri
 
 /// File name (lowercase, no `.disabled`) → (identity, display name), from
 /// a hopper.json's addons.
+/// Every CurseForge project the instance has had, by file name (lowercase,
+/// no `.disabled`) → (project, icon URL): its hopper.json now and the one in
+/// each snapshot, newest first. For backed-up files, which keep no project.
+pub fn projects_seen(root: &Path) -> HashMap<String, (u64, String)> {
+    let base = base(root);
+    let mut jsons: Vec<Vec<u8>> = fs::read(root.join(crate::instances::HOPPER_FILE)).into_iter().collect();
+    let mut seen = HashSet::new();
+    for snap in list(root) {
+        if let Some(f) = snap.files.iter().find(|f| f.rel == crate::instances::HOPPER_FILE)
+            && seen.insert(f.hash.clone())
+            && let Ok(b) = fs::read(blob(&base, &f.hash))
+        {
+            jsons.push(b);
+        }
+    }
+    let mut out = HashMap::new();
+    for b in jsons {
+        let Ok(inst) = serde_json::from_slice::<crate::instances::Instance>(&b) else { continue };
+        for a in inst.addons.into_iter().filter(|a| a.project_id != 0) {
+            let key = a.file_name.to_lowercase().trim_end_matches(".disabled").to_string();
+            out.entry(key).or_insert((a.project_id, a.icon));
+        }
+    }
+    out
+}
+
+/// Identity → (project, icon URL), from a hopper.json's addons.
+fn addon_projects(json: Option<&[u8]>) -> HashMap<String, (u64, String)> {
+    let Some(inst) = json.and_then(|b| serde_json::from_slice::<crate::instances::Instance>(b).ok()) else {
+        return HashMap::new();
+    };
+    inst.addons
+        .into_iter()
+        .filter(|a| a.project_id != 0)
+        .map(|a| (format!("p:{}", a.project_id), (a.project_id, a.icon)))
+        .collect()
+}
+
 fn addon_names(json: Option<Vec<u8>>) -> HashMap<String, (String, String)> {
     let Some(inst) = json.and_then(|b| serde_json::from_slice::<crate::instances::Instance>(&b).ok()) else {
         return HashMap::new();
@@ -621,8 +663,12 @@ pub fn compare(root: &Path, snap: &Snapshot) -> anyhow::Result<Changes> {
         snap.files.iter().filter(|f| !skipped(&f.rel)).map(|f| (f.rel.as_str(), f.hash.as_str())).collect();
     let base = base(root);
     let hopper = crate::instances::HOPPER_FILE;
-    let names_then = addon_names(then.get(hopper).and_then(|h| fs::read(blob(&base, h)).ok()));
-    let names_now = addon_names(fs::read(root.join(hopper)).ok());
+    let json_then = then.get(hopper).and_then(|h| fs::read(blob(&base, h)).ok());
+    let json_now = fs::read(root.join(hopper)).ok();
+    let mut projects = addon_projects(json_then.as_deref());
+    projects.extend(addon_projects(json_now.as_deref()));
+    let names_then = addon_names(json_then);
+    let names_now = addon_names(json_now);
 
     let mut out = Changes::default();
     // Mods, matched by project so a new version reads as a change.
@@ -645,12 +691,19 @@ pub fn compare(root: &Path, snap: &Snapshot) -> anyhow::Result<Changes> {
             e.2.push(file);
         }
     }
-    for (_, (name, mut t, mut n)) in by_key {
+    for (key, (name, mut t, mut n)) in by_key {
+        let (project, icon) = projects.get(&key).cloned().unwrap_or_default();
         t.sort();
         n.sort();
         let len = t.len().max(n.len());
         for i in 0..len {
-            out.mods.push(ModChange { name: name.clone(), then: t.get(i).cloned(), now: n.get(i).cloned() });
+            out.mods.push(ModChange {
+                name: name.clone(),
+                project,
+                icon: icon.clone(),
+                then: t.get(i).cloned(),
+                now: n.get(i).cloned(),
+            });
         }
     }
     out.mods.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.then.cmp(&b.then)));

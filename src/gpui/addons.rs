@@ -1482,6 +1482,8 @@ impl AddonsView {
         // Offered, never ticked: removing them is the user's call.
         let _ = removing_mods;
         let picked: Rc<std::cell::RefCell<std::collections::HashSet<String>>> = Default::default();
+        // Ticks dragged down the list of libraries that could go too.
+        let paint = drag_pick::Paint::default();
         // What the remaining jars would lose: checked once in the background
         // for everything that may go; shown for what actually goes.
         let breaks: Rc<std::cell::RefCell<Option<Breaks>>> = Default::default();
@@ -1564,14 +1566,34 @@ impl AddonsView {
                         let (p, file) = (picked.clone(), file.clone());
                         let on = picked.borrow().contains(&file);
                         let pid = pids.get(&file).copied().unwrap_or(0);
-                        h_flex()
+                        // Press a box and drag down the list: the rows
+                        // crossed take its new state.
+                        let set = {
+                            let (p, file) = (picked.clone(), file.clone());
+                            std::rc::Rc::new(move |v: usize, window: &mut Window, _: &mut App| {
+                                let changed = if v == 1 {
+                                    p.borrow_mut().insert(file.clone())
+                                } else {
+                                    p.borrow_mut().remove(&file)
+                                };
+                                if changed {
+                                    window.refresh();
+                                }
+                            })
+                        };
+                        let (s1, s2, paint2) = (set.clone(), set.clone(), paint.clone());
+                        drag_pick::paint_row(h_flex(), &paint, "orphans", move |v, w, cx| s1(v, w, cx))
                             .gap_1()
                             .child(widgets::thumb(peek.icons.get(&pid).map(PathBuf::as_path), rems(1.25), cx))
-                            .child(
+                            .child(drag_pick::paint_option(div(), &paint, "orphans", usize::from(!on), move |v, w, cx| s2(v, w, cx)).child(
                                 gpui_kit::component::checkbox::Checkbox::new(("orphan", i))
                                     .label(name.clone())
                                     .checked(on)
                                     .on_click(move |v: &bool, window, _| {
+                                        // The press already set it.
+                                        if paint2.active(&"orphans".into()) {
+                                            return;
+                                        }
                                         if *v {
                                             p.borrow_mut().insert(file.clone());
                                         } else {
@@ -1579,7 +1601,7 @@ impl AddonsView {
                                         }
                                         window.refresh();
                                     }),
-                            )
+                            ))
                             .when(pid != 0, |r| {
                                 let peek = peek.clone();
                                 r.child(
@@ -1845,7 +1867,7 @@ impl AddonsView {
             ids.dedup();
             ids
         };
-        let review = cx.new(|_| UpdateReview { rows, skip, held });
+        let review = cx.new(|_| UpdateReview { rows, skip, held, paint: Default::default() });
         if !lookup.is_empty() {
             let (inst, review) = ((*inst).clone(), review.clone());
             window
@@ -3690,6 +3712,8 @@ struct UpdateReview {
     /// Skipped only for a problem, and not touched since: ticked again if
     /// the problem turns out not to be one.
     held: HashSet<u64>,
+    /// Ticks dragged down the list.
+    paint: drag_pick::Paint,
 }
 
 impl UpdateReview {
@@ -3804,14 +3828,32 @@ impl Render for UpdateReview {
                     let problem = r.problem();
                     // Skipped rows fade; their warning stays readable.
                     let dim = |d: Div| if on { d } else { d.opacity(0.55) };
-                    h_flex()
+                    // Press a box and drag down the list: the rows crossed
+                    // take its new state.
+                    let view = cx.entity();
+                    let set = std::rc::Rc::new(move |v: usize, window: &mut Window, cx: &mut App| {
+                        view.update(cx, |this, cx| {
+                            let changed = if v == 1 { this.skip.remove(&pid) } else { this.skip.insert(pid) };
+                            if changed {
+                                this.held.remove(&pid);
+                                window.refresh();
+                                cx.notify();
+                            }
+                        })
+                    });
+                    let (s1, s2, paint) = (set.clone(), set.clone(), self.paint.clone());
+                    drag_pick::paint_row(h_flex(), &self.paint, "review", move |v, w, cx| s1(v, w, cx))
                         .min_h(row_h)
                         .pl_6()
                         .gap_2()
-                        .child(
+                        .child(drag_pick::paint_option(div(), &self.paint, "review", usize::from(!on), move |v, w, cx| s2(v, w, cx)).child(
                             Checkbox::new(("review-row", pid as usize))
                                 .checked(on)
                                 .on_click(cx.listener(move |this, v: &bool, window, cx| {
+                                    // The press already set it.
+                                    if paint.active(&"review".into()) {
+                                        return;
+                                    }
                                     this.held.remove(&pid);
                                     if *v {
                                         this.skip.remove(&pid);
@@ -3821,7 +3863,7 @@ impl Render for UpdateReview {
                                     window.refresh();
                                     cx.notify();
                                 })),
-                        )
+                        ))
                         .child(dim(div().flex_none().child(widgets::thumb(r.icon.as_deref(), rems(1.25), cx))))
                         .child(
                             v_flex()

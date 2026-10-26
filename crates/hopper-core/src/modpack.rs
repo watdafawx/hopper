@@ -125,6 +125,19 @@ pub fn pending_downloads(inst: &Instance) -> Vec<Pending> {
         .unwrap_or_default()
 }
 
+/// The website pages of the files still to download into the instance at
+/// `root` (for Hopper's download window).
+pub fn pending_urls_at(root: &Path) -> Vec<String> {
+    fs::read(root.join(PENDING_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Vec<Pending>>(&b).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.url)
+        .filter(|u| !u.is_empty())
+        .collect()
+}
+
 /// Forgets the pending downloads (the user dealt with them).
 pub fn clear_pending(inst: &Instance) -> anyhow::Result<()> {
     clear_pending_at(&inst.root)

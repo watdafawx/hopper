@@ -291,6 +291,8 @@ pub struct ModsTab {
     // Review updates
     reviewing: bool,
     review_picked: HashSet<String>,
+    /// Ticks dragged down the review list.
+    paint: drag_pick::Paint,
     review_open: Option<String>,
     review_notes: HashMap<String, Option<String>>,
     // CurseForge key
@@ -363,6 +365,7 @@ impl ModsTab {
             results: None,
             reviewing: false,
             review_picked: HashSet::new(),
+            paint: Default::default(),
             review_open: None,
             review_notes: HashMap::new(),
             cf_key,
@@ -1579,18 +1582,39 @@ impl ModsTab {
                 Some(Some(md)) => Self::markdown(ElementId::Name(format!("rv-notes:{pid}").into()), md, cx),
                 _ => widgets::caption("Loading…", cx).into_any_element(),
             });
+            // Press a box and drag down the list: the rows crossed take its
+            // new state.
+            let on = self.review_picked.contains(&pid);
+            let view = cx.entity();
+            let set = {
+                let pid = pid.clone();
+                Rc::new(move |v: usize, _: &mut Window, cx: &mut App| {
+                    let pid = pid.clone();
+                    view.update(cx, |this, cx| {
+                        let changed = if v == 1 { this.review_picked.insert(pid) } else { this.review_picked.remove(&pid) };
+                        if changed {
+                            cx.notify();
+                        }
+                    })
+                })
+            };
+            let (s1, s2, paint) = (set.clone(), set.clone(), self.paint.clone());
             v_flex()
                 .px_3()
                 .py_1p5()
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
-                    h_flex()
+                    drag_pick::paint_row(h_flex(), &self.paint, "review", move |v, w, cx| s1(v, w, cx))
                         .gap_2()
-                        .child(
+                        .child(drag_pick::paint_option(div(), &self.paint, "review", usize::from(!on), move |v, w, cx| s2(v, w, cx)).child(
                             Checkbox::new(ElementId::Name(format!("rv-pick:{pid}").into()))
-                                .checked(self.review_picked.contains(&pid))
+                                .checked(on)
                                 .on_click(cx.listener(move |this, v: &bool, _, cx| {
+                                    // The press already set it.
+                                    if paint.active(&"review".into()) {
+                                        return;
+                                    }
                                     if *v {
                                         this.review_picked.insert(p1.clone());
                                     } else {
@@ -1598,7 +1622,7 @@ impl ModsTab {
                                     }
                                     cx.notify();
                                 })),
-                        )
+                        ))
                         .child(
                             h_flex()
                                 .id(ElementId::Name(format!("rv-open:{pid}").into()))

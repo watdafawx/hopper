@@ -1542,7 +1542,9 @@ impl Store {
             } else {
                 format!("{left} still to download")
             });
-            Ok(Msg::InstanceChanged(inst.root.clone()))
+            // Website-only files: the download window gets them.
+            let pages = hopper::modpack::pending_urls_at(&inst.root);
+            Ok(Msg::Updated(inst.root.clone(), Vec::new(), pages))
         });
     }
 
@@ -1817,7 +1819,10 @@ impl Store {
                     Err(e) => job.note(format!("{} not updated: {e:#}", server.name)),
                 }
             }
-            Ok(Msg::InstanceChanged(full.root.clone()))
+            // Website-only files the pack wants: the download window gets
+            // them, as for mod updates.
+            let pages = hopper::modpack::pending_urls_at(&full.root);
+            Ok(Msg::Updated(full.root.clone(), Vec::new(), pages))
         });
     }
 

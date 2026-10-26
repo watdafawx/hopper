@@ -364,3 +364,74 @@ pub fn click_swallowed<V: Picks>(this: &mut V) -> bool {
 pub fn spreading<V: Picks>(this: &mut V) -> bool {
     this.picks().drag.as_ref().is_some_and(|p| p.spread)
 }
+
+// ---- painting a choice down a plain list ---------------------------------------
+
+/// Press an option on one row of a plain (not virtual) list and move over
+/// other rows with the button held: each row takes the same option. For
+/// choice pairs (Keep mine / Use the pack's) and tick boxes in dialogs.
+/// Cheap to clone; every row of a list shares one.
+#[derive(Clone, Default)]
+pub struct Paint(std::rc::Rc<std::cell::RefCell<Option<(SharedString, usize)>>>);
+
+impl Paint {
+    /// Pressed option `value` on a row of list `group`.
+    pub fn start(&self, group: &SharedString, value: usize) {
+        *self.0.borrow_mut() = Some((group.clone(), value));
+    }
+
+    /// The pointer moved over a row of `group`: the option to give it while
+    /// painting. A move without the button ends the paint.
+    fn over(&self, group: &SharedString, pressed: bool) -> Option<usize> {
+        let mut s = self.0.borrow_mut();
+        if !pressed {
+            *s = None;
+            return None;
+        }
+        s.as_ref().filter(|(g, _)| g == group).map(|(_, v)| *v)
+    }
+
+    pub fn end(&self) {
+        *self.0.borrow_mut() = None;
+    }
+
+    /// A paint in `group` is running (a tick box's own click, which comes
+    /// with the release, skips itself then: the press already set it).
+    pub fn active(&self, group: &SharedString) -> bool {
+        self.0.borrow().as_ref().is_some_and(|(g, _)| g == group)
+    }
+}
+
+/// `el` (one option of a row) starts a paint when pressed: `set(value)`
+/// gives this row the option at once.
+pub fn paint_option<E: InteractiveElement>(
+    el: E,
+    paint: &Paint,
+    group: impl Into<SharedString>,
+    value: usize,
+    set: impl Fn(usize, &mut Window, &mut App) + 'static,
+) -> E {
+    let (p, g) = (paint.clone(), group.into());
+    el.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+        p.start(&g, value);
+        set(value, window, cx);
+    })
+}
+
+/// `el` (a whole row) takes the running paint when the pointer moves over
+/// it with the button held. `set` should do nothing when the row already
+/// has that option.
+pub fn paint_row<E: InteractiveElement>(
+    el: E,
+    paint: &Paint,
+    group: impl Into<SharedString>,
+    set: impl Fn(usize, &mut Window, &mut App) + 'static,
+) -> E {
+    let (p, g, p2) = (paint.clone(), group.into(), paint.clone());
+    el.on_mouse_move(move |e: &MouseMoveEvent, window, cx| {
+        if let Some(v) = p.over(&g, e.pressed_button == Some(MouseButton::Left)) {
+            set(v, window, cx);
+        }
+    })
+    .on_mouse_up(MouseButton::Left, move |_, _, _| p2.end())
+}

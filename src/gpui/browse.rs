@@ -1175,16 +1175,11 @@ impl BrowseView {
             };
             // Website-only files (the project or a dependency) land on the
             // instance's pending list; the download window gets their pages.
-            let pending_urls = |i: &Option<Instance>| -> Vec<String> {
-                i.as_ref()
-                    .map(|i| hopper::modpack::pending_downloads(i).into_iter().map(|p| p.url).collect())
-                    .unwrap_or_default()
-            };
-            let before = pending_urls(&place.target);
-            let after_inst = place.target.clone();
+            // A new pack's instance is read once it exists.
+            let before = place.target.as_ref().map(|i| hopper::modpack::pending_urls_at(&i.root)).unwrap_or_default();
             let (changed, line) = hopper::browse::install_project(&m, file, browsing, place, job)?;
             job.detail(line);
-            let pages: Vec<String> = pending_urls(&after_inst)
+            let pages: Vec<String> = hopper::modpack::pending_urls_at(&changed)
                 .into_iter()
                 .filter(|u| !before.contains(u))
                 .collect();
