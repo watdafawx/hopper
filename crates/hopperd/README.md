@@ -197,16 +197,11 @@ the address the player typed and passes them to that server's own port.
 - Settings › General › Remove this server: Remove from panel (folder kept), or Delete (type the name; the folder moves to `.hopper-deleted` in the servers folder for 30 days, restore or delete for good from the Panel folder page). Servers that run where they are can only be removed from the panel.
 - API: `GET host/browse`, `GET host/scan`, `PUT settings/panel-folder`, `POST settings/panel-folder/move`, `POST panel/restart`, `GET|PUT settings/servers-folder`, `POST servers/import-folder`, `incoming/uploads` (chunked, like file uploads), `GET servers/zip-info`, `POST servers/import-zip`, `GET packs/search`, `GET packs/versions`, `POST servers/create-from-pack`, `POST servers/{id}/remove`, `PUT deleted/{name}/restore`, `DELETE deleted/{name}`.
 
-## Mod profiles and finding the mod that breaks it (0.8.0)
+## Mod profiles (0.8.0)
 
 - Profiles (Mods toolbar): switch to a saved set of mods that are off, save the current one, delete one. Each shows what switching would turn on and off.
-- Find the mod that breaks it: hopper-core's `bisect` rounds (half the suspects off, always with what needs them), with the strip, row chips and answers from Hopper desktop. The On switches wait until the hunt ends.
-- "Run rounds for me" (when it won't start or crashes): hopperd stops the server, parks the round's mods, starts it, and answers by itself: reaching "Done" works, a crash, an exit or 10 minutes is still broken. Warns when players are online. Pause / resume; after a hopperd restart the rounds show as paused.
-- When the loader refuses a round because a mod needs one that's parked ("Mod X requires Y"), the hunt learns that pair and plays the round again instead of taking the answer.
-- Rounds play on a throwaway world by default (`level-name` is switched to `hopper-hunt-world` and put back, and that world deleted, when the hunt ends), so the real world never saves with mods missing.
-- Schedules (crash restarts, scheduled restarts, autostart) skip a server while a hunt runs.
-- Files: `hopper-bisect.json` (core's journal) and `hopper-bisect-server.json` (auto rounds, log, world) in the server folder.
-- API: `GET mods/profiles`, `POST mods/profiles/save|use|delete` `{name}`; `GET mods/hunt`, `POST mods/hunt/start` `{kind, auto, scratch_world}` (job), `.../answer` `{answer}` (job), `.../undo` (job), `.../fine` `{file, fine}` (job), `.../finish` `{keep_off}` (job), `.../auto` `{run}`. Capabilities `mods.profiles`, `mods.hunt`.
+- API: `GET mods/profiles`, `POST mods/profiles/save|use|delete` `{name}`. Capability `mods.profiles`.
+- "Find the mod that breaks it" (0.8.0) was removed: turning mods off in rounds broke worlds, KubeJS scripts and data packs on big packs. A hunt left running is put back when hopperd starts: every mod as before it (from `hopper-bisect.json`) and the real world back in `level-name` (from `hopper-bisect-server.json`).
 
 ## Mods table like Hopper desktop (0.7.0)
 

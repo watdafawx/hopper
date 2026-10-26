@@ -362,7 +362,62 @@ pub fn missing(mods_dir: &Path) -> Vec<Missing> {
     missing_without(mods_dir, &[])
 }
 
+/// How many of the turned-on mods in `mods_dir` need each mod id (their
+/// own requirements, read from the jars and cached). A mod many others need
+/// is a library: an error often passes through its code without being its
+/// fault.
+pub fn dependents(mods_dir: &Path) -> HashMap<String, usize> {
+    let enabled: Vec<PathBuf> = std::fs::read_dir(mods_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().to_lowercase().ends_with(".jar"))
+        .collect();
+    let refs: Vec<&PathBuf> = enabled.iter().collect();
+    let mut out: HashMap<String, usize> = HashMap::new();
+    for (_, j) in read_all(&refs) {
+        let mut seen = std::collections::HashSet::new();
+        for (id, _) in &j.requires {
+            if !j.own.contains(id) && seen.insert(id.clone()) {
+                *out.entry(id.clone()).or_default() += 1;
+            }
+        }
+    }
+    out
+}
+
 /// [`missing`] as it would be with the files named in `without` gone.
+/// Turned-on mods an update of `file` would stop loading: each needs the
+/// mod in `file` at a version range that takes `from` (its version now)
+/// but not `to` (the update's). Both are read from the file names, so the
+/// two are judged alike. (their name, the range they need), by name.
+pub fn broken_by(mods_dir: &Path, file: &str, from: &str, to: &str) -> Vec<(String, String)> {
+    let Some(me) = jar(&mods_dir.join(file)) else { return Vec::new() };
+    let enabled: Vec<PathBuf> = std::fs::read_dir(mods_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().to_lowercase().ends_with(".jar") && p.file_name().is_some_and(|n| n != file))
+        .collect();
+    let refs: Vec<&PathBuf> = enabled.iter().collect();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (_, j) in read_all(&refs) {
+        for (id, range) in &j.requires {
+            if me.own.contains(id)
+                && accepts(range, from) == Some(true)
+                && accepts(range, to) == Some(false)
+                && !out.iter().any(|(n, _)| *n == j.name)
+            {
+                out.push((j.name.clone(), range.clone()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 pub fn missing_without(mods_dir: &Path, without: &[String]) -> Vec<Missing> {
     let entries: Vec<PathBuf> = std::fs::read_dir(mods_dir)
         .into_iter()

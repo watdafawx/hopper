@@ -291,7 +291,7 @@ impl FilesTab {
         if self.query.is_empty() {
             return all.clone();
         }
-        all.iter().filter(|e| e.name.to_lowercase().contains(&self.query)).cloned().collect()
+        all.iter().filter(|e| hopper::fuzzy::words_match(&self.query, &[&e.name])).cloned().collect()
     }
 
     // ---- opening -----------------------------------------------------------

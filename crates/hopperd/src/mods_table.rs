@@ -221,7 +221,6 @@ async fn toggle_many(
     Json(b): Json<ManyBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    crate::mods_hunt::refuse_while_hunting(&e)?;
     let running = e.server.state().is_alive();
     log::info!("{}: turning {} {} mods", e.name, if b.enabled { "on" } else { "off" }, b.files.len());
     let n = blocking(move || {

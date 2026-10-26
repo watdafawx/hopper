@@ -177,6 +177,25 @@ pub fn signals(text: &str) -> Vec<Raw> {
             let Some(m) = FRAME.captures(l) else { continue };
             let id = m.get(1).map_or("", |g| g.as_str()).to_string();
             let jar = m[2].to_string();
+            // A mod's change to the game's own code (a mixin) runs in the
+            // game's frames: `Minecraft.handler$jip000$omegaconfig$onReturn`.
+            if let Some(mx) = MIXIN_METHOD.captures(l) {
+                let mid = mx[1].to_string();
+                if !out.iter().any(|r| r.mod_id == mid) {
+                    let (certainty, why) = if first {
+                        first_name = mid.clone();
+                        (Certainty::Likely, "Its change to the game's code (a mixin) was running when it crashed.".to_string())
+                    } else {
+                        (
+                            Certainty::Possible,
+                            format!("Its change to the game's code (a mixin) called {first_name}, where the error happened."),
+                        )
+                    };
+                    first = false;
+                    add(&mut out, Raw { mod_id: mid, jar: String::new(), certainty, why, class: String::new(), needs: Vec::new() });
+                }
+                continue;
+            }
             if NOT_MODS.contains(&id.as_str()) || is_loader_jar(&jar) {
                 continue;
             }
@@ -302,6 +321,42 @@ fn fabric_signals(lines: &[&str], out: &mut Vec<Raw>) {
         });
         first = false;
     }
+}
+
+/// A library (a mod at least [`crate::bisect::LIBRARY_MIN`] others need,
+/// like Architectury or Cloth Config) is rarely the cause just because the
+/// error passed through its code: it does work for the mods that call it.
+/// Such a suspect drops to possible, and the first other mod in the chain
+/// becomes the likely one. What the loader itself names stays certain.
+fn demote_libraries(suspects: &mut [Suspect], dependents: &std::collections::HashMap<String, usize>, ids: &impl Fn(&str) -> Vec<String>) {
+    let users = |s: &Suspect| -> usize {
+        let mut own = ids(&s.file_name);
+        if !s.mod_id.is_empty() {
+            own.push(s.mod_id.clone());
+        }
+        own.iter().map(|i| dependents.get(i).copied().unwrap_or(0)).max().unwrap_or(0)
+    };
+    let mut library: Option<String> = None;
+    for s in suspects.iter_mut().filter(|s| s.certainty == Certainty::Likely) {
+        let n = users(s);
+        if n >= crate::bisect::LIBRARY_MIN {
+            s.certainty = Certainty::Possible;
+            s.why = format!(
+                "A library {n} of your mods use: the error happened in its code, but the mod that used it is more often the cause."
+            );
+            library.get_or_insert_with(|| if s.mod_id.is_empty() { s.file_name.clone() } else { s.mod_id.clone() });
+        }
+    }
+    let Some(lib) = library else { return };
+    if suspects.iter().any(|s| s.certainty <= Certainty::Likely) {
+        return;
+    }
+    // The first mod in the chain that isn't a library.
+    if let Some(s) = suspects.iter_mut().find(|s| s.certainty == Certainty::Possible && users(s) < crate::bisect::LIBRARY_MIN) {
+        s.certainty = Certainty::Likely;
+        s.why = format!("Its code called {lib}, where the error happened: more likely the cause than the library.");
+    }
+    suspects.sort_by_key(|s| s.certainty);
 }
 
 /// "mod 'Sodium' (sodium)" read as "Sodium".
@@ -452,8 +507,46 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
     let now = crate::time::now();
     let text = report.as_deref().map(|p| tail(p, 2 << 20)).unwrap_or_default();
     let log = tail(&root.join("logs").join("latest.log"), 2 << 20);
-    let mut raws = signals(&text);
-    for r in signals(&log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
+    let suspects = analyze(root, &text, &log, mods, &ids);
+    let out_of_memory = text.contains("OutOfMemoryError") || log.contains("java.lang.OutOfMemoryError");
+    let kind = if !suspects.is_empty() {
+        CrashKind::Mods
+    } else if out_of_memory {
+        CrashKind::Memory
+    } else if native.is_some() && report.is_none() {
+        CrashKind::Native
+    } else {
+        CrashKind::Unknown
+    };
+    let source = report.clone().or(native.clone()).unwrap_or_default();
+    let headline = match (&report, &native) {
+        (Some(_), _) => headline(&text),
+        (None, Some(n)) => native_line(&tail(n, 64 << 10)),
+        _ => String::new(),
+    };
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new() })
+}
+
+/// A saved crash read again from its report with today's rules (which mods
+/// count as libraries, which frames name a mod), so an older card doesn't
+/// keep an old guess. `None` when its report is gone or isn't a crash
+/// report, or nothing changed.
+pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) -> Vec<String>) -> Option<Crash> {
+    let is_report = saved.source.extension().is_some_and(|e| e == "txt") && saved.source.is_file();
+    if !is_report || saved.kind != CrashKind::Mods {
+        return None;
+    }
+    let suspects = analyze(root, &tail(&saved.source, 2 << 20), "", mods, &ids);
+    if suspects.is_empty() || suspects == saved.suspects {
+        return None;
+    }
+    Some(Crash { suspects, ..saved.clone() })
+}
+
+/// The mods a crash report (and the game log) points at, most likely first.
+fn analyze(root: &Path, text: &str, log: &str, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) -> Vec<Suspect> {
+    let mut raws = signals(text);
+    for r in signals(log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
         add(&mut raws, r);
     }
     // Frames that name no jar (Fabric): the jar that has the class's package.
@@ -474,29 +567,14 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
     raws.sort_by_key(|r| r.certainty);
     let mut suspects: Vec<Suspect> = Vec::new();
     for r in raws {
-        let Some(file) = match_jar(&r, mods, &ids) else { continue };
+        let Some(file) = match_jar(&r, mods, ids) else { continue };
         if suspects.iter().any(|s| s.file_name == file) {
             continue;
         }
         suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs });
     }
-    let out_of_memory = text.contains("OutOfMemoryError") || log.contains("java.lang.OutOfMemoryError");
-    let kind = if !suspects.is_empty() {
-        CrashKind::Mods
-    } else if out_of_memory {
-        CrashKind::Memory
-    } else if native.is_some() && report.is_none() {
-        CrashKind::Native
-    } else {
-        CrashKind::Unknown
-    };
-    let source = report.clone().or(native.clone()).unwrap_or_default();
-    let headline = match (&report, &native) {
-        (Some(_), _) => headline(&text),
-        (None, Some(n)) => native_line(&tail(n, 64 << 10)),
-        _ => String::new(),
-    };
-    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new() })
+    demote_libraries(&mut suspects, &crate::deps::dependents(&root.join("mods")), ids);
+    suspects
 }
 
 /// A Java crash file's "Problematic frame" line.
@@ -648,6 +726,53 @@ pub fn clear(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sus(file: &str, id: &str, c: Certainty) -> Suspect {
+        Suspect { file_name: file.into(), mod_id: id.into(), certainty: c, why: String::new(), needs: Vec::new() }
+    }
+
+    #[test]
+    fn a_library_is_not_the_likely_cause() {
+        let deps: std::collections::HashMap<String, usize> = [("architectury".to_string(), 40)].into();
+        let ids = |f: &str| if f.starts_with("arch") { vec!["architectury".to_string()] } else { vec![] };
+        // The library first in the chain, a mod that called it next.
+        let mut s = vec![sus("architectury.jar", "architectury", Certainty::Likely), sus("caller.jar", "caller", Certainty::Possible)];
+        demote_libraries(&mut s, &deps, &ids);
+        assert_eq!((s[0].file_name.as_str(), s[0].certainty), ("caller.jar", Certainty::Likely));
+        assert_eq!(s[1].certainty, Certainty::Possible);
+        assert!(s[0].why.contains("architectury"));
+        // Only the library: nothing is called likely.
+        let mut s = vec![sus("architectury.jar", "architectury", Certainty::Likely)];
+        demote_libraries(&mut s, &deps, &ids);
+        assert_eq!(s[0].certainty, Certainty::Possible);
+        // What the loader names stays certain, library or not.
+        let mut s = vec![sus("architectury.jar", "architectury", Certainty::Certain)];
+        demote_libraries(&mut s, &deps, &ids);
+        assert_eq!(s[0].certainty, Certainty::Certain);
+    }
+
+    /// The saved crash of the instance in `HOPPER_CRASH_ROOT` read again
+    /// (read only: printed, not saved).
+    #[test]
+    #[ignore]
+    fn reread_live() {
+        let Ok(root) = std::env::var("HOPPER_CRASH_ROOT") else { return };
+        let root = PathBuf::from(root);
+        let dir = root.join("mods");
+        let mods: Vec<String> = fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+            .collect();
+        let saved = load(&root).expect("a saved crash");
+        println!("saved: {:?}", saved.suspects.iter().map(|s| (s.certainty, s.file_name.clone())).collect::<Vec<_>>());
+        match reread(&root, &saved, &mods, |f| crate::deps::own_ids(&dir.join(f)).0) {
+            Some(c) => println!("reread: {:?}", c.suspects.iter().map(|s| (s.certainty, s.file_name.clone())).collect::<Vec<_>>()),
+            None => println!("reread: unchanged"),
+        }
+    }
 
     const LOADING: &str = "---- Minecraft Crash Report ----
 Description: Mod loading failures have occurred; consult the issue messages for more details

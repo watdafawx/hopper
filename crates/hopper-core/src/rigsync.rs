@@ -310,12 +310,10 @@ impl Filters {
         } else {
             !(self.hide_wont && wont)
         };
-        let t = self.text.to_lowercase();
-        let ok_text = t.is_empty()
-            || d.mod_name.to_lowercase().contains(&t)
-            || m.is_some_and(|m| {
-                m.file_name.to_lowercase().contains(&t) || m.mod_id.to_lowercase().contains(&t)
-            });
+        let ok_text = match m {
+            Some(m) => crate::fuzzy::words_match(&self.text, &[&d.mod_name, &m.file_name, &m.mod_id]),
+            None => crate::fuzzy::words_match(&self.text, &[&d.mod_name]),
+        };
         self.status.matches(d.status) && ok_env && ok_source && ok_wont && ok_text
     }
 }

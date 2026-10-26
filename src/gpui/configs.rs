@@ -733,7 +733,7 @@ impl ConfigsPanel {
     // ---- the list --------------------------------------------------------
 
     fn matches(&self, rel: &str) -> bool {
-        self.query.is_empty() || rel.to_lowercase().contains(&self.query)
+        hopper::fuzzy::words_match(&self.query, &[rel])
     }
 
     /// Files per filter, after the search: what the filter tabs count.

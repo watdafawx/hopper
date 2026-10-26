@@ -896,9 +896,7 @@ impl ServersView {
         };
         mods.iter()
             .filter(|m| {
-                self.query.is_empty()
-                    || m.mod_name.to_lowercase().contains(&self.query)
-                    || m.file_name.to_lowercase().contains(&self.query)
+                hopper::fuzzy::words_match(&self.query, &[&m.mod_name, &m.file_name])
             })
             .cloned()
             .collect()

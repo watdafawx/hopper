@@ -257,11 +257,6 @@ impl AppView {
                     this.library.update(cx, |l, cx| l.open(root, cx));
                     this.go(Page::Library, cx);
                 }
-                StoreEvent::ShowMods(root) => {
-                    let root = root.clone();
-                    this.library.update(cx, |l, cx| l.open_mods(root, cx));
-                    this.go(Page::Library, cx);
-                }
                 StoreEvent::Peek { root, project } => {
                     let (root, project) = (root.clone(), *project);
                     this.library.update(cx, |l, cx| l.peek(root, project, cx));

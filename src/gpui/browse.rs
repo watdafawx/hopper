@@ -2101,10 +2101,7 @@ impl BrowseView {
             b.list()
                 .iter()
                 .filter(|b| {
-                    q.is_empty()
-                        || [&b.name, &b.summary, &b.author]
-                            .iter()
-                            .any(|s| s.to_lowercase().contains(&q))
+                    hopper::fuzzy::words_match(&q, &[&b.name, &b.summary, &b.author])
                 })
                 .map(|b| b.to_mod())
                 .collect()

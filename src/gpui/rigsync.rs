@@ -138,6 +138,8 @@ pub struct SyncPanel {
     server: Option<PathBuf>,
     diff: Option<Result<Vec<DiffEntry>, String>>,
     note: Option<Annotation>,
+    /// Which server pack the server was built or last updated from.
+    pack_marker: Option<hopper::server_pack_update::Marker>,
     crash: Option<ServerCrash>,
     /// Global datapacks and mod configs that differ from the pack, looked
     /// up after each comparison (they sit on the same slow share).
@@ -263,6 +265,7 @@ impl SyncPanel {
             server: None,
             diff: None,
             note: None,
+            pack_marker: None,
             crash: None,
             drift: None,
             drift_open: false,
@@ -519,12 +522,13 @@ impl SyncPanel {
         let anyway = self.store.read(cx).settings().sync_anyway.clone();
         self._task = Some(cx.spawn(async move |this, cx| {
             let root = server.root.clone();
-            let (diff, crash, server_nf) = cx
+            let (diff, crash, server_nf, marker) = cx
                 .background_spawn(async move {
                     (
                         rigsync::compare(&inst, &server, &anyway),
                         hopper::crashscan::last_crash(&server.root),
                         hopper::server_update::server_neoforge(&server.root),
+                        hopper::server_pack_update::recorded_on(&server),
                     )
                 })
                 .await;
@@ -539,6 +543,7 @@ impl SyncPanel {
                     this.check_drift(d, cx);
                 }
                 this.server_nf = server_nf;
+                this.pack_marker = marker;
                 this.want_nf_versions(cx);
                 if this.holding() {
                     this.diff_next = Some(diff.map(|(d, n)| (d, Some(n))).map_or_else(|e| (Err(e), None), |(d, n)| (Ok(d), n)));
@@ -1209,14 +1214,58 @@ impl SyncPanel {
             Some((None, Some(note))) => Some(note.clone()),
             _ => None,
         };
+        // The server pack the server came from: its version, and whether
+        // the pack has moved on since.
+        let marker = self.pack_marker.clone().filter(|m| !m.server_pack.is_empty());
+        let behind = marker
+            .as_ref()
+            .zip(inst.pack.as_ref())
+            .is_some_and(|(m, p)| m.pack_file_id != 0 && p.file_id != 0 && m.pack_file_id != p.file_id);
+        let pack_version = inst.pack.as_ref().map(|p| p.version.clone()).unwrap_or_default();
+        let version_line = marker.as_ref().map(|m| {
+            let label = hopper::instance_ops::pack_version_label(&m.server_pack);
+            let label = if label.is_empty() { m.server_pack.clone() } else { label };
+            let (server, inst) = (server.clone(), inst.clone());
+            let fg = theme.foreground;
+            v_flex()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .id("server-pack-version")
+                        .gap_1p5()
+                        .text_sm()
+                        .clickable(cx)
+                        .hover(move |s| s.text_color(fg))
+                        .child(Icon::new(IconName::Tag).xsmall().text_color(theme.muted_foreground))
+                        .child(div().font_semibold().child(label))
+                        .child(widgets::caption(m.server_pack.clone(), cx).text_xs().truncate())
+                        .tooltip(|w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Server pack versions: pick one and see what changes").build(w, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, w, cx| {
+                            crate::pack_update::open_server(this.store.clone(), server.clone(), inst.clone(), w, cx)
+                        })),
+                )
+                .child(if behind {
+                    widgets::caption(format!("The pack is on {pack_version}: the server is behind."), cx)
+                        .text_xs()
+                        .text_color(theme.warning)
+                } else {
+                    widgets::caption("The same version as the pack.", cx).text_xs()
+                })
+        });
         let pack_btn = cf_pack.then(|| {
             let (server, inst) = (server.clone(), inst.clone());
             Button::new("server-pack-update")
-                .outline()
+                .map(|b| if behind { b.primary() } else { b.outline() })
                 .small()
                 .w_full()
                 .icon(IconName::Package)
-                .label("Update from server pack")
+                .label(if behind && !pack_version.is_empty() {
+                    format!("Update to {pack_version}")
+                } else {
+                    "Update from server pack".to_string()
+                })
                 .tooltip("Uses the pack author's official server pack: its mods and config files. Shows what changes first, like a pack update.")
                 .disabled(online || self.running)
                 .on_click(cx.listener(move |this, _, w, cx| {
@@ -1233,6 +1282,12 @@ impl SyncPanel {
                         .child(Icon::new(IconName::Package).small().text_color(theme.muted_foreground))
                         .child("Server pack"),
                 )
+                .children(version_line)
+                // No record yet: Hopper writes one when it builds or updates
+                // the server from a server pack.
+                .when(marker.is_none() && cf_pack, |c| {
+                    c.child(widgets::caption("Version not known yet: shown once it's updated from a server pack here.", cx).text_xs())
+                })
                 .when_some(pack_line, |c, t| c.child(widgets::caption(t, cx).text_xs()))
                 .children(pack_btn)
         });

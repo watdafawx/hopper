@@ -6,7 +6,7 @@ use crate::store::{Store, Updates};
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
@@ -198,7 +198,7 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
     for a in &inst.addons {
         (a.project_id, a.file_id, &a.file_name, &a.name, &a.author, &a.icon).hash(&mut h);
         (a.enabled, a.from_pack, a.locked, a.class_id, &a.env, &a.date_added).hash(&mut h);
-        (&a.mr_project, &a.page).hash(&mut h);
+        (&a.mr_project, &a.page, &a.locked_version).hash(&mut h);
     }
     match store.updates(root) {
         None => 0u8.hash(&mut h),
@@ -461,8 +461,6 @@ pub struct AddonsView {
     /// the server root and [`marks_key`] it was compared at.
     pub(crate) marks: Option<(PathBuf, u64, HashMap<String, hopper::model::DiffEntry>)>,
     pub(crate) missing: crate::addons_extra::MissingDeps,
-    /// The find-the-broken-mod hunt, when one runs.
-    pub(crate) hunt: crate::addons_extra::HuntUi,
     search: Entity<InputState>,
     query: String,
     show: Show,
@@ -532,6 +530,9 @@ pub struct AddonsView {
     pub(crate) dep_jobs: HashMap<String, u64>,
     /// Installed from the banner, shown as Installed until they go.
     pub(crate) dep_done: HashSet<String>,
+    /// Missing mods' projects, by mod id, looked up once: (project, name,
+    /// icon URL), `None` when none was found. Absent while looking.
+    pub(crate) dep_projects: std::cell::RefCell<HashMap<String, Option<(u64, String, String)>>>,
     /// Installed chips fading out now.
     pub(crate) dep_leaving: Option<(std::time::Instant, HashSet<String>)>,
     /// A missing list read while chips were installing or done: shown once
@@ -602,7 +603,6 @@ impl AddonsView {
             loose_set: HashSet::new(),
             marks: None,
             missing: Default::default(),
-            hunt: Default::default(),
             search,
             query: String::new(),
             show: Show::All,
@@ -629,6 +629,7 @@ impl AddonsView {
             crashed: HashMap::new(),
             dep_jobs: HashMap::new(),
             dep_done: HashSet::new(),
+            dep_projects: Default::default(),
             dep_leaving: None,
             missing_next: None,
             leaving: None,
@@ -694,7 +695,6 @@ impl AddonsView {
     /// always, with `force`). All the disk reads the table needs happen
     /// here, never while rendering.
     fn sync(&mut self, force: bool, cx: &mut Context<Self>) {
-        self.read_hunt(cx);
         // The last crash's mods, for their tag (read once, then cached).
         if let Some(root) = self.root.clone() {
             let c = self.store.update(cx, |s, _| s.crash(&root).cloned());
@@ -1122,10 +1122,7 @@ impl AddonsView {
                 Show::All => true,
             })
             .filter(|(_, a)| {
-                q.is_empty()
-                    || a.name.to_lowercase().contains(q)
-                    || a.file_name.to_lowercase().contains(q)
-                    || a.author.to_lowercase().contains(q)
+                hopper::fuzzy::words_match(q, &[&a.name, &a.file_name, &a.author])
             })
             .map(|(i, a)| (i, a.name.to_lowercase()))
             .collect();
@@ -1194,7 +1191,7 @@ impl AddonsView {
             out.extend(
                 loose
                     .iter()
-                    .filter(|f| q.is_empty() || f.to_lowercase().contains(q))
+                    .filter(|f| hopper::fuzzy::words_match(q, &[f.as_str()]))
                     .cloned()
                     .map(Row::Loose),
             );
@@ -1266,15 +1263,6 @@ impl AddonsView {
         }
         if let Some(dir) = self.global_dir() {
             return self.toggle_global(dir, files, on, window, cx);
-        }
-        // A hunt owns the on/off state until it ends.
-        if self.hunt_running() {
-            window.push_notification(
-                Notification::info("Finding the broken mod: mark mods known good on their chip, or stop the hunt first."),
-                cx,
-            );
-            cx.notify();
-            return;
         }
         let Some(root) = self.root.clone() else { return };
         let (related, mode) = {
@@ -1838,7 +1826,15 @@ impl AddonsView {
                 if risk == Risk::Pre && a.is_none_or(|a| a.release_type <= 1) {
                     skip.insert(u.project_id);
                 }
-                let (issues, missing) = load_problems(&inst, &u.file);
+                let (mut issues, missing) = load_problems(&inst, &u.file);
+                // One that would stop another mod loading is held too.
+                for (n, r) in store.update_breaks(&inst.root, u.project_id) {
+                    issues.push(format!("stops {n} loading (it needs {r})"));
+                }
+                // A version the user locked out is left out.
+                if a.is_some_and(|a| !a.locked_version.is_empty() && a.locked_version == u.file.file_name) {
+                    skip.insert(u.project_id);
+                }
                 // So is one whose new file would stop the game loading.
                 if (!issues.is_empty() || !missing.is_empty()) && skip.insert(u.project_id) {
                     held.insert(u.project_id);
@@ -2719,8 +2715,15 @@ impl AddonsView {
         if self.recent.contains_key(&a.project_id) {
             return None;
         }
+        // Locked out, or it would stop another mod loading: only on purpose.
+        if !a.locked_version.is_empty() && a.locked_version == u.file.file_name {
+            return None;
+        }
         let store = self.store.read(cx);
         if let Some(r) = &self.root {
+            if !store.update_breaks(r, a.project_id).is_empty() {
+                return None;
+            }
             let hold = !store.queues_updates(r) && store.edit_hold_reason(r).is_some();
             let busy = store.update_state(r, a.project_id).is_some();
             let from_web = a.project_id != 0 && store.pending(r).iter().any(|p| p.project_id == a.project_id);
@@ -2808,7 +2811,6 @@ impl AddonsView {
         flags: Flags,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let hunt_chip = self.hunt_chip(&a.file_name, cx);
         // Resource packs in game order: grip, place and ↑↓ (or Use).
         let order_cell = self.order_mode().then(|| self.order_cell(&a.file_name, &a.name, flags.rank, cx));
         let shader_on = self.class == cf::CLASS_SHADERS && self.is_active_shader(&a.file_name);
@@ -2943,7 +2945,6 @@ Details").into()),
                     .child(a.name.clone())
             })
             .children(side_inline)
-            .children(hunt_chip)
             .when(shader_on, |r| r.child(widgets::chip(theme.success).child("Active")))
             .when_some(also, |r, also| {
                 r.child(
@@ -2972,6 +2973,14 @@ Details").into()),
             });
 
         let done = self.recent.contains_key(&a.project_id);
+        // The offered file locked out (the user keeps this version), and
+        // the mods the update would stop loading.
+        let vlocked = update.is_some_and(|u| !a.locked_version.is_empty() && a.locked_version == u.file.file_name);
+        let breaks: Vec<(String, String)> = match (&self.root, update) {
+            (Some(r), Some(_)) => store.update_breaks(r, a.project_id).to_vec(),
+            _ => Vec::new(),
+        };
+        let breaking = !breaks.is_empty() && !vlocked;
         // A drag across switches or Update buttons: what letting go does.
         let sweep = self.pick.sweeping();
         let swept = self.swept.contains(&file);
@@ -2999,10 +3008,12 @@ Details").into()),
             let view = cx.entity();
             let f_sweep = a.file_name.clone();
             let can_run = hold.is_none() && updating.is_none() && !from_web;
+            // Drag-updates pass over a locked or breaking update.
+            let sweepable = can_run && !vlocked && breaks.is_empty();
             let split = widgets::split(
                 // Pressed and dragged across rows: their Update buttons too.
                 drag_pick::handle(div().id(id("update-sweep")).flex_1().flex(), cx, move |this, _, cx| {
-                    if can_run {
+                    if sweepable {
                         this.sweep_down(&f_sweep, Sweep::Action, true, cx)
                     }
                 })
@@ -3010,8 +3021,23 @@ Details").into()),
                         Button::new(id("update"))
                             .flex_1()
                             .small()
-                            .map(|b| if swept_update { b.primary() } else { b.outline() })
-                            .icon(IconName::Download)
+                            .map(|b| {
+                                if swept_update {
+                                    b.primary()
+                                } else if breaking {
+                                    b.with_variant(ButtonVariant::Warning).outline()
+                                } else {
+                                    b.outline()
+                                }
+                            })
+                            .when(vlocked, |b| b.opacity(0.6))
+                            .icon(if vlocked {
+                                IconName::Lock
+                            } else if breaking {
+                                IconName::TriangleAlert
+                            } else {
+                                IconName::Download
+                            })
                             // Narrow, the icon alone (the tooltip says the rest).
                             .when(!compact, |b| {
                                 b.label(match (updating, progress) {
@@ -3027,6 +3053,15 @@ Details").into()),
                                 "The author only allows downloads from CurseForge's website: Hopper's download window is getting it, and adds it when it arrives".to_string()
                             } else if let Some(h) = hold {
                                 h.to_string()
+                            } else if vlocked {
+                                let (old, new) = u.versions();
+                                format!("{new} is locked: you keep {old}.\nShift+click to update anyway, or click the lock tag to unlock.")
+                            } else if breaking {
+                                format!(
+                                    "{tip}\nThis stops {} loading: {}",
+                                    breaks.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "),
+                                    breaks.iter().map(|(n, r)| format!("{n} needs {r}")).collect::<Vec<_>>().join("; ")
+                                )
                             } else if dim {
                                 // Updating keeps it off (see install::apply_updates).
                                 format!("{tip}
@@ -3035,8 +3070,16 @@ It stays disabled after updating: turn it on in the On column.")
                                 tip
                             })
                             .disabled(!can_run)
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 if drag_pick::click_swallowed(this) {
+                                    return;
+                                }
+                                // A locked version installs only with Shift.
+                                if vlocked && !window.modifiers().shift {
+                                    window.push_notification(
+                                        Notification::info("This version is locked: Shift+click Update to install it anyway."),
+                                        cx,
+                                    );
                                     return;
                                 }
                                 this.settle.clicked();
@@ -3095,6 +3138,7 @@ It stays disabled after updating: turn it on in the On column.")
             update_file,
             reset_cfg,
             (pid_menu, locked, mr, has_project, global, on),
+            update.map(|u| (u.versions(), u.file.file_name.clone(), vlocked)),
         );
         h_flex()
             .id(id("row"))
@@ -3159,7 +3203,13 @@ It stays disabled after updating: turn it on in the On column.")
                         // File name and version chip. Click either to pick
                         // another version.
                         let (pid, upd) = (a.project_id, update.map(|u| u.file.clone()));
-                        let primary = theme.primary;
+                        let primary = if breaking {
+                            theme.warning
+                        } else if vlocked {
+                            theme.muted_foreground
+                        } else {
+                            theme.primary
+                        };
                         let chip = h_flex()
                             .flex_none()
                             .max_w(rems(16.))
@@ -3221,40 +3271,40 @@ Change version", a.file_name).into()
                         } else {
                             "Change version".into()
                         };
-                        h_flex()
-                            .id(id("file"))
-                            .min_w_0()
-                            .gap_2()
-                            .children(chip)
-                            .when(!has_chip, |r| {
-                                r.child(
-                                    widgets::caption(a.file_name.clone(), cx)
-                                        .text_xs()
-                                        .min_w_0()
-                                        .group_hover("file", move |s| s.text_color(primary)),
+                        // What answers hover and click is the chip itself:
+                        // its bounds are what it draws, while the row around
+                        // it can be squeezed narrower than the chip (then only
+                        // the chip's start answered). Without a chip, the
+                        // file name.
+                        let target: Stateful<Div> = match chip {
+                            Some(c) => c.id(id("file")),
+                            None => div().id(id("file")).min_w_0().child(
+                                widgets::caption(a.file_name.clone(), cx)
+                                    .text_xs()
+                                    .min_w_0()
+                                    .group_hover("file", move |s| s.text_color(primary)),
+                            ),
+                        };
+                        target.when(pid != 0, |d| {
+                            d.clickable(cx)
+                                .group("file")
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .invisible()
+                                        .group_hover("file", |s| s.visible())
+                                        .text_color(primary)
+                                        .child(Icon::new(IconName::ChevronDown).xsmall()),
                                 )
-                            })
-                            .when(pid != 0, |d| {
-                                d.clickable(cx)
-                                    .group("file")
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .ml(px(-4.))
-                                            .invisible()
-                                            .group_hover("file", |s| s.visible())
-                                            .text_color(primary)
-                                            .child(Icon::new(IconName::ChevronDown).xsmall()),
-                                    )
-                                    .tooltip(move |w, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.versions(pid, upd.clone(), window, cx)
-                                    }))
-                            })
-                    })),
+                                .tooltip(move |w, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.versions(pid, upd.clone(), window, cx)
+                                }))
+                        })
+                    }).children(self.lock_tags(a, update, &breaks, vlocked, cx))),
             )
             .when(self.action_fits(), |r| r.child(action))
             .children(self.spacer())
@@ -3352,6 +3402,120 @@ Change version", a.file_name).into()
             .into_any_element()
     }
 
+    /// Locks the offered file of `file`'s mod out (`Some(its file name)`),
+    /// or lifts the lock (`None`).
+    pub(crate) fn lock_version(&mut self, file: String, lock: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let r = self.store.update(cx, |s, cx| {
+            let r = s.set_version_lock(&root, &file, lock);
+            cx.notify();
+            r
+        });
+        self.report(r, window, cx);
+        cx.notify();
+    }
+
+    /// Beside the version chip: what the update breaks (each mod with its
+    /// icon, opening its page) and Lock, or the locked tag (a click unlocks).
+    fn lock_tags(
+        &self,
+        a: &Addon,
+        update: Option<&Update>,
+        breaks: &[(String, String)],
+        vlocked: bool,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(u) = update else { return Vec::new() };
+        let theme = cx.theme().clone();
+        let (_, new) = u.versions();
+        let file = a.file_name.clone();
+        let key = |p: &str| ElementId::Name(format!("{p}:{}", a.file_name).into());
+        let mut out = Vec::new();
+        if vlocked {
+            let (f, tip) = (file.clone(), SharedString::from(format!("{new} is locked: you keep this version. Click to unlock.")));
+            out.push(
+                div()
+                    .id(key("vlocked"))
+                    .flex_none()
+                    .clickable(cx)
+                    .child(
+                        widgets::chip(theme.muted_foreground)
+                            .child(h_flex().gap_1().child(Icon::new(IconName::Lock).xsmall()).child(format!("{new} locked"))),
+                    )
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.lock_version(f.clone(), None, window, cx)
+                    }))
+                    .into_any_element(),
+            );
+            return out;
+        }
+        if breaks.is_empty() {
+            return out;
+        }
+        let inst = self.table.inst.clone();
+        // "breaks X": the first mod with its icon (its page on click), and
+        // how many more in the tooltip.
+        let (first, range) = (breaks[0].0.clone(), breaks[0].1.clone());
+        let found = inst.as_ref().and_then(|i| i.addons.iter().find(|x| x.name == first)).map(|x| (x.project_id, x.icon.clone()));
+        let icon = found.as_ref().and_then(|(_, i)| self.store.read(cx).image(i)).map(std::path::Path::to_path_buf);
+        let tip: SharedString = breaks
+            .iter()
+            .map(|(n, r)| format!("{n} needs {r}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into();
+        let more = breaks.len() - 1;
+        let pid = found.map_or(0, |(p, _)| p);
+        let warn = theme.warning;
+        out.push(
+            h_flex()
+                .id(key("breaks"))
+                .flex_none()
+                .gap_1()
+                .px_1p5()
+                .rounded(theme.radius)
+                .text_xs()
+                .bg(warn.opacity(widgets::alpha::TINT))
+                .text_color(warn)
+                .child(Icon::new(IconName::TriangleAlert).xsmall())
+                .child("breaks")
+                .child(widgets::thumb(icon.as_deref(), rems(0.85), cx))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(first.clone()))
+                .when(more > 0, |r| r.child(format!("+{more}")))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(format!("{tip}\n(needs {range} now)")).build(w, cx))
+                .when(pid != 0, |d| {
+                    d.clickable(cx).on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_peek(pid, cx)
+                    }))
+                })
+                .into_any_element(),
+        );
+        let lock_file = u.file.file_name.clone();
+        out.push(
+            div()
+                .id(key("lock-this"))
+                .flex_none()
+                .clickable(cx)
+                .child(
+                    widgets::chip(theme.muted_foreground)
+                        .child(h_flex().gap_1().child(Icon::new(IconName::Lock).xsmall()).child(format!("Lock {new}"))),
+                )
+                .tooltip(|w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Keep this version: the update stays listed, but only installs with Shift+click")
+                        .build(w, cx)
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.lock_version(file.clone(), Some(lock_file.clone()), window, cx)
+                }))
+                .into_any_element(),
+        );
+        out
+    }
+
     /// The row's menu, for right-click and its ⋯ button.
     #[allow(clippy::too_many_arguments)]
     fn row_menu(
@@ -3362,6 +3526,8 @@ Change version", a.file_name).into()
         update_file: Option<hopper::cf::File>,
         reset_cfg: Option<(Entity<Store>, PathBuf, u64, String)>,
         (pid_menu, locked, mr, has_project, global, on): (u64, bool, bool, bool, bool, bool),
+        // The offered update's (versions, file name, locked out).
+        vlock: Option<((String, String), String, bool)>,
     ) -> Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> {
             Rc::new(move |menu, _, _| {
                 let f = f_menu.clone();
@@ -3433,6 +3599,21 @@ Change version", a.file_name).into()
                                     this.store.read(cx).switch_source(r, f2.clone());
                                 }
                             })
+                        }),
+                    )
+                })
+                .when_some(vlock.clone().filter(|_| !global), |m, ((old, new), file, is_locked)| {
+                    let (v, f) = (view.clone(), f_menu.clone());
+                    m.item(
+                        PopupMenuItem::new(if is_locked {
+                            format!("Unlock {new}")
+                        } else {
+                            format!("Lock {new} (keep {old})")
+                        })
+                        .icon(if is_locked { IconName::LockOpen } else { IconName::Lock })
+                        .on_click(move |_, window, cx| {
+                            let lock = (!is_locked).then(|| file.clone());
+                            v.update(cx, |this, cx| this.lock_version(f.clone(), lock, window, cx))
                         }),
                     )
                 })
@@ -4176,7 +4357,6 @@ impl Render for AddonsView {
         let dups = self.duplicate_banner(&inst, cx);
         let blockers = self.blocker_banner(&inst, cx);
         let shaders = self.shader_notes(&inst, cx);
-        let hunt = self.hunt_strip(&inst, cx);
         let updates = self.table.updates.clone();
         let rows = self.table.rows.clone();
         // Narrow with the instance list open: offer its room, once.
@@ -4290,7 +4470,6 @@ impl Render for AddonsView {
             .gap_3()
             .children(tabs)
             .children(global_head)
-            .children(hunt)
             .child(toolbar)
             .children(blockers)
             .children(dups)

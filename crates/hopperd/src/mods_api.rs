@@ -488,7 +488,6 @@ async fn toggle(
     Json(b): Json<FileBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    crate::mods_hunt::refuse_while_hunting(&e)?;
     let running = e.server.state().is_alive();
     blocking(move || {
         let mut inst = instance(&e)?;

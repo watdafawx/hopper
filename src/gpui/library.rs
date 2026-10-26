@@ -630,12 +630,6 @@ impl LibraryView {
         });
     }
 
-    /// Opens `root` on its Mods tab.
-    pub fn open_mods(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        self.open(root, cx);
-        self.set_tab(InstTab::Mods, cx);
-    }
-
     fn set_tab(&mut self, tab: InstTab, cx: &mut Context<Self>) {
         if tab.is_pack() {
             self.last_pack = tab;
@@ -791,7 +785,7 @@ impl LibraryView {
         let settings = store.settings();
         let mut groups: BTreeMap<String, Vec<&Instance>> = BTreeMap::new();
         for inst in store.instances() {
-            if !self.query.is_empty() && !inst.name.to_lowercase().contains(&self.query) {
+            if !hopper::fuzzy::words_match(&self.query, &[&inst.name]) {
                 continue;
             }
             let g = settings
@@ -1943,7 +1937,24 @@ impl LibraryView {
                 } else {
                     p.version.clone()
                 };
-                r.child(fact(IconName::Tag, v))
+                // Opens the pack's versions and changelogs (Pack versions).
+                let (store, root, pid) = (self.store.clone(), inst.root.clone(), p.project_id);
+                let upd = self.store.read(cx).pack_update(inst).cloned();
+                let fg = theme.foreground;
+                r.child(
+                    fact(IconName::Tag, v)
+                        .id("hero-pack-version")
+                        .when(pid != 0, |d| {
+                            d.clickable(cx)
+                                .hover(move |s| s.text_color(fg))
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Pack versions and changelogs").build(window, cx)
+                                })
+                                .on_click(move |_, window, cx| {
+                                    crate::versions::open(store.clone(), root.clone(), pid, true, upd.clone(), window, cx)
+                                })
+                        }),
+                )
             })
             .when_some(page.clone(), |r, (author, downloads, ..)| {
                 let soft = |icon: IconName, text: String| {

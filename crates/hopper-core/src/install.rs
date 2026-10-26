@@ -32,6 +32,7 @@ pub fn addon_from(m: &cf::Mod, f: &cf::File, from_pack: bool) -> Addon {
         release_type: f.release_type,
         locked: false,
         cf_locked: false,
+        locked_version: String::new(),
         requires: match &f.modrinth {
             Some(mr) => mr
                 .requires

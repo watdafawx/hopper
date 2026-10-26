@@ -2,12 +2,12 @@
   // Profiles ▾, as in Hopper desktop's Mods toolbar: switch to a saved set
   // of mods that are off, save the current one, delete one, or start
   // finding the mod that breaks the server.
-  import { Layers, ChevronDown, Plus, ScanSearch, Trash2 } from '@lucide/svelte';
+  import { Layers, ChevronDown, Plus, Trash2 } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { ask, confirmIt } from './lib/dialog.svelte.js';
 
-  let { base, alive = false, hunting = false, onChanged = () => {}, onHunt = () => {} } = $props();
+  let { base, alive = false, onChanged = () => {} } = $props();
   let open = $state(false);
   let list = $state(null);
 
@@ -83,7 +83,7 @@
       {:else}
         {#each list as p (p.name)}
           <div class="it">
-            <button class="use" disabled={hunting} title={hunting ? 'The hunt decides which mods are on until it ends' : what(p)} onclick={() => use(p)}>
+            <button class="use" title={what(p)} onclick={() => use(p)}>
               <span class="ell">Use “{p.name}”</span>
               {#if !p.turns_on && !p.turns_off}<span class="chip running">now</span>{:else}<span class="tiny muted">{p.turns_off ? `−${p.turns_off}` : ''}{p.turns_on && p.turns_off ? ' ' : ''}{p.turns_on ? `+${p.turns_on}` : ''}</span>{/if}
             </button>
@@ -95,8 +95,6 @@
       {/if}
       <hr />
       <button class="row1" onclick={save}><Plus size={13} />Save current as…</button>
-      <hr />
-      <button class="row1" disabled={hunting} onclick={() => { open = false; onHunt(); }}><ScanSearch size={13} />Find the mod that breaks it…</button>
       {#if alive}<div class="hd">Switching while it runs: restart to load the change.</div>{/if}
     </div>
   {/if}

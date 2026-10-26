@@ -61,6 +61,9 @@ pub enum Msg {
         key: String,
         clip: Option<Arc<crate::anim::Clip>>,
     },
+    /// What each update would stop loading: project → (mod, the range it
+    /// needs).
+    Breaks(PathBuf, HashMap<u64, Vec<(String, String)>>),
     Updates {
         root: PathBuf,
         result: Result<Vec<Update>, String>,
@@ -83,6 +86,8 @@ pub enum Msg {
     SessionSaved(PathBuf),
     /// What an instance's last game crash names (`None`: it ended fine).
     Crashed(PathBuf, Option<hopper::crashdetect::Crash>),
+    /// A saved crash read again with today's rules (no notification).
+    CrashReread(PathBuf, hopper::crashdetect::Crash),
     /// A running game wrote a crash report and is still open (its error
     /// screen).
     LiveCrash(PathBuf, hopper::crashdetect::Crash),
@@ -120,8 +125,6 @@ pub enum StoreEvent {
     ShowServer { root: PathBuf, compare: bool },
     /// Open an instance in the Library.
     ShowInstance(PathBuf),
-    /// Open an instance's Mods tab (the crash hunt starts there).
-    ShowMods(PathBuf),
 }
 
 impl EventEmitter<StoreEvent> for Store {}
@@ -214,6 +217,9 @@ pub struct Store {
     cats: Option<HashMap<String, Vec<String>>>,
     cats_pending: std::collections::HashSet<String>,
     updates: HashMap<PathBuf, Updates>,
+    /// Per instance, the mods each update would stop loading (see
+    /// [`Store::update_breaks`]).
+    breaks: HashMap<PathBuf, HashMap<u64, Vec<(String, String)>>>,
     /// When each instance's update check last started.
     updates_at: HashMap<PathBuf, Instant>,
     servers: Vec<ServerInfo>,
@@ -374,6 +380,7 @@ impl Store {
             cats: None,
             cats_pending: Default::default(),
             updates: HashMap::new(),
+            breaks: HashMap::new(),
             updates_at: HashMap::new(),
             servers: Vec::new(),
             accounts: Default::default(),
@@ -831,6 +838,12 @@ impl Store {
                 list.extend(w);
                 cx.notify();
             }
+            // A saved crash read again: no news, just a better guess.
+            Msg::CrashReread(root, c) => {
+                hopper::crashdetect::save(&root, &c);
+                self.crashes.insert(root, Some(c));
+                cx.notify();
+            }
             Msg::Crashed(root, c) => {
                 // Told already while the game was open: just keep it.
                 let told = self.live_told.remove(&root);
@@ -915,6 +928,28 @@ impl Store {
                     }
                     u
                 });
+                // What each update would stop loading, read from the other
+                // mods' own requirements in the background.
+                if let (Ok(u), Some(inst)) = (&result, self.instance(&root)) {
+                    let (dir, r2) = (inst.mods_dir(), root.clone());
+                    let list: Vec<(u64, String, String, String)> = u
+                        .iter()
+                        .map(|u| {
+                            let (from, to) = u.versions();
+                            (u.project_id, u.from.clone(), from, to)
+                        })
+                        .collect();
+                    self.spawn(move || {
+                        let map = list
+                            .into_iter()
+                            .filter_map(|(pid, file, from, to)| {
+                                let b = hopper::deps::broken_by(&dir, &file, &from, &to);
+                                (!b.is_empty()).then_some((pid, b))
+                            })
+                            .collect();
+                        Msg::Breaks(r2, map)
+                    });
+                }
                 self.updates.insert(
                     root,
                     match result {
@@ -922,6 +957,9 @@ impl Store {
                         Err(e) => Updates::Failed(e),
                     },
                 );
+            }
+            Msg::Breaks(root, map) => {
+                self.breaks.insert(root, map);
             }
             Msg::Status { key, status } => {
                 self.statuses.insert(key, status);
@@ -997,6 +1035,14 @@ impl Store {
         foreign.retain(|f| !main.contains(&f.root));
         self.instances.extend(foreign);
         self.instances.sort_by_key(|i| i.name.to_lowercase());
+        // A mod hunt an older Hopper left running: its mods go back on or
+        // off as before it (the hunt was removed).
+        for i in self.instances.iter_mut().filter(|i| hopper::bisect::path(&i.root).is_file()) {
+            match hopper::bisect::restore_leftover(i) {
+                Ok(n) => log::info!("{}: put back {} mods from an unfinished mod hunt", i.name, n.unwrap_or(0)),
+                Err(e) => log::warn!("{}: putting back the mod hunt's mods: {e:#}", i.name),
+            }
+        }
         self.pending.clear();
         for i in self.instances.clone() {
             self.read_pending(&i);
@@ -1143,10 +1189,33 @@ impl Store {
 
     /// The instance's last game crash, until a game ends fine.
     pub fn crash(&mut self, root: &Path) -> Option<&hopper::crashdetect::Crash> {
-        self.crashes
-            .entry(root.to_path_buf())
-            .or_insert_with(|| hopper::crashdetect::load(root))
-            .as_ref()
+        if !self.crashes.contains_key(root) {
+            let saved = hopper::crashdetect::load(root);
+            // Read its report again in the background with today's rules,
+            // so an older card doesn't keep an old guess.
+            if let Some(c) = saved.clone()
+                && let Some(i) = self.instance(root)
+            {
+                let (tx, wake, root, dir) = (self.tx.clone(), self.wake.clone(), root.to_path_buf(), i.mods_dir());
+                std::thread::spawn(move || {
+                    let mods: Vec<String> = std::fs::read_dir(&dir)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+                        .collect();
+                    if let Some(fresh) =
+                        hopper::crashdetect::reread(&root, &c, &mods, |f| hopper::deps::own_ids(&dir.join(f)).0)
+                    {
+                        let _ = tx.send(Msg::CrashReread(root, fresh));
+                        wake();
+                    }
+                });
+            }
+            self.crashes.insert(root.to_path_buf(), saved);
+        }
+        self.crashes.get(root).and_then(Option::as_ref)
     }
 
     /// The name of the mod a crash suspects most.
@@ -2177,6 +2246,25 @@ impl Store {
             .find(|i| i.root == root)
             .ok_or("That instance is gone.")?;
         install::delete_profile(inst, name).map(|_| ()).map_err(|e| format!("{e:#}"))
+    }
+
+    /// The mods `project`'s offered update would stop loading: (mod, the
+    /// version range it needs). Empty when none, or not checked yet.
+    pub fn update_breaks(&self, root: &Path, project: u64) -> &[(String, String)] {
+        self.breaks.get(root).and_then(|m| m.get(&project)).map_or(&[], Vec::as_slice)
+    }
+
+    /// Locks one update's file out (`Some(file name)`) or lifts it (`None`):
+    /// the update stays listed but is only installed on purpose.
+    pub fn set_version_lock(&mut self, root: &Path, file: &str, version: Option<String>) -> Result<(), String> {
+        let inst = self
+            .instances
+            .iter_mut()
+            .find(|i| i.root == root)
+            .ok_or("That instance is gone.")?;
+        let a = inst.addons.iter_mut().find(|a| a.file_name == file).ok_or("That mod is gone.")?;
+        a.locked_version = version.unwrap_or_default();
+        inst.save().map_err(|e| format!("{e:#}"))
     }
 
     /// Keeps files out of (or back in) update offers.

@@ -349,9 +349,50 @@ pub fn rank<'a>(
     });
 }
 
+/// A list search: every word typed must be found, in any order, in one of
+/// `fields` (name, file, author…), case aside: as a piece of a field ("gad"
+/// in "Building Gadgets"), or, for a word of 3+ letters, its letters in
+/// order inside one word that starts with the same letter ("mkism" in
+/// "Mekanism"). "mek ma" finds "Mekanism Magic"; an empty query matches.
+pub fn words_match(query: &str, fields: &[&str]) -> bool {
+    let fields: Vec<String> = fields.iter().map(|f| f.to_lowercase()).collect();
+    query.split_whitespace().all(|w| {
+        let w = w.to_lowercase();
+        fields.iter().any(|f| f.contains(&w))
+            || w.chars().count() >= 3
+                && fields.iter().any(|f| {
+                    f.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                        word.chars().next() == w.chars().next() && in_order(&w, word)
+                    })
+                })
+    })
+}
+
+/// Whether `needle`'s characters appear in order in `hay`.
+fn in_order(needle: &str, hay: &str) -> bool {
+    let mut h = hay.chars();
+    needle.chars().all(|c| h.any(|x| x == c))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_search_words() {
+        let f = |q: &str, name: &str| words_match(q, &[name, "file.jar", "author"]);
+        assert!(f("mek ma", "Mekanism Magic"));
+        assert!(f("ma mek", "Mekanism Magic"));
+        assert!(f("mekanism m", "Mekanism Magic"));
+        assert!(f("mkism", "Mekanism: Engineering"));
+        assert!(f("gadgets", "Building Gadgets Extra"));
+        assert!(f("", "Anything"));
+        assert!(!f("mek ma", "Mekanism: Engineering"));
+        // Short words stay pieces: no loose letter matches.
+        assert!(!f("mz", "Mekanism"));
+        // Letters in order only inside one word that starts the same.
+        assert!(!f("kism", "Mekanism"));
+    }
 
     fn s(q: &str, t: &str) -> Option<i32> {
         score(&Query::new(q), t)

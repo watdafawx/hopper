@@ -441,7 +441,7 @@ impl ModsTab {
                 .enumerate()
                 .filter(|(_, m)| f.fits(m))
                 .filter(|(_, m)| {
-                    q.is_empty() || format!("{} {} {}", m.name, m.file, m.author).to_lowercase().contains(&q)
+                    hopper::fuzzy::words_match(&q, &[&m.name, &m.file, &m.author])
                 })
                 .map(|(i, _)| i)
                 .collect(),

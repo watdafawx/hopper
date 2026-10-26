@@ -586,6 +586,7 @@ impl Render for LogsView {
             let warned = self.warnings_card(&root, cx);
             let crash = self.crash.as_ref().filter(|_| card.is_none()).map(|c| {
                 let name = c.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let report = c.path.clone();
                 // The lead: the error line under the description, and the
                 // mods the report suspects.
                 let error = c
@@ -626,10 +627,8 @@ impl Render for LogsView {
                                     .outline()
                                     .icon(IconName::FileText)
                                     .label("Open report")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.tab_picked = true;
-                                        this.select(LogTab::Crashes, cx)
-                                    })),
+                                    .tooltip("Opens the crash report file")
+                                    .on_click(move |_, _, _| open_path(&report)),
                             ),
                     )
                     .children(error.map(|e| div().text_sm().font_medium().line_clamp(2).child(e)))
@@ -902,16 +901,15 @@ impl LogsView {
                         )
                     })
                     .when(has_report, |r| {
+                        let p = source.clone();
                         r.child(
                             Button::new("crash-open-report")
                                 .small()
                                 .outline()
                                 .icon(IconName::FileText)
                                 .label("Open report")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.tab_picked = true;
-                                    this.select(LogTab::Crashes, cx)
-                                })),
+                                .tooltip("Opens the crash report file")
+                                .on_click(move |_, _, _| open_path(&p)),
                         )
                     })
                     .when(!has_report && source.is_file(), |r| {
@@ -924,7 +922,6 @@ impl LogsView {
                                 .on_click(move |_, _, _| open_path(&p)),
                         )
                     })
-                    .child(crate::addons_extra::hunt_button("crash-hunt", root.to_path_buf(), self.store.clone()))
                     .child(
                         Button::new("crash-dismiss")
                             .small()
@@ -1128,7 +1125,8 @@ impl LogsView {
         let n = self.line_count();
         let filtered = self.visible.is_some();
         let share = self.share_row(&path, cx);
-        let logs_dir = root.join("logs");
+        // The folder of the file shown: logs/, or crash-reports/ on that tab.
+        let shown_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| root.join("logs"));
         // Older reports: a picker in the Crash reports tab.
         let crash_pick = (self.tab == LogTab::Crashes && self.crashes.len() > 1).then(|| {
             let items = self
@@ -1176,8 +1174,8 @@ impl LogsView {
                     .small()
                     .ghost()
                     .icon(IconName::FolderOpen)
-                    .tooltip(format!("Open the logs folder ({})", path.display()))
-                    .on_click(move |_, _, _| open_path(&logs_dir)),
+                    .tooltip(format!("Open its folder ({})", shown_dir.display()))
+                    .on_click(move |_, _, _| open_path(&shown_dir)),
             );
         v_flex()
             .flex_1()

@@ -46,6 +46,18 @@ pub fn recorded(root: &Path) -> Option<Marker> {
     serde_json::from_slice(&fs::read(root.join(MARKER)).ok()?).ok()
 }
 
+/// [`recorded`] for a server anywhere: its folder, or through its Hopper
+/// Server.
+pub fn recorded_on(server: &crate::server::ServerInfo) -> Option<Marker> {
+    match &server.remote {
+        Some(r) => {
+            let text = crate::hopperd::Client::for_remote(r).ok()?.read_text(&r.id, MARKER).ok()?;
+            serde_json::from_str(&text).ok()
+        }
+        None => recorded(&server.root),
+    }
+}
+
 pub fn record(root: &Path, m: &Marker) -> anyhow::Result<()> {
     fs::write(root.join(MARKER), serde_json::to_vec_pretty(m)?)?;
     Ok(())

@@ -103,6 +103,11 @@ pub struct Addon {
     pub release_type: u32,
     /// Never offered as an update.
     pub locked: bool,
+    /// One update's file locked out (the user keeps this version): still
+    /// shown, but only installed on purpose. A different (newer) update
+    /// isn't held by it. Empty when none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub locked_version: String,
     /// CurseForge's `isLocked` for this file when Hopper last read or wrote
     /// it. A re-import that finds another value takes CurseForge's change.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -925,6 +930,7 @@ fn import_curseforge(root: &Path) -> Option<Instance> {
                 release_type: f.map_or(0, |f| f.release_type),
                 locked: a.is_locked,
                 cf_locked: a.is_locked,
+                locked_version: String::new(),
                 mr_project: String::new(),
                 mr_version: String::new(),
                 mr_sha1: String::new(),
