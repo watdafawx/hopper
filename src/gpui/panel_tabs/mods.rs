@@ -7,6 +7,7 @@
 //! updates are checked on their own.
 
 use super::{Load, Target, call, get, job, load_state, q};
+use crate::drag_pick::{self, DragPick, PickDrag, PickState, Picks, Sweep};
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
@@ -267,6 +268,10 @@ pub struct ModsTab {
     /// Rows shown, as indices into the list's mods.
     shown: Rc<Vec<usize>>,
     scroll: UniformListScrollHandle,
+    /// A drag across the switches, while the button is down.
+    pick: PickState,
+    /// The files a switch drag will switch when let go.
+    swept: HashSet<String>,
     updates: Option<Vec<Up>>,
     checking: bool,
     identifying: bool,
@@ -342,6 +347,8 @@ impl ModsTab {
             search,
             shown: Rc::default(),
             scroll: UniformListScrollHandle::new(),
+            pick: PickState::default(),
+            swept: HashSet::new(),
             updates: None,
             checking: false,
             identifying: false,
@@ -526,6 +533,46 @@ impl ModsTab {
     }
 
     // ---- changes ----------------------------------------------------------------
+
+    /// Switches several mods at once (a drag across the switches).
+    fn toggle_many(&mut self, files: Vec<String>, on: bool, cx: &mut Context<Self>) {
+        if files.len() == 1 {
+            return self.toggle(files[0].clone(), on, cx);
+        }
+        let Some(t) = self.target.clone() else { return };
+        if let Load::Ready(d) = &mut self.data {
+            for m in d.mods.iter_mut().filter(|m| files.contains(&m.file)) {
+                m.enabled = on;
+            }
+        }
+        let path = t.sp("/mods/toggle-many");
+        call(cx, &t, move |c| c.post(&path, json!({ "files": files, "enabled": on })), self.fresh(
+            |this: &mut Self, r: Result<Value, String>, cx| {
+                match r {
+                    Ok(v) if bl(&v, "restart_needed") => this.say("Restart the server to apply."),
+                    Ok(_) => {}
+                    Err(e) => this.fail(e),
+                }
+                this.load(false, cx);
+            },
+        ));
+        cx.notify();
+    }
+
+    /// Row `ix`'s file and whether it's on.
+    fn row_switch(&self, ix: usize) -> Option<(String, bool)> {
+        let m = self.mods().get(*self.shown.get(ix)?)?;
+        Some((m.file.clone(), m.enabled))
+    }
+
+    /// The rows a switch drag crosses whose switch it changes.
+    fn swept_files(&self, p: &DragPick) -> Vec<String> {
+        p.rows()
+            .filter_map(|i| self.row_switch(i))
+            .filter(|(_, on)| *on != p.on)
+            .map(|(f, _)| f)
+            .collect()
+    }
 
     fn toggle(&mut self, file: String, on: bool, cx: &mut Context<Self>) {
         let Some(t) = self.target.clone() else { return };
@@ -1044,6 +1091,9 @@ impl ModsTab {
             s
         };
         let (f_pick, f_on, on) = (file.clone(), file.clone(), m.enabled);
+        let f_sweep = file.clone();
+        // A drag across switches: the state letting go will set.
+        let swept = self.pick.sweeping() == Some(Sweep::Switch) && self.swept.contains(&file);
         h_flex()
             .id(id("mod"))
             .w_full()
@@ -1054,7 +1104,12 @@ impl ModsTab {
             .clickable(cx)
             .hover(|s| widgets::row_hover(s, cx))
             .when(sel, |d| widgets::row_selected(d, cx))
-            .on_click(cx.listener(move |this, _, _, cx| this.pick(f_pick.clone(), cx)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // A drag let go on this row isn't a click on it.
+                if !drag_pick::spreading(this) {
+                    this.pick(f_pick.clone(), cx)
+                }
+            }))
             .child(div().when(!on, |d| d.opacity(0.55)).child(widgets::thumb(icon, rems(1.75), cx)))
             .child(
                 v_flex()
@@ -1081,12 +1136,26 @@ impl ModsTab {
             )
             .child(
                 // The switch's click stays off the row.
-                div().id(id("sw")).flex_none().on_click(|_, _, cx| cx.stop_propagation()).child(
+                // Pressed and dragged across rows: their switches too.
+                drag_pick::handle(div().id(id("sw")).flex_none(), cx, move |this, _, cx| {
+                    let Some(ix) = this.shown.iter().position(|&i| this.mods().get(i).is_some_and(|m| m.file == f_sweep)) else {
+                        return;
+                    };
+                    this.swept.clear();
+                    drag_pick::start(this, DragPick::sweep(ix, Sweep::Switch, !on), cx);
+                })
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
                     Switch::new(id("on"))
                         .small()
-                        .checked(on)
+                        .checked(on != swept)
                         .tooltip(if on { "Turn off" } else { "Turn on" })
-                        .on_change(cx.listener(move |this, v: &bool, _, cx| this.toggle(f_on.clone(), *v, cx))),
+                        .on_change(cx.listener(move |this, v: &bool, _, cx| {
+                            if drag_pick::click_swallowed(this) {
+                                return;
+                            }
+                            this.toggle(f_on.clone(), *v, cx)
+                        })),
                 ),
             )
             .into_any_element()
@@ -1998,6 +2067,30 @@ fn short_name(name: &str) -> String {
     name.trim_end_matches(".disabled").trim_end_matches(".jar").to_string()
 }
 
+impl Picks for ModsTab {
+    fn picks(&mut self) -> &mut PickState {
+        &mut self.pick
+    }
+
+    fn pick_list(&self) -> (UniformListScrollHandle, usize) {
+        (self.scroll.clone(), self.shown.len())
+    }
+
+    fn pick_changed(&mut self, p: &DragPick, _: &mut Context<Self>) -> SharedString {
+        self.swept = self.swept_files(p).into_iter().collect();
+        let (verb, none) = if p.on { ("Turning on", "All on") } else { ("Turning off", "All off") };
+        DragPick::count_label(verb, none, self.swept.len())
+    }
+
+    fn pick_commit(&mut self, p: DragPick, _: &mut Window, cx: &mut Context<Self>) {
+        self.swept.clear();
+        let files = self.swept_files(&p);
+        if !files.is_empty() {
+            self.toggle_many(files, p.on, cx);
+        }
+    }
+}
+
 impl Render for ModsTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs = self.sub_tabs(window, cx).into_any_element();
@@ -2028,10 +2121,17 @@ impl Render for ModsTab {
                 .into_any_element()
             } else {
                 div()
+                    .id("panel-mod-area")
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .relative()
+                    .on_drag_move::<PickDrag>(cx.listener(|this, e: &DragMoveEvent<PickDrag>, window, cx| {
+                        let row_h = rems(ROW_H).to_pixels(window.rem_size());
+                        drag_pick::moved(this, e.event.position.y, row_h, window, cx)
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                     .child(
                         uniform_list(
                             "panel-mod-rows",

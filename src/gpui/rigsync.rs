@@ -2,7 +2,7 @@
 //! or removing mods. Used by the Server sync page and an instance's Server tab.
 
 use crate::widgets::Clickable as _;
-use crate::drag_pick::{DragPick, PickDrag, Picks};
+use crate::drag_pick::{self, DragPick, PickDrag, PickState, Picks, Sweep};
 use crate::store::{Msg, Store};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -159,12 +159,12 @@ pub struct SyncPanel {
     filters: Filters,
     search: Entity<InputState>,
     selected: HashSet<String>,
-    /// A drag across the tick boxes, while the button is down.
-    pick: Option<DragPick>,
+    /// A drag across the tick boxes or row buttons, while the button is down.
+    pick: PickState,
     /// The row a tick box was last pressed on, for Shift.
     pick_anchor: Option<usize>,
-    pick_row_h: Pixels,
-    _pick_tick: Option<Task<()>>,
+    /// The rows a button drag will act on when let go.
+    swept: HashSet<String>,
     /// Groups showing their rows.
     open: HashSet<Group>,
     /// The rows deliberately kept off the server show in the list.
@@ -275,10 +275,9 @@ impl SyncPanel {
             filters: Filters::default(),
             search,
             selected: HashSet::new(),
-            pick: None,
+            pick: PickState::default(),
             pick_anchor: None,
-            pick_row_h: px(0.),
-            _pick_tick: None,
+            swept: HashSet::new(),
             open: [Group::Add, Group::Update, Group::ServerOnly, Group::KeptOff].into(),
             show_kept: false,
             items: Vec::new(),
@@ -842,6 +841,54 @@ impl SyncPanel {
         }
     }
 
+    /// List line `ix`'s row button, when it can run now: the row's key, the
+    /// button's words, what it does, its group and the row.
+    fn line_act(&self, ix: usize, cx: &App) -> Option<(String, (&'static str, &'static str), RowAct, Group, DiffEntry)> {
+        let Some(Ok(diff)) = &self.diff else { return None };
+        let Item::Row(i) = self.items.get(ix)? else { return None };
+        let d = diff.get(*i)?;
+        let g = Group::of(d);
+        let (words, act) = match g {
+            Group::Add => (("Adding", "Added"), RowAct::Push),
+            Group::Update if d.status == DiffStatus::ServerNewer => (("Replacing", "Replaced"), RowAct::Push),
+            Group::Update => (("Updating", "Updated"), RowAct::Push),
+            Group::ServerOnly => (("Removing", "Removed"), RowAct::Remove),
+            Group::KeptOff => (("Sending", "Sent"), RowAct::Push),
+            _ => return None,
+        };
+        let key = row_key(d);
+        let blocked = self.running || (self.online(cx) && !self.allow_online);
+        if blocked || self.acted.contains_key(&key) || self.acting.contains_key(&key) {
+            return None;
+        }
+        Some((key, words, act, g, d.clone()))
+    }
+
+    /// The rows a button drag crosses that have the first row's kind of
+    /// button (Add, Update, Remove…).
+    fn swept_acts(&self, p: &DragPick, cx: &App) -> Vec<(String, (&'static str, &'static str), RowAct, DiffEntry)> {
+        let Some((.., g0, _)) = self.line_act(p.start, cx) else { return Vec::new() };
+        p.rows()
+            .filter_map(|ix| self.line_act(ix, cx))
+            .filter(|(.., g, _)| *g == g0)
+            .map(|(k, w, a, _, d)| (k, w, a, d))
+            .collect()
+    }
+
+    /// A row button pressed: a drag across rows may follow.
+    fn sweep_down(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(ix) = (0..self.items.len()).find(|&i| {
+            matches!(self.items.get(i), Some(Item::Row(r)) if matches!(&self.diff, Some(Ok(d)) if d.get(*r).is_some_and(|d| row_key(d) == key)))
+        }) else {
+            return;
+        };
+        if self.line_act(ix, cx).is_none() {
+            return;
+        }
+        self.swept.clear();
+        drag_pick::start(self, DragPick::sweep(ix, Sweep::Action, true), cx);
+    }
+
     /// A tick box pressed: Shift ticks the rows from the last pressed box,
     /// else a drag starts (ticking, or unticking from a ticked box).
     fn pick_down(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) {
@@ -855,76 +902,16 @@ impl SyncPanel {
                         self.selected.insert(k);
                     }
                 }
-                self.pick = None;
+                self.pick.drag = None;
             }
             None => {
                 let p = DragPick::new(ix, !self.selected.contains(key), self.selected.clone());
                 self.selected = p.apply(|i| self.line_key(i));
-                self.pick = Some(p);
+                drag_pick::start(self, p, cx);
             }
         }
         self.pick_anchor = Some(ix);
         cx.notify();
-    }
-
-    fn pick_move(&mut self, y: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(mut p) = self.pick.take() else { return };
-        self.pick_row_h = rems(ROW_H).to_pixels(window.rem_size());
-        if p.moved(y, &self.scroll, self.pick_row_h, self.items.len()) {
-            self.selected = p.apply(|i| self.line_key(i));
-            cx.notify();
-        }
-        if let Some(c) = &p.chip {
-            let t = p.label();
-            c.update(cx, |c, cx| {
-                c.text = t;
-                cx.notify();
-            });
-        }
-        self.pick = Some(p);
-        if self._pick_tick.is_none() {
-            self._pick_tick = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
-                    let go = this.update(cx, |this, cx| this.pick_frame(cx)).unwrap_or(false);
-                    if !go {
-                        break;
-                    }
-                }
-            }));
-        }
-    }
-
-    /// One frame while a drag runs: scrolls at the edges. False once it ended.
-    fn pick_frame(&mut self, cx: &mut Context<Self>) -> bool {
-        if !cx.has_active_drag() {
-            self.pick_end(cx);
-            return false;
-        }
-        let Some(mut p) = self.pick.take() else {
-            self._pick_tick = None;
-            return false;
-        };
-        if p.edge_scroll(&self.scroll, self.pick_row_h, self.items.len()) {
-            self.selected = p.apply(|i| self.line_key(i));
-            if let Some(c) = &p.chip {
-                let t = p.label();
-                c.update(cx, |c, cx| {
-                    c.text = t;
-                    cx.notify();
-                });
-            }
-            cx.notify();
-        }
-        self.pick = Some(p);
-        true
-    }
-
-    fn pick_end(&mut self, cx: &mut Context<Self>) {
-        if self.pick.take().is_some() {
-            cx.notify();
-        }
-        self._pick_tick = None;
     }
 
     /// Lists the NeoForge builds for the pack's Minecraft version, once,
@@ -2207,6 +2194,8 @@ impl SyncPanel {
         };
         // One action per row, named for what it does to the server.
         let compact = self.fit.compact;
+        // A drag across row buttons: the ones letting go will press.
+        let lit = self.pick.sweeping() == Some(Sweep::Action) && self.swept.contains(&key);
         let act = |key_id: &'static str,
                    label: &'static str,
                    icon: IconName,
@@ -2216,7 +2205,8 @@ impl SyncPanel {
             let (d2, pair2, key2) = (d.clone(), pair.clone(), key.clone());
             Button::new(id(key_id))
                 .small()
-                .outline()
+                .when(!lit, |b| b.outline())
+                .when(lit && !danger, |b| b.primary())
                 .icon(icon)
                 // Tight: the icon alone, its words in the tooltip.
                 .map(|b| if compact { b.tooltip(label) } else { b.label(label) })
@@ -2224,6 +2214,9 @@ impl SyncPanel {
                 .disabled(blocked)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
+                    if drag_pick::click_swallowed(this) {
+                        return;
+                    }
                     if let Some((s, i)) = &pair2 {
                         this.act_row(key2.clone(), words, rigsync::chip_ops(a, &d2, i, s), cx);
                     }
@@ -2273,10 +2266,19 @@ impl SyncPanel {
                         }),
                 )
         });
+        // Pressed and dragged across rows: the same button on each.
+        let sweep = |el: AnyElement, cx: &Context<Self>| -> AnyElement {
+            let k = key.clone();
+            drag_pick::handle(div().id(id("act-sweep")).flex_none(), cx, move |this, _, cx| this.sweep_down(&k, cx))
+                .child(el)
+                .into_any_element()
+        };
         let theme = cx.theme().clone();
         let action: AnyElement = match g {
-            Group::Add => act("Add", "Add to server", IconName::Plus, ("Adding", "Added"), RowAct::Push, false)
-                .into_any_element(),
+            Group::Add => sweep(
+                act("Add", "Add to server", IconName::Plus, ("Adding", "Added"), RowAct::Push, false).into_any_element(),
+                cx,
+            ),
             Group::Update => {
                 let lead = if d.status == DiffStatus::ServerNewer {
                     act("Replace", "Replace on server", IconName::ArrowUp, ("Replacing", "Replaced"), RowAct::Push, false)
@@ -2291,7 +2293,7 @@ impl SyncPanel {
                     Some((_, inst)) => {
                         let (store, root) = (self.store.clone(), inst.root.clone());
                         widgets::split(
-                            widgets::split_lead(lead),
+                            sweep(widgets::split_lead(lead).into_any_element(), cx),
                             id("changes"),
                             widgets::Tint::Outline,
                             gpui_kit::component::Size::Small,
@@ -2304,27 +2306,32 @@ impl SyncPanel {
                         )
                         .into_any_element()
                     }
-                    None => lead.into_any_element(),
+                    None => sweep(lead.into_any_element(), cx),
                 }
             }
-            Group::ServerOnly => act(
-                "Remove",
-                "Remove from server",
-                IconName::Trash,
-                ("Removing", "Removed"),
-                RowAct::Remove,
-                true,
-            )
-            .when(!compact, |b| b.tooltip("Moves the jar to the server's .hopper-backups (undo from History)"))
-            .into_any_element(),
+            Group::ServerOnly => sweep(
+                act(
+                    "Remove",
+                    "Remove from server",
+                    IconName::Trash,
+                    ("Removing", "Removed"),
+                    RowAct::Remove,
+                    true,
+                )
+                .when(!compact, |b| b.tooltip("Moves the jar to the server's .hopper-backups (undo from History)"))
+                .into_any_element(),
+                cx,
+            ),
             Group::KeptOff => h_flex()
                 .gap_3()
-                .child(
+                .child(sweep(
                     act("Send once", "Send once", IconName::Upload, ("Sending", "Sent"), RowAct::Push, false)
                         .when(!compact, |b| {
                             b.tooltip("Copy it to the server this time; the next comparison still keeps it off")
-                        }),
-                )
+                        })
+                        .into_any_element(),
+                    cx,
+                ))
                 .when(pid != 0, |r| {
                     r.child(
                         Checkbox::new(id("always"))
@@ -2430,6 +2437,10 @@ impl SyncPanel {
             .when(pickable, |r| {
                 r.clickable(cx).on_click(
 cx.listener(move |this, _, _, cx| {
+                    // A drag let go on this row isn't a click on it.
+                    if drag_pick::spreading(this) {
+                        return;
+                    }
                     if !this.selected.remove(&k2) {
                         this.selected.insert(k2.clone());
                     }
@@ -2438,23 +2449,14 @@ cx.listener(move |this, _, _, cx| {
             })
             .child(div().w_6().h_full().flex_none().when(pickable, |c| {
                 let key = key.clone();
-                let view = cx.entity();
                 c.child(
-                    div()
-                        .id(id("pick-cell"))
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .clickable(cx)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                this.pick_down(&key, e.modifiers.shift, cx)
-                            }),
-                        )
-                        .on_click(|_, _, cx| cx.stop_propagation())
-                        .on_drag(PickDrag, move |_, _, _, cx| crate::drag_pick::chip_for(&view, cx))
-                        .child(Checkbox::new(id("pick")).checked(picked)),
+                    drag_pick::handle(
+                        div().id(id("pick-cell")).size_full().flex().items_center().clickable(cx),
+                        cx,
+                        move |this, e, cx| this.pick_down(&key, e.modifiers.shift, cx),
+                    )
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(Checkbox::new(id("pick")).checked(picked)),
                 )
             }))
             .child(thumb)
@@ -2569,8 +2571,39 @@ impl RowTags {
 }
 
 impl Picks for SyncPanel {
-    fn pick_mut(&mut self) -> Option<&mut DragPick> {
-        self.pick.as_mut()
+    fn picks(&mut self) -> &mut PickState {
+        &mut self.pick
+    }
+
+    fn pick_list(&self) -> (UniformListScrollHandle, usize) {
+        (self.scroll.clone(), self.items.len())
+    }
+
+    fn pick_changed(&mut self, p: &DragPick, cx: &mut Context<Self>) -> SharedString {
+        match p.kind {
+            Sweep::Tick => {
+                self.selected = p.apply(|i| self.line_key(i));
+                p.tick_label()
+            }
+            Sweep::Switch | Sweep::Action => {
+                let acts = self.swept_acts(p, cx);
+                self.swept = acts.iter().map(|(k, ..)| k.clone()).collect();
+                let verb = self.line_act(p.start, cx).map_or("Doing", |(_, w, ..)| w.0);
+                DragPick::count_label(verb, "Nothing to do", self.swept.len())
+            }
+        }
+    }
+
+    fn pick_commit(&mut self, p: DragPick, _: &mut Window, cx: &mut Context<Self>) {
+        self.swept.clear();
+        if p.kind == Sweep::Tick {
+            return;
+        }
+        let Some((s, i)) = self.pair_header(cx) else { return };
+        for (key, words, act, d) in self.swept_acts(&p, cx) {
+            self.act_row(key, words, rigsync::chip_ops(act, &d, &i, &s), cx);
+        }
+        cx.notify();
     }
 }
 
@@ -2747,10 +2780,11 @@ impl Render for SyncPanel {
                         div()
                             .id("sync-rows-area")
                             .on_drag_move::<PickDrag>(cx.listener(|this, e: &DragMoveEvent<PickDrag>, window, cx| {
-                                this.pick_move(e.event.position.y, window, cx)
+                                let row_h = rems(ROW_H).to_pixels(window.rem_size());
+                                drag_pick::moved(this, e.event.position.y, row_h, window, cx)
                             }))
-                            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.pick_end(cx)))
-                            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.pick_end(cx)))
+                            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
+                            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                             .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
                             .flex_1()
                             .min_h_0()

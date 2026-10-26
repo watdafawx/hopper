@@ -1,20 +1,42 @@
-//! Ticking many rows at once: press a row's tick box and drag. Every row the
-//! pointer crosses takes the state the first box got (ticked, or unticked
-//! when it started ticked). Held near the list's top or bottom edge, the
-//! list scrolls by itself and keeps picking up rows.
+//! Press a row control and drag across rows: every row the pointer crosses
+//! gets the same.
 //!
-//! The view keeps a `DragPick` while the button is down, puts
-//! [`cell`]-style handlers on each tick box, and on its list area:
-//! `on_drag_move::<PickDrag>` (pointer moved), `on_mouse_up` and
-//! `on_mouse_up_out` (done).
+//! - Tick boxes ([`Sweep::Tick`]): rows take the state the first box got
+//!   (ticked, or unticked when it started ticked), at once.
+//! - On/off switches ([`Sweep::Switch`]): the crossed switches show the new
+//!   state while the button is held; letting go switches them all in one go,
+//!   so the dependency check runs once, for the lot.
+//! - Row buttons such as Update ([`Sweep::Action`]): the crossed buttons light
+//!   up; letting go runs them all.
+//!
+//! Held near the list's top or bottom edge, the list scrolls by itself and
+//! keeps picking up rows.
+//!
+//! A view keeps a [`PickState`] and implements [`Picks`]. Each control gets
+//! `on_mouse_down` (start the drag) and `on_drag(PickDrag, chip_for)`; the
+//! list area gets `on_drag_move::<PickDrag>` → [`moved`] and `on_mouse_up` /
+//! `on_mouse_up_out` → [`released`]. A swept control's own click handler
+//! asks [`click_swallowed`] first, so letting go over it doesn't run it twice.
 
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use std::collections::HashSet;
+use std::ops::RangeInclusive;
 
 /// What GPUI carries while a pick drag runs.
 #[derive(Clone, Copy)]
 pub struct PickDrag;
+
+/// What a drag does to the rows it crosses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sweep {
+    /// Ticks or unticks them, as it goes.
+    Tick,
+    /// Switches them on or off, on letting go.
+    Switch,
+    /// Presses their button (Update, Add…), on letting go.
+    Action,
+}
 
 /// The small label beside the pointer: "Ticking 5".
 pub struct PickChip {
@@ -45,24 +67,55 @@ impl Render for PickChip {
 pub struct DragPick {
     pub start: usize,
     pub cur: usize,
-    /// Ticking (true) or unticking.
+    pub kind: Sweep,
+    /// Ticking or switching on (true), or the opposite.
     pub on: bool,
-    /// The picks before the drag began.
+    /// The pointer has been on another row than the first.
+    pub spread: bool,
+    /// The picks before the drag began (ticks only).
     base: HashSet<String>,
     /// The pointer's height in the window, for the edge scroll.
     y: Option<Pixels>,
+    /// The chip's text.
+    text: SharedString,
     pub chip: Option<Entity<PickChip>>,
 }
 
 impl DragPick {
+    /// A tick drag.
     pub fn new(start: usize, on: bool, base: HashSet<String>) -> Self {
-        DragPick { start, cur: start, on, base, y: None, chip: None }
+        DragPick {
+            start,
+            cur: start,
+            kind: Sweep::Tick,
+            on,
+            spread: false,
+            base,
+            y: None,
+            text: SharedString::default(),
+            chip: None,
+        }
+    }
+
+    /// A switch or button drag.
+    pub fn sweep(start: usize, kind: Sweep, on: bool) -> Self {
+        DragPick { kind, ..Self::new(start, on, HashSet::new()) }
+    }
+
+    /// The rows crossed so far.
+    pub fn rows(&self) -> RangeInclusive<usize> {
+        self.start.min(self.cur)..=self.start.max(self.cur)
+    }
+
+    /// GPUI started the drag (the pointer moved while held).
+    pub fn dragged(&self) -> bool {
+        self.chip.is_some()
     }
 
     /// The picks with rows `start..=cur` set to the drag's state.
     pub fn apply(&self, key_of: impl Fn(usize) -> Option<String>) -> HashSet<String> {
         let mut out = self.base.clone();
-        for ix in self.start.min(self.cur)..=self.start.max(self.cur) {
+        for ix in self.rows() {
             if let Some(k) = key_of(ix) {
                 if self.on {
                     out.insert(k);
@@ -74,12 +127,18 @@ impl DragPick {
         out
     }
 
-    pub fn label(&self) -> SharedString {
+    /// A tick drag's chip: "Ticking 5" (nothing on the first row alone).
+    pub fn tick_label(&self) -> SharedString {
         if self.cur == self.start {
             return SharedString::default();
         }
         let n = self.start.abs_diff(self.cur) + 1;
         format!("{} {n}", if self.on { "Ticking" } else { "Unticking" }).into()
+    }
+
+    /// A sweep's chip: "Updating 5" ("Nothing to update" when none fit).
+    pub fn count_label(verb: &str, none: &str, n: usize) -> SharedString {
+        if n == 0 { none.to_string().into() } else { format!("{verb} {n}").into() }
     }
 
     /// The pointer moved to `y`: the row under it (by the list's scroll and
@@ -94,6 +153,7 @@ impl DragPick {
         let Some(ix) = row_at(scroll, y, row_h, count) else { return false };
         let changed = ix != self.cur;
         self.cur = ix;
+        self.spread |= ix != self.start;
         changed
     }
 
@@ -126,6 +186,19 @@ impl DragPick {
         self.track(scroll, row_h, count);
         true
     }
+
+    /// Puts the chip's text on the chip, once it exists.
+    fn show(&self, cx: &mut App) {
+        if let Some(c) = &self.chip {
+            let t = self.text.clone();
+            c.update(cx, |c, cx| {
+                if c.text != t {
+                    c.text = t;
+                    cx.notify();
+                }
+            });
+        }
+    }
 }
 
 /// The row under window height `y` in a uniform list (clamped to the list).
@@ -143,20 +216,151 @@ pub fn row_at(scroll: &UniformListScrollHandle, y: Pixels, row_h: Pixels, count:
     Some((ix.max(0.) as usize).min(count - 1))
 }
 
-/// A view with a pick drag, so the drag's label can find it.
-pub trait Picks {
-    fn pick_mut(&mut self) -> Option<&mut DragPick>;
+/// A view's drag: the drag itself, and the frame loop that scrolls at the
+/// list's edges and notices the drag ending.
+#[derive(Default)]
+pub struct PickState {
+    pub drag: Option<DragPick>,
+    row_h: Pixels,
+    tick: Option<Task<()>>,
+}
+
+impl PickState {
+    /// The running sweep's kind, once the pointer has crossed rows.
+    pub fn sweeping(&self) -> Option<Sweep> {
+        self.drag.as_ref().filter(|p| p.dragged()).map(|p| p.kind)
+    }
+}
+
+/// A view with a pick drag.
+pub trait Picks: Sized + 'static {
+    fn picks(&mut self) -> &mut PickState;
+    /// The list's scroll handle and its number of lines.
+    fn pick_list(&self) -> (UniformListScrollHandle, usize);
+    /// The drag's rows changed: tick them, or show what letting go will do.
+    /// Returns the chip's text.
+    fn pick_changed(&mut self, p: &DragPick, cx: &mut Context<Self>) -> SharedString;
+    /// Let go after a switch or button sweep: do it to the crossed rows.
+    fn pick_commit(&mut self, p: DragPick, window: &mut Window, cx: &mut Context<Self>);
+}
+
+/// Starts a drag (from a control's mouse down).
+pub fn start<V: Picks>(this: &mut V, p: DragPick, cx: &mut Context<V>) {
+    let s = this.picks();
+    s.drag = Some(p);
+    s.tick = None;
+    cx.notify();
 }
 
 /// The label a pick drag shows beside the pointer, made when GPUI starts
 /// the drag (after the pointer moves a little) and kept by the view's pick
 /// so its count updates.
-pub fn chip_for<V: Picks + 'static>(view: &Entity<V>, cx: &mut App) -> Entity<PickChip> {
+pub fn chip_for<V: Picks>(view: &Entity<V>, cx: &mut App) -> Entity<PickChip> {
     let chip = cx.new(|_| PickChip { text: SharedString::default() });
-    view.update(cx, |v, _| {
-        if let Some(p) = v.pick_mut() {
+    view.update(cx, |v, cx| {
+        if let Some(mut p) = v.picks().drag.take() {
             p.chip = Some(chip.clone());
+            // A sweep shows its first row at once.
+            if p.kind != Sweep::Tick {
+                p.text = v.pick_changed(&p, cx);
+                cx.notify();
+            }
+            p.show(cx);
+            v.picks().drag = Some(p);
         }
     });
     chip
+}
+
+/// Makes `el` (a row's tick box, switch or button) start a drag when
+/// pressed: `down` sets the drag up with [`start`].
+pub fn handle<V: Picks>(
+    el: Stateful<Div>,
+    cx: &Context<V>,
+    down: impl Fn(&mut V, &MouseDownEvent, &mut Context<V>) + 'static,
+) -> Stateful<Div> {
+    let view = cx.entity();
+    el.on_mouse_down(MouseButton::Left, cx.listener(move |this, e: &MouseDownEvent, _, cx| down(this, e, cx)))
+        .on_drag(PickDrag, move |_, _, _, cx| chip_for(&view, cx))
+}
+
+/// The pointer moved during a drag (the list's `on_drag_move::<PickDrag>`).
+pub fn moved<V: Picks>(this: &mut V, y: Pixels, row_h: Pixels, window: &mut Window, cx: &mut Context<V>) {
+    let Some(mut p) = this.picks().drag.take() else { return };
+    this.picks().row_h = row_h;
+    let (scroll, n) = this.pick_list();
+    if p.moved(y, &scroll, row_h, n) {
+        p.text = this.pick_changed(&p, cx);
+        cx.notify();
+    }
+    p.show(cx);
+    this.picks().drag = Some(p);
+    if this.picks().tick.is_none() {
+        let task = cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
+                let go = this.update_in(cx, |this, window, cx| frame(this, window, cx)).unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
+        });
+        this.picks().tick = Some(task);
+    }
+}
+
+/// One frame while a drag runs: scrolls at the edges. False once it ended.
+fn frame<V: Picks>(this: &mut V, window: &mut Window, cx: &mut Context<V>) -> bool {
+    // Let go where the list didn't hear it (a control that stops the
+    // event): finish here.
+    if !cx.has_active_drag() {
+        released(this, window, cx);
+        return false;
+    }
+    let Some(mut p) = this.picks().drag.take() else {
+        this.picks().tick = None;
+        return false;
+    };
+    let (scroll, n) = this.pick_list();
+    let row_h = this.picks().row_h;
+    if p.edge_scroll(&scroll, row_h, n) {
+        p.text = this.pick_changed(&p, cx);
+        p.show(cx);
+        cx.notify();
+    }
+    this.picks().drag = Some(p);
+    true
+}
+
+/// The button was let go (the list's `on_mouse_up` / `on_mouse_up_out`):
+/// a sweep that crossed rows runs.
+pub fn released<V: Picks>(this: &mut V, window: &mut Window, cx: &mut Context<V>) {
+    this.picks().tick = None;
+    let Some(p) = this.picks().drag.take() else { return };
+    if p.kind != Sweep::Tick && p.dragged() {
+        this.pick_commit(p, window, cx);
+    }
+    cx.notify();
+}
+
+/// For a swept control's click: true when a drag that crossed rows is
+/// ending over it, so the sweep does the work. A plain click (or a drag
+/// that stayed on its row) ends the sweep here and runs as a click.
+pub fn click_swallowed<V: Picks>(this: &mut V) -> bool {
+    let s = this.picks();
+    match &s.drag {
+        Some(p) if p.spread => true,
+        Some(p) if p.kind != Sweep::Tick => {
+            s.drag = None;
+            s.tick = None;
+            false
+        }
+        _ => false,
+    }
+}
+
+/// A drag that crossed rows is running (for a row's own click, which
+/// shouldn't fire when a drag ends on it).
+pub fn spreading<V: Picks>(this: &mut V) -> bool {
+    this.picks().drag.as_ref().is_some_and(|p| p.spread)
 }

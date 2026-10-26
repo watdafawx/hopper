@@ -1,7 +1,7 @@
 //! The Mods, Resource packs, Shaders and Data packs tabs: a sortable, filterable table
 //! of what an instance has installed, with updates, toggles and removal.
 
-use crate::drag_pick::{DragPick, PickDrag, Picks};
+use crate::drag_pick::{self, DragPick, PickDrag, PickState, Picks, Sweep};
 use crate::store::{Store, Updates};
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
@@ -473,12 +473,13 @@ pub struct AddonsView {
     /// Resource packs Paxi (or another global folder) also has: shown,
     /// rather than folded into one row.
     pub(crate) show_copies: bool,
-    /// A drag across the tick boxes, while the button is down.
-    pick: Option<DragPick>,
+    /// A drag across the tick boxes, switches or Update buttons, while the
+    /// button is down.
+    pick: PickState,
     /// The row a tick box was last pressed on, for Shift.
     pick_anchor: Option<usize>,
-    pick_row_h: Pixels,
-    _pick_tick: Option<Task<()>>,
+    /// The files a switch or Update drag will act on when let go.
+    swept: HashSet<String>,
     /// Jars in the mods folder Hopper doesn't track, by folder mtime.
     /// Keyed by folder, its mtime and the tracked file names (identifying
     /// jars tracks them without touching the folder).
@@ -610,10 +611,9 @@ impl AddonsView {
             updates_first: true,
             sort: (SortCol::Added, false),
             selected: HashSet::new(),
-            pick: None,
+            pick: PickState::default(),
             pick_anchor: None,
-            pick_row_h: px(0.),
-            _pick_tick: None,
+            swept: HashSet::new(),
             loose: (None, Vec::new()),
             table: Table::default(),
             scroll: UniformListScrollHandle::new(),
@@ -2656,76 +2656,57 @@ impl AddonsView {
         match self.pick_anchor.or(self.cursor).filter(|_| shift) {
             Some(a) => {
                 self.select_range(a, ix, true);
-                self.pick = None;
+                self.pick.drag = None;
             }
             None => {
                 let p = DragPick::new(ix, !self.selected.contains(file), self.selected.clone());
                 self.selected = p.apply(|i| self.row_file(i));
-                self.pick = Some(p);
+                drag_pick::start(self, p, cx);
             }
         }
         self.pick_anchor = Some(ix);
         cx.notify();
     }
 
-    fn pick_move(&mut self, y: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(mut p) = self.pick.take() else { return };
-        self.pick_row_h = rems(ROW_H).to_pixels(window.rem_size());
-        if p.moved(y, &self.scroll, self.pick_row_h, self.table.rows.len()) {
-            self.selected = p.apply(|i| self.row_file(i));
-            cx.notify();
-        }
-        if let Some(c) = &p.chip {
-            let t = p.label();
-            c.update(cx, |c, cx| {
-                c.text = t;
-                cx.notify();
-            });
-        }
-        self.pick = Some(p);
-        if self._pick_tick.is_none() {
-            self._pick_tick = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
-                    let go = this.update(cx, |this, cx| this.pick_frame(cx)).unwrap_or(false);
-                    if !go {
-                        break;
-                    }
-                }
-            }));
-        }
+    /// A switch or Update button pressed: a drag across rows may follow.
+    /// `on` is what a switch drag sets.
+    fn sweep_down(&mut self, file: &str, kind: Sweep, on: bool, cx: &mut Context<Self>) {
+        let Some(ix) = self.row_ix_of(file) else { return };
+        self.swept.clear();
+        drag_pick::start(self, DragPick::sweep(ix, kind, on), cx);
     }
 
-    /// One frame while a drag runs: scrolls at the edges. False once it ended.
-    fn pick_frame(&mut self, cx: &mut Context<Self>) -> bool {
-        if !cx.has_active_drag() {
-            self.pick_end(cx);
-            return false;
+    /// Row `ix`'s file and whether it's on, when it has an on/off switch
+    /// (shaders are a choice instead).
+    fn row_switch(&self, ix: usize) -> Option<(String, bool)> {
+        if self.class == cf::CLASS_SHADERS {
+            return None;
         }
-        let Some(mut p) = self.pick.take() else {
-            self._pick_tick = None;
-            return false;
-        };
-        if p.edge_scroll(&self.scroll, self.pick_row_h, self.table.rows.len()) {
-            self.selected = p.apply(|i| self.row_file(i));
-            if let Some(c) = &p.chip {
-                let t = p.label();
-                c.update(cx, |c, cx| {
-                    c.text = t;
-                    cx.notify();
-                });
+        let inst = self.table.inst.as_ref()?;
+        let Row::Addon(i) = self.table.rows.get(ix)? else { return None };
+        let a = inst.addons.get(*i)?;
+        Some((a.file_name.clone(), self.row_on(a)))
+    }
+
+    /// Row `ix`'s update, when its Update button would run now.
+    fn row_update(&self, ix: usize, cx: &App) -> Option<(String, Update)> {
+        let inst = self.table.inst.as_ref()?;
+        let Row::Addon(i) = self.table.rows.get(ix)? else { return None };
+        let a = inst.addons.get(*i)?;
+        let u = self.table.updates.get(&a.project_id)?;
+        if self.recent.contains_key(&a.project_id) {
+            return None;
+        }
+        let store = self.store.read(cx);
+        if let Some(r) = &self.root {
+            let hold = !store.queues_updates(r) && store.edit_hold_reason(r).is_some();
+            let busy = store.update_state(r, a.project_id).is_some();
+            let from_web = a.project_id != 0 && store.pending(r).iter().any(|p| p.project_id == a.project_id);
+            if hold || busy || from_web {
+                return None;
             }
-            cx.notify();
         }
-        self.pick = Some(p);
-        true
-    }
-
-    fn pick_end(&mut self, cx: &mut Context<Self>) {
-        if self.pick.take().is_some() {
-            cx.notify();
-        }
-        self._pick_tick = None;
+        Some((a.file_name.clone(), u.clone()))
     }
 
     /// Picks row `ix`, or unpicks it if picked (Ctrl+click).
@@ -2969,6 +2950,11 @@ Details").into()),
             });
 
         let done = self.recent.contains_key(&a.project_id);
+        // A drag across switches or Update buttons: what letting go does.
+        let sweep = self.pick.sweeping();
+        let swept = self.swept.contains(&file);
+        let swept_update = swept && sweep == Some(Sweep::Action);
+        let swept_switch = swept && sweep == Some(Sweep::Switch);
         // Hover-only controls stay shown on a picked row, the key cursor's
         // row and the row whose menu is open.
         let shown = picked
@@ -2989,12 +2975,20 @@ Details").into()),
             let tip = format!("{}  →  {}", u.from, u.file.file_name);
             let (pid, file) = (u.project_id, u.file.clone());
             let view = cx.entity();
+            let f_sweep = a.file_name.clone();
+            let can_run = hold.is_none() && updating.is_none() && !from_web;
             let split = widgets::split(
-                widgets::split_lead(
+                // Pressed and dragged across rows: their Update buttons too.
+                drag_pick::handle(div().id(id("update-sweep")).flex_1().flex(), cx, move |this, _, cx| {
+                    if can_run {
+                        this.sweep_down(&f_sweep, Sweep::Action, true, cx)
+                    }
+                })
+                .child(widgets::split_lead(
                         Button::new(id("update"))
                             .flex_1()
                             .small()
-                            .outline()
+                            .map(|b| if swept_update { b.primary() } else { b.outline() })
                             .icon(IconName::Download)
                             // Narrow, the icon alone (the tooltip says the rest).
                             .when(!compact, |b| {
@@ -3018,13 +3012,16 @@ It stays disabled after updating: turn it on in the On column.")
                             } else {
                                 tip
                             })
-                            .disabled(hold.is_some() || updating.is_some() || from_web)
+                            .disabled(!can_run)
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                if drag_pick::click_swallowed(this) {
+                                    return;
+                                }
                                 this.settle.clicked();
                                 this.run_updates(vec![u.clone()], cx);
                                 this.pull_recent(cx);
                             })),
-                ),
+                )),
                 id("changes"),
                 widgets::Tint::Outline,
                 gpui_kit::component::Size::Small,
@@ -3107,24 +3104,13 @@ It stays disabled after updating: turn it on in the On column.")
                 )
             })
             .child(
-                {
-                    let view = cx.entity();
-                    col_check()
-                        .id(id("pick"))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                this.pick_down(&f_sel, e.modifiers.shift, cx)
-                            }),
-                        )
-                        .on_click(|_, _, cx| cx.stop_propagation())
-                        .on_drag(PickDrag, move |_, _, _, cx| crate::drag_pick::chip_for(&view, cx))
-                        .child(Checkbox::new(id("sel")).checked(picked))
-                },
+                drag_pick::handle(
+                    col_check().id(id("pick")).h_full().flex().items_center().cursor_pointer(),
+                    cx,
+                    move |this, e, cx| this.pick_down(&f_sel, e.modifiers.shift, cx),
+                )
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(Checkbox::new(id("sel")).checked(picked)),
             )
             .children(order_cell)
             .child({
@@ -3264,19 +3250,31 @@ Change version", a.file_name).into()
                 radio
             } else {
                 let order = self.order_mode();
-                Switch::new(id("on"))
-                    .small()
-                    .checked(on)
-                    .tooltip(match (order, on) {
-                        (true, true) => "Stop using it in game",
-                        (true, false) => "Use it in game (adds it at the top)",
-                        (false, true) => "Turn off",
-                        (false, false) => "Turn on",
-                    })
-                    .on_change(cx.listener(move |this, v: &bool, w, cx| {
-                        this.toggle(vec![f_on.clone()], *v, w, cx)
-                    }))
-                    .into_any_element()
+                let f_sweep = f_on.clone();
+                // Pressed and dragged across rows: their switches too, all
+                // switched (and checked for what they need) on letting go.
+                drag_pick::handle(div().id(id("on-sweep")), cx, move |this, _, cx| {
+                    this.sweep_down(&f_sweep, Sweep::Switch, !on, cx)
+                })
+                .child(
+                    Switch::new(id("on"))
+                        .small()
+                        // While dragging: the state letting go will set.
+                        .checked(on != swept_switch)
+                        .tooltip(match (order, on) {
+                            (true, true) => "Stop using it in game",
+                            (true, false) => "Use it in game (adds it at the top)",
+                            (false, true) => "Turn off",
+                            (false, false) => "Turn on",
+                        })
+                        .on_change(cx.listener(move |this, v: &bool, w, cx| {
+                            if drag_pick::click_swallowed(this) {
+                                return;
+                            }
+                            this.toggle(vec![f_on.clone()], *v, w, cx)
+                        })),
+                )
+                .into_any_element()
             }))
             .when(self.cols.date, |r| r.child({
                 let exact = hopper::time::date_of(&a.date_added);
@@ -4047,8 +4045,70 @@ struct Flags {
 }
 
 impl Picks for AddonsView {
-    fn pick_mut(&mut self) -> Option<&mut DragPick> {
-        self.pick.as_mut()
+    fn picks(&mut self) -> &mut PickState {
+        &mut self.pick
+    }
+
+    fn pick_list(&self) -> (UniformListScrollHandle, usize) {
+        (self.scroll.clone(), self.table.rows.len())
+    }
+
+    fn pick_changed(&mut self, p: &DragPick, cx: &mut Context<Self>) -> SharedString {
+        match p.kind {
+            Sweep::Tick => {
+                self.selected = p.apply(|i| self.row_file(i));
+                p.tick_label()
+            }
+            // Only the switches that change.
+            Sweep::Switch => {
+                self.swept = p
+                    .rows()
+                    .filter_map(|i| self.row_switch(i))
+                    .filter(|(_, on)| *on != p.on)
+                    .map(|(f, _)| f)
+                    .collect();
+                let (verb, none) = match (self.order_mode(), p.on) {
+                    (true, true) => ("Using", "All in use"),
+                    (true, false) => ("Not using", "None in use"),
+                    (false, true) => ("Turning on", "All on"),
+                    (false, false) => ("Turning off", "All off"),
+                };
+                DragPick::count_label(verb, none, self.swept.len())
+            }
+            Sweep::Action => {
+                self.swept = p.rows().filter_map(|i| self.row_update(i, cx)).map(|(f, _)| f).collect();
+                DragPick::count_label("Updating", "No updates", self.swept.len())
+            }
+        }
+    }
+
+    fn pick_commit(&mut self, p: DragPick, window: &mut Window, cx: &mut Context<Self>) {
+        self.swept.clear();
+        match p.kind {
+            Sweep::Tick => {}
+            // All at once, so the mods they need (or that need them) are
+            // checked once, for the lot.
+            Sweep::Switch => {
+                let files: Vec<String> = p
+                    .rows()
+                    .filter_map(|i| self.row_switch(i))
+                    .filter(|(_, on)| *on != p.on)
+                    .map(|(f, _)| f)
+                    .collect();
+                if !files.is_empty() {
+                    self.toggle(files, p.on, window, cx);
+                }
+            }
+            Sweep::Action => {
+                let ups: Vec<Update> = p.rows().filter_map(|i| self.row_update(i, cx)).map(|(_, u)| u).collect();
+                if !ups.is_empty() {
+                    self.settle.clicked();
+                    self.run_updates(ups, cx);
+                    self.pull_recent(cx);
+                }
+            }
+        }
+        cx.notify();
     }
 }
 
@@ -4148,10 +4208,11 @@ impl Render for AddonsView {
             div()
                 .id("addon-table")
                 .on_drag_move::<PickDrag>(cx.listener(|this, e: &DragMoveEvent<PickDrag>, window, cx| {
-                    this.pick_move(e.event.position.y, window, cx)
+                    let row_h = rems(ROW_H).to_pixels(window.rem_size());
+                    drag_pick::moved(this, e.event.position.y, row_h, window, cx)
                 }))
-                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.pick_end(cx)))
-                .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.pick_end(cx)))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                 .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
                 .track_focus(&self.focus)
                 .key_context("AddonsTable")
