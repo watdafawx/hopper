@@ -46,6 +46,9 @@ pub struct BackupsView {
     comparing: HashSet<String>,
     /// What's running (a snapshot or restore), shown instead of the intro.
     busy: Option<String>,
+    /// The snapshot to show open the first time the list loads, instead of
+    /// the newest (a task's "View snapshot").
+    focus: Option<String>,
 }
 
 impl BackupsView {
@@ -64,7 +67,10 @@ impl BackupsView {
                 // Now has likely moved on: compare again.
                 this.changes.clear();
                 this.comparing.clear();
-                let first = snaps.first().map(|s| s.id.clone());
+                let first = match this.focus.take() {
+                    Some(f) if snaps.iter().any(|s| s.id == f) => Some(f),
+                    _ => snaps.first().map(|s| s.id.clone()),
+                };
                 this.snaps = Some(snaps);
                 this.used = used;
                 if let Some(id) = first {
@@ -733,6 +739,12 @@ impl Render for BackupsView {
 
 /// Opens an instance's backups.
 pub fn open(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut App) {
+    open_at(store, root, None, window, cx)
+}
+
+/// Opens an instance's backups on its snapshots, with `snap` open (else
+/// the newest).
+pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| {
         let mut v = BackupsView {
             sets: hopper::backups::list(&root),
@@ -747,6 +759,7 @@ pub fn open(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut A
             changes: HashMap::new(),
             comparing: HashSet::new(),
             busy: None,
+            focus: snap,
         };
         v.reload_snaps(cx);
         v

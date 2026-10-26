@@ -270,12 +270,20 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf, fs::Metadata)>)
     }
 }
 
+/// Files in the snapshot folders that aren't settings, left out of
+/// snapshots (so a restore leaves them alone too): the spark profiler's
+/// output in `config/spark` (thousands of files), all but its config.
+fn skipped(rel: &str) -> bool {
+    rel.strip_prefix("config/spark/").is_some_and(|r| r != "config.json")
+}
+
 /// The instance's snapshotted files as they are now: (rel, path, metadata).
 fn current(root: &Path) -> Vec<(String, PathBuf, fs::Metadata)> {
     let mut out = Vec::new();
     for f in FOLDERS {
         walk(root, &root.join(f), &mut out);
     }
+    out.retain(|(rel, _, _)| !skipped(rel));
     for m in META {
         let p = root.join(m);
         if let Ok(md) = fs::metadata(&p)
@@ -339,65 +347,154 @@ pub fn take(root: &Path, reason: Reason) -> anyhow::Result<Snapshot> {
     Ok(s)
 }
 
-/// [`take`] inside a running job, showing its progress there.
+/// Snapshots taken inside a job: (job id, instance root, snapshot id), the
+/// newest last, so the task can open it.
+static BY_JOB: Mutex<Vec<(u64, PathBuf, String)>> = Mutex::new(Vec::new());
+
+/// [`take`] inside a running job, showing its progress there. The task can
+/// then open it (see [`of_job`]).
 pub fn take_in(root: &Path, reason: Reason, job: &crate::jobs::Job) -> anyhow::Result<Snapshot> {
-    job.detail("Saving a snapshot first");
+    job.detail("Saving a snapshot to undo this");
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let s = take_locked(root, reason, &|i, n| job.progress(i, n))?;
+    let s = take_locked(root, reason, &|i, n| {
+        job.progress(i, n);
+        job.detail(format!("Saving a snapshot to undo this: {i} of {n} files"));
+    })?;
     prune_locked(root);
+    let mut by = BY_JOB.lock().unwrap_or_else(|e| e.into_inner());
+    by.push((job.id(), root.to_path_buf(), s.id.clone()));
+    let extra = by.len().saturating_sub(64);
+    by.drain(..extra);
     Ok(s)
 }
 
-fn take_locked(root: &Path, reason: Reason, progress: &dyn Fn(usize, usize)) -> anyhow::Result<Snapshot> {
+/// The snapshot job `id` took: its instance root and snapshot id.
+pub fn of_job(id: u64) -> Option<(PathBuf, String)> {
+    let by = BY_JOB.lock().unwrap_or_else(|e| e.into_inner());
+    by.iter().rev().find(|(j, ..)| *j == id).map(|(_, r, s)| (r.clone(), s.clone()))
+}
+
+/// How many snapshots an instance has, without reading them.
+pub fn count(root: &Path) -> usize {
+    fs::read_dir(base(root))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().strip_suffix(".json").is_some_and(|id| id.parse::<i64>().is_ok()))
+        .count()
+}
+
+/// Hashes one file (or takes its known hash) and stores it in the blobs
+/// when no snapshot has it yet. `tmp` is this thread's own copy target.
+#[allow(clippy::too_many_arguments)]
+fn store_one(
+    base: &Path,
+    known: &Cache,
+    tmp: &Path,
+    rel: &str,
+    path: &Path,
+    md: &fs::Metadata,
+    fresh_after: i64,
+    new_bytes: &std::sync::atomic::AtomicU64,
+) -> anyhow::Result<Entry> {
     use anyhow::Context as _;
+    use std::sync::atomic::Ordering;
+    let key = (rel.to_string(), md.len(), mtime_ms(md));
+    let hash = match known.get(&key).filter(|_| key.2 < fresh_after) {
+        Some(h) => h.clone(),
+        None => hash_file(path).with_context(|| format!("reading {rel}"))?,
+    };
+    let mut entry = Entry { rel: rel.to_string(), size: md.len(), mtime: key.2, hash };
+    let dest = blob(base, &entry.hash);
+    if dest.exists() {
+        return Ok(entry);
+    }
+    fs::create_dir_all(dest.parent().unwrap_or(base))?;
+    // Jars: a hard link, if it still matches what was hashed.
+    if is_mod(rel) && fs::hard_link(path, &dest).is_ok() {
+        if fs::metadata(&dest).is_ok_and(|m| m.len() == entry.size && mtime_ms(&m) == entry.mtime) {
+            new_bytes.fetch_add(entry.size, Ordering::Relaxed);
+            return Ok(entry);
+        }
+        // Changed since it was hashed: this link isn't that content.
+        let _ = fs::remove_file(&dest);
+    }
+    let (h, size) = copy_hashing(path, tmp).with_context(|| format!("copying {rel}"))?;
+    // Changed while being read: keep what was copied.
+    entry.hash = h;
+    entry.size = size;
+    let dest = blob(base, &entry.hash);
+    fs::create_dir_all(dest.parent().unwrap_or(base))?;
+    if dest.exists() {
+        let _ = fs::remove_file(tmp);
+    } else {
+        fs::rename(tmp, &dest)?;
+        new_bytes.fetch_add(size, Ordering::Relaxed);
+    }
+    Ok(entry)
+}
+
+fn take_locked(root: &Path, reason: Reason, progress: &dyn Fn(usize, usize)) -> anyhow::Result<Snapshot> {
     let base = base(root);
     fs::create_dir_all(base.join("blobs"))?;
     let known = cache(&list(root));
-    let tmp = base.join("blobs").join(format!("incoming-{}", std::process::id()));
-    let mut files = Vec::new();
-    let mut new_bytes = 0;
     let all = current(root);
     let total = all.len();
     // A file changed within the last moments can change again without its
     // size or time moving (same millisecond), so it's always read.
     let fresh_after = now_ms().saturating_sub(2000);
-    for (i, (rel, path, md)) in all.into_iter().enumerate() {
-        if i % 25 == 0 {
-            progress(i, total);
-        }
-        let key = (rel.clone(), md.len(), mtime_ms(&md));
-        let hash = match known.get(&key).filter(|_| key.2 < fresh_after) {
-            Some(h) => h.clone(),
-            None => hash_file(&path).with_context(|| format!("reading {rel}"))?,
-        };
-        let mut entry = Entry { rel: rel.clone(), size: md.len(), mtime: key.2, hash };
-        let dest = blob(&base, &entry.hash);
-        if !dest.exists() {
-            fs::create_dir_all(dest.parent().unwrap_or(&base))?;
-            // Jars: a hard link, if it still matches what was hashed.
-            let linked = is_mod(&rel)
-                && fs::hard_link(&path, &dest).is_ok()
-                && fs::metadata(&dest).is_ok_and(|m| m.len() == entry.size && mtime_ms(&m) == entry.mtime);
-            if !linked {
-                let _ = fs::remove_file(&dest);
-                let (h, size) = copy_hashing(&path, &tmp).with_context(|| format!("copying {rel}"))?;
-                // Changed while being read: keep what was copied.
-                entry.hash = h;
-                entry.size = size;
-                let dest = blob(&base, &entry.hash);
-                fs::create_dir_all(dest.parent().unwrap_or(&base))?;
-                if dest.exists() {
-                    let _ = fs::remove_file(&tmp);
-                } else {
-                    fs::rename(&tmp, &dest)?;
-                    new_bytes += size;
+    // Files are read and stored by several threads: a first snapshot reads
+    // thousands of files. Progress is shown from this thread.
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let new_bytes = AtomicU64::new(0);
+    let failed = AtomicBool::new(false);
+    let slots: Vec<Mutex<Option<anyhow::Result<Entry>>>> = (0..total).map(|_| Mutex::new(None)).collect();
+    let workers = std::env::var("HOPPER_SNAPSHOT_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
+        .clamp(1, 8);
+    std::thread::scope(|sc| {
+        for w in 0..workers {
+            let (all, known, base, slots) = (&all, &known, &base, &slots);
+            let (next, done, new_bytes, failed) = (&next, &done, &new_bytes, &failed);
+            sc.spawn(move || {
+                let tmp = base.join("blobs").join(format!("incoming-{}-{w}", std::process::id()));
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= all.len() || failed.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let (rel, path, md) = &all[i];
+                    let r = store_one(base, known, &tmp, rel, path, md, fresh_after, new_bytes);
+                    if r.is_err() {
+                        failed.store(true, Ordering::Relaxed);
+                    }
+                    *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                    done.fetch_add(1, Ordering::Relaxed);
                 }
-            } else {
-                new_bytes += entry.size;
-            }
+            });
         }
-        files.push(entry);
+        loop {
+            let d = done.load(Ordering::Relaxed);
+            progress(d, total);
+            if d >= total || failed.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    });
+    let mut files = Vec::with_capacity(total);
+    for slot in slots {
+        match slot.into_inner().unwrap_or_else(|e| e.into_inner()) {
+            Some(Ok(e)) => files.push(e),
+            Some(Err(e)) => return Err(e),
+            None => anyhow::bail!("The snapshot stopped partway"),
+        }
     }
+    let new_bytes = new_bytes.into_inner();
     let mut ms = now_ms();
     while base.join(format!("{ms}.json")).exists() {
         ms += 1;
@@ -774,6 +871,38 @@ mod tests {
         let b = base(root).join("blobs");
         walk(&b, &b, &mut out);
         out.len()
+    }
+
+    /// Times a first and a second snapshot of the folder in
+    /// `HOPPER_SNAPSHOT_ROOT` (a throwaway copy), then removes them.
+    #[test]
+    #[ignore]
+    fn time_real_copy() {
+        let Ok(root) = std::env::var("HOPPER_SNAPSHOT_ROOT") else { return };
+        let root = PathBuf::from(root);
+        let _ = fs::remove_dir_all(base(&root));
+        let t = std::time::Instant::now();
+        let s = take(&root, Reason::Manual).unwrap();
+        println!("first: {} files in {:.1}s", s.files.len(), t.elapsed().as_secs_f64());
+        let t = std::time::Instant::now();
+        take(&root, Reason::Manual).unwrap();
+        println!("second: {:.1}s", t.elapsed().as_secs_f64());
+        let _ = fs::remove_dir_all(base(&root));
+    }
+
+    #[test]
+    fn leaves_out_spark_output() {
+        let root = temp("spark");
+        write(&root, "config/spark/config.json", "{}");
+        write(&root, "config/spark/mat/a.bin", "dump");
+        write(&root, "config/spark/p.sparkprofile", "prof");
+        let s = take(&root, Reason::Manual).unwrap();
+        let rels: Vec<&str> = s.files.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels, ["config/spark/config.json"]);
+        // A restore doesn't touch what the snapshot left out.
+        restore(&root, &s.id).unwrap();
+        assert!(root.join("config/spark/mat/a.bin").is_file());
+        assert!(root.join("config/spark/p.sparkprofile").is_file());
     }
 
     #[test]

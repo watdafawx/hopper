@@ -440,6 +440,9 @@ impl Store {
         if store.settings.peer_sync {
             store.start_peers();
         }
+        // Packs kept from updates that weren't used for a while go.
+        let keep = store.settings.pack_keep_days;
+        std::thread::spawn(move || hopper::modpack::prune_packs_older_than(keep));
         store
     }
 

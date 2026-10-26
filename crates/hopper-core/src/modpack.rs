@@ -313,6 +313,33 @@ pub fn prune_pack_cache(keep_bytes: u64, max_age: Option<Duration>) -> anyhow::R
     prune_dir(&cache_dir(), keep_bytes, max_age, std::time::SystemTime::now())
 }
 
+/// Drops cached packs not used for `days` days (0 keeps them all).
+/// Returns the bytes freed.
+pub fn prune_packs_older_than(days: u32) -> u64 {
+    if days == 0 {
+        return 0;
+    }
+    let age = Duration::from_secs(u64::from(days) * 86_400);
+    match prune_pack_cache(u64::MAX, Some(age)) {
+        Ok(n) => {
+            if n > 0 {
+                log::info!("pack cache: freed {} (unused for {days} days)", crate::instance_ops::human_bytes(n));
+            }
+            n
+        }
+        Err(e) => {
+            log::warn!("pack cache: {e:#}");
+            0
+        }
+    }
+}
+
+/// How many packs are cached and the bytes they take.
+pub fn pack_cache_stats() -> (usize, u64) {
+    let f = cache_files(&cache_dir());
+    (f.len(), f.iter().map(|f| f.1).sum())
+}
+
 /// Bytes the pack download cache takes.
 pub fn pack_cache_size() -> u64 {
     cache_files(&cache_dir()).iter().map(|f| f.1).sum()

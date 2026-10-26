@@ -147,7 +147,8 @@ impl TasksButton {
             };
             // A finished comparison opens its review on click.
             let review = j.error.is_none() && crate::pack_update::has_review(id, j.done);
-            let (store_r, me) = (store.clone(), me.clone());
+            let (store_r, me_s) = (store.clone(), me.clone());
+            let me = me_s.clone();
             v_flex()
                 .id(ElementId::Name(format!("task-row-{id}").into()))
                 .gap_1()
@@ -187,9 +188,36 @@ impl TasksButton {
                             let done = j.done;
                             let detail = j.error.clone().map(|e| format!("{}: {e}", j.title));
                             let store_c = store.clone();
+                            // A snapshot this task took to undo it.
+                            let snap = done.then(|| hopper::snapshots::of_job(id)).flatten();
+                            let store_s = store.clone();
                             h_flex()
                                 .flex_none()
                                 .gap_1()
+                                .when_some(snap, |r, (root, snap)| {
+                                    r.child(
+                                        Button::new(ElementId::Name(format!("task-snap-{id}").into()))
+                                            .icon(IconName::Archive)
+                                            .xsmall()
+                                            .ghost()
+                                            .label("View snapshot")
+                                            .tooltip("The snapshot taken first: compare it with now, or restore it")
+                                            .on_click(move |_, window, cx| {
+                                                cx.stop_propagation();
+                                                me_s.update(cx, |t, cx| {
+                                                    t.open = false;
+                                                    cx.notify();
+                                                });
+                                                crate::backups_view::open_at(
+                                                    store_s.clone(),
+                                                    root.clone(),
+                                                    Some(snap.clone()),
+                                                    window,
+                                                    cx,
+                                                )
+                                            }),
+                                    )
+                                })
                                 .when_some(detail, |r, d| {
                                     r.child(
                                         Button::new(ElementId::Name(format!("task-copy-{id}").into()))

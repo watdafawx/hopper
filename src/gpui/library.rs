@@ -246,6 +246,8 @@ pub struct LibraryView {
     peers: Entity<PeersView>,
     search: Entity<InputState>,
     query: String,
+    /// The shown instance's snapshot count, read at most every few seconds.
+    snap_count: std::cell::RefCell<Option<(PathBuf, std::time::Instant, usize)>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -413,6 +415,7 @@ impl LibraryView {
             peers,
             search,
             query: String::new(),
+            snap_count: Default::default(),
             _subscriptions: subs,
         };
         view.ensure_selection(cx);
@@ -2279,6 +2282,44 @@ impl LibraryView {
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tab.label()).build(w, cx))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_tab(tab, cx)))
         });
+        // Backups: snapshots to undo an update, and what was removed.
+        let backups = {
+            let n = self.snapshot_count(&inst.root);
+            let (store, root) = (self.store.clone(), inst.root.clone());
+            let muted = theme.muted_foreground;
+            div()
+                .id("inst-backups")
+                .relative()
+                .size(rems(2.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radius)
+                .clickable(cx)
+                .hover(|s| widgets::row_hover(s, cx))
+                .child(Icon::new(IconName::Archive).small().text_color(muted))
+                .when(n > 0, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(-2.))
+                            .right(px(-4.))
+                            .px_1()
+                            .rounded_full()
+                            .bg(theme.secondary)
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(rems(0.625))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(muted)
+                            .child(n.to_string()),
+                    )
+                })
+                .tooltip(|w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Snapshots and backups: undo an update or a removal").build(w, cx)
+                })
+                .on_click(move |_, window, cx| crate::backups_view::open(store.clone(), root.clone(), window, cx))
+        };
         div()
             .flex_none()
             .px_6()
@@ -2297,9 +2338,24 @@ impl LibraryView {
                     )
                     .children(more)
                     .child(div().w(px(1.)).h(rems(1.25)).bg(theme.border))
-                    .child(h_flex().gap_0p5().children(manage)),
+                    .child(h_flex().gap_0p5().child(backups).children(manage)),
             )
             .into_any_element()
+    }
+
+    /// `root`'s snapshot count, cached for a few seconds (the tab row draws
+    /// often).
+    fn snapshot_count(&self, root: &Path) -> usize {
+        let mut c = self.snap_count.borrow_mut();
+        if let Some((r, t, n)) = c.as_ref()
+            && r == root
+            && t.elapsed() < std::time::Duration::from_secs(5)
+        {
+            return *n;
+        }
+        let n = hopper::snapshots::count(root);
+        *c = Some((root.to_path_buf(), std::time::Instant::now(), n));
+        n
     }
 
     /// A bar tab's name: "Packs" for the pack tabs.

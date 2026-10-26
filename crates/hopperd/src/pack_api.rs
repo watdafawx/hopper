@@ -59,7 +59,13 @@ struct PlanBody {
     pack: cf::File,
     #[serde(default)]
     cf_key: String,
+    /// The desktop's "keep downloaded packs" days, for this panel's cache.
+    #[serde(default)]
+    keep_days: Option<u32>,
 }
+
+/// Days a downloaded pack stays here when the desktop doesn't say.
+const KEEP_DAYS: u32 = 30;
 
 async fn plan(
     State(app): State<Arc<App>>,
@@ -74,7 +80,9 @@ async fn plan(
     let title = format!("Comparing {} with {}", e.name, b.pack.display_name);
     let job = spawn(&app, title, move |job| {
         let server = hopper_core::server::load(&e.root);
-        spu::plan(&server, &b.inst, &b.pack, job)
+        let r = spu::plan(&server, &b.inst, &b.pack, job);
+        hopper_core::modpack::prune_packs_older_than(b.keep_days.unwrap_or(KEEP_DAYS));
+        r
     });
     Ok(Json(json!({ "job": job })))
 }
@@ -86,6 +94,8 @@ struct ApplyBody {
     take: HashSet<String>,
     #[serde(default)]
     cf_key: String,
+    #[serde(default)]
+    keep_days: Option<u32>,
 }
 
 async fn apply(
@@ -107,7 +117,9 @@ async fn apply(
         let server = hopper_core::server::load(&e.root);
         // NeoForge's installer runs with the server's own Java.
         let java = server.java.clone().map(std::path::PathBuf::from).unwrap_or_else(|| "java".into());
-        spu::apply(&server, &b.plan, &b.take, "127.0.0.1", &java, None, job)
+        let r = spu::apply(&server, &b.plan, &b.take, "127.0.0.1", &java, None, job);
+        hopper_core::modpack::prune_packs_older_than(b.keep_days.unwrap_or(KEEP_DAYS));
+        r
     });
     Ok(Json(json!({ "job": job })))
 }

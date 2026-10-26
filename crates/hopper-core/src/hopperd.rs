@@ -387,7 +387,7 @@ impl Client {
     ) -> anyhow::Result<crate::server_pack_update::ServerPlan> {
         let v = self.post(
             &format!("/servers/{}/pack/plan", enc(id)),
-            json!({ "inst": inst, "pack": pack, "cf_key": crate::cf::api_key().unwrap_or("") }),
+            json!({ "inst": inst, "pack": pack, "cf_key": crate::cf::api_key().unwrap_or(""), "keep_days": keep_days() }),
         )?;
         let result = self.follow(v["job"].as_u64().context("no job id")?, job)?;
         Ok(serde_json::from_value(result)?)
@@ -403,7 +403,7 @@ impl Client {
     ) -> anyhow::Result<crate::server_pack_update::Report> {
         let v = self.post(
             &format!("/servers/{}/pack/apply", enc(id)),
-            json!({ "plan": plan, "take": take, "cf_key": crate::cf::api_key().unwrap_or("") }),
+            json!({ "plan": plan, "take": take, "cf_key": crate::cf::api_key().unwrap_or(""), "keep_days": keep_days() }),
         )?;
         let result = self.follow(v["job"].as_u64().context("no job id")?, job)?;
         Ok(serde_json::from_value(result)?)
@@ -492,6 +492,48 @@ pub fn enc(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// The desktop's "keep downloaded packs" days, sent with pack jobs so the
+/// panel prunes its own cache the same way.
+fn keep_days() -> u32 {
+    crate::settings::Settings::load().map_or(30, |s| s.pack_keep_days)
+}
+
+/// Twins found so far: a local (share) server root and the same folder on a
+/// Hopper Server.
+static TWINS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, ServerInfo>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// `server` reached through a share (like `Q:\Minecraft\packs\atm10`) as
+/// the same folder on one of `panels`, so work that downloads (server pack
+/// updates) runs on the server's PC instead of over the share: same folder
+/// name and the same `server.properties`. `None` when it isn't on one, or
+/// no panel answers.
+pub fn twin(server: &ServerInfo, panels: &[crate::settings::HopperPanel]) -> Option<ServerInfo> {
+    if server.remote.is_some() || panels.is_empty() {
+        return None;
+    }
+    if let Some(t) = TWINS.lock().unwrap_or_else(|e| e.into_inner()).get(&server.root) {
+        return Some(t.clone());
+    }
+    let folder = server.root.file_name()?.to_string_lossy().to_lowercase();
+    let props = "server.properties".to_string();
+    let ours = crate::configdiff::file_hash(&server.root.join(&props))?;
+    for p in panels {
+        let Some(c) = Client::for_panel(p) else { continue };
+        let Ok(infos) = c.server_infos() else { continue };
+        for info in infos {
+            let same_name = info.root.file_name().is_some_and(|f| f.to_string_lossy().to_lowercase() == folder);
+            let Some(r) = info.remote.as_ref().filter(|_| same_name) else { continue };
+            let theirs = c.hashes(&r.id, std::slice::from_ref(&props)).ok().and_then(|h| h.get(&props).cloned());
+            if theirs.as_deref() == Some(ours.as_str()) {
+                TWINS.lock().unwrap_or_else(|e| e.into_inner()).insert(server.root.clone(), info.clone());
+                return Some(info);
+            }
+        }
+    }
+    None
 }
 
 fn info_from(v: &Value, base: &str, ca: &str, panel: &str) -> ServerInfo {
@@ -755,6 +797,19 @@ pub fn device_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Against the real panel and share named in `HOPPER_TWIN_ROOT`: read
+    /// only (lists servers, hashes server.properties).
+    #[test]
+    #[ignore]
+    fn twin_live() {
+        let Ok(root) = std::env::var("HOPPER_TWIN_ROOT") else { return };
+        let s = crate::settings::Settings::load().expect("settings");
+        let server = crate::server::load(Path::new(&root));
+        let t = twin(&server, &s.hopper_panels);
+        println!("twin of {root}: {:?}", t.as_ref().map(|t| (t.root.clone(), t.remote.as_ref().map(|r| r.id.clone()))));
+        assert!(t.is_some());
+    }
 
     #[test]
     fn urls() {

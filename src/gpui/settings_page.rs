@@ -225,6 +225,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Advanced, "mcp-changes", "Let assistants change instances", "Install mods, switch them on or off and update them. Each change runs as a task you can see.", "mcp install update enable disable"),
     e(C::Advanced, "mcp-window", "Let assistants see and use the window", "Screenshots, clicks and typing in Hopper, for debugging Hopper itself.", "mcp screenshot click debug"),
     e(C::Advanced, "mcp-connect", "Connect an assistant", "Copies what to paste into your assistant's settings.", "mcp claude desktop code config json"),
+    e(C::Advanced, "pack-cache", "Downloaded packs", "Kept so comparing and installing an update doesn't download the pack again.", "cache disk space clear delete zip modpack server pack keep days"),
     e(C::Advanced, "data-folder", "Hopper's folder", "Settings, accounts, downloads and caches Hopper keeps. New copies of Hopper keep them in a Hopper Data folder next to hopper.exe.", "appdata settings.json files data folder portable move drive"),
 ];
 
@@ -2008,7 +2009,7 @@ impl SettingsPage {
         ]
     }
 
-    fn advanced(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {
+    fn advanced(&self, s: &hopper::settings::Settings, rem: Pixels, cx: &mut Context<Self>) -> Vec<Block> {
         let links = Switch::new("links")
             .checked(s.links_enabled)
             .on_click(cx.listener(|this, v: &bool, window, cx| {
@@ -2141,8 +2142,63 @@ impl SettingsPage {
                                 }
                             }),
                       )),
+                self.pack_cache_row(s, rem, cx),
             ],
         )]
+    }
+
+    /// Downloaded packs: what they take, how long they stay, and Clear.
+    fn pack_cache_row(&self, s: &hopper::settings::Settings, rem: Pixels, cx: &mut Context<Self>) -> Row {
+        const DAYS: [(u32, &str); 4] = [(7, "Keep 1 week"), (30, "Keep 30 days"), (90, "Keep 90 days"), (0, "Keep forever")];
+        let (n, bytes) = hopper::modpack::pack_cache_stats();
+        let used = match n {
+            0 => "None kept now.".to_string(),
+            1 => format!("1 pack, {}.", hopper::instance_ops::human_bytes(bytes)),
+            n => format!("{n} packs, {}.", hopper::instance_ops::human_bytes(bytes)),
+        };
+        let label = DAYS
+            .iter()
+            .find(|(d, _)| *d == s.pack_keep_days)
+            .map_or_else(|| format!("Keep {} days", s.pack_keep_days), |(_, l)| l.to_string());
+        let store = self.store.clone();
+        let picker = widgets::picker(
+            "pack-cache",
+            label,
+            DAYS.iter().map(|(d, l)| (l.to_string(), *d == s.pack_keep_days)).collect(),
+            rem,
+            Rc::new(move |ix, _, cx| {
+                let days = DAYS[ix.min(DAYS.len() - 1)].0;
+                store.update(cx, |s, cx| s.update_settings(|st| st.pack_keep_days = days, cx));
+                // A shorter time applies now, not at the next start.
+                std::thread::spawn(move || hopper::modpack::prune_packs_older_than(days));
+            }),
+        );
+        Row::new("pack-cache")
+            .desc(format!("{} {used}", entry("pack-cache").desc))
+            .control(
+                h_flex()
+                    .gap_2()
+                    .child(div().w(rems(10.)).child(picker))
+                    .child(
+                        Button::new("pack-cache-clear")
+                            .small()
+                            .outline()
+                            .label("Clear")
+                            .disabled(n == 0)
+                            .tooltip("Removes every downloaded pack now. The next update downloads its pack again.")
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                let n = match hopper::modpack::prune_pack_cache(0, None) {
+                                    Ok(n) => Notification::success(format!(
+                                        "Freed {}",
+                                        hopper::instance_ops::human_bytes(n)
+                                    )),
+                                    Err(e) => Notification::error(format!("{e:#}")),
+                                };
+                                window.push_notification(n, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 
     /// The theme menu: each with a strip of its colors.
@@ -2351,7 +2407,7 @@ impl Render for SettingsPage {
             Category::Content => self.content(&s, cx),
             Category::Appearance => self.appearance(&s, window, cx),
             Category::Updates => self.updates(cx),
-            Category::Advanced => self.advanced(&s, cx),
+            Category::Advanced => self.advanced(&s, window.rem_size(), cx),
         };
         let theme = cx.theme().clone();
         let header = h_flex()

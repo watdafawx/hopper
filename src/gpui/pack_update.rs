@@ -53,7 +53,9 @@ static REVIEWS: std::sync::Mutex<Option<HashMap<u64, Review>>> = std::sync::Mute
 /// Server comparisons by job, from the moment they start: (what is
 /// compared, the result once there). The task list reopens one while it is
 /// still downloading, and the dialog follows the job instead of owning it.
-type ServerResult = Result<(Vec<cf::File>, ServerPlan), String>;
+/// The pack versions, the plan, and the server it was made on (the share's
+/// server, or the same folder on its Hopper Server).
+type ServerResult = Result<(Vec<cf::File>, ServerPlan, ServerInfo), String>;
 type ServerReview = (ServerTarget, Option<ServerResult>);
 static SERVER_REVIEWS: std::sync::Mutex<Option<HashMap<u64, ServerReview>>> = std::sync::Mutex::new(None);
 
@@ -92,6 +94,9 @@ struct ServerTarget {
     targets: Vec<cf::File>,
     pick: usize,
     splan: Option<ServerPlan>,
+    /// Where `splan` was made, when not `server` itself: the same folder on
+    /// its Hopper Server, which downloads and applies the update there.
+    via: Option<ServerInfo>,
     /// The comparison job this dialog follows.
     job: Option<u64>,
     /// That job's detail and progress while it runs.
@@ -171,8 +176,10 @@ impl UpdatePreview {
     /// Server mode: looks up the pack versions (first time), then compares
     /// the picked one's server pack with the server.
     fn plan_server(&mut self, cx: &mut Context<Self>) {
+        let panels = self.store.read(cx).settings().hopper_panels.clone();
         let Some(t) = self.server.as_mut() else { return };
         t.splan = None;
+        t.via = None;
         t.status = None;
 
         self.plan = None;
@@ -192,8 +199,15 @@ impl UpdatePreview {
                     t.targets.clone()
                 };
                 let pick = t.pick.min(targets.len() - 1);
-                let p = hopper::server_pack_update::plan(&t.server, &t.inst, &targets[pick], &job)?;
-                Ok::<_, anyhow::Error>((targets, p))
+                // A server reached through the share that its Hopper Server
+                // also runs: the server's PC downloads and compares.
+                let via = hopper::hopperd::twin(&t.server, &panels);
+                if via.is_some() {
+                    job.detail("Comparing on the Hopper Server");
+                }
+                let server = via.unwrap_or_else(|| t.server.clone());
+                let p = hopper::server_pack_update::plan(&server, &t.inst, &targets[pick], &job)?;
+                Ok::<_, anyhow::Error>((targets, p, server))
             })();
             job.finish(&r.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e:#}")));
             match r {
@@ -246,13 +260,14 @@ impl UpdatePreview {
 
     fn take_result(&mut self, id: u64, r: ServerResult) {
         match r {
-            Ok((targets, p)) => {
+            Ok((targets, p, on)) => {
                 self.set_defaults(&p.plan);
                 self.from = p.base.clone().unwrap_or_else(|| "this server".into());
                 self.plan = Some(Ok(p.plan.clone()));
                 if let Some(t) = self.server.as_mut() {
                     t.targets = targets;
                     t.splan = Some(p);
+                    t.via = (on.root != t.server.root).then_some(on);
                     t.status = None;
                 }
             }
@@ -285,7 +300,9 @@ impl UpdatePreview {
         if let Some(id) = t.job {
             server_reviews(|m| m.remove(&id));
         }
-        let (server, take, client_root) = (t.server.clone(), v.take.clone(), t.inst.root.clone());
+        // Applied where it was compared.
+        let server = t.via.clone().unwrap_or_else(|| t.server.clone());
+        let (take, client_root) = (v.take.clone(), t.inst.root.clone());
         let s = v.store.read(cx);
         let host = s.settings().server_host.clone();
         let java = hopper::launch::installer_java(std::path::Path::new(&s.settings().launcher_dir));
@@ -1319,6 +1336,7 @@ pub fn open_server(store: Entity<Store>, server: ServerInfo, inst: Instance, win
         targets: Vec::new(),
         pick: 0,
         splan: None,
+        via: None,
         job: None,
         status: None,
     };

@@ -146,6 +146,9 @@ pub struct Settings {
     /// that are off): "ask" (or empty), "all" to change them too, "only"
     /// to change just that mod.
     pub dependents: String,
+    /// Days a downloaded pack (kept to compare and install updates without
+    /// downloading it again) stays after it was last used; 0 keeps them.
+    pub pack_keep_days: u32,
     /// Deleted instances, worlds and backups are removed outright instead
     /// of filling the Recycle Bin (on C:) with gigabytes.
     pub delete_permanently: bool,
@@ -375,6 +378,7 @@ impl Default for Settings {
             browse_sort: String::new(),
             last_sort: String::new(),
             dependents: String::new(),
+            pack_keep_days: 30,
             delete_permanently: true,
             // A new user: Hopper shows its setup on the first start.
             setup_done: false,
