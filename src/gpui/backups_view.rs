@@ -422,10 +422,18 @@ impl BackupsView {
         let mut ok = 0;
         let mut renamed = 0;
         let mut errors = Vec::new();
+        // Mod jars put back: identified, so a mod's record follows its jar.
+        let mut jars = Vec::new();
+        let mods_dir = self.root.join("mods");
         for f in &files {
             match hopper::backups::restore(&self.root, f) {
                 Ok(p) => {
                     ok += 1;
+                    if p.parent() == Some(mods_dir.as_path())
+                        && let Some(n) = p.file_name()
+                    {
+                        jars.push(n.to_string_lossy().into_owned());
+                    }
                     if !self.root.join(&f.restore_to).eq(&p) {
                         renamed += 1;
                     }
@@ -450,6 +458,8 @@ impl BackupsView {
             window.push_notification(Notification::error(e), cx);
         }
         self.changed(cx);
+        let root = self.root.clone();
+        self.store.update(cx, |s, _| s.identify_jars(&root, jars));
     }
 
     fn ask_delete(&mut self, set: Set, window: &mut Window, cx: &mut Context<Self>) {

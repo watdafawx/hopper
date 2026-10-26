@@ -43,6 +43,9 @@ pub enum Msg {
     PanelServers(String, Result<Vec<ServerInfo>, String>),
     /// An instance changed on disk; reload it.
     InstanceChanged(PathBuf),
+    /// Jars were identified after an older copy went back: reload, then
+    /// ask for updates again (the record now names the older file).
+    Reidentified(PathBuf),
     /// Mods were updated: the instance is read again, and only those
     /// projects leave its list of available updates (no full re-check).
     /// Pages to open in the browser (Hopper's download window couldn't).
@@ -729,6 +732,10 @@ impl Store {
                 if let Some(k) = kept {
                     self.updates.insert(root, k);
                 }
+            }
+            Msg::Reidentified(root) => {
+                self.handle(Msg::InstanceChanged(root.clone()), cx);
+                self.check_updates(&root, true);
             }
             Msg::OpenUrls(urls) => {
                 for u in &urls {
@@ -2311,6 +2318,21 @@ impl Store {
                 let n = install::identify_loose(&mut inst, job)?;
                 job.detail(format!("Identified {n} jars"));
                 Ok(Msg::InstanceChanged(inst.root.clone()))
+            });
+        }
+    }
+
+    /// Identifies just `jars` (put back from Backups), so the mod's record
+    /// follows its jar; then checks updates again.
+    pub fn identify_jars(&self, root: &Path, jars: Vec<String>) {
+        if jars.is_empty() {
+            return;
+        }
+        if let Some(mut inst) = self.instance(root).cloned() {
+            self.spawn_instance_job(&inst.root.clone(), format!("Identifying {}", jars.join(", ")), move |job| {
+                let n = install::identify_jars(&mut inst, &jars, job)?;
+                job.detail(format!("Identified {n} jars"));
+                Ok(Msg::Reidentified(inst.root.clone()))
             });
         }
     }

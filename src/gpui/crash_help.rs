@@ -23,10 +23,14 @@ pub fn put_back_changed(
 ) -> bool {
     use gpui_kit::component::WindowExt as _;
     match hopper::crashdetect::put_back(root, ch) {
-        Ok(_) => {
+        Ok(back) => {
             let r = root.to_path_buf();
+            // The mod's record still names the newer jar (now in Backups):
+            // identify the jar that's back so the record follows it.
+            let jar: Vec<String> = back.file_name().map(|n| n.to_string_lossy().into_owned()).into_iter().collect();
             store.update(cx, |s, cx| {
                 s.spawn(move || crate::store::Msg::InstanceChanged(r));
+                s.identify_jars(root, jar);
                 cx.notify();
             });
             true

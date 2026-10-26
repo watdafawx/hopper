@@ -1088,6 +1088,22 @@ pub fn loose_jars(inst: &Instance) -> Vec<String> {
 /// and adds the matches. Returns how many were identified.
 pub fn identify_loose(inst: &mut Instance, job: &Job) -> anyhow::Result<usize> {
     let loose = loose_jars(inst);
+    identify_jars(inst, &loose, job)
+}
+
+/// Identifies the jars `names` (file names in the mods folder) the same
+/// way: after an older copy is put back, its record moves to that jar
+/// (the newer one's jar is gone). Returns how many were identified.
+pub fn identify_jars(inst: &mut Instance, names: &[String], job: &Job) -> anyhow::Result<usize> {
+    // Only jars with no record yet (a tracked one would get a second).
+    let untracked = loose_jars(inst);
+    let loose: Vec<String> = untracked
+        .into_iter()
+        .filter(|l| names.iter().any(|n| n.eq_ignore_ascii_case(l) || n.eq_ignore_ascii_case(l.trim_end_matches(".disabled"))))
+        .collect();
+    if loose.is_empty() {
+        return Ok(0);
+    }
     let mut by_fp = HashMap::new();
     for (i, name) in loose.iter().enumerate() {
         job.progress(i, loose.len());
@@ -1147,7 +1163,17 @@ fn put_identified(inst: &mut Instance, mut a: Addon) {
         .position(|o| o.project_id == a.project_id && a.project_id != 0 && gone(&o.file_name))
     {
         Some(i) => {
-            a.from_pack = inst.addons[i].from_pack;
+            // The same mod, another file: it keeps what the user and the
+            // pack said about it (when added, locks, where it runs).
+            let o = &inst.addons[i];
+            a.from_pack = o.from_pack;
+            a.date_added = o.date_added.clone();
+            a.locked = o.locked;
+            a.locked_version = o.locked_version.clone();
+            a.cf_locked = o.cf_locked;
+            if a.env.is_empty() {
+                a.env = o.env.clone();
+            }
             inst.addons[i] = a;
         }
         None => inst.addons.push(a),
