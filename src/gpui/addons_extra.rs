@@ -873,17 +873,25 @@ impl AddonsView {
     /// besides missing mods, with Turn off where that fixes it.
     pub(crate) fn blocker_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
         use hopper::deps::BlockerKind;
-        if self.class != cf::CLASS_MODS
-            || self.missing.root.as_ref() != Some(&inst.root)
-            || self.missing.blockers.is_empty()
-        {
+        let blockers: &[hopper::deps::Blocker] =
+            if self.missing.root.as_ref() == Some(&inst.root) { &self.missing.blockers } else { &[] };
+        // The last crash's "stopped loading" mod, unless a blocker row
+        // names it already.
+        let stop = self.crash_stop.as_ref().filter(|(st, _)| {
+            !blockers.iter().any(|b| b.file_name.eq_ignore_ascii_case(st.file_name.trim_end_matches(".disabled")))
+        });
+        if self.class != cf::CLASS_MODS || (blockers.is_empty() && stop.is_none()) {
             return None;
         }
         let theme = cx.theme().clone();
-        let loaded_fine = self.missing.loaded_fine;
-        let n = self.missing.blockers.len();
+        // A crash says loading broke, whatever the files look like.
+        let loaded_fine = self.missing.loaded_fine.filter(|_| stop.is_none());
+        let n = blockers.len() + usize::from(stop.is_some());
         let mut rows: Vec<AnyElement> = Vec::new();
-        for (i, b) in self.missing.blockers.iter().enumerate() {
+        if let Some((st, changed)) = stop {
+            rows.push(self.crash_stop_row(inst, st, changed.as_ref(), cx));
+        }
+        for (i, b) in blockers.iter().enumerate() {
             let addon = inst.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(&b.file_name));
             let (pid, icon) = (
                 addon.map_or(0, |a| a.project_id),
@@ -991,9 +999,7 @@ impl AddonsView {
                     .into_any_element(),
             );
         }
-        let loader_note = self
-            .missing
-            .blockers
+        let loader_note = blockers
             .iter()
             .any(|b| matches!(&b.kind, BlockerKind::Loader { id, .. } if id != "minecraft"));
         let n_rows = rows.len();
@@ -1025,6 +1031,113 @@ impl AddonsView {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The banner's row for the last crash: "X stopped the game from
+    /// loading after Y was updated (a → b)", with Put a back and Turn off X.
+    fn crash_stop_row(
+        &self,
+        inst: &Instance,
+        st: &hopper::crashdetect::Stopped,
+        changed: Option<&hopper::crashdetect::Changed>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mods_dir = inst.root.join("mods");
+        let find = |file: &str| {
+            let bare = file.trim_end_matches(".disabled");
+            inst.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(bare))
+        };
+        let view = cx.entity();
+        let link = |key: &str, file: &str, fallback: &str, cx: &Context<Self>| {
+            let a = find(file);
+            let name = a
+                .map(|a| a.name.clone())
+                .filter(|n| !n.is_empty())
+                .or_else(|| (!fallback.is_empty()).then(|| fallback.to_string()))
+                .unwrap_or_else(|| hopper::crashdetect::jar_name(&mods_dir, file));
+            let icon = a.and_then(|a| self.store.read(cx).image(&a.icon)).map(std::path::Path::to_path_buf);
+            let v = view.clone();
+            widgets::mod_link(
+                SharedString::from(format!("crash-stop:{key}")),
+                name,
+                icon.as_deref(),
+                a.map_or(0, |a| a.project_id),
+                move |p, _, cx| v.update(cx, |this, cx| this.open_peek(p, cx)),
+                cx,
+            )
+            .flex_none()
+            .font_semibold()
+        };
+        let stopped_name = find(&st.file_name)
+            .map(|a| a.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| hopper::crashdetect::jar_name(&mods_dir, &st.file_name));
+        let sentence = h_flex()
+            .flex_wrap()
+            .gap_x_1p5()
+            .gap_y_0p5()
+            .items_center()
+            .child(link("stopped", &st.file_name, "", cx))
+            .child(widgets::caption(if changed.is_some() { "stopped the game from loading. Its error names" } else { "stopped the game from loading" }, cx))
+            // Only what's known: the error names it and it changed lately,
+            // not that the change caused it.
+            .when_some(changed, |r, ch| {
+                let versions =
+                    if ch.from.is_empty() || ch.to.is_empty() { String::new() } else { format!(" ({} → {})", ch.from, ch.to) };
+                r.child(link("changed", &ch.file_name, &ch.name, cx))
+                    .child(widgets::caption(format!("updated {}{versions}", hopper::time::relative_secs(ch.when)), cx))
+            });
+        let why = if st.error.is_empty() {
+            "In the last crash. Logs & crashes has more.".to_string()
+        } else {
+            format!("In the last crash: \"{}\"", st.error)
+        };
+        let mut actions: Vec<AnyElement> = Vec::new();
+        if let Some(ch) = changed {
+            let (root, ch) = (inst.root.clone(), ch.clone());
+            actions.push(
+                Button::new("crash-stop-back")
+                    .xsmall()
+                    .outline()
+                    .icon(IconName::Undo2)
+                    .label(if ch.from.is_empty() { "Put the older version back".to_string() } else { format!("Put {} back", ch.from) })
+                    .tooltip("Swaps in the copy Hopper kept. The newer one goes to Backups, so you can undo this there.")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let store = this.store.clone();
+                        if crate::crash_help::put_back_changed(&store, &root, &ch, window, cx) {
+                            this.crash_stop = None;
+                            // Untracked jars changed too: re-read the folder.
+                            this.resync(cx);
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let file = st.file_name.clone();
+        actions.push(
+            Button::new("crash-stop-off")
+                .xsmall()
+                .outline()
+                .label(format!("Turn off {stopped_name}"))
+                .tooltip(file.clone())
+                .on_click(cx.listener(move |this, _, window, cx| this.turn_off_jar(&file, window, cx)))
+                .into_any_element(),
+        );
+        h_flex()
+            .gap_4()
+            .items_start()
+            .text_sm()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(sentence)
+                    .child(widgets::caption(why, cx).text_xs().whitespace_normal()),
+            )
+            .child(h_flex().flex_none().gap_2().children(actions))
+            .into_any_element()
     }
 
     fn enable_provider(&mut self, file: &str, window: &mut Window, cx: &mut Context<Self>) {

@@ -278,6 +278,9 @@ pub struct ModTags<'a> {
     pub modrinth: bool,
     /// Named in the instance's last game crash: why.
     pub crashed: Option<&'a str>,
+    /// Categories shown before the rest fold into "+n" (default 2). Fewer
+    /// when the line has other chips to fit, so "+n" isn't clipped off.
+    pub max_categories: Option<usize>,
 }
 
 /// Categories shown before the rest fold into "+n".
@@ -296,7 +299,8 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         "both" => Some(tag(muted, "Client + server".into())),
         _ => None,
     };
-    let more = t.categories.len().saturating_sub(MOD_TAG_CATEGORIES);
+    let shown = t.max_categories.unwrap_or(MOD_TAG_CATEGORIES).min(t.categories.len());
+    let more = t.categories.len() - shown;
     let crashed = t.crashed.map(|why| {
         let why = SharedString::from(why.to_string());
         div()
@@ -317,11 +321,11 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         .children(
             t.categories
                 .iter()
-                .take(MOD_TAG_CATEGORIES)
+                .take(shown)
                 .map(|c| chip(muted).child(c.clone())),
         )
         .when(more > 0, |r| {
-            let rest: SharedString = t.categories[MOD_TAG_CATEGORIES..].join(", ").into();
+            let rest: SharedString = t.categories[shown..].join(", ").into();
             r.child(
                 div()
                     .id(ElementId::Name(format!("more-tags:{}", t.key).into()))

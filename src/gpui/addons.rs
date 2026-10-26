@@ -524,6 +524,10 @@ pub struct AddonsView {
     recent: HashMap<u64, Update>,
     /// Mods the instance's last game crash names: lower-case file name → why.
     crashed: HashMap<String, String>,
+    /// The last crash's mod that stopped the game loading, and the update
+    /// its error names (with the older copy), for the top notice. None
+    /// once that mod is off or the older copy is back.
+    pub(crate) crash_stop: Option<(hopper::crashdetect::Stopped, Option<hopper::crashdetect::Changed>)>,
     /// Clicks and pointer, for when Updated rows may go.
     pub(crate) settle: widgets::Settle,
     /// Missing mods installing from the banner: mod id → its job.
@@ -627,6 +631,7 @@ impl AddonsView {
             recent: HashMap::new(),
             settle: Default::default(),
             crashed: HashMap::new(),
+            crash_stop: None,
             dep_jobs: HashMap::new(),
             dep_done: HashSet::new(),
             dep_projects: Default::default(),
@@ -705,6 +710,23 @@ impl AddonsView {
                 .instance(&root)
                 .map(|i| i.addons.iter().filter(|a| !a.enabled).map(|a| a.file_name.trim_end_matches(".disabled").to_lowercase()).collect())
                 .unwrap_or_default();
+            let mods_dir = root.join("mods");
+            let stop = c.as_ref().and_then(|c| {
+                let st = c.stopped.clone()?;
+                if off.contains(&st.file_name.trim_end_matches(".disabled").to_lowercase()) {
+                    return None;
+                }
+                let changed = c.suspects.iter().find(|s| s.file_name == st.file_name).and_then(|s| s.changed.clone());
+                // Put back already: the older copy left backups for the mods folder.
+                let back = changed.as_ref().is_some_and(|ch| {
+                    !ch.backup.exists() && ch.backup.file_name().is_some_and(|n| mods_dir.join(n).exists())
+                });
+                (!back).then_some((st, changed))
+            });
+            if stop != self.crash_stop {
+                self.crash_stop = stop;
+                cx.notify();
+            }
             let now: HashMap<String, String> = c
                 .map(|c| {
                     c.suspects
@@ -2898,6 +2920,16 @@ impl AddonsView {
         // The Author column gone: the name's tooltip says it.
         let by = (!self.cols.author && !a.author.is_empty()).then(|| format!("by {}", a.author));
 
+        // The offered file locked out (the user keeps this version), and
+        // the mods the update would stop loading.
+        let vlocked = update.is_some_and(|u| !a.locked_version.is_empty() && a.locked_version == u.file.file_name);
+        let breaks: Vec<(String, String)> = match (&self.root, update) {
+            (Some(r), Some(_)) => store.update_breaks(r, a.project_id).to_vec(),
+            _ => Vec::new(),
+        };
+        // "breaks" / Lock chips share the tag line: categories fold into
+        // "+n" so it isn't clipped off.
+        let lock_line = update.is_some() && (vlocked || !breaks.is_empty());
         let tags = widgets::mod_tags(
             widgets::ModTags {
                 key: &file,
@@ -2911,6 +2943,7 @@ impl AddonsView {
                 categories: if self.compact { &[] } else { store.categories(a) },
                 modrinth: !a.mr_project.is_empty(),
                 crashed: self.crashed.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).map(String::as_str),
+                max_categories: lock_line.then_some(0),
             },
             cx,
         );
@@ -2973,13 +3006,6 @@ Details").into()),
             });
 
         let done = self.recent.contains_key(&a.project_id);
-        // The offered file locked out (the user keeps this version), and
-        // the mods the update would stop loading.
-        let vlocked = update.is_some_and(|u| !a.locked_version.is_empty() && a.locked_version == u.file.file_name);
-        let breaks: Vec<(String, String)> = match (&self.root, update) {
-            (Some(r), Some(_)) => store.update_breaks(r, a.project_id).to_vec(),
-            _ => Vec::new(),
-        };
         let breaking = !breaks.is_empty() && !vlocked;
         // A drag across switches or Update buttons: what letting go does.
         let sweep = self.pick.sweeping();
@@ -3199,7 +3225,7 @@ It stays disabled after updating: turn it on in the On column.")
                     .gap_0p5()
                     .when(dim, |d| d.opacity(0.55))
                     .child(name_line)
-                    .child(h_flex().gap_2().min_w_0().child(tags).child({
+                    .child(h_flex().gap_2().min_w_0().overflow_hidden().child(tags).child({
                         // File name and version chip. Click either to pick
                         // another version.
                         let (pid, upd) = (a.project_id, update.map(|u| u.file.clone()));
@@ -3709,7 +3735,8 @@ Change version", a.file_name).into()
     /// spacer after the actions takes the rest; a max width on a growing
     /// cell would share the room with the spacer instead.
     pub(crate) fn name_cell(&self) -> Div {
-        let d = div().min_w_0();
+        // Room between the tag line and the Update button.
+        let d = div().min_w_0().pr_4();
         if self.cols.cap { d.flex_shrink(1.).w(rems(NAME_MAX)) } else { d.flex_1() }
     }
 

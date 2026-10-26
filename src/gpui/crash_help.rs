@@ -11,6 +11,33 @@ use std::path::{Path, PathBuf};
 const MODRINTH: &str = "https://modrinth.com/mod/crash-assistant";
 const CURSEFORGE: &str = "https://www.curseforge.com/minecraft/mc-mods/crash-assistant";
 
+/// Puts back the older copy of a mod the last crash's error names (the
+/// newer one goes to Backups) and re-reads the instance. Says why in a
+/// notification when it can't. True when it's back.
+pub fn put_back_changed(
+    store: &Entity<Store>,
+    root: &Path,
+    ch: &hopper::crashdetect::Changed,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    use gpui_kit::component::WindowExt as _;
+    match hopper::crashdetect::put_back(root, ch) {
+        Ok(_) => {
+            let r = root.to_path_buf();
+            store.update(cx, |s, cx| {
+                s.spawn(move || crate::store::Msg::InstanceChanged(r));
+                cx.notify();
+            });
+            true
+        }
+        Err(e) => {
+            window.push_notification(gpui_kit::component::notification::Notification::warning(format!("{e:#}")), cx);
+            false
+        }
+    }
+}
+
 /// A bordered, tinted box that calls attention to one thing.
 pub fn callout(color: Hsla, cx: &App) -> Div {
     v_flex()

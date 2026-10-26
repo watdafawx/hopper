@@ -92,6 +92,9 @@ struct JarInfo {
     fabric: Option<Box<FabricSide>>,
     /// Ids from nested jars (jar-in-jar), whichever metadata is read.
     nested: Vec<String>,
+    /// (mod id, its version) for the nested jars' mods, so an
+    /// "incompatible" range can be checked against them.
+    nested_versions: Vec<(String, String)>,
     /// Its mods come from a mods.toml (Forge or NeoForge).
     toml: bool,
 }
@@ -295,6 +298,7 @@ fn inspect(zip: &mut zip::ZipArchive<impl Read + std::io::Seek>, depth: u8) -> J
             if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(buf)) {
                 let inner = inspect(&mut z, depth + 1);
                 info.nested.extend(inner.provides.iter().chain(&inner.nested).cloned());
+                info.nested_versions.extend(inner.versions.into_iter().chain(inner.nested_versions));
                 info.provides.extend(inner.provides.into_iter().chain(inner.nested));
             }
         }
@@ -727,6 +731,20 @@ pub fn blockers(mods_dir: &Path, loader: &str, game: &str) -> Vec<Blocker> {
             provider.entry(id.as_str()).or_insert(p);
         }
     }
+    // Nested mods' versions, for incompatibilities: the highest nested copy
+    // (the one the loader picks), and a top-level jar's own version over it.
+    let mut inc_versions: HashMap<&str, &str> = HashMap::new();
+    for (_, j) in &on {
+        for (id, v) in &j.nested_versions {
+            let e = inc_versions.entry(id.as_str()).or_insert(v.as_str());
+            if cmp(v, e) == Some(std::cmp::Ordering::Greater) {
+                *e = v.as_str();
+            }
+        }
+    }
+    for (id, (_, v)) in &versions {
+        inc_versions.insert(id, v);
+    }
 
     // Forge, and NeoForge for 1.20.1, read mods.toml over neoforge.mods.toml.
     let reads_mods_toml = !neoforge || !mc_at_least(game, (20, 5));
@@ -777,8 +795,8 @@ pub fn blockers(mods_dir: &Path, loader: &str, game: &str) -> Vec<Blocker> {
             }
             let Some(by) = provider.get(id.as_str()).filter(|by| **by != path) else { continue };
             // Its version, when known, must be in the range.
-            let hit = match versions.get(id.as_str()) {
-                Some((_, have)) => accepts(range, have) != Some(false),
+            let hit = match inc_versions.get(id.as_str()) {
+                Some(have) => accepts(range, have) != Some(false),
                 None => true,
             };
             if hit {
@@ -1225,6 +1243,43 @@ version=\"4.5\"
             assert!(got.contains(&want), "{want:?} not in {got:?}");
         }
         assert!(blockers(&t, "neoforge-21.1.264", "1.21.1").iter().all(|b| b.file_name != "almanac.jar"));
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    /// Sable refuses Sable Companion "(1.6.0,)"; Aperture Innovations nests
+    /// companion 1.6.0, which loads (seen in game, 2026-10-26). A newer
+    /// nested copy is refused.
+    #[test]
+    fn incompatible_checks_nested_versions() {
+        use std::io::Write as _;
+        let t = std::env::temp_dir().join(format!("hopper-nested-inc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        let neo = "META-INF/neoforge.mods.toml";
+        let head = "modLoader=\"javafml\"\nloaderVersion=\"[1,)\"\n";
+        let m = |id: &str, v: &str| format!("[[mods]]\nmodId=\"{id}\"\nversion=\"{v}\"\n");
+        jar(&t.join("sable.jar"), &[(neo, &(head.to_string() + &m("sable", "2.0.6")
+            + "[[dependencies.sable]]\nmodId=\"sablecompanion\"\ntype=\"incompatible\"\nversionRange=\"(1.6.0,)\"\nreason=\"Sable is out of date\"\n"))]);
+        let bundle = |name: &str, companion: &str| {
+            let inner = t.join("inner.tmp");
+            jar(&inner, &[(neo, &(head.to_string() + &m("sablecompanion", companion)))]);
+            let bytes = std::fs::read(&inner).unwrap();
+            std::fs::remove_file(&inner).unwrap();
+            let mut z = zip::ZipWriter::new(std::fs::File::create(t.join(name)).unwrap());
+            z.start_file::<_, ()>(neo, Default::default()).unwrap();
+            z.write_all((head.to_string() + &m("aperture_innovations", "2.1.1")).as_bytes()).unwrap();
+            z.start_file::<_, ()>("META-INF/jarjar/companion.jar", Default::default()).unwrap();
+            z.write_all(&bytes).unwrap();
+            z.finish().unwrap();
+        };
+        let incompatible = |t: &Path| {
+            blockers(t, "neoforge-21.1.259", "1.21.1").into_iter().filter(|b| matches!(b.kind, BlockerKind::Incompatible { .. })).count()
+        };
+        bundle("aperture-a.jar", "1.6.0");
+        assert_eq!(incompatible(&t), 0, "1.6.0 is outside (1.6.0,)");
+        std::fs::remove_file(t.join("aperture-a.jar")).unwrap();
+        bundle("aperture-b.jar", "1.6.1");
+        assert_eq!(incompatible(&t), 1, "1.6.1 is inside (1.6.0,)");
         std::fs::remove_dir_all(&t).unwrap();
     }
 

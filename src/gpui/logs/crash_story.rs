@@ -3,11 +3,11 @@
 //! happened, in order. See design/crash-detection.md, "Root cause first".
 
 use super::LogsView;
-use crate::store::{Msg, Store, StoreEvent};
+use crate::store::{Store, StoreEvent};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::crashdetect::{Certainty, Crash, Stopped};
@@ -115,17 +115,8 @@ impl LogsView {
                                 .label(label)
                                 .tooltip("Swaps in the copy Hopper kept. The newer one goes to Backups, so you can undo this there.")
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    match hopper::crashdetect::put_back(&root_p, &ch_p) {
-                                        Ok(_) => this.store.update(cx, |s, cx| {
-                                            let r = root_p.clone();
-                                            s.spawn(move || Msg::InstanceChanged(r));
-                                            cx.notify();
-                                        }),
-                                        Err(e) => window.push_notification(
-                                            gpui_kit::component::notification::Notification::warning(format!("{e:#}")),
-                                            cx,
-                                        ),
-                                    }
+                                    let store = this.store.clone();
+                                    crate::crash_help::put_back_changed(&store, &root_p, &ch_p, window, cx);
                                     cx.notify();
                                 })),
                         )
