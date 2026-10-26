@@ -236,10 +236,11 @@ pub fn plan(
     // The server pack the server came from.
     let marker = recorded(&server.root).filter(|m| m.project_id == pid && m.server_pack_file_id != 0);
     let base_assumed = marker.is_none();
-    let base_id = match &marker {
-        Some(m) => m.server_pack_file_id,
-        None => inst.pack.as_ref().map_or(0, |p| p.server_pack_file_id),
-    };
+    let base_id = base_server_pack(
+        marker.as_ref().map(|m| m.server_pack_file_id),
+        inst.pack.as_ref().map_or(0, |p| p.server_pack_file_id),
+        file.id,
+    );
     let mut base_name = None;
     let mut base_url = None;
     let mut base_prefix = prefix.clone();
@@ -370,6 +371,19 @@ pub fn plan(
         mods_note,
         kept,
     })
+}
+
+/// The server pack to compare against (0: none): the recorded one, else the
+/// instance's version as a guess. A guess that's the version being
+/// installed (the instance updated first) would say the server has this
+/// pack already, so every mod it added reads as left off and every config
+/// change as yours: no base then, and differences are listed to choose.
+fn base_server_pack(recorded: Option<u64>, instance_sp: u64, target: u64) -> u64 {
+    match recorded {
+        Some(id) => id,
+        None if instance_sp == target => 0,
+        None => instance_sp,
+    }
 }
 
 fn read(z: &mut zip::ZipArchive<fs::File>, name: &str) -> Option<Vec<u8>> {
@@ -761,6 +775,17 @@ mod tests {
         assert_eq!(by_action(&ch, ModAction::Remove), vec![("dropped-1.0.jar".into(), String::new())]);
         assert_eq!(kept, KeptMods { added: 2, yours: 1, left_off: 1 });
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// TNP-LL8 (2026-10-27): no record on the server, the instance already
+    /// on 1.78.0, updating to 1.78.0's server pack added none of its six
+    /// new mods. A guess equal to the target is no base.
+    #[test]
+    fn guessed_base_equal_to_target_is_none() {
+        assert_eq!(base_server_pack(None, 9324083, 9324083), 0);
+        assert_eq!(base_server_pack(None, 9300000, 9324083), 9300000);
+        assert_eq!(base_server_pack(Some(9324083), 9324083, 9324083), 9324083);
+        assert_eq!(base_server_pack(None, 0, 9324083), 0);
     }
 
     #[test]
