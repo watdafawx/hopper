@@ -67,6 +67,40 @@ pub struct Suspect {
     /// What it needs that isn't installed: (mod id, versions).
     #[serde(default)]
     pub needs: Vec<(String, String)>,
+    /// Another mod its error names that changed lately, with its older copy.
+    #[serde(default)]
+    pub changed: Option<Changed>,
+}
+
+/// A mod that changed before the crash, which a suspect's error names:
+/// "Forbidden & Arcanus was updated Oct 24 (2.6.1 → 2.6.2)".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Changed {
+    /// The jar in the mods folder now.
+    pub file_name: String,
+    /// Its display name (or mod id).
+    pub name: String,
+    /// The older copy's version and the installed one's (either may be empty).
+    pub from: String,
+    pub to: String,
+    /// When the older copy was set aside (seconds since the epoch).
+    pub when: i64,
+    /// The older copy, in `.hopper-backups`.
+    pub backup: PathBuf,
+}
+
+/// A mod that failed while the game was loading, when the crash came
+/// after (a knock-on effect): the story the crash card tells.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Stopped {
+    /// Its jar in the mods folder.
+    pub file_name: String,
+    pub mod_id: String,
+    /// Its own error message (empty when the log has none).
+    pub error: String,
+    /// Mods the loader skipped because they need it (jars), from
+    /// `logs/debug.log`.
+    pub skipped: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -83,6 +117,9 @@ pub struct Crash {
     /// Suspects the player turned off from the crash card, to turn back on.
     #[serde(default)]
     pub turned_off: Vec<String>,
+    /// The mod that stopped loading, when the crash followed from that.
+    #[serde(default)]
+    pub stopped: Option<Stopped>,
 }
 
 fn re(p: &str) -> Regex {
@@ -506,8 +543,12 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
     }
     let now = crate::time::now();
     let text = report.as_deref().map(|p| tail(p, 2 << 20)).unwrap_or_default();
-    let log = tail(&root.join("logs").join("latest.log"), 2 << 20);
-    let suspects = analyze(root, &text, &log, mods, &ids);
+    let log_path = root.join("logs").join("latest.log");
+    let log = tail(&log_path, 2 << 20);
+    let loading = loading_lines(&log_path);
+    // Backups made after this crash (by a fix) aren't what changed before it.
+    let before = report.as_deref().and_then(modified_secs).unwrap_or(now);
+    let (suspects, stopped) = analyze(root, &text, &log, &loading, before, mods, &ids);
     let out_of_memory = text.contains("OutOfMemoryError") || log.contains("java.lang.OutOfMemoryError");
     let kind = if !suspects.is_empty() {
         CrashKind::Mods
@@ -524,7 +565,7 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         (None, Some(n)) => native_line(&tail(n, 64 << 10)),
         _ => String::new(),
     };
-    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new() })
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped })
 }
 
 /// A saved crash read again from its report with today's rules (which mods
@@ -536,19 +577,50 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
     if !is_report || saved.kind != CrashKind::Mods {
         return None;
     }
-    let suspects = analyze(root, &tail(&saved.source, 2 << 20), "", mods, &ids);
-    if suspects.is_empty() || suspects == saved.suspects {
+    // The game log still from the same run (written within minutes of the
+    // report) says whether loading had already failed.
+    let log_path = root.join("logs").join("latest.log");
+    let same_run = match (modified_secs(&saved.source), modified_secs(&log_path)) {
+        (Some(a), Some(b)) => (a - b).abs() < 300,
+        _ => false,
+    };
+    let loading = if same_run { loading_lines(&log_path) } else { String::new() };
+    let before = modified_secs(&saved.source).unwrap_or(saved.when);
+    let (mut suspects, stopped) = analyze(root, &tail(&saved.source, 2 << 20), "", &loading, before, mods, &ids);
+    // A change already put back (its older copy left backups for the mods
+    // folder) stays on the card, to say so.
+    for s in suspects.iter_mut().filter(|s| s.changed.is_none()) {
+        let kept = saved.suspects.iter().find(|o| o.file_name == s.file_name).and_then(|o| o.changed.clone());
+        if let Some(ch) = kept
+            && !ch.backup.exists()
+            && ch.backup.file_name().is_some_and(|n| root.join("mods").join(n).exists())
+        {
+            s.changed = Some(ch);
+        }
+    }
+    if suspects.is_empty() || (suspects == saved.suspects && stopped == saved.stopped) {
         return None;
     }
-    Some(Crash { suspects, ..saved.clone() })
+    Some(Crash { suspects, stopped, ..saved.clone() })
 }
 
 /// The mods a crash report (and the game log) points at, most likely first.
-fn analyze(root: &Path, text: &str, log: &str, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) -> Vec<Suspect> {
+/// `loading` is what [`loading_lines`] kept of the whole game log.
+/// Only backups set aside by `before` (the crash) count as what changed.
+fn analyze(
+    root: &Path,
+    text: &str,
+    log: &str,
+    loading: &str,
+    before: i64,
+    mods: &[String],
+    ids: &impl Fn(&str) -> Vec<String>,
+) -> (Vec<Suspect>, Option<Stopped>) {
     let mut raws = signals(text);
     for r in signals(log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
         add(&mut raws, r);
     }
+    knock_on(&mut raws, loading);
     // Frames that name no jar (Fabric): the jar that has the class's package.
     if raws.iter().any(|r| !r.class.is_empty()) {
         let idx = PackageIndex::build(&root.join("mods"), mods);
@@ -571,10 +643,287 @@ fn analyze(root: &Path, text: &str, log: &str, mods: &[String], ids: &impl Fn(&s
         if suspects.iter().any(|s| s.file_name == file) {
             continue;
         }
-        suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs });
+        suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs, changed: None });
     }
     demote_libraries(&mut suspects, &crate::deps::dependents(&root.join("mods")), ids);
-    suspects
+    // What the loader names may say which other mod it wanted: if that one
+    // changed lately, the change is the likely trigger.
+    let sets: Vec<crate::backups::Set> = crate::backups::list(root).into_iter().filter(|s| s.when <= before).collect();
+    for s in suspects.iter_mut().filter(|s| s.certainty == Certainty::Certain) {
+        s.changed = what_changed(root, s, mods, &sets);
+    }
+    let stopped = stopped(root, loading, &suspects, mods, ids);
+    (suspects, stopped)
+}
+
+/// A jar's name for people when the instance's list has none: the name the
+/// jar gives itself, else its file name without ".jar".
+pub fn jar_name(mods_dir: &Path, file: &str) -> String {
+    let bare = file.trim_end_matches(".disabled");
+    let (_, name) = crate::deps::own_ids(&mods_dir.join(file));
+    if name.is_empty() { bare.trim_end_matches(".jar").to_string() } else { name }
+}
+
+/// Puts the older copy of a changed mod back: the jar there now goes to
+/// `.hopper-backups` first (so Backups can undo this), then the older copy
+/// returns to the mods folder. The restored jar's path.
+pub fn put_back(root: &Path, c: &Changed) -> anyhow::Result<PathBuf> {
+    let saved = crate::backups::list(root)
+        .into_iter()
+        .flat_map(|s| s.files)
+        .find(|f| f.path == c.backup)
+        .ok_or_else(|| anyhow::anyhow!("The older copy of {} isn't in backups any more.", c.name))?;
+    let now = root.join("mods").join(&c.file_name);
+    if now.is_file() {
+        let dir = root.join(crate::sync::BACKUP_DIR).join(crate::time::now().to_string());
+        fs::create_dir_all(&dir)?;
+        let aside = dir.join(&c.file_name);
+        if fs::rename(&now, &aside).is_err() {
+            fs::copy(&now, &aside)?;
+            fs::remove_file(&now)?;
+        }
+        crate::backups::record(&dir, &aside, &format!("mods/{}", c.file_name));
+    }
+    crate::backups::restore(root, &saved)
+}
+
+/// `Skipping Mod Construction task for mod x because a dependency threw an exception.`
+static SKIPPED: LazyLock<Regex> =
+    LazyLock::new(|| re(r"Skipping .+? task for mod ([\w.-]+) because a dependency threw an exception"));
+
+/// The first mod the loader says failed, as a story for the card, with
+/// the mods skipped because of it. Those lines are only in `debug.log`
+/// (of the same run as `latest.log`).
+fn stopped(root: &Path, loading: &str, suspects: &[Suspect], mods: &[String], ids: &impl Fn(&str) -> Vec<String>) -> Option<Stopped> {
+    let (_, failed) = loading_failures(loading);
+    let (raw, error) = failed.into_iter().next()?;
+    let s = suspects.iter().find(|s| s.certainty == Certainty::Certain && s.mod_id.eq_ignore_ascii_case(&raw.mod_id))?;
+    let logs = root.join("logs");
+    let same_run = match (modified_secs(&logs.join("debug.log")), modified_secs(&logs.join("latest.log"))) {
+        (Some(a), Some(b)) => (a - b).abs() < 300,
+        _ => false,
+    };
+    let mut skipped: Vec<String> = Vec::new();
+    if same_run {
+        for id in skipped_ids(&logs.join("debug.log")) {
+            let r = Raw { mod_id: id, jar: String::new(), certainty: Certainty::Possible, why: String::new(), class: String::new(), needs: Vec::new() };
+            if let Some(f) = match_jar(&r, mods, ids)
+                && f != s.file_name
+                && !skipped.contains(&f)
+            {
+                skipped.push(f);
+            }
+        }
+    }
+    Some(Stopped { file_name: s.file_name.clone(), mod_id: s.mod_id.clone(), error, skipped })
+}
+
+/// The mod ids `debug.log` says were skipped because a mod they need
+/// failed (the whole file, up to 256 MB, line by line).
+fn skipped_ids(p: &Path) -> Vec<String> {
+    use std::io::{BufRead, Read};
+    let Ok(f) = fs::File::open(p) else { return Vec::new() };
+    let mut r = std::io::BufReader::new(f.take(256 << 20));
+    let (mut out, mut buf) = (Vec::new(), Vec::new());
+    while r.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+        // Cheap check before the regex: most lines aren't these.
+        if buf.windows(9).any(|w| w == b"Skipping ") {
+            let l = String::from_utf8_lossy(&buf);
+            if let Some(c) = SKIPPED.captures(&l) {
+                let id = c[1].to_string();
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// The loader's own words that loading had already failed when the game
+/// went on (and then crashed somewhere else).
+static BROKEN: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"Failed to wait for future .+?, \d+ errors? found|Cowardly refusing to send event \S+ to a broken mod state")
+});
+/// The loader naming the mod that failed while loading (NeoForge, Forge).
+static LOAD_FAILED: LazyLock<Regex> = LazyLock::new(|| {
+    re(concat!(
+        r"Failed to create mod instance\. ModID: ([\w.-]+)",
+        r"|Caught exception during event \S+ dispatch for modid ([\w.-]+)",
+        r"|Failed to register automatic subscribers\. ModID: ([\w.-]+)",
+        r"|Failed to apply mixin\. Mixin Class: \S+, ModID: ([\w.-]+)",
+    ))
+});
+/// `java.lang.IllegalStateException: message`, or `Caused by: …`.
+static EXCEPTION: LazyLock<Regex> =
+    LazyLock::new(|| re(r"^\s*(?:Caused by: )?(?:[\w$]+\.)+[\w$]*(?:Exception|Error|Throwable)[\w$]*: (.+)$"));
+
+/// What [`loading_lines`] looks for.
+const LOADING_MARKS: [&str; 6] = [
+    "Failed to wait for future",
+    "to a broken mod state",
+    "Failed to create mod instance",
+    "dispatch for modid",
+    "Failed to register automatic subscribers",
+    "Failed to apply mixin. Mixin Class",
+];
+
+/// The lines of a whole game log that say loading failed, each with the
+/// error under it. They come early in a long log, before the last 2 MB
+/// the rest of the scan reads, so the whole file (up to 64 MB) is read
+/// line by line and only these are kept.
+pub fn loading_lines(p: &Path) -> String {
+    use std::io::{BufRead, Read};
+    let Ok(f) = fs::File::open(p) else { return String::new() };
+    let mut r = std::io::BufReader::new(f.take(64 << 20));
+    let (mut out, mut buf, mut keep) = (String::new(), Vec::new(), 0usize);
+    while r.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+        let l = String::from_utf8_lossy(&buf);
+        if LOADING_MARKS.iter().any(|m| l.contains(m)) {
+            keep = 60;
+        } else if l.starts_with('[') {
+            // The next log entry: the error under the mark has ended.
+            keep = 0;
+        }
+        if keep > 0 {
+            out.push_str(l.trim_end_matches(['\r', '\n']));
+            out.push('\n');
+            keep -= 1;
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// Whether loading had already failed, and the mods the loader says
+/// failed, each with its error as the reason.
+fn loading_failures(text: &str) -> (bool, Vec<(Raw, String)>) {
+    let lines: Vec<&str> = text.lines().collect();
+    let broken = lines.iter().any(|l| BROKEN.is_match(l));
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let Some(c) = LOAD_FAILED.captures(l) else { continue };
+        let Some(id) = (1..=4).find_map(|g| c.get(g)).map(|g| g.as_str().to_string()) else { continue };
+        if NOT_MODS.contains(&id.as_str()) {
+            continue;
+        }
+        // The error under it; the deepest "Caused by" is nearest the cause.
+        let mut msg = String::new();
+        for (k, n) in lines.iter().enumerate().skip(i + 1).take(60) {
+            if n.starts_with('[') {
+                break;
+            }
+            if let Some(m) = EXCEPTION.captures(n)
+                && (k == i + 1 || n.trim_start().starts_with("Caused by:"))
+            {
+                msg = m[1].trim().to_string();
+            }
+        }
+        let why = if msg.is_empty() {
+            "It failed while the game was loading, so the rest couldn't finish loading.".to_string()
+        } else {
+            format!("It failed while the game was loading: \"{}\"", cut(&msg, 300))
+        };
+        if !out.iter().any(|(r, _): &(Raw, String)| r.mod_id == id) {
+            out.push((Raw { mod_id: id, jar: String::new(), certainty: Certainty::Certain, why, class: String::new(), needs: Vec::new() }, msg));
+        }
+    }
+    (broken, out)
+}
+
+/// When a mod had already failed to load, the game can go on a little and
+/// crash somewhere else: that crash report's error is a knock-on effect.
+/// The mod that failed becomes certain, and what the report's trace names
+/// drops to possible. If the log only says loading was broken, the trace
+/// still drops to possible (the cause is earlier in the log).
+fn knock_on(raws: &mut Vec<Raw>, loading: &str) {
+    let (broken, failed) = loading_failures(loading);
+    let failed: Vec<Raw> = failed.into_iter().map(|(r, _)| r).collect();
+    if failed.is_empty() && !broken {
+        return;
+    }
+    let why = match failed.first() {
+        Some(f) => format!("It crashed after {} had already failed to load, so this error most likely follows from that one.", f.mod_id),
+        None => "Loading had already failed before this crash, so this error most likely follows from an earlier one in the game log.".to_string(),
+    };
+    for r in raws.iter_mut().filter(|r| r.certainty != Certainty::Certain && !failed.iter().any(|f| same(f, &r.mod_id, &r.jar))) {
+        r.certainty = Certainty::Possible;
+        r.why = why.clone();
+    }
+    for f in failed {
+        add(raws, f);
+    }
+    raws.sort_by_key(|r| r.certainty);
+}
+
+/// Text as plain words, to match names however a mod writes them:
+/// "Forbidden & Arcanus", "Forbidden Arcanus" and "forbidden_arcanus" all
+/// read " forbidden arcanus ".
+fn words(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let plain: String = lower.chars().map(|c| if c.is_alphanumeric() || c == '.' { c } else { ' ' }).collect();
+    let kept: Vec<&str> = plain
+        .split_whitespace()
+        .map(|w| w.trim_matches('.'))
+        .filter(|w| !w.is_empty() && *w != "and" && *w != "the")
+        .collect();
+    format!(" {} ", kept.join(" "))
+}
+
+/// Whether `text` names `name` (a display name or a mod id) as whole
+/// words. A one-word name counts only written with a capital, as a name
+/// ("requires Create 6.0", not "failed to create").
+fn mentions(text: &str, name: &str) -> bool {
+    let n = words(name);
+    let bare = n.trim();
+    if bare.chars().count() < 4 {
+        return false;
+    }
+    if bare.contains(' ') {
+        return words(text).contains(&n);
+    }
+    text.split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case(bare) && w.chars().next().is_some_and(char::is_uppercase))
+}
+
+/// Another installed mod that `s`'s reason names (by display name or mod
+/// id) and that Hopper set an older copy of aside in `.hopper-backups`
+/// (it was updated or replaced), newest copy first.
+fn what_changed(root: &Path, s: &Suspect, mods: &[String], sets: &[crate::backups::Set]) -> Option<Changed> {
+    if sets.is_empty() || s.why.is_empty() {
+        return None;
+    }
+    let why = &s.why;
+    let dir = root.join("mods");
+    for m in mods.iter().filter(|m| m.to_ascii_lowercase().ends_with(".jar") && **m != s.file_name) {
+        let (ids, name) = crate::deps::own_ids(&dir.join(m));
+        let named = mentions(why, &name) || ids.iter().any(|i| !NOT_MODS.contains(&i.as_str()) && mentions(why, i));
+        if !named || ids.is_empty() {
+            continue;
+        }
+        let to = crate::deps::own_version(&dir.join(m));
+        for set in sets {
+            for f in set.files.iter().filter(|f| f.restore_to.starts_with("mods/") && f.name.to_ascii_lowercase().ends_with(".jar")) {
+                if !crate::deps::own_ids(&f.path).0.iter().any(|i| ids.contains(i)) {
+                    continue;
+                }
+                let from = crate::deps::own_version(&f.path);
+                if !from.is_empty() && from == to {
+                    continue; // the same version: not a change
+                }
+                return Some(Changed {
+                    file_name: m.clone(),
+                    name: if name.is_empty() { ids[0].clone() } else { name },
+                    from,
+                    to,
+                    when: set.when,
+                    backup: f.path.clone(),
+                });
+            }
+        }
+    }
+    None
 }
 
 /// A Java crash file's "Problematic frame" line.
@@ -683,6 +1032,7 @@ impl LiveWatch {
                     certainty: Certainty::Possible,
                     why: "Its changes to the game's code (a mixin) failed to apply while you played. It may misbehave or crash later.".into(),
                     needs: Vec::new(),
+                    changed: None,
                 });
             }
         }
@@ -728,7 +1078,7 @@ mod tests {
     use super::*;
 
     fn sus(file: &str, id: &str, c: Certainty) -> Suspect {
-        Suspect { file_name: file.into(), mod_id: id.into(), certainty: c, why: String::new(), needs: Vec::new() }
+        Suspect { file_name: file.into(), mod_id: id.into(), certainty: c, why: String::new(), needs: Vec::new(), changed: None }
     }
 
     #[test]
@@ -751,6 +1101,34 @@ mod tests {
         assert_eq!(s[0].certainty, Certainty::Certain);
     }
 
+    /// The newest crash of the instance in `HOPPER_CRASH_ROOT`, read again
+    /// (read only: nothing is saved).
+    #[test]
+    #[ignore]
+    fn detect_live() {
+        let Ok(root) = std::env::var("HOPPER_CRASH_ROOT") else { return };
+        let root = PathBuf::from(root);
+        let dir = root.join("mods");
+        let mods: Vec<String> = fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+            .collect();
+        let c = detect(&root, 0, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).expect("a crash");
+        println!("headline: {}", c.headline);
+        for s in &c.suspects {
+            println!("{:?} {} ({}): {}", s.certainty, s.file_name, s.mod_id, s.why);
+            if let Some(ch) = &s.changed {
+                println!("   changed: {} {} -> {} at {} (old copy {})", ch.name, ch.from, ch.to, ch.when, ch.backup.display());
+            }
+        }
+        if let Some(st) = &c.stopped {
+            println!("stopped: {} | error: {} | skipped: {:?}", st.file_name, st.error, st.skipped);
+        }
+    }
+
     /// The saved crash of the instance in `HOPPER_CRASH_ROOT` read again
     /// (read only: printed, not saved).
     #[test]
@@ -769,8 +1147,22 @@ mod tests {
         let saved = load(&root).expect("a saved crash");
         println!("saved: {:?}", saved.suspects.iter().map(|s| (s.certainty, s.file_name.clone())).collect::<Vec<_>>());
         match reread(&root, &saved, &mods, |f| crate::deps::own_ids(&dir.join(f)).0) {
-            Some(c) => println!("reread: {:?}", c.suspects.iter().map(|s| (s.certainty, s.file_name.clone())).collect::<Vec<_>>()),
+            Some(c) => println!(
+                "reread: {:?}",
+                c.suspects.iter().map(|s| (s.certainty, s.file_name.clone(), s.changed.as_ref().map(|ch| (ch.from.clone(), ch.to.clone())))).collect::<Vec<_>>()
+            ),
             None => println!("reread: unchanged"),
+        }
+    }
+
+    /// How many mods in `HOPPER_DEPS_DIR` need each of a few libraries (read only).
+    #[test]
+    #[ignore]
+    fn dependents_live() {
+        let Ok(dir) = std::env::var("HOPPER_DEPS_DIR") else { return };
+        let d = crate::deps::dependents(Path::new(&dir));
+        for id in ["architectury", "cloth_config", "geckolib", "sable", "create"] {
+            println!("{id}: {}", d.get(id).copied().unwrap_or(0));
         }
     }
 
@@ -964,6 +1356,149 @@ A detailed walkthrough of the error
         assert_eq!(load(&root), Some(c));
         clear(&root);
         assert!(load(&root).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// TNP Limitless 8, 2026-10-26, cut down: the report blames a mixin
+    /// calling Architectury, but Mekanism Magic had already stopped loading.
+    const KNOCK_ON_REPORT: &str = "Description: Initializing game
+
+java.lang.IllegalStateException: Mod 'architectury' is not available!
+\tat TRANSFORMER/architectury@13.0.11/dev.architectury.platform.hooks.EventBusesHooks.lambda$whenAvailable$0(EventBusesHooks.java:34) ~[architectury-13.0.11-neoforge.jar%231397!/:?] {re:classloading}
+\tat java.base/java.util.Optional.orElseThrow(Optional.java:403) ~[?:?] {}
+\tat TRANSFORMER/architectury@13.0.11/dev.architectury.networking.NetworkManager.registerReceiver(NetworkManager.java:97) ~[architectury-13.0.11-neoforge.jar%231397!/:?] {re:mixin,re:classloading}
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.handler$jip000$omegaconfig$onReturn(Minecraft.java:38520) ~[client-1.21.1-20240808.144430-srg.jar%231295!/:?] {re:mixin}
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.<init>(Minecraft.java:636) ~[client-1.21.1-20240808.144430-srg.jar%231295!/:?] {re:mixin}
+
+A detailed walkthrough of the error
+";
+    const KNOCK_ON_LOG: &str = "[26Oct2026 16:46:26.698] [modloading-worker-0/ERROR] [Cristel Lib/]: Structure sets are missing from config: [goety:crypt_wing_a]
+[26Oct2026 16:46:39.600] [modloading-worker-0/ERROR] [net.neoforged.fml.javafmlmod.FMLModContainer/LOADING]: Failed to create mod instance. ModID: mekanism_magic, class com.example.mekanismmagic.MekanismMagic
+java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.6.1 + Valhelsia Core 1.1.5; found 2.6.2 + 1.1.5. Startup was stopped rather than dropping saved Clibano machine registrations.
+\tat TRANSFORMER/mekanism_magic@1.0.7/com.example.mekanismmagic.integration.ModCompatibility.requireForbiddenContentVersions(ModCompatibility.java:72) ~[?:?]
+\tat MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.javafmlmod.FMLModContainer.constructMod(FMLModContainer.java:122) ~[loader-4.0.45.jar%23107!/:4.0]
+[26Oct2026 16:46:39.620] [Render thread/INFO] [com.mojang.blaze3d.platform.GlDebug/]: OpenGL debug message
+[26Oct2026 16:46:46.036] [Render thread/FATAL] [net.neoforged.fml.ModLoader/LOADING]: Failed to wait for future Mod Construction, 1 errors found
+[26Oct2026 16:46:47.853] [Render thread/ERROR] [net.neoforged.fml.ModLoader/]: Cowardly refusing to send event net.neoforged.neoforge.client.event.sound.SoundEngineLoadEvent to a broken mod state
+";
+
+    #[test]
+    fn a_mod_that_failed_to_load_comes_before_the_knock_on_crash() {
+        let mut raws = signals(KNOCK_ON_REPORT);
+        knock_on(&mut raws, KNOCK_ON_LOG);
+        let got: Vec<(&str, Certainty)> = raws.iter().map(|r| (r.mod_id.as_str(), r.certainty)).collect();
+        assert_eq!(
+            got,
+            [("mekanism_magic", Certainty::Certain), ("architectury", Certainty::Possible), ("omegaconfig", Certainty::Possible)]
+        );
+        assert!(raws[0].why.contains("requires 2.6.1 + Valhelsia Core 1.1.5; found 2.6.2"), "{}", raws[0].why);
+        assert!(raws[1].why.contains("after mekanism_magic had already failed to load"), "{}", raws[1].why);
+
+        // Only the loader's "broken" lines, no mod named: the trace still drops.
+        let mut raws = signals(KNOCK_ON_REPORT);
+        knock_on(&mut raws, "[x] [Render thread/FATAL] [ModLoader/]: Failed to wait for future Mod Construction, 2 errors found\n");
+        assert!(raws.iter().all(|r| r.certainty == Certainty::Possible));
+        assert!(raws[0].why.contains("earlier one in the game log"));
+
+        // A clean log changes nothing.
+        let mut raws = signals(KNOCK_ON_REPORT);
+        let before = raws.clone();
+        knock_on(&mut raws, "");
+        assert_eq!(raws, before);
+    }
+
+    #[test]
+    fn skipped_mods_come_from_debug_log() {
+        let dir = std::env::temp_dir().join(format!("hopper-crash-sk-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("debug.log");
+        fs::write(
+            &p,
+            "[26Oct2026 16:46:39.900] [modloading-worker-0/DEBUG] [net.neoforged.fml.ModLoader/]: Skipping Mod Construction task for mod mekenergistics because a dependency threw an exception.
+[26Oct2026 16:46:39.901] [modloading-worker-0/DEBUG] [x/]: Skipping nothing here
+[26Oct2026 16:46:39.901] [modloading-worker-0/DEBUG] [net.neoforged.fml.ModLoader/]: Skipping Mod Construction task for mod omni_upgrades because a dependency threw an exception.
+[26Oct2026 16:46:40.001] [modloading-worker-0/DEBUG] [net.neoforged.fml.ModLoader/]: Skipping Common setup task for mod omni_upgrades because a dependency threw an exception.
+",
+        )
+        .unwrap();
+        assert_eq!(skipped_ids(&p), ["mekenergistics", "omni_upgrades"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn loading_lines_keep_the_marks_from_anywhere_in_the_log() {
+        let dir = std::env::temp_dir().join(format!("hopper-crash-ll-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("latest.log");
+        // 3 MB of noise after the failure: past the 2 MB the tail reads.
+        let noise = "[26Oct2026 16:46:49.590] [Worker/INFO] [x/]: nothing to see here\n".repeat(50_000);
+        fs::write(&p, format!("{KNOCK_ON_LOG}{noise}")).unwrap();
+        let kept = loading_lines(&p);
+        assert!(kept.contains("ModID: mekanism_magic"));
+        assert!(kept.contains("found 2.6.2 + 1.1.5"));
+        assert!(!kept.contains("Cristel Lib") && !kept.contains("nothing to see here"));
+        let (broken, failed) = loading_failures(&kept);
+        assert!(broken);
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].1.starts_with("Forbidden & Arcanus machine content requires 2.6.1"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_mod_an_error_names_and_its_older_copy() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("hopper-crash-wc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mods = root.join("mods");
+        let set = root.join(".hopper-backups").join("1792845542");
+        fs::create_dir_all(&mods).unwrap();
+        fs::create_dir_all(&set).unwrap();
+        let jar = |p: &Path, id: &str, name: &str, ver: &str| {
+            let mut z = zip::ZipWriter::new(fs::File::create(p).unwrap());
+            z.start_file::<_, ()>("META-INF/neoforge.mods.toml", Default::default()).unwrap();
+            write!(z, "modLoader=\"javafml\"\n[[mods]]\nmodId=\"{id}\"\nversion=\"{ver}\"\ndisplayName=\"{name}\"\n").unwrap();
+            z.finish().unwrap();
+        };
+        jar(&mods.join("mekanism_magic-1.0.7.jar"), "mekanism_magic", "Mekanism Magic", "1.0.7");
+        // Its own name has no "&": the error writes it "Forbidden & Arcanus".
+        jar(&mods.join("forbidden_arcanus-1.21.1-2.6.2.jar"), "forbidden_arcanus", "Forbidden Arcanus", "2.6.2");
+        jar(&mods.join("valhelsia_core-1.1.5.jar"), "valhelsia_core", "Valhelsia Core", "1.1.5");
+        jar(&set.join("forbidden_arcanus-2.6.1.jar"), "forbidden_arcanus", "Forbidden Arcanus", "2.6.1");
+        fs::write(set.join(crate::backups::ORIGINS), r#"{"forbidden_arcanus-2.6.1.jar":"mods/forbidden_arcanus-2.6.1.jar"}"#).unwrap();
+        let list: Vec<String> = ["mekanism_magic-1.0.7.jar", "forbidden_arcanus-1.21.1-2.6.2.jar", "valhelsia_core-1.1.5.jar"]
+            .map(String::from)
+            .to_vec();
+        let (_, failed) = loading_failures(KNOCK_ON_LOG);
+        let s = Suspect {
+            file_name: list[0].clone(),
+            mod_id: "mekanism_magic".into(),
+            certainty: Certainty::Certain,
+            why: failed[0].0.why.clone(),
+            needs: Vec::new(),
+            changed: None,
+        };
+        let c = what_changed(&root, &s, &list, &crate::backups::list(&root)).expect("a change");
+        assert_eq!(
+            (c.file_name.as_str(), c.name.as_str(), c.from.as_str(), c.to.as_str(), c.when),
+            ("forbidden_arcanus-1.21.1-2.6.2.jar", "Forbidden Arcanus", "2.6.1", "2.6.2", 1792845542)
+        );
+        // Putting it back swaps the two: 2.6.1 in mods, 2.6.2 in backups.
+        let back = put_back(&root, &c).unwrap();
+        assert_eq!(back, mods.join("forbidden_arcanus-2.6.1.jar"));
+        assert!(!mods.join("forbidden_arcanus-1.21.1-2.6.2.jar").exists());
+        let aside: Vec<String> = crate::backups::list(&root).into_iter().flat_map(|s| s.files).map(|f| f.restore_to).collect();
+        assert_eq!(aside, ["mods/forbidden_arcanus-1.21.1-2.6.2.jar"]);
+        assert!(put_back(&root, &c).is_err(), "the older copy is used up");
+        fs::rename(mods.join("forbidden_arcanus-2.6.1.jar"), set.join("forbidden_arcanus-2.6.1.jar")).ok();
+        // Valhelsia Core is named too, but has no older copy: no change.
+        let _ = fs::remove_dir_all(root.join(".hopper-backups"));
+        assert_eq!(what_changed(&root, &s, &list, &crate::backups::list(&root)), None);
+        // Names and ids as whole words, however they're written.
+        assert!(mentions("needs Valhelsia Core 1.1.", "valhelsia_core"));
+        assert!(mentions("Forbidden & Arcanus requires", "Forbidden Arcanus"));
+        assert!(mentions("requires Create 6.0", "create"));
+        assert!(!mentions("Failed to create mod instance", "Create"), "a word, not a name");
+        assert!(!mentions("needs JEI", "jei"), "too short to trust");
         let _ = fs::remove_dir_all(&root);
     }
 

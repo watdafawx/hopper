@@ -334,6 +334,11 @@ pub fn own_ids(path: &Path) -> (Vec<String>, String) {
     jar(path).map(|j| (j.own.clone(), j.name.clone())).unwrap_or_default()
 }
 
+/// The version of the jar's own (first) mod, empty when it doesn't say.
+pub fn own_version(path: &Path) -> String {
+    jar(path).and_then(|j| j.versions.first().map(|v| v.1.clone())).unwrap_or_default()
+}
+
 /// Reads jars on a few threads.
 fn read_all(list: &[&PathBuf]) -> Vec<(PathBuf, Arc<JarInfo>)> {
     let chunk = list.len().div_ceil(8).max(1);
@@ -355,11 +360,6 @@ fn enabled_jars(mods_dir: &Path) -> Vec<PathBuf> {
         .map(|e| e.path())
         .filter(|p| p.to_string_lossy().to_lowercase().ends_with(".jar") && p.is_file())
         .collect()
-}
-
-/// Required mod ids no enabled jar in `mods_dir` provides.
-pub fn missing(mods_dir: &Path) -> Vec<Missing> {
-    missing_without(mods_dir, &[])
 }
 
 /// How many of the turned-on mods in `mods_dir` need each mod id (their
@@ -387,7 +387,7 @@ pub fn dependents(mods_dir: &Path) -> HashMap<String, usize> {
     out
 }
 
-/// [`missing`] as it would be with the files named in `without` gone.
+/// Required mod ids no enabled jar in `mods_dir` provides.
 /// Turned-on mods an update of `file` would stop loading: each needs the
 /// mod in `file` at a version range that takes `from` (its version now)
 /// but not `to` (the update's). Both are read from the file names, so the
@@ -418,6 +418,11 @@ pub fn broken_by(mods_dir: &Path, file: &str, from: &str, to: &str) -> Vec<(Stri
     out
 }
 
+pub fn missing(mods_dir: &Path) -> Vec<Missing> {
+    missing_without(mods_dir, &[])
+}
+
+/// [`missing`] as it would be with the files named in `without` gone.
 pub fn missing_without(mods_dir: &Path, without: &[String]) -> Vec<Missing> {
     let entries: Vec<PathBuf> = std::fs::read_dir(mods_dir)
         .into_iter()

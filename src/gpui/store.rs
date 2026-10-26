@@ -1225,7 +1225,8 @@ impl Store {
                 .iter()
                 .find(|a| a.file_name.eq_ignore_ascii_case(s.file_name.trim_end_matches(".disabled")))
                 .map(|a| a.name.clone())
-                .unwrap_or_else(|| s.file_name.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| hopper::crashdetect::jar_name(&i.mods_dir(), &s.file_name))
         })
     }
 

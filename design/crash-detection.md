@@ -19,6 +19,50 @@ Phase 1 as built differs from the draft in three places:
 - Fabric: nested jars (`META-INF/jars`) aren't in the package index yet, and
   a package shipped in two jars (a shaded library) names neither.
 
+## Root cause first (2026-10-26: built; logic in `crashdetect.rs`, card is option D of `mockups/features/crash-root-cause.html`, in `src/gpui/logs/crash_story.rs`)
+
+The card: "<mod> stopped the game from loading", a fix box (**Put <old> back**
+swaps the jar with its copy in backups, the newer one goes to Backups; plus
+**Turn off <mod>**), then "What happened" in order: the update, the mod's
+error, mods skipped because of it (`debug.log`'s "Skipping … task for mod
+x"), and the report's own error as a knock-on effect.
+
+Case: TNP Limitless 8 crashed with `Mod 'architectury' is not available!`
+from OmegaConfig's mixin. Hopper said "Likely: OmegaConfig". The real cause
+was Mekanism Magic: its constructor stopped loading on purpose because
+Forbidden & Arcanus had been updated (2.6.1 → 2.6.2, with 2.6.1 still in
+`.hopper-backups`). Every later error was a knock-on effect.
+
+A person found it in four generic steps; Hopper does the same, with no mod
+named in code:
+
+1. **Was loading already broken?** `latest.log` says so in the loader's own
+   words: `Failed to wait for future <phase>, N errors found`,
+   `Cowardly refusing to send event … to a broken mod state`. Then the crash
+   report's exception is a knock-on error, not the cause.
+2. **Who broke it?** The loader names the mod: `Failed to create mod
+   instance. ModID: <id>`, `Caught exception during event <e> dispatch for
+   modid <id>`, `Failed to register automatic subscribers. ModID: <id>`,
+   `Failed to apply mixin. Mixin Class: …, ModID: <id>`. Certain. The reason
+   is the exception's first line (mods often write a plain sentence there).
+3. **Demote the symptom.** When 1 and 2 hold, what the crash report's trace
+   names drops to Possible: "It crashed after <mod> had already stopped
+   loading, so this error follows from that one."
+4. **What changed?** If the reason names another installed mod (its id or
+   display name) and that mod has an older copy in `.hopper-backups`, or its
+   jar changed after the last good start (`deps::loaded_fine`), the suspect
+   carries a hint: "Forbidden & Arcanus was updated on Oct 24 (2.6.1 →
+   2.6.2)", with a way to put the old one back.
+
+Also: these lines sit early in the log (1.2 MB into a 3.2 MB one here), so
+step 1–2 scan the whole `latest.log` line by line for these markers instead
+of the last 2 MB.
+
+Tests: a cut-down copy of this crash (report + log excerpt) as a unit test,
+expecting Mekanism Magic Certain, OmegaConfig and Architectury Possible, and
+the hint naming Forbidden & Arcanus; plus `detect_live` on the real
+instance (read only).
+
 ## Goal
 
 When a game started from Hopper crashes, Hopper tells the player which mods

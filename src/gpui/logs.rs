@@ -23,6 +23,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod crash_story;
+
 /// How much of a log to show when it opens.
 const OPEN_BYTES: u64 = 400_000;
 /// More growth than this in one second reloads the tail instead.
@@ -759,7 +761,7 @@ impl LogsView {
                 let name = a
                     .map(|a| a.name.clone())
                     .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| s.file_name.trim_end_matches(".disabled").to_string());
+                    .unwrap_or_else(|| hopper::crashdetect::jar_name(&root.join("mods"), &s.file_name));
                 let icon = a.and_then(|a| store.image(&a.icon)).map(Path::to_path_buf);
                 let pid = a.map_or(0, |a| a.project_id);
                 // Mod ids in the reason read as names.
@@ -868,7 +870,7 @@ impl LogsView {
                 addon(&s.file_name)
                     .map(|a| a.name.clone())
                     .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| s.file_name.trim_end_matches(".disabled").to_string())
+                    .unwrap_or_else(|| hopper::crashdetect::jar_name(&root.join("mods"), &s.file_name))
             })
             .collect();
         let has_report = c.source.extension().is_some_and(|e| e == "txt") && c.source.starts_with(root.join("crash-reports"));
@@ -876,6 +878,14 @@ impl LogsView {
         let still_open = self.store.read(cx).running(root).is_some_and(|r| c.when >= r.started as i64);
         let source = c.source.clone();
         let root_d = root.to_path_buf();
+        // A mod failed while loading and the crash followed: tell that story
+        // (with its own fix) instead of the list.
+        let story = c
+            .stopped
+            .as_ref()
+            .filter(|st| c.suspects.iter().any(|s| s.file_name == st.file_name))
+            .map(|st| self.crash_story(root, c, st, cx));
+        let listed = story.is_none();
         callout(theme.danger, cx)
             .child(
                 h_flex()
@@ -936,10 +946,10 @@ impl LogsView {
                             })),
                     ),
             )
-            .when(!c.headline.is_empty(), |d| {
+            .when(listed && !c.headline.is_empty(), |d| {
                 d.child(div().text_sm().font_medium().line_clamp(2).child(c.headline.clone()))
             })
-            .when(!likely.is_empty(), |d| {
+            .when(listed && !likely.is_empty(), |d| {
                 d.child(
                     h_flex()
                         .gap_1p5()
@@ -948,12 +958,13 @@ impl LogsView {
                         .child(div().font_semibold().child(likely.join(", "))),
                 )
             })
-            .when(!rows.is_empty(), |d| {
+            .when(listed && !rows.is_empty(), |d| {
                 d.child(widgets::caption("Mods in this crash, most likely first:", cx).text_xs())
                     .child(v_flex().children(rows))
             })
+            .children(story)
             .when_some(note, |d, n| d.child(div().text_sm().child(n)))
-            .children(self.crash_actions(root, c, cx))
+            .when(listed, |d| d.children(self.crash_actions(root, c, cx)))
             .when(source.is_file(), |d| d.child(div().pt_1().child(self.share_row(&source, cx))))
             .into_any_element()
     }
@@ -974,7 +985,7 @@ impl LogsView {
             .enumerate()
             .map(|(i, s)| {
                 let a = inst.and_then(|i| i.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(s.file_name.trim_end_matches(".disabled"))));
-                let name = a.map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| s.file_name.clone());
+                let name = a.map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| hopper::crashdetect::jar_name(&root.join("mods"), &s.file_name));
                 let icon = a.and_then(|a| store.image(&a.icon)).map(Path::to_path_buf);
                 let pid = a.map_or(0, |a| a.project_id);
                 let (store2, root2) = (self.store.clone(), root.to_path_buf());
@@ -1028,7 +1039,16 @@ impl LogsView {
                 .iter()
                 .any(|a| a.enabled && a.file_name.eq_ignore_ascii_case(f.trim_end_matches(".disabled")))
         };
-        let can_turn_off = c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && on(&s.file_name)).count();
+        let to_turn_off: Vec<&str> =
+            c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && on(&s.file_name)).map(|s| s.file_name.as_str()).collect();
+        let can_turn_off = to_turn_off.len();
+        // One mod: its own name on the button.
+        let only = (can_turn_off == 1)
+            .then(|| {
+                let f = to_turn_off[0].trim_end_matches(".disabled");
+                inst.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(f)).map(|a| a.name.clone()).filter(|n| !n.is_empty())
+            })
+            .flatten();
         let turned = c.turned_off.len();
         let playing = store.running(root).is_some();
         if can_turn_off == 0 && turned == 0 {
@@ -1045,7 +1065,9 @@ impl LogsView {
                             .small()
                             .outline()
                             .icon(IconName::PowerOff)
-                            .label(if can_turn_off == 1 {
+                            .label(if let Some(n) = &only {
+                                format!("Turn off {n}")
+                            } else if can_turn_off == 1 {
                                 "Turn off the likely one".to_string()
                             } else {
                                 format!("Turn off the {can_turn_off} likely ones")
