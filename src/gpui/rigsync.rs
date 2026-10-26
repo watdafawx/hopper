@@ -748,7 +748,7 @@ impl SyncPanel {
         let name = server.name.clone();
         let body = format!(
             "This will {what} in {}. Replaced files go to .hopper-backups.",
-            server.root.display()
+            server.place(&self.store.read(cx).settings().hopper_panels)
         );
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (store, server, inst) = (store.clone(), server.clone(), inst.clone());
@@ -961,7 +961,7 @@ impl SyncPanel {
         let older = hopper::scan::compare_versions(&want, &have) == std::cmp::Ordering::Less;
         let body = format!(
             "Installs NeoForge {want} in {} and points run.bat at it{}. Mods aren't touched. The old run.bat is kept in .hopper-backups.",
-            server.root.display(),
+            server.place(&self.store.read(cx).settings().hopper_panels),
             if older { " (an older build than the server has now)" } else { "" },
         );
         window.open_alert_dialog(cx, move |alert, _, _| {

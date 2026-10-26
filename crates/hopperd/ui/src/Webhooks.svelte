@@ -23,7 +23,7 @@
   function edit(h) {
     form = h
       ? { id: h.id, name: h.name, url: h.url, events: [...h.events], servers: [...h.servers], enabled: h.enabled }
-      : { name: '', url: '', events: ['start', 'stop', 'crash', 'backup', 'problem'], servers: [], enabled: true };
+      : { name: '', url: '', events: ['start', 'stop', 'crash', 'backup', 'problem', 'tps', 'disk', 'ram', 'copy_failed'], servers: [], enabled: true };
   }
 
   const flip = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
@@ -116,7 +116,7 @@
         <button class="btn sm icon ghost" title="Remove" onclick={() => remove(h)}><Trash2 size={13} /></button>
       </div>
     {:else}
-      <p class="small subtle">Post to Discord or any URL when servers start, stop or crash, players join or leave, and backups finish.</p>
+      <p class="small subtle">Post to Discord or any URL when servers start, stop or crash, players join or leave, backups finish, and alerts fire.</p>
     {/each}
   {/if}
 </div>

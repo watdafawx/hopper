@@ -688,6 +688,7 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
             let o = options(&c, &b.name, &t.mc_version, ServerLoader::from_instance(&t.loader)?, &java, memory, b.port);
             let r = hopper_core::hosting::create_from_server_files(&files, &o, job)?;
             job.note(format!("From {}: {} mods", r.server_pack, r.create.mods_copied));
+            crate::pack_api::link_new_server(&r.create.root, mr, project, file_id);
             return finish(&a, &r.create.root, c.address, &r.create.skipped);
         }
         let (pack, file) = client.expect("one of the two");
@@ -697,6 +698,7 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
         let o = options(&c, &b.name, &mc, ServerLoader::Vanilla, &java, b.memory_mb, b.port);
         let (r, _used) = hopper_core::hosting::create_from_client_pack(&pack, &file, &o, job)?;
         job.note(format!("Built from the client pack: {} mods copied, {} left out as client-only.", r.mods_copied, r.skipped.len()));
+        crate::pack_api::link_new_server(&r.root, mr, project, file_id);
         finish(&a, &r.root, c.address, &r.skipped)
     });
     Ok(Json(json!({ "job": job })))

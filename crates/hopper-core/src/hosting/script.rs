@@ -335,6 +335,31 @@ pub fn minecraft_version(root: &Path, script: &str) -> Option<String> {
     }
 }
 
+/// Sets the heap the start script itself gives java: every `-Xmx` on its
+/// java line becomes `mb`. Scripts that take memory from
+/// `user_jvm_args.txt` only have none and are left alone (true when the
+/// script changed). Used with [`JvmArgs::set_memory`], so memory set in
+/// the panel applies whichever of the two the server reads, since java
+/// takes the last `-Xmx` on its line.
+pub fn set_script_memory(root: &Path, mb: u32) -> anyhow::Result<bool> {
+    for script in SCRIPTS {
+        let path = root.join(script);
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let Some(line) = launch_line(&text) else { continue };
+        let re = regex::Regex::new(r"(?i)-Xmx\d+[kmgt]?").expect("regex");
+        if !re.is_match(line) {
+            return Ok(false);
+        }
+        let new_line = re.replace_all(line, format!("-Xmx{}", super::jvm::format_mb(mb)).as_str()).into_owned();
+        if new_line == line {
+            return Ok(false);
+        }
+        fs::write(&path, text.replacen(line, &new_line, 1)).with_context(|| format!("writing {}", path.display()))?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Points the launch line at another java, keeping everything else.
 pub fn rewrite_java(text: &str, java: &Path) -> Option<String> {
     let line = launch_line(text)?;
@@ -371,7 +396,21 @@ mod tests {
     }
 
     #[test]
-    fn jar_script_and_java8() {
+    fn memory_set_in_the_panel_reaches_a_start_bat() {
+        let dir = std::env::temp_dir().join(format!("hopper-scriptmem-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let crlf = "\r\n";
+        fs::write(dir.join("start.bat"), format!("java -Dfabric.log.level=DEBUG -Xmx8G -jar fabric-server-launch.jar nogui{crlf}pause{crlf}")).unwrap();
+        assert!(set_script_memory(&dir, 4096).unwrap());
+        let text = fs::read_to_string(dir.join("start.bat")).unwrap();
+        assert!(text.starts_with("java -Dfabric.log.level=DEBUG -Xmx4G -jar fabric-server-launch.jar nogui"), "{text}");
+        // A script that reads user_jvm_args.txt has no -Xmx of its own.
+        fs::write(dir.join("start.bat"), "java @user_jvm_args.txt -jar server.jar nogui").unwrap();
+        assert!(!set_script_memory(&dir, 4096).unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+fn jar_script_and_java8() {
         let t = LaunchTarget::Jar("fabric-server-launch.jar".into());
         let l = parse_launch(&run_bat(Path::new("java"), &t, 21), &jvm()).unwrap();
         assert_eq!(l.args, ["-Xms4G", "-Xmx4G", "-jar", "fabric-server-launch.jar", "nogui"]);

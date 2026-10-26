@@ -1,18 +1,20 @@
 <script>
   import Avatar from './Avatar.svelte';
   import { onMount, onDestroy } from 'svelte';
-  import { Server, LayoutDashboard, Shield, LogOut, Wifi, WifiOff, Globe, Waypoints, RefreshCw, FolderCog } from '@lucide/svelte';
+  import { Server, LayoutDashboard, Shield, LogOut, Wifi, WifiOff, Globe, Waypoints, RefreshCw, FolderCog, Compass } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { live, connect, disconnect, startPing } from './lib/live.svelte.js';
   import { color, pathKind } from './lib/format.js';
   import { toast, say } from './lib/toast.svelte.js';
   import Overview from './Overview.svelte';
+  import Browse from './Browse.svelte';
   import ServerPage from './ServerPage.svelte';
   import Access from './Access.svelte';
   import ServersFolder from './ServersFolder.svelte';
   import { session } from './lib/me.svelte.js';
   import Dialog from './Dialog.svelte';
   import Transfers from './Transfers.svelte';
+  import { packUpdates, refreshPackUpdates } from './lib/packs.svelte.js';
 
   let { hello, me, onSignOut } = $props();
   const owner = $derived(me?.role === 'owner');
@@ -23,9 +25,9 @@
 
   let route = $state(location.hash.slice(1) || '/');
   let pending = $state([]);
-  let pingTimer, pendTimer;
+  let pingTimer, pendTimer, packTimer, packSoon;
 
-  const page = $derived(route.startsWith('/server/') ? 'server' : route === '/access' ? 'access' : (route === '/panel-folder' || route === '/servers-folder') && owner ? 'folder' : 'overview');
+  const page = $derived(route.startsWith('/server/') ? 'server' : route === '/browse' || route.startsWith('/browse/') ? 'browse' : route === '/access' ? 'access' : (route === '/panel-folder' || route === '/servers-folder') && owner ? 'folder' : 'overview');
   // #/server/<id>/<tab>/<path...>
   const segs = $derived(route.split('/').slice(2).map(decodeURIComponent));
   const serverId = $derived(page === 'server' ? segs[0] : null);
@@ -66,6 +68,11 @@
     addEventListener('hashchange', onHash);
     connect();
     pingTimer = startPing();
+    // Servers with a newer modpack version: the panel checks stale ones in
+    // the background, so look again shortly after the first call.
+    refreshPackUpdates();
+    packSoon = setTimeout(refreshPackUpdates, 45000);
+    packTimer = setInterval(refreshPackUpdates, 15 * 60 * 1000);
     if (owner) {
       checkPending();
       pendTimer = setInterval(checkPending, 3000);
@@ -76,6 +83,8 @@
   onDestroy(() => {
     clearInterval(pingTimer);
     clearInterval(pendTimer);
+    clearInterval(packTimer);
+    clearTimeout(packSoon);
   });
 </script>
 
@@ -87,6 +96,7 @@
       <span class="chip tiny host">{hello.name}</span>
     </div>
     <button class="nav" class:on={page === 'overview'} onclick={() => go('/')}><LayoutDashboard size={14} />Overview</button>
+    <button class="nav" class:on={page === 'browse'} onclick={() => go('/browse')}><Compass size={14} />Browse</button>
     <div class="navsec lbl row">Servers<span class="sp"></span>
       {#if owner}<button class="btn ghost icon" title="Look for new server folders" onclick={rescan}><RefreshCw size={12} /></button>{/if}
     </div>
@@ -94,6 +104,7 @@
       <button class="srv" class:on={serverId === s.id} onclick={() => go(`/server/${encodeURIComponent(s.id)}`)}>
         <Avatar server={s} cls="sic" />
         <span class="nm">{s.name}</span>
+        {#if packUpdates.byId[s.id]}{@const u = packUpdates.byId[s.id]}<span class="pdot" title="Pack update: {u.from} → {u.to}"></span>{/if}
         <span class="dot {s.state}"></span>
       </button>
     {:else}
@@ -121,7 +132,9 @@
       </span>
     </header>
     <div class="content">
-      {#if page === 'server'}
+      {#if page === 'browse'}
+        <Browse segs={segs} />
+      {:else if page === 'server'}
         {#key serverId}<ServerPage id={serverId} {tab} path={subpath} />{/key}
       {:else if page === 'access'}
         <Access {hello} {me} bind:pending />
@@ -151,6 +164,7 @@
   .srv { display: flex; align-items: center; gap: 9px; padding: 6px 9px; border-radius: 7px; color: var(--subtle); width: 100%; text-align: left; }
   .srv .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pad { padding: 4px 9px; }
+  .pdot { width: 7px; height: 7px; border-radius: 99px; background: var(--acc); flex: none; box-shadow: 0 0 0 2px var(--acc-dim); }
   .badge { margin-left: auto; background: var(--acc); color: #1a1a1f; border-radius: 99px; font-size: 11px; font-weight: 700; padding: 0 6px; }
   .foot { margin-top: auto; border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 2px; }
   .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }

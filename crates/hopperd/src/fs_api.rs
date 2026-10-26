@@ -76,7 +76,7 @@ async fn list(
 }
 
 /// `attachment; filename*=UTF-8''...`
-fn disposition(name: &str, inline: bool) -> HeaderValue {
+pub(crate) fn disposition(name: &str, inline: bool) -> HeaderValue {
     let enc: String = name
         .bytes()
         .map(|b| match b {
@@ -168,9 +168,9 @@ fn inline_type(name: &str) -> &'static str {
 }
 
 /// Sends what's written to it down a channel, in 256 KB pieces.
-struct ChanWriter {
-    tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
-    buf: Vec<u8>,
+pub(crate) struct ChanWriter {
+    pub(crate) tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+    pub(crate) buf: Vec<u8>,
 }
 
 impl ChanWriter {

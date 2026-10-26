@@ -485,6 +485,37 @@ impl Blocker {
             BlockerKind::Invalid(why) => why.clone(),
         }
     }
+
+    /// [`Self::text`] in pieces, so the other mod can be shown as a link:
+    /// the words before it, the other mod (its id and jar), the words after
+    /// it, and why (its own line).
+    pub fn parts(&self) -> BlockerParts {
+        match &self.kind {
+            BlockerKind::WrongVersion { needs, versions, jar, have } => BlockerParts {
+                lead: "only works with".into(),
+                other: Some((needs.clone(), jar.clone())),
+                tail: format!("{}; you have {have}", range_words(versions)),
+                why: String::new(),
+            },
+            BlockerKind::Incompatible { with, jar, reason } => BlockerParts {
+                lead: "won't load beside".into(),
+                other: Some((with.clone(), jar.clone())),
+                tail: String::new(),
+                why: reason.clone(),
+            },
+            _ => BlockerParts { lead: self.text(), other: None, tail: String::new(), why: String::new() },
+        }
+    }
+}
+
+/// See [`Blocker::parts`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockerParts {
+    pub lead: String,
+    /// The other mod: its mod id and the jar it's in.
+    pub other: Option<(String, String)>,
+    pub tail: String,
+    pub why: String,
 }
 
 fn loader_name(id: &str) -> &str {

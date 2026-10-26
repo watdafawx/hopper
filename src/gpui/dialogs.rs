@@ -17,18 +17,31 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hopper::cf::{self, Loader, LoaderVersion};
+use hopper::cf::{self, LoaderVersion};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-const KINDS: [(Loader, &str); 5] = [
-    (Loader::Any, "Vanilla"),
-    (Loader::NeoForge, "NeoForge"),
-    (Loader::Forge, "Forge"),
-    (Loader::Fabric, "Fabric"),
-    (Loader::Quilt, "Quilt"),
+/// (loader id prefix, label); "" is vanilla.
+const KINDS: [(&str, &str); 5] = [
+    ("", "Vanilla"),
+    ("neoforge", "NeoForge"),
+    ("forge", "Forge"),
+    ("fabric", "Fabric"),
+    ("quilt", "Quilt"),
 ];
+/// A new server can also be a plugin server (same order as Hopper Server's
+/// New server: Vanilla, plugins, mods).
+const SERVER_KINDS: [(&str, &str); 7] = [
+    ("", "Vanilla"),
+    ("paper", "Paper"),
+    ("purpur", "Purpur"),
+    ("neoforge", "NeoForge"),
+    ("forge", "Forge"),
+    ("fabric", "Fabric"),
+    ("quilt", "Quilt"),
+];
+const PLUGIN_KINDS: [&str; 2] = ["paper", "purpur"];
 
 pub(crate) fn footer(action: &'static str, ready: bool) -> DialogFooter {
     DialogFooter::new()
@@ -49,16 +62,35 @@ pub struct CreateForm {
     name: Entity<InputState>,
     versions: Vec<String>,
     game_version: String,
-    kind: Loader,
+    /// A KINDS id ("" vanilla, "neoforge"…).
+    kind: &'static str,
     loaders: HashMap<String, Vec<LoaderVersion>>,
     /// Minecraft versions whose loader list has arrived.
     loaded: std::collections::HashSet<String>,
     loader: String,
+    /// Making a server: Paper and Purpur too, and Forge's own recommended
+    /// version.
+    server: bool,
 }
 
 impl CreateForm {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::named("New instance", window, cx)
+    }
+
+    /// The form for a new server: plugin servers (Paper, Purpur) too.
+    pub(crate) fn for_server(default_name: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut f = Self::named(default_name, window, cx);
+        f.server = true;
+        f
+    }
+
+    fn kinds(&self) -> &'static [(&'static str, &'static str)] {
+        if self.server { &SERVER_KINDS } else { &KINDS }
+    }
+
+    fn kind_label(&self) -> &'static str {
+        self.kinds().iter().find(|(k, _)| *k == self.kind).map_or("", |(_, l)| *l)
     }
 
     /// The form with `default_name` in its name field (the server dialog
@@ -83,10 +115,11 @@ impl CreateForm {
             name,
             versions: Vec::new(),
             game_version: String::new(),
-            kind: Loader::NeoForge,
+            kind: "neoforge",
             loaders: HashMap::new(),
             loaded: Default::default(),
             loader: String::new(),
+            server: false,
         }
     }
 
@@ -97,9 +130,15 @@ impl CreateForm {
             return;
         }
         self.loaders.insert(gv.clone(), Vec::new());
+        let server = self.server;
         cx.spawn(async move |this, cx| {
             let key = gv.clone();
-            let r = cx.background_spawn(async move { cf::loader_versions(&gv) }).await;
+            let r = cx
+                .background_spawn(async move {
+                    let list = cf::loader_versions(&gv);
+                    if server { server_loader_versions(&gv, list.unwrap_or_default()) } else { list }
+                })
+                .await;
             this.update(cx, |this, cx| {
                 this.loaded.insert(key.clone());
                 this.loaders.insert(key, r.unwrap_or_default());
@@ -117,7 +156,7 @@ impl CreateForm {
     }
 
     fn options(&self) -> Vec<LoaderVersion> {
-        let prefix = format!("{}-", self.kind.name().to_lowercase());
+        let prefix = format!("{}-", self.kind);
         self.loaders
             .get(&self.game_version)
             .into_iter()
@@ -147,7 +186,7 @@ impl CreateForm {
         if !self.ready(cx) {
             return None;
         }
-        let loader = if self.kind == Loader::Any { String::new() } else { self.loader.clone() };
+        let loader = if self.kind.is_empty() { String::new() } else { self.loader.clone() };
         Some((
             self.name.read(cx).value().trim().to_string(),
             self.game_version.clone(),
@@ -163,7 +202,7 @@ impl CreateForm {
     pub(crate) fn ready(&self, cx: &App) -> bool {
         !self.name.read(cx).value().trim().is_empty()
             && !self.game_version.is_empty()
-            && (self.kind == Loader::Any || !self.loader.is_empty())
+            && (self.kind.is_empty() || !self.loader.is_empty())
     }
 
     fn create(form: &Entity<Self>, store: &Entity<Store>, window: &mut Window, cx: &mut App) -> bool {
@@ -171,7 +210,7 @@ impl CreateForm {
         if !this.ready(cx) {
             return false;
         }
-        let loader = if this.kind == Loader::Any {
+        let loader = if this.kind.is_empty() {
             String::new()
         } else {
             this.loader.clone()
@@ -222,7 +261,10 @@ impl Render for CreateForm {
                 }
             })
         };
-        let kind_ix = KINDS.iter().position(|(k, _)| *k == self.kind).unwrap_or(0);
+        let kinds = self.kinds();
+        let kind_ix = kinds.iter().position(|(k, _)| *k == self.kind).unwrap_or(0);
+        let plugins = PLUGIN_KINDS.contains(&self.kind);
+        let muted = cx.theme().muted_foreground;
         settings_form(rem)
             .child(Field::new().label("Name").child(Input::new(&self.name)))
             .child(
@@ -242,30 +284,36 @@ impl Render for CreateForm {
                 )),
             )
             .child(
-                Field::new().label("Loader").child(
+                Field::new().label(if self.server { "Type" } else { "Loader" }).child(
                     TabBar::new("new-kind")
                         .segmented()
                         .small()
                         .selected_index(kind_ix)
-                        .children(KINDS.iter().map(|(_, l)| Tab::new().label(*l)))
-                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                            this.kind = KINDS[*ix].0;
+                        .children(kinds.iter().map(|(_, l)| Tab::new().label(*l)))
+                        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                            this.kind = kinds[*ix].0;
                             this.loader.clear();
                             this.pick_loader();
                             cx.notify();
                         })),
                 ),
             )
-            .when(self.kind != Loader::Any, |f| {
+            .when(!self.kind.is_empty(), |f| {
                 f.child(
-                    Field::new().label("Loader version").child(widgets::picker(
+                    Field::new()
+                        .label(if plugins {
+                            format!("{} build", self.kind_label())
+                        } else {
+                            "Loader version".to_string()
+                        })
+                        .child(widgets::picker(
                         "new-loader",
                         match (self.loader.is_empty(), self.loaded()) {
                             (false, _) => self.loader.clone(),
                             (true, false) => "Loading builds".into(),
                             (true, true) => format!(
                                 "No {} builds for {}",
-                                self.kind.name(),
+                                self.kind_label(),
                                 self.game_version
                             ),
                         },
@@ -287,7 +335,46 @@ impl Render for CreateForm {
                     )),
                 )
             })
+            .when(plugins, |f| {
+                f.child(Field::new().child(div().text_sm().text_color(muted).child(format!(
+                    "Plugins (.jar files from Hangar, Modrinth or SpigotMC) go in the plugins folder. {} doesn't run Forge or Fabric mods.",
+                    self.kind_label()
+                ))))
+            })
     }
+}
+
+/// A new server's version lists: the mod loaders' (Forge's own recommended
+/// version marked) plus Paper's and Purpur's builds, newest first.
+fn server_loader_versions(mc: &str, mut list: Vec<LoaderVersion>) -> anyhow::Result<Vec<LoaderVersion>> {
+    use hopper::hosting::create;
+    let (paper, purpur, forge) = std::thread::scope(|s| {
+        let p = s.spawn(|| create::paper_builds(mc).unwrap_or_default());
+        let u = s.spawn(|| create::purpur_builds(mc).unwrap_or_default());
+        let f = s.spawn(|| create::forge_promoted(mc));
+        (
+            p.join().unwrap_or_default(),
+            u.join().unwrap_or_default(),
+            f.join().ok().flatten(),
+        )
+    });
+    if let Some(pick) = forge.map(|v| format!("forge-{v}"))
+        && list.iter().any(|v| v.name == pick)
+    {
+        for v in list.iter_mut().filter(|v| v.name.starts_with("forge-")) {
+            v.recommended = v.name == pick;
+        }
+    }
+    for (kind, builds) in [("paper", paper), ("purpur", purpur)] {
+        list.extend(builds.into_iter().enumerate().map(|(i, b)| LoaderVersion {
+            name: format!("{kind}-{b}"),
+            game_version: mc.to_string(),
+            latest: i == 0,
+            recommended: i == 0,
+        }));
+    }
+    anyhow::ensure!(!list.is_empty(), "Couldn't list server types for Minecraft {mc}");
+    Ok(list)
 }
 
 pub fn open_create(store: Entity<Store>, window: &mut Window, cx: &mut App) {

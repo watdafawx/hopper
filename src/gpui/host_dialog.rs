@@ -191,7 +191,7 @@ pub struct HostForm {
 impl HostForm {
     fn new(store: Entity<Store>, from: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         store.update(cx, |s, _| s.want_javas());
-        let base = cx.new(|cx| CreateForm::named("New server", window, cx));
+        let base = cx.new(|cx| CreateForm::for_server("New server", window, cx));
         let memory = cx.new(|_| SliderState::new().min(1.).max(32.).step(0.5).default_value(6.));
         let root = PathBuf::from(store.read(cx).hosted_root());
         let port = hopper::hosting::suggest_port(&root).to_string();
@@ -265,7 +265,9 @@ impl HostForm {
             ServerLoader::Fabric(v) => ("fabric", v.unwrap_or_default()),
             ServerLoader::Quilt(v) => ("quilt", v.unwrap_or_default()),
             ServerLoader::NeoForge(v) => ("neoforge", v),
-            ServerLoader::Forge(_) => return Err("Hopper Server can't make Forge servers yet.".into()),
+            ServerLoader::Forge(v) => ("forge", v),
+            ServerLoader::Paper(v) => ("paper", v.unwrap_or_default()),
+            ServerLoader::Purpur(v) => ("purpur", v.unwrap_or_default()),
         };
         let port = self.port.read(cx).value().trim().to_string();
         let port: Option<u16> = if port.is_empty() { None } else { Some(port.parse().map_err(|_| "The port must be a number.")?) };
@@ -473,7 +475,7 @@ impl Render for HostForm {
             .description(if from_instance {
                 "Its Minecraft, loader, server-side mods and configs. Client-only mods stay out."
             } else {
-                "A fresh server: pick the game and loader."
+                "A fresh server: pick the game and server type."
             })
             .child(
                 v_flex()

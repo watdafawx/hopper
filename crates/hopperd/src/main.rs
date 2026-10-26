@@ -16,8 +16,11 @@
 //! start with Windows, or install as a service) and runs a tray icon: see
 //! `launcher`.
 
+mod alerts;
 mod api;
 mod auth;
+mod backups_api;
+mod browse_api;
 mod config;
 mod control;
 mod discovery;
@@ -28,6 +31,7 @@ mod home;
 mod host;
 #[cfg(windows)]
 mod launcher;
+mod logs_api;
 mod manage_api;
 mod mcp;
 mod mods_api;
@@ -36,9 +40,11 @@ mod mods_more;
 mod mods_table;
 mod security;
 mod net;
+mod offsite;
 mod pack_api;
 mod router;
 mod servers;
+mod server_ops;
 mod servers_admin;
 mod service;
 mod sftp;
@@ -47,6 +53,7 @@ mod tls;
 mod tray;
 mod ui;
 mod webhooks;
+mod worlds_api;
 mod zipstream;
 
 use anyhow::Context as _;

@@ -8,7 +8,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use hopper_core::hosting::backup::{self, Kind, Scope};
+use hopper_core::hosting::backup;
 use hopper_core::hosting::properties::{self, PropKind, Properties};
 use hopper_core::hosting::{JvmArgs, JvmPreset, Schedule};
 use serde::Deserialize;
@@ -22,10 +22,6 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/properties", get(get_props).put(put_props))
         .route("/api/v1/servers/{id}/jvm", get(get_jvm).put(put_jvm))
         .route("/api/v1/servers/{id}/players", get(players).post(player_action))
-        .route("/api/v1/servers/{id}/backups", get(backups).post(make_backup))
-        .route("/api/v1/servers/{id}/backups/{name}", axum::routing::delete(delete_backup))
-        .route("/api/v1/servers/{id}/backups/{name}/entries", get(backup_entries))
-        .route("/api/v1/servers/{id}/backups/{name}/restore", post(restore_backup))
         .route("/api/v1/servers/{id}/schedule", get(get_schedule).put(put_schedule))
         .route("/api/v1/servers/create", post(create))
         .route("/api/v1/meta/minecraft", get(mc_versions))
@@ -170,6 +166,9 @@ async fn get_jvm(
 struct JvmBody {
     memory_mb: Option<u32>,
     preset: Option<String>,
+    /// The Java flags, one or more per line, replacing every flag in
+    /// user_jvm_args.txt. An -Xmx / -Xms in it sets memory too.
+    flags_text: Option<String>,
 }
 
 async fn put_jvm(
@@ -186,6 +185,8 @@ async fn put_jvm(
         if let Some(mb) = b.memory_mb {
             anyhow::ensure!((512..=262_144).contains(&mb), "Memory must be between 512 MB and 256 GB.");
             a.set_memory(mb);
+            // A start script with its own -Xmx (start.bat packs) gets it too.
+            hopper_core::hosting::script::set_script_memory(&e.root, mb)?;
         }
         if let Some(p) = b.preset {
             let preset = match p.as_str() {
@@ -197,6 +198,22 @@ async fn put_jvm(
             let major = java_of(&e).1.unwrap_or(21);
             anyhow::ensure!(preset.supported(major), "{} needs a newer Java than this server's (Java {major}).", preset.label());
             a.set_preset(preset, major);
+        }
+        if let Some(t) = b.flags_text {
+            let p = JvmArgs::parse(&t);
+            a.flags = p.flags;
+            if p.xmx_mb.is_some() {
+                a.xmx_mb = p.xmx_mb;
+            }
+            if p.xms_mb.is_some() {
+                a.xms_mb = p.xms_mb;
+            }
+            // Java won't start with a minimum heap above the maximum.
+            if let (Some(min), Some(max)) = (a.xms_mb, a.xmx_mb) {
+                if min > max {
+                    a.xms_mb = Some(max);
+                }
+            }
         }
         a.save(&e.root)
     })
@@ -283,97 +300,7 @@ async fn player_action(
     Ok(Json(json!({ "ok": true })))
 }
 
-// ---- backups -------------------------------------------------------------------------
-
-async fn backups(
-    State(app): State<Arc<App>>,
-    headers: HeaderMap,
-    method: Method,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
-    let e = entry(&app, &headers, &method, &id)?;
-    let root = e.root.clone();
-    let list = blocking(move || Ok(backup::list(&root))).await?;
-    let total: u64 = list.iter().map(|b| b.size).sum();
-    let free = app.host.read().unwrap().disk_free;
-    Ok(Json(json!({ "backups": list, "total_size": total, "disk_free": free, "folder": backup::DIR })))
-}
-
-#[derive(Deserialize)]
-struct MakeBody {
-    #[serde(default)]
-    worlds_only: bool,
-    #[serde(default)]
-    note: String,
-}
-
-async fn make_backup(
-    State(app): State<Arc<App>>,
-    headers: HeaderMap,
-    method: Method,
-    Path(id): Path<String>,
-    Json(b): Json<MakeBody>,
-) -> ApiResult<Json<Value>> {
-    let e = entry(&app, &headers, &method, &id)?;
-    let scope = if b.worlds_only { Scope::Worlds } else { Scope::Full };
-    let a = app.clone();
-    let job = crate::pack_api::spawn(&app, format!("Backing up {}", e.name), move |job| {
-        let r = backup::make(&e.root, scope, Kind::Manual, b.note.trim(), Some(&e.server), job)?;
-        let text = format!("{} backed up ({})", e.name, r.name);
-        let ev = crate::webhooks::Event { event: "backup", server_id: e.id.clone(), server: e.name.clone(), text, at: crate::webhooks::now() };
-        crate::webhooks::emit(&a, vec![ev]);
-        Ok(r)
-    });
-    Ok(Json(json!({ "job": job })))
-}
-
-async fn delete_backup(
-    State(app): State<Arc<App>>,
-    headers: HeaderMap,
-    method: Method,
-    Path((id, name)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
-    let e = entry(&app, &headers, &method, &id)?;
-    log::info!("{}: deleting backup {name}", e.name);
-    blocking(move || backup::delete(&e.root, &name)).await?;
-    Ok(Json(json!({ "ok": true })))
-}
-
-async fn backup_entries(
-    State(app): State<Arc<App>>,
-    headers: HeaderMap,
-    method: Method,
-    Path((id, name)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
-    let e = entry(&app, &headers, &method, &id)?;
-    let list = blocking(move || backup::entries(&e.root, &name)).await?;
-    Ok(Json(json!({ "entries": list })))
-}
-
-#[derive(Deserialize)]
-struct RestoreBody {
-    #[serde(default)]
-    paths: Vec<String>,
-}
-
-async fn restore_backup(
-    State(app): State<Arc<App>>,
-    headers: HeaderMap,
-    method: Method,
-    Path((id, name)): Path<(String, String)>,
-    Json(b): Json<RestoreBody>,
-) -> ApiResult<Json<Value>> {
-    let e = entry(&app, &headers, &method, &id)?;
-    if e.server.state().is_alive() {
-        return Err(conflict(format!("Stop {} before restoring a backup.", e.name)));
-    }
-    log::info!("{}: restoring {name} ({} paths)", e.name, if b.paths.is_empty() { "all".into() } else { b.paths.len().to_string() });
-    let job = crate::pack_api::spawn(&app, format!("Restoring {}", e.name), move |job| {
-        let n = backup::restore(&e.root, &name, &b.paths, job)?;
-        Ok(json!({ "files": n }))
-    });
-    Ok(Json(json!({ "job": job })))
-}
+// Backups: see backups_api.rs.
 
 // ---- schedule ---------------------------------------------------------------------------
 
@@ -424,22 +351,59 @@ async fn loader_versions(
     method: Method,
     Path(mc): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    use hopper_core::hosting::create;
     require(&app, &headers, &method)?;
-    let list = blocking(move || hopper_core::cf::loader_versions(&mc)).await?;
+    // The mod loaders' lists, Paper's and Purpur's builds and Forge's
+    // recommended version, fetched at once. A list that fails is left out
+    // (old Minecraft versions have no NeoForge, Paper starts at 1.8...).
+    let (list, paper, purpur, forge_pick) = blocking(move || {
+        Ok(std::thread::scope(|s| {
+            let l = s.spawn(|| hopper_core::cf::loader_versions(&mc).unwrap_or_default());
+            let p = s.spawn(|| create::paper_builds(&mc).unwrap_or_default());
+            let u = s.spawn(|| create::purpur_builds(&mc).unwrap_or_default());
+            let f = s.spawn(|| create::forge_promoted(&mc));
+            (
+                l.join().unwrap_or_default(),
+                p.join().unwrap_or_default(),
+                u.join().unwrap_or_default(),
+                f.join().ok().flatten(),
+            )
+        }))
+    })
+    .await?;
     let mut by: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for l in list {
         if let Some((kind, v)) = l.name.split_once('-') {
             by.entry(kind.to_string()).or_default().push(v.to_string());
         }
     }
-    Ok(Json(json!({ "loaders": by })))
+    for (kind, builds) in [("paper", paper), ("purpur", purpur)] {
+        if !builds.is_empty() {
+            by.insert(kind.to_string(), builds);
+        }
+    }
+    let mut recommended = serde_json::Map::new();
+    // Forge's recommended version goes first, so forms pick it by default.
+    if let (Some(pick), Some(forge)) = (forge_pick, by.get_mut("forge"))
+        && let Some(i) = forge.iter().position(|v| *v == pick)
+    {
+        let v = forge.remove(i);
+        forge.insert(0, v.clone());
+        recommended.insert("forge".into(), json!(v));
+    }
+    for kind in ["paper", "purpur"] {
+        if let Some(first) = by.get(kind).and_then(|b| b.first()) {
+            recommended.insert(kind.into(), json!(first));
+        }
+    }
+    Ok(Json(json!({ "loaders": by, "recommended": recommended })))
 }
 
 #[derive(Deserialize)]
 struct CreateBody {
     name: String,
     mc_version: String,
-    /// vanilla, fabric, quilt, neoforge.
+    /// vanilla, paper, purpur, fabric, quilt, neoforge, forge.
     loader: String,
     #[serde(default)]
     loader_version: String,
@@ -452,6 +416,26 @@ struct CreateBody {
     address: String,
     /// The person creating it agreed to the Minecraft EULA in the form.
     accept_eula: bool,
+}
+
+/// The server type a create body asks for. Versions end up in download
+/// URLs, so they may only hold version characters.
+fn server_loader(kind: &str, version: &str) -> Result<hopper_core::hosting::ServerLoader, String> {
+    use hopper_core::hosting::ServerLoader;
+    if !version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_')) {
+        return Err(format!("{version} isn't a version."));
+    }
+    let opt = (!version.is_empty()).then(|| version.to_string());
+    Ok(match kind {
+        "vanilla" => ServerLoader::Vanilla,
+        "paper" => ServerLoader::Paper(opt),
+        "purpur" => ServerLoader::Purpur(opt),
+        "fabric" => ServerLoader::Fabric(opt),
+        "quilt" => ServerLoader::Quilt(opt),
+        "neoforge" => ServerLoader::NeoForge(opt.ok_or("Pick a NeoForge version.")?),
+        "forge" => ServerLoader::Forge(opt.ok_or("Pick a Forge version.")?),
+        other => return Err(format!("Hopper Server can't make {other} servers.")),
+    })
 }
 
 /// A Java that runs `mc`'s server: an installed one, else Temurin downloaded.
@@ -467,7 +451,7 @@ pub(crate) fn java_for(mc: &str, job: &hopper_core::jobs::Job) -> anyhow::Result
 }
 
 async fn create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<CreateBody>) -> ApiResult<Json<Value>> {
-    use hopper_core::hosting::{CreateOptions, ServerLoader};
+    use hopper_core::hosting::CreateOptions;
     require(&app, &headers, &method)?;
     if !b.accept_eula {
         return Err(bad("Agree to the Minecraft EULA to make a server."));
@@ -475,14 +459,7 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     let Some(root) = app.cfg.read().unwrap().servers_root.clone() else {
         return Err(bad("Set the servers folder first (hopperd --servers-root)."));
     };
-    let loader = match b.loader.as_str() {
-        "vanilla" => ServerLoader::Vanilla,
-        "fabric" => ServerLoader::Fabric((!b.loader_version.is_empty()).then(|| b.loader_version.clone())),
-        "quilt" => ServerLoader::Quilt((!b.loader_version.is_empty()).then(|| b.loader_version.clone())),
-        "neoforge" if !b.loader_version.is_empty() => ServerLoader::NeoForge(b.loader_version.clone()),
-        "neoforge" => return Err(bad("Pick a NeoForge version.")),
-        other => return Err(bad(format!("Hopper Server can't make {other} servers yet."))),
-    };
+    let loader = server_loader(&b.loader, b.loader_version.trim()).map_err(bad)?;
     let address = match b.address.trim() {
         "" => None,
         a => Some(hopper_core::hosting::router::clean_address(a).map_err(bad)?),
@@ -533,5 +510,16 @@ mod tests {
     fn names() {
         assert!(super::valid_name("Steve") && super::valid_name("a_b_9"));
         assert!(!super::valid_name("x y") && !super::valid_name("Steve;op me") && !super::valid_name(""));
+    }
+
+    #[test]
+    fn server_types() {
+        use hopper_core::hosting::ServerLoader;
+        assert_eq!(super::server_loader("paper", "").unwrap(), ServerLoader::Paper(None));
+        assert_eq!(super::server_loader("purpur", "2329").unwrap(), ServerLoader::Purpur(Some("2329".into())));
+        assert_eq!(super::server_loader("forge", "47.4.10").unwrap(), ServerLoader::Forge("47.4.10".into()));
+        assert!(super::server_loader("forge", "").is_err());
+        assert!(super::server_loader("forge", "47/../x").is_err());
+        assert!(super::server_loader("bukkit", "").is_err());
     }
 }

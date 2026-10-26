@@ -8,6 +8,11 @@
   import Spark from './Spark.svelte';
   import NewServer from './NewServer.svelte';
   import Addr from './Addr.svelte';
+  import ServerAlerts from './ServerAlerts.svelte';
+
+  // Alerts about the PC itself (drive nearly full, memory): the server
+  // pages show them too, but this is where they belong.
+  const PANEL = { id: '', state: '' };
 
   let making = $state(false);
 
@@ -20,6 +25,7 @@
 <div class="pad">
   <div class="row hd"><h2>Overview</h2><span class="sp"></span>
     <button class="btn pri" onclick={() => (making = true)}><Plus size={14} />New server</button></div>
+  <div class="alerts"><ServerAlerts server={PANEL} part="banner" /></div>
   <div class="grid4">
     <div class="card stat">
       <div class="lbl">CPU{h?.cpu_name ? ` · ${h.cpu_name.replace(/\(R\)|\(TM\)|CPU|Processor|\d+-Core/g, '').trim()}` : ''}</div>
@@ -99,6 +105,7 @@
 {#if making}<NewServer close={() => (making = false)} />{/if}
 
 <style>
+  .alerts :global(.ban) { margin: 0 0 10px; }
   .icl { display: flex; flex: none; }
   .pad { padding: 18px; }
   h2 { font-size: 17px; }

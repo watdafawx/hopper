@@ -1,5 +1,6 @@
 //! Webhooks: Discord or any URL hears when servers start, stop, crash,
-//! players join or leave, backups finish and schedules act.
+//! players join or leave, backups finish, schedules act and alerts fire
+//! (low TPS, a drive nearly full, the PC nearly out of memory).
 //!
 //! Events come from comparing each live snapshot with the one before, and
 //! from the scheduler. Hooks live in `webhooks.json` in the data folder;
@@ -32,6 +33,10 @@ pub const EVENTS: &[(&str, &str)] = &[
     ("sleep", "Server put to sleep (nobody on)"),
     ("schedule", "Scheduled restarts and warnings"),
     ("problem", "Something the panel tried failed"),
+    ("tps", "Low TPS"),
+    ("disk", "Drive nearly full"),
+    ("ram", "PC nearly out of memory"),
+    ("copy_failed", "Off-site backup copy failed"),
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,7 +112,8 @@ fn color(event: &str) -> u32 {
     match event {
         "start" | "join" => 0x22c55e,
         "stop" | "leave" => 0x71717a,
-        "crash" | "problem" => 0xef4444,
+        "crash" | "problem" | "copy_failed" => 0xef4444,
+        "tps" | "disk" | "ram" => 0xeab308,
         "backup" => 0x60a5fa,
         _ => 0xf97316,
     }
@@ -224,6 +230,9 @@ fn changes(before: &HashMap<String, Seen>, s: &crate::servers::Summary) -> Vec<E
 
 fn from_schedule(app: &App, e: &ScheduleEvent) -> Option<Event> {
     let entry = app.servers.list().into_iter().find(|x| x.root == e.root())?;
+    if let ScheduleEvent::CrashRestarted { attempt, .. } = e {
+        crate::alerts::note_crash_restart(app, &entry.id, &entry.name, *attempt);
+    }
     let kind = match e {
         ScheduleEvent::BackedUp { .. } => "backup",
         ScheduleEvent::Failed { .. } | ScheduleEvent::GaveUp { .. } => "problem",
@@ -232,8 +241,11 @@ fn from_schedule(app: &App, e: &ScheduleEvent) -> Option<Event> {
     Some(Event { event: kind, server_id: entry.id.clone(), server: entry.name.clone(), text: e.message(), at: now() })
 }
 
-/// Watches the live snapshot and the scheduler for as long as the panel runs.
+/// Watches the live snapshot and the scheduler for as long as the panel runs,
+/// and starts the alert checks and off-site backup copies.
 pub fn watch(app: Arc<App>) {
+    crate::alerts::start(app.clone());
+    crate::offsite::start(app.clone());
     tokio::spawn(async move {
         let mut rx = app.snapshot.subscribe();
         let mut before: HashMap<String, Seen> = HashMap::new();
@@ -267,6 +279,9 @@ pub fn watch(app: Arc<App>) {
 
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
+        .merge(crate::backups_api::routes())
+        .merge(crate::alerts::routes())
+        .merge(crate::logs_api::routes())
         .route("/api/v1/webhooks", get(list).post(create))
         .route("/api/v1/webhooks/{id}", put(update).delete(remove))
         .route("/api/v1/webhooks/{id}/test", post(test))

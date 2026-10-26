@@ -167,6 +167,27 @@ impl Servers {
         self.entries.read().unwrap().iter().find(|e| e.id == id).cloned()
     }
 
+    /// Reads a server's loader, version and memory from its files again
+    /// (after its version changed), keeping its id and process.
+    pub fn reload_info(&self, id: &str) {
+        let mut entries = self.entries.write().unwrap();
+        let Some(i) = entries.iter().position(|e| e.id == id) else { return };
+        let e = &entries[i];
+        let info = server::load(&e.root);
+        let fresh = Entry {
+            id: e.id.clone(),
+            panel_id: e.panel_id.clone(),
+            root: e.root.clone(),
+            name: e.name.clone(),
+            loader: info.loader.clone(),
+            minecraft: hopper_core::hosting::script::start_info(&e.root).minecraft,
+            max_memory: info.max_memory.clone(),
+            managed_by: e.managed_by,
+            server: e.server.clone(),
+        };
+        entries[i] = Arc::new(fresh);
+    }
+
     pub fn summary(&self, e: &Entry) -> Summary {
         let state = e.server.state();
         let t = e.server.tracker();

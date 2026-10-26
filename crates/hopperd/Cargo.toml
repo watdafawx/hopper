@@ -1,6 +1,6 @@
 [package]
 name = "hopperd"
-version = "0.10.0"
+version = "0.11.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -31,6 +31,8 @@ tower-http = { version = "0.6", features = ["compression-gzip"] }
 argon2 = "0.5"
 getrandom = "0.3"
 sha2 = "0.10"
+# Off-site backup copies: encryption and S3 request signing (rustls already uses it).
+ring = "0.17"
 include_dir = "0.7"
 mdns-sd.workspace = true
 if-addrs = "0.13"

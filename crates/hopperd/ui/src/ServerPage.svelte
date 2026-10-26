@@ -2,9 +2,9 @@
   import { session, outside } from './lib/me.svelte.js';
   import Avatar from './Avatar.svelte';
   import { onMount, onDestroy, tick } from 'svelte';
-  import { Play, Square, RotateCw, Skull, CornerDownLeft, Search, ArrowDown, Gauge, Users, Info } from '@lucide/svelte';
+  import { Play, Square, RotateCw, Skull, CornerDownLeft, Search, ArrowDown, Gauge, Users, Info, Share2, PackagePlus } from '@lucide/svelte';
   import { live, consoles, history, follow, unfollow } from './lib/live.svelte.js';
-  import { post } from './lib/api.js';
+  import { api, post } from './lib/api.js';
   import { bytes, uptime, color, xmx, stateLabel } from './lib/format.js';
   import { power } from './lib/power.js';
   import { say } from './lib/toast.svelte.js';
@@ -17,7 +17,12 @@
   import Schedule from './Schedule.svelte';
   import Settings from './Settings.svelte';
   import Mods from './Mods.svelte';
+  import Worlds from './Worlds.svelte';
   import Addr from './Addr.svelte';
+  import ServerAlerts from './ServerAlerts.svelte';
+  import ShareLog from './ShareLog.svelte';
+  import PackUpdate from './PackUpdate.svelte';
+  import { notePackCheck, shortVersions } from './lib/packs.svelte.js';
 
   let { id, tab = 'console', path = '' } = $props();
 
@@ -40,6 +45,7 @@
   let histAt = -1;
   let box = $state();
   let stuck = $state(true);
+  let sharing = $state(null);
 
   function kind(line) {
     if (/\[Hopper\]/.test(line)) return 'h';
@@ -106,7 +112,26 @@
     }
   }
 
-  onMount(() => follow(id));
+  // The server's modpack and newer versions of it (cached by the panel).
+  let packCheck = $state(null);
+  /** The check the update dialog opened with (it keeps it while the check refreshes). */
+  let packOpen = $state(null);
+  const packNewer = $derived(packCheck?.pack ? packCheck.newer || [] : []);
+  const packShort = $derived(packNewer.length ? shortVersions(packCheck.pack.current.name, packNewer[0].name) : null);
+
+  async function checkPack(force = false) {
+    try {
+      packCheck = await api(`/servers/${encodeURIComponent(id)}/pack/check${force ? '?force=1' : ''}`);
+      notePackCheck(id, packCheck);
+    } catch {
+      // no CurseForge key, offline, or not a pack: no notice
+    }
+  }
+
+  onMount(() => {
+    follow(id);
+    checkPack();
+  });
   onDestroy(() => unfollow(id));
 </script>
 
@@ -119,7 +144,8 @@
       <div class="row wrap">
         <h2>{s.name}</h2>
         <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateLabel[s.state]}{alive ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
-        {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}
+        {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />
+        {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => (packOpen = packCheck)}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
       </div>
       <div class="small muted ell">{s.loader || 'Minecraft'}{s.version ? ` · Minecraft ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gap={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gap">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
     </div>
@@ -134,10 +160,13 @@
     </div>
   </div>
 
+  <ServerAlerts server={s} part="banner" />
+
   <nav class="tabs">
     <button class:on={tab === 'console'} onclick={() => nav('console')}>Console</button>
     <button class:on={filesTab} onclick={() => nav('files')}>Files</button>
     <button class:on={tab === 'mods'} onclick={() => nav('mods')}>Mods</button>
+    <button class:on={tab === 'worlds'} onclick={() => nav('worlds')}>Worlds</button>
     <button class:on={tab === 'players'} onclick={() => nav('players')}>Players</button>
     <button class:on={tab === 'backups'} onclick={() => nav('backups')}>Backups</button>
     <button class:on={tab === 'schedule'} onclick={() => nav('schedule')}>Schedule</button>
@@ -152,6 +181,8 @@
     <div class="full"><Trash server={s} close={() => nav('files')} /></div>
   {:else if tab === 'mods'}
     <div class="full scroll"><Mods server={s} /></div>
+  {:else if tab === 'worlds'}
+    <div class="full scroll"><Worlds server={s} openFiles={(p) => nav('files', p)} openBackups={() => nav('backups')} /></div>
   {:else if tab === 'players'}
     <div class="full scroll"><Players server={s} /></div>
   {:else if tab === 'backups'}
@@ -171,6 +202,7 @@
         <button class="chip" class:on={filter === 'c'} onclick={() => (filter = 'c')}>Chat</button>
         <span class="sp"></span>
         <div class="input find"><Search size={13} /><input placeholder="Filter" bind:value={query} /></div>
+        <button class="btn sm" title="Share a log or crash report on mclo.gs" onclick={() => (sharing = { path: '' })}><Share2 size={13} />Share log</button>
       </div>
       <div class="lines" bind:this={box} onscroll={onScroll}>
         {#each shown as l (l.i)}
@@ -196,6 +228,7 @@
         <Spark values={history[`${id}.cpu`]} color="#f97316" />
         <div class="t gap">RAM<b>{bytes(s.mem_bytes)}{cap ? ` / ${bytes(cap)}` : ''}</b></div>
         <Spark values={history[`${id}.mem`]} color="#60a5fa" />
+        <ServerAlerts server={s} part="live" />
       </div>
       <div class="card">
         <h3><Users size={14} />Players <span class="muted fw">{s.players.length} / {s.max_players}</span></h3>
@@ -219,6 +252,9 @@
   {/if}
 {/if}
 
+
+{#if sharing && s}<ShareLog server={s} path={sharing.path} onClose={() => (sharing = null)} />{/if}
+{#if packOpen && s}<PackUpdate server={s} check={packOpen} onClose={() => (packOpen = null)} onDone={() => checkPack(true)} openFiles={(p) => nav('files', p)} />{/if}
 <style>
   .pad { padding: 18px; }
   .head { display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; flex-wrap: wrap; }
@@ -227,6 +263,8 @@
   h2 { font-size: 17px; font-weight: 700; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sleep { color: var(--gold); }
+  .packup { cursor: pointer; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+  .packup:hover { filter: brightness(1.2); }
   .gap { margin-left: 6px; }
   .tabs { display: flex; gap: 20px; padding: 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
   .tabs button { padding: 9px 0; color: var(--subtle); font-weight: 500; }

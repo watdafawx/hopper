@@ -77,7 +77,7 @@
     <div class="sec lbl">Backups</div>
     <div class="f"><div><div>Back up every</div><div class="tiny muted">Hours, while the server runs. 0: off.</div></div>
       <div class="input w"><input type="number" min="0" max="168" bind:value={s.backup_every_hours} /></div></div>
-    <div class="f"><div>Scheduled backups kept</div><div class="input w"><input type="number" min="1" max="500" bind:value={s.backup_keep} /></div></div>
+    <div class="f"><div><div>Which ones are kept</div><div class="tiny muted">Set in the Backups tab: the newest {s.backup_keep}, and one a day or a week if you like.</div></div></div>
     <div class="f"><div>What they hold</div>
       <div class="seg">
         <button class:on={s.backup_scope === 'worlds'} onclick={() => (s.backup_scope = 'worlds')}>Worlds</button>

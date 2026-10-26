@@ -1022,6 +1022,26 @@ fn inline_md(s: &str) -> String {
     out
 }
 
+/// Latin letters with a mark, like `eacute` (é) or `Ouml` (Ö): pack pages
+/// write "Pok&eacute;mon".
+fn accented(ent: &str) -> Option<char> {
+    const MARKS: [(&str, &str, &str); 7] = [
+        ("acute", "aeiouyAEIOUY", "áéíóúýÁÉÍÓÚÝ"),
+        ("grave", "aeiouAEIOU", "àèìòùÀÈÌÒÙ"),
+        ("circ", "aeiouAEIOU", "âêîôûÂÊÎÔÛ"),
+        ("uml", "aeiouyAEIOU", "äëïöüÿÄËÏÖÜ"),
+        ("tilde", "anoANO", "ãñõÃÑÕ"),
+        ("cedil", "cC", "çÇ"),
+        ("ring", "aA", "åÅ"),
+    ];
+    let mut cs = ent.chars();
+    let letter = cs.next()?;
+    let mark = cs.as_str();
+    let (_, from, to) = MARKS.iter().find(|(m, _, _)| *m == mark)?;
+    let i = from.chars().position(|c| c == letter)?;
+    to.chars().nth(i)
+}
+
 pub fn decode_entities(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
@@ -1056,6 +1076,10 @@ pub fn decode_entities(s: &str) -> String {
             "trade" => Some('™'),
             "rarr" => Some('→'),
             "larr" => Some('←'),
+            "deg" => Some('°'),
+            "times" => Some('×'),
+            "szlig" => Some('ß'),
+            _ if accented(ent).is_some() => accented(ent),
             _ if ent.starts_with("#x") => u32::from_str_radix(&ent[2..], 16)
                 .ok()
                 .and_then(char::from_u32),
@@ -1629,6 +1653,7 @@ let x = 1;
             decode_entities("a &amp; b &#8217; &#x2014; &bogus"),
             "a & b ’ — &bogus"
         );
+        assert_eq!(decode_entities("Pok&eacute;mon &Ouml; &ntilde; &ccedil; &xacute;"), "Pokémon Ö ñ ç &xacute;");
         // Moonlight Lib's description: an emoji right after a bare "&".
         let emoji = "Tips &abcd\u{1f600}\u{1f600}x"; // byte 10 is inside the 2nd emoji
         assert_eq!(decode_entities(emoji), emoji);

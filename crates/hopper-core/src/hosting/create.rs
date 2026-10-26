@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 const MOJANG_MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const FABRIC_META: &str = "https://meta.fabricmc.net/v2";
 const QUILT_META: &str = "https://meta.quiltmc.org/v3";
+const PAPER_API: &str = "https://fill.papermc.io/v3/projects/paper";
+const PURPUR_API: &str = "https://api.purpurmc.org/v2/purpur";
+const FORGE_PROMOS: &str = "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json";
 
 /// The server software to install.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +33,10 @@ pub enum ServerLoader {
     NeoForge(String),
     /// Forge's own version without the game version, e.g. "47.3.0".
     Forge(String),
+    /// Paper build number ("133"); `None` picks the newest stable one.
+    Paper(Option<String>),
+    /// Purpur build number ("2329"); `None` picks the newest one.
+    Purpur(Option<String>),
 }
 
 impl ServerLoader {
@@ -49,6 +56,10 @@ impl ServerLoader {
             ServerLoader::Fabric(Some(ver("fabric-")))
         } else if low.starts_with("quilt-") {
             ServerLoader::Quilt(Some(ver("quilt-")))
+        } else if low.starts_with("paper-") {
+            ServerLoader::Paper(Some(ver("paper-")).filter(|v| !v.is_empty()))
+        } else if low.starts_with("purpur-") {
+            ServerLoader::Purpur(Some(ver("purpur-")).filter(|v| !v.is_empty()))
         } else {
             bail!("Hopper can't host a server for loader {loader}")
         })
@@ -61,11 +72,19 @@ impl ServerLoader {
             ServerLoader::Quilt(_) => "Quilt",
             ServerLoader::NeoForge(_) => "NeoForge",
             ServerLoader::Forge(_) => "Forge",
+            ServerLoader::Paper(_) => "Paper",
+            ServerLoader::Purpur(_) => "Purpur",
         }
     }
 
+    /// Runs mods (more memory by default, modded server.properties).
     pub fn is_modded(&self) -> bool {
-        *self != ServerLoader::Vanilla
+        !matches!(self, ServerLoader::Vanilla | ServerLoader::Paper(_) | ServerLoader::Purpur(_))
+    }
+
+    /// Runs Bukkit/Spigot/Paper plugins from a `plugins` folder.
+    pub fn runs_plugins(&self) -> bool {
+        matches!(self, ServerLoader::Paper(_) | ServerLoader::Purpur(_))
     }
 }
 
@@ -97,7 +116,10 @@ impl CreateOptions {
             minecraft: self.mc_version.clone(),
             loader: match &self.loader {
                 ServerLoader::Vanilla => "Vanilla".into(),
-                ServerLoader::Fabric(v) | ServerLoader::Quilt(v) => {
+                ServerLoader::Fabric(v)
+                | ServerLoader::Quilt(v)
+                | ServerLoader::Paper(v)
+                | ServerLoader::Purpur(v) => {
                     format!("{} {}", self.loader.name(), v.clone().unwrap_or_default()).trim().to_string()
                 }
                 ServerLoader::NeoForge(v) | ServerLoader::Forge(v) => format!("{} {v}", self.loader.name()),
@@ -211,6 +233,8 @@ pub fn install_loader(
             )))
         }
         ServerLoader::Forge(v) => install_forge(root, mc, v, java, job),
+        ServerLoader::Paper(v) => install_paper(root, mc, v.as_deref(), job),
+        ServerLoader::Purpur(v) => install_purpur(root, mc, v.as_deref(), job),
     }
 }
 
@@ -388,6 +412,140 @@ pub fn install_forge(root: &Path, mc: &str, version: &str, java: &Path, job: &Jo
     let out = out?;
     cleanup_installer_files(root);
     forge_target(root, &full).with_context(|| format!("the Forge installer did not finish: {}", out.last_line))
+}
+
+/// A bare file name from an API answer ("paper-1.21.1-133.jar").
+fn plain_file_name(n: &str) -> bool {
+    !n.is_empty() && !n.contains(['/', '\\', ':']) && !n.contains("..")
+}
+
+/// Paper's builds for `mc`, newest first: the stable ones, or every build
+/// when there's no stable one yet (a new Minecraft version). Empty when
+/// Paper doesn't support `mc`.
+pub fn paper_builds(mc: &str) -> anyhow::Result<Vec<String>> {
+    Ok(paper_build_list(&fetch_paper_builds(mc)?))
+}
+
+fn fetch_paper_builds(mc: &str) -> anyhow::Result<Value> {
+    // A version Paper doesn't have answers 404.
+    match crate::cf::agent().get(&format!("{PAPER_API}/versions/{mc}/builds")).call() {
+        Ok(mut r) => Ok(r.body_mut().with_config().limit(64 << 20).read_json()?),
+        Err(ureq::Error::StatusCode(404)) => Ok(Value::Array(Vec::new())),
+        Err(e) => Err(e).with_context(|| format!("fetching Paper's builds for {mc}")),
+    }
+}
+
+/// The builds in Paper's `/versions/{mc}/builds` answer, newest first.
+fn paper_build_list(list: &Value) -> Vec<String> {
+    paper_candidates(list)
+        .into_iter()
+        .filter_map(|b| b["id"].as_u64())
+        .map(|id| id.to_string())
+        .collect()
+}
+
+/// Stable builds (or all when none is stable), newest first.
+fn paper_candidates(list: &Value) -> Vec<&Value> {
+    let all: Vec<&Value> = list.as_array().into_iter().flatten().collect();
+    let stable: Vec<&Value> = all.iter().copied().filter(|b| b["channel"] == "STABLE").collect();
+    let mut pick = if stable.is_empty() { all } else { stable };
+    pick.sort_by_key(|b| std::cmp::Reverse(b["id"].as_u64().unwrap_or(0)));
+    pick
+}
+
+/// Paper's server jar for `mc` (build `build`, or the newest stable),
+/// checked against its SHA-256.
+pub fn install_paper(root: &Path, mc: &str, build: Option<&str>, job: &Job) -> anyhow::Result<LaunchTarget> {
+    job.detail(format!("Finding Paper for Minecraft {mc}"));
+    let list = fetch_paper_builds(mc)?;
+    let b = match build {
+        Some(id) => list
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|b| b["id"].as_u64().map(|n| n.to_string()).as_deref() == Some(id))
+            .with_context(|| format!("Paper has no build {id} for Minecraft {mc}"))?,
+        None => *paper_candidates(&list)
+            .first()
+            .with_context(|| format!("Paper doesn't support Minecraft {mc}"))?,
+    };
+    let d = &b["downloads"]["server:default"];
+    let url = d["url"].as_str().context("Paper's build has no server download")?;
+    let file = d["name"].as_str().filter(|n| plain_file_name(n)).unwrap_or("paper.jar").to_string();
+    let dest = root.join(&file);
+    job.detail(format!("Downloading Paper {mc} build {}", b["id"]));
+    download(url, &dest, d["size"].as_u64(), job)?;
+    if let Some(want) = d["checksums"]["sha256"].as_str() {
+        use sha2::Digest as _;
+        let got = format!("{:x}", sha2::Sha256::digest(fs::read(&dest)?));
+        if !got.eq_ignore_ascii_case(want) {
+            let _ = fs::remove_file(&dest);
+            bail!("Paper didn't download correctly (checksum mismatch); try again");
+        }
+    }
+    fs::create_dir_all(root.join("plugins"))?;
+    Ok(LaunchTarget::Jar(file))
+}
+
+/// Purpur's builds for `mc`, newest first; empty when Purpur doesn't
+/// support `mc`.
+pub fn purpur_builds(mc: &str) -> anyhow::Result<Vec<String>> {
+    match crate::cf::agent().get(&format!("{PURPUR_API}/{mc}")).call() {
+        Ok(mut r) => Ok(purpur_build_list(&r.body_mut().read_json()?)),
+        Err(ureq::Error::StatusCode(404)) => Ok(Vec::new()),
+        Err(e) => Err(e).with_context(|| format!("fetching Purpur's builds for {mc}")),
+    }
+}
+
+/// The builds in Purpur's `/v2/purpur/{mc}` answer, newest first.
+fn purpur_build_list(v: &Value) -> Vec<String> {
+    let mut all: Vec<String> = v["builds"]["all"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b.as_str().map(String::from))
+        .filter(|b| !b.is_empty() && b.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    all.sort_by_key(|b| std::cmp::Reverse(b.parse::<u64>().unwrap_or(0)));
+    all
+}
+
+/// Purpur's server jar for `mc` (build `build`, or the newest).
+pub fn install_purpur(root: &Path, mc: &str, build: Option<&str>, job: &Job) -> anyhow::Result<LaunchTarget> {
+    job.detail(format!("Finding Purpur for Minecraft {mc}"));
+    let build = match build {
+        Some(b) => b.to_string(),
+        None => purpur_builds(mc)?
+            .into_iter()
+            .next()
+            .with_context(|| format!("Purpur doesn't support Minecraft {mc}"))?,
+    };
+    anyhow::ensure!(!build.is_empty() && build.chars().all(|c| c.is_ascii_digit()), "bad Purpur build {build}");
+    let file = format!("purpur-{mc}-{build}.jar");
+    anyhow::ensure!(plain_file_name(&file), "bad Minecraft version {mc}");
+    let dest = root.join(&file);
+    job.detail(format!("Downloading Purpur {mc} build {build}"));
+    download(&format!("{PURPUR_API}/{mc}/{build}/download"), &dest, None, job)?;
+    // A jar is a zip; an error page isn't.
+    if !fs::read(&dest).is_ok_and(|b| b.starts_with(b"PK")) {
+        let _ = fs::remove_file(&dest);
+        bail!("Purpur {mc} build {build} didn't download correctly; try again");
+    }
+    fs::create_dir_all(root.join("plugins"))?;
+    Ok(LaunchTarget::Jar(file))
+}
+
+/// Forge's recommended version for `mc` ("47.4.10"), else its latest one.
+pub fn forge_promoted(mc: &str) -> Option<String> {
+    forge_promo(&fetch_json(FORGE_PROMOS).ok()?, mc)
+}
+
+fn forge_promo(promos: &Value, mc: &str) -> Option<String> {
+    let p = &promos["promos"];
+    p[format!("{mc}-recommended")]
+        .as_str()
+        .or_else(|| p[format!("{mc}-latest")].as_str())
+        .map(String::from)
 }
 
 /// What run.bat should start after a Forge install of `full` ("1.20.1-47.3.0").
@@ -660,6 +818,51 @@ mod tests {
             ServerLoader::Fabric(Some("0.16.5".into()))
         );
         assert!(ServerLoader::from_instance("liteloader-1").is_err());
+    }
+
+    #[test]
+    fn plugin_server_loaders() {
+        assert_eq!(ServerLoader::from_instance("paper-133").unwrap(), ServerLoader::Paper(Some("133".into())));
+        assert_eq!(ServerLoader::from_instance("paper-").unwrap(), ServerLoader::Paper(None));
+        assert_eq!(ServerLoader::from_instance("Purpur-2329").unwrap(), ServerLoader::Purpur(Some("2329".into())));
+        assert!(!ServerLoader::Paper(None).is_modded() && ServerLoader::Purpur(None).runs_plugins());
+        assert!(ServerLoader::Forge("47.4.10".into()).is_modded() && !ServerLoader::Forge(String::new()).runs_plugins());
+        let o = CreateOptions::new("x", Path::new("."), "1.21.1", ServerLoader::Paper(Some("133".into())), Path::new("java"));
+        assert_eq!(o.memory_mb, 2048);
+        assert_eq!(o.hosted_meta().loader, "Paper 133");
+    }
+
+    #[test]
+    fn paper_build_lists() {
+        let builds = serde_json::json!([
+            { "id": 131, "channel": "STABLE" },
+            { "id": 134, "channel": "BETA" },
+            { "id": 133, "channel": "STABLE" },
+            { "id": 132, "channel": "STABLE" }
+        ]);
+        assert_eq!(paper_build_list(&builds), ["133", "132", "131"]);
+        // A new Minecraft version with only beta builds still lists them.
+        let beta = serde_json::json!([{ "id": 3, "channel": "BETA" }, { "id": 7, "channel": "ALPHA" }]);
+        assert_eq!(paper_build_list(&beta), ["7", "3"]);
+        assert!(paper_build_list(&serde_json::json!({ "message": "not found" })).is_empty());
+    }
+
+    #[test]
+    fn purpur_build_lists() {
+        let v = serde_json::json!({ "builds": { "latest": "2329", "all": ["2285", "2329", "999", "x"] } });
+        assert_eq!(purpur_build_list(&v), ["2329", "2285", "999"]);
+        assert!(purpur_build_list(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn forge_promotions() {
+        let p = serde_json::json!({ "promos": {
+            "1.20.1-latest": "47.4.12", "1.20.1-recommended": "47.4.10", "1.21.4-latest": "54.1.0"
+        } });
+        assert_eq!(forge_promo(&p, "1.20.1").as_deref(), Some("47.4.10"));
+        assert_eq!(forge_promo(&p, "1.21.4").as_deref(), Some("54.1.0"));
+        assert_eq!(forge_promo(&p, "1.99"), None);
+        assert!(plain_file_name("paper-1.21.1-133.jar") && !plain_file_name("../x.jar") && !plain_file_name("a\\b"));
     }
 
     #[test]

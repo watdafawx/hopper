@@ -5,16 +5,22 @@
 //! and that keeps running when Hopper restarts.
 
 pub mod backup;
+pub mod chunkstore;
+pub mod clone;
 pub mod create;
 pub mod jvm;
 pub mod local_panel;
 pub mod logparse;
+pub mod logshare;
 pub mod process;
 pub mod properties;
+pub mod rcon;
 pub mod router;
 pub mod schedule;
 pub mod script;
 pub mod server_pack;
+pub mod version_change;
+pub mod worlds;
 pub mod zip_import;
 
 pub use create::{

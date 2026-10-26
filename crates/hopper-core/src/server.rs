@@ -45,6 +45,21 @@ impl ServerInfo {
     pub fn mods_dir(&self) -> PathBuf {
         self.root.join("mods")
     }
+
+    /// Where the server is, for messages: its folder, or "TNP-LL8 on rig"
+    /// for a Hopper Server (its root is a stand-in path, not a folder).
+    pub fn place(&self, panels: &[crate::settings::HopperPanel]) -> String {
+        let Some(r) = &self.remote else {
+            return self.root.display().to_string();
+        };
+        let panel = panels
+            .iter()
+            .find(|p| p.id == r.panel)
+            .map(|p| p.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| crate::hopperd::host_name(&r.base));
+        format!("{} on {panel}", self.name)
+    }
 }
 
 /// Every folder under `root` with a `server.properties` is a server.
@@ -177,6 +192,36 @@ fn read_varint(r: &mut impl Read) -> anyhow::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn place_names_remote_servers() {
+        let mut s = ServerInfo {
+            name: "TNP-LL8".into(),
+            root: crate::hopperd::panel_root("p1", "TNP-LL8"),
+            manager: Manager::Unknown,
+            properties: BTreeMap::new(),
+            loader: None,
+            java: None,
+            max_memory: None,
+            remote: Some(crate::hopperd::Remote {
+                base: "https://192.168.50.3:8790".into(),
+                id: "x".into(),
+                ca: String::new(),
+                panel: "p1".into(),
+            }),
+        };
+        let panels = vec![crate::settings::HopperPanel {
+            id: "p1".into(),
+            name: "rig".into(),
+            url: String::new(),
+            ca: String::new(),
+        }];
+        assert_eq!(s.place(&panels), "TNP-LL8 on rig");
+        assert_eq!(s.place(&[]), "TNP-LL8 on 192.168.50.3");
+        s.remote = None;
+        s.root = PathBuf::from(r"G:\Minecraft\packs\TNP-LL8");
+        assert_eq!(s.place(&panels), r"G:\Minecraft\packs\TNP-LL8");
+    }
 
     #[test]
     fn varint_round_trip() {

@@ -4,7 +4,7 @@ A standalone panel for Minecraft servers: a web UI in any browser, and the API
 Hopper desktop uses to control the same servers. It runs on the machine that
 hosts the servers. Hopper desktop is not needed to use it.
 
-Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages. 0.7.0: Mods table like Hopper desktop. 0.8.0: mod profiles and finding the mod that breaks a server. 0.9.0: panel folder, importing and deleting servers. 0.10.0: double-click on Windows (portable, start with Windows or service, tray), Docker image on GHCR.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
+Status: **M6 (v1): servers, console, files (history, search, SFTP), mods, players, backups, schedules, settings, new servers; people with roles, webhooks, MCP; LAN, Tailscale and internet (HTTPS, two-factor); Windows service, systemd and Docker. 0.2.0: server addresses with sleeping servers. 0.4.0: servers other panels know run in place. 0.5.0: mods like Hopper desktop. 0.6.0: files explorer and settings pages. 0.7.0: Mods table like Hopper desktop. 0.8.0: mod profiles and finding the mod that breaks a server. 0.9.0: panel folder, importing and deleting servers. 0.10.0: double-click on Windows (portable, start with Windows or service, tray), Docker image on GHCR. 0.11.0: Browse and pack updates like Hopper desktop, worlds, alerts, deduplicated and off-site backups, copying servers, changing versions.** Plan and roadmap: [design/server-panel.md](../../design/server-panel.md).
 
 ## Run it
 
@@ -121,7 +121,7 @@ scan, NeoForge version, and server pack updates (run here as jobs).
 - Rate limits, an audit log of changes and sign-ins, and API tokens
   (read-only or full, per server, expiring) in Access & devices.
 
-Not yet: incremental and off-site backups (see the roadmap).
+Incremental and off-site backups: see 0.11.0 below.
 
 ## v1 extras (M6)
 
@@ -171,6 +171,23 @@ the address the player typed and passes them to that server's own port.
   `unknown_server`); per server in `.hopper-route.json` in its folder.
 - Servers see players as coming from 127.0.0.1 (no proxy forwarding yet).
 
+## Worlds, alerts, backups and copies (0.11.0)
+
+- **Backups** are deduplicated: files are cut into chunks stored once, so a second backup of an unchanged server takes seconds and almost no space. Older zip backups still list, browse and restore, and **Convert** turns one into the new kind. Keep rules (newest N, daily, weekly) apply to scheduled backups.
+- **Off-site copies:** every backup can also go, encrypted, to a folder or network share, an SFTP server, S3-compatible storage (AWS, B2, R2, MinIO) or another Hopper Server (Access & devices). Keep the recovery key: a backup can be brought back from a copy even after the server's own is gone.
+- **Worlds tab:** every world with its size, seed and last played; new worlds, switching the active one, upload, download, reset (same seed, new seed or a chosen one, a backup first, the old folder to the server's trash) and pre-generating with Chunky.
+- **Alerts:** a crash (also when the server was restarted after it), low TPS (read over RCON, which the panel can turn on), a nearly full drive or the PC nearly out of memory. They show on the server's page and the Overview, and go to webhooks.
+- **Copy a server** (Settings › General): a clone with or without its world on its own port, or a template (mods, configs and start files) that New server can start from.
+- **Change version** (Settings › Version): another Minecraft or loader version for a stopped server, with a full backup first, a check of what the server starts with, and one-step Undo.
+- **Share a log or crash report** on mclo.gs, after a preview of what's hidden (IP addresses, tokens, the Windows user name).
+
+## Browse, adding content and pack updates
+
+- **Browse** works like Hopper desktop's: a Type list (Modpacks, Mods, Data packs), **Install into** a server (sets the Minecraft and loader filters from it), categories and sorts, an Installed chip on what the server already has, and a project page with its description, versions, changelogs and Install / Install this version. Mods come with their dependencies; data packs go in a world's `datapacks` folder (or a global one). The Mods tab's **Add content** opens it for that server.
+- **Pack updates:** a server made from a CurseForge or Modrinth pack shows "Pack update 1.2.0 → 1.3.0" next to its status, and a dot in the sidebar. The review shows the changelog of every version in between, then Compare downloads the new server pack and lists what changes (loader, mods added / updated / removed, config files, with a choice per file both you and the pack changed). Update runs with the server stopped; replaced files go to `.hopper-backups`. In-place updates need a CurseForge server pack; other packs get the notice and changelogs.
+- The Mods tab draws only the rows on screen, so 1000+ mod packs scroll and filter without lag.
+- API: `GET browse/target`, `POST browse/install`, `browse/search|categories|pack|versions?type=mods|datapacks&into=<id>`, `GET servers/{id}/pack/check`, `GET pack-updates`, `GET servers/{id}/pack/diff`, and `pack/plan` / `pack/apply` also take `{file}` / `{plan_id, take}` from the web.
+
 ## Panel folder, importing and deleting servers (0.9.0)
 
 - Setup asks for the panel folder (older panels ask the owner on sign-in, "Not now" skips). On the next start the panel moves its data into `<folder>\.hopper-server`; the start-up data folder keeps only a pointer (`home = ...`). Picking it restarts the panel (exit code 75; the Windows service and systemd start it again).
@@ -206,7 +223,7 @@ the address the player typed and passes them to that server's own port.
 - Files works like a file explorer: Back / Forward / Up (also Alt+arrows and the mouse side buttons), a path you can type, a folder tree, list or tiles with image thumbnails, and a preview pane (text, images, a jar's mod name and contents).
 - Double-click opens by type: text in the editor, images in a viewer, zips and jars browsed like folders (nothing is unpacked), anything else downloads.
 - Right-click menu, Ctrl+X / C / V across folders, drag onto a folder, the tree or the path to move (Ctrl copies), drop files from your PC onto a folder to upload into it, drag on empty space to select. Chrome and Edge can drag a file out to the desktop.
-- Settings is one page per section (General, Players & access, World, Network & address, Memory & Java, Start files, All properties), one column each, with search across all pages and a server icon picker.
+- Settings is one page per section (General, Players & access, World, Network & address, Memory & Java, All properties), one column each, with search across all pages and a server icon picker.
 
 ## Mods like Hopper desktop (0.5.0)
 

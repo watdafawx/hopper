@@ -4,6 +4,8 @@
   import { Link, Check, X, Network, Wifi, Globe, Waypoints, Lock, MonitorSmartphone, Trash2, FolderTree } from '@lucide/svelte';
   import Security from './Security.svelte';
   import Webhooks from './Webhooks.svelte';
+  import Alerts from './Alerts.svelte';
+  import BackupTargets from './BackupTargets.svelte';
   import Users from './Users.svelte';
   import Addresses from './Addresses.svelte';
   import { pathKind } from './lib/format.js';
@@ -112,6 +114,10 @@
     <Users />
 
     <Webhooks />
+
+    <Alerts />
+
+    <BackupTargets />
 
     <div class="card wide">
       <h3><MonitorSmartphone size={14} />Paired devices</h3>

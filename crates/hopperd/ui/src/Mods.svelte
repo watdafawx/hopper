@@ -5,6 +5,7 @@
   // and the side panel for the picked mod. Unknown jars are identified in
   // the background and updates are checked on CurseForge and Modrinth.
   import { untrack } from 'svelte';
+  import { browseHash } from './lib/browse.js';
   import CfKey from './CfKey.svelte';
   import ModPeek from './ModPeek.svelte';
   import ModVersions from './ModVersions.svelte';
@@ -32,11 +33,6 @@
   let chip = $state('all');
   let busy = $state('');
   let identifying = $state('');
-  let adding = $state(false);
-  let query = $state('');
-  let source = $state('modrinth');
-  let results = $state([]);
-  let searching = $state(false);
   let updates = $state(null);
   let checking = $state(false);
   let reviewing = $state(false);
@@ -137,6 +133,41 @@
   const selMods = $derived(mods.filter((m) => selected.has(m.file)));
   const selUpdates = $derived(selMods.filter((m) => m.update && !m.locked));
   const allShownPicked = $derived(shown.length > 0 && shown.every((m) => selected.has(m.file)));
+
+  // Big packs have 1000+ mods: only the rows near the screen are drawn
+  // (every row is ROW px tall), the rest is empty space of the same height.
+  const ROW = 52;
+  const EXTRA = 12;
+  let rowsEl = $state();
+  let win = $state({ a: 0, b: 40 });
+  const visible = $derived(shown.slice(win.a, win.b));
+  function measure() {
+    if (!rowsEl) return;
+    const sc = rowsEl.closest('.scroll');
+    const view = sc ? sc.getBoundingClientRect() : { top: 0, height: innerHeight };
+    const top = rowsEl.getBoundingClientRect().top - view.top;
+    const a = Math.max(0, Math.floor(-top / ROW) - EXTRA);
+    const b = Math.max(a + 1, Math.ceil((view.height - top) / ROW) + EXTRA);
+    if (a !== win.a || b !== win.b) win = { a, b };
+  }
+  $effect(() => {
+    if (!rowsEl) return;
+    const sc = rowsEl.closest('.scroll') || window;
+    const on = () => measure();
+    sc.addEventListener('scroll', on, { passive: true });
+    window.addEventListener('resize', on);
+    measure();
+    return () => {
+      sc.removeEventListener('scroll', on);
+      window.removeEventListener('resize', on);
+    };
+  });
+  // The list's length or the banners above it changed: the window moves.
+  $effect(() => {
+    shown.length;
+    selected.size;
+    queueMicrotask(measure);
+  });
   // The offers on the rows: the table, the review and the counts agree.
   const pendingUpdates = $derived(updates ? mods.filter((m) => m.update && !m.locked).map((m) => m.update) : []);
 
@@ -326,27 +357,6 @@
     await f(m);
   }
 
-  async function search(e) {
-    e?.preventDefault();
-    searching = true;
-    try {
-      results = (await api(`${base}/mods/search?q=${encodeURIComponent(query)}&source=${source}`)).results;
-    } catch (err) {
-      say(err.message, true);
-      results = [];
-    } finally {
-      searching = false;
-    }
-  }
-
-  async function install(r) {
-    const res = await run(`Adding ${r.name}`, 'install', { project_id: r.id });
-    if (res) {
-      say(`Added ${res.added.join(', ')}${alive ? '. Restart to load it.' : ''}`);
-      r.installed = true;
-    }
-  }
-
   async function editMeta() {
     const v = await ask('Minecraft version and loader', `${data.game_version} ${data.loader}`.trim(), {
       body: 'Used to pick mod files. For example: 1.21.1 neoforge-21.1.259 (or fabric, quilt, forge-47.4.0).',
@@ -416,7 +426,7 @@
   {:else}
     <div class="row wrap toolbar">
       <div class="input find"><Search size={13} /><input placeholder="Search" bind:value={filter} />{#if filter}<button class="clr" title="Clear" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
-      <button class="btn sm" disabled={!!busy} onclick={() => (adding = !adding)}><Plus size={13} />Add mods</button>
+      <a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a>
       {#each CHIPS as [k, label] (k)}
         {#if k === 'all' || counts[k]}<button class="fchip" class:on={chip === k} onclick={() => (chip = k)}>{label}{k === 'all' ? '' : ` ${counts[k]}`}</button>{/if}
       {/each}
@@ -437,30 +447,6 @@
     {#if hunt && (hunting || huntSetup)}<ModHunt {base} {server} st={hunt} bind:setup={huntSetup} onChanged={huntChanged} />{/if}
     {#if clientOn}<div class="small warn">{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on: servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them. <button class="link" onclick={() => (chip = 'client')}>Show</button></div>{/if}
 
-    {#if adding}
-      <div class="add">
-        <form class="row" onsubmit={search}>
-          <div class="seg">
-            <button type="button" class:on={source === 'modrinth'} onclick={() => (source = 'modrinth')}>Modrinth</button>
-            <button type="button" class:on={source === 'curseforge'} disabled={!data?.curseforge} onclick={() => (source = 'curseforge')}>CurseForge</button>
-          </div>
-          <div class="input grow"><Search size={13} /><input bind:value={query} placeholder="Search mods for {data?.game_version}" /></div>
-          <button class="btn sm pri" disabled={searching}>Search</button>
-          <button type="button" class="btn sm ghost icon" title="Close" onclick={() => (adding = false)}><X size={13} /></button>
-        </form>
-        <div class="results">
-          {#each results as r (r.id)}
-            <div class="res">
-              {#if r.icon}<img src={r.icon} alt="" width="34" height="34" loading="lazy" />{:else}<span class="ph"></span>{/if}
-              <div class="grow"><div class="nm">{r.name} <span class="tiny muted">{r.author}</span></div><div class="tiny muted ell">{r.summary}</div></div>
-              {#if r.installed}<span class="chip running">added</span>{:else}<button class="btn sm" disabled={!!busy} onclick={() => install(r)}><Plus size={13} />Add</button>{/if}
-            </div>
-          {:else}
-            <p class="small muted">{searching ? 'Searching…' : 'Search to find mods. Dependencies are added with them.'}</p>
-          {/each}
-        </div>
-      </div>
-    {/if}
 
     {#if selected.size}
       <div class="bulk row">
@@ -489,7 +475,9 @@
           <button class="c-added" onclick={() => setSort('added')}>Added{#if sort.col === 'added'}{#if sort.desc}<ArrowDown size={11} />{:else}<ArrowUp size={11} />{/if}{/if}</button>
           <span class="c-end"></span>
         </div>
-        {#each shown as m (m.file)}
+        <div class="rows" bind:this={rowsEl} style:height="{shown.length * ROW}px">
+        <div class="win" style:transform="translateY({win.a * ROW}px)">
+        {#each visible as m (m.file)}
           {@const up = m.update && !m.locked ? m.update : null}
           {@const sel = picked === m.file || selected.has(m.file) || menu?.m === m}
           <div class="tr mod clickable" class:off={!m.enabled} class:sel class:yours={yours(m)} role="button" tabindex="0"
@@ -530,9 +518,12 @@
               <button class="ib del" title="Remove (kept in .hopper-backups)" onclick={async (e) => { e.stopPropagation(); if (await removeMods(base, [m], alive)) changed(true); }}><Trash2 size={13} /></button>
             </span>
           </div>
-        {:else}
-          <p class="small muted pad">{data ? (mods.length ? 'No mod fits the search and filters.' : 'Nothing installed here yet.') : 'Loading…'}</p>
         {/each}
+        </div>
+        </div>
+        {#if !shown.length}
+          <p class="small muted pad">{data ? (mods.length ? 'No mod fits the search and filters.' : 'Nothing installed here yet.') : 'Loading…'}</p>
+        {/if}
       </div>
       {#if pickedMod}<ModPeek {server} mod={pickedMod} onClose={() => (picked = null)} onChanged={changed} onUpdate={(m) => applyUpdates([m.project_id])} />{/if}
     </div>
@@ -591,13 +582,15 @@
   .th { color: var(--muted); font-size: 11px; padding-top: 2px; padding-bottom: 6px; border-bottom: 1px solid var(--line); border-radius: 0; }
   .th button { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); font-size: 11.5px; text-align: left; }
   .th button:hover { color: var(--text); }
-  .mod { cursor: pointer; min-height: 52px; }
+  .mod { cursor: pointer; height: 52px; overflow: hidden; }
+  .rows { position: relative; }
+  .win { will-change: transform; }
   .mod:hover { background: #ffffff08; }
   .mod.sel { background: var(--acc-dim); box-shadow: inset 3px 0 0 var(--acc); }
   .mod.yours::before { content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--gold); }
   .mod.sel.yours::before { display: none; }
   .mod.off { opacity: 0.55; }
-  .mod img, .res img { border-radius: 6px; background: var(--raise); flex: none; }
+  .mod img { border-radius: 6px; background: var(--raise); flex: none; }
   .nm { font-weight: 500; display: flex; gap: 6px; align-items: center; min-width: 0; }
   .lk { color: var(--muted); display: grid; }
   .tags { display: flex; gap: 4px; align-items: center; margin-top: 2px; min-width: 0; overflow: hidden; flex-wrap: nowrap; }
@@ -626,13 +619,6 @@
   .ph { width: 34px; height: 34px; border-radius: 6px; background: var(--raise); flex: none; }
   .ph.sm { width: 30px; height: 30px; }
   .pad { padding: 8px 4px; }
-  .add { border: 1px solid var(--line2); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; background: var(--base); }
-  .results { max-height: 380px; overflow: auto; }
-  .res { display: flex; align-items: center; gap: 10px; padding: 7px 2px; border-bottom: 1px solid var(--line); }
-  .seg { display: flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; flex: none; }
-  .seg button { padding: 4px 10px; font-size: 12.5px; color: var(--subtle); }
-  .seg button.on { background: var(--acc); color: #1a1a1f; font-weight: 600; }
-  .seg button:disabled { opacity: 0.4; }
   .icon { padding: 3px 5px; }
   .sw { position: relative; width: 30px; height: 17px; flex: none; cursor: pointer; }
   .sw input { opacity: 0; width: 0; height: 0; }

@@ -1,12 +1,14 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { ArrowLeft, Save, Download, CheckCircle2, AlertTriangle, ChevronRight, History, X, RotateCcw } from '@lucide/svelte';
+  import { ArrowLeft, Save, Download, CheckCircle2, AlertTriangle, ChevronRight, History, X, RotateCcw, Share2 } from '@lucide/svelte';
+  import ShareLog from './ShareLog.svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { download } from './lib/transfers.svelte.js';
 
   let { server, path, close } = $props();
+  let sharing = $state(false);
 
   let host = $state();
   let ed = null;
@@ -144,6 +146,7 @@
     {:else if loaded && !dirty}<span class="chip running"><CheckCircle2 size={12} />Saved</span>{/if}
     <span class="sp"></span>
     <button class="btn sm" class:on={versions} title="Earlier versions" onclick={history}><History size={14} />History</button>
+    {#if /^(logs\/[^/]+\.log(\.gz)?|crash-reports\/[^/]+\.txt)$/i.test(path)}<button class="btn sm" title="Share on mclo.gs" onclick={() => (sharing = true)}><Share2 size={14} />Share</button>{/if}
     <button class="btn sm icon" title="Download" onclick={() => download(`/api/v1${base}/file?path=${encodeURIComponent(path)}`)}><Download size={14} /></button>
     <button class="btn sm pri" disabled={!dirty || saving} onclick={() => save()}><Save size={14} />Save <span class="kbd k">Ctrl S</span></button>
   </div>
@@ -183,6 +186,8 @@
   <div class="foot tiny muted">The previous version is kept in the trash each time you save.</div>
 </div>
 
+
+{#if sharing}<ShareLog {server} {path} onClose={() => (sharing = false)} />{/if}
 <style>
   .wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--term); }
   .ftool { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--base); flex-wrap: wrap; }

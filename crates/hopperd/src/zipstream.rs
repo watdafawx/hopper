@@ -113,8 +113,13 @@ impl<W: Write> ZipStream<W> {
     pub fn add_file(&mut self, name: &str, path: &Path) -> io::Result<()> {
         let mut f = std::fs::File::open(path)?;
         let meta = f.metadata()?;
-        let size = meta.len();
-        let (time, date) = dos_time(meta.modified().ok());
+        self.add_reader(name, meta.len(), meta.modified().ok(), &mut f)
+    }
+
+    /// Adds `size` bytes read from `r` as `name`. A reader that ends early
+    /// is padded with zeros to the size already promised.
+    pub fn add_reader(&mut self, name: &str, size: u64, modified: Option<std::time::SystemTime>, r: &mut dyn Read) -> io::Result<()> {
+        let (time, date) = dos_time(modified);
         let offset = self.pos;
         self.local_header(name.as_bytes(), size, time, date)?;
         let mut crc = crc32fast::Hasher::new();
@@ -122,7 +127,7 @@ impl<W: Write> ZipStream<W> {
         let mut buf = vec![0u8; 256 * 1024];
         while left > 0 {
             let want = buf.len().min(left as usize);
-            let n = f.read(&mut buf[..want])?;
+            let n = r.read(&mut buf[..want])?;
             if n == 0 {
                 // The file shrank: pad to the size already promised.
                 buf[..want].fill(0);

@@ -1,11 +1,13 @@
 <script>
   import RemoveServer from './RemoveServer.svelte';
+  import CopyServer from './CopyServer.svelte';
+  import VersionPage from './VersionPage.svelte';
   import { session } from './lib/me.svelte.js';
   // Settings, one section per page like Hopper desktop's settings: a list
   // on the left switches the page, each page is one column (label left,
   // control right). Search finds a setting on any page. Changes to
   // server.properties wait in a save bar.
-  import { SlidersHorizontal, MemoryStick, Save, Search, FileCode, Globe, Users, Map as MapIcon, ListTree, X, ImageUp } from '@lucide/svelte';
+  import { SlidersHorizontal, MemoryStick, Save, Search, FileCode, Globe, Users, Map as MapIcon, ListTree, X, ImageUp, ArrowRightLeft } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { queueUploads, onUploaded } from './lib/transfers.svelte.js';
@@ -22,6 +24,11 @@
   let orig = $state({});
   let jvm = $state(null);
   let mem = $state(4096);
+  /** The Java flags box, one flag per line, and what it loaded with. */
+  let flagsText = $state('');
+  let flagsOrig = $state('');
+  const flagCount = $derived(flagsText.split('\n').filter((l) => l.trim() && !l.trim().startsWith('#')).length);
+  const hasArgsFile = $derived((jvm?.files || []).includes('user_jvm_args.txt'));
   let filter = $state('');
   let saving = $state(false);
   let page = $state('general');
@@ -30,13 +37,16 @@
   /** Pages; groups of server.properties keys on each (a heading, keys). */
   const PAGES = [
     ['general', 'General', SlidersHorizontal, [['Server list', ['motd']], ['Game', ['difficulty', 'gamemode', 'hardcore', 'pvp', 'enable-command-block']]]],
+    ['version', 'Version', ArrowRightLeft, []],
     ['players', 'Players & access', Users, [['Players', ['max-players', 'spawn-protection', 'allow-flight']], ['Who can join', ['online-mode', 'white-list']]]],
     ['world', 'World', MapIcon, [['World', ['level-name', 'level-seed']], ['Performance', ['view-distance', 'simulation-distance']]]],
     ['network', 'Network & address', Globe, [['Network', ['server-port']]]],
     ['java', 'Memory & Java', MemoryStick, []],
-    ['files', 'Start files', FileCode, []],
     ['all', 'All properties', ListTree, []],
   ];
+  /** Words that find a page (things on it that aren't server.properties keys). */
+  const PAGE_WORDS = { java: 'java memory ram flags jvm args arguments start files run.bat start.bat user_jvm_args garbage', version:'version minecraft loader neoforge forge fabric quilt paper purpur upgrade downgrade update', general: 'clone copy template duplicate remove delete' };
+  const PAGE_HINT = { version: 'Change Minecraft or loader version', general: 'Clone, save as template, remove', java: 'Memory, Java flags and start files' };
   const UNITS = { 'view-distance': 'chunks', 'simulation-distance': 'chunks', 'spawn-protection': 'blocks', 'max-players': 'players' };
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -49,6 +59,7 @@
     return `${k} ${s?.label || ''} ${s?.description || ''}`.toLowerCase().includes(q);
   };
   const hits = $derived(q ? allKeys.filter(match) : []);
+  const pageHits = $derived(q ? PAGES.filter(([id]) => PAGE_WORDS[id]?.split(' ').some((w) => w.startsWith(q))) : []);
   const changed = $derived(Object.keys(values).filter((k) => String(values[k]) !== String(orig[k] ?? '')));
   const cur = $derived(PAGES.find((p) => p[0] === page));
 
@@ -59,8 +70,7 @@
       for (const s of props.specs) if (!(s.key in v)) v[s.key] = s.default;
       values = v;
       orig = { ...v };
-      jvm = await api(`${base}/jvm`);
-      mem = jvm.memory_mb || 4096;
+      setJvm(await api(`${base}/jvm`));
     } catch (e) {
       say(e.message, true);
     }
@@ -85,11 +95,16 @@
     try {
       const r = await api(`${base}/jvm`, { method: 'PUT', body });
       say(r.restart_needed ? 'Saved. Restart the server to apply.' : 'Saved.');
-      jvm = await api(`${base}/jvm`);
-      mem = jvm.memory_mb || mem;
+      setJvm(await api(`${base}/jvm`));
     } catch (e) {
       say(e.message, true);
     }
+  }
+
+  function setJvm(j) {
+    jvm = j;
+    mem = j.memory_mb || mem;
+    flagsOrig = flagsText = (j.flags || []).join('\n');
   }
 
   async function pickIcon(ev) {
@@ -158,6 +173,7 @@
       <div class="small muted">Loading…</div>
     {:else if q}
       <h2>{hits.length} setting{hits.length === 1 ? '' : 's'} matching “{filter}”</h2>
+      {#each pageHits as [id, label, Icon] (id)}<button class="pagehit" onclick={() => { filter = ''; page = id; }}><Icon size={14} />{label}<span class="tiny muted">{PAGE_HINT[id]}</span></button>{/each}
       {#each hits as k (k)}{@render field(k)}{:else}<div class="small muted">Nothing matches. Try the key name, like view-distance.</div>{/each}
     {:else}
       <h2>{cur[1]}</h2>
@@ -175,8 +191,14 @@
         {/if}
       {/each}
 
+      {#if page === 'general'}
+        <CopyServer {server} />
+      {/if}
       {#if page === 'general' && session.owner}
         <RemoveServer {server} />
+      {/if}
+      {#if page === 'version'}
+        <VersionPage {server} />
       {/if}
       {#if page === 'network'}
         <h4>Address players join by</h4>
@@ -193,16 +215,19 @@
           <div class="fl"><div class="lab"><div>Garbage collector</div><div class="tiny muted">How Java frees memory. G1 tuned suits most packs.</div></div>
             <div class="ctl"><div class="seg">{#each jvm.presets as p (p.id)}<button class:on={jvm.preset === p.id} disabled={!p.supported} title={p.supported ? '' : 'Needs a newer Java'} onclick={() => saveJvm({ preset: p.id })}>{p.label}</button>{/each}</div>
               {#if jvm.preset === 'custom'}<span class="tiny muted">custom flags ({jvm.flags.length})</span>{/if}</div></div>
-        {/if}
-      {:else if page === 'files'}
-        {#if jvm}
+          <h4>Java flags ({flagCount})</h4>
+          <div class="tiny muted hint">One per line, saved to user_jvm_args.txt.{hasArgsFile ? '' : ' This server has no user_jvm_args.txt yet; its start script may not read one.'}</div>
+          <textarea class="flags mono" spellcheck="false" rows={Math.min(24, Math.max(6, flagCount + 1))} bind:value={flagsText}></textarea>
+          {#if flagsText !== flagsOrig}
+            <div class="row flagbar"><span class="sp"></span>
+              <button class="btn sm ghost" onclick={() => (flagsText = flagsOrig)}>Discard</button>
+              <button class="btn sm pri" onclick={() => saveJvm({ flags_text: flagsText })}><Save size={13} />Save flags</button></div>
+          {/if}
           <h4>Files that start the server</h4>
           {#each jvm.files || [] as f (f)}
             <div class="fl"><div class="lab"><div class="mono">{f}</div><div class="tiny muted">{f === 'user_jvm_args.txt' ? 'Java arguments: memory and flags' : 'The start script'}</div></div>
               <div class="ctl"><a class="btn sm" href="#/server/{encodeURIComponent(server.id)}/edit/{encodeURIComponent(f)}"><FileCode size={13} />Edit</a></div></div>
           {:else}<div class="small muted">No run.bat, start.bat or user_jvm_args.txt; the server starts from its jar.</div>{/each}
-          <h4>Java flags ({jvm.flags.length})</h4>
-          <div class="flags mono">{jvm.flags.join('\n') || 'None'}</div>
         {/if}
       {:else if page === 'all'}
         <div class="tiny muted hint">Every key in server.properties. Keys without a description here are shown by name.</div>
@@ -230,8 +255,10 @@
   .secs > button.on { background: var(--raise); color: var(--text); box-shadow: inset 3px 0 0 var(--acc); }
   .form { flex: 1; min-width: 0; max-width: 860px; display: flex; flex-direction: column; }
   .form h2 { font-size: 17px; margin-bottom: 6px; }
-  .form h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 2px; }
+  .form :global(h4) { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 2px; }
   .hint { margin-bottom: 6px; }
+  .pagehit { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; text-align: left; }
+  .pagehit:hover { background: #ffffff06; }
   .fl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 10px 4px; border-bottom: 1px solid var(--line); }
   .fl.dirty { background: var(--acc-dim); border-radius: 6px; }
   .lab > div:first-child { font-weight: 500; }
@@ -255,7 +282,9 @@
   .range { width: 260px; accent-color: var(--acc); }
   .memv { min-width: 56px; text-align: right; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 380px; display: block; }
-  .flags { white-space: pre-wrap; word-break: break-all; font-size: 11.5px; background: var(--term); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; max-height: 420px; overflow: auto; color: var(--subtle); }
+  .flags { white-space: pre-wrap; word-break: break-all; font-size: 11.5px; background: var(--term); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; max-height: 520px; overflow: auto; color: var(--text); width: 100%; resize: vertical; line-height: 1.5; }
+  .flags:focus { outline: none; border-color: var(--acc); }
+  .flagbar { gap: 8px; margin-top: 8px; }
   .savebar { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 30; gap: 10px; padding: 8px 12px; box-shadow: 0 12px 40px #000c; border-color: #f9731677; width: min(620px, calc(100vw - 32px)); }
   @media (max-width: 900px) { .layout { flex-direction: column; } .secs { width: 100%; position: static; } .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; } .wide, .range { width: 100%; } }
 </style>
