@@ -575,7 +575,7 @@ pub fn sparkline(values: Vec<f32>, max: f32, color: Hsla) -> impl IntoElement {
 
 /// A full-width dropdown button listing `items` (label, checked).
 pub fn picker(
-    id: &'static str,
+    id: impl Into<ElementId>,
     label: String,
     items: Vec<(String, bool)>,
     rem: Pixels,
@@ -604,7 +604,7 @@ impl PickIcon {
 /// [`picker`] with an icon or picture beside each entry, and the picked
 /// one's logo on the button.
 pub fn picker_with(
-    id: &'static str,
+    id: impl Into<ElementId>,
     label: String,
     lead: Option<PickIcon>,
     items: Vec<(String, bool, Option<PickIcon>)>,

@@ -6,7 +6,7 @@ resolver = "3"
 # One version for every crate: release.ps1 and release.yml read the first
 # `version = "..."` line of this file.
 [workspace.package]
-version = "0.13.10"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -18,6 +18,8 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
+# Config editing that keeps comments and layout.
+toml_edit = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 directories = "6"
 log = "0.4"

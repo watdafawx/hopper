@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod crash_story;
+mod crash_switch;
 
 /// How much of a log to show when it opens.
 const OPEN_BYTES: u64 = 400_000;
@@ -967,6 +968,7 @@ impl LogsView {
             .children(story)
             .when_some(note, |d, n| d.child(div().text_sm().child(n)))
             .when(listed, |d| d.children(self.crash_actions(root, c, cx)))
+            .when(listed, |d| d.children(self.config_switches(root, c, None, cx)))
             .when(source.is_file(), |d| d.child(div().pt_1().child(self.share_row(&source, cx))))
             .into_any_element()
     }

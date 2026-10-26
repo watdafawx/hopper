@@ -35,7 +35,7 @@ pub fn files(inst: &Instance, addon: &Addon) -> Vec<String> {
     files_for(&inst.root, &ids)
 }
 
-fn files_for(root: &Path, ids: &[String]) -> Vec<String> {
+pub(crate) fn files_for(root: &Path, ids: &[String]) -> Vec<String> {
     let ids: Vec<String> = ids.iter().map(|i| squash(i)).filter(|i| i.len() >= 3 && i != "minecraft").collect();
     if ids.is_empty() {
         return Vec::new();

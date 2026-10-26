@@ -1315,6 +1315,30 @@ impl Store {
         Ok(())
     }
 
+    /// Turns off the config switch `s` of the crash (its old config goes to
+    /// backups) and drops it from the card.
+    pub fn crash_switch_off(&mut self, root: &Path, s: &hopper::configswitch::Switch) -> Result<(), String> {
+        hopper::configswitch::turn_off(root, s).map_err(|e| e.to_string())?;
+        if let Some(mut c) = self.crash(root).cloned() {
+            c.switches.retain(|x| x != s);
+            hopper::crashdetect::save(root, &c);
+            self.crashes.insert(root.to_path_buf(), Some(c));
+        }
+        Ok(())
+    }
+
+    /// A config was saved: the crash's switches that are off now drop off
+    /// its card.
+    pub fn crash_config_saved(&mut self, root: &Path) {
+        let Some(mut c) = self.crash(root).cloned() else { return };
+        let n = c.switches.len();
+        c.switches.retain(|s| hopper::configswitch::is_on(root, s));
+        if c.switches.len() != n {
+            hopper::crashdetect::save(root, &c);
+            self.crashes.insert(root.to_path_buf(), Some(c));
+        }
+    }
+
     /// Forgets the instance's last crash (the player dismissed it).
     pub fn dismiss_crash(&mut self, root: &Path) {
         hopper::crashdetect::clear(root);

@@ -14,7 +14,7 @@ use hopper::crashdetect::{Certainty, Crash, Stopped};
 use std::path::Path;
 
 /// A mod by its jar: icon and name, opening the mod peek on click.
-fn mod_ref(store: &Entity<Store>, root: &Path, file: &str, key: &str, cx: &App) -> AnyElement {
+pub(super) fn mod_ref(store: &Entity<Store>, root: &Path, file: &str, key: &str, cx: &App) -> AnyElement {
     let s = store.read(cx);
     let bare = file.trim_end_matches(".disabled");
     let a = s.instance(root).and_then(|i| i.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(bare)));
@@ -42,11 +42,11 @@ fn mod_ref(store: &Entity<Store>, root: &Path, file: &str, key: &str, cx: &App) 
 }
 
 /// Words and mod names in one line that wraps between them.
-fn sentence(parts: Vec<AnyElement>) -> Div {
+pub(super) fn sentence(parts: Vec<AnyElement>) -> Div {
     h_flex().flex_wrap().items_center().gap_x_1().gap_y_0p5().children(parts)
 }
 
-fn words(t: impl Into<SharedString>) -> AnyElement {
+pub(super) fn words(t: impl Into<SharedString>) -> AnyElement {
     div().child(t.into()).into_any_element()
 }
 
@@ -132,9 +132,13 @@ impl LogsView {
                         .into_any_element()
                 })
             })
-            .when(changed.is_none(), |d| d.children(self.crash_actions(root, c, cx)));
+            .when(changed.is_none(), |d| d.children(self.crash_actions(root, c, cx)))
+            .children({
+                let above = changed.is_some() || self.crash_actions(root, c, cx).is_some();
+                self.config_switches(root, c, Some(above), cx)
+            });
         // A box with nothing to offer (all turned off and played) isn't shown.
-        let has_fix = changed.is_some() || self.crash_actions(root, c, cx).is_some();
+        let has_fix = changed.is_some() || self.crash_actions(root, c, cx).is_some() || !c.switches.is_empty();
 
         // What happened, in order.
         let mut steps: Vec<(bool, AnyElement)> = Vec::new();

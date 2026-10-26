@@ -12,6 +12,7 @@ mod anim;
 mod app;
 mod brand;
 mod browse;
+mod config_editor;
 mod configs;
 mod content;
 mod datapacks;

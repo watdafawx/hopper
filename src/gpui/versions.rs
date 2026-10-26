@@ -308,7 +308,19 @@ impl Render for VersionsView {
                                 .when(e.installed && !pack, |r| {
                                     let (store, root, pid, from) =
                                         (self.store.clone(), self.root.clone(), self.project_id, self.from.clone());
+                                    let (s2, r2, f2) = (store.clone(), root.clone(), from.clone());
                                     r.child(
+                                        Button::new("edit-config")
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::Pencil)
+                                            .label("Edit config")
+                                            .tooltip("Edit this mod's config: its settings, or the file as text")
+                                            .on_click(move |_, window, cx| {
+                                                crate::config_editor::open_for_mod(s2.clone(), r2.clone(), pid, f2.clone(), window, cx)
+                                            }),
+                                    )
+                                    .child(
                                         Button::new("reset-config")
                                             .small()
                                             .ghost()

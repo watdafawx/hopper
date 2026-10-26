@@ -15,6 +15,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 zip.workspace = true
 directories.workspace = true
 log.workspace = true

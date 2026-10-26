@@ -120,6 +120,24 @@ pub struct Crash {
     /// The mod that stopped loading, when the crash followed from that.
     #[serde(default)]
     pub stopped: Option<Stopped>,
+    /// Settings in the blamed mods' configs that turn off the item the
+    /// crash names (a workaround that keeps the mod).
+    #[serde(default)]
+    pub switches: Vec<crate::configswitch::Switch>,
+}
+
+/// The config switches for the items the crash names, of its Certain and
+/// Likely mods.
+fn switches(root: &Path, text: &str, suspects: &[Suspect]) -> Vec<crate::configswitch::Switch> {
+    let mut out: Vec<crate::configswitch::Switch> = Vec::new();
+    for s in suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.mod_id.is_empty()) {
+        for sw in crate::configswitch::find(root, &s.mod_id, text) {
+            if !out.contains(&sw) {
+                out.push(sw);
+            }
+        }
+    }
+    out
 }
 
 fn re(p: &str) -> Regex {
@@ -613,7 +631,8 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         (None, Some(n)) => native_line(&tail(n, 64 << 10)),
         _ => String::new(),
     };
-    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped })
+    let switches = switches(root, &text, &suspects);
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches })
 }
 
 /// A saved crash read again from its report with today's rules (which mods
@@ -634,7 +653,9 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
     };
     let loading = if same_run { loading_lines(&log_path) } else { String::new() };
     let before = modified_secs(&saved.source).unwrap_or(saved.when);
-    let (mut suspects, stopped) = analyze(root, &tail(&saved.source, 2 << 20), "", &loading, before, mods, &ids);
+    let text = tail(&saved.source, 2 << 20);
+    let (mut suspects, stopped) = analyze(root, &text, "", &loading, before, mods, &ids);
+    let switches = switches(root, &text, &suspects);
     // A change already put back (its older copy left backups for the mods
     // folder) stays on the card, to say so.
     for s in suspects.iter_mut().filter(|s| s.changed.is_none()) {
@@ -646,10 +667,10 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
             s.changed = Some(ch);
         }
     }
-    if suspects.is_empty() || (suspects == saved.suspects && stopped == saved.stopped) {
+    if suspects.is_empty() || (suspects == saved.suspects && stopped == saved.stopped && switches == saved.switches) {
         return None;
     }
-    Some(Crash { suspects, stopped, ..saved.clone() })
+    Some(Crash { suspects, stopped, switches, ..saved.clone() })
 }
 
 /// What a crash report names, for a report Hopper didn't see the game
@@ -672,7 +693,8 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
     } else {
         CrashKind::Unknown
     };
-    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped })
+    let switches = switches(root, &text, &suspects);
+    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches })
 }
 
 /// Whether `report` was written after the crash `saved` came from, so the
@@ -1619,6 +1641,9 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
                 println!("   {}", headline(&text));
                 for r in signals(&text) {
                     println!("   {:?} {} [{}] {}", r.certainty, r.mod_id, r.jar, r.why);
+                    for sw in crate::configswitch::find(&inst.root, &r.mod_id, &text) {
+                        println!("      switch: {} = true ({}) at {}:{}", sw.key, sw.label, sw.file, sw.line);
+                    }
                 }
             }
         }

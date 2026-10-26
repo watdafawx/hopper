@@ -3596,7 +3596,15 @@ Change version", a.file_name).into()
                         }),
                 )
                 .when_some(reset_cfg.clone(), |m, (store, root, pid, file)| {
+                    let (s2, r2, f2) = (store.clone(), root.clone(), file.clone());
                     m.item(
+                        PopupMenuItem::new("Edit config…")
+                            .icon(IconName::Pencil)
+                            .on_click(move |_, window, cx| {
+                                crate::config_editor::open_for_mod(s2.clone(), r2.clone(), pid, f2.clone(), window, cx)
+                            }),
+                    )
+                    .item(
                         PopupMenuItem::new("Reset config…")
                             .icon(IconName::Settings2)
                             .on_click(move |_, window, cx| {

@@ -13,6 +13,8 @@ pub mod cf;
 pub mod cf_instance;
 pub mod changelog;
 pub mod configdiff;
+pub mod configedit;
+pub mod configswitch;
 pub mod crashdetect;
 pub mod crashscan;
 pub mod deps;
