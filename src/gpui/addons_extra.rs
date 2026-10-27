@@ -113,6 +113,9 @@ pub struct MissingDeps {
     /// When the game last loaded fine with these exact mods: the banners
     /// then say "may", not "will" (metadata misses runtime stand-ins).
     pub loaded_fine: Option<i64>,
+    /// The loader and Minecraft the blockers were checked against: a new
+    /// loader checks again.
+    pub against: (String, String),
 }
 
 impl AddonsView {
@@ -191,7 +194,8 @@ impl AddonsView {
     pub(crate) fn want_missing(&mut self, inst: &Instance, cx: &mut Context<Self>) {
         let dir = inst.mods_dir();
         let mtime = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
-        if self.missing.root.as_ref() == Some(&inst.root) && self.missing.mtime == mtime {
+        let against = (inst.loader.clone(), inst.game_version.clone());
+        if self.missing.root.as_ref() == Some(&inst.root) && self.missing.mtime == mtime && self.missing.against == against {
             return;
         }
         // Same instance: the old list stays up while the folder is read
@@ -205,6 +209,7 @@ impl AddonsView {
             blockers: if same { std::mem::take(&mut self.missing.blockers) } else { Vec::new() },
             queued: hopper::locked::list(&inst.root).len(),
             loaded_fine: if same { self.missing.loaded_fine } else { None },
+            against: against.clone(),
         };
         let root = inst.root.clone();
         let snapshot = inst.clone();
@@ -220,7 +225,7 @@ impl AddonsView {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if this.missing.root.as_ref() == Some(&root) && this.missing.mtime == mtime {
+                if this.missing.root.as_ref() == Some(&root) && this.missing.mtime == mtime && this.missing.against == against {
                     this.missing.dups = dups;
                     this.missing.blockers = blockers;
                     this.missing.loaded_fine = loaded_fine;
@@ -869,6 +874,57 @@ impl AddonsView {
         }
     }
 
+    /// Moves the instance to the newest `kind` loader (e.g. "neoforge") for
+    /// its Minecraft that `range` accepts, and installs it, as saving a new
+    /// loader in the instance's settings does.
+    fn update_loader(&mut self, root: PathBuf, kind: String, range: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(inst) = self.store.read(cx).instance(&root).cloned() else { return };
+        let gv = inst.game_version.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx.background_spawn(async move { cf::loader_versions(&gv) }).await;
+            this.update_in(cx, |this, window, cx| {
+                let prefix = format!("{kind}-");
+                // Newest first: the newest build that fits.
+                let pick = r.ok().and_then(|list| {
+                    list.into_iter().find(|v| {
+                        v.name
+                            .strip_prefix(&prefix)
+                            .is_some_and(|ver| hopper::deps::accepts(&range, ver) == Some(true))
+                    })
+                });
+                let Some(v) = pick else {
+                    window.push_notification(
+                        Notification::error(format!(
+                            "No {} version for Minecraft {} fits ({range}).",
+                            crate::store::loader_label(&prefix).trim_end_matches(['-', ' ']),
+                            inst.game_version
+                        )),
+                        cx,
+                    );
+                    return;
+                };
+                let mut inst = inst;
+                inst.loader = v.name.clone();
+                match inst.save() {
+                    Ok(()) => {
+                        let store = this.store.read(cx);
+                        let r = inst.root.clone();
+                        store.spawn(move || crate::store::Msg::InstanceChanged(r));
+                        store.install_loader(inst);
+                        window.push_notification(
+                            Notification::success(format!("Installing {}.", crate::store::loader_label(&v.name))),
+                            cx,
+                        );
+                    }
+                    Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+                }
+                this.resync(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// "N problems will stop the game at loading": what the loader refuses
     /// besides missing mods, with Turn off where that fixes it.
     pub(crate) fn blocker_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -919,7 +975,39 @@ impl AddonsView {
             });
             let mut actions: Vec<AnyElement> = Vec::new();
             match &b.kind {
-                BlockerKind::Invalid(_) | BlockerKind::Loader { .. } => {
+                BlockerKind::Loader { id, versions, .. } => {
+                    // A newer loader fixes it, when it's this instance's
+                    // loader (not Minecraft itself).
+                    let kind = inst.loader.split('-').next().unwrap_or("").to_string();
+                    let ours = !kind.is_empty() && (id == &kind || (id == "fabricloader" && kind == "fabric"));
+                    if ours {
+                        let (root, range) = (inst.root.clone(), versions.clone());
+                        let min = range
+                            .trim()
+                            .strip_prefix('[')
+                            .and_then(|r| r.split(',').next())
+                            .map(|m| m.trim().to_string())
+                            .filter(|m| !m.is_empty());
+                        let name = crate::store::loader_label(&format!("{kind}-")).trim_end_matches(['-', ' ']).to_string();
+                        let label = match &min {
+                            Some(m) => format!("Update {name} to {m}+"),
+                            None => format!("Update {name}"),
+                        };
+                        actions.push(
+                            Button::new(SharedString::from(format!("blk-loader:{i}")))
+                                .xsmall()
+                                .outline()
+                                .label(label)
+                                .tooltip("Installs the newest version that fits, like picking it in the instance's settings")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.update_loader(root.clone(), kind.clone(), range.clone(), window, cx)
+                                }))
+                                .into_any_element(),
+                        );
+                    }
+                    actions.push(off(format!("blk-off:{i}"), b.file_name.clone(), "Turn off".into()));
+                }
+                BlockerKind::Invalid(_) => {
                     actions.push(off(format!("blk-off:{i}"), b.file_name.clone(), "Turn off".into()));
                 }
                 BlockerKind::Incompatible { jar, .. } => {
@@ -1017,7 +1105,7 @@ impl AddonsView {
                         .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx)))
                         .when(loader_note, |c| {
                             c.child(widgets::caption(
-                                "For a mod that needs a newer loader, pick a newer loader version in this instance's settings.",
+                                "For a mod that needs a newer loader, update the loader here or pick a version in this instance's settings.",
                                 cx,
                             ))
                         })

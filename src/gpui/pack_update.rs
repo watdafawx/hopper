@@ -160,6 +160,82 @@ pub struct UpdatePreview {
     /// Dropped mods one of yours needs that you keep (file, lower case).
     keep_needed: HashSet<String>,
     _search_sub: Subscription,
+    /// 0: the pack's changelog ("What's new"), 1: what the update changes.
+    tab: usize,
+    /// Changelogs of the versions the update brings, newest first.
+    log: Option<Result<Vec<LogEntry>, String>>,
+}
+
+/// One version's changelog in "What's new".
+#[derive(Clone)]
+struct LogEntry {
+    name: String,
+    date: String,
+    release: &'static str,
+    md: SharedString,
+}
+
+/// Words that mark a pack author's advice worth seeing before updating.
+const ADVICE: [&str; 7] = [
+    "fresh install",
+    "backup",
+    "back up",
+    "new world",
+    "world reset",
+    "reset your world",
+    "not compatible with existing worlds",
+];
+
+/// Lines of the changelogs with advice on how to update (a fresh install,
+/// backing up worlds), as plain text, at most four.
+fn advice(entries: &[LogEntry]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for e in entries {
+        for line in e.md.lines() {
+            let t = plain(line);
+            let low = t.to_lowercase();
+            if t.is_empty() || t.len() > 220 || !ADVICE.iter().any(|w| low.contains(w)) {
+                continue;
+            }
+            // The same advice again, or inside a longer line: once.
+            if let Some(i) = out.iter().position(|o| {
+                let o = o.to_lowercase();
+                low.contains(&o) || o.contains(&low)
+            }) {
+                if t.len() < out[i].len() {
+                    out[i] = t;
+                }
+                continue;
+            }
+            out.push(t);
+            if out.len() == 4 {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// A markdown line as plain text: marks out, "[x](url)" read as "x".
+fn plain(line: &str) -> String {
+    let mut t = String::new();
+    let mut depth = 0usize;
+    let mut prev = ' ';
+    for c in line.chars() {
+        if depth > 0 {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+        } else if c == '(' && prev == ']' {
+            depth = 1;
+        } else if !matches!(c, '*' | '_' | '#' | '>' | '[' | ']' | '`' | '\\') {
+            t.push(c);
+        }
+        prev = c;
+    }
+    t.split_whitespace().collect::<Vec<_>>().join(" ").trim_start_matches(['-', '•', ' ']).trim().to_string()
 }
 
 impl UpdatePreview {
@@ -204,7 +280,210 @@ impl UpdatePreview {
             query: String::new(),
             keep_needed: HashSet::new(),
             _search_sub: sub,
+            tab: 0,
+            log: None,
         }
+    }
+
+    /// Loads the changelogs of the versions the update brings (the
+    /// installed one's when it brings none: a reinstall).
+    fn load_log(&mut self, cx: &mut Context<Self>) {
+        let (inst, update) = match &self.server {
+            Some(t) => (Some(t.inst.clone()), t.latest.clone()),
+            None => (self.store.read(cx).instance(&self.root).cloned(), self.file.clone()),
+        };
+        let Some(inst) = inst else { return };
+        let Some(pack) = inst.pack.clone().filter(|p| p.project_id != 0) else {
+            self.log = Some(Ok(Vec::new()));
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    hopper::install::changelogs(&inst, pack.project_id, pack.file_id, update.as_ref(), true)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.log = Some(match r {
+                    Ok((entries, _)) => {
+                        let new: Vec<_> = entries.iter().filter(|e| !e.installed).collect();
+                        let shown: Vec<_> = if new.is_empty() { entries.iter().collect() } else { new };
+                        Ok(shown
+                            .into_iter()
+                            .map(|e| LogEntry {
+                                name: e.name.clone(),
+                                date: e.date.clone(),
+                                release: e.release,
+                                md: hopper::richtext::to_markdown(&e.blocks).into(),
+                            })
+                            .collect())
+                    }
+                    Err(e) => Err(format!("{e:#}")),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A link in a changelog: a CurseForge or Modrinth project opens its
+    /// page beside the window; anything else in the browser.
+    fn open_log_link(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(link) = hopper::source::project_link(url) else {
+            cx.open_url(url);
+            return;
+        };
+        let url = url.to_string();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { hopper::source::project_from_link(&link) })
+                .await;
+            this.update_in(cx, |this, window, cx| match r {
+                Ok(p) => this.open_peek(p, window, cx),
+                Err(_) => cx.open_url(&url),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The "Changes" tab's label: how big the update is, or that it's
+    /// still being prepared.
+    fn changes_label(&self) -> String {
+        match &self.plan {
+            Some(Ok(p)) => {
+                let files = p
+                    .files
+                    .iter()
+                    .filter(|f| match f.action {
+                        FileAction::Add | FileAction::Update | FileAction::Merge => true,
+                        FileAction::Conflict => self.take.contains(&f.rel),
+                        _ => false,
+                    })
+                    .count();
+                format!("Changes · {} mods · {files} files", p.mods.len())
+            }
+            Some(Err(_)) => "Changes · couldn't prepare".into(),
+            None => {
+                let pct = self
+                    .server
+                    .as_ref()
+                    .and_then(|t| t.status.as_ref())
+                    .and_then(|s| s.1)
+                    .map(|p| format!(" {:.0}%", p * 100.));
+                format!("Changes · preparing{}", pct.unwrap_or_else(|| "…".into()))
+            }
+        }
+    }
+
+    /// "What's new": the author's advice on updating, each new version's
+    /// changelog, and what Update will do.
+    fn whats_new(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (warning, muted, primary, surface, radius) =
+            (theme.warning, theme.muted_foreground, theme.primary, theme.secondary, theme.radius);
+        let body: AnyElement = match &self.log {
+            None => h_flex()
+                .gap_2()
+                .py_3()
+                .child(Spinner::new().small())
+                .child(widgets::caption("Loading the changelog", cx))
+                .into_any_element(),
+            Some(Err(e)) => widgets::fine_print(format!("The changelog couldn't be loaded: {e}"), cx).into_any_element(),
+            Some(Ok(entries)) if entries.is_empty() => widgets::caption("This pack has no changelog.", cx).into_any_element(),
+            Some(Ok(entries)) => {
+                let notes = advice(entries);
+                let view = cx.entity();
+                v_flex()
+                    .gap_4()
+                    .when(!notes.is_empty(), |c| {
+                        c.child(
+                            v_flex()
+                                .gap_1()
+                                .pl_3()
+                                .pr_2()
+                                .py_2()
+                                .rounded_r(radius)
+                                .border_l_2()
+                                .border_color(warning)
+                                .bg(warning.opacity(0.06))
+                                .text_sm()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .font_semibold()
+                                        .text_color(warning)
+                                        .child(Icon::new(IconName::TriangleAlert).small())
+                                        .child("From the pack author"),
+                                )
+                                .children(notes.into_iter().map(|n| div().child(n))),
+                        )
+                    })
+                    .children(entries.iter().map(|e| {
+                        let view = view.clone();
+                        v_flex()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().text_lg().font_semibold().child(e.name.clone()))
+                                    .child(widgets::chip(muted).xsmall().child(e.release))
+                                    .child(widgets::caption(hopper::time::relative(&e.date), cx).text_xs()),
+                            )
+                            .child(crate::versions::changelog_view(
+                                ElementId::Name(format!("upd-log:{}", e.name).into()),
+                                e.md.clone(),
+                                &self.store,
+                                move |url, window, cx| view.update(cx, |this, cx| this.open_log_link(url, window, cx)),
+                                cx,
+                            ))
+                    }))
+                    .into_any_element()
+            }
+        };
+        let strip = match &self.plan {
+            Some(Ok(p)) => {
+                let server = self.server.is_some();
+                let to = if server { "the server pack".to_string() } else { p.file.display_name.clone() };
+                let mine = if server { "The server's own mods and files stay." } else { "Your own mods and files stay." };
+                let what = match self.bulk {
+                    Bulk::Mine => format!("Mods update to {to}'s; your edited files stay as they are."),
+                    Bulk::Review => format!("Mods update to {to}'s; files as you picked them."),
+                    _ if p.base_known => format!("Mods and the pack's files update to {to}'s, keeping your edits as picked."),
+                    _ => format!("Pack files are replaced with {to}'s, like the CurseForge app."),
+                };
+                format!("{what} {mine}")
+            }
+            Some(Err(_)) => "The update couldn't be prepared: see Changes.".to_string(),
+            None => "Preparing the update in the background…".to_string(),
+        };
+        v_flex()
+            .gap_3()
+            .child(body)
+            .child(
+                h_flex()
+                    .id("whats-new-strip")
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded(radius)
+                    .bg(surface)
+                    .text_sm()
+                    .child(Icon::new(IconName::FileText).small().text_color(primary).flex_none())
+                    .child(div().flex_1().min_w_0().child(strip))
+                    .child(
+                        Button::new("see-changes")
+                            .xsmall()
+                            .ghost()
+                            .label("See changes ›")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.tab = 1;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// A fresh plan's state: picks at their defaults, lists closed.
@@ -1331,9 +1610,9 @@ impl UpdatePreview {
         }
         if f > 0 {
             parts.push(if server {
-                format!("{f} files of the server's own in pack folders")
+                format!("{f} of the server's own files")
             } else {
-                format!("{f} of your files in pack folders")
+                format!("{f} of your own files")
             });
         }
         let any = !parts.is_empty();
@@ -1381,7 +1660,7 @@ impl UpdatePreview {
                     .child(self.file_tree("stay-files", rows, cx))
                     .child(
                         widgets::fine_print(
-                            "Files in folders the pack also uses that the pack doesn't ship: yours, and ones mods made. The update writes next to them, never over them.",
+                            "Your scripts and packs, and the settings of mods you added: the pack doesn't ship them, so the update writes next to them, never over them.",
                             cx,
                         ),
                     )
@@ -1433,6 +1712,16 @@ impl UpdatePreview {
                         .child(self.file_tree("stay-edited", rows, cx)),
                 );
             }
+        }
+        if plan.mod_made > 0 {
+            out = out.child(widgets::summary_row(
+                "sum-made",
+                IconName::Settings2,
+                muted,
+                div().text_color(muted).child(format!("{} settings files the pack's mods made: never touched", plan.mod_made)),
+                None,
+                cx,
+            ));
         }
         out = out.child(widgets::summary_row(
             "sum-never",
@@ -1872,6 +2161,19 @@ impl Render for UpdatePreview {
             }
         };
         let notes = self.server_notes(cx);
+        let changes_label = self.changes_label();
+        let tabs = TabBar::new("update-tabs")
+            .underline()
+            .small()
+            .selected_index(self.tab)
+            .child(Tab::new().label("What's new"))
+            .child(Tab::new().label(changes_label))
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                this.tab = *ix;
+                cx.notify();
+            }));
+        let body = if self.tab == 0 { self.whats_new(cx) } else { body };
+        let loaded = loaded || matches!(self.log, Some(Ok(_)));
         let peek = self.peek.clone().map(|p| {
             v_flex()
                 .w(rems(30.))
@@ -1886,13 +2188,15 @@ impl Render for UpdatePreview {
             .when(loaded, |c| c.h(total_h))
             .gap_3()
             .children({
-                let caption = match &self.plan {
-                    Some(Ok(p)) => format!("{}  →  {}", self.from, p.file.file_name),
+                let caption = match (&self.plan, &self.file) {
+                    (Some(Ok(p)), _) => format!("{}  →  {}", self.from, p.file.file_name),
+                    (_, Some(f)) => format!("{}  →  {}", self.from, f.file_name),
                     _ => self.from.clone(),
                 };
                 (!caption.is_empty()).then(|| widgets::caption(caption, cx))
             })
             .children(notes)
+            .child(tabs)
             // Loaded, the list fills the window-tall dialog and scrolls;
             // before that the "comparing" line sizes itself (a flex child
             // with no height to share collapses to nothing).
@@ -1960,6 +2264,7 @@ fn show(
             }
             None => v.plan(file, cx),
         }
+        v.load_log(cx);
         v
     });
     let title = format!("{} {}", if reinstall { "Reinstall" } else { "Update" }, inst.name);
@@ -1978,7 +2283,12 @@ fn show(
                         Button::new("upd-go")
                             .primary()
                             .icon(if reinstall { IconName::RotateCcw } else { IconName::Download })
-                            .label(if reinstall { "Reinstall" } else { "Update" })
+                            .label(match (reinstall, ready) {
+                                (true, true) => "Reinstall",
+                                (false, true) => "Update",
+                                (true, false) => "Reinstall (preparing…)",
+                                (false, false) => "Update (preparing…)",
+                            })
                             .disabled(!ready),
                     )),
             )
@@ -2027,6 +2337,7 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
             Some(_) => v.follow(cx),
             None => v.plan_server(cx),
         }
+        v.load_log(cx);
         v
     });
     window.open_dialog(cx, move |dialog, window, cx| {
@@ -2044,7 +2355,7 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
                         Button::new("supd-go")
                             .primary()
                             .icon(IconName::ServerCog)
-                            .label("Update server")
+                            .label(if ready { "Update server" } else { "Update server (preparing…)" })
                             .disabled(!ready),
                     )),
             )

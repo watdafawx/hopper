@@ -127,23 +127,35 @@ impl VersionsView {
     }
 
     fn changelog(&self, id: ElementId, md: SharedString, cx: &App) -> AnyElement {
-        if md.trim().is_empty() {
-            return widgets::caption("No changelog for this version.", cx)
-                .italic()
-                .into_any_element();
-        }
         let (store, root) = (self.store.clone(), self.root.clone());
-        let (id, md) = match self.store.read(cx).translations().shown(&md) {
-            Some(en) => (ElementId::Name(format!("{id}:en").into()), en),
-            None => (id, md),
-        };
-        // The list around it scrolls; the text must not catch the wheel.
-        TextView::markdown(id, md)
-            .selectable(true)
-            .scrollable(false)
-            .on_link_click(move |url, _, window, cx| open_link(&store, &root, url, window, cx))
-            .into_any_element()
+        changelog_view(id, md, &self.store, move |url, window, cx| open_link(&store, &root, url, window, cx), cx)
     }
+}
+
+/// One version's changelog (markdown), in English when it was translated;
+/// `on_link` handles a clicked link. Shared by every changelog list.
+pub(crate) fn changelog_view(
+    id: ElementId,
+    md: SharedString,
+    store: &Entity<Store>,
+    on_link: impl Fn(&str, &mut Window, &mut App) + Send + Sync + 'static,
+    cx: &App,
+) -> AnyElement {
+    if md.trim().is_empty() {
+        return widgets::caption("No changelog for this version.", cx)
+            .italic()
+            .into_any_element();
+    }
+    let (id, md) = match store.read(cx).translations().shown(&md) {
+        Some(en) => (ElementId::Name(format!("{id}:en").into()), en),
+        None => (id, md),
+    };
+    // The list around it scrolls; the text must not catch the wheel.
+    TextView::markdown(id, md)
+        .selectable(true)
+        .scrollable(false)
+        .on_link_click(move |url, _, window, cx| on_link(url, window, cx))
+        .into_any_element()
 }
 
 impl Render for VersionsView {

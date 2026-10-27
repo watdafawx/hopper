@@ -189,6 +189,10 @@ pub struct UpdatePlan {
     /// they stay.
     #[serde(default)]
     pub your_files: Vec<String>,
+    /// Settings files the pack's mods wrote (in config/ and the like, not
+    /// shipped by the pack): they stay too, but aren't listed.
+    #[serde(default)]
+    pub mod_made: usize,
     pub(crate) new_zip: PathBuf,
     /// Override folders in the zip, later ones on top.
     pub(crate) prefixes: Vec<String>,
@@ -652,7 +656,8 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
         skip_rels.extend(o.keys().cloned());
     }
     skip_rels.extend(inst.addons.iter().map(|a| format!("{}/{}", a.folder(), a.file_name)));
-    let your_files = your_files(&inst.root, new.keys().map(String::as_str), &skip_rels);
+    let your_ids = mod_ids(&inst.root.join("mods"), yours.iter().filter(|a| a.folder() == "mods").map(|a| a.file_name.as_str()));
+    let (your_files, mod_made) = split_made(your_files(&inst.root, new.keys().map(String::as_str), &skip_rels), &your_ids);
     Ok(UpdatePlan {
         file: file.clone(),
         mods,
@@ -667,6 +672,7 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
         needed,
         your_mods,
         your_files,
+        mod_made,
         new_zip,
         prefixes,
         same,
@@ -768,6 +774,59 @@ pub fn your_files<'a>(root: &Path, pack_rels: impl Iterator<Item = &'a str>, ski
     }
     out.sort();
     out
+}
+
+/// Folders where mods write their own settings files.
+const SETTINGS_DIRS: [&str; 2] = ["config", "defaultconfigs"];
+
+/// The mod ids of the jars `files` in `mods_dir` (lower case, with their
+/// display names), for telling their settings files apart.
+pub fn mod_ids<'a>(mods_dir: &Path, files: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in files {
+        let (ids, name) = crate::deps::own_ids(&mods_dir.join(f));
+        out.extend(ids);
+        if !name.is_empty() {
+            out.push(name);
+        }
+    }
+    out.iter()
+        .map(|s| norm_id(s))
+        .filter(|s| s.len() >= 3)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Lower case, letters and digits only ("Ars_Conflux" and "ars-conflux"
+/// match).
+fn norm_id(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// Splits [`your_files`] into the ones that are yours (scripts, packs, and
+/// settings of your own mods, by `your_ids` from [`mod_ids`]) and a count
+/// of settings files the pack's mods wrote.
+pub fn split_made(files: Vec<String>, your_ids: &[String]) -> (Vec<String>, usize) {
+    let mut made = 0;
+    let yours = files
+        .into_iter()
+        .filter(|rel| {
+            let Some((top, rest)) = rel.split_once('/') else { return true };
+            if !SETTINGS_DIRS.iter().any(|d| top.eq_ignore_ascii_case(d)) {
+                return true;
+            }
+            // Its first folder, or its file name: "goety/x.toml",
+            // "ars_conflux-common.toml".
+            let head = norm_id(rest.split('/').next().unwrap_or(rest));
+            let mine = your_ids.iter().any(|id| head.starts_with(id.as_str()));
+            if !mine {
+                made += 1;
+            }
+            mine
+        })
+        .collect();
+    (yours, made)
 }
 
 /// A pack file Hopper treats as a mod or pack you can turn off: directly in
@@ -1182,6 +1241,7 @@ mod tests {
             needed: Vec::new(),
             your_mods: Vec::new(),
             your_files: Vec::new(),
+            mod_made: 0,
             new_zip: PathBuf::new(),
             prefixes: Vec::new(),
             same,
@@ -1229,6 +1289,24 @@ mod tests {
         assert_eq!(n.len(), 1);
         assert_eq!((n[0].file.as_str(), n[0].by.as_str(), n[0].project), ("core.jar", "Mine", 1));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_files_of_your_mods_are_yours() {
+        let files = vec![
+            "config/ars_conflux-common.toml".to_string(),
+            "config/goety/goety.toml".to_string(),
+            "config/mekanism/general.toml".to_string(),
+            "defaultconfigs/create-server.toml".to_string(),
+            "kubejs/server_scripts/mine.js".to_string(),
+        ];
+        let ids = vec!["arsconflux".to_string(), "goety".to_string()];
+        let (yours, made) = split_made(files, &ids);
+        assert_eq!(
+            yours,
+            vec!["config/ars_conflux-common.toml", "config/goety/goety.toml", "kubejs/server_scripts/mine.js"]
+        );
+        assert_eq!(made, 2);
     }
 
     #[test]
@@ -1314,6 +1392,7 @@ mod tests {
             needed: Vec::new(),
             your_mods: Vec::new(),
             your_files: Vec::new(),
+            mod_made: 0,
             new_zip: PathBuf::new(),
             prefixes: Vec::new(),
             same: Vec::new(),
@@ -1373,6 +1452,7 @@ mod tests {
             needed: Vec::new(),
             your_mods: Vec::new(),
             your_files: Vec::new(),
+            mod_made: 0,
             new_zip: PathBuf::new(),
             prefixes: Vec::new(),
             same: Vec::new(),
@@ -1409,6 +1489,7 @@ mod tests {
             needed: Vec::new(),
             your_mods: Vec::new(),
             your_files: Vec::new(),
+            mod_made: 0,
             new_zip: PathBuf::new(),
             prefixes: Vec::new(),
             same: vec!["s".into()],

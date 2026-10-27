@@ -393,6 +393,8 @@ pub fn plan(
     let mut your_files = packdiff::your_files(&server.root, new.files.keys().map(String::as_str), &skip_rels);
     // The world and server state aren't "your files": they're never touched.
     your_files.retain(|r| updatable(r, &level));
+    let your_ids = packdiff::mod_ids(&server.mods_dir(), added.iter().map(String::as_str));
+    let (your_files, mod_made) = packdiff::split_made(your_files, &your_ids);
 
     Ok(ServerPlan {
         plan: UpdatePlan {
@@ -409,6 +411,7 @@ pub fn plan(
             needed,
             your_mods,
             your_files,
+            mod_made,
             new_zip,
             prefixes: vec![prefix],
             same,
