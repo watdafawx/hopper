@@ -31,9 +31,6 @@ pub struct InstanceSettings {
     root: Option<PathBuf>,
     /// An instance to load on the next frame (loading needs the window).
     pending: Option<PathBuf>,
-    /// Open the loader's changelog once this instance and its loader
-    /// builds are in.
-    log_wanted: Option<PathBuf>,
     name: Entity<InputState>,
     width: Entity<InputState>,
     height: Entity<InputState>,
@@ -74,7 +71,6 @@ impl InstanceSettings {
             store,
             root: None,
             pending: None,
-            log_wanted: None,
             name,
             width,
             height,
@@ -107,16 +103,6 @@ impl InstanceSettings {
     /// Shows an instance's settings (dropping unsaved edits).
     pub fn show_for(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.pending = Some(root);
-        cx.notify();
-    }
-
-    /// Shows an instance's settings with its loader's builds and changelog
-    /// open on top.
-    pub fn show_loader_log(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        if self.root.as_ref() != Some(&root) {
-            self.pending = Some(root.clone());
-        }
-        self.log_wanted = Some(root);
         cx.notify();
     }
 
@@ -470,15 +456,6 @@ impl Render for InstanceSettings {
         let Some(root) = self.root.clone() else {
             return div().into_any_element();
         };
-        // Waits for the loader builds (a failed fetch leaves none to wait for).
-        if self.pending.is_none()
-            && self.log_wanted.as_ref() == Some(&root)
-            && self.loaders.get(&self.game_version).is_none_or(|v| !v.is_empty())
-        {
-            self.log_wanted = None;
-            let form = cx.entity();
-            window.defer(cx, move |window, cx| open_loader_log(form, window, cx));
-        }
         let rem = window.rem_size();
         let view = cx.entity();
         let dirty = self.dirty(cx);
@@ -747,12 +724,15 @@ impl Render for InstanceSettings {
 /// mod changelogs. "Use this version" picks it in the Loader dropdown
 /// (Save applies it).
 struct LoaderLog {
-    form: Entity<InstanceSettings>,
+    store: Entity<Store>,
+    root: PathBuf,
     kind: String,
     installed: String,
     /// Builds offered for this Minecraft version, newest first.
     offered: Vec<String>,
     log: Option<Result<Vec<hopper::loader_changes::Change>, String>>,
+    /// Told the build picked, after it's saved (the settings form follows).
+    on_used: Option<Rc<dyn Fn(&str, &mut App)>>,
 }
 
 impl Render for LoaderLog {
@@ -786,7 +766,7 @@ impl Render for LoaderLog {
                         let target = i == 0 && !installed;
                         let full = format!("{}-{}", self.kind, c.version);
                         let usable = self.offered.contains(&full);
-                        let form = self.form.clone();
+                        let (store, root, on_used) = (self.store.clone(), self.root.clone(), self.on_used.clone());
                         v_flex()
                             .gap_1p5()
                             .p_3()
@@ -808,13 +788,12 @@ impl Render for LoaderLog {
                                             .label("Use this version");
                                         let b = if target { b.primary() } else { b.outline() };
                                         r.child(b.on_click(move |_, window, cx| {
-                                            let full = full.clone();
-                                            form.update(cx, |f, cx| {
-                                                f.loader = full;
-                                                f.want_loader_changes(cx);
-                                                cx.notify();
-                                            });
                                             window.close_dialog(cx);
+                                            if switch_loader(&store, &root, full.clone(), window, cx)
+                                                && let Some(f) = &on_used
+                                            {
+                                                f(&full, cx);
+                                            }
                                         }))
                                     }),
                             )
@@ -856,39 +835,72 @@ impl Render for LoaderLog {
     }
 }
 
-/// Opens the changelog of the picked loader's kind for an instance's form.
-fn open_loader_log(form: Entity<InstanceSettings>, window: &mut Window, cx: &mut App) {
-    let f = form.read(cx);
-    let Some(installed) = f.installed_loader(cx) else { return };
-    let kind = f.loader.split('-').next().unwrap_or("").to_string();
+/// Moves an instance to `loader` ("neoforge-21.1.265"): saves it and
+/// installs it, as saving a new loader in Settings does. Shared by the
+/// loader's versions window and the problem card's "Update NeoForge".
+pub(crate) fn switch_loader(store: &Entity<Store>, root: &std::path::Path, loader: String, window: &mut Window, cx: &mut App) -> bool {
+    let Some(mut inst) = store.read(cx).instance(root).cloned() else { return false };
+    if inst.loader == loader {
+        return false;
+    }
+    inst.loader = loader;
+    match inst.save() {
+        Ok(()) => {
+            let s = store.read(cx);
+            let r = inst.root.clone();
+            s.spawn(move || Msg::InstanceChanged(r));
+            let label = loader_label(&inst.loader);
+            s.install_loader(inst);
+            window.push_notification(Notification::success(format!("Installing {label}.")), cx);
+            true
+        }
+        Err(e) => {
+            window.push_notification(Notification::error(format!("{e:#}")), cx);
+            false
+        }
+    }
+}
+
+/// Opens an instance's loader builds and changelog over whatever is shown;
+/// "Use this version" installs that build right away. `on_used` hears
+/// which one (the settings form, to follow).
+pub(crate) fn open_loader_versions(
+    store: Entity<Store>,
+    root: PathBuf,
+    on_used: Option<Rc<dyn Fn(&str, &mut App)>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(inst) = store.read(cx).instance(&root).cloned() else { return };
+    let kind = inst.loader.split('-').next().unwrap_or("").to_string();
     if kind.is_empty() {
         return;
     }
-    let mc = f.game_version.clone();
-    let prefix = format!("{kind}-");
-    let offered: Vec<String> = f
-        .loaders
-        .get(&mc)
-        .into_iter()
-        .flatten()
-        .filter(|v| v.name.starts_with(&prefix))
-        .map(|v| v.name.clone())
-        .collect();
-    let newest = offered
-        .first()
-        .and_then(|n| n.split_once('-'))
-        .map(|(_, v)| v.to_string())
-        .unwrap_or_else(|| installed.split_once('-').map_or(String::new(), |(_, v)| v.to_string()));
-    let view = cx.new(|_| LoaderLog { form, kind: kind.clone(), installed, offered, log: None });
+    let (installed, mc) = (inst.loader.clone(), inst.game_version.clone());
+    let view = cx.new(|_| LoaderLog { store, root, kind: kind.clone(), installed: installed.clone(), offered: Vec::new(), log: None, on_used });
     let v2 = view.clone();
     cx.spawn(async move |cx| {
-        let r = cx
+        let prefix = format!("{kind}-");
+        let (offered, log) = cx
             .background_spawn(async move {
-                hopper::loader_changes::history(&kind, &mc, &newest).map_err(|e| format!("{e:#}"))
+                let offered: Vec<String> = cf::loader_versions(&mc)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|v| v.name.starts_with(&prefix))
+                    .map(|v| v.name)
+                    .collect();
+                let newest = offered
+                    .first()
+                    .and_then(|n| n.split_once('-'))
+                    .map(|(_, v)| v.to_string())
+                    .unwrap_or_else(|| installed.split_once('-').map_or(String::new(), |(_, v)| v.to_string()));
+                let log = hopper::loader_changes::history(&kind, &mc, &newest).map_err(|e| format!("{e:#}"));
+                (offered, log)
             })
             .await;
         v2.update(cx, |v, cx| {
-            v.log = Some(r);
+            v.offered = offered;
+            v.log = Some(log);
             cx.notify();
         });
     })
@@ -900,4 +912,22 @@ fn open_loader_log(form: Entity<InstanceSettings>, window: &mut Window, cx: &mut
             .margin_top(rems(3.5).to_pixels(window.rem_size()))
             .child(view.clone())
     });
+}
+
+/// The versions window from the settings form: the form follows the
+/// build picked.
+fn open_loader_log(form: Entity<InstanceSettings>, window: &mut Window, cx: &mut App) {
+    let f = form.read(cx);
+    let Some(root) = f.root.clone() else { return };
+    let store = f.store.clone();
+    let on_used: Rc<dyn Fn(&str, &mut App)> = Rc::new(move |loader: &str, cx: &mut App| {
+        let loader = loader.to_string();
+        form.update(cx, |f, cx| {
+            f.loader = loader;
+            // Its changes are now the installed version's.
+            f.loader_changes = None;
+            cx.notify();
+        });
+    });
+    open_loader_versions(store, root, Some(on_used), window, cx);
 }

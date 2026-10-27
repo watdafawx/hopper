@@ -1913,7 +1913,7 @@ impl LibraryView {
                 if inst.loader.is_empty() {
                     f.into_any_element()
                 } else {
-                    // Opens the loader's builds and changelog in Settings.
+                    // Opens the loader's builds and changelog over this tab.
                     let root = inst.root.clone();
                     let fg = theme.foreground;
                     f.id("hero-loader")
@@ -1923,10 +1923,8 @@ impl LibraryView {
                             gpui_kit::component::tooltip::Tooltip::new("Loader versions and changelog")
                                 .build(window, cx)
                         })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_tab(InstTab::Settings, cx);
-                            let root = root.clone();
-                            this.settings.update(cx, |s, cx| s.show_loader_log(root, cx));
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            crate::inst_settings::open_loader_versions(this.store.clone(), root.clone(), None, window, cx);
                         }))
                         .into_any_element()
                 }

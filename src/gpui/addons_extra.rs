@@ -903,21 +903,7 @@ impl AddonsView {
                     );
                     return;
                 };
-                let mut inst = inst;
-                inst.loader = v.name.clone();
-                match inst.save() {
-                    Ok(()) => {
-                        let store = this.store.read(cx);
-                        let r = inst.root.clone();
-                        store.spawn(move || crate::store::Msg::InstanceChanged(r));
-                        store.install_loader(inst);
-                        window.push_notification(
-                            Notification::success(format!("Installing {}.", crate::store::loader_label(&v.name))),
-                            cx,
-                        );
-                    }
-                    Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
-                }
+                crate::inst_settings::switch_loader(&this.store, &inst.root, v.name.clone(), window, cx);
                 this.resync(cx);
             })
             .ok();
