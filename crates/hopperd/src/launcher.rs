@@ -276,7 +276,7 @@ fn already_running(found: Found) -> anyhow::Result<()> {
             if crate::absolute(&exe) != crate::absolute(&me_exe) {
                 service::copy_retrying(&me_exe, &exe)?;
             }
-            Command::new(&exe).arg("--tray").creation_flags(CREATE_NO_WINDOW).spawn().with_context(|| format!("starting {}", exe.display()))?;
+            spawn_tray(&exe).with_context(|| format!("starting {}", exe.display()))?;
             if wait_for_panel(r.port, Duration::from_secs(30)) {
                 open_url(&panel_url(r.port, None));
             }
@@ -608,9 +608,22 @@ fn set_service_tray_startup(on: bool) {
 fn start_service_tray() {
     let exe = service::installed().map(|s| s.exe).filter(|e| e.is_file());
     let Some(exe) = exe.or_else(|| std::env::current_exe().ok()) else { return };
-    if let Err(e) = Command::new(&exe).arg("--tray").creation_flags(CREATE_NO_WINDOW).spawn() {
+    if let Err(e) = spawn_tray(&exe) {
         log::warn!("starting the tray: {e}");
     }
+}
+
+/// `exe --tray`, detached. Stdio must be null: after `hide_console` our
+/// inherited console handles are dead, and Windows refuses to start a
+/// child with them ("The request is not supported", os error 50).
+fn spawn_tray(exe: &Path) -> std::io::Result<Child> {
+    Command::new(exe)
+        .arg("--tray")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
 }
 
 // ---- the service's tray -----------------------------------------------------------------
