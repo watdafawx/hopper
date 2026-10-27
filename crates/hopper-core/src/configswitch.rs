@@ -100,43 +100,59 @@ fn label(lines: &[&str], ix: usize, key: &str) -> String {
     key.replace(['_', '-', '.'], " ")
 }
 
-/// The switch in config `text` (file `rel`) for `item`, if it's on.
-fn find_in(text: &str, rel: &str, mod_id: &str, item: &str) -> Option<Switch> {
+/// The switch in config `text` (file `rel`) for `item`, and whether it's on.
+fn find_any(text: &str, rel: &str, mod_id: &str, item: &str) -> Option<(Switch, bool)> {
     let lines: Vec<&str> = text.lines().collect();
     lines.iter().enumerate().find_map(|(ix, l)| {
-        let key = TRUE_LINE.captures(l)?[1].to_string();
+        let m = BOOL_LINE.captures(l)?;
+        let key = m[1].to_string();
+        let on = &m[2] == "true";
         let last = key.rsplit('.').next().unwrap_or(&key);
-        matches(last, item).then(|| Switch {
-            mod_id: mod_id.to_string(),
-            item: item.to_string(),
-            file: rel.to_string(),
-            line: ix + 1,
-            label: label(&lines, ix, last),
-            key: last.to_string(),
+        matches(last, item).then(|| {
+            let s = Switch {
+                mod_id: mod_id.to_string(),
+                item: item.to_string(),
+                file: rel.to_string(),
+                line: ix + 1,
+                label: label(&lines, ix, last),
+                key: last.to_string(),
+            };
+            (s, on)
         })
     })
 }
 
+/// The switch for `item`, if it's on.
+#[cfg(test)]
+fn find_in(text: &str, rel: &str, mod_id: &str, item: &str) -> Option<Switch> {
+    find_any(text, rel, mod_id, item).filter(|(_, on)| *on).map(|(s, _)| s)
+}
+
 /// The switches for the items of `mod_id` that crash `text` names, in that
-/// mod's config files (TOML).
-pub fn find(root: &Path, mod_id: &str, text: &str) -> Vec<Switch> {
+/// mod's config files (TOML), each with whether it's on.
+pub fn find_all(root: &Path, mod_id: &str, text: &str) -> Vec<(Switch, bool)> {
     let items = items(text, mod_id);
     if items.is_empty() {
         return Vec::new();
     }
     let files: Vec<String> =
         crate::modconfig::files_for(root, &[mod_id.to_string()]).into_iter().filter(|f| f.ends_with(".toml")).collect();
-    let mut out: Vec<Switch> = Vec::new();
+    let mut out = Vec::new();
     for item in &items {
         for rel in &files {
             let Ok(text) = fs::read_to_string(root.join(rel)) else { continue };
-            if let Some(s) = find_in(&text, rel, mod_id, item) {
-                out.push(s);
+            if let Some(found) = find_any(&text, rel, mod_id, item) {
+                out.push(found);
                 break;
             }
         }
     }
     out
+}
+
+/// The switches that are on, of [`find_all`].
+pub fn find(root: &Path, mod_id: &str, text: &str) -> Vec<Switch> {
+    find_all(root, mod_id, text).into_iter().filter(|(_, on)| *on).map(|(s, _)| s).collect()
 }
 
 /// Whether the switch is still on in its file (on its line).
@@ -146,9 +162,22 @@ pub fn is_on(root: &Path, s: &Switch) -> bool {
     })
 }
 
+/// `key = true|false`, `"key" = false # note`.
+static BOOL_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\s*"?([A-Za-z0-9_.-]+)"?\s*=\s*(true|false)\s*(?:#.*)?$"#).expect("static regex"));
+
 /// Sets the switch to `false`. The config as it was goes to backups first
 /// (Backups can put it back). Fails when the line changed since.
 pub fn turn_off(root: &Path, s: &Switch) -> anyhow::Result<()> {
+    set(root, s, false)
+}
+
+/// Puts the switch back to `true` (undoes [`turn_off`]).
+pub fn turn_on(root: &Path, s: &Switch) -> anyhow::Result<()> {
+    set(root, s, true)
+}
+
+fn set(root: &Path, s: &Switch, on: bool) -> anyhow::Result<()> {
     if !crate::configdiff::safe_rel(&s.file) || !s.file.starts_with("config/") {
         anyhow::bail!("That isn't a config file.");
     }
@@ -156,18 +185,19 @@ pub fn turn_off(root: &Path, s: &Switch) -> anyhow::Result<()> {
     let text = fs::read_to_string(&path)?;
     let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
     let l = lines.get_mut(s.line.wrapping_sub(1)).ok_or_else(|| anyhow::anyhow!("The setting moved; open the config instead."))?;
-    let ok = TRUE_LINE.captures(l.trim_end_matches('\r')).is_some_and(|m| m[1].rsplit('.').next() == Some(s.key.as_str()));
-    // Turned off already (in the config editor, say): nothing to do.
-    let off = format!("{} = false", s.key);
-    if !ok && l.trim().trim_start_matches('"').replace("\" =", " =").starts_with(&off) {
+    let now = BOOL_LINE
+        .captures(l.trim_end_matches('\r'))
+        .filter(|m| m[1].rsplit('.').next() == Some(s.key.as_str()))
+        .map(|m| &m[2] == "true")
+        .ok_or_else(|| anyhow::anyhow!("{} isn't on line {} any more; open the config instead.", s.key, s.line))?;
+    // Already so (changed in the config editor, say): nothing to do.
+    if now == on {
         return Ok(());
-    }
-    if !ok {
-        anyhow::bail!("{} isn't on line {} any more; open the config instead.", s.key, s.line);
     }
     let eq = l.find('=').unwrap_or(0);
     let (head, tail) = l.split_at(eq);
-    *l = format!("{head}{}", tail.replacen("true", "false", 1));
+    let (from, to) = if on { ("false", "true") } else { ("true", "false") };
+    *l = format!("{head}{}", tail.replacen(from, to, 1));
     crate::sync::backup_into(root, &path)?;
     fs::write(&path, lines.join("\n"))?;
     Ok(())
@@ -220,6 +250,14 @@ mod tests {
         turn_off(&root, &found[0]).unwrap();
         assert_eq!(fs::read_to_string(root.join(&found[0].file)).unwrap(), after);
         assert!(!is_on(&root, &found[0]));
+        // Still found, as off: the crash counts as worked around.
+        let all = find_all(&root, "mysticalagricultureplus", "x mysticalagricultureplus:fe_seeds y");
+        assert_eq!(all, vec![(found[0].clone(), false)]);
+        assert!(find(&root, "mysticalagricultureplus", "mysticalagricultureplus:fe_seeds").is_empty());
+        // Back on: the file as it was.
+        turn_on(&root, &found[0]).unwrap();
+        assert_eq!(fs::read_to_string(root.join(&found[0].file)).unwrap(), CONFIG);
+        assert!(is_on(&root, &found[0]));
         // The line moved: says so.
         fs::write(root.join(&found[0].file), format!("
 {CONFIG}")).unwrap();

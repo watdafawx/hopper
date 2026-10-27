@@ -124,20 +124,26 @@ pub struct Crash {
     /// crash names (a workaround that keeps the mod).
     #[serde(default)]
     pub switches: Vec<crate::configswitch::Switch>,
+    /// Switches turned off from the card or the config editor since, to
+    /// say so and turn back on.
+    #[serde(default)]
+    pub switched_off: Vec<crate::configswitch::Switch>,
 }
 
 /// The config switches for the items the crash names, of its Certain and
-/// Likely mods.
-fn switches(root: &Path, text: &str, suspects: &[Suspect]) -> Vec<crate::configswitch::Switch> {
-    let mut out: Vec<crate::configswitch::Switch> = Vec::new();
+/// Likely mods: those still on, and those turned off since (the crash is
+/// worked around until the next game says otherwise).
+fn switches(root: &Path, text: &str, suspects: &[Suspect]) -> (Vec<crate::configswitch::Switch>, Vec<crate::configswitch::Switch>) {
+    let (mut on, mut off): (Vec<crate::configswitch::Switch>, Vec<crate::configswitch::Switch>) = (Vec::new(), Vec::new());
     for s in suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.mod_id.is_empty()) {
-        for sw in crate::configswitch::find(root, &s.mod_id, text) {
-            if !out.contains(&sw) {
-                out.push(sw);
+        for (sw, is_on) in crate::configswitch::find_all(root, &s.mod_id, text) {
+            let list = if is_on { &mut on } else { &mut off };
+            if !list.contains(&sw) {
+                list.push(sw);
             }
         }
     }
-    out
+    (on, off)
 }
 
 fn re(p: &str) -> Regex {
@@ -631,8 +637,8 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         (None, Some(n)) => native_line(&tail(n, 64 << 10)),
         _ => String::new(),
     };
-    let switches = switches(root, &text, &suspects);
-    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches })
+    let (switches, switched_off) = switches(root, &text, &suspects);
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off })
 }
 
 /// A saved crash read again from its report with today's rules (which mods
@@ -655,7 +661,7 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
     let before = modified_secs(&saved.source).unwrap_or(saved.when);
     let text = tail(&saved.source, 2 << 20);
     let (mut suspects, stopped) = analyze(root, &text, "", &loading, before, mods, &ids);
-    let switches = switches(root, &text, &suspects);
+    let (switches, switched_off) = switches(root, &text, &suspects);
     // A change already put back (its older copy left backups for the mods
     // folder) stays on the card, to say so.
     for s in suspects.iter_mut().filter(|s| s.changed.is_none()) {
@@ -667,10 +673,12 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
             s.changed = Some(ch);
         }
     }
-    if suspects.is_empty() || (suspects == saved.suspects && stopped == saved.stopped && switches == saved.switches) {
+    if suspects.is_empty()
+        || (suspects == saved.suspects && stopped == saved.stopped && switches == saved.switches && switched_off == saved.switched_off)
+    {
         return None;
     }
-    Some(Crash { suspects, stopped, switches, ..saved.clone() })
+    Some(Crash { suspects, stopped, switches, switched_off, ..saved.clone() })
 }
 
 /// What a crash report names, for a report Hopper didn't see the game
@@ -693,8 +701,8 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
     } else {
         CrashKind::Unknown
     };
-    let switches = switches(root, &text, &suspects);
-    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches })
+    let (switches, switched_off) = switches(root, &text, &suspects);
+    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off })
 }
 
 /// Whether `report` was written after the crash `saved` came from, so the

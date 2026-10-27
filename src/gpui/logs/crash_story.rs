@@ -138,7 +138,7 @@ impl LogsView {
                 self.config_switches(root, c, Some(above), cx)
             });
         // A box with nothing to offer (all turned off and played) isn't shown.
-        let has_fix = changed.is_some() || self.crash_actions(root, c, cx).is_some() || !c.switches.is_empty();
+        let has_fix = changed.is_some() || self.crash_actions(root, c, cx).is_some() || !c.switches.is_empty() || !c.switched_off.is_empty();
 
         // What happened, in order.
         let mut steps: Vec<(bool, AnyElement)> = Vec::new();

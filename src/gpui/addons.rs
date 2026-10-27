@@ -451,6 +451,9 @@ pub struct AddonsView {
     focus: FocusHandle,
     /// The row the keys act on.
     cursor: Option<usize>,
+    /// The keys moved the cursor last (not the mouse): its row shows its
+    /// controls as if hovered.
+    keys: bool,
     /// Where a Shift+click range starts: the row last clicked without Shift.
     anchor: Option<usize>,
     pub(crate) store: Entity<Store>,
@@ -642,6 +645,7 @@ impl AddonsView {
             slide_gen: 0,
             _ticker: None,
             menu_for: None,
+            keys: false,
             _bulk_watch: None,
             _subscriptions: subs,
         }
@@ -714,6 +718,10 @@ impl AddonsView {
             let stop = c.as_ref().and_then(|c| {
                 let st = c.stopped.clone()?;
                 if off.contains(&st.file_name.trim_end_matches(".disabled").to_lowercase()) {
+                    return None;
+                }
+                // Worked around: its item's switch is off in its config.
+                if c.switched_off.iter().any(|s| s.mod_id.eq_ignore_ascii_case(&st.mod_id)) {
                     return None;
                 }
                 let changed = c.suspects.iter().find(|s| s.file_name == st.file_name).and_then(|s| s.changed.clone());
@@ -2786,6 +2794,7 @@ impl AddonsView {
         }
         let ix = ix.clamp(0, n as isize - 1) as usize;
         self.cursor = Some(ix);
+        self.keys = true;
         self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
         cx.notify();
     }
@@ -3015,7 +3024,7 @@ Details").into()),
         // Hover-only controls stay shown on a picked row, the key cursor's
         // row and the row whose menu is open.
         let shown = picked
-            || self.cursor.and_then(|c| self.row_file(c)).as_deref() == Some(file.as_str())
+            || (self.keys && self.cursor.and_then(|c| self.row_file(c)).as_deref() == Some(file.as_str()))
             || self.menu_for.as_deref() == Some(file.as_str());
         let progress = self
             .root
@@ -4471,6 +4480,16 @@ impl Render for AddonsView {
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                 .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                 .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
+                // The mouse takes over: the key cursor's row stops showing
+                // its controls, and a menu that closed without saying so
+                // lets its row go too.
+                .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| {
+                    if this.keys {
+                        this.keys = false;
+                        cx.notify();
+                    }
+                }))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| this.menu_for = None))
                 .track_focus(&self.focus)
                 .key_context("AddonsTable")
                 .on_action(cx.listener(|this, _: &RowUp, _, cx| this.on_row_key(-1, cx)))

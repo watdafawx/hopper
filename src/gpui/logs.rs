@@ -1093,7 +1093,7 @@ impl LogsView {
                     r.child(
                         Button::new("crash-play")
                             .small()
-                            .primary()
+                            .success()
                             .icon(IconName::Play)
                             .label(if turned == 1 { "Play without it" } else { "Play without them" })
                             .disabled(playing)

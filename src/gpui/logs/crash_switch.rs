@@ -30,7 +30,7 @@ impl LogsView {
     /// it names. `inside`: in the fix box, `Some(true)` under other fixes (a
     /// rule between); `None`: a box of its own.
     pub(super) fn config_switches(&mut self, root: &Path, c: &Crash, inside: Option<bool>, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if c.switches.is_empty() {
+        if c.switches.is_empty() && c.switched_off.is_empty() {
             return None;
         }
         let theme = cx.theme().clone();
@@ -121,6 +121,63 @@ impl LogsView {
                                     .whitespace_normal()
                                     .child(div().font_semibold().text_color(theme.warning).child(format!("Existing {} will be deleted.", sw.label)))
                                     .child(deletes(&sw.label)),
+                            ),
+                    ),
+            );
+        }
+        // Turned off already: say so, play, or put it back.
+        for (i, sw) in c.switched_off.iter().enumerate() {
+            let (s_on, r_on, r_play) = (sw.clone(), root.to_path_buf(), root.to_path_buf());
+            let file = sw.file.rsplit('/').next().unwrap_or(&sw.file).to_string();
+            list = list.child(
+                v_flex()
+                    .gap_1p5()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(widgets::done_mark(("crash-switch-done", i), format!("{} is off", sw.label), false, cx))
+                            .child(widgets::caption(format!("{} = false in {file}. Play to check the crash is gone.", sw.key), cx).text_xs()),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new(("crash-switch-play", i))
+                                    .small()
+                                    .success()
+                                    .icon(IconName::Play)
+                                    .label("Play")
+                                    .disabled(running)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let native = this.store.read(cx).settings().launch_native;
+                                        if native && !hopper::msauth::has_saved_login() {
+                                            crate::dialogs::open_sign_in(this.store.clone(), window, cx);
+                                            return;
+                                        }
+                                        if let Err(e) = this.store.update(cx, |s, _| s.play(&r_play)) {
+                                            window.push_notification(Notification::warning(e), cx);
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new(("crash-switch-on", i))
+                                    .small()
+                                    .ghost()
+                                    .icon(IconName::Undo2)
+                                    .label("Turn it back on")
+                                    .disabled(running)
+                                    .tooltip(format!("Sets {} = true again. The config as it is now goes to Backups.", s_on.key))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let r = this.store.update(cx, |s, cx| {
+                                            let r = s.crash_switch_on(&r_on, &s_on);
+                                            cx.notify();
+                                            r
+                                        });
+                                        if let Err(e) = r {
+                                            window.push_notification(Notification::warning(e), cx);
+                                        }
+                                    })),
                             ),
                     ),
             );

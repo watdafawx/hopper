@@ -1321,6 +1321,24 @@ impl Store {
         hopper::configswitch::turn_off(root, s).map_err(|e| e.to_string())?;
         if let Some(mut c) = self.crash(root).cloned() {
             c.switches.retain(|x| x != s);
+            if !c.switched_off.contains(s) {
+                c.switched_off.push(s.clone());
+            }
+            hopper::crashdetect::save(root, &c);
+            self.crashes.insert(root.to_path_buf(), Some(c));
+        }
+        Ok(())
+    }
+
+    /// Undoes [`crash_switch_off`]: the setting goes back to true and the
+    /// card offers it again.
+    pub fn crash_switch_on(&mut self, root: &Path, s: &hopper::configswitch::Switch) -> Result<(), String> {
+        hopper::configswitch::turn_on(root, s).map_err(|e| e.to_string())?;
+        if let Some(mut c) = self.crash(root).cloned() {
+            c.switched_off.retain(|x| x != s);
+            if !c.switches.contains(s) {
+                c.switches.push(s.clone());
+            }
             hopper::crashdetect::save(root, &c);
             self.crashes.insert(root.to_path_buf(), Some(c));
         }
@@ -1332,8 +1350,15 @@ impl Store {
     pub fn crash_config_saved(&mut self, root: &Path) {
         let Some(mut c) = self.crash(root).cloned() else { return };
         let n = c.switches.len();
-        c.switches.retain(|s| hopper::configswitch::is_on(root, s));
-        if c.switches.len() != n {
+        let (on, off): (Vec<_>, Vec<_>) = c.switches.drain(..).partition(|s| hopper::configswitch::is_on(root, s));
+        c.switches = on;
+        c.switched_off.extend(off);
+        // Turned back on in the editor: offered again.
+        let back: Vec<_> = c.switched_off.iter().filter(|s| hopper::configswitch::is_on(root, s)).cloned().collect();
+        c.switched_off.retain(|s| !back.contains(s));
+        let changed = c.switches.len() != n || !back.is_empty();
+        c.switches.extend(back);
+        if changed {
             hopper::crashdetect::save(root, &c);
             self.crashes.insert(root.to_path_buf(), Some(c));
         }
