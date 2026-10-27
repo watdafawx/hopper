@@ -81,6 +81,8 @@ type TargetsKey = (PathBuf, bool, usize);
 /// An install started from Browse.
 struct Pending {
     project: u64,
+    /// The file picked from the Files list; `None` for the newest fitting.
+    file: Option<u64>,
     /// The instance it goes into; `None` for a modpack (a new instance).
     target: Option<PathBuf>,
     /// Its job, found right after it started.
@@ -1140,6 +1142,7 @@ impl BrowseView {
     ) {
         let browsing = m.class_id.unwrap_or(self.class);
         let pack = hopper::browse::is_modpack(&m, browsing);
+        let picked = file.as_ref().map(|f| f.id);
         let (pending, hold, _) = self.install_state(m.id, pack, cx);
         if pending || hold.is_some() {
             return;
@@ -1204,6 +1207,7 @@ impl BrowseView {
             .max();
         self.pending.push(Pending {
             project,
+            file: picked,
             target: into,
             job,
             ended: None,
@@ -1235,6 +1239,17 @@ impl BrowseView {
     /// Whether an install of `project` into the current target (or as a new
     /// instance, for a modpack) is under way, and why one can't start now.
     /// (installing now, why it can't, how far the install is).
+    /// The project's pending install against the file `file` from the
+    /// Files list: (it's this file, it's another of its files).
+    fn file_pending(&self, project: u64, pack: bool, file: u64) -> (bool, bool) {
+        let into = if pack { None } else { self.target.as_ref() };
+        match self.pending.iter().find(|p| p.project == project && p.target.as_ref() == into) {
+            Some(p) if p.file == Some(file) => (true, false),
+            Some(_) => (false, true),
+            None => (false, false),
+        }
+    }
+
     fn install_state(&self, project: u64, pack: bool, cx: &App) -> (bool, Option<&'static str>, Option<f32>) {
         let into = if pack { None } else { self.target.as_ref() };
         let p = self
@@ -2566,6 +2581,10 @@ impl BrowseView {
                             )
                             .into_any_element()
                         } else {
+                            // Only the file being installed shows it; the
+                            // others wait for it.
+                            let (this_file, other_file) =
+                                if pending { self.file_pending(m.id, is_pack, f.id) } else { (false, false) };
                             let lead = install_button(
                                 widgets::split_lead(
                                     Button::new(ElementId::Name(format!("file:{}", f.id).into()))
@@ -2573,12 +2592,13 @@ impl BrowseView {
                                         .outline(),
                                 ),
                                 if installed_file.is_some() { "Switch" } else { "Install" },
-                                pending,
-                                progress,
+                                this_file,
+                                progress.filter(|_| this_file),
                                 hold,
                                 cx,
                             )
-                            .when(!can || locked, |b| b.disabled(true))
+                            .when(!can || locked || other_file, |b| b.disabled(true))
+                            .when(other_file, |b| b.tooltip("Another version of it is installing"))
                             .when(locked, |b| b.tooltip("Locked: unlock it in the Mods tab to switch versions"))
                                 .on_click(cx.listener(move |this, _, w, cx| {
                                     this.install(m1.clone(), Some(f1.clone()), w, cx)
