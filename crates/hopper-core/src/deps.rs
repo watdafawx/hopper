@@ -870,6 +870,42 @@ fn cmp(have: &str, bound: &str) -> Option<std::cmp::Ordering> {
 }
 
 /// Whether version `have` fits `range`: a Maven range ("[4.4,)",
+/// The versions written in a file name or title: runs of numbers with dots
+/// ("ftb-xmod-compat-neoforge-21.1.14.jar" gives "21.1.14").
+pub fn versions_in(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in name.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() || (c == '.' && !cur.is_empty() && !cur.ends_with('.')) {
+            cur.push(c);
+        } else {
+            let v = cur.trim_end_matches('.').to_string();
+            if v.contains('.') {
+                out.push(v);
+            }
+            cur.clear();
+        }
+    }
+    out
+}
+
+/// Whether any of a mod's published files (`names`: file names or
+/// titles) has a version `range` accepts. `None` when the range isn't
+/// understood. False means the version asked for doesn't exist, usually a
+/// mistake in the asking mod (FTB Library 2101.1.38 asks for FTB XMod
+/// Compat "2101.1.14", whose versions are 21.1.x).
+pub fn range_published(range: &str, names: &[String]) -> Option<bool> {
+    let mut understood = false;
+    for v in names.iter().flat_map(|n| versions_in(n)) {
+        match accepts(range, &v) {
+            Some(true) => return Some(true),
+            Some(false) => understood = true,
+            None => {}
+        }
+    }
+    understood.then_some(false)
+}
+
 /// "[1.0,2.0)", "4.4" meaning at least) or a Fabric one (">=0.116",
 /// "<2", "~1.2", "^1.2", "1.2.x", "*", several separated by spaces).
 /// `None` when the range isn't understood (no warning then).
@@ -1001,6 +1037,18 @@ mod tests {
             z.write_all(b.as_bytes()).unwrap();
         }
         z.finish().unwrap();
+    }
+
+    #[test]
+    fn a_version_nobody_published_is_spotted() {
+        let files = vec![
+            "ftb-xmod-compat-neoforge-21.1.14.jar".to_string(),
+            "[NEOFORGE][1.21.1] FTB XMod Compat 21.1.13".to_string(),
+        ];
+        assert_eq!(versions_in(&files[0]), vec!["21.1.14"]);
+        assert_eq!(range_published("[2101.1.14,)", &files), Some(false));
+        assert_eq!(range_published("[21.1.14,)", &files), Some(true));
+        assert_eq!(range_published("[21.1.15,)", &files), Some(false));
     }
 
     #[test]

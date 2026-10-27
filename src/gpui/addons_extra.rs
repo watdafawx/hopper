@@ -116,6 +116,9 @@ pub struct MissingDeps {
     /// The loader and Minecraft the blockers were checked against: a new
     /// loader checks again.
     pub against: (String, String),
+    /// Wrong-version rows whose asked-for version nobody published (mod
+    /// id and range → a version that does exist, as an example).
+    pub ghosts: std::collections::HashMap<(String, String), String>,
 }
 
 impl AddonsView {
@@ -210,6 +213,7 @@ impl AddonsView {
             queued: hopper::locked::list(&inst.root).len(),
             loaded_fine: if same { self.missing.loaded_fine } else { None },
             against: against.clone(),
+            ghosts: if same { std::mem::take(&mut self.missing.ghosts) } else { Default::default() },
         };
         let root = inst.root.clone();
         let snapshot = inst.clone();
@@ -227,6 +231,7 @@ impl AddonsView {
             this.update(cx, |this, cx| {
                 if this.missing.root.as_ref() == Some(&root) && this.missing.mtime == mtime && this.missing.against == against {
                     this.missing.dups = dups;
+                    this.want_ghosts(&blockers, cx);
                     this.missing.blockers = blockers;
                     this.missing.loaded_fine = loaded_fine;
                     // Wrong versions are warned about when an update causes
@@ -911,6 +916,62 @@ impl AddonsView {
         .detach();
     }
 
+    /// For each "only works with X a.b or newer" row: whether X ever
+    /// published such a version. When it didn't, no update fixes it.
+    fn want_ghosts(&mut self, blockers: &[hopper::deps::Blocker], cx: &mut Context<Self>) {
+        use hopper::deps::BlockerKind;
+        let Some(root) = self.missing.root.clone() else { return };
+        let Some(inst) = self.store.read(cx).instance(&root).cloned() else { return };
+        let asks: Vec<(String, String, u64)> = blockers
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockerKind::WrongVersion { needs, versions, jar, .. } => {
+                    let key = (needs.clone(), versions.clone());
+                    if self.missing.ghosts.contains_key(&key) {
+                        return None;
+                    }
+                    let a = inst.addons.iter().find(|a| {
+                        a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(jar.trim_end_matches(".disabled"))
+                    })?;
+                    (a.project_id != 0).then(|| (needs.clone(), versions.clone(), a.project_id))
+                }
+                _ => None,
+            })
+            .collect();
+        if asks.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_spawn(async move {
+                    let mut out = Vec::new();
+                    for (needs, versions, pid) in asks {
+                        let Ok(files) = hopper::source::files(pid, "", hopper::cf::Loader::Any) else { continue };
+                        let names: Vec<String> =
+                            files.iter().flat_map(|f| [f.file_name.clone(), f.display_name.clone()]).collect();
+                        if hopper::deps::range_published(&versions, &names) == Some(false) {
+                            let example = names
+                                .iter()
+                                .flat_map(|n| hopper::deps::versions_in(n))
+                                .max_by(|a, b| hopper::scan::compare_versions(a, b))
+                                .unwrap_or_default();
+                            out.push(((needs, versions), example));
+                        }
+                    }
+                    out
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.missing.root.as_ref() == Some(&root) && !found.is_empty() {
+                    this.missing.ghosts.extend(found);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// "N problems will stop the game at loading": what the loader refuses
     /// besides missing mods, with Turn off where that fixes it.
     pub(crate) fn blocker_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1001,6 +1062,26 @@ impl AddonsView {
                     let name = other.as_ref().map_or_else(String::new, |o| o.2.clone());
                     actions.push(off(format!("blk-off2:{i}"), jar.clone(), format!("Turn off {name}")));
                 }
+                BlockerKind::WrongVersion { needs, versions, .. }
+                    if self.missing.ghosts.contains_key(&(needs.clone(), versions.clone())) =>
+                {
+                    // No update fixes it: go back to a version of this mod
+                    // that doesn't ask for it.
+                    actions.push(off(format!("blk-off:{i}"), b.file_name.clone(), format!("Turn off {}", b.mod_name)));
+                    let (store, root) = (self.store.clone(), inst.root.clone());
+                    actions.push(
+                        Button::new(SharedString::from(format!("blk-older:{i}")))
+                            .xsmall()
+                            .outline()
+                            .label(format!("Older {}", b.mod_name))
+                            .tooltip("Its versions, to go back to one before this mistake")
+                            .disabled(pid == 0)
+                            .on_click(move |_, window, cx| {
+                                crate::versions::open(store.clone(), root.clone(), pid, false, None, window, cx)
+                            })
+                            .into_any_element(),
+                    );
+                }
                 BlockerKind::WrongVersion { needs, .. } => {
                     actions.push(off(format!("blk-off:{i}"), b.file_name.clone(), format!("Turn off {}", b.mod_name)));
                     let id = needs.clone();
@@ -1035,6 +1116,25 @@ impl AddonsView {
                     None => el,
                 }
             };
+            // A version nobody published: say so, and that the asking mod
+            // is at fault.
+            // Its versions, shown by the one installed.
+            let ghost = match &b.kind {
+                hopper::deps::BlockerKind::WrongVersion { needs, versions, have, .. }
+                    if self.missing.ghosts.contains_key(&(needs.clone(), versions.clone())) =>
+                {
+                    Some(have.clone())
+                }
+                _ => None,
+            };
+            let mut parts = parts;
+            if let (Some(example), Some(o)) = (&ghost, other.as_ref()) {
+                parts.tail = format!("{}, a version that doesn't exist", parts.tail.split(';').next().unwrap_or("").trim());
+                parts.why = format!(
+                    "{}'s versions are numbered like {example} (yours): this is likely a mistake by {}'s author. Go back to an older {} until it's fixed.",
+                    o.2, b.mod_name, b.mod_name
+                );
+            }
             // Under the sentence: why, and which file the other mod is in.
             let why: Vec<String> = [
                 parts.why.clone(),
