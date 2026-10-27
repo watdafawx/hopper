@@ -191,16 +191,20 @@ pub fn targets(inst: &Instance, latest: Option<cf::File>) -> anyhow::Result<Vec<
 }
 
 /// Downloads `pack`'s server pack and works out what updating `server` to
-/// it would do. `inst` is the instance the server runs.
+/// it would do. `inst` is the instance the server runs. Mods are always
+/// compared with the old server pack (its file list is cheap to read).
+/// Other files only with `compare`; without, the server pack's copy of
+/// every file that differs is the default, like the CurseForge app.
 pub fn plan(
     server: &ServerInfo,
     inst: &Instance,
     pack: &cf::File,
+    compare: bool,
     job: &Job,
 ) -> anyhow::Result<ServerPlan> {
     // A server on a Hopper Server: the panel plans it next to the files.
     if let Some(r) = &server.remote {
-        return crate::hopperd::Client::for_remote(r)?.pack_plan(&r.id, inst, pack, job);
+        return crate::hopperd::Client::for_remote(r)?.pack_plan(&r.id, inst, pack, compare, job);
     }
     let pid = inst.pack.as_ref().map_or(0, |p| p.project_id);
     let sp_id = pack.server_pack_file_id.filter(|id| *id != 0).ok_or_else(|| {
@@ -282,10 +286,11 @@ pub fn plan(
 
     // Config and other files.
     job.detail("Comparing files");
+    let file_base = base.as_ref().filter(|_| compare);
     let (mut files, same) =
-        packdiff::plan_files_by(base.as_ref().map(|b| &b.files), &new.files, &server.root, file_key);
+        packdiff::plan_files_by(file_base.map(|b| &b.files), &new.files, &server.root, file_key);
     let mut merged = HashMap::new();
-    if let Some(b) = &base {
+    if let Some(b) = file_base {
         let conflicts: Vec<_> = files
             .iter_mut()
             .filter(|f| f.action == FileAction::Conflict)
@@ -318,8 +323,10 @@ pub fn plan(
     }
 
     // Mods.
+    let mut added = Vec::new();
     let (mods, kept, mods_note) = if new.mods_included {
-        let (mut m, k) = mod_changes(&server.mods_dir(), &new.jars, base.as_ref().map(|b| &b.jars));
+        let (mut m, k, a) = mod_changes(&server.mods_dir(), &new.jars, base.as_ref().map(|b| &b.jars));
+        added = a;
         // The instance knows these mods: their projects and icons.
         for c in &mut m {
             let jar = if c.to.is_empty() { &c.from } else { &c.to };
@@ -348,6 +355,45 @@ pub fn plan(
         )
     };
 
+    // Mods the server pack drops that the server's own mods need.
+    let dropped: Vec<(String, String, u64, String)> = mods
+        .iter()
+        .filter(|m| m.action == ModAction::Remove)
+        .map(|m| (m.from.clone(), m.name.clone(), m.project, m.icon.clone()))
+        .collect();
+    let added_low: HashSet<String> = added.iter().map(|a| a.to_ascii_lowercase()).collect();
+    let addon_of = |jar: &str| {
+        let stem = serverpack::jar_stem(jar);
+        inst.addons
+            .iter()
+            .find(|a| a.file_name.eq_ignore_ascii_case(jar) || (!stem.is_empty() && serverpack::jar_stem(&a.file_name) == stem))
+    };
+    let needed = packdiff::needed_by_yours(&server.mods_dir(), &dropped, |jar| {
+        added_low
+            .contains(&jar.to_ascii_lowercase())
+            .then(|| addon_of(jar).map(|a| (a.name.clone(), a.project_id, a.icon.clone())).unwrap_or_default())
+    });
+    let your_mods = added
+        .iter()
+        .map(|jar| {
+            let a = addon_of(jar);
+            ModChange {
+                name: a.filter(|a| !a.name.is_empty()).map_or_else(|| serverpack::jar_stem(jar), |a| a.name.clone()),
+                from: jar.clone(),
+                project: a.map_or(0, |a| a.project_id),
+                icon: a.map(|a| a.icon.clone()).unwrap_or_default(),
+                ..Default::default()
+            }
+        })
+        .collect();
+    let mut skip_rels: HashSet<String> = new.files.keys().cloned().collect();
+    if let Some(b) = &base {
+        skip_rels.extend(b.files.keys().cloned());
+    }
+    let mut your_files = packdiff::your_files(&server.root, new.files.keys().map(String::as_str), &skip_rels);
+    // The world and server state aren't "your files": they're never touched.
+    your_files.retain(|r| updatable(r, &level));
+
     Ok(ServerPlan {
         plan: UpdatePlan {
             file,
@@ -358,7 +404,11 @@ pub fn plan(
             off_old: HashMap::new(),
             removed: Vec::new(),
             updated: Vec::new(),
-            base_known: base.is_some(),
+            base_known: file_base.is_some(),
+            compared: compare,
+            needed,
+            your_mods,
+            your_files,
             new_zip,
             prefixes: vec![prefix],
             same,
@@ -441,7 +491,7 @@ fn mod_changes(
     dir: &Path,
     new: &HashMap<String, u64>,
     base: Option<&HashMap<String, u64>>,
-) -> (Vec<ModChange>, KeptMods) {
+) -> (Vec<ModChange>, KeptMods, Vec<String>) {
     let have = jars_in(dir);
     let low = |s: &str| s.to_ascii_lowercase();
     let have_low: HashMap<String, &String> = have.keys().map(|k| (low(k), k)).collect();
@@ -464,6 +514,7 @@ fn mod_changes(
     let mut used: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     let mut kept = KeptMods::default();
+    let mut added = Vec::new();
     let mut new_sorted: Vec<(&String, &u64)> = new.iter().collect();
     new_sorted.sort();
     for (name, &size) in new_sorted {
@@ -526,9 +577,10 @@ fn mod_changes(
             });
         } else {
             kept.added += 1;
+            added.push(h.clone());
         }
     }
-    (out, kept)
+    (out, kept, added)
 }
 
 /// What [`apply`] did.
@@ -766,7 +818,7 @@ mod tests {
             ("offmod-1.0.jar", 1),
             ("added-2.0.jar", 1),
         ]);
-        let (ch, kept) = mod_changes(&dir, &new, Some(&base));
+        let (ch, kept, _) = mod_changes(&dir, &new, Some(&base));
         assert_eq!(by_action(&ch, ModAction::Add), vec![(String::new(), "added-2.0.jar".into())]);
         assert_eq!(
             by_action(&ch, ModAction::Update),
@@ -792,7 +844,7 @@ mod tests {
     fn without_a_base_the_pack_wins() {
         let dir = server_dir("nb", &[("a-1.0.jar", 1), ("b-1.0.jar", 1), ("mine.jar", 1)]);
         let new = jars(&[("a-1.0.jar", 3), ("b-2.0.jar", 1), ("c-1.0.jar", 1)]);
-        let (ch, kept) = mod_changes(&dir, &new, None);
+        let (ch, kept, _) = mod_changes(&dir, &new, None);
         assert_eq!(by_action(&ch, ModAction::Add), vec![(String::new(), "c-1.0.jar".into())]);
         assert_eq!(
             by_action(&ch, ModAction::Update),
@@ -904,7 +956,7 @@ fn real_server_pack_update() {
 
     let jobs = crate::jobs::Jobs::default();
     let job = jobs.start("test");
-    let p = plan(&server, &inst, &installed, &job).unwrap();
+    let p = plan(&server, &inst, &installed, true, &job).unwrap();
     let action = |rel: &str| p.plan.files.iter().find(|f| f.rel == rel).map(|f| f.action);
     println!("seeded: {:?}", changed.iter().take(3).map(|r| (r, action(r))).collect::<Vec<_>>());
     assert_eq!(action(&changed[0]), Some(FileAction::Update));

@@ -179,6 +179,11 @@ pub fn caption(text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// Small muted text that wraps (a [`caption`] stays on one line).
+pub fn fine_print(text: impl Into<SharedString>, cx: &App) -> Div {
+    div().text_xs().text_color(cx.theme().muted_foreground).child(text.into())
+}
+
 /// The dialogs' top offset in rems, clear of the title bar: shared so every
 /// dialog lines up.
 pub const DIALOG_TOP: f32 = 3.5;
@@ -499,6 +504,62 @@ pub fn notice_bar(color: Hsla, icon: IconName, cx: &App) -> Div {
         .border_color(color.opacity(0.3))
         .bg(color.opacity(0.08))
         .child(Icon::new(icon).small().flex_none().text_color(color))
+}
+
+/// One line of a summary ("242 mods: 17 added…"): a tinted icon, `body`,
+/// and "Show ›" / "Hide ⌄" at the end when it opens a list (`open` is
+/// `Some`). Add the click with `.on_click`.
+pub fn summary_row(
+    id: impl Into<ElementId>,
+    icon: IconName,
+    color: Hsla,
+    body: impl IntoElement,
+    open: Option<bool>,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let (muted, accent) = (theme.muted_foreground, theme.primary);
+    h_flex()
+        .id(id)
+        .gap_2p5()
+        .py_1()
+        .text_sm()
+        .child(
+            div()
+                .flex_none()
+                .size(rems(1.25))
+                .rounded(px(crate::theme::RADIUS))
+                .bg(color.opacity(alpha::TINT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::new(icon).xsmall().text_color(color)),
+        )
+        .child(h_flex().flex_1().min_w_0().gap_1p5().flex_wrap().child(body))
+        .when_some(open, |r, open| {
+            clickable(r, cx)
+                .hover(move |s| s.text_color(accent))
+                .child(
+                    h_flex()
+                        .flex_none()
+                        .gap_0p5()
+                        .text_xs()
+                        .text_color(if open { accent } else { muted })
+                        .child(if open { "Hide" } else { "Show" })
+                        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall()),
+                )
+        })
+}
+
+/// The list a [`summary_row`] opens, indented under it.
+pub fn expand_area(cx: &App) -> Div {
+    v_flex()
+        .ml(rems(1.9))
+        .mb_2()
+        .pt_2()
+        .gap_2()
+        .border_t_1()
+        .border_color(cx.theme().border)
 }
 
 /// A small round status dot (a server's state: green running, grey

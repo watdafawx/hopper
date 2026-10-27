@@ -351,6 +351,10 @@ struct PlanBody {
     /// Web: the pack file id to update to (the server's own pack).
     #[serde(default)]
     file: Option<String>,
+    /// Desktop: compare with the server's changes (old desktops don't
+    /// send it, and always compared).
+    #[serde(default)]
+    compare: Option<bool>,
     #[serde(default)]
     cf_key: String,
     /// The desktop's "keep downloaded packs" days, for this panel's cache.
@@ -372,11 +376,12 @@ async fn plan(
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     ensure_cf_key(&b.cf_key);
     let keep_days = b.keep_days.unwrap_or(KEEP_DAYS);
+    let compare = b.compare.unwrap_or(true);
     if let (Some(inst), Some(pack)) = (b.inst, b.pack) {
         let title = format!("Comparing {} with {}", e.name, pack.display_name);
         let job = spawn(&app, title, move |job| {
             let server = hopper_core::server::load(&e.root);
-            let r = spu::plan(&server, &inst, &pack, job);
+            let r = spu::plan(&server, &inst, &pack, compare, job);
             hopper_core::modpack::prune_packs_older_than(keep_days);
             r
         });
@@ -411,7 +416,7 @@ async fn plan(
         let old = inst.pack.take().unwrap_or_default();
         inst.pack = Some(PackRef { project_id: pid, file_id: cur, server_pack_file_id: server_pack, ..old });
         let server = hopper_core::server::load(&e.root);
-        let p = spu::plan(&server, &inst, &pack, job)?;
+        let p = spu::plan(&server, &inst, &pack, true, job)?;
         hopper_core::modpack::prune_packs_older_than(keep_days);
         let out = summary(job.id(), &p);
         let mut g = PLANS.lock().unwrap();

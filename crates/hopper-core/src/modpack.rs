@@ -86,6 +86,21 @@ pub struct Overrides {
     pub leave_out: HashSet<String>,
     /// Pack mods you updated yourself that keep your file.
     pub keep_mine: HashSet<u64>,
+    /// Mods the pack drops that you keep (file names, lower case): one of
+    /// your mods needs them. They become yours.
+    pub keep_dropped: HashSet<String>,
+}
+
+/// Pack mods leaving with an update that you chose to keep (see
+/// [`Overrides::keep_dropped`]): no longer the pack's, so later updates
+/// leave them alone.
+fn adopt_kept(inst: &mut Instance, overrides: Option<&Overrides>) {
+    let Some(o) = overrides.filter(|o| !o.keep_dropped.is_empty()) else { return };
+    for a in inst.addons.iter_mut() {
+        if a.from_pack && o.keep_dropped.contains(&a.file_name.to_lowercase()) {
+            a.from_pack = false;
+        }
+    }
 }
 
 // ── files a pack wants that could not be downloaded ─────────────────
@@ -890,6 +905,7 @@ fn apply_pack(
     // the new version go to backups; mods you added stay.
     inst.game_version = manifest.minecraft.version.clone();
     inst.loader = manifest.loader();
+    adopt_kept(inst, overrides);
     commit(inst, staged, |a| {
         a.from_pack && !wanted.contains_key(&a.project_id)
     })?;
@@ -2159,7 +2175,7 @@ pub fn update_any(
     let overrides = match overrides {
         Some(o) => o,
         None => {
-            let plan = crate::packdiff::plan(inst, file, job)?;
+            let plan = crate::packdiff::plan(inst, file, true, job)?;
             // Mods you turned off stay off.
             merged = plan.decisions_with(&plan.default_take(), &plan.default_choices());
             &merged
@@ -2432,6 +2448,7 @@ fn apply_mrpack_with(
         inst.game_version = mc.clone();
     }
     inst.loader = index.loader();
+    adopt_kept(inst, overrides);
     commit(inst, staged, |a| {
         a.from_pack && !keep.contains(&a.file_name.to_lowercase())
     })?;

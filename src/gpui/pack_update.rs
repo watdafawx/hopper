@@ -7,10 +7,10 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
     h_flex, v_flex,
@@ -30,9 +30,21 @@ use crate::widgets::{DIALOG_CHROME_FOOTER as DIALOG_CHROME, DIALOG_TOP};
 /// Collapsible groups of the preview.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Group {
-    Mods(ModAction),
     Files(FileAction),
 }
+
+/// The summary lines that open a list (one at a time).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Mods,
+    Files,
+    Dropped,
+    Stays,
+    Edited,
+}
+
+/// Rows a list draws before "…N more".
+const LIST_CAP: usize = 300;
 
 /// The bulk choice for files both you and the pack changed.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -132,13 +144,103 @@ pub struct UpdatePreview {
     /// Reinstalling the installed version: compared without a base, so
     /// every file you changed is a conflict you can reset to the pack's.
     reinstall: bool,
+    /// Compare with your changes (downloads the installed version too).
+    /// Off: a quick update, like the CurseForge app.
+    compare: bool,
+    /// The pack version updated to (instance mode), to compare again.
+    file: Option<cf::File>,
+    /// The summary line whose list is open.
+    section: Option<Section>,
+    /// The open list's filter tab, and (What stays) which tab.
+    filter: usize,
+    /// Folders opened in a file list.
+    folders: HashSet<String>,
+    search: Entity<InputState>,
+    query: String,
+    /// Dropped mods one of yours needs that you keep (file, lower case).
+    keep_needed: HashSet<String>,
+    _search_sub: Subscription,
 }
 
 impl UpdatePreview {
+    fn new(
+        store: Entity<Store>,
+        root: PathBuf,
+        server: Option<ServerTarget>,
+        from: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let sub = cx.subscribe_in(&search, window, |this, state, event, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.query = state.read(cx).value().trim().to_lowercase();
+                cx.notify();
+            }
+        });
+        UpdatePreview {
+            store,
+            root,
+            server,
+            from,
+            plan: None,
+            take: HashSet::new(),
+            bulk: Bulk::Pack,
+            turn_on: HashSet::new(),
+            paint: Default::default(),
+            peek: None,
+            _peek_watch: None,
+            open: HashSet::new(),
+            diffs: HashMap::new(),
+            mc_change: None,
+            backup_worlds: false,
+            reinstall: false,
+            compare: false,
+            file: None,
+            section: None,
+            filter: 0,
+            folders: HashSet::new(),
+            search,
+            query: String::new(),
+            keep_needed: HashSet::new(),
+            _search_sub: sub,
+        }
+    }
+
+    /// A fresh plan's state: picks at their defaults, lists closed.
+    fn loaded(&mut self, p: &UpdatePlan, cx: &mut Context<Self>) {
+        self.set_defaults(p);
+        self.turn_on = p.default_choices();
+        self.compare = p.compared;
+        self.keep_needed.clear();
+        self.want_icons(p, cx);
+    }
+
+    /// Switches between the quick update and comparing with your changes,
+    /// and plans again.
+    fn set_compare(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.compare = on;
+        self.section = None;
+        self.open.clear();
+        self.diffs.clear();
+        if self.server.is_some() {
+            if let Some(old) = self.server.as_mut().and_then(|t| t.job.take()) {
+                server_reviews(|m| m.remove(&old));
+                self.store.read(cx).jobs().cancel(old);
+            }
+            self.plan_server(cx);
+        } else if let Some(f) = self.file.clone() {
+            self.plan = None;
+            self.plan(f, cx);
+        }
+        cx.notify();
+    }
+
     fn plan(&mut self, file: cf::File, cx: &mut Context<Self>) {
         let Some(inst) = self.store.read(cx).instance(&self.root).cloned() else {
             return;
         };
+        let compare = self.compare;
         let job = self
             .store
             .read(cx)
@@ -147,7 +249,7 @@ impl UpdatePreview {
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
-                    let r = hopper::packdiff::plan(&inst, &file, &job);
+                    let r = hopper::packdiff::plan(&inst, &file, compare, &job);
                     job.finish(&r.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e:#}")));
                     if let Ok(p) = &r {
                         // Kept even if the dialog closes meanwhile: the
@@ -163,9 +265,11 @@ impl UpdatePreview {
                 .await;
             this.update(cx, |this, cx| {
                 if let Ok(p) = &r {
-                    this.set_defaults(p);
-                    this.turn_on = p.default_choices();
-                    this.want_icons(p, cx);
+                    // Another mode was picked meanwhile: its plan is coming.
+                    if p.compared != this.compare {
+                        return;
+                    }
+                    this.loaded(p, cx);
                 }
                 this.plan = Some(r);
                 cx.notify();
@@ -179,6 +283,7 @@ impl UpdatePreview {
     /// the picked one's server pack with the server.
     fn plan_server(&mut self, cx: &mut Context<Self>) {
         let panels = self.store.read(cx).settings().hopper_panels.clone();
+        let compare = self.compare;
         let Some(t) = self.server.as_mut() else { return };
         t.splan = None;
         t.via = None;
@@ -208,7 +313,7 @@ impl UpdatePreview {
                     job.detail("Comparing on the Hopper Server");
                 }
                 let server = via.unwrap_or_else(|| t.server.clone());
-                let p = hopper::server_pack_update::plan(&server, &t.inst, &targets[pick], &job)?;
+                let p = hopper::server_pack_update::plan(&server, &t.inst, &targets[pick], compare, &job)?;
                 Ok::<_, anyhow::Error>((targets, p, server))
             })();
             job.finish(&r.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e:#}")));
@@ -244,7 +349,7 @@ impl UpdatePreview {
                         if let Some(r) = result {
                             this.take_result(id, r);
                             if let Some(Ok(p)) = this.plan.clone() {
-                                this.want_icons(&p, cx);
+                                this.loaded(&p, cx);
                             }
                         }
                         cx.notify();
@@ -263,7 +368,6 @@ impl UpdatePreview {
     fn take_result(&mut self, id: u64, r: ServerResult) {
         match r {
             Ok((targets, p, on)) => {
-                self.set_defaults(&p.plan);
                 self.from = p.base.clone().unwrap_or_else(|| "this server".into());
                 self.plan = Some(Ok(p.plan.clone()));
                 if let Some(t) = self.server.as_mut() {
@@ -298,7 +402,11 @@ impl UpdatePreview {
     fn apply_server(view: &Entity<Self>, cx: &mut App) -> bool {
         let v = view.read(cx);
         let Some(t) = &v.server else { return false };
-        let Some(p) = t.splan.clone() else { return false };
+        let Some(mut p) = t.splan.clone() else { return false };
+        // Dropped mods one of the server's own mods needs, kept.
+        p.plan
+            .mods
+            .retain(|m| !(m.action == ModAction::Remove && v.keep_needed.contains(&m.from.to_lowercase())));
         if let Some(id) = t.job {
             server_reviews(|m| m.remove(&id));
         }
@@ -404,13 +512,6 @@ impl UpdatePreview {
                 );
             }
         }
-        c = c.child(
-            widgets::caption(
-                "Server packs often leave out global datapacks (Paxi, OpenLoader) and configs of mods new to the pack.                  Server sync flags what still differs afterwards.",
-                cx,
-            )
-            .text_xs(),
-        );
         Some(c.into_any_element())
     }
 
@@ -419,7 +520,10 @@ impl UpdatePreview {
     fn set_defaults(&mut self, p: &UpdatePlan) {
         self.take = p.default_take();
         let n = p.count(FileAction::Conflict);
-        self.bulk = if self.take.is_empty() {
+        // A quick update: the pack's copy, like the CurseForge app.
+        self.bulk = if !p.base_known {
+            Bulk::Pack
+        } else if self.take.is_empty() {
             Bulk::Mine
         } else if self.take.len() == n {
             Bulk::Pack
@@ -445,6 +549,8 @@ impl UpdatePreview {
                     self.take.remove(r);
                 }
             }
+            // Without a base, your own settings (options.txt…) stay.
+            Bulk::Pack if !plan.base_known => self.take = plan.default_take(),
             Bulk::Pack => self.take.extend(all),
             Bulk::Review => {
                 self.open.insert(Group::Files(FileAction::Conflict));
@@ -454,9 +560,11 @@ impl UpdatePreview {
         cx.notify();
     }
 
-    /// Files both you and the pack changed: one choice for all of them,
-    /// with the per-file list folded below it.
-    fn conflict_card(&self, plan: &UpdatePlan, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// "Your choice": what happens to the pack files that differ from
+    /// yours, all at once or per file, with the per-file list folded below.
+    /// A quick update offers to compare with your changes; a compared one
+    /// to go back.
+    fn choice_card(&self, plan: &UpdatePlan, cx: &mut Context<Self>) -> Option<AnyElement> {
         let rows: Vec<String> = plan
             .files
             .iter()
@@ -464,82 +572,181 @@ impl UpdatePreview {
             .map(|f| f.rel.clone())
             .collect();
         let n = rows.len();
-        if n == 0 {
+        let server = self.server.is_some();
+        let quick = !plan.base_known;
+        // A server with no old server pack to compare with: comparing would
+        // change nothing.
+        let has_base = self
+            .server
+            .as_ref()
+            .is_none_or(|t| t.splan.as_ref().is_some_and(|p| p.base.is_some()));
+        let can_compare = quick && !plan.compared && !self.reinstall && has_base;
+        if n == 0 && !plan.compared {
             return None;
         }
-        let suggested = plan.default_take().len();
-        // "Suggested" only when it differs from both "all" choices.
+        let files = if n == 1 { "file" } else { "files" };
+        let to = if server {
+            "the server pack".to_string()
+        } else {
+            plan.file.display_name.clone()
+        };
+        let title = if n == 0 {
+            "Compared with your changes: none clash with the pack's".to_string()
+        } else if quick {
+            if server {
+                format!("{n} server {files} differ from the server pack")
+            } else {
+                format!("{n} pack {files} differ from {to}")
+            }
+        } else {
+            format!("{n} {files} you and the pack both changed")
+        };
+        let mine_label = if server { "Keep the server's" } else { "Keep my edits" };
         let mut choices = Vec::new();
-        if suggested > 0 && suggested < n {
-            choices.push((Bulk::Suggested, "Suggested"));
+        if quick {
+            choices.push((Bulk::Pack, "Use the pack's"));
+            choices.push((Bulk::Mine, mine_label));
+        } else {
+            let suggested = plan.default_take().len();
+            // "Suggested" only when it differs from both "all" choices.
+            if suggested > 0 && suggested < n {
+                choices.push((Bulk::Suggested, "Suggested"));
+            }
+            choices.push((Bulk::Mine, mine_label));
+            choices.push((Bulk::Pack, "Use all the pack's"));
         }
-        choices.push((Bulk::Mine, "Keep all my changes"));
-        choices.push((Bulk::Pack, "Take all the pack's"));
         choices.push((Bulk::Review, "Review each"));
         let selected = choices
             .iter()
             .position(|(b, _)| *b == self.bulk)
             .unwrap_or(choices.len() - 1);
         let mine = rows.iter().filter(|r| !self.take.contains(*r)).count();
+        let backups = if server {
+            "The server's copies go to .hopper-backups."
+        } else {
+            "Yours go to .hopper-backups, and a snapshot is saved first."
+        };
         let note = match self.bulk {
+            Bulk::Pack if quick && mine > 0 => format!(
+                "The new version's copy replaces each one, like the CurseForge app. {backups} Your own settings ({}) stay.",
+                rows.iter().filter(|r| !self.take.contains(*r)).cloned().collect::<Vec<_>>().join(", ")
+            ),
+            Bulk::Pack if quick => format!("The new version's copy replaces each one, like the CurseForge app. {backups}"),
+            Bulk::Pack => format!("The pack's copy replaces every one. {backups}"),
             Bulk::Suggested => format!(
-                "Pack content (quests, scripts) takes the pack's copy ({}); settings keep yours ({mine}).",
+                "Pack content (quests, scripts) takes the pack's copy ({}); settings keep yours ({mine}). {backups}",
                 n - mine
             ),
-            Bulk::Mine => "Your copy of every file stays; the pack's changes to them are skipped.".to_string(),
-            Bulk::Pack => "The pack's copy replaces every file.".to_string(),
-            Bulk::Review => format!("Picked per file: {mine} keep yours, {} take the pack's.", n - mine),
+            Bulk::Mine if server => "The server's copy of every one stays; the pack's changes to them are skipped.".to_string(),
+            Bulk::Mine => "Your copy of every one stays; the pack's changes to them are skipped.".to_string(),
+            Bulk::Review => format!("Picked per file: {mine} keep yours, {} take the pack's. {backups}", n - mine),
         };
-        let files = if n == 1 { "file" } else { "files" };
         let open = self.open.contains(&Group::Files(FileAction::Conflict));
         let picks: Vec<Bulk> = choices.iter().map(|(b, _)| *b).collect();
         let theme = cx.theme();
+        let (warning, primary, muted) = (theme.warning, theme.primary, theme.muted_foreground);
+        let (radius, border) = (theme.radius, theme.border);
+        let compare_note = if server {
+            "Finds the files you edited on the server so you can keep them, and merges edits where the pack changed other lines. Reads the old server pack's file list (no full download)."
+                .to_string()
+        } else {
+            format!(
+                "Finds the files you edited yourself so you can keep them, and merges edits where the pack changed other lines. Downloads the version you have ({}) too.",
+                self.from
+            )
+        };
         let card = v_flex()
             .gap_2()
             .px_3()
             .py_2p5()
-            .rounded(theme.radius)
+            .rounded(radius)
             .border_1()
-            .border_color(theme.warning.opacity(widgets::alpha::LINE))
+            .border_color(primary.opacity(widgets::alpha::LINE))
+            .bg(primary.opacity(0.04))
             .child(
                 h_flex()
                     .gap_2()
-                    .child(widgets::chip(cx.theme().warning).xsmall().child("Both changed"))
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(format!("{n} {files} you and the pack both changed")),
+                    .child(widgets::chip(primary).xsmall().child("Your choice"))
+                    .child(div().text_sm().font_semibold().child(title)),
+            )
+            .when(n > 0, |c| {
+                c.child(
+                    h_flex().child(
+                        TabBar::new("bulk-pick")
+                            .segmented()
+                            .small()
+                            .selected_index(selected)
+                            .children(choices.iter().map(|(_, l)| Tab::new().label(*l)))
+                            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                                if let Some(b) = picks.get(*ix) {
+                                    this.pick_bulk(*b, cx);
+                                }
+                            })),
                     ),
-            )
-            .child(
-                h_flex().child(
-                    TabBar::new("bulk-pick")
-                        .segmented()
-                        .small()
-                        .selected_index(selected)
-                        .children(choices.iter().map(|(_, l)| Tab::new().label(*l)))
-                        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                            if let Some(b) = picks.get(*ix) {
-                                this.pick_bulk(*b, cx);
-                            }
-                        })),
-                ),
-            )
-            .child(widgets::caption(format!("{note} Replaced files go to .hopper-backups."), cx).text_xs())
-            .child(
-                h_flex()
-                    .id("review-files")
-                    .gap_1()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .clickable(cx)
-                    .hover(|s| s.text_color(theme.primary))
-                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small())
-                    .child(if open { "Hide the files".to_string() } else { format!("Review {n} {files}") })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle(Group::Files(FileAction::Conflict), cx))),
-            )
-            .when(open, |c| c.child(self.conflicts(rows, cx)));
+                )
+                .child(widgets::fine_print(note, cx))
+                .child(
+                    h_flex()
+                        .id("review-files")
+                        .gap_1()
+                        .text_sm()
+                        .text_color(muted)
+                        .clickable(cx)
+                        .hover(move |s| s.text_color(primary))
+                        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small())
+                        .child(if open { "Hide the files".to_string() } else { format!("Review {n} {files}") })
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle(Group::Files(FileAction::Conflict), cx))),
+                )
+                .when(open, |c| c.child(self.conflicts(rows, cx)))
+            })
+            .when(can_compare, |c| {
+                c.child(
+                    h_flex()
+                        .gap_3()
+                        .items_start()
+                        .px_3()
+                        .py_2()
+                        .rounded(radius)
+                        .border_1()
+                        .border_dashed()
+                        .border_color(border)
+                        .child(
+                            Button::new("compare-changes")
+                                .small()
+                                .outline()
+                                .icon(IconName::GitCompare)
+                                .label("Compare with my changes")
+                                .flex_none()
+                                .on_click(cx.listener(|this, _, _, cx| this.set_compare(true, cx))),
+                        )
+                        .child(widgets::fine_print(compare_note, cx).flex_1().min_w_0()),
+                )
+            })
+            .when(plan.compared, |c| {
+                c.child(
+                    h_flex().child(div().flex_1()).child(
+                        Button::new("back-quick")
+                            .xsmall()
+                            .ghost()
+                            .label("Back to the quick update")
+                            .on_click(cx.listener(|this, _, _, cx| this.set_compare(false, cx))),
+                    ),
+                )
+            })
+            .when(plan.compared && !plan.base_known && !self.reinstall, |c| {
+                c.child(
+                    h_flex()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(warning)
+                        .child(Icon::new(IconName::TriangleAlert).xsmall())
+                        .child(if server {
+                            "No record of the server pack this server came from, so your edits can't be told from the pack's."
+                        } else {
+                            "The version you have couldn't be downloaded, so your edits can't be told from the pack's."
+                        }),
+                )
+            });
         Some(card.into_any_element())
     }
 
@@ -568,7 +775,8 @@ impl UpdatePreview {
         let Some(Ok(plan)) = &v.plan else {
             return false;
         };
-        let overrides = plan.decisions_with(&v.take, &v.turn_on);
+        let mut overrides = plan.decisions_with(&v.take, &v.turn_on);
+        overrides.keep_dropped = v.keep_needed.clone();
         let (store, root, file) = (v.store.clone(), v.root.clone(), plan.file.clone());
         let backup = v.backup_worlds;
         if let Ok(mut g) = REVIEWS.lock()
@@ -607,127 +815,638 @@ impl UpdatePreview {
         true
     }
 
-    fn group_header(
-        &self,
-        g: Group,
-        tag: Tag,
-        label: String,
-        n: usize,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let open = self.open.contains(&g);
-        let theme = cx.theme();
+    /// Opens a summary line's list (closing any other), or closes it.
+    fn toggle_section(&mut self, s: Section, window: &mut Window, cx: &mut Context<Self>) {
+        self.section = if self.section == Some(s) { None } else { Some(s) };
+        self.filter = 0;
+        self.folders.clear();
+        if !self.query.is_empty() {
+            self.query.clear();
+            self.search.update(cx, |i, cx| i.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Filter tabs and the search box over an open list.
+    fn list_tools(&self, id: &'static str, tabs: Vec<String>, cx: &mut Context<Self>) -> Div {
         h_flex()
-            .id(ElementId::Name(format!("group:{label}").into()))
             .gap_2()
-            .py_1()
-            .clickable(cx)
-            .when(n > 0, |r| r.hover(|s| s.text_color(theme.primary)))
-            .when(n == 0, |r| r.opacity(0.5))
+            .when(tabs.len() > 1, |r| {
+                r.child(
+                    TabBar::new(id)
+                        .segmented()
+                        .xsmall()
+                        .selected_index(self.filter)
+                        .children(tabs.into_iter().map(|l| Tab::new().label(l)))
+                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                            this.filter = *ix;
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(div().flex_1())
             .child(
-                Icon::new(if open && n > 0 {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .small()
-                .text_color(theme.muted_foreground),
+                div()
+                    .w(rems(13.))
+                    // Enter in the box would take the dialog's Update.
+                    .on_action(|_: &gpui_kit::component::dialog::Confirm, _, _| {})
+                    .child(Input::new(&self.search).small().cleanable(true)),
             )
-            .child(div().w_8().text_sm().font_semibold().child(n.to_string()))
-            .child(tag)
-            .child(div().text_sm().child(label))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if n > 0 {
-                    this.toggle(g, cx)
-                }
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        self.query.is_empty() || text.to_lowercase().contains(&self.query)
+    }
+
+    /// A unified diff under a file row.
+    fn diff_block(d: Option<String>, cx: &App) -> Div {
+        let theme = cx.theme();
+        let lines: Vec<String> = d
+            .unwrap_or("Not a text file.".into())
+            .lines()
+            .take(400)
+            .map(str::to_string)
+            .collect();
+        v_flex()
+            .my_1()
+            .p_3()
+            .rounded(theme.radius)
+            .bg(theme.muted)
+            .font_family(theme.mono_font_family.clone())
+            .text_xs()
+            .children(lines.into_iter().map(|l| {
+                let color = if l.starts_with('+') && !l.starts_with("+++") {
+                    theme.success
+                } else if l.starts_with('-') && !l.starts_with("---") {
+                    theme.danger
+                } else if l.starts_with("@@") {
+                    theme.info
+                } else {
+                    theme.muted_foreground
+                };
+                div()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_color(color)
+                    .child(l.replace('\t', "    "))
             }))
     }
 
-    fn mods_group(&self, plan: &UpdatePlan, a: ModAction, cx: &mut Context<Self>) -> AnyElement {
-        let (tag, label) = match a {
-            ModAction::Add => (widgets::chip(cx.theme().success).xsmall().child("Added"), "mods the pack adds"),
-            ModAction::Update => (widgets::chip(cx.theme().info).xsmall().child("Updated"), "mods updated"),
-            ModAction::Remove => (
-                widgets::chip(cx.theme().danger).xsmall().child("Removed"),
-                "mods the pack drops (moved to backups)",
-            ),
-        };
-        let g = Group::Mods(a);
-        let rows: Vec<_> = plan.mods.iter().filter(|m| m.action == a).cloned().collect();
-        let header = self.group_header(g, tag, label.to_string(), rows.len(), cx);
-        let open = self.open.contains(&g);
-        v_flex()
-            .child(header)
-            .when(open, |c| {
-                c.child(
-                    v_flex().pl(rems(4.25)).pb_2().children(rows.into_iter().map(|m| {
-                        let detail = match a {
-                            ModAction::Update => format!("{}  →  {}", m.from, m.to),
-                            ModAction::Add => m.to.clone(),
-                            ModAction::Remove => m.from.clone(),
-                        };
-                        h_flex()
-                            .gap_3()
-                            .py_0p5()
-                            .child(self.mod_cell(format!("mod:{}:{}", m.name, m.to), &m.name, &m.icon, m.project, cx))
-                            .child(widgets::caption(detail, cx).text_xs().min_w_0())
+    /// Files grouped by their top folder, folders closed until clicked
+    /// (open while searching). Each row: (path, chip, has a diff).
+    fn file_tree(&self, id: &str, rows: Vec<(String, Option<(&'static str, Hsla)>, bool)>, cx: &mut Context<Self>) -> AnyElement {
+        let mut by: std::collections::BTreeMap<String, Vec<(String, Option<(&'static str, Hsla)>, bool)>> =
+            std::collections::BTreeMap::new();
+        for r in rows.into_iter().filter(|r| self.matches(&r.0)) {
+            let top = match r.0.split_once('/') {
+                Some((t, _)) => format!("{t}/"),
+                None => "other".to_string(),
+            };
+            by.entry(top).or_default().push(r);
+        }
+        if by.is_empty() {
+            return widgets::caption(if self.query.is_empty() { "Nothing here." } else { "No match." }, cx)
+                .text_xs()
+                .into_any_element();
+        }
+        let theme = cx.theme();
+        let (muted, primary, border) = (theme.muted_foreground, theme.primary, theme.border);
+        let searching = !self.query.is_empty();
+        let mut out = v_flex().rounded(theme.radius).border_1().border_color(border);
+        for (folder, rows) in by {
+            let open = searching || self.folders.contains(&folder);
+            // "1,412 replaced · 640 new", or "6 files" without chips.
+            let mut counts: Vec<(&'static str, usize)> = Vec::new();
+            for r in &rows {
+                let l = r.1.map_or("files", |c| c.0);
+                match counts.iter_mut().find(|c| c.0 == l) {
+                    Some(c) => c.1 += 1,
+                    None => counts.push((l, 1)),
+                }
+            }
+            let counts = counts
+                .iter()
+                .map(|(l, n)| match *l {
+                    "files" if *n == 1 => "1 file".to_string(),
+                    l => format!("{n} {}", l.to_lowercase()),
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let f2 = folder.clone();
+            out = out.child(
+                h_flex()
+                    .id(SharedString::from(format!("{id}-fold-{folder}")))
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .border_b_1()
+                    .border_color(border)
+                    .clickable(cx)
+                    .hover(move |s| s.text_color(primary))
+                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(muted))
+                    .child(div().flex_1().min_w_0().font_semibold().child(folder.clone()))
+                    .child(div().text_xs().text_color(muted).child(counts))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.folders.remove(&f2) {
+                            this.folders.insert(f2.clone());
+                        }
+                        cx.notify();
                     })),
+            );
+            if !open {
+                continue;
+            }
+            let more = rows.len().saturating_sub(LIST_CAP);
+            for (rel, chip, diffable) in rows.into_iter().take(LIST_CAP) {
+                let diff = self.diffs.get(&rel).cloned();
+                let r1 = rel.clone();
+                out = out.child(
+                    v_flex().child(
+                        h_flex()
+                            .gap_2()
+                            .pl_6()
+                            .pr_2()
+                            .py_0p5()
+                            .border_b_1()
+                            .border_color(border.opacity(0.5))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .truncate()
+                                    .child(rel.strip_prefix(folder.as_str()).unwrap_or(&rel).to_string()),
+                            )
+                            .children(chip.map(|(l, c)| widgets::chip(c).xsmall().child(l)))
+                            .when(diffable, |r| {
+                                r.child(
+                                    h_flex().w(rems(6.5)).flex_none().justify_end().child(
+                                        Button::new(SharedString::from(format!("{id}-diff:{rel}")))
+                                            .xsmall()
+                                            .ghost()
+                                            .label(if diff.is_some() { "Hide changes" } else { "Changes" })
+                                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_diff(r1.clone(), cx))),
+                                    ),
+                                )
+                            }),
+                    )
+                    .when_some(diff, |c, d| c.child(Self::diff_block(d, cx).mx_2())),
+                );
+            }
+            if more > 0 {
+                out = out.child(
+                    widgets::caption(format!("…{more} more in {folder}: search to narrow"), cx)
+                        .text_xs()
+                        .pl_6()
+                        .py_1(),
+                );
+            }
+        }
+        out.into_any_element()
+    }
+
+    /// A dropped mod one of yours needs: a warning, and a button to keep it.
+    fn needed_card(&self, n: &hopper::packdiff::Needed, cx: &mut Context<Self>) -> AnyElement {
+        let kept = self.keep_needed.contains(&n.file.to_lowercase());
+        let theme = cx.theme();
+        let warning = theme.warning;
+        let view = cx.entity();
+        let open = move |p: u64, w: &mut Window, cx: &mut App| {
+            view.update(cx, |this, cx| this.open_peek(p, w, cx));
+        };
+        let img = |u: &str, cx: &Context<Self>| self.store.read(cx).image(u).map(|p| p.to_path_buf());
+        let (by_img, img2) = (img(&n.by_icon, cx), img(&n.icon, cx));
+        let to = if self.server.is_some() { "the new server pack".to_string() } else { self.plan_name() };
+        let file = n.file.to_lowercase();
+        v_flex()
+            .gap_1p5()
+            .px_3()
+            .py_2()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(warning.opacity(0.4))
+            .bg(warning.opacity(0.05))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(warning)
+                    .child(Icon::new(IconName::TriangleAlert).small())
+                    .child("The pack drops a mod one of yours needs"),
+            )
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_1()
+                    .text_sm()
+                    .child(widgets::mod_link(
+                        SharedString::from(format!("need-by:{}", n.file)),
+                        n.by.clone(),
+                        by_img.as_deref(),
+                        n.by_project,
+                        open.clone(),
+                        cx,
+                    ))
+                    .child("needs")
+                    .child(widgets::mod_link(
+                        SharedString::from(format!("need:{}", n.file)),
+                        n.name.clone(),
+                        img2.as_deref(),
+                        n.project,
+                        open,
+                        cx,
+                    ))
+                    .child("."),
+            )
+            .child(div().text_sm().child(format!("{to} no longer includes it. Without it the game won't start.")))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        Button::new(SharedString::from(format!("keep-need:{}", n.file)))
+                            .xsmall()
+                            .outline()
+                            .label(if kept { "Remove it with the pack".to_string() } else { format!("Keep {}", n.name) })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.keep_needed.remove(&file) {
+                                    this.keep_needed.insert(file.clone());
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        widgets::fine_print(
+                            if kept {
+                                "Kept: it counts as one of your mods from now on, so later updates leave it alone."
+                            } else {
+                                "Removed with the pack unless you keep it."
+                            },
+                            cx,
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The version updated to, by name.
+    fn plan_name(&self) -> String {
+        match &self.plan {
+            Some(Ok(p)) => p.file.display_name.clone(),
+            _ => "the new version".into(),
+        }
+    }
+
+    /// A list of mods with a chip each: (change, chip, detail).
+    fn mod_rows(&self, id: &str, rows: Vec<(hopper::packdiff::ModChange, (&'static str, Hsla), String)>, cx: &mut Context<Self>) -> AnyElement {
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|(m, _, d)| self.matches(&m.name) || self.matches(d))
+            .collect();
+        if rows.is_empty() {
+            return widgets::caption(if self.query.is_empty() { "Nothing here." } else { "No match." }, cx)
+                .text_xs()
+                .into_any_element();
+        }
+        let theme = cx.theme();
+        let border = theme.border;
+        let more = rows.len().saturating_sub(LIST_CAP);
+        v_flex()
+            .rounded(theme.radius)
+            .border_1()
+            .border_color(border)
+            .children(rows.into_iter().take(LIST_CAP).map(|(m, (label, color), detail)| {
+                widgets::row_hover(
+                    h_flex()
+                        .gap_3()
+                        .px_2()
+                        .py_0p5()
+                        .border_b_1()
+                        .border_color(border.opacity(0.5))
+                        .child(self.mod_cell(format!("{id}:{}:{}:{}", m.name, m.from, m.to), &m.name, &m.icon, m.project, cx))
+                        .child(widgets::caption(detail, cx).text_xs().flex_1().min_w_0().truncate())
+                        .child(widgets::chip(color).xsmall().child(label)),
+                    cx,
                 )
+            }))
+            .when(more > 0, |c| {
+                c.child(widgets::caption(format!("…{more} more: search to narrow"), cx).text_xs().px_2().py_1())
             })
             .into_any_element()
     }
 
-    fn files_group(&self, plan: &UpdatePlan, a: FileAction, cx: &mut Context<Self>) -> AnyElement {
-        let (tag, label) = match a {
-            FileAction::Add => (widgets::chip(cx.theme().success).xsmall().child("New"), "new files from the pack"),
-            FileAction::Update => (
-                widgets::chip(cx.theme().info).xsmall().child("Updated"),
-                "files the pack changed and you didn't",
-            ),
-            FileAction::Merge => (
-                widgets::chip(cx.theme().info).xsmall().child("Merged"),
-                "files both changed in different places: combined",
-            ),
-            FileAction::KeepYours => (
-                widgets::chip(cx.theme().muted_foreground).xsmall().child("Yours"),
-                "files only you changed: kept",
-            ),
-            FileAction::Remove => (
-                widgets::chip(cx.theme().danger).xsmall().child("Removed"),
-                "files the pack dropped (moved to backups)",
-            ),
-            FileAction::KeepDropped => (
-                widgets::chip(cx.theme().muted_foreground).xsmall().child("Kept"),
-                "files the pack dropped but you changed: kept",
-            ),
-            FileAction::Conflict => (
-                widgets::chip(cx.theme().warning).xsmall().child("Both changed"),
-                "files you and the pack both changed",
-            ),
-        };
-        let g = Group::Files(a);
-        let rows: Vec<String> = plan
+    /// "What changes": mods, pack files and (compared) dropped files, each
+    /// a line that opens its list.
+    fn changes(&self, plan: &UpdatePlan, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (success, info, danger, warning, primary, muted) =
+            (theme.success, theme.info, theme.danger, theme.warning, theme.primary, theme.muted_foreground);
+        let count = |a: ModAction| plan.mods.iter().filter(|m| m.action == a).count();
+        let (added, updated, dropped) = (count(ModAction::Add), count(ModAction::Update), count(ModAction::Remove));
+        let total = added + updated + dropped;
+        let open = self.section;
+        let mut out = v_flex().gap_0p5().child(div().font_semibold().child("What changes"));
+
+        // Mods.
+        let mut body = h_flex().gap_1p5().flex_wrap();
+        if total == 0 {
+            body = body.child(div().text_color(muted).child("No mod changes"));
+        } else {
+            body = body.child(format!("{total} mods:"));
+            for (n, l, c) in [(added, "added", success), (updated, "updated", info), (dropped, "dropped", danger)] {
+                if n > 0 {
+                    body = body.child(widgets::chip(c).xsmall().child(format!("{n} {l}")));
+                }
+            }
+            if !plan.needed.is_empty() {
+                body = body.child(widgets::chip(warning).xsmall().child(format!("⚠ {} needed by yours", plan.needed.len())));
+            }
+        }
+        out = out.child(
+            widgets::summary_row("sum-mods", IconName::Package, info, body, (total > 0).then_some(open == Some(Section::Mods)), cx)
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    if total > 0 {
+                        this.toggle_section(Section::Mods, w, cx)
+                    }
+                })),
+        );
+        if open == Some(Section::Mods) {
+            let needed: HashSet<String> = plan.needed.iter().map(|n| n.file.to_lowercase()).collect();
+            let want = match self.filter {
+                1 => Some(ModAction::Add),
+                2 => Some(ModAction::Update),
+                3 => Some(ModAction::Remove),
+                _ => None,
+            };
+            let mut rows: Vec<_> = plan
+                .mods
+                .iter()
+                .filter(|m| want.is_none_or(|a| m.action == a))
+                .map(|m| {
+                    let need = m.action == ModAction::Remove && needed.contains(&m.from.to_lowercase());
+                    let kept = need && self.keep_needed.contains(&m.from.to_lowercase());
+                    let chip = match m.action {
+                        ModAction::Add => ("Added", success),
+                        ModAction::Update => ("Updated", info),
+                        ModAction::Remove if kept => ("Kept", warning),
+                        ModAction::Remove => ("Dropped", danger),
+                    };
+                    let detail = match m.action {
+                        ModAction::Update => format!("{}  →  {}", m.from, m.to),
+                        ModAction::Add => m.to.clone(),
+                        ModAction::Remove if need => format!("⚠ one of yours needs it · {}", m.from),
+                        ModAction::Remove => m.from.clone(),
+                    };
+                    (need, (m.clone(), chip, detail))
+                })
+                .collect();
+            rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.0.name.to_lowercase().cmp(&b.1.0.name.to_lowercase())));
+            let tabs = vec![
+                format!("All {total}"),
+                format!("Added {added}"),
+                format!("Updated {updated}"),
+                format!("Dropped {dropped}"),
+            ];
+            let needed_cards: Vec<AnyElement> = plan.needed.iter().map(|n| self.needed_card(n, cx)).collect();
+            out = out.child(
+                widgets::expand_area(cx)
+                    .children(needed_cards)
+                    .child(self.list_tools("mods-filter", tabs, cx))
+                    .child(self.mod_rows("chg", rows.into_iter().map(|r| r.1).collect(), cx))
+                    .when(dropped > 0, |c| c.child(widgets::caption("Dropped mods go to .hopper-backups.", cx).text_xs())),
+            );
+        }
+
+        // Pack files.
+        let take = &self.take;
+        let written: Vec<&hopper::packdiff::FileChange> = plan
             .files
             .iter()
-            .filter(|f| f.action == a)
+            .filter(|f| match f.action {
+                FileAction::Add | FileAction::Update | FileAction::Merge => true,
+                FileAction::Conflict => take.contains(&f.rel),
+                _ => false,
+            })
+            .collect();
+        let new_n = written.iter().filter(|f| f.action == FileAction::Add).count();
+        let merged_n = written.iter().filter(|f| f.action == FileAction::Merge).count();
+        let replaced_n = written.len() - new_n;
+        let what = if self.server.is_some() { "server pack files" } else { "pack files" };
+        let text = if written.is_empty() {
+            format!("No {what} change")
+        } else if !plan.base_known {
+            format!("{} {what} written: {replaced_n} replaced, {new_n} new", written.len())
+        } else if merged_n > 0 {
+            format!("{} {what} updated ({new_n} new, {merged_n} merged)", written.len())
+        } else {
+            format!("{} {what} updated ({new_n} new)", written.len())
+        };
+        let n_written = written.len();
+        out = out.child(
+            widgets::summary_row(
+                "sum-files",
+                IconName::FileText,
+                primary,
+                div().when(n_written == 0, |d| d.text_color(muted)).child(text),
+                (n_written > 0).then_some(open == Some(Section::Files)),
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, w, cx| {
+                if n_written > 0 {
+                    this.toggle_section(Section::Files, w, cx)
+                }
+            })),
+        );
+        if open == Some(Section::Files) {
+            let rows: Vec<_> = written
+                .iter()
+                .filter(|f| match self.filter {
+                    1 => f.action != FileAction::Add,
+                    2 => f.action == FileAction::Add,
+                    _ => true,
+                })
+                .map(|f| {
+                    let chip = match f.action {
+                        FileAction::Add => ("New", success),
+                        FileAction::Merge => ("Merged", info),
+                        _ => ("Replaced", primary),
+                    };
+                    (f.rel.clone(), Some(chip), f.action != FileAction::Add)
+                })
+                .collect();
+            let tabs = vec!["All".to_string(), format!("Replaced {replaced_n}"), format!("New {new_n}")];
+            out = out.child(
+                widgets::expand_area(cx)
+                    .child(self.list_tools("files-filter", tabs, cx))
+                    .child(self.file_tree("chg-files", rows, cx))
+                    .child(widgets::caption("\"Changes\" shows yours against the pack's.", cx).text_xs()),
+            );
+        }
+
+        // Compared: files the pack dropped that you never changed.
+        let gone: Vec<String> = plan
+            .files
+            .iter()
+            .filter(|f| f.action == FileAction::Remove)
             .map(|f| f.rel.clone())
             .collect();
-        let header = self.group_header(g, tag, label.to_string(), rows.len(), cx);
-        let open = self.open.contains(&g);
-        let body: Option<AnyElement> = open.then(|| {
-            if a == FileAction::Conflict {
-                self.conflicts(rows, cx)
-            } else {
-                v_flex()
-                    .pl(rems(4.25))
-                    .pb_2()
-                    .children(rows.into_iter().map(|r| {
-                        widgets::caption(r, cx).text_xs().py_0p5()
-                    }))
-                    .into_any_element()
+        if !gone.is_empty() {
+            let n = gone.len();
+            out = out.child(
+                widgets::summary_row(
+                    "sum-dropped",
+                    IconName::Archive,
+                    danger,
+                    div().child(format!("{n} files the pack dropped, unedited: to backups")),
+                    Some(open == Some(Section::Dropped)),
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, w, cx| this.toggle_section(Section::Dropped, w, cx))),
+            );
+            if open == Some(Section::Dropped) {
+                let rows = gone.into_iter().map(|r| (r, Some(("Removed", danger)), false)).collect();
+                out = out.child(
+                    widgets::expand_area(cx)
+                        .child(self.list_tools("dropped-filter", Vec::new(), cx))
+                        .child(self.file_tree("chg-dropped", rows, cx)),
+                );
             }
-        });
-        v_flex().child(header).children(body).into_any_element()
+        }
+        out.into_any_element()
+    }
+
+    /// "What stays": your mods and files, (compared) the files you edited,
+    /// and what an update never touches.
+    fn stays(&self, plan: &UpdatePlan, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (success, warning, muted) = (theme.success, theme.warning, theme.muted_foreground);
+        let server = self.server.is_some();
+        let open = self.section;
+        let (m, f) = (plan.your_mods.len(), plan.your_files.len());
+        let mut out = v_flex().gap_0p5().child(div().font_semibold().child("What stays"));
+        let mut parts = Vec::new();
+        if m > 0 {
+            parts.push(if server { format!("{m} mods not in the server pack") } else { format!("{m} mods you added") });
+        }
+        if f > 0 {
+            parts.push(if server {
+                format!("{f} files of the server's own in pack folders")
+            } else {
+                format!("{f} of your files in pack folders")
+            });
+        }
+        let any = !parts.is_empty();
+        out = out.child(
+            widgets::summary_row(
+                "sum-stays",
+                IconName::Check,
+                success,
+                div().when(!any, |d| d.text_color(muted)).child(if any {
+                    parts.join(" · ")
+                } else {
+                    "Nothing of yours in the pack's folders".to_string()
+                }),
+                any.then_some(open == Some(Section::Stays)),
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, w, cx| {
+                if any {
+                    this.toggle_section(Section::Stays, w, cx)
+                }
+            })),
+        );
+        if open == Some(Section::Stays) {
+            let by: HashMap<String, String> = plan.needed.iter().map(|n| (n.by.to_lowercase(), n.name.clone())).collect();
+            let tabs = vec![format!("Your mods {m}"), format!("Your files {f}")];
+            let list = if self.filter == 0 {
+                let mut rows: Vec<_> = plan
+                    .your_mods
+                    .iter()
+                    .map(|y| {
+                        let need = by.get(&y.name.to_lowercase());
+                        let detail = match need {
+                            Some(d) => format!("⚠ needs {d}, which the pack drops"),
+                            None => y.from.clone(),
+                        };
+                        (need.is_some(), (y.clone(), ("Yours", if need.is_some() { warning } else { muted }), detail))
+                    })
+                    .collect();
+                rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.0.name.to_lowercase().cmp(&b.1.0.name.to_lowercase())));
+                self.mod_rows("stay", rows.into_iter().map(|r| r.1).collect(), cx)
+            } else {
+                let rows = plan.your_files.iter().map(|r| (r.clone(), None, false)).collect();
+                v_flex()
+                    .gap_1()
+                    .child(self.file_tree("stay-files", rows, cx))
+                    .child(
+                        widgets::fine_print(
+                            "Files in folders the pack also uses that the pack doesn't ship: yours, and ones mods made. The update writes next to them, never over them.",
+                            cx,
+                        ),
+                    )
+                    .into_any_element()
+            };
+            out = out.child(widgets::expand_area(cx).child(self.list_tools("stay-tabs", tabs, cx)).child(list));
+        }
+        if let Some(k) = self.server.as_ref().and_then(|t| t.splan.as_ref()).map(|p| p.kept) {
+            let mut lines = Vec::new();
+            if k.yours > 0 {
+                lines.push(format!("{} mods where the server runs another version and the pack didn't change it keep the server's.", k.yours));
+            }
+            if k.left_off > 0 {
+                lines.push(format!("{} pack mods the server doesn't have stay off.", k.left_off));
+            }
+            for l in lines {
+                out = out.child(widgets::caption(l, cx).text_xs().pl(rems(1.9)));
+            }
+        }
+
+        // Compared: files you edited, kept.
+        let take = &self.take;
+        let edited: Vec<String> = plan
+            .files
+            .iter()
+            .filter(|f| match f.action {
+                FileAction::KeepYours | FileAction::KeepDropped => true,
+                FileAction::Conflict => !take.contains(&f.rel),
+                _ => false,
+            })
+            .map(|f| f.rel.clone())
+            .collect();
+        if !edited.is_empty() {
+            let n = edited.len();
+            let text = if server {
+                format!("{n} pack files the server changed: kept")
+            } else {
+                format!("{n} pack files you changed: kept")
+            };
+            out = out.child(
+                widgets::summary_row("sum-edited", IconName::Check, success, div().child(text), Some(open == Some(Section::Edited)), cx)
+                    .on_click(cx.listener(|this, _, w, cx| this.toggle_section(Section::Edited, w, cx))),
+            );
+            if open == Some(Section::Edited) {
+                let rows = edited.into_iter().map(|r| (r, Some(("Yours", muted)), true)).collect();
+                out = out.child(
+                    widgets::expand_area(cx)
+                        .child(self.list_tools("edited-filter", Vec::new(), cx))
+                        .child(self.file_tree("stay-edited", rows, cx)),
+                );
+            }
+        }
+        out = out.child(widgets::summary_row(
+            "sum-never",
+            IconName::ShieldCheck,
+            muted,
+            div().text_color(muted).child(if server {
+                "The world, ops, whitelist and bans: never touched"
+            } else {
+                "Worlds, screenshots, logs, shader settings and backups: never touched"
+            }),
+            None,
+            cx,
+        ));
+        out.into_any_element()
     }
 
     /// Fetches the icons of every mod the plan lists.
@@ -945,7 +1664,6 @@ impl UpdatePreview {
     }
 
     fn conflicts(&self, rows: Vec<String>, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
         v_flex()
             .pl(rems(1.25))
             .gap_1()
@@ -1014,39 +1732,7 @@ impl UpdatePreview {
                                     })),
                             ),
                     )
-                    .when_some(diff, |c, d| {
-                        let lines: Vec<String> = d
-                            .unwrap_or("Not a text file.".into())
-                            .lines()
-                            .take(400)
-                            .map(str::to_string)
-                            .collect();
-                        c.child(
-                            v_flex()
-                                .my_1()
-                                .p_3()
-                                .rounded(theme.radius)
-                                .bg(theme.muted)
-                                .font_family(theme.mono_font_family.clone())
-                                .text_xs()
-                                .children(lines.into_iter().map(|l| {
-                                    let color = if l.starts_with('+') && !l.starts_with("+++") {
-                                        theme.success
-                                    } else if l.starts_with('-') && !l.starts_with("---") {
-                                        theme.danger
-                                    } else if l.starts_with("@@") {
-                                        theme.info
-                                    } else {
-                                        theme.muted_foreground
-                                    };
-                                    div()
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .text_color(color)
-                                        .child(l.replace('\t', "    "))
-                                })),
-                        )
-                    })
+                    .when_some(diff, |c, d| c.child(Self::diff_block(d, cx)))
             }))
             .into_any_element()
     }
@@ -1102,8 +1788,10 @@ impl Render for UpdatePreview {
                 .child(widgets::caption(
                     if self.reinstall {
                         "Downloading this pack version and comparing it with your instance"
+                    } else if self.compare {
+                        "Downloading both pack versions and comparing them with your changes"
                     } else {
-                        "Downloading both pack versions and comparing them with your instance"
+                        "Downloading the new version and comparing it with your instance"
                     },
                     cx,
                 ))
@@ -1116,25 +1804,15 @@ impl Render for UpdatePreview {
             Some(Ok(plan)) => {
                 let plan = plan.clone();
                 let server_mode = self.server.is_some();
-                let mods: Vec<AnyElement> = [ModAction::Add, ModAction::Update, ModAction::Remove]
-                    .into_iter()
-                    .map(|a| self.mods_group(&plan, a, cx))
-                    .collect();
-                // Conflicts get their own card at the top.
-                let files: Vec<AnyElement> = [
-                    FileAction::Merge,
-                    FileAction::Update,
-                    FileAction::Add,
-                    FileAction::KeepYours,
-                    FileAction::Remove,
-                    FileAction::KeepDropped,
-                ]
-                .into_iter()
-                .map(|a| self.files_group(&plan, a, cx))
-                .collect();
                 let theme = cx.theme();
                 let mc_change = self.mc_change.clone();
                 let backup = self.backup_worlds;
+                let (warning, muted, border) = (theme.warning, theme.muted_foreground, theme.border);
+                let radius = theme.radius;
+                let choice = self.choice_card(&plan, cx);
+                let mine = self.your_choices(&plan, cx);
+                let changes = self.changes(&plan, cx);
+                let stays = self.stays(&plan, cx);
                 v_flex()
                     .gap_4()
                     .when_some(mc_change, |c, (from, to)| {
@@ -1143,14 +1821,14 @@ impl Render for UpdatePreview {
                                 .gap_2()
                                 .px_3()
                                 .py_2p5()
-                                .rounded(theme.radius)
+                                .rounded(radius)
                                 .border_1()
-                                .border_color(theme.warning.opacity(0.5))
+                                .border_color(warning.opacity(0.5))
                                 .child(
                                     h_flex()
                                         .gap_2()
                                         .text_sm()
-                                        .text_color(theme.warning)
+                                        .text_color(warning)
                                         .child(Icon::new(IconName::TriangleAlert).small())
                                         .child(format!("Minecraft {from} → {to}: worlds are converted and can't go back.")),
                                 )
@@ -1165,65 +1843,31 @@ impl Render for UpdatePreview {
                                 ),
                         )
                     })
-                    .when(!plan.base_known, |c| {
-                        c.child(
-                            h_flex()
-                                .gap_2()
-                                .text_sm()
-                                .text_color(theme.warning)
-                                .items_start()
-                                .child(Icon::new(IconName::TriangleAlert).small().flex_none().mt(px(2.)))
-                                .child(div().flex_1().min_w_0().child(if server_mode {
-                                    "Hopper can't tell which server pack this server came from, so every file that differs counts as both changed."
-                                } else if self.reinstall {
-                                    "Reinstalling this version: every file that differs from the pack's is listed as both changed. Keep yours, or take the pack's to reset it (yours is backed up first)."
-                                } else {
-                                    "The installed pack version couldn't be downloaded, so every file that differs counts as both changed."
-                                })),
-                        )
-                    })
+                    .children(choice)
+                    .children(mine)
+                    .child(changes)
+                    .child(stays)
                     .when(!server_mode, |c| {
                         c.child(
                             h_flex()
                                 .gap_2()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child(Icon::new(IconName::Layers).small().flex_none())
+                                .text_xs()
+                                .text_color(muted)
+                                .child(Icon::new(IconName::Layers).xsmall().flex_none())
                                 .child("A snapshot of mods and configs is saved first. Restore it any time from Backups."),
                         )
                     })
-                    .children(self.conflict_card(&plan, cx))
-                    .children(self.your_choices(&plan, cx))
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Mods"))
-                            .children(mods)
-                            .children({
-                                let kept_text = if let Some(k) = self.server.as_ref().and_then(|t| t.splan.as_ref()).map(|p| p.kept) {
-                                    let mut t = format!("{} mods that aren't in the server pack stay.", k.added);
-                                    if k.yours > 0 {
-                                        t.push_str(&format!("\n{} mods where the server runs another version and the pack didn't change it keep the server's.", k.yours));
-                                    }
-                                    if k.left_off > 0 {
-                                        t.push_str(&format!("\n{} pack mods the server doesn't have stay off.", k.left_off));
-                                    }
-                                    t
-                                } else {
-                                    format!("{} mods you added stay as they are.", plan.kept_mods)
-                                };
-                                kept_text
-                                    .lines()
-                                    .map(|l| widgets::caption(l.to_string(), cx).text_xs().pl(rems(1.5)))
-                                    .collect::<Vec<_>>()
-                            }),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().font_semibold().child("Config and other files"))
-                            .children(files),
-                    )
+                    .when(server_mode, |c| {
+                        c.child(
+                            div()
+                                .pl_3()
+                                .border_l_2()
+                                .border_color(border)
+                                .text_xs()
+                                .text_color(muted)
+                                .child("Server packs often leave out global datapacks (Paxi, OpenLoader) and configs of mods new to the pack. Server sync flags what still differs afterwards."),
+                        )
+                    })
                     .into_any_element()
             }
         };
@@ -1302,30 +1946,15 @@ fn show(
     let backup_worlds = mc_change.is_some();
     let reinstall = inst.pack.as_ref().is_some_and(|p| hopper::packdiff::is_reinstall(p, &file));
     let view = cx.new(|cx| {
-        let mut v = UpdatePreview {
-            store,
-            root,
-            server: None,
-            from,
-            plan: None,
-            take: HashSet::new(),
-            bulk: Bulk::Suggested,
-            turn_on: HashSet::new(),
-            paint: Default::default(),
-            peek: None,
-            _peek_watch: None,
-            open: HashSet::new(),
-            diffs: HashMap::new(),
-            mc_change,
-            backup_worlds,
-            reinstall,
-        };
+        let mut v = UpdatePreview::new(store, root, None, from, window, cx);
+        v.mc_change = mc_change;
+        v.backup_worlds = backup_worlds;
+        v.reinstall = reinstall;
+        v.file = Some(file.clone());
         match plan {
             Some(r) => {
                 if let Ok(p) = &r {
-                    v.set_defaults(p);
-                    v.turn_on = p.default_choices();
-                    v.want_icons(p, cx);
+                    v.loaded(p, cx);
                 }
                 v.plan = Some(r);
             }
@@ -1393,24 +2022,7 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
     let server = t.server.clone();
     let title = format!("Update {} from the server pack", server.name);
     let view = cx.new(|cx| {
-        let mut v = UpdatePreview {
-            store,
-            root: server.root.clone(),
-            server: Some(ServerTarget { job, ..t }),
-            from: String::new(),
-            plan: None,
-            take: HashSet::new(),
-            bulk: Bulk::Suggested,
-            turn_on: HashSet::new(),
-            paint: Default::default(),
-            peek: None,
-            _peek_watch: None,
-            open: HashSet::new(),
-            diffs: HashMap::new(),
-            mc_change: None,
-            backup_worlds: false,
-            reinstall: false,
-        };
+        let mut v = UpdatePreview::new(store, server.root.clone(), Some(ServerTarget { job, ..t }), String::new(), window, cx);
         match job {
             Some(_) => v.follow(cx),
             None => v.plan_server(cx),

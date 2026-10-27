@@ -383,11 +383,12 @@ impl Client {
         id: &str,
         inst: &crate::instances::Instance,
         pack: &crate::cf::File,
+        compare: bool,
         job: &crate::jobs::Job,
     ) -> anyhow::Result<crate::server_pack_update::ServerPlan> {
         let v = self.post(
             &format!("/servers/{}/pack/plan", enc(id)),
-            json!({ "inst": inst, "pack": pack, "cf_key": crate::cf::api_key().unwrap_or(""), "keep_days": keep_days() }),
+            json!({ "inst": inst, "pack": pack, "compare": compare, "cf_key": crate::cf::api_key().unwrap_or(""), "keep_days": keep_days() }),
         )?;
         let result = self.follow(v["job"].as_u64().context("no job id")?, job)?;
         Ok(serde_json::from_value(result)?)

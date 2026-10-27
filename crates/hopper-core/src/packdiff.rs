@@ -38,6 +38,52 @@ pub fn pack_content(rel: &str) -> bool {
     PACK_CONTENT.iter().any(|p| rel.starts_with(p))
 }
 
+/// Your own settings a pack sometimes ships: yours stays unless you pick
+/// the pack's, even in a quick update.
+pub const KEEP_LOCAL: [&str; 5] = [
+    "options.txt",
+    "optionsof.txt",
+    "optionsshaders.txt",
+    "servers.dat",
+    "server.properties",
+];
+
+/// Yours is the default for this file in a quick update.
+pub fn keep_local(rel: &str) -> bool {
+    KEEP_LOCAL.iter().any(|k| rel.eq_ignore_ascii_case(k))
+}
+
+/// Folders never listed as your files: worlds, logs, backups and the like.
+const NOT_LISTED: [&str; 12] = [
+    "mods",
+    "saves",
+    "logs",
+    "crash-reports",
+    "screenshots",
+    "backups",
+    "local",
+    ".hopper-backups",
+    ".hopper",
+    "world",
+    "journeymap",
+    "xaero",
+];
+
+/// A mod the pack drops that one of your mods needs.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Needed {
+    /// The dropped mod's file (in mods/) and name.
+    pub file: String,
+    pub name: String,
+    pub project: u64,
+    pub icon: String,
+    /// Your mod that needs it.
+    pub by: String,
+    pub by_project: u64,
+    pub by_icon: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FileAction {
     /// New in the pack; you don't have it.
@@ -128,6 +174,21 @@ pub struct UpdatePlan {
     /// be told apart from the pack's. Without it every differing file is a
     /// conflict.
     pub base_known: bool,
+    /// Compared with your changes (the installed version was fetched).
+    /// Without it (a quick update) every pack file that differs takes the
+    /// pack's copy by default, like the CurseForge app.
+    #[serde(default)]
+    pub compared: bool,
+    /// Mods the pack drops that one of your mods needs.
+    #[serde(default)]
+    pub needed: Vec<Needed>,
+    /// Mods you added, which stay (`from` is the file).
+    #[serde(default)]
+    pub your_mods: Vec<ModChange>,
+    /// Files in folders the pack writes to that the pack doesn't ship:
+    /// they stay.
+    #[serde(default)]
+    pub your_files: Vec<String>,
     pub(crate) new_zip: PathBuf,
     /// Override folders in the zip, later ones on top.
     pub(crate) prefixes: Vec<String>,
@@ -150,10 +211,12 @@ impl UpdatePlan {
         self.files.iter().filter(|f| f.action == FileAction::Conflict)
     }
 
-    /// Conflicts that default to the pack's copy (pack content folders).
+    /// Conflicts that default to the pack's copy: without a base (a quick
+    /// update or a reinstall) all but your own settings ([`keep_local`]),
+    /// like the CurseForge app; compared, the pack content folders.
     pub fn default_take(&self) -> HashSet<String> {
         self.conflicts()
-            .filter(|f| pack_content(&f.rel))
+            .filter(|f| if self.base_known { pack_content(&f.rel) } else { !keep_local(&f.rel) })
             .map(|f| f.rel.clone())
             .collect()
     }
@@ -444,9 +507,11 @@ pub fn is_reinstall(pack: &crate::instances::PackRef, file: &cf::File) -> bool {
     pack.file_id != 0 && pack.file_id == file.id
 }
 
-/// Downloads the new pack version (and the installed one, to compare
-/// against) and works out what updating to `file` would do.
-pub fn plan(inst: &Instance, file: &cf::File, job: &Job) -> anyhow::Result<UpdatePlan> {
+/// Downloads the new pack version and works out what updating to `file`
+/// would do. With `compare` it downloads the installed one too, to tell
+/// your edits from the pack's; without (a quick update) the pack's files
+/// simply replace yours, like the CurseForge app.
+pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyhow::Result<UpdatePlan> {
     let pack = inst
         .pack
         .clone()
@@ -465,7 +530,7 @@ pub fn plan(inst: &Instance, file: &cf::File, job: &Job) -> anyhow::Result<Updat
     // reinstall of that same version: with it as the base every file you
     // changed would count as yours and stay, and a reinstall is for getting
     // the pack's back. Without a base, each one is a conflict to settle.
-    let old_zip = if is_reinstall(&pack, file) {
+    let old_zip = if !compare || is_reinstall(&pack, file) {
         None
     } else {
         job.detail("Downloading the installed version to compare");
@@ -557,6 +622,37 @@ pub fn plan(inst: &Instance, file: &cf::File, job: &Job) -> anyhow::Result<Updat
     let (off, off_old) = off_mods(inst, &mods, &mut files);
     removed.extend(removed_files(inst, &mut files, old.as_ref()));
     removed.sort_by_key(|m| m.name.to_lowercase());
+    job.detail("Checking what your mods need");
+    let yours: Vec<&crate::instances::Addon> = inst.addons.iter().filter(|a| !a.from_pack).collect();
+    let dropped: Vec<(String, String, u64, String)> = mods
+        .iter()
+        .filter(|m| m.action == ModAction::Remove)
+        .map(|m| (m.from.clone(), m.name.clone(), m.project, m.icon.clone()))
+        .collect();
+    let needed = needed_by_yours(&inst.root.join("mods"), &dropped, |jar| {
+        yours
+            .iter()
+            .find(|a| a.file_name.eq_ignore_ascii_case(jar))
+            .map(|a| (a.name.clone(), a.project_id, a.icon.clone()))
+            // A jar Hopper has no record of is yours too.
+            .or_else(|| (!inst.addons.iter().any(|a| a.file_name.eq_ignore_ascii_case(jar))).then(|| (String::new(), 0, String::new())))
+    });
+    let your_mods = yours
+        .iter()
+        .map(|a| ModChange {
+            name: if a.name.is_empty() { a.file_name.clone() } else { a.name.clone() },
+            from: a.file_name.clone(),
+            project: a.project_id,
+            icon: a.icon.clone(),
+            ..Default::default()
+        })
+        .collect();
+    let mut skip_rels: HashSet<String> = new.keys().cloned().collect();
+    if let Some(o) = &old {
+        skip_rels.extend(o.keys().cloned());
+    }
+    skip_rels.extend(inst.addons.iter().map(|a| format!("{}/{}", a.folder(), a.file_name)));
+    let your_files = your_files(&inst.root, new.keys().map(String::as_str), &skip_rels);
     Ok(UpdatePlan {
         file: file.clone(),
         mods,
@@ -567,11 +663,111 @@ pub fn plan(inst: &Instance, file: &cf::File, job: &Job) -> anyhow::Result<Updat
         updated,
         kept_mods: inst.addons.iter().filter(|a| !a.from_pack).count(),
         base_known: old.is_some(),
+        compared: compare,
+        needed,
+        your_mods,
+        your_files,
         new_zip,
         prefixes,
         same,
         merged,
     })
+}
+
+/// Mods in `dropped` (file, name, project, icon) that one of your mods
+/// needs: with them gone, a mod `yours` claims (giving its name, project
+/// and icon) would miss a required mod it doesn't miss now.
+pub fn needed_by_yours(
+    mods_dir: &Path,
+    dropped: &[(String, String, u64, String)],
+    yours: impl Fn(&str) -> Option<(String, u64, String)>,
+) -> Vec<Needed> {
+    let present: Vec<&(String, String, u64, String)> =
+        dropped.iter().filter(|d| mods_dir.join(&d.0).is_file()).collect();
+    if present.is_empty() {
+        return Vec::new();
+    }
+    let before: HashSet<(String, String)> = crate::deps::missing(mods_dir)
+        .into_iter()
+        .map(|m| (m.file_name, m.needs))
+        .collect();
+    let without: Vec<String> = present.iter().map(|d| d.0.clone()).collect();
+    let ids: Vec<Vec<String>> = present
+        .iter()
+        .map(|d| {
+            let p = mods_dir.join(&d.0);
+            let mut v = crate::deps::own_ids(&p).0;
+            v.extend(crate::deps::provides(&p));
+            v
+        })
+        .collect();
+    let mut out: Vec<Needed> = Vec::new();
+    for m in crate::deps::missing_without(mods_dir, &without) {
+        if before.contains(&(m.file_name.clone(), m.needs.clone())) {
+            continue;
+        }
+        let Some((by, by_project, by_icon)) = yours(&m.file_name) else { continue };
+        let Some(i) = ids.iter().position(|v| v.iter().any(|id| *id == m.needs)) else { continue };
+        let d = present[i];
+        let by = if by.is_empty() { m.mod_name.clone() } else { by };
+        if out.iter().any(|n| n.file == d.0 && n.by == by) {
+            continue;
+        }
+        out.push(Needed {
+            file: d.0.clone(),
+            name: d.1.clone(),
+            project: d.2,
+            icon: d.3.clone(),
+            by,
+            by_project,
+            by_icon,
+        });
+    }
+    out
+}
+
+/// Files under `root` in the top folders the pack writes to (from
+/// `pack_rels`) that aren't in `skip`: your own, which an update leaves.
+/// Worlds, logs, backups and mods/ aren't listed.
+pub fn your_files<'a>(root: &Path, pack_rels: impl Iterator<Item = &'a str>, skip: &HashSet<String>) -> Vec<String> {
+    let tops: HashSet<String> = pack_rels
+        .filter_map(|r| r.split_once('/').map(|(t, _)| t.to_string()))
+        .filter(|t| {
+            let l = t.to_ascii_lowercase();
+            !NOT_LISTED.contains(&l.as_str()) && !l.starts_with("world")
+        })
+        .collect();
+    let skip_low: HashSet<String> = skip.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let mut out = Vec::new();
+    let mut stack: Vec<PathBuf> = tops.iter().map(|t| root.join(t)).collect();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            let low = rel.to_ascii_lowercase();
+            let base = low.strip_suffix(".disabled").unwrap_or(&low);
+            if skip_low.contains(&low) || skip_low.contains(base) {
+                continue;
+            }
+            out.push(rel);
+            if out.len() >= 20_000 {
+                stack.clear();
+                break;
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// A pack file Hopper treats as a mod or pack you can turn off: directly in
@@ -948,6 +1144,94 @@ mod tests {
     }
 
     #[test]
+    fn quick_update_takes_the_packs_files_and_lists_yours() {
+        let root = std::env::temp_dir().join(format!("hopper-packdiff-quick-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["config", "kubejs/server_scripts", "saves/w", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let write = |rel: &str, text: &str| fs::write(root.join(rel), text).unwrap();
+        write("config/a.toml", "a=mine");
+        write("config/mine.toml", "x=1");
+        write("kubejs/server_scripts/pack.js", "old");
+        write("kubejs/server_scripts/my_recipes.js", "mine");
+        write("options.txt", "fov:90");
+        write("saves/w/level.dat", "w");
+        write("mods/mine.jar", "j");
+        let new: HashMap<String, String> = [
+            ("config/a.toml", h("a=2")),
+            ("kubejs/server_scripts/pack.js", h("new")),
+            ("options.txt", h("fov:70")),
+            ("config/new.toml", h("n")),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let (files, same) = plan_files(None, &new, &root);
+        let plan = UpdatePlan {
+            file: cf::File::default(),
+            mods: Vec::new(),
+            files,
+            kept_mods: 0,
+            off: Vec::new(),
+            removed: Vec::new(),
+            updated: Vec::new(),
+            off_old: HashMap::new(),
+            base_known: false,
+            compared: false,
+            needed: Vec::new(),
+            your_mods: Vec::new(),
+            your_files: Vec::new(),
+            new_zip: PathBuf::new(),
+            prefixes: Vec::new(),
+            same,
+            merged: HashMap::new(),
+        };
+        // Like CurseForge: the pack's copy, except your own settings.
+        let take = plan.default_take();
+        assert!(take.contains("config/a.toml"));
+        assert!(take.contains("kubejs/server_scripts/pack.js"));
+        assert!(!take.contains("options.txt"));
+
+        let skip: HashSet<String> = new.keys().cloned().collect();
+        let yours = your_files(&root, new.keys().map(String::as_str), &skip);
+        assert_eq!(yours, vec!["config/mine.toml".to_string(), "kubejs/server_scripts/my_recipes.js".to_string()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn warns_when_a_dropped_mod_is_needed_by_yours() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("hopper-packdiff-need-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let jar = |name: &str, toml: String| {
+            let mut z = zip::ZipWriter::new(fs::File::create(dir.join(name)).unwrap());
+            z.start_file::<_, ()>("META-INF/neoforge.mods.toml", Default::default()).unwrap();
+            z.write_all(toml.as_bytes()).unwrap();
+            z.finish().unwrap();
+        };
+        let toml = |id: &str, deps: &str| format!("modLoader=\"javafml\"\n[[mods]]\nmodId=\"{id}\"\nversion=\"1.0\"\n{deps}");
+        let req = |owner: &str, id: &str| {
+            format!("[[dependencies.{owner}]]\nmodId=\"{id}\"\ntype=\"required\"\nversionRange=\"[1,)\"\nside=\"BOTH\"\n")
+        };
+        jar("core.jar", toml("core", ""));
+        jar("other.jar", toml("other", ""));
+        jar("mine.jar", toml("mine", &req("mine", "core")));
+        jar("packmod.jar", toml("packmod", &req("packmod", "other")));
+        let dropped = vec![
+            ("core.jar".to_string(), "Core".to_string(), 1, String::new()),
+            ("other.jar".to_string(), "Other".to_string(), 2, String::new()),
+        ];
+        // Only mine.jar is yours: the pack's own mod needing "other" isn't
+        // your problem.
+        let n = needed_by_yours(&dir, &dropped, |j| (j == "mine.jar").then(|| ("Mine".to_string(), 9, String::new())));
+        assert_eq!(n.len(), 1);
+        assert_eq!((n[0].file.as_str(), n[0].by.as_str(), n[0].project), ("core.jar", "Mine", 1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn merges_changes_to_different_lines() {
         let base = "a=1\nb=1\nc=1\nd=1\n";
         let yours = "a=mine\nb=1\nc=1\nd=1\n";
@@ -1026,6 +1310,10 @@ mod tests {
             removed: Vec::new(),
             updated: Vec::new(),
             base_known: true,
+            compared: true,
+            needed: Vec::new(),
+            your_mods: Vec::new(),
+            your_files: Vec::new(),
             new_zip: PathBuf::new(),
             prefixes: Vec::new(),
             same: Vec::new(),
@@ -1081,6 +1369,10 @@ mod tests {
             .concat(),
             updated: Vec::new(),
             base_known: true,
+            compared: true,
+            needed: Vec::new(),
+            your_mods: Vec::new(),
+            your_files: Vec::new(),
             new_zip: PathBuf::new(),
             prefixes: Vec::new(),
             same: Vec::new(),
@@ -1113,6 +1405,10 @@ mod tests {
             removed: Vec::new(),
             updated: Vec::new(),
             base_known: true,
+            compared: true,
+            needed: Vec::new(),
+            your_mods: Vec::new(),
+            your_files: Vec::new(),
             new_zip: PathBuf::new(),
             prefixes: Vec::new(),
             same: vec!["s".into()],
@@ -1147,7 +1443,7 @@ mod real {
         .unwrap();
         let file = ups.first().map(|(_, f)| f.clone()).expect("an update");
         let jobs = crate::jobs::Jobs::new(crate::waker::noop());
-        let plan = plan(&inst, &file, &jobs.start("plan")).unwrap();
+        let plan = plan(&inst, &file, true, &jobs.start("plan")).unwrap();
         println!("{} -> {} (base known: {})", p.file_name, file.file_name, plan.base_known);
         for a in [ModAction::Add, ModAction::Update, ModAction::Remove] {
             println!("mods {a:?}: {}", plan.mod_count(a));
