@@ -91,8 +91,9 @@ pub struct App {
     pub auth: auth::Auth,
     pub servers: servers::Servers,
     pub host: host::Shared,
-    /// Where the panel answers, e.g. "http://192.168.50.3:8790".
-    pub addresses: Vec<String>,
+    /// Where the panel answers, e.g. "https://192.168.50.3:8790" (kept
+    /// current as the machine's addresses change).
+    pub addresses: RwLock<Vec<String>>,
     pub snapshot: watch::Sender<Arc<Snapshot>>,
     /// Wakes the snapshot loop early.
     pub refresh: Notify,
@@ -270,24 +271,12 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         }
     }
 
-    let lan = discovery::lan_addresses();
     let ca = tls::load_or_create_ca(&data_dir, &cfg.name)?;
     let tls_info = TlsInfo { fingerprint: tls::fingerprint(&ca.der), ca_pem: ca.pem.clone() };
-    let names = tls::local_names(&cfg.public_names);
-    let mut ips: Vec<std::net::IpAddr> = lan.clone();
-    ips.push([127, 0, 0, 1].into());
-    ips.extend(cfg.public_names.iter().filter_map(|n| n.parse::<std::net::IpAddr>().ok()));
-    let own_cert = std::sync::Arc::new(tls::issue(&ca, &names, &ips)?);
-    let mut addresses: Vec<String> = lan.iter().map(|ip| format!("https://{ip}:{}", cfg.port)).collect();
-    if let Some(ts) = tls::tailscale_name() {
-        addresses.push(format!("https://{ts}:{}", cfg.port));
-    }
-    for n in &cfg.public_names {
-        addresses.push(format!("https://{n}:{}", cfg.port));
-    }
-    if let Some(d) = &cfg.acme_domain {
-        addresses.push(format!("https://{d}"));
-    }
+    let net_now = NetIdentity::now(&cfg);
+    let lan = net_now.lan.clone();
+    let own_cert: tls::OwnCert = Arc::new(RwLock::new(Arc::new(tls::issue(&ca, &net_now.names, &net_now.ips)?)));
+    let addresses = net_now.addresses.clone();
     log::info!("certificate fingerprint {}", tls_info.fingerprint);
     let host = host::start(cfg.servers_root.clone());
     let (snapshot, _) = watch::channel(Arc::new(Snapshot::default()));
@@ -298,7 +287,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         auth,
         servers: servers::Servers::new(),
         host,
-        addresses,
+        addresses: RwLock::new(addresses),
         snapshot,
         refresh: Notify::new(),
         jobs: Default::default(),
@@ -349,10 +338,68 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         None
     };
 
+    keep_addresses_current(app.clone(), ca, own_cert.clone(), net_now);
+
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(serve(app, cfg, own_cert, shutdown))
 }
 
-async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::CertifiedKey>, shutdown: Shutdown) -> anyhow::Result<()> {
+/// This machine's names and addresses, and the panel links they make.
+#[derive(PartialEq)]
+struct NetIdentity {
+    lan: Vec<std::net::IpAddr>,
+    names: Vec<String>,
+    ips: Vec<std::net::IpAddr>,
+    addresses: Vec<String>,
+}
+
+impl NetIdentity {
+    fn now(cfg: &Config) -> Self {
+        let lan = discovery::lan_addresses();
+        let names = tls::local_names(&cfg.public_names);
+        let mut ips = lan.clone();
+        ips.push([127, 0, 0, 1].into());
+        ips.extend(cfg.public_names.iter().filter_map(|n| n.parse::<std::net::IpAddr>().ok()));
+        let mut addresses: Vec<String> = lan.iter().map(|ip| format!("https://{ip}:{}", cfg.port)).collect();
+        if let Some(ts) = names.iter().find(|n| n.ends_with(".ts.net")) {
+            addresses.push(format!("https://{ts}:{}", cfg.port));
+        }
+        for n in &cfg.public_names {
+            addresses.push(format!("https://{n}:{}", cfg.port));
+        }
+        if let Some(d) = &cfg.acme_domain {
+            addresses.push(format!("https://{d}"));
+        }
+        NetIdentity { lan, names, ips, addresses }
+    }
+}
+
+/// Re-issues the panel's certificate and its address list when the
+/// machine's addresses change. As a service, hopperd often starts before
+/// the network card has its address; without this the certificate would
+/// never name the LAN IP and clients connecting by IP are refused.
+fn keep_addresses_current(app: Arc<App>, ca: tls::Ca, own: tls::OwnCert, mut last: NetIdentity) {
+    let _ = std::thread::Builder::new().name("addresses".into()).spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(20));
+            let cfg = app.cfg.read().unwrap().clone();
+            let now = NetIdentity::now(&cfg);
+            if now == last {
+                continue;
+            }
+            match tls::issue(&ca, &now.names, &now.ips) {
+                Ok(cert) => {
+                    *own.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(cert);
+                    *app.addresses.write().unwrap() = now.addresses.clone();
+                    log::info!("addresses changed: certificate now names {:?} and {:?}", now.names, now.ips);
+                    last = now;
+                }
+                Err(e) => log::warn!("re-issuing the certificate: {e:#}"),
+            }
+        }
+    });
+}
+
+async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shutdown) -> anyhow::Result<()> {
     // The live snapshot: once a second, or right away when asked.
     let a = app.clone();
     tokio::spawn(async move {
@@ -404,7 +451,8 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: Arc<rustls::sign::Certified
     });
     let tls = tls::server_config(tls::Resolver { own: own_cert, acme });
 
-    log::info!("hopperd {} on {}", env!("CARGO_PKG_VERSION"), app.addresses.first().cloned().unwrap_or_else(|| format!("https://{addr}")));
+    let first = app.addresses.read().unwrap().first().cloned();
+    log::info!("hopperd {} on {}", env!("CARGO_PKG_VERSION"), first.unwrap_or_else(|| format!("https://{addr}")));
     net::serve(listener, api::router(app), tls, async {
         shutdown.await;
         log::info!("stopping the panel; servers keep running");

@@ -112,6 +112,56 @@ fn logo(size: u32) -> Vec<u8> {
     px
 }
 
+/// The tray's status icons: the logo with a dot in the bottom-right corner
+/// (green running, amber starting, red stopped; stopped also greys the logo).
+const DOTS: [(&str, [u8; 3], bool); 3] = [("2", [0x22, 0xc5, 0x5e], false), ("3", [0xf5, 0xa5, 0x24], false), ("4", [0xef, 0x44, 0x44], true)];
+
+fn logo_dot(size: u32, dot: [u8; 3], grey: bool) -> Vec<u8> {
+    let mut px = logo(size);
+    let s = size as f32;
+    let (cx, cy, r) = (s * 0.72, s * 0.72, s * 0.26);
+    let ring = (s * 0.08).max(1.0);
+    for y in 0..size {
+        for x in 0..size {
+            let i = ((y * size + x) * 4) as usize;
+            if grey {
+                let l = (px[i] as f32 * 0.3 + px[i + 1] as f32 * 0.59 + px[i + 2] as f32 * 0.11) * 0.75;
+                px[i..i + 3].copy_from_slice(&[l as u8; 3]);
+                px[i + 3] = (px[i + 3] as f32 * 0.8) as u8;
+            }
+            // 4x4 samples per pixel for a smooth edge.
+            let (mut inner, mut outer) = (0f32, 0f32);
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let dx = x as f32 + (sx as f32 + 0.5) / 4.0 - cx;
+                    let dy = y as f32 + (sy as f32 + 0.5) / 4.0 - cy;
+                    let d = (dx * dx + dy * dy).sqrt();
+                    if d <= r {
+                        inner += 1.0 / 16.0;
+                    } else if d <= r + ring {
+                        outer += 1.0 / 16.0;
+                    }
+                }
+            }
+            // A dark ring keeps the dot readable on any taskbar.
+            let mut put = |c: [u8; 3], cover: f32| {
+                if cover <= 0.0 {
+                    return;
+                }
+                let a0 = px[i + 3] as f32 / 255.0;
+                let a = cover + a0 * (1.0 - cover);
+                for k in 0..3 {
+                    px[i + k] = ((c[k] as f32 * cover + px[i + k] as f32 * a0 * (1.0 - cover)) / a.max(1e-6)).round() as u8;
+                }
+                px[i + 3] = (a * 255.0).round() as u8;
+            };
+            put([0x0b, 0x0e, 0x13], outer);
+            put(dot, inner);
+        }
+    }
+    px
+}
+
 /// The logo as an SVG of square pixels, for the web UI.
 fn logo_svg() -> String {
     let mut s = String::from(
@@ -136,10 +186,14 @@ fn logo_svg() -> String {
 
 /// A .ico with 32-bit images of the logo.
 fn ico() -> Vec<u8> {
-    let sizes = [16u32, 20, 24, 32, 40, 48, 64, 256];
+    ico_of(&[16, 20, 24, 32, 40, 48, 64, 256], logo)
+}
+
+/// A .ico with 32-bit images from `draw(size)`.
+fn ico_of(sizes: &[u32], draw: impl Fn(u32) -> Vec<u8>) -> Vec<u8> {
     let mut images = Vec::new();
-    for &n in &sizes {
-        let rgba = logo(n);
+    for &n in sizes {
+        let rgba = draw(n);
         let mut img = Vec::new();
         for v in [40u32, n, n * 2] {
             img.extend_from_slice(&v.to_le_bytes());
@@ -181,6 +235,11 @@ fn windows_resources() {
     std::fs::write(&path, ico()).unwrap();
     let mut res = winresource::WindowsResource::new();
     res.set_icon_with_id(&path.to_string_lossy(), "1");
+    for (id, dot, grey) in DOTS {
+        let p = path.with_file_name(format!("hopperd-{id}.ico"));
+        std::fs::write(&p, ico_of(&[16, 20, 24, 32, 40, 48, 64], |n| logo_dot(n, dot, grey))).unwrap();
+        res.set_icon_with_id(&p.to_string_lossy(), id);
+    }
     res.set_manifest(MANIFEST);
     if let Err(e) = res.compile() {
         println!("cargo:warning=no exe icon or manifest: {e}");

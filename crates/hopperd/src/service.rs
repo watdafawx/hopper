@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 const DISPLAY: &str = "Hopper Server";
 const ABOUT: &str = "Hopper Server: Minecraft server panel (web UI and API).";
-const USAGE: &str = "Use: hopperd service install|uninstall|update|start|status [--data <dir>] [--copy]";
+const USAGE: &str = "Use: hopperd service install|uninstall|update|start|stop|restart|status [--data <dir>] [--copy]";
 
 /// The service's name: `hopperd`. `HOPPERD_SERVICE` changes it (and the
 /// Start-with-Windows entry), so a test copy can run next to the real one.
@@ -98,6 +98,10 @@ fn run_command(args: &[String]) -> anyhow::Result<()> {
         }
         #[cfg(windows)]
         "start" => imp::start(),
+        #[cfg(windows)]
+        "stop" => imp::stop_service(),
+        #[cfg(windows)]
+        "restart" => imp::restart(),
         #[cfg(windows)]
         "update" => {
             imp::update(&std::env::current_exe()?)?;
@@ -266,6 +270,22 @@ mod imp {
         s.start::<&str>(&[]).context("starting the service")
     }
 
+    /// Stops the panel (servers keep running).
+    pub fn stop_service() -> anyhow::Result<()> {
+        let m = manager(ServiceManagerAccess::CONNECT)?;
+        let s = m.open_service(name(), ServiceAccess::STOP | ServiceAccess::QUERY_STATUS).context("the service isn't installed")?;
+        stop_and_wait(&s)
+    }
+
+    pub fn restart() -> anyhow::Result<()> {
+        let m = manager(ServiceManagerAccess::CONNECT)?;
+        let s = m
+            .open_service(name(), ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::QUERY_STATUS)
+            .context("the service isn't installed")?;
+        stop_and_wait(&s)?;
+        s.start::<&str>(&[]).context("starting the service")
+    }
+
     /// Replaces the service's exe with `new` and starts it again. Servers
     /// keep running meanwhile; the panel finds them again.
     pub fn update(new: &Path) -> anyhow::Result<()> {
@@ -286,15 +306,21 @@ mod imp {
     /// The installed service, as anyone can see it (no admin needed).
     pub struct Installed {
         pub running: bool,
+        /// Starting, stopping or pausing right now.
+        pub pending: bool,
+        /// The exe the service runs.
+        pub exe: PathBuf,
         pub data: Option<PathBuf>,
     }
 
     pub fn installed() -> Option<Installed> {
         let m = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
         let s = m.open_service(name(), ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG).ok()?;
-        let running = s.query_status().ok()?.current_state == ServiceState::Running;
-        let (_, data) = split_command(&s.query_config().ok()?.executable_path.to_string_lossy());
-        Some(Installed { running, data })
+        let state = s.query_status().ok()?.current_state;
+        let running = state == ServiceState::Running;
+        let pending = matches!(state, ServiceState::StartPending | ServiceState::StopPending | ServiceState::ContinuePending | ServiceState::PausePending);
+        let (exe, data) = split_command(&s.query_config().ok()?.executable_path.to_string_lossy());
+        Some(Installed { running, pending, exe, data })
     }
 
     /// The exe and `--data` folder from a service's command line.

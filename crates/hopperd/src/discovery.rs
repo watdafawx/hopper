@@ -53,7 +53,9 @@ pub fn announce(name: &str, port: u16, addrs: &[IpAddr]) -> anyhow::Result<Servi
     let mdns = ServiceDaemon::new()?;
     let host = format!("{}.local.", crate::servers::slug(name));
     let props = [("version", env!("CARGO_PKG_VERSION")), ("api", "1"), ("path", "/api/v1")];
-    let info = ServiceInfo::new(SERVICE, name, &host, addrs, port, &props[..])?;
+    // Auto addresses: follows the network card as it gets (or changes) its
+    // address after hopperd started.
+    let info = ServiceInfo::new(SERVICE, name, &host, addrs, port, &props[..])?.enable_addr_auto();
     mdns.register(info)?;
     Ok(mdns)
 }

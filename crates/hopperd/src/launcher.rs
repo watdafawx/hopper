@@ -94,9 +94,13 @@ pub fn start() -> anyhow::Result<()> {
 }
 
 /// `hopperd --tray` (Start with Windows): the tray, without the dialog.
+/// With the service installed, the service's tray (its state, start/stop).
 pub fn tray_only() -> anyhow::Result<()> {
     hide_console();
     init_log();
+    if let Some(s) = service::installed() {
+        return run_service_tray(s.data.unwrap_or_else(boot_dir));
+    }
     if find_running().is_some() {
         log::info!("already running; not starting a second copy");
         return Ok(());
@@ -240,6 +244,9 @@ fn already_running(found: Found) -> anyhow::Result<()> {
             elevated,
         ));
     }
+    if let Found::Service { .. } = &found {
+        buttons.push((103, "Show tray icon\nShows whether the service is up, and starts or stops it from the icon. Also at sign-in.".into(), false));
+    }
     buttons.push((102, "Uninstall…\nRemoves the service or the startup entry. Your servers and data stay where they are.".into(), elevated));
     let picked = task_dialog(&format!("{} is already running", service::display()), &content, &buttons, None);
     match (picked, found) {
@@ -257,6 +264,10 @@ fn already_running(found: Found) -> anyhow::Result<()> {
             elevate(&["service", "update"])?;
             info_box(&format!("Updated to v{me}."));
             open_service_panel(&boot);
+        }
+        (Some(103), Found::Service { .. }) => {
+            set_service_tray_startup(true);
+            start_service_tray();
         }
         (Some(101), Found::Tray(r)) => {
             quit_running(&r)?;
@@ -358,6 +369,8 @@ fn install_service() -> anyhow::Result<()> {
     elevate(&["service", "install", "--copy", "--data", &data])?;
     set_startup(false)?;
     save_mode("service");
+    set_service_tray_startup(true);
+    start_service_tray();
     open_service_panel(&boot);
     Ok(())
 }
@@ -576,6 +589,158 @@ fn set_startup(on: bool) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Shows the service's tray at sign-in (or not): the same Run entry as
+/// Start with Windows, pointing at the service's exe.
+fn set_service_tray_startup(on: bool) {
+    if !on {
+        reg_delete(RUN_KEY, &service::display());
+        return;
+    }
+    let Some(exe) = service::installed().map(|s| s.exe).filter(|e| e.is_file()) else { return };
+    if let Err(e) = reg_set(RUN_KEY, &service::display(), &format!("\"{}\" --tray", exe.display())) {
+        log::warn!("{e:#}");
+    }
+}
+
+/// Starts the service's tray (it quits at once if one runs already).
+fn start_service_tray() {
+    let exe = service::installed().map(|s| s.exe).filter(|e| e.is_file());
+    let Some(exe) = exe.or_else(|| std::env::current_exe().ok()) else { return };
+    if let Err(e) = Command::new(&exe).arg("--tray").creation_flags(CREATE_NO_WINDOW).spawn() {
+        log::warn!("starting the tray: {e}");
+    }
+}
+
+// ---- the service's tray -----------------------------------------------------------------
+
+/// The tray for the installed service: a dot on the icon shows its state,
+/// and the menu starts, stops or restarts it (each asks for admin).
+fn run_service_tray(boot: PathBuf) -> anyhow::Result<()> {
+    if tray::already_open() {
+        log::info!("the service's tray is open already");
+        return Ok(());
+    }
+    tray::set_state(MenuState {
+        status: "Checking the service…".into(),
+        startup: startup_on(),
+        service: Some(tray::Service::Starting),
+        ..Default::default()
+    });
+    let (tx, rx) = channel();
+    // Set while we stop the service ourselves (no "it stopped" alert).
+    let expected_stop = Arc::new(AtomicBool::new(false));
+    {
+        let (boot, expected_stop) = (boot.clone(), expected_stop.clone());
+        std::thread::Builder::new().name("watch-service".into()).spawn(move || watch_service(boot, expected_stop))?;
+    }
+    std::thread::Builder::new().name("tray-cmds".into()).spawn(move || {
+        for cmd in rx {
+            if !handle_service(&boot, &expected_stop, cmd) {
+                tray::close();
+                break;
+            }
+        }
+    })?;
+    tray::run(tx);
+    log::info!("service tray closed");
+    Ok(())
+}
+
+/// Every 2 seconds: the service's state and whether the panel answers.
+/// Alerts when it stops without being asked to.
+fn watch_service(boot: PathBuf, expected_stop: Arc<AtomicBool>) {
+    let mut last: Option<tray::Service> = None;
+    loop {
+        let mut ms = tray::state();
+        if ms.busy {
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        let Some(inst) = service::installed() else {
+            log::info!("the service was removed; closing its tray");
+            tray::close();
+            return;
+        };
+        let port = service::real_data(&boot).1.port;
+        let h = if inst.running { hello(port) } else { None };
+        let state = match (&h, inst.running, inst.pending) {
+            (Some(_), true, _) => tray::Service::Running,
+            (_, _, true) | (None, true, _) => tray::Service::Starting,
+            _ => tray::Service::Stopped,
+        };
+        ms.status = match (state, &h) {
+            (tray::Service::Running, Some(h)) => format!("Service running · v{} · port {port}", h["version"].as_str().unwrap_or("?")),
+            (tray::Service::Starting, _) if inst.running => "Service running, panel not answering yet".into(),
+            (tray::Service::Starting, _) => "Service starting…".into(),
+            _ => "Service stopped".into(),
+        };
+        // The first address is the LAN one (lan_addresses ranks it first).
+        ms.lan = h.as_ref().and_then(|h| h["addresses"].as_array()?.first()?.as_str().map(String::from));
+        ms.startup = startup_on();
+        ms.service = Some(state);
+        if state == tray::Service::Stopped
+            && last.is_some_and(|l| l != tray::Service::Stopped)
+            && !expected_stop.swap(false, Ordering::SeqCst)
+        {
+            tray::notify(&format!("{} stopped", service::display()), "The service isn't running. Click the icon to start it.", true);
+        }
+        if state == tray::Service::Running {
+            expected_stop.store(false, Ordering::SeqCst);
+        }
+        last = Some(state);
+        tray::set_state(ms);
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn handle_service(boot: &Path, expected_stop: &AtomicBool, cmd: Cmd) -> bool {
+    let run = |args: &[&str], busy: &str| {
+        set_busy(busy);
+        let r = elevate(args);
+        set_busy("");
+        if let Err(e) = r {
+            log::warn!("service {}: {e:#}", args[1]);
+            error_box(&format!("{e:#}"));
+        }
+    };
+    match cmd {
+        Cmd::Open => {
+            let port = service::real_data(boot).1.port;
+            open_url(&panel_url(port, service_setup_code(boot).as_deref()));
+        }
+        Cmd::CopyAddress => {
+            if let Some(a) = tray::state().lan
+                && tray::clipboard(&a)
+            {
+                tray::notify("Address copied", &format!("{a}: Hopper on another PC connects here."), false);
+            }
+        }
+        Cmd::OpenFolder => {
+            let (data, cfg) = service::real_data(boot);
+            open_url(&cfg.home.unwrap_or(data).to_string_lossy());
+        }
+        Cmd::OpenLog => open_url(&boot.join("hopperd.log").to_string_lossy()),
+        Cmd::ToggleStartup => {
+            set_service_tray_startup(!startup_on());
+            let mut ms = tray::state();
+            ms.startup = startup_on();
+            tray::set_state(ms);
+        }
+        Cmd::StartService => run(&["service", "start"], "Starting the service…"),
+        Cmd::StopService => {
+            expected_stop.store(true, Ordering::SeqCst);
+            run(&["service", "stop"], "Stopping the service…");
+        }
+        Cmd::RestartService => {
+            expected_stop.store(true, Ordering::SeqCst);
+            run(&["service", "restart"], "Restarting the service…");
+        }
+        Cmd::Quit | Cmd::EndSession => return false,
+        Cmd::InstallService => {}
+    }
+    true
 }
 
 // ---- the tray and the panel it runs ---------------------------------------------------
@@ -859,6 +1024,8 @@ fn handle(sup: &Arc<Supervisor>, cmd: Cmd) -> bool {
             sup.stop();
             return false;
         }
+        // Service menu only.
+        Cmd::StartService | Cmd::StopService | Cmd::RestartService | Cmd::OpenLog => {}
     }
     true
 }

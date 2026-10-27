@@ -4,6 +4,10 @@
 //! launcher as [`Cmd`]s on a channel (so slow work, like stopping servers,
 //! never freezes the icon). The menu reads [`MenuState`], which the
 //! launcher keeps current.
+//!
+//! Two menus: the portable one (the tray runs the panel) and the service
+//! one (the panel is the Windows service; the tray shows its state with a
+//! dot on the icon and starts, stops or restarts it).
 
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
@@ -26,6 +30,19 @@ pub enum Cmd {
     Quit,
     /// Windows is signing out or shutting down.
     EndSession,
+    StartService,
+    StopService,
+    RestartService,
+    OpenLog,
+}
+
+/// The service's state, for the service menu and the icon's dot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Service {
+    Running,
+    /// Starting, stopping, or running but not answering yet.
+    Starting,
+    Stopped,
 }
 
 /// What the menu shows.
@@ -38,6 +55,21 @@ pub struct MenuState {
     pub startup: bool,
     /// Busy (stopping servers, installing): only the status line.
     pub busy: bool,
+    /// Set in service mode: the service menu and a status dot on the icon.
+    pub service: Option<Service>,
+}
+
+impl MenuState {
+    /// The icon resource: 1 the plain logo, 2-4 with a green, amber or red
+    /// dot (build.rs).
+    fn icon(&self) -> u16 {
+        match self.service {
+            None => 1,
+            Some(Service::Running) => 2,
+            Some(Service::Starting) => 3,
+            Some(Service::Stopped) => 4,
+        }
+    }
 }
 
 static STATE: Mutex<Option<MenuState>> = Mutex::new(None);
@@ -53,6 +85,10 @@ const ID_FOLDER: usize = 3;
 const ID_STARTUP: usize = 4;
 const ID_SERVICE: usize = 5;
 const ID_QUIT: usize = 6;
+const ID_START: usize = 7;
+const ID_STOP: usize = 8;
+const ID_RESTART: usize = 9;
+const ID_LOG: usize = 10;
 
 pub fn set_state(s: MenuState) {
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
@@ -76,6 +112,12 @@ fn post(msg: u32) {
             let _ = PostMessageW(Some(HWND(h as *mut _)), msg, WPARAM(0), LPARAM(0));
         }
     }
+}
+
+/// A tray of ours runs already in this session.
+pub fn already_open() -> bool {
+    // SAFETY: looks a window up by class name.
+    unsafe { FindWindowW(w!("HopperServerTray"), None).is_ok_and(|h| !h.is_invalid()) }
 }
 
 /// Ends [`run`]'s loop (from any thread); the icon goes with it.
@@ -146,12 +188,25 @@ unsafe fn add_icon(hwnd: HWND) {
         let mut nid = data(hwnd);
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         nid.uCallbackMessage = WM_TRAY;
-        // The exe's own icon (resource 1, from build.rs).
-        nid.hIcon = LoadIconW(Some(module.into()), PCWSTR(1 as _)).or_else(|_| LoadIconW(None, IDI_APPLICATION)).unwrap_or_default();
+        // The exe's own icons (from build.rs).
+        nid.hIcon = icon(module.into(), state().icon());
         copy(&mut nid.szTip, &tip());
         if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
             log::warn!("tray: Windows refused the icon");
         }
+    }
+}
+
+/// The tray-sized copy of icon resource `id` (sharp at the taskbar's
+/// size, unlike LoadIconW's 32 px one).
+unsafe fn icon(module: windows::Win32::Foundation::HINSTANCE, id: u16) -> HICON {
+    unsafe {
+        let (w, h) = (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+        LoadImageW(Some(module), PCWSTR(id as usize as _), IMAGE_ICON, w, h, LR_DEFAULTCOLOR | LR_SHARED)
+            .map(|h| HICON(h.0))
+            .or_else(|_| LoadIconW(Some(module), PCWSTR(1 as _)))
+            .or_else(|_| LoadIconW(None, IDI_APPLICATION))
+            .unwrap_or_default()
     }
 }
 
@@ -166,7 +221,13 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
         WM_TRAY => {
             match lparam.0 as u32 {
                 WM_LBUTTONDBLCLK | WM_LBUTTONUP => {
-                    if !state().busy {
+                    let s = state();
+                    // Stopped service: nothing to open; the menu has Start.
+                    if s.service == Some(Service::Stopped) {
+                        if lparam.0 as u32 == WM_LBUTTONUP {
+                            unsafe { menu(hwnd) }
+                        }
+                    } else if !s.busy {
                         send(Cmd::Open);
                     }
                 }
@@ -177,8 +238,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
         }
         WM_REFRESH => {
             let mut nid = data(hwnd);
-            nid.uFlags = NIF_TIP;
+            nid.uFlags = NIF_TIP | NIF_ICON;
             copy(&mut nid.szTip, &tip());
+            // SAFETY: loads one of our own (shared) icon resources.
+            if let Ok(module) = unsafe { GetModuleHandleW(None) } {
+                nid.hIcon = unsafe { icon(module.into(), state().icon()) };
+            }
             // SAFETY: our own icon.
             unsafe {
                 let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
@@ -223,7 +288,33 @@ unsafe fn menu(hwnd: HWND) {
         if !s.status.is_empty() {
             item(MF_STRING | MF_GRAYED, 0, &s.status);
         }
-        if !s.busy {
+        if let Some(svc) = s.service.filter(|_| !s.busy) {
+            let shield = "\tadmin";
+            match svc {
+                Service::Stopped => {
+                    item(MF_STRING, ID_START, &format!("Start service{shield}"));
+                    let _ = SetMenuDefaultItem(m, ID_START as u32, 0);
+                    item(MF_STRING | MF_GRAYED, ID_OPEN, "Open panel");
+                }
+                _ => {
+                    item(MF_STRING, ID_OPEN, "Open panel");
+                    let _ = SetMenuDefaultItem(m, ID_OPEN as u32, 0);
+                    if let Some(lan) = &s.lan {
+                        item(MF_STRING, ID_COPY, &format!("Copy address for other devices\t{}", lan.trim_start_matches("https://")));
+                    }
+                }
+            }
+            item(MF_STRING, ID_FOLDER, "Open panel folder");
+            item(MF_STRING, ID_LOG, "Open log");
+            if svc != Service::Stopped {
+                let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+                item(MF_STRING, ID_RESTART, &format!("Restart service{shield}"));
+                item(MF_STRING, ID_STOP, &format!("Stop service{shield}"));
+            }
+            let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+            item(if s.startup { MF_STRING | MF_CHECKED } else { MF_STRING }, ID_STARTUP, "Show this icon at sign-in");
+            item(MF_STRING, ID_QUIT, "Hide icon\tservice keeps running");
+        } else if !s.busy {
             item(MF_STRING, ID_OPEN, "Open panel");
             let _ = SetMenuDefaultItem(m, ID_OPEN as u32, 0);
             if let Some(lan) = &s.lan {
@@ -250,6 +341,10 @@ unsafe fn menu(hwnd: HWND) {
             ID_STARTUP => send(Cmd::ToggleStartup),
             ID_SERVICE => send(Cmd::InstallService),
             ID_QUIT => send(Cmd::Quit),
+            ID_START => send(Cmd::StartService),
+            ID_STOP => send(Cmd::StopService),
+            ID_RESTART => send(Cmd::RestartService),
+            ID_LOG => send(Cmd::OpenLog),
             _ => {}
         }
     }

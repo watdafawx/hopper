@@ -115,9 +115,14 @@ pub fn issue(ca: &Ca, names: &[String], ips: &[IpAddr]) -> anyhow::Result<Certif
 /// domain, the panel's own for everything else.
 #[derive(Debug)]
 pub struct Resolver {
-    pub own: Arc<CertifiedKey>,
+    /// Swapped when this machine's addresses change (see [`OwnCert`]).
+    pub own: OwnCert,
     pub acme: Option<(String, Arc<rustls_acme::ResolvesServerCertAcme>)>,
 }
+
+/// The panel's own certificate, re-issued when the machine's addresses
+/// change (a service starts before the network card has its address).
+pub type OwnCert = Arc<std::sync::RwLock<Arc<CertifiedKey>>>;
 
 impl ResolvesServerCert for Resolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
@@ -127,7 +132,7 @@ impl ResolvesServerCert for Resolver {
         {
             return acme.resolve(hello);
         }
-        Some(self.own.clone())
+        Some(self.own.read().unwrap_or_else(|e| e.into_inner()).clone())
     }
 }
 
@@ -161,7 +166,14 @@ pub fn local_names(extra: &[String]) -> Vec<String> {
 /// This machine's Tailscale DNS name (e.g. "rig.tail3c9e.ts.net"), when it
 /// runs Tailscale.
 pub fn tailscale_name() -> Option<String> {
-    let out = std::process::Command::new("tailscale").args(["status", "--json"]).output().ok()?;
+    let mut cmd = std::process::Command::new("tailscale");
+    cmd.args(["status", "--json"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flash (checked every few seconds)
+    }
+    let out = cmd.output().ok()?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
     let name = v["Self"]["DNSName"].as_str()?.trim_end_matches('.').to_string();
     (!name.is_empty()).then_some(name)

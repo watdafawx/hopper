@@ -173,7 +173,7 @@ async fn hello(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Socke
         "setup_needed": setup_needed,
         // A browser on this PC sets the owner password without the code.
         "local_setup": setup_needed && crate::auth::trusted_local(cfg.trust_local_setup, addr.ip(), &headers),
-        "addresses": app.addresses,
+        "addresses": *app.addresses.read().unwrap(),
         "port": cfg.port,
         "capabilities": CAPABILITIES,
         "tls": { "fingerprint": app.tls.fingerprint, "ca": app.tls.ca_pem, "domain": cfg.acme_domain },
