@@ -1140,26 +1140,43 @@ pub fn identify_packs(paths: &[PathBuf], class: u32) -> (std::collections::HashM
             continue;
         }
         let same = |m: &cf::Mod| squash(&m.name) == want || squash(&m.slug) == want;
+        // A project named differently from its files ("The Brazilian
+        // Project [1.21.1-1.3.0].zip" of "The Brazilian Localization
+        // Project") is still the one when it published a file of exactly
+        // this name: a repacked copy of that file, so its hash misses.
+        let by_file = |v: &[cf::Mod]| {
+            v.iter().take(3).find_map(|m| {
+                let files = crate::source::files(m.id, "", cf::Loader::Any).ok()?;
+                let f = file_named(&files, &file)?;
+                Some(PackMatch { project: m.clone(), file: Some(f) })
+            })
+        };
         let hit = [class, cf::CLASS_MODS].into_iter().find_map(|class_id| {
             let s = cf::Search {
                 class_id,
                 text: name.clone(),
                 ..Default::default()
             };
+            let look = |v: Vec<cf::Mod>| match v.iter().find(|m| same(m)) {
+                Some(m) => Some(PackMatch { project: m.clone(), file: None }),
+                None => by_file(&v),
+            };
             cf::search(&s)
                 .ok()
-                .and_then(|(v, _)| v.into_iter().find(same))
-                .or_else(|| {
-                    crate::modrinth::search(&s)
-                        .ok()
-                        .and_then(|(v, _)| v.into_iter().find(same))
-                })
+                .and_then(|(v, _)| look(v))
+                .or_else(|| crate::modrinth::search(&s).ok().and_then(|(v, _)| look(v)))
         });
         if let Some(m) = hit {
-            out.insert(p.clone(), PackMatch { project: m, file: None });
+            out.insert(p.clone(), m);
         }
     }
     (out, answered)
+}
+
+/// The file of `files` named `file` (switched off or not), ignoring case.
+fn file_named(files: &[cf::File], file: &str) -> Option<cf::File> {
+    let file = file.strip_suffix(".disabled").unwrap_or(file);
+    files.iter().find(|f| f.file_name.eq_ignore_ascii_case(file)).cloned()
 }
 
 /// A found pack's installed file and the newer one for the instance's
@@ -1237,6 +1254,20 @@ mod pack_name_tests {
         assert_eq!(pack_search_name("BotanyMinecolonies.zip"), "Botany Minecolonies");
         assert_eq!(pack_search_name("tnp_data"), "tnp data");
         assert_eq!(pack_search_name("Better Trades [1.21.1-1.3.0].zip"), "Better Trades");
+    }
+
+    /// A repacked pack is still known by the exact name of a file its
+    /// project published.
+    #[test]
+    fn finds_file_by_exact_name() {
+        use crate::cf::File;
+        let f = |id: u64, n: &str| File { id, file_name: n.into(), ..Default::default() };
+        let files = [f(1, "The Brazilian Project [1.21.1-1.5.2].zip"), f(2, "The Brazilian Project [1.21.1-1.3.0].zip")];
+        let hit = |n: &str| super::file_named(&files, n).map(|x| x.id);
+        assert_eq!(hit("The Brazilian Project [1.21.1-1.3.0].zip"), Some(2));
+        assert_eq!(hit("The Brazilian Project [1.21.1-1.3.0].zip.disabled"), Some(2));
+        assert_eq!(hit("the brazilian project [1.21.1-1.5.2].ZIP"), Some(1));
+        assert_eq!(hit("The Brazilian Project [1.21.1-1.4.0].zip"), None);
     }
 
     /// A pack switched off (renamed to .disabled) is looked up and keyed
