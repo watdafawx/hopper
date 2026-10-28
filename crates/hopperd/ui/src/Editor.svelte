@@ -12,7 +12,8 @@
   import ConfigSettings from './ConfigSettings.svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
-  import { confirmIt, dialog } from './lib/dialog.svelte.js';
+  import { confirmIt, choose, dialog } from './lib/dialog.svelte.js';
+  import { leave } from './lib/leave.js';
   import { download } from './lib/transfers.svelte.js';
   import { jump } from './lib/files.svelte.js';
   import { configOwners, ownerOf, siblingsOf } from './lib/files-config.js';
@@ -248,6 +249,19 @@
     if (dirty && !leaving) e.preventDefault();
   }
 
+  // Leaving by a tab, link, the palette or back/forward: ask first (Shell
+  // puts the old address back while this is open).
+  const leaveGuard = {
+    blocked: () => dirty && !leaving,
+    async settle() {
+      const r = await choose(`Save ${name} before leaving?`, { body: 'Your changes are dropped unless you save them.', ok: 'Save', alt: 'Discard changes' });
+      if (r === 'alt') leaving = true;
+      else if (r === 'ok') await save();
+      return !dirty || leaving;
+    },
+  };
+  leave.guard = leaveGuard;
+
   onMount(async () => {
     addEventListener('beforeunload', guard);
     configOwners(server.id).then((o) => (owners = o));
@@ -295,6 +309,7 @@
   });
 
   onDestroy(() => {
+    if (leave.guard === leaveGuard) leave.guard = null;
     removeEventListener('beforeunload', guard);
     ed?.destroy();
   });

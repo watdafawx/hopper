@@ -25,6 +25,7 @@
   import NewServer from './NewServer.svelte';
   import { session } from './lib/me.svelte.js';
   import { dialog } from './lib/dialog.svelte.js';
+  import { leave } from './lib/leave.js';
   import Dialog from './Dialog.svelte';
   import Transfers from './Transfers.svelte';
   import { refreshPackUpdates } from './lib/packs.svelte.js';
@@ -232,7 +233,24 @@
       route = location.hash.slice(1) || '/';
     };
     fix();
-    const onHash = () => {
+    // A page with unsaved work (the editor) can ask before the panel leaves
+    // it: put the old address back, ask, then go on if it says so.
+    let restoring = false;
+    const onHash = async () => {
+      if (restoring) {
+        restoring = false;
+        return;
+      }
+      const to = location.hash.slice(1) || '/';
+      const g = leave.guard;
+      if (g?.blocked() && to !== route) {
+        const at = history.state?.hopperNav;
+        restoring = true;
+        if (typeof at === 'number' && at !== navPos) history.go(navPos - at);
+        else history.back();
+        if (await g.settle()) location.hash = to;
+        return;
+      }
       navMoved();
       fix();
     };
