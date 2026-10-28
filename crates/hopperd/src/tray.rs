@@ -8,6 +8,10 @@
 //! Two menus: the portable one (the tray runs the panel) and the service
 //! one (the panel is the Windows service; the tray shows its state with a
 //! dot on the icon and starts, stops or restarts it).
+//!
+//! Both show a newer Hopper Server: a blue dot in the icon's top-right
+//! corner, a line in the tooltip and an "Update to X.Y.Z" item at the top
+//! of the menu, plus "Check for updates".
 
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
@@ -15,7 +19,9 @@ use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows::Win32::UI::Shell::{NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_ERROR, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW};
+use windows::Win32::UI::Shell::{
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_ERROR, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW, Shell_NotifyIconW,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -34,6 +40,9 @@ pub enum Cmd {
     StopService,
     RestartService,
     OpenLog,
+    CheckUpdates,
+    /// Install the newer version the menu shows.
+    Update,
 }
 
 /// The service's state, for the service menu and the icon's dot.
@@ -57,24 +66,35 @@ pub struct MenuState {
     pub busy: bool,
     /// Set in service mode: the service menu and a status dot on the icon.
     pub service: Option<Service>,
+    /// A newer Hopper Server that can be installed: the "Update to" item and
+    /// the blue dot.
+    pub update: Option<String>,
+    /// An update on its way in ("Installing 0.14.0…"): this greyed line
+    /// replaces the update items.
+    pub updating: Option<String>,
+    /// "Check for updates" is running.
+    pub checking: bool,
 }
 
 impl MenuState {
     /// The icon resource: 1 the plain logo, 2-4 with a green, amber or red
-    /// dot (build.rs).
+    /// dot; 5-8 the same with the blue update dot (build.rs).
     fn icon(&self) -> u16 {
-        match self.service {
+        let base = match self.service {
             None => 1,
             Some(Service::Running) => 2,
             Some(Service::Starting) => 3,
             Some(Service::Stopped) => 4,
-        }
+        };
+        if self.update.is_some() || self.updating.is_some() { base + 4 } else { base }
     }
 }
 
 static STATE: Mutex<Option<MenuState>> = Mutex::new(None);
 static CMDS: OnceLock<Mutex<Sender<Cmd>>> = OnceLock::new();
 static HWND_SLOT: Mutex<Option<isize>> = Mutex::new(None);
+/// What a click on the notification showing now does.
+static BALLOON: Mutex<Option<Cmd>> = Mutex::new(None);
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_REFRESH: u32 = WM_APP + 2;
@@ -89,6 +109,8 @@ const ID_START: usize = 7;
 const ID_STOP: usize = 8;
 const ID_RESTART: usize = 9;
 const ID_LOG: usize = 10;
+const ID_CHECK: usize = 11;
+const ID_UPDATE: usize = 12;
 
 pub fn set_state(s: MenuState) {
     *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some(s);
@@ -138,7 +160,16 @@ fn data(hwnd: HWND) -> NOTIFYICONDATAW {
 
 fn tip() -> String {
     let s = state();
-    if s.status.is_empty() { crate::service::display() } else { format!("{}\n{}", crate::service::display(), s.status) }
+    let mut t = crate::service::display();
+    if let Some(u) = &s.updating {
+        t = format!("{t}\n{u}");
+    } else if let Some(v) = &s.update {
+        t = format!("{t}\nUpdate {v} available");
+    }
+    if !s.status.is_empty() {
+        t = format!("{t}\n{}", s.status);
+    }
+    t
 }
 
 /// Adds the icon and runs the message loop until [`close`].
@@ -232,6 +263,12 @@ unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     }
                 }
                 WM_RBUTTONUP | WM_CONTEXTMENU => unsafe { menu(hwnd) },
+                NIN_BALLOONUSERCLICK => {
+                    if let Some(c) = BALLOON.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        send(c);
+                    }
+                }
+                NIN_BALLOONTIMEOUT => *BALLOON.lock().unwrap_or_else(|e| e.into_inner()) = None,
                 _ => {}
             }
             LRESULT(0)
@@ -288,6 +325,24 @@ unsafe fn menu(hwnd: HWND) {
         if !s.status.is_empty() {
             item(MF_STRING | MF_GRAYED, 0, &s.status);
         }
+        // A newer version goes first, as the default (bold) item.
+        let update = !s.busy && s.updating.is_none() && s.update.is_some();
+        if !s.busy {
+            if let Some(u) = &s.updating {
+                item(MF_STRING | MF_GRAYED, 0, u);
+                let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+            } else if let Some(v) = &s.update {
+                let admin = if s.service.is_some() { "\tadmin" } else { "" };
+                item(MF_STRING, ID_UPDATE, &format!("Update to {v}{admin}"));
+                let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+            }
+        }
+        let check = || {
+            if s.updating.is_none() {
+                let flags = if s.checking { MF_STRING | MF_GRAYED } else { MF_STRING };
+                item(flags, ID_CHECK, if s.checking { "Checking for updates…" } else { "Check for updates" });
+            }
+        };
         if let Some(svc) = s.service.filter(|_| !s.busy) {
             let shield = "\tadmin";
             match svc {
@@ -311,6 +366,7 @@ unsafe fn menu(hwnd: HWND) {
                 item(MF_STRING, ID_RESTART, &format!("Restart service{shield}"));
                 item(MF_STRING, ID_STOP, &format!("Stop service{shield}"));
             }
+            check();
             let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
             item(if s.startup { MF_STRING | MF_CHECKED } else { MF_STRING }, ID_STARTUP, "Show this icon at sign-in");
             item(MF_STRING, ID_QUIT, "Hide icon\tservice keeps running");
@@ -324,8 +380,13 @@ unsafe fn menu(hwnd: HWND) {
             let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
             item(if s.startup { MF_STRING | MF_CHECKED } else { MF_STRING }, ID_STARTUP, "Start with Windows");
             item(MF_STRING, ID_SERVICE, "Install as a service…");
+            check();
             let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
             item(MF_STRING, ID_QUIT, "Quit");
+        }
+        // A stopped service keeps Start as the default.
+        if update && s.service != Some(Service::Stopped) {
+            let _ = SetMenuDefaultItem(m, ID_UPDATE as u32, 0);
         }
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -345,6 +406,8 @@ unsafe fn menu(hwnd: HWND) {
             ID_STOP => send(Cmd::StopService),
             ID_RESTART => send(Cmd::RestartService),
             ID_LOG => send(Cmd::OpenLog),
+            ID_CHECK => send(Cmd::CheckUpdates),
+            ID_UPDATE => send(Cmd::Update),
             _ => {}
         }
     }
@@ -352,6 +415,12 @@ unsafe fn menu(hwnd: HWND) {
 
 /// A Windows notification from the icon.
 pub fn notify(title: &str, body: &str, error: bool) {
+    notify_then(title, body, error, None);
+}
+
+/// A Windows notification; clicking it sends `on_click`.
+pub fn notify_then(title: &str, body: &str, error: bool, on_click: Option<Cmd>) {
+    *BALLOON.lock().unwrap_or_else(|e| e.into_inner()) = on_click;
     let Some(h) = *HWND_SLOT.lock().unwrap_or_else(|e| e.into_inner()) else { return };
     let mut nid = data(HWND(h as *mut _));
     nid.uFlags = NIF_INFO;

@@ -115,20 +115,36 @@ fn logo(size: u32) -> Vec<u8> {
 /// The tray's status icons: the logo with a dot in the bottom-right corner
 /// (green running, amber starting, red stopped; stopped also greys the logo).
 const DOTS: [(&str, [u8; 3], bool); 3] = [("2", [0x22, 0xc5, 0x5e], false), ("3", [0xf5, 0xa5, 0x24], false), ("4", [0xef, 0x44, 0x44], true)];
+/// The same four icons (plain, then each dot) with a blue "update ready"
+/// dot in the top-right corner: resources 5-8. Top-right so it never
+/// covers the service's state dot.
+const UPDATE_DOT: [u8; 3] = [0x3b, 0x9e, 0xff];
 
-fn logo_dot(size: u32, dot: [u8; 3], grey: bool) -> Vec<u8> {
+fn logo_dot(size: u32, dot: Option<([u8; 3], bool)>, update: bool) -> Vec<u8> {
     let mut px = logo(size);
     let s = size as f32;
-    let (cx, cy, r) = (s * 0.72, s * 0.72, s * 0.26);
-    let ring = (s * 0.08).max(1.0);
+    if dot.is_some_and(|(_, grey)| grey) {
+        for i in (0..px.len()).step_by(4) {
+            let l = (px[i] as f32 * 0.3 + px[i + 1] as f32 * 0.59 + px[i + 2] as f32 * 0.11) * 0.75;
+            px[i..i + 3].copy_from_slice(&[l as u8; 3]);
+            px[i + 3] = (px[i + 3] as f32 * 0.8) as u8;
+        }
+    }
+    if let Some((c, _)) = dot {
+        circle(&mut px, size, s * 0.72, s * 0.72, s * 0.26, c);
+    }
+    if update {
+        circle(&mut px, size, s * 0.78, s * 0.22, s * 0.19, UPDATE_DOT);
+    }
+    px
+}
+
+/// Paints a dot with a dark ring (readable on any taskbar) over `px`.
+fn circle(px: &mut [u8], size: u32, cx: f32, cy: f32, r: f32, dot: [u8; 3]) {
+    let ring = (size as f32 * 0.08).max(1.0);
     for y in 0..size {
         for x in 0..size {
             let i = ((y * size + x) * 4) as usize;
-            if grey {
-                let l = (px[i] as f32 * 0.3 + px[i + 1] as f32 * 0.59 + px[i + 2] as f32 * 0.11) * 0.75;
-                px[i..i + 3].copy_from_slice(&[l as u8; 3]);
-                px[i + 3] = (px[i + 3] as f32 * 0.8) as u8;
-            }
             // 4x4 samples per pixel for a smooth edge.
             let (mut inner, mut outer) = (0f32, 0f32);
             for sy in 0..4 {
@@ -143,7 +159,6 @@ fn logo_dot(size: u32, dot: [u8; 3], grey: bool) -> Vec<u8> {
                     }
                 }
             }
-            // A dark ring keeps the dot readable on any taskbar.
             let mut put = |c: [u8; 3], cover: f32| {
                 if cover <= 0.0 {
                     return;
@@ -159,7 +174,6 @@ fn logo_dot(size: u32, dot: [u8; 3], grey: bool) -> Vec<u8> {
             put(dot, inner);
         }
     }
-    px
 }
 
 /// The logo as an SVG of square pixels, for the web UI.
@@ -235,9 +249,17 @@ fn windows_resources() {
     std::fs::write(&path, ico()).unwrap();
     let mut res = winresource::WindowsResource::new();
     res.set_icon_with_id(&path.to_string_lossy(), "1");
+    let sizes = [16, 20, 24, 32, 40, 48, 64];
     for (id, dot, grey) in DOTS {
         let p = path.with_file_name(format!("hopperd-{id}.ico"));
-        std::fs::write(&p, ico_of(&[16, 20, 24, 32, 40, 48, 64], |n| logo_dot(n, dot, grey))).unwrap();
+        std::fs::write(&p, ico_of(&sizes, |n| logo_dot(n, Some((dot, grey)), false))).unwrap();
+        res.set_icon_with_id(&p.to_string_lossy(), id);
+    }
+    // With the update dot: 5 plain, 6-8 with the service's dot.
+    let updated = [("5", None), ("6", Some((DOTS[0].1, DOTS[0].2))), ("7", Some((DOTS[1].1, DOTS[1].2))), ("8", Some((DOTS[2].1, DOTS[2].2)))];
+    for (id, dot) in updated {
+        let p = path.with_file_name(format!("hopperd-{id}.ico"));
+        std::fs::write(&p, ico_of(&sizes, |n| logo_dot(n, dot, true))).unwrap();
         res.set_icon_with_id(&p.to_string_lossy(), id);
     }
     res.set_manifest(MANIFEST);

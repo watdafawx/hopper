@@ -2,7 +2,7 @@
 //! `hopperd-v<version>` (Windows; Docker and Linux update the image or the
 //! binary instead).
 //!
-//! A while after start and then every few hours it looks for a newer
+//! A while after start and then every half hour it looks for a newer
 //! release. With auto-update on (the default) it downloads the Windows zip,
 //! puts the new hopperd.exe in place of the running one (Windows lets a
 //! running exe be renamed, not overwritten) and restarts once no job is
@@ -36,8 +36,8 @@ use std::time::Duration;
 pub const REPO: &str = "watdafawx/hopper";
 const TAG: &str = "hopperd-v";
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
-/// How often to look for a new version.
-const EVERY: Duration = Duration::from_secs(6 * 3600);
+/// How often to look for a new version (as often as Hopper desktop).
+const EVERY: Duration = Duration::from_secs(30 * 60);
 /// Written before restarting into an update, so the service's tray doesn't
 /// alert "stopped" while the service manager starts it again.
 pub const MARKER: &str = "updating.json";
@@ -63,7 +63,7 @@ pub struct Status {
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
 
-fn status() -> Status {
+pub fn status() -> Status {
     STATUS.lock().unwrap().clone().unwrap_or(Status { current: CURRENT, ..Default::default() })
 }
 
@@ -191,18 +191,23 @@ fn exe_from_zip(zip: &Path) -> anyhow::Result<Vec<u8>> {
     bail!("The download has no hopperd.exe.")
 }
 
-/// Downloads `r` and puts it in place of the running exe.
-fn install(r: &Release) -> anyhow::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    let tmp = exe.with_extension("download");
-    hopper_core::cf::download_checked(&r.url, &tmp, &hopper_core::cf::Expect { len: r.size, ..Default::default() }, None, |_| {})
+/// Downloads `r` (to `tmp`, removed after) and returns its hopperd.exe.
+fn fetch(r: &Release, tmp: &Path) -> anyhow::Result<Vec<u8>> {
+    hopper_core::cf::download_checked(&r.url, tmp, &hopper_core::cf::Expect { len: r.size, ..Default::default() }, None, |_| {})
         .context("downloading the update")?;
-    let bytes = exe_from_zip(&tmp);
-    let _ = std::fs::remove_file(&tmp);
+    let bytes = exe_from_zip(tmp);
+    let _ = std::fs::remove_file(tmp);
     let bytes = bytes?;
     if bytes.get(..2) != Some(b"MZ") {
         bail!("The download isn't a Windows program.");
     }
+    Ok(bytes)
+}
+
+/// Downloads `r` and puts it in place of the running exe.
+fn install(r: &Release) -> anyhow::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let bytes = fetch(r, &exe.with_extension("download"))?;
     let staged = exe.with_extension("new.exe");
     let old = exe.with_extension("old.exe");
     std::fs::write(&staged, &bytes).context("saving the update")?;
@@ -213,6 +218,32 @@ fn install(r: &Release) -> anyhow::Result<PathBuf> {
         return Err(e).context("putting the update in place");
     }
     Ok(exe)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+/// The newest version newer than this build, if there is one (for the
+/// service's tray, which checks on its own).
+pub fn latest() -> anyhow::Result<Option<String>> {
+    Ok(newest()?.map(|r| r.version))
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+/// Downloads the newest release's hopperd.exe into `dir`, for the
+/// service's tray to install into the service (`<exe> service update`).
+pub fn download_newest(dir: &Path) -> anyhow::Result<(String, PathBuf)> {
+    let Some(r) = newest()? else { bail!("Hopper Server is up to date.") };
+    std::fs::create_dir_all(dir)?;
+    let bytes = fetch(&r, &dir.join("hopperd.download"))?;
+    let exe = dir.join("hopperd.exe");
+    std::fs::write(&exe, bytes).context("saving the update")?;
+    Ok((r.version, exe))
+}
+
+/// Checks now on this thread (the tray's "Check for updates"); installs too
+/// when `install_it`. Returns once the check is done; with one running
+/// already, returns at once (the status says "checking").
+pub fn check(app: &Arc<App>, install_it: bool) {
+    run_once(app, install_it);
 }
 
 /// What an earlier update left beside the exe; at start.

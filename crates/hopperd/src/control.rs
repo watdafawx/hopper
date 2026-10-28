@@ -2,8 +2,9 @@
 //!
 //! The tray starts hopperd as a child with a random token in
 //! `HOPPERD_CONTROL_TOKEN`. The child then writes [`Running`] to
-//! [`running_file`] (the user's local app data) and answers three requests
-//! from this PC that carry the token: status, stop every server, and quit.
+//! [`running_file`] (the user's local app data) and answers four requests
+//! from this PC that carry the token: status, stop every server, quit, and
+//! check for (or install) an update.
 //! Without the token (a terminal run, the service) none of this exists.
 
 use crate::App;
@@ -131,6 +132,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/local/status", get(status))
         .route("/api/v1/local/stop-servers", post(stop_servers))
         .route("/api/v1/local/quit", post(quit_now))
+        .route("/api/v1/local/update", post(update))
 }
 
 /// Compares without leaking where they differ.
@@ -161,7 +163,43 @@ async fn status(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Sock
         "lan": lan,
         "home": cfg.home,
         "data": app.data_dir,
+        "update": update_json(cfg.auto_update),
     })))
+}
+
+/// The self-update state, for the tray's menu, icon and notifications.
+fn update_json(auto: bool) -> Value {
+    let u = crate::autoupdate::status();
+    json!({
+        "current": u.current, "latest": u.latest, "state": u.state, "error": u.error, "checked": u.checked,
+        "auto": auto, "why_not": crate::autoupdate::why_not(),
+    })
+}
+
+#[derive(Deserialize, Default)]
+struct UpdateBody {
+    /// Install it too ("Update to X.Y.Z"); otherwise only look.
+    #[serde(default)]
+    install: bool,
+}
+
+/// "Check for updates" waits for the answer; "Update to X.Y.Z" starts the
+/// install and returns (the panel restarts into it when done).
+async fn update(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Option<Json<UpdateBody>>) -> Result<Json<Value>, StatusCode> {
+    check(&addr, &headers)?;
+    let install = body.is_some_and(|b| b.install);
+    if install {
+        if let Some(w) = crate::autoupdate::why_not() {
+            return Ok(Json(json!({ "ok": false, "error": w })));
+        }
+        let a = app.clone();
+        std::thread::spawn(move || crate::autoupdate::check(&a, true));
+    } else {
+        let a = app.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::autoupdate::check(&a, false)).await;
+    }
+    let auto = app.cfg.read().unwrap().auto_update;
+    Ok(Json(json!({ "ok": true, "update": update_json(auto) })))
 }
 
 async fn stop_servers(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {

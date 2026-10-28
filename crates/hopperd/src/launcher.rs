@@ -483,7 +483,11 @@ fn open_url(url: &str) {
 
 /// Runs `hopperd <args>` as admin (one UAC prompt) and waits for it.
 fn elevate(args: &[&str]) -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
+    elevate_with(&std::env::current_exe()?, args)
+}
+
+/// [`elevate`] with another hopperd.exe (a downloaded update).
+fn elevate_with(exe: &Path, args: &[&str]) -> anyhow::Result<()> {
     let report = std::env::temp_dir().join(format!("hopperd-elevated-{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&report);
     let quote = |a: &str| if a.contains(' ') || a.is_empty() { format!("\"{a}\"") } else { a.to_string() };
@@ -671,6 +675,16 @@ fn run_service_tray(boot: PathBuf) -> anyhow::Result<()> {
         let (boot, expected_stop) = (boot.clone(), expected_stop.clone());
         std::thread::Builder::new().name("watch-service".into()).spawn(move || watch_service(boot, expected_stop))?;
     }
+    {
+        let boot = boot.clone();
+        std::thread::Builder::new().name("update-check".into()).spawn(move || {
+            std::thread::sleep(first_check());
+            loop {
+                service_check(&boot, false);
+                std::thread::sleep(UPDATE_EVERY);
+            }
+        })?;
+    }
     std::thread::Builder::new().name("tray-cmds".into()).spawn(move || {
         for cmd in rx {
             if !handle_service(&boot, &expected_stop, cmd) {
@@ -726,6 +740,10 @@ fn watch_service(boot: PathBuf, expected_stop: Arc<AtomicBool>) {
         ms.lan = h.as_ref().and_then(|h| h["addresses"].as_array()?.first()?.as_str().map(String::from));
         ms.startup = startup_on();
         ms.service = Some(state);
+        // The service may have updated itself past what this tray found.
+        let svc_version = h.as_ref().and_then(|h| h["version"].as_str());
+        ms.update = SVC_UPDATE.lock().unwrap().clone().filter(|v| svc_version.is_none_or(|s| newer(v, s)));
+        ms.checking = SVC_CHECKING.load(Ordering::SeqCst);
         // Restarting into an update: the service manager starts it again.
         let updating = std::fs::metadata(boot.join(crate::autoupdate::MARKER))
             .and_then(|m| m.modified())
@@ -788,10 +806,132 @@ fn handle_service(boot: &Path, expected_stop: &AtomicBool, cmd: Cmd) -> bool {
             expected_stop.store(true, Ordering::SeqCst);
             run(&["service", "restart"], "Restarting the service…");
         }
+        Cmd::CheckUpdates => service_check(boot, true),
+        Cmd::Update => update_service(expected_stop),
         Cmd::Quit | Cmd::EndSession => return false,
         Cmd::InstallService => {}
     }
     true
+}
+
+// ---- updates in the tray ------------------------------------------------------------------
+
+/// How often the service's tray looks for a new version (the panel itself
+/// checks as often; see `autoupdate`).
+const UPDATE_EVERY: Duration = Duration::from_secs(30 * 60);
+
+/// The first look, a while after start (sooner when testing an update).
+fn first_check() -> Duration {
+    Duration::from_secs(if std::env::var_os("HOPPERD_TEST_VERSION").is_some() { 15 } else { 120 })
+}
+
+/// The last version a notification announced: each one is announced once.
+static ANNOUNCED: Mutex<Option<String>> = Mutex::new(None);
+/// The service's tray: the newer version it found, and whether it's looking.
+static SVC_UPDATE: Mutex<Option<String>> = Mutex::new(None);
+static SVC_CHECKING: AtomicBool = AtomicBool::new(false);
+
+/// "Hopper Server X.Y.Z is available"; clicking it updates.
+fn show_available(v: &str, service: bool) {
+    *ANNOUNCED.lock().unwrap() = Some(v.to_string());
+    let body = if service {
+        "Click to update (Windows asks for admin). Your servers keep running."
+    } else {
+        "Click to update. Your servers keep running; the panel is back in a few seconds."
+    };
+    tray::notify_then(&format!("Hopper Server {v} is available"), body, false, Some(Cmd::Update));
+}
+
+/// [`show_available`] the first time `v` is seen.
+fn announce_once(v: &str, service: bool) {
+    if ANNOUNCED.lock().unwrap().as_deref() != Some(v) {
+        show_available(v, service);
+    }
+}
+
+/// The result of a "Check for updates" the player asked for.
+fn show_check_result(r: Result<Option<String>, String>, current: &str, service: bool) {
+    match r {
+        Ok(Some(v)) => show_available(&v, service),
+        Ok(None) => tray::notify("Hopper Server is up to date", &format!("{current} is the newest version."), false),
+        Err(e) => tray::notify("Couldn't check for updates", &e, true),
+    }
+}
+
+fn set_checking(on: bool) {
+    let mut ms = tray::state();
+    ms.checking = on;
+    tray::set_state(ms);
+}
+
+/// The service's tray looks itself (the service's own state needs a
+/// sign-in to read). Background looks announce a new version once, unless
+/// the service installs it by itself.
+fn service_check(boot: &Path, asked: bool) {
+    if SVC_CHECKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    set_checking(true);
+    let r = crate::autoupdate::latest().map_err(|e| format!("{e:#}"));
+    if let Ok(v) = &r {
+        *SVC_UPDATE.lock().unwrap() = v.clone();
+    }
+    SVC_CHECKING.store(false, Ordering::SeqCst);
+    let mut ms = tray::state();
+    ms.checking = false;
+    if let Ok(v) = &r {
+        ms.update = v.clone();
+    }
+    tray::set_state(ms);
+    if asked {
+        show_check_result(r, env!("CARGO_PKG_VERSION"), true);
+    } else if let Ok(Some(v)) = &r
+        && !service::real_data(boot).1.auto_update
+    {
+        announce_once(v, true);
+    }
+}
+
+/// Downloads the newer version and installs it into the service (asks for
+/// admin): the new exe's own `service update`, as when a newer copy is run.
+fn update_service(expected_stop: &AtomicBool) {
+    let Some(v) = tray::state().update else { return };
+    set_busy(&format!("Downloading {v}…"));
+    let dir = std::env::temp_dir().join(format!("hopperd-update-{}", std::process::id()));
+    let r = crate::autoupdate::download_newest(&dir).and_then(|(v, exe)| {
+        set_busy(&format!("Installing {v}…"));
+        expected_stop.store(true, Ordering::SeqCst);
+        elevate_with(&exe, &["service", "update"])
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    set_busy("");
+    if let Err(e) = r {
+        expected_stop.store(false, Ordering::SeqCst);
+        log::warn!("updating the service: {e:#}");
+        error_box(&format!("The service wasn't updated: {e:#}"));
+    }
+}
+
+/// The panel's update state (from `control`'s status) into the menu.
+/// Announces a new version once, unless the panel installs it by itself.
+fn apply_panel_update(ms: &mut MenuState, u: &serde_json::Value) {
+    let state = u["state"].as_str().unwrap_or("");
+    let latest = u["latest"].as_str().map(String::from);
+    let v = latest.clone().unwrap_or_else(|| "the update".into());
+    ms.updating = match state {
+        "downloading" => Some(format!("Downloading {v}…")),
+        "waiting" => Some(format!("Installing {v} once the running job finishes")),
+        "restarting" => Some(format!("Restarting into {v}…")),
+        _ => None,
+    };
+    ms.update = if ms.updating.is_none() { latest } else { None };
+    ms.checking = state == "checking";
+    let installs_itself = u["auto"].as_bool().unwrap_or(false) && u["why_not"].is_null();
+    if let Some(v) = &ms.update
+        && !installs_itself
+    {
+        announce_once(v, false);
+    }
 }
 
 // ---- the tray and the panel it runs ---------------------------------------------------
@@ -843,6 +983,18 @@ impl Supervisor {
         } else {
             a.post(&url).header(control::HEADER, &self.token).send_json(serde_json::json!({})).ok()?
         };
+        if res.status() != 200 {
+            return None;
+        }
+        res.body_mut().read_json().ok()
+    }
+
+    /// Asks the panel to check for an update (waits for the answer) or to
+    /// install it (returns at once).
+    fn update(&self, install: bool) -> Option<serde_json::Value> {
+        let url = format!("http://127.0.0.1:{}/api/v1/local/update", self.port());
+        let a = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(120))).http_status_as_error(false).build().new_agent();
+        let mut res = a.post(&url).header(control::HEADER, &self.token).send_json(serde_json::json!({ "install": install })).ok()?;
         if res.status() != 200 {
             return None;
         }
@@ -971,6 +1123,7 @@ fn watch(sup: Arc<Supervisor>, mut open: bool) {
                 let up = s["servers_up"].as_array().map_or(0, Vec::len);
                 ms.status = format!("Running · {up} server{} up · port {}", if up == 1 { "" } else { "s" }, s["port"]);
                 ms.lan = s["lan"].as_str().map(String::from);
+                apply_panel_update(&mut ms, &s["update"]);
                 if open {
                     open = false;
                     open_url(&panel_url(s["port"].as_u64().unwrap_or(8790) as u16, s["setup_code"].as_str()));
@@ -1084,6 +1237,33 @@ fn handle(sup: &Arc<Supervisor>, cmd: Cmd) -> bool {
             sup.stop();
             return false;
         }
+        Cmd::CheckUpdates => {
+            set_checking(true);
+            let mut r = sup.update(false).map(|r| r["update"].clone());
+            // Another check was running: wait for it.
+            let t = Instant::now();
+            while r.as_ref().is_some_and(|u| u["state"] == "checking") && t.elapsed() < Duration::from_secs(90) {
+                std::thread::sleep(Duration::from_secs(1));
+                r = sup.request("GET", "status").map(|s| s["update"].clone());
+            }
+            set_checking(false);
+            let result = match &r {
+                None => Err("The panel isn't answering.".to_string()),
+                Some(u) if u["state"] == "error" => Err(u["error"].as_str().unwrap_or("unknown error").to_string()),
+                Some(u) => Ok(u["latest"].as_str().map(String::from)),
+            };
+            let current = r.as_ref().and_then(|u| u["current"].as_str().map(String::from)).unwrap_or_else(|| env!("CARGO_PKG_VERSION").into());
+            show_check_result(result, &current, false);
+        }
+        Cmd::Update => match sup.update(true) {
+            Some(r) if r["ok"] == true => {
+                let mut ms = tray::state();
+                ms.updating = Some(format!("Downloading {}…", ms.update.take().unwrap_or_else(|| "the update".into())));
+                tray::set_state(ms);
+            }
+            Some(r) => error_box(r["error"].as_str().unwrap_or("The update didn't start.")),
+            None => error_box("The panel isn't answering, so the update didn't start."),
+        },
         // Service menu only.
         Cmd::StartService | Cmd::StopService | Cmd::RestartService | Cmd::OpenLog => {}
     }
