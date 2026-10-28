@@ -134,6 +134,26 @@ pub struct Crash {
     /// A dedicated server's crash (the cards say "server", not "game").
     #[serde(default)]
     pub server: bool,
+    /// Seconds Java kept running after the server stopped from this crash,
+    /// until Minecraft's watchdog ended it (0: it exited).
+    #[serde(default)]
+    pub lingered: i64,
+}
+
+impl Crash {
+    /// The line the crash card adds when Java didn't exit after the crash.
+    pub fn lingered_note(&self) -> Option<String> {
+        if self.lingered <= 0 {
+            return None;
+        }
+        let how_long = if self.lingered < 90 {
+            format!("{} seconds", self.lingered)
+        } else {
+            let m = (self.lingered + 30) / 60;
+            if m == 1 { "a minute".into() } else { format!("{m} minutes") }
+        };
+        Some(format!("After it stopped, Java kept running for {how_long}, until Minecraft's watchdog ended it."))
+    }
 }
 
 /// The config switches for the items the crash names, of its Certain and
@@ -340,6 +360,11 @@ pub fn signals(text: &str) -> Vec<Raw> {
         }
     }
     fabric_signals(&lines, &mut out);
+    // The watchdog's own stack is only the watchdog: where the server was
+    // stuck is in the thread dump.
+    if !after_stop(text) && lines.iter().take(60).any(|l| l.trim() == "Description: Watching Server") {
+        stuck_tick(&lines, &mut out);
+    }
     out.sort_by_key(|r| r.certainty);
     out
 }
@@ -646,7 +671,7 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         _ => String::new(),
     };
     let (switches, switched_off) = switches(root, &text, &suspects);
-    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false })
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0 })
 }
 
 /// A saved crash read again from its report with today's rules (which mods
@@ -711,13 +736,13 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
         CrashKind::Unknown
     };
     let (switches, switched_off) = switches(root, &text, &suspects);
-    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false })
+    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0 })
 }
 
 /// What the game or server logs as it writes its crash report. After it
 /// comes the shutdown, where mods can fail too (a config that won't
 /// unload): those errors follow from the crash, so the scan stops here.
-const CRASH_SAVED: [&str; 3] = ["Preparing crash report with UUID", "This crash report has been saved to", "Crash report saved to"];
+pub(crate) const CRASH_SAVED: [&str; 3] = ["Preparing crash report with UUID", "This crash report has been saved to", "Crash report saved to"];
 
 /// A log up to the line where the crash report is written.
 pub fn before_crash(log: &str) -> &str {
@@ -743,10 +768,26 @@ pub fn server(root: &Path) -> Option<Crash> {
     let this_run = |p: &Path| {
         p.file_name().is_some_and(|n| log.contains(&*n.to_string_lossy())) || modified_secs(p).is_some_and(|t| t + 60 >= log_end)
     };
-    let report = crate::logs::crash_reports(root)
+    let mut report = crate::logs::crash_reports(root)
         .into_iter()
         .find(|p| p.extension().is_some_and(|e| e == "txt"))
         .filter(|p| this_run(p));
+    // A watchdog report written after the server had already stopped (Java
+    // hung on threads that never ended) isn't the crash: the report before
+    // it, from the same run, is. A server that stopped normally and then
+    // hung didn't crash.
+    let mut lingered = 0;
+    let mut log_names_report = true;
+    if let Some(w) = report.clone()
+        && after_stop(&tail(&w, 2 << 20))
+    {
+        report = None;
+        if let Some((p, secs)) = crash_before_watchdog(root, &w) {
+            log_names_report = p.file_name().is_some_and(|n| log.contains(&*n.to_string_lossy()));
+            report = Some(p);
+            lingered = secs;
+        }
+    }
     let native = fs::read_dir(root)
         .ok()?
         .flatten()
@@ -772,8 +813,10 @@ pub fn server(root: &Path) -> Option<Crash> {
         mods.iter().map(|m| (m.clone(), crate::deps::own_ids(&dir.join(m)).0)).collect();
     let ids = |f: &str| own.get(f).cloned().unwrap_or_default();
     let text = report.as_deref().map(|p| tail(p, 2 << 20)).unwrap_or_default();
-    let log = before_crash(&log);
-    let loading = loading_lines(&log_path);
+    // latest.log may be a later start's (the server was started again after
+    // the watchdog): then it says nothing about this crash.
+    let log = if log_names_report { before_crash(&log) } else { "" };
+    let loading = if log_names_report { loading_lines(&log_path) } else { String::new() };
     let when = report.as_deref().or(native.as_deref()).and_then(modified_secs).unwrap_or(log_end);
     let (mut suspects, stopped) = analyze(root, &text, log, &loading, when, &mods, &ids);
     client_only(&text, log, &mut suspects, &mods, &ids);
@@ -796,8 +839,75 @@ pub fn server(root: &Path) -> Option<Crash> {
     };
     let (switches, switched_off) = switches(root, &text, &suspects);
     let source = report.or(native).unwrap_or_default();
-    Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true })
+    Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true, lingered })
 }
+
+/// Whether a crash report is Minecraft's watchdog firing after the server
+/// had already stopped: its thread dump has no "Server thread" (the server's
+/// main loop ended), or a mod counted the stop (AllTheLeaks' "Server
+/// Stopped: 1"). Java kept running on threads that never ended, and the
+/// watchdog took the time since the last tick for a hung tick.
+pub fn after_stop(text: &str) -> bool {
+    let watchdog = text.lines().take(60).any(|l| l.trim() == "Description: Watching Server");
+    watchdog && (!text.contains("\n\"Server thread\"") || text.lines().any(|l| l.trim() == "Server Stopped: 1"))
+}
+
+/// How long (seconds) the watchdog waits for a tick: `max-tick-time` in
+/// `server.properties` (milliseconds, 60 s by default).
+fn max_tick_secs(root: &Path) -> i64 {
+    fs::read_to_string(root.join("server.properties"))
+        .ok()
+        .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("max-tick-time=")?.trim().parse::<i64>().ok()))
+        .filter(|ms| *ms > 0)
+        .map_or(60, |ms| ms / 1000)
+}
+
+/// The crash report the server wrote before the watchdog report `watchdog`
+/// in the same run (within the watchdog's wait, plus a few minutes for the
+/// shutdown), and the seconds between them.
+fn crash_before_watchdog(root: &Path, watchdog: &Path) -> Option<(PathBuf, i64)> {
+    let w = modified_secs(watchdog)?;
+    let window = max_tick_secs(root) + 300;
+    let reports = crate::logs::crash_reports(root);
+    let at = reports.iter().position(|p| p == watchdog)?;
+    let prev = reports[at + 1..].iter().find(|p| p.extension().is_some_and(|e| e == "txt"))?;
+    let t = modified_secs(prev)?;
+    (t <= w && w - t <= window).then(|| (prev.clone(), w - t))
+}
+
+/// A watchdog report from a server that hung while running: the mods in its
+/// "Server thread" dump, where the tick was stuck. The innermost mod is
+/// likely, the mods that called it possible.
+fn stuck_tick(lines: &[&str], out: &mut Vec<Raw>) {
+    let Some(start) = lines.iter().position(|l| l.starts_with("\"Server thread\"")) else { return };
+    let mut first_name = String::new();
+    for l in lines[start + 1..].iter().take_while(|l| !l.trim().is_empty()) {
+        let t = l.trim();
+        if !t.starts_with("at ") {
+            continue;
+        }
+        let id = match MIXIN_METHOD.captures(t) {
+            Some(m) => m[1].to_string(),
+            None => match DUMP_FRAME.captures(t) {
+                Some(m) => m[1].to_string(),
+                None => continue,
+            },
+        };
+        if NOT_MODS.contains(&id.as_str()) || id.starts_with("java.") || id.starts_with("jdk.") || out.iter().any(|r| r.mod_id == id) {
+            continue;
+        }
+        let (certainty, why) = if first_name.is_empty() {
+            first_name = id.clone();
+            (Certainty::Likely, "The server was stuck in its code when the watchdog stopped it.".to_string())
+        } else {
+            (Certainty::Possible, format!("Its code called {first_name}, where the server was stuck."))
+        };
+        out.push(Raw { mod_id: id, jar: String::new(), certainty, why, class: String::new(), needs: Vec::new() });
+    }
+}
+
+/// A thread dump's frame: `at TRANSFORMER/somemod@1.0/com.x.Y.z(Y.java:1)`.
+static DUMP_FRAME: LazyLock<Regex> = LazyLock::new(|| re(r"^at\s+(?:[\w-]+/)?([\w.-]+)@[^/\s]+/\S+\("));
 
 /// A config of a mod a server crash names that isn't the same as in the
 /// paired instance: one setting (the switch for the item the crash names:
@@ -1499,6 +1609,7 @@ source: {}", c.headline, c.source.display());
                 println!("   changed: {} {} -> {}", ch.name, ch.from, ch.to);
             }
         }
+        println!("lingered: {:?}", c.lingered_note());
         if let Some(st) = &c.stopped {
             println!("stopped: {} | error: {} | skipped: {:?}", st.file_name, st.error, st.skipped);
         }
@@ -1960,6 +2071,95 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         fs::write(root.join("logs/latest.log"), "[29Oct2026 10:00:00.000] [main/INFO] [x/]: Starting\n").unwrap();
         fs::File::options().write(true).open(root.join("logs/latest.log")).unwrap().set_modified(later).unwrap();
         assert!(server(&root).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    const TNP_WATCHDOG: &str = include_str!("crashdetect_fixtures/tnp-watchdog-after-stop.txt");
+    const TNP_WATCHDOG_RUN: &str = include_str!("crashdetect_fixtures/tnp-watchdog-run.log");
+
+    fn set_mtime(p: &Path, t: std::time::SystemTime) {
+        fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+    }
+
+    /// TNP Limitless 8's server, 2026-10-28 23:04: Mystical Agriculture Plus
+    /// crashed it and it stopped, but Distant Horizons' threads kept Java
+    /// running. At 23:11 the watchdog (max-tick-time 400 s) wrote a "Watching
+    /// Server" report with no Server thread in it: the card named no mod.
+    #[test]
+    fn a_watchdog_report_after_the_stop_is_not_the_crash() {
+        assert!(after_stop(TNP_WATCHDOG));
+        assert!(!after_stop(TNP_REPORT));
+        let mods = [
+            ("MysticalAgriculturePlus-1.0.1.jar", "mysticalagricultureplus", "Mystical Agriculture Plus"),
+            ("cc-tweaked-1.21.1-forge-1.120.2.jar", "computercraft", "CC: Tweaked"),
+            ("DistantHorizons-3.3.3.jar", "distanthorizons", "Distant Horizons"),
+        ];
+        let first = "crash-2026-10-28_23.04.39-server.txt";
+        let dog = "crash-2026-10-28_23.11.23-server.txt";
+        let root = server_root("watchdog", &mods, (first, TNP_REPORT), TNP_WATCHDOG_RUN);
+        fs::write(root.join("crash-reports").join(dog), TNP_WATCHDOG).unwrap();
+        fs::write(root.join("server.properties"), "motd=x\nmax-tick-time=400001\n").unwrap();
+        let t0 = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let secs = std::time::Duration::from_secs;
+        set_mtime(&root.join("crash-reports").join(first), t0);
+        set_mtime(&root.join("crash-reports").join(dog), t0 + secs(403));
+        set_mtime(&root.join("logs/latest.log"), t0 + secs(404));
+
+        let c = server(&root).expect("the crash before the watchdog");
+        assert!(c.source.ends_with(first), "{:?}", c.source);
+        assert_eq!(c.kind, CrashKind::Mods);
+        assert_eq!(c.suspects[0].mod_id, "mysticalagricultureplus");
+        assert_eq!(c.suspects[0].certainty, Certainty::Certain);
+        assert!(!c.suspects.iter().any(|s| s.mod_id == "distanthorizons"));
+        assert!(c.headline.contains("fe_seeds does not exist"), "{}", c.headline);
+        assert_eq!(c.lingered, 403);
+        assert_eq!(
+            c.lingered_note().as_deref(),
+            Some("After it stopped, Java kept running for 7 minutes, until Minecraft's watchdog ended it.")
+        );
+
+        // Started again after the watchdog (as on rig): latest.log is the new
+        // start's and doesn't name the crash; the report alone still does.
+        fs::write(root.join("logs/latest.log"), "[28Oct2026 23:11:31.542] [main/INFO] [x/]: ModLauncher running\n").unwrap();
+        set_mtime(&root.join("logs/latest.log"), t0 + secs(423));
+        let c = server(&root).expect("still the crash before the watchdog");
+        assert!(c.source.ends_with(first));
+        assert_eq!(c.suspects[0].mod_id, "mysticalagricultureplus");
+
+        // The same report long after the earlier crash (past the watchdog's
+        // wait): that one was another run, and this server stopped normally.
+        set_mtime(&root.join("crash-reports").join(first), t0 - secs(3600));
+        assert!(server(&root).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A watchdog that fires while the server runs is a hang: the mods in the
+    /// Server thread's stack are the ones it was stuck in.
+    #[test]
+    fn a_running_hang_names_the_mods_in_the_server_thread() {
+        let hang = TNP_WATCHDOG.replace("Server Stopped: 1", "Server Started: 1").replace(
+            "\"Server console handler\"",
+            "\"Server thread\" prio=8 Id=60 RUNNABLE\n\
+             \tat java.base@21.0.11/java.util.HashMap.get(HashMap.java:556)\n\
+             \tat TRANSFORMER/slowmod@2.0/com.slow.Pathfinder.search(Pathfinder.java:88)\n\
+             \tat TRANSFORMER/minecraft@1.21.1/net.minecraft.world.entity.Mob.handler$abc000$callermod$onTick(Mob.java)\n\
+             \tat TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.tickServer(MinecraftServer.java:900)\n\
+             \n\
+             \"Server console handler\"",
+        );
+        assert!(!after_stop(&hang));
+        let got: Vec<(String, Certainty)> = signals(&hang).into_iter().map(|r| (r.mod_id, r.certainty)).collect();
+        assert_eq!(got, [("slowmod".to_string(), Certainty::Likely), ("callermod".to_string(), Certainty::Possible)]);
+        // After the stop, the dump's other threads (Distant Horizons') name nothing.
+        assert!(signals(TNP_WATCHDOG).is_empty());
+
+        let mods = [("slowmod-2.0.jar", "slowmod", "Slow Mod"), ("callermod-1.0.jar", "callermod", "Caller Mod")];
+        let root = server_root("hang", &mods, ("crash-2026-10-28_23.11.23-server.txt", &hang), "[x] [Server thread/INFO] [x/]: Done\n");
+        let c = server(&root).expect("a hang is a crash");
+        assert!(c.source.ends_with("crash-2026-10-28_23.11.23-server.txt"));
+        assert_eq!(c.suspects[0].mod_id, "slowmod");
+        assert!(c.suspects[0].why.contains("stuck"), "{}", c.suspects[0].why);
+        assert_eq!(c.lingered, 0);
         let _ = fs::remove_dir_all(&root);
     }
 
