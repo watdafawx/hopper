@@ -1211,6 +1211,70 @@ pub fn bare_urls(text: &str) -> Vec<(&str, bool)> {
     out
 }
 
+/// Words that mark a pack author's advice worth seeing before updating.
+const ADVICE: [&str; 7] = [
+    "fresh install",
+    "backup",
+    "back up",
+    "new world",
+    "world reset",
+    "reset your world",
+    "not compatible with existing worlds",
+];
+
+/// Lines of changelogs (as Markdown) with advice on how to update (a fresh
+/// install, backing up worlds), as plain text, at most four. Hopper
+/// desktop and the web panel show them above the pack's changelog.
+pub fn advice<'a>(changelogs: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for md in changelogs {
+        for line in md.lines() {
+            let t = plain_line(line);
+            let low = t.to_lowercase();
+            if t.is_empty() || t.len() > 220 || !ADVICE.iter().any(|w| low.contains(w)) {
+                continue;
+            }
+            // The same advice again, or inside a longer line: once.
+            if let Some(i) = out.iter().position(|o| {
+                let o = o.to_lowercase();
+                low.contains(&o) || o.contains(&low)
+            }) {
+                if t.len() < out[i].len() {
+                    out[i] = t;
+                }
+                continue;
+            }
+            out.push(t);
+            if out.len() == 4 {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// A markdown line as plain text: marks out, "[x](url)" read as "x".
+fn plain_line(line: &str) -> String {
+    let mut t = String::new();
+    let mut depth = 0usize;
+    let mut prev = ' ';
+    for c in line.chars() {
+        if depth > 0 {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+        } else if c == '(' && prev == ']' {
+            depth = 1;
+        } else if !matches!(c, '*' | '_' | '#' | '>' | '[' | ']' | '`' | '\\') {
+            t.push(c);
+        }
+        prev = c;
+    }
+    t.split_whitespace().collect::<Vec<_>>().join(" ").trim_start_matches(['-', '•', ' ']).trim().to_string()
+}
+
 /// Blocks as Markdown, for UIs that render Markdown themselves. An image
 /// without a link of its own links to itself, so a click can open it.
 pub fn to_markdown(blocks: &[Block]) -> String {

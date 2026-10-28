@@ -32,6 +32,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/templates/{tid}", delete(delete_template))
         .route("/api/v1/servers/from-template", post(from_template))
         .route("/api/v1/servers/{id}/version", get(version))
+        .route("/api/v1/servers/{id}/version/loader-log", get(loader_log))
         .route("/api/v1/servers/{id}/version/check", post(version_check))
         .route("/api/v1/servers/{id}/version/change", post(version_change))
         .route("/api/v1/servers/{id}/version/undo", post(version_undo))
@@ -242,6 +243,43 @@ async fn version(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
             "java": java.map(|j| j.to_string_lossy().into_owned()),
             "java_major": major,
             "record": record,
+        }))
+    })
+    .await?;
+    Ok(Json(v))
+}
+
+/// The loader's builds for the server's Minecraft (newest first) and what
+/// each changed, for the loader's versions window: `{ kind, minecraft,
+/// installed, offered: [version], log: [{ version, text }] }`.
+async fn loader_log(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let root = e.root.clone();
+    let v = blocking(move || {
+        let have = vc::installed(&root);
+        if have.kind.is_empty() || have.kind == "vanilla" {
+            anyhow::bail!("This server has no mod loader to change.");
+        }
+        let prefix = format!("{}-", have.kind);
+        let offered: Vec<String> = hopper_core::cf::loader_versions(&have.minecraft)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.name.strip_prefix(&prefix).map(str::to_string))
+            .collect();
+        let newest = offered.first().cloned().unwrap_or_else(|| have.version.clone());
+        let log = if matches!(have.kind.as_str(), "neoforge" | "forge" | "fabric") && !newest.is_empty() {
+            hopper_core::loader_changes::history(&have.kind, &have.minecraft, &newest)
+                .map(|v| v.into_iter().take(80).map(|c| json!({ "version": c.version, "text": c.text })).collect::<Vec<_>>())
+                .map_err(|e| format!("{e:#}"))
+        } else {
+            Ok(offered.iter().map(|v| json!({ "version": v, "text": "" })).collect())
+        };
+        Ok(json!({
+            "kind": have.kind, "minecraft": have.minecraft, "installed": have.version,
+            "pack": hopper_core::server_pack_update::recorded(&root).is_some(),
+            "offered": offered,
+            "log": log.as_ref().ok(),
+            "error": log.as_ref().err(),
         }))
     })
     .await?;

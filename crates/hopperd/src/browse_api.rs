@@ -597,7 +597,7 @@ fn spans_json(spans: &[Span]) -> Value {
         .collect::<Vec<_>>())
 }
 
-fn blocks_json(blocks: &[Block]) -> Value {
+pub(crate) fn blocks_json(blocks: &[Block]) -> Value {
     json!(blocks
         .iter()
         .take(2000)

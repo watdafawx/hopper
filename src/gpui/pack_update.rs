@@ -175,67 +175,10 @@ struct LogEntry {
     md: SharedString,
 }
 
-/// Words that mark a pack author's advice worth seeing before updating.
-const ADVICE: [&str; 7] = [
-    "fresh install",
-    "backup",
-    "back up",
-    "new world",
-    "world reset",
-    "reset your world",
-    "not compatible with existing worlds",
-];
-
-/// Lines of the changelogs with advice on how to update (a fresh install,
-/// backing up worlds), as plain text, at most four.
+/// The author's advice on updating, from the changelogs (shared with the
+/// web panel).
 fn advice(entries: &[LogEntry]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for e in entries {
-        for line in e.md.lines() {
-            let t = plain(line);
-            let low = t.to_lowercase();
-            if t.is_empty() || t.len() > 220 || !ADVICE.iter().any(|w| low.contains(w)) {
-                continue;
-            }
-            // The same advice again, or inside a longer line: once.
-            if let Some(i) = out.iter().position(|o| {
-                let o = o.to_lowercase();
-                low.contains(&o) || o.contains(&low)
-            }) {
-                if t.len() < out[i].len() {
-                    out[i] = t;
-                }
-                continue;
-            }
-            out.push(t);
-            if out.len() == 4 {
-                return out;
-            }
-        }
-    }
-    out
-}
-
-/// A markdown line as plain text: marks out, "[x](url)" read as "x".
-fn plain(line: &str) -> String {
-    let mut t = String::new();
-    let mut depth = 0usize;
-    let mut prev = ' ';
-    for c in line.chars() {
-        if depth > 0 {
-            match c {
-                '(' => depth += 1,
-                ')' => depth -= 1,
-                _ => {}
-            }
-        } else if c == '(' && prev == ']' {
-            depth = 1;
-        } else if !matches!(c, '*' | '_' | '#' | '>' | '[' | ']' | '`' | '\\') {
-            t.push(c);
-        }
-        prev = c;
-    }
-    t.split_whitespace().collect::<Vec<_>>().join(" ").trim_start_matches(['-', '•', ' ']).trim().to_string()
+    hopper::richtext::advice(entries.iter().map(|e| e.md.as_ref()))
 }
 
 impl UpdatePreview {

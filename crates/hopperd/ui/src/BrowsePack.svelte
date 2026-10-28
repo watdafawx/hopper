@@ -14,7 +14,7 @@
 
   // `target`: the server mods and data packs install into (Browse's
   // "Install into"); `busy`: what its install of this project is doing.
-  let { source, id, type = 'modpacks', target = null, mc = '', loader = '', back = '/browse', busy = '', onMake, onInstall } = $props();
+  let { source, id, type = 'modpacks', target = null, mc = '', loader = '', back = '/browse', busy = '', onMake, onInstall, onBack = null } = $props();
   const packs = $derived(type === 'modpacks');
 
   let p = $state(null);
@@ -68,7 +68,9 @@
     }
   }
 
+  // `onBack`: shown as a peek beside a dialog, which closes it.
   function goBack() {
+    if (onBack) return onBack();
     location.hash = back;
   }
 
@@ -98,7 +100,7 @@
 <svelte:window onkeydown={key} />
 
 <div class="pack">
-  <div class="row"><button class="btn sm ghost" onclick={goBack}><ArrowLeft size={14} />Browse</button>
+  <div class="row"><button class="btn sm ghost" onclick={goBack}><ArrowLeft size={14} />{onBack ? 'Close' : 'Browse'}</button>
     <span class="tiny muted">{TYPES[type]?.label || 'Modpacks'}{filterText ? ` · ${filterText}` : ''}{target ? ` · into ${target.name}` : ''}</span></div>
 
   {#if error}

@@ -22,6 +22,8 @@
   import ServerAlerts from './ServerAlerts.svelte';
   import ShareLog from './ShareLog.svelte';
   import PackUpdate from './PackUpdate.svelte';
+  import PackVersions from './PackVersions.svelte';
+  import LoaderVersions from './LoaderVersions.svelte';
   import { notePackCheck, shortVersions } from './lib/packs.svelte.js';
 
   let { id, tab = 'console', path = '' } = $props();
@@ -116,6 +118,22 @@
   let packCheck = $state(null);
   /** The check the update dialog opened with (it keeps it while the check refreshes). */
   let packOpen = $state(null);
+  /** The pack version the update dialog updates to (null: the newest). */
+  let packFile = $state(null);
+  // Clicking the pack or loader version in the header, as in desktop.
+  let versionsOpen = $state(null);
+  let loaderOpen = $state(false);
+  function openUpdate(file = null) {
+    versionsOpen = null;
+    packFile = file;
+    packOpen = packCheck;
+  }
+  function openVersions() {
+    packOpen = null;
+    versionsOpen = packCheck;
+  }
+  // A mod loader the panel can change (not vanilla, Paper's own builds…).
+  const hasLoader = $derived(!!s?.loader && /^(neoforge|forge|fabric|quilt)/i.test(s.loader));
   const packNewer = $derived(packCheck?.pack ? packCheck.newer || [] : []);
   const packShort = $derived(packNewer.length ? shortVersions(packCheck.pack.current.name, packNewer[0].name) : null);
 
@@ -145,9 +163,9 @@
         <h2>{s.name}</h2>
         <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateLabel[s.state]}{alive ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
         {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />
-        {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => (packOpen = packCheck)}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
+        {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => openUpdate()}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
       </div>
-      <div class="small muted ell">{s.loader || 'Minecraft'}{s.version ? ` · Minecraft ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gap={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gap">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
+      <div class="small muted ell">{#if packCheck?.pack}<button class="vlink" title="{packCheck.pack.name}: versions and changelogs" onclick={openVersions}>{packCheck.pack.current.name}</button>{' · '}{/if}{#if s.version}<button class="vlink" title="Change Minecraft version (Settings › Version)" onclick={() => nav('settings', 'version')}>Minecraft {s.version}</button>{:else}Minecraft{/if}{#if s.loader}{' · '}{#if hasLoader}<button class="vlink" title="Loader versions and changelog" onclick={() => (loaderOpen = true)}>{s.loader}</button>{:else}{s.loader}{/if}{/if} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gap={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gap">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
     </div>
     <div class="row acts">
       {#if !alive}
@@ -190,7 +208,7 @@
   {:else if tab === 'schedule'}
     <div class="full scroll"><Schedule server={s} /></div>
   {:else if tab === 'settings'}
-    <div class="full scroll"><Settings server={s} /></div>
+    <div class="full scroll">{#key path}<Settings server={s} start={path} />{/key}</div>
   {:else}
   <div class="split">
     <section class="term">
@@ -254,7 +272,9 @@
 
 
 {#if sharing && s}<ShareLog server={s} path={sharing.path} onClose={() => (sharing = null)} />{/if}
-{#if packOpen && s}<PackUpdate server={s} check={packOpen} onClose={() => (packOpen = null)} onDone={() => checkPack(true)} openFiles={(p) => nav('files', p)} />{/if}
+{#if packOpen && s}{#key packFile}<PackUpdate server={s} check={packOpen} file={packFile} onClose={() => (packOpen = null)} onDone={() => checkPack(true)} openFiles={(p) => nav('files', p)} onOtherVersion={openVersions} />{/key}{/if}
+{#if versionsOpen && s}<PackVersions server={s} check={versionsOpen} onPick={openUpdate} onClose={() => (versionsOpen = null)} />{/if}
+{#if loaderOpen && s}<LoaderVersions server={s} onClose={() => (loaderOpen = false)} />{/if}
 <style>
   .pad { padding: 18px; }
   .head { display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; flex-wrap: wrap; }
@@ -266,6 +286,8 @@
   .packup { cursor: pointer; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
   .packup:hover { filter: brightness(1.2); }
   .gap { margin-left: 6px; }
+  .vlink { color: inherit; border-bottom: 1px dashed #ffffff30; padding: 0; }
+  .vlink:hover { color: var(--acc); border-color: var(--acc); }
   .tabs { display: flex; gap: 20px; padding: 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
   .tabs button { padding: 9px 0; color: var(--subtle); font-weight: 500; }
   .tabs button.on { color: var(--text); box-shadow: inset 0 -2px var(--acc); }

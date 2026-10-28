@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex};
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/v1/servers/{id}/pack/check", get(check))
+        .route("/api/v1/servers/{id}/pack/changelog", get(changelog))
         .route("/api/v1/servers/{id}/pack/plan", post(plan))
         .route("/api/v1/servers/{id}/pack/diff", get(diff))
         .route("/api/v1/servers/{id}/pack/apply", post(apply))
@@ -237,6 +238,12 @@ fn look_up(link: &PackLink) -> anyhow::Result<Value> {
     };
     let mut newer: Vec<&cf::File> = files.iter().filter(|f| f.id != fid && f.file_date > current.file_date).collect();
     newer.sort_by(|a, b| b.file_date.cmp(&a.file_date));
+    // Every version, for the Versions window (switching to an older one too).
+    let mut all: Vec<&cf::File> = files.iter().collect();
+    if !all.iter().any(|f| f.id == fid) {
+        all.push(&current);
+    }
+    all.sort_by(|a, b| b.file_date.cmp(&a.file_date));
     let page = if !m.links.website_url.is_empty() {
         m.links.website_url.clone()
     } else if mr {
@@ -253,6 +260,7 @@ fn look_up(link: &PackLink) -> anyhow::Result<Value> {
             "updatable": !mr,
         },
         "newer": newer.iter().map(|f| version_json(f, mr)).collect::<Vec<_>>(),
+        "versions": all.iter().map(|f| version_json(f, mr)).collect::<Vec<_>>(),
         "checked": now_secs(),
     }))
 }
@@ -351,8 +359,9 @@ struct PlanBody {
     /// Web: the pack file id to update to (the server's own pack).
     #[serde(default)]
     file: Option<String>,
-    /// Desktop: compare with the server's changes (old desktops don't
-    /// send it, and always compared).
+    /// Compare with the server's changes. Desktop: old desktops don't send
+    /// it, and always compared. Web: off unless asked (a quick update, as
+    /// desktop does by default).
     #[serde(default)]
     compare: Option<bool>,
     #[serde(default)]
@@ -376,6 +385,7 @@ async fn plan(
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     ensure_cf_key(&b.cf_key);
     let keep_days = b.keep_days.unwrap_or(KEEP_DAYS);
+    let web_compare = b.compare.unwrap_or(false);
     let compare = b.compare.unwrap_or(true);
     if let (Some(inst), Some(pack)) = (b.inst, b.pack) {
         let title = format!("Comparing {} with {}", e.name, pack.display_name);
@@ -416,7 +426,7 @@ async fn plan(
         let old = inst.pack.take().unwrap_or_default();
         inst.pack = Some(PackRef { project_id: pid, file_id: cur, server_pack_file_id: server_pack, ..old });
         let server = hopper_core::server::load(&e.root);
-        let p = spu::plan(&server, &inst, &pack, true, job)?;
+        let p = spu::plan(&server, &inst, &pack, web_compare, job)?;
         hopper_core::modpack::prune_packs_older_than(keep_days);
         let out = summary(job.id(), &p);
         let mut g = PLANS.lock().unwrap();
@@ -438,13 +448,62 @@ fn summary(plan_id: u64, p: &ServerPlan) -> Value {
         "loader": p.loader.as_ref().map(|(from, to)| json!({ "from": from, "to": to })),
         "mods_note": p.mods_note,
         "kept": p.kept,
-        "mods": p.plan.mods.iter().map(|m| json!({
-            "name": m.name, "from": m.from, "to": m.to, "action": m.action, "icon": m.icon,
-            "project": m.project.to_string(),
+        "compared": p.plan.compared,
+        "mods": p.plan.mods.iter().map(mod_json).collect::<Vec<_>>(),
+        "your_mods": p.plan.your_mods.iter().map(mod_json).collect::<Vec<_>>(),
+        "your_files": p.plan.your_files,
+        "mod_made": p.plan.mod_made,
+        "needed": p.plan.needed.iter().map(|n| json!({
+            "file": n.file, "name": n.name, "project": n.project.to_string(), "icon": n.icon,
+            "by": n.by, "by_project": n.by_project.to_string(), "by_icon": n.by_icon,
         })).collect::<Vec<_>>(),
         "files": p.plan.files,
         "take": p.plan.default_take(),
     })
+}
+
+fn mod_json(m: &hopper_core::packdiff::ModChange) -> Value {
+    json!({
+        "name": m.name, "from": m.from, "to": m.to, "action": m.action, "icon": m.icon,
+        "project": m.project.to_string(),
+    })
+}
+
+/// The changelogs of the versions an update to `file` brings (newest
+/// first; the installed version's alone when it brings none), and the
+/// pack author's advice on updating picked out of them.
+async fn changelog(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let file: Option<u64> = q.get("file").and_then(|f| f.trim().parse().ok());
+    let v = blocking(move || {
+        let link = pack_of(&e.root).ok_or_else(|| anyhow::anyhow!("{} isn't linked to a modpack.", e.name))?;
+        let (pid, cur) = link.ids()?;
+        let inst = crate::mods_api::instance_of(&e)?;
+        let update = match file {
+            Some(f) if f != cur => Some(source::file(pid, f)?),
+            _ => None,
+        };
+        let (entries, _) = hopper_core::install::changelogs(&inst, pid, cur, update.as_ref(), true)?;
+        let new: Vec<_> = entries.iter().filter(|e| !e.installed).collect();
+        let shown: Vec<_> = if new.is_empty() { entries.iter().collect() } else { new };
+        let md: Vec<String> = shown.iter().map(|e| hopper_core::richtext::to_markdown(&e.blocks)).collect();
+        let advice = hopper_core::richtext::advice(md.iter().map(String::as_str));
+        Ok(json!({
+            "advice": advice,
+            "entries": shown.iter().map(|e| json!({
+                "name": e.name, "date": e.date, "release": e.release,
+                "blocks": crate::browse_api::blocks_json(&e.blocks),
+            })).collect::<Vec<_>>(),
+        }))
+    })
+    .await?;
+    Ok(Json(v))
 }
 
 /// A file both sides changed: a diff from the server's copy to the pack's.
@@ -491,6 +550,10 @@ struct ApplyBody {
     /// Conflicting files where the pack's copy wins.
     #[serde(default)]
     take: HashSet<String>,
+    /// Web: dropped mods one of the server's own mods needs, kept (their
+    /// files).
+    #[serde(default)]
+    keep: Vec<String>,
     #[serde(default)]
     cf_key: String,
     #[serde(default)]
@@ -511,11 +574,17 @@ async fn apply(
     }
     ensure_cf_key(&b.cf_key);
     let web = b.plan.is_none();
-    let plan = match (b.plan, b.plan_id.as_deref().and_then(|p| p.trim().parse::<u64>().ok())) {
+    let mut plan = match (b.plan, b.plan_id.as_deref().and_then(|p| p.trim().parse::<u64>().ok())) {
         (Some(p), _) => p,
         (None, Some(job)) => take_plan(job, &id).ok_or_else(|| bad("That comparison is gone: compare again."))?,
         (None, None) => return Err(bad("Which update?")),
     };
+    if !b.keep.is_empty() {
+        let keep: HashSet<String> = b.keep.iter().map(|k| k.to_lowercase()).collect();
+        plan.plan
+            .mods
+            .retain(|m| !(m.action == hopper_core::packdiff::ModAction::Remove && keep.contains(&m.from.to_lowercase())));
+    }
     log::info!("{}: updating from {}", e.name, plan.plan.file.display_name);
     let title = format!("{} → {}", e.name, plan.pack.display_name);
     let keep_days = b.keep_days.unwrap_or(KEEP_DAYS);

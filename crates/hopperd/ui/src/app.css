@@ -60,3 +60,6 @@ a.btn { color: var(--text); }
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--raise); border: 1px solid var(--line2); border-radius: 8px; padding: 9px 14px; box-shadow: 0 10px 30px #0008; z-index: 50; max-width: min(560px, calc(100vw - 32px)); }
 .toast.bad { border-color: #ef444477; }
 .ic.big { width: 40px; height: 40px; font-size: 16px; }
+/* Drag across rows (lib/dragpick): the label beside the pointer, and no text picking meanwhile. */
+.pick-chip { position: fixed; z-index: 200; pointer-events: none; background: var(--acc); color: #1a1a1f; font-size: 11.5px; font-weight: 600; border-radius: 6px; padding: 1px 8px; box-shadow: 0 6px 18px #000a; white-space: nowrap; }
+body.picking, body.picking * { user-select: none !important; cursor: grabbing !important; }

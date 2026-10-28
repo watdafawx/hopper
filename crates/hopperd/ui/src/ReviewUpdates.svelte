@@ -7,6 +7,7 @@
   import { untrack } from 'svelte';
   import { api } from './lib/api.js';
   import { md } from './lib/md.js';
+  import { paintDown, paintOver, paintClick } from './lib/dragpick.svelte.js';
 
   let { server, updates, mods = [], busy = '', onApply, onClose } = $props();
   const GROUPS = [
@@ -35,6 +36,18 @@
       }
     }
   }
+
+  // Pressed on a tick box and dragged down the list: each row takes the same.
+  function set(id, on) {
+    if (picked.has(id) === on) return;
+    const s = new Set(picked);
+    on ? s.add(id) : s.delete(id);
+    picked = s;
+  }
+
+  // Rows in the order shown, across the groups, for painting.
+  const order = $derived(groups.flatMap((g) => g.rows.map((u) => u.project_id)));
+  const paintAt = (i, v) => order[i] != null && set(order[i], v);
 
   function flip(id) {
     const s = new Set(picked);
@@ -66,9 +79,9 @@
         </div>
         {#each g.rows as u (u.project_id)}
           {@const on = picked.has(u.project_id)}
-          <div class="u" class:dim={!on}>
+          <div class="u" class:dim={!on} role="presentation" onpointerenter={(e) => paintOver(e, 'review', order.indexOf(u.project_id), paintAt)}>
             <div class="row">
-              <input type="checkbox" checked={on} onchange={() => flip(u.project_id)} />
+              <input type="checkbox" checked={on} onpointerdown={(e) => paintDown(e, 'review', order.indexOf(u.project_id), !on, paintAt)} onclick={(e) => paintClick(e, () => flip(u.project_id))} />
               {#if icon(u)}<img src={icon(u)} alt="" width="20" height="20" loading="lazy" />{:else}<span class="ph"></span>{/if}
               <button class="nm grow" onclick={() => toggleNotes(u)} title="What changed">{#if open === u.project_id}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}<span class="ell">{u.name}</span></button>
               <span class="vchip"><span class="ell muted">{u.from}</span><ArrowRight size={11} /><span class="ell to">{u.to}</span></span>

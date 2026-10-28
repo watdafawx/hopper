@@ -1,4 +1,5 @@
 <script>
+  import { untrack } from 'svelte';
   import RemoveServer from './RemoveServer.svelte';
   import CopyServer from './CopyServer.svelte';
   import VersionPage from './VersionPage.svelte';
@@ -14,7 +15,8 @@
   import Address from './Address.svelte';
   import Avatar from './Avatar.svelte';
 
-  let { server } = $props();
+  // `start`: the page to open on (the header's "Minecraft 1.21.1" opens Version).
+  let { server, start = '' } = $props();
   // The live feed hands over a new `server` object every second; effects
   // that should run once per server key on the id alone.
   const sid = $derived(server.id);
@@ -31,7 +33,7 @@
   const hasArgsFile = $derived((jvm?.files || []).includes('user_jvm_args.txt'));
   let filter = $state('');
   let saving = $state(false);
-  let page = $state('general');
+  let page = $state(untrack(() => start || 'general'));
   let iconPick = $state();
 
   /** Pages; groups of server.properties keys on each (a heading, keys). */

@@ -12,6 +12,7 @@
   import ReviewUpdates from './ReviewUpdates.svelte';
   import ModBackups from './ModBackups.svelte';
   import ModProfiles from './ModProfiles.svelte';
+  import LoaderVersions from './LoaderVersions.svelte';
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
@@ -21,6 +22,7 @@
   import { ask } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
   import { setOn, removeMods, setLocked, resetConfig, switchSource, ago } from './lib/modops.js';
+  import { pick, startPick, swept, sweeping, clickSwallowed, tickLabel, countLabel } from './lib/dragpick.svelte.js';
 
   let { server } = $props();
   // The live feed hands over a new `server` object every second; effects
@@ -37,6 +39,7 @@
   let reviewing = $state(false);
   let picked = $state(null);
   let versionsFor = $state(null);
+  let loaderOpen = $state(false);
   let backupCount = $state(null);
   let selected = $state(new Set());
   let anchor = null;
@@ -259,6 +262,7 @@
   async function toggle(m, e) {
     e?.preventDefault();
     e?.stopPropagation();
+    if (e && clickSwallowed()) return;
     if (await setOn(base, [m], !m.enabled, alive)) await load();
   }
 
@@ -275,8 +279,43 @@
     }
   }
 
+  // Drag across rows, as in desktop: tick boxes tick as the pointer
+  // crosses them; switches and Update buttons act on letting go.
+  function tickDown(e, m, ix) {
+    const on = !selected.has(m.file);
+    startPick(e, {
+      list: 'mods', kind: 'tick', ix, on, selected,
+      keyAt: (i) => shown[i]?.file ?? null,
+      onTick: (s) => (selected = s),
+      label: tickLabel(on),
+    });
+  }
+  function switchDown(e, m, ix) {
+    const on = !m.enabled;
+    // Only the switches that change.
+    const keyAt = (i) => (shown[i] && shown[i].enabled !== on ? shown[i].file : null);
+    startPick(e, {
+      list: 'mods', kind: 'switch', ix, on, keyAt,
+      label: countLabel(on ? 'Turning on' : 'Turning off', on ? 'All on' : 'All off'),
+      onCommit: async (files) => {
+        // All at once, so what they need is checked once, for the lot.
+        if (await setOn(base, mods.filter((x) => files.includes(x.file)), on, alive)) await load();
+      },
+    });
+  }
+  function updateDown(e, m, ix) {
+    startPick(e, {
+      list: 'mods', kind: 'action', ix, on: true,
+      keyAt: (i) => (shown[i]?.update && !shown[i].locked && !updating.has(shown[i].project_id) ? shown[i].project_id : null),
+      label: countLabel('Updating', 'No updates'),
+      onCommit: (ids) => applyUpdates(ids),
+    });
+  }
+  const swSweep = $derived(sweeping('mods'));
+
   function check(m, e) {
     e.stopPropagation();
+    if (clickSwallowed()) return e.preventDefault();
     const s = new Set(selected);
     const on = !s.has(m.file);
     if (e.shiftKey && anchor) {
@@ -366,7 +405,7 @@
     <button class:on={sub === 'backups'} onclick={() => (sub = 'backups')}>Backups{backupCount ? ` ${backupCount}` : ''}</button>
     <span class="sp"></span>
     {#if data}
-      <button class="chip meta" title="Change" onclick={editMeta}><Settings2 size={11} />{data.game_version || 'version?'} · {data.loader || 'loader?'}</button>
+      <button class="chip meta" title={/^(neoforge|forge|fabric|quilt)/i.test(data.loader || '') ? 'Loader versions and changelog' : 'Change'} onclick={() => (/^(neoforge|forge|fabric|quilt)/i.test(data.loader || '') ? (loaderOpen = true) : editMeta())}><Settings2 size={11} />{data.game_version || 'version?'} · {data.loader || 'loader?'}</button>
       {#if data.pack}<span class="chip acc" title="Pack mods update through Update from server pack">{data.pack}</span>{/if}
     {/if}
   </nav>
@@ -424,16 +463,18 @@
           <button class="c-added" onclick={() => setSort('added')}>Added{#if sort.col === 'added'}{#if sort.desc}<ArrowDown size={11} />{:else}<ArrowUp size={11} />{/if}{/if}</button>
           <span class="c-end"></span>
         </div>
-        <div class="rows" bind:this={rowsEl} style:height="{shown.length * ROW}px">
+        <div class="rows" data-pick-list="mods" bind:this={rowsEl} style:height="{shown.length * ROW}px">
         <div class="win" style:transform="translateY({win.a * ROW}px)">
-        {#each visible as m (m.file)}
+        {#each visible as m, vi (m.file)}
+          {@const ix = win.a + vi}
           {@const up = m.update && !m.locked ? m.update : null}
+          {@const swOn = swSweep === 'switch' && swept('mods', ix) ? pick.on : m.enabled}
           {@const sel = picked === m.file || selected.has(m.file) || menu?.m === m}
-          <div class="tr mod clickable" class:off={!m.enabled} class:sel class:yours={yours(m)} role="button" tabindex="0"
-            onclick={(e) => !e.target.closest('button, input, label, a') && (picked = picked === m.file ? null : m.file)}
+          <div class="tr mod clickable" class:off={!m.enabled} class:sel class:yours={yours(m)} role="button" tabindex="0" data-pick-ix={ix}
+            onclick={(e) => !clickSwallowed() && !e.target.closest('button, input, label, a') && (picked = picked === m.file ? null : m.file)}
             onkeydown={(e) => e.key === 'Enter' && (picked = m.file)}
             oncontextmenu={(e) => openMenu(m, e)}>
-            <span class="c-ck"><input type="checkbox" checked={selected.has(m.file)} onclick={(e) => check(m, e)} /></span>
+            <span class="c-ck"><input type="checkbox" checked={selected.has(m.file)} onpointerdown={(e) => tickDown(e, m, ix)} onclick={(e) => check(m, e)} /></span>
             {#if m.icon}<img src={m.icon} alt="" width="30" height="30" loading="lazy" />{:else}<span class="ph sm"></span>{/if}
             <div class="c-name">
               <div class="nm"><span class="ell" title={m.author ? `by ${m.author}` : m.file}>{m.name}</span>{#if m.locked}<span class="lk" title="Updates ignored. Right-click to allow them."><Lock size={11} /></span>{/if}</div>
@@ -451,7 +492,7 @@
               {#if done.has(m.project_id) && !up}<span class="okt small row"><CircleCheck size={13} />Updated</span>
               {:else if up}
                 <div class="splitb" title="{m.update.from} → {m.update.file}">
-                  <button class="lead" disabled={updating.has(m.project_id) || !!busy} onclick={() => applyUpdates([m.project_id])}>{#if updating.has(m.project_id)}<span class="spin"></span>Updating{:else}<Download size={12} />Update{/if}</button>
+                  <button class="lead" class:lit={swSweep === 'action' && swept('mods', ix)} disabled={updating.has(m.project_id) || !!busy} onpointerdown={(e) => updateDown(e, m, ix)} onclick={() => !clickSwallowed() && applyUpdates([m.project_id])}>{#if updating.has(m.project_id)}<span class="spin"></span>Updating{:else}<Download size={12} />Update{/if}</button>
                   <button onclick={() => (versionsFor = m)}>What changed</button>
                 </div>
               {:else if m.source}
@@ -460,7 +501,7 @@
             </div>
             <span class="c-author muted ell" title={m.author}>{m.author}</span>
             <span class="c-side muted" title={SIDE[m.side]?.[1] || 'Not known'}>{#if SIDE[m.side]}{@const I = SIDE[m.side][0]}<I size={13} />{/if}</span>
-            <span class="c-on"><label class="sw" title={m.enabled ? 'Turn off' : 'Turn on'}><input type="checkbox" checked={m.enabled} onclick={(e) => toggle(m, e)} /><span></span></label></span>
+            <span class="c-on"><label class="sw" class:pend={swOn !== m.enabled} title={m.enabled ? 'Turn off' : 'Turn on'} onpointerdown={(e) => switchDown(e, m, ix)}><input type="checkbox" checked={swOn} onclick={(e) => toggle(m, e)} /><span></span></label></span>
             <span class="c-added muted" title={m.date_added ? new Date(m.date_added).toLocaleString() : ''}>{ago(m.date_added)}</span>
             <span class="c-end row">
               <button class="ib more" title="More" onclick={(e) => openMenu(m, e)}><Ellipsis size={14} /></button>
@@ -494,6 +535,7 @@
   </div>
 {/if}
 
+{#if loaderOpen}<LoaderVersions {server} onClose={() => (loaderOpen = false)} onChanged={() => changed(true)} />{/if}
 {#if versionsFor}<ModVersions {server} mod={versionsFor} dialog onClose={() => (versionsFor = null)} onChanged={changed} />{/if}
 {#if reviewing && pendingUpdates.length}<ReviewUpdates {server} updates={pendingUpdates} {mods} {busy} onApply={applyUpdates} onClose={() => (reviewing = false)} />{/if}
 
@@ -562,6 +604,8 @@
   .splitb button:hover:not(:disabled) { background: #ffffff10; color: var(--text); }
   .splitb .lead { color: var(--text); border-right: 1px solid var(--line2); }
   .splitb button:disabled { opacity: 0.7; }
+  .splitb .lead.lit { background: var(--acc-dim); color: var(--acc); }
+  .sw.pend span { outline: 2px dashed var(--acc); outline-offset: 2px; }
   @container (max-width: 1050px) { .tr { grid-template-columns: 22px 30px minmax(0, 1fr) 190px 40px 44px 86px 52px; } .tr .c-author { display: none; } }
   @container (max-width: 860px) { .tr { grid-template-columns: 22px 30px minmax(0, 1fr) 190px 40px 44px 52px; } .tr .c-added { display: none; } }
   @container (max-width: 640px) { .tr { grid-template-columns: 22px 30px minmax(0, 1fr) 110px 44px 52px; } .tr .c-side { display: none; } .splitb button:not(.lead) { display: none; } .ghostcl { font-size: 0; gap: 0; } }
