@@ -629,6 +629,8 @@ impl ServerControl {
         let success = theme.success;
         h_flex()
             .gap_2()
+            // A narrow column wraps instead of pushing buttons out.
+            .when(compact, |r| r.flex_wrap())
             // Compact (a card that names the state already): only a
             // transition shows.
             .when(!compact || busy.is_some(), |r| {
@@ -681,12 +683,20 @@ impl ServerControl {
                 }
             })
             .when(compact, |r| {
+                // With the state chip or Stop / Restart showing, the row
+                // is full: Console shrinks to a ghost icon so it fits.
+                let tight = running || busy.is_some();
                 r.child(
                     Button::new("panel-console")
                         .small()
-                        .outline()
                         .icon(IconName::SquareTerminal)
-                        .label("Console")
+                        .map(|b| {
+                            if tight {
+                                b.ghost().tooltip("Console")
+                            } else {
+                                b.outline().label("Console")
+                            }
+                        })
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(ControlEvent::Console))),
                 )
             })
