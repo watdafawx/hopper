@@ -107,19 +107,48 @@ struct FabricSide {
     incompatible: Vec<(String, String, String)>,
 }
 
-/// (provides, requires) as the instance's loader reads the jar: a Fabric
-/// or Quilt instance reads fabric.mod.json even where mods.toml is there too.
-fn seen_as(j: &JarInfo, fabric: bool) -> (Vec<String>, &[(String, String)]) {
-    match (&j.fabric, fabric) {
-        (Some(f), true) => (f.provides.iter().chain(&j.nested).cloned().collect(), &f.requires),
-        _ => (j.provides.clone(), &j.requires),
-    }
+/// How the pack's loader reads its jars, judged from the jars themselves
+/// (callers of [`missing`] only have the mods folder).
+#[derive(Clone, Copy, Default)]
+struct View {
+    /// A Fabric or Quilt pack: dual jars are read by their fabric.mod.json.
+    fabric: bool,
+    /// Forge, or NeoForge before 1.20.5: a jar with both files is read by
+    /// its mods.toml, not its neoforge.mods.toml.
+    mods_toml: bool,
+    /// Sinytra Connector loads the Fabric-only jars.
+    connector: bool,
 }
 
-/// Whether most enabled jars are Fabric-only: a Fabric or Quilt pack.
-fn fabric_pack(on: &[(PathBuf, Arc<JarInfo>)]) -> bool {
-    let fabric = on.iter().filter(|(_, j)| j.meta.fabric && !j.toml).count();
-    fabric > on.iter().filter(|(_, j)| j.toml).count()
+/// Whether Sinytra Connector is installed. Its mod ("connectormod") sits in
+/// a jar nested inside Connector's jar.
+fn has_connector(on: &[(PathBuf, Arc<JarInfo>)]) -> bool {
+    on.iter().any(|(_, j)| j.provides.iter().any(|p| p == "connector" || p == "connectormod"))
+}
+
+fn view(on: &[(PathBuf, Arc<JarInfo>)]) -> View {
+    let connector = has_connector(on);
+    // Most enabled jars Fabric-only: a Fabric or Quilt pack. Connector
+    // only runs on Forge and NeoForge, however many Fabric jars it loads.
+    let fabric_only = on.iter().filter(|(_, j)| j.meta.fabric && !j.toml).count();
+    let fabric = !connector && fabric_only > on.iter().filter(|(_, j)| j.toml).count();
+    // Jars made for one loader carry only that loader's file: more with
+    // only mods.toml than only neoforge.mods.toml is a Forge pack (or a
+    // NeoForge 1.20.1 one), which reads mods.toml (DeceasedCraft's Sodium
+    // Options API needs Reese's Sodium Options only in its neoforge.mods.toml).
+    let only = |forge: bool| on.iter().filter(|(_, j)| j.meta.mods_toml == forge && j.meta.neoforge.is_some() != forge).count();
+    View { fabric, mods_toml: only(true) > only(false), connector }
+}
+
+/// (provides, requires) as the pack's loader reads the jar: a Fabric or
+/// Quilt pack reads fabric.mod.json even where mods.toml is there too, and
+/// Forge reads mods.toml over neoforge.mods.toml.
+fn seen_as(j: &JarInfo, v: View) -> (Vec<String>, &[(String, String)]) {
+    match (&j.fabric, &j.forge) {
+        (Some(f), _) if v.fabric => (f.provides.iter().chain(&j.nested).cloned().collect(), &f.requires),
+        (_, Some(f)) if v.mods_toml => (j.provides.clone(), &f.0),
+        _ => (j.provides.clone(), &j.requires),
+    }
 }
 
 /// Mod ids the game sees that no jar's metadata declares: Embeddium
@@ -130,12 +159,12 @@ fn normalize(id: &str, connector: bool) -> String {
 }
 
 /// What enabled jars provide, plus the stand-ins above.
-fn provided_ids(on: &[(PathBuf, Arc<JarInfo>)], fabric: bool, connector: bool) -> HashSet<String> {
+fn provided_ids(on: &[(PathBuf, Arc<JarInfo>)], v: View) -> HashSet<String> {
     let mut set: HashSet<String> = on
         .iter()
-        .flat_map(|(_, j)| seen_as(j, fabric).0)
+        .flat_map(|(_, j)| seen_as(j, v).0)
         .chain(BUILTIN.iter().map(|s| s.to_string()))
-        .map(|id| normalize(&id, connector))
+        .map(|id| normalize(&id, v.connector))
         .collect();
     if set.contains("embeddium") {
         set.insert("sodium".into());
@@ -178,6 +207,8 @@ struct Meta {
     /// and names its `modLoader`.
     neoforge: Option<bool>,
     fabric: bool,
+    /// `META-INF/mods.toml` is there.
+    mods_toml: bool,
     /// The manifest marks it a library or language provider (`FMLModType`).
     fml_mod_type: bool,
 }
@@ -200,6 +231,7 @@ fn inspect(zip: &mut zip::ZipArchive<impl Read + std::io::Seek>, depth: u8) -> J
         info.meta.neoforge = Some(ok);
     }
     info.meta.fabric = zip.by_name("fabric.mod.json").is_ok();
+    info.meta.mods_toml = zip.by_name("META-INF/mods.toml").is_ok();
     info.meta.fml_mod_type = ["META-INF/MANIFEST.MF", "META-INF/MANIFEST.mf"]
         .iter()
         .filter_map(|m| read(zip, m))
@@ -380,9 +412,11 @@ pub fn dependents(mods_dir: &Path) -> HashMap<String, usize> {
         .collect();
     let refs: Vec<&PathBuf> = enabled.iter().collect();
     let mut out: HashMap<String, usize> = HashMap::new();
-    for (_, j) in read_all(&refs) {
+    let on = read_all(&refs);
+    let v = view(&on);
+    for (_, j) in &on {
         let mut seen = std::collections::HashSet::new();
-        for (id, _) in &j.requires {
+        for (id, _) in seen_as(j, v).1 {
             if !j.own.contains(id) && seen.insert(id.clone()) {
                 *out.entry(id.clone()).or_default() += 1;
             }
@@ -407,8 +441,10 @@ pub fn broken_by(mods_dir: &Path, file: &str, from: &str, to: &str) -> Vec<(Stri
         .collect();
     let refs: Vec<&PathBuf> = enabled.iter().collect();
     let mut out: Vec<(String, String)> = Vec::new();
-    for (_, j) in read_all(&refs) {
-        for (id, range) in &j.requires {
+    let on = read_all(&refs);
+    let v = view(&on);
+    for (_, j) in &on {
+        for (id, range) in seen_as(j, v).1 {
             if me.own.contains(id)
                 && accepts(range, from) == Some(true)
                 && accepts(range, to) == Some(false)
@@ -443,9 +479,8 @@ pub fn missing_without(mods_dir: &Path, without: &[String]) -> Vec<Missing> {
     let disabled: Vec<&PathBuf> = entries.iter().filter(|p| is(p, ".jar.disabled")).collect();
     let on = read_all(&enabled);
     let off = read_all(&disabled);
-    let fabric = fabric_pack(&on);
-    let connector = on.iter().any(|(_, j)| j.provides.iter().any(|p| p == "connector"));
-    let provided = provided_ids(&on, fabric, connector);
+    let v = view(&on);
+    let provided = provided_ids(&on, v);
     // Which jar provides each id, and at what version.
     let versions: HashMap<&str, (&PathBuf, &str)> = on
         .iter()
@@ -455,11 +490,11 @@ pub fn missing_without(mods_dir: &Path, without: &[String]) -> Vec<Missing> {
     let mut out = Vec::new();
     for (path, j) in &on {
         let mut seen = HashSet::new();
-        for (id, range) in seen_as(j, fabric).1 {
+        for (id, range) in seen_as(j, v).1 {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            if provided.contains(&normalize(id, connector)) {
+            if provided.contains(&normalize(id, v.connector)) {
                 // Installed: is it too old for this mod? Like [`blockers`],
                 // only the lower end counts: the loader runs a newer one
                 // (ATMons runs Torchmaster's Cobblemon compat, made for
@@ -694,7 +729,7 @@ pub fn blockers(mods_dir: &Path, loader: &str, game: &str) -> Vec<Blocker> {
     // Jars that aren't mods to this loader. NeoForge from 1.20.5 reports
     // them; older loaders pass over them.
     if neoforge && mc_at_least(game, (20, 5)) {
-        let connector = on.iter().any(|(_, j)| j.provides.iter().any(|p| p == "connector"));
+        let connector = has_connector(&on);
         for p in &paths {
             let Some((_, j)) = on.iter().find(|(q, _)| q == p) else {
                 out.push(Blocker {
@@ -1031,13 +1066,105 @@ mod tests {
     use std::io::Write;
 
     fn jar(path: &Path, files: &[(&str, &str)]) {
-        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let raw: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_bytes())).collect();
+        std::fs::write(path, jar_bytes(&raw)).unwrap();
+    }
+
+    fn jar_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for (n, b) in files {
             z.start_file::<_, ()>(*n, Default::default()).unwrap();
-            z.write_all(b.as_bytes()).unwrap();
+            z.write_all(b).unwrap();
         }
-        z.finish().unwrap();
+        z.finish().unwrap().into_inner()
     }
+
+    /// DeceasedCraft (Forge 1.20.1, Sinytra Connector) showed three missing
+    /// mods that the game doesn't need.
+    #[test]
+    fn forge_pack_reads_mods_toml_and_connector_provides_fabric_api() {
+        let dir = std::env::temp_dir().join(format!("hopper-deps-dc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = |id: &str, deps: &str| format!("modLoader=\"javafml\"
+[[mods]]
+modId=\"{id}\"
+version=\"1.0\"
+{deps}");
+        let dep = |owner: &str, id: &str, mandatory: bool| {
+            format!("[[dependencies.{owner}]]
+modId=\"{id}\"
+mandatory={mandatory}
+versionRange=\"*\"
+side=\"BOTH\"
+")
+        };
+        // Ordinary Forge mods: the pack reads like a Forge one.
+        for n in ["txnilib", "necronomicon", "plain"] {
+            jar(&dir.join(format!("{n}.jar")), &[("META-INF/mods.toml", &toml(n, ""))]);
+        }
+        // Immersive Lanterns: optional on Forge, required in its NeoForge
+        // and Fabric files.
+        jar(
+            &dir.join("immersivelanterns.jar"),
+            &[
+                ("META-INF/mods.toml", &toml("immersivelanterns", &(dep("immersivelanterns", "txnilib", true) + &dep("immersivelanterns", "accessories", false)))),
+                ("META-INF/neoforge.mods.toml", &toml("immersivelanterns", &dep("immersivelanterns", "accessories", true))),
+                ("fabric.mod.json", r#"{"id":"immersivelanterns","depends":{"accessories":"*","fabric-api":"*"}}"#),
+            ],
+        );
+        // Sodium Options API: Reese's Sodium Options only in neoforge.mods.toml.
+        jar(
+            &dir.join("sodiumoptionsapi.jar"),
+            &[
+                ("META-INF/mods.toml", &toml("sodiumoptionsapi", "")),
+                ("META-INF/neoforge.mods.toml", &toml("sodiumoptionsapi", &dep("sodiumoptionsapi", "reeses_sodium_options", true))),
+            ],
+        );
+        // Connector's mod sits in a nested jar; Forgified Fabric API is "fabric_api".
+        let inner = jar_bytes(&[("META-INF/mods.toml", toml("connectormod", "").as_bytes())]);
+        std::fs::write(dir.join("connector.jar"), jar_bytes(&[("META-INF/jarjar/connector-mod.jar", &inner)])).unwrap();
+        jar(&dir.join("fabric-api.jar"), &[("META-INF/mods.toml", &toml("fabric_api", ""))]);
+        // A Fabric-only mod Connector loads.
+        jar(
+            &dir.join("resistancebalancer.jar"),
+            &[("fabric.mod.json", r#"{"id":"resistance_balancer","depends":{"fabricloader":">=0.15","java":">=17","fabric-api":"*","necronomicon":">=1.0"}}"#)],
+        );
+        assert_eq!(missing(&dir), vec![]);
+        assert!(dependents(&dir).get("reeses_sodium_options").is_none());
+
+        // A mod Forge does need still shows.
+        std::fs::remove_file(dir.join("txnilib.jar")).unwrap();
+        let m: Vec<String> = missing(&dir).into_iter().map(|m| m.needs).collect();
+        assert_eq!(m, vec!["txnilib"]);
+        jar(&dir.join("txnilib.jar"), &[("META-INF/mods.toml", &toml("txnilib", ""))]);
+
+        // Without Connector, nothing provides "fabric-api".
+        std::fs::remove_file(dir.join("connector.jar")).unwrap();
+        let m: Vec<String> = missing(&dir).into_iter().map(|m| m.needs).collect();
+        assert_eq!(m, vec!["fabric-api"]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // On NeoForge 1.21 (jars with only neoforge.mods.toml) the same dual
+        // jar is read by its neoforge.mods.toml.
+        let dir = std::env::temp_dir().join(format!("hopper-deps-dn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["a", "b"] {
+            jar(&dir.join(format!("{n}.jar")), &[("META-INF/neoforge.mods.toml", &toml(n, ""))]);
+        }
+        jar(
+            &dir.join("sodiumoptionsapi.jar"),
+            &[
+                ("META-INF/mods.toml", &toml("sodiumoptionsapi", "")),
+                ("META-INF/neoforge.mods.toml", &toml("sodiumoptionsapi", &dep("sodiumoptionsapi", "reeses_sodium_options", true))),
+            ],
+        );
+        let m: Vec<String> = missing(&dir).into_iter().map(|m| m.needs).collect();
+        assert_eq!(m, vec!["reeses_sodium_options"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     #[test]
     fn a_version_nobody_published_is_spotted() {
