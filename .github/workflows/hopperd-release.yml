@@ -84,11 +84,21 @@ jobs:
           v="${GITHUB_REF_NAME#hopperd-v}"
           # Never "Latest": the README's and website's download link
           # (releases/latest/download/hopper.exe) must stay on Hopper desktop.
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            # Notes: the release commit's body, then the commits since the
-            # last hopperd-v* tag (pwsh is on every GitHub runner).
+          # Notes: the release commit's body, then the commits since the
+          # last hopperd-v* tag. pwsh may be missing on the arm64 runner, so
+          # that one falls back to a short line and the others write the
+          # real notes (the same text every time, so the order doesn't matter).
+          if command -v pwsh >/dev/null 2>&1; then
             pwsh -NoProfile -File scripts/release-notes.ps1 "$GITHUB_REF_NAME" "${{ github.repository }}" > notes.md
+            has_notes=1
+          else
+            echo "Hopper Server $v." > notes.md
+            has_notes=0
+          fi
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --latest=false --title "Hopper Server $v" --notes-file notes.md
+          elif [ "$has_notes" = 1 ]; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
           fi
           gh release upload "$GITHUB_REF_NAME" "hopperd-$v-${{ matrix.asset }}" --clobber
       - name: Keep the binary for the Docker image
