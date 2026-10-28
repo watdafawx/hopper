@@ -141,6 +141,9 @@ pub struct SyncPanel {
     /// Which server pack the server was built or last updated from.
     pack_marker: Option<hopper::server_pack_update::Marker>,
     crash: Option<ServerCrash>,
+    /// A change put back from the crash card, with its crash's time: the
+    /// crash no longer names it, so the card keeps it to say it's back.
+    crash_back: Option<(i64, hopper::crashdetect::Changed)>,
     /// Global datapacks and mod configs that differ from the pack, looked
     /// up after each comparison (they sit on the same slow share).
     drift: Option<hopper::configdiff::Drift>,
@@ -267,6 +270,7 @@ impl SyncPanel {
             note: None,
             pack_marker: None,
             crash: None,
+            crash_back: None,
             drift: None,
             drift_open: false,
             drift_hidden: None,
@@ -1490,15 +1494,7 @@ impl SyncPanel {
         let local = self.server.clone().filter(|r| !hopper::hopperd::is_remote_root(r)).map(|r| r.join("mods"));
         let (store, view) = (self.store.clone(), cx.entity());
         move |file: &str, key: &str, cx: &App| {
-            let bare = file.trim_end_matches(".disabled");
-            let stem = hopper::serverpack::jar_stem(bare);
-            let a = addons.iter().find(|a| {
-                a.file_name.eq_ignore_ascii_case(bare) || (!stem.is_empty() && hopper::serverpack::jar_stem(&a.file_name) == stem)
-            });
-            let name = a.map(|a| a.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| match &local {
-                Some(dir) => hopper::crashdetect::jar_name(dir, file),
-                None => bare.trim_end_matches(".jar").to_string(),
-            });
+            let (name, a) = crash_addon(&addons, file, local.as_deref());
             let icon = a.and_then(|a| store.read(cx).image(&a.icon)).map(Path::to_path_buf);
             let view = view.clone();
             widgets::mod_link(
@@ -1586,15 +1582,13 @@ impl SyncPanel {
             let store = self.store.read(cx);
             self.server.as_ref().and_then(|r| store.server(r)).and_then(|sv| store.paired(sv)).map(|i| i.addons.clone()).unwrap_or_default()
         };
-        let display = |f: &str| -> String {
-            let bare = f.trim_end_matches(".disabled");
-            let stem = hopper::serverpack::jar_stem(bare);
-            addons
-                .iter()
-                .find(|a| a.file_name.eq_ignore_ascii_case(bare) || (!stem.is_empty() && hopper::serverpack::jar_stem(&a.file_name) == stem))
-                .map(|a| a.name.clone())
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| bare.trim_end_matches(".jar").to_string())
+        let local = self.server.clone().filter(|r| !hopper::hopperd::is_remote_root(r)).map(|r| r.join("mods"));
+        let display = |f: &str| -> String { crash_addon(&addons, f, local.as_deref()).0 };
+        // Mod ids in a reason read as names.
+        let named: Vec<(String, String)> =
+            c.suspects.iter().filter(|s| !s.mod_id.is_empty()).map(|s| (s.mod_id.clone(), display(&s.file_name))).collect();
+        let readable = |why: &str| {
+            named.iter().fold(why.to_string(), |w, (id, n)| w.replace(&format!(" {id},"), &format!(" {n},")).replace(&format!(" {id} "), &format!(" {n} ")))
         };
         let turn_off: Vec<String> = c
             .suspects
@@ -1609,7 +1603,10 @@ impl SyncPanel {
         let st = c.stopped.clone().filter(|st| c.suspects.iter().any(|s| s.file_name == st.file_name));
         let mut body: Vec<AnyElement> = Vec::new();
         if let Some(st) = &st {
-            let changed = c.suspects.iter().find(|s| s.file_name == st.file_name).and_then(|s| s.changed.clone());
+            let named = c.suspects.iter().find(|s| s.file_name == st.file_name).and_then(|s| s.changed.clone());
+            let back = if named.is_none() { self.crash_back.clone().filter(|(w, _)| *w == c.when).map(|(_, ch)| ch) } else { None };
+            let is_back = back.is_some();
+            let changed = named.or(back);
             body.push(crash_view::story_title(&c, st, &link, cx).into_any_element());
             if changed.is_some() || !turn_off.is_empty() {
                 let mut fix = crash_view::fix_box(cx);
@@ -1629,6 +1626,7 @@ impl SyncPanel {
                         .disabled(blocked)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let ch = ch_p.clone();
+                            this.crash_back = this.crash.as_ref().map(|c| (c.when, ch.clone()));
                             this.crash_fix(
                                 move |root| {
                                     match hopper::hopperd::locate(root) {
@@ -1647,13 +1645,28 @@ impl SyncPanel {
                                 cx,
                             );
                         }));
+                    // Once back, the older jar is the one in the mods folder.
+                    let now_file =
+                        if is_back { ch.backup.file_name().map_or(ch.file_name.clone(), |n| n.to_string_lossy().into_owned()) } else { ch.file_name.clone() };
+                    let back_row = is_back.then(|| {
+                        h_flex()
+                            .gap_2()
+                            .child(widgets::done_mark(
+                                "srv-crash-put-back-done",
+                                format!("{} is back", if ch.from.is_empty() { "The older version".to_string() } else { ch.from.clone() }),
+                                true,
+                                cx,
+                            ))
+                            .child(widgets::caption("Start the server to try again. Backups has the newer one.", cx).text_xs())
+                    });
                     fix = fix
                         .child(
-                            sentence(vec![link(&ch.file_name, "fix", cx), words(format!("was updated {when}{}", crash_view::versions(ch)))])
+                            sentence(vec![link(&now_file, "fix", cx), words(format!("was updated {when}{}", crash_view::versions(ch)))])
                                 .text_sm()
                                 .font_semibold(),
                         )
-                        .child(
+                        .children(back_row)
+                        .when(!is_back, |d| d.child(
                             h_flex()
                                 .gap_2()
                                 .flex_wrap()
@@ -1666,13 +1679,16 @@ impl SyncPanel {
                                     )
                                     .text_xs(),
                                 ),
-                        );
+                        ));
                 } else {
                     fix = fix.child(h_flex().child(self.crash_turn_off(turn_off.clone(), turn_off_label.clone(), blocked, cx)));
                 }
                 body.push(fix.into_any_element());
             }
-            body.push(crash_view::what_happened(&c, st, changed.as_ref().map(|ch| (ch, ch.file_name.as_str())), &link, cx));
+            let now_file = changed.as_ref().map(|ch| {
+                if is_back { ch.backup.file_name().map_or(ch.file_name.clone(), |n| n.to_string_lossy().into_owned()) } else { ch.file_name.clone() }
+            });
+            body.push(crash_view::what_happened(&c, st, changed.as_ref().zip(now_file.as_deref()), &link, cx));
         } else {
             if !c.headline.is_empty() {
                 body.push(div().text_sm().font_medium().line_clamp(2).child(c.headline.clone()).into_any_element());
@@ -1715,7 +1731,7 @@ impl SyncPanel {
                         .into_iter()
                         .collect();
                     let below = below.into_iter().map(|b| h_flex().child(b).into_any_element()).collect();
-                    crash_view::suspect_row(link(&s.file_name, &format!("row{i}"), cx), s, s.why.clone(), below, cx).into_any_element()
+                    crash_view::suspect_row(link(&s.file_name, &format!("row{i}"), cx), s, readable(&s.why), below, cx).into_any_element()
                 })
                 .collect();
             if !rows.is_empty() {
@@ -3110,6 +3126,32 @@ pub(crate) fn server_online(
     }
     store.status(root).is_some_and(|s| matches!(s, Status::Online { .. }))
         || store.panel_stats(root).is_some_and(|p| p.running || p.starting)
+}
+
+/// The pack's copy of a server jar named on the crash card, for its name,
+/// icon and page: the same file, else the same name stem. A stem can match
+/// another mod (cc-tweaked, CC Tweaked Compat), so on a local server the
+/// copy must also carry the jar's own name; else the jar's name alone.
+fn crash_addon<'a>(addons: &'a [hopper::instances::Addon], file: &str, local: Option<&Path>) -> (String, Option<&'a hopper::instances::Addon>) {
+    let bare = file.trim_end_matches(".disabled");
+    if let Some(a) = addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare)) {
+        let name = if a.name.is_empty() { bare.trim_end_matches(".jar").to_string() } else { a.name.clone() };
+        return (name, Some(a));
+    }
+    let stem = hopper::serverpack::jar_stem(bare);
+    let same: Vec<&hopper::instances::Addon> =
+        addons.iter().filter(|a| !stem.is_empty() && hopper::serverpack::jar_stem(&a.file_name) == stem).collect();
+    match local {
+        Some(dir) => {
+            let own = hopper::crashdetect::jar_name(dir, file);
+            let a = same.into_iter().find(|a| a.name.eq_ignore_ascii_case(&own));
+            (own, a)
+        }
+        None => match same.as_slice() {
+            [a] if !a.name.is_empty() => (a.name.clone(), Some(*a)),
+            _ => (bare.trim_end_matches(".jar").to_string(), None),
+        },
+    }
 }
 
 /// One line for why the last start crashed: the mods Hopper is sure of

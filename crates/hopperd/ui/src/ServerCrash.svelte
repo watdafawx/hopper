@@ -65,7 +65,9 @@
   // The mod that stopped the server, when the crash came after it.
   const st = $derived(crash?.stopped && suspects.some((s) => s.file_name === crash.stopped.file_name) ? crash.stopped : null);
   const rootSuspect = $derived(st ? suspects.find((s) => s.file_name === st.file_name) : null);
-  const changed = $derived(rootSuspect?.changed || null);
+  // The change the error names; once put back from here the crash no
+  // longer names it, so the card keeps it to say so.
+  const changed = $derived(rootSuspect?.changed || (st && back ? back.ch : null));
   const likely = $derived(suspects.filter((s) => s.certainty !== 'Possible'));
   // Turned off, or removed: Certain and Likely mods still on and here, apart from client-only ones (they go).
   const toTurnOff = $derived(likely.filter((s) => !s.client_only && modOf(s.file_name) && isOn(s.file_name)));
@@ -100,7 +102,7 @@
     try {
       const r = await post(`${base}/crash/put-back`, { file: ch.file_name });
       say(`${ch.from || 'The older version'} is back. ${ch.to || 'The newer one'} is in Mods › Backups.`);
-      const keep = { file: r.back, from: ch.from, name: ch.name };
+      const keep = { file: r.back, from: ch.from, name: ch.name, ch };
       await load();
       back = keep;
     } catch (e) {
@@ -223,12 +225,14 @@
 {/if}
 
 <style>
-  .crash { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; margin-bottom: 10px; border: 1px solid #ef444499; border-radius: var(--radius-lg); background: #ef44440f; }
+  .crash { container-type: inline-size; display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; margin-bottom: 10px; border: 1px solid #ef444499; border-radius: var(--radius-lg); background: #ef44440f; }
   .head { gap: 8px; color: var(--red); }
   .head b { font-weight: 600; font-size: 14px; }
   .when { font-size: 12.5px; }
   .grow { flex: 1; min-width: 0; }
-  .line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; font-size: 13px; }
+  /* Words and mod names flow as one sentence that wraps anywhere. */
+  .line { font-size: 13px; line-height: 22px; }
+  .line > :global(*) { margin-right: 5px; vertical-align: middle; }
   .strong { font-weight: 600; }
   .headline { font-size: 13px; font-weight: 500; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .fix { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius); border: 1px solid #f9731659; background: #f9731612; }
@@ -244,9 +248,10 @@
   .quote { white-space: normal; }
   .rows { display: flex; flex-direction: column; }
   .sus { display: flex; gap: 12px; align-items: flex-start; padding: 4px 0; }
-  .who { flex: none; width: 16rem; min-width: 0; }
+  .who { flex: none; width: 14rem; min-width: 0; }
   .grade { flex: none; width: 5rem; }
-  .why { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .why { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+  .why .tiny, .quote, .steps .tiny { white-space: normal; overflow-wrap: anywhere; }
   .need { color: var(--gold); font-family: var(--mono, monospace); }
   .note { font-size: 13px; }
   .mod { display: inline-flex; align-items: center; gap: 7px; flex: none; color: var(--text); padding: 0; max-width: 100%; }
@@ -258,9 +263,11 @@
   .tag.likely { color: var(--gold); background: var(--gold-dim); }
   .tag.possible { color: var(--subtle); }
   .done { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--green); border: 1px solid #22c55e55; border-radius: var(--radius); padding: 2px 8px; }
-  @media (max-width: 700px) {
-    .sus { flex-wrap: wrap; }
-    .who { width: auto; }
-    .why { flex-basis: 100%; }
+  /* A narrow card (beside the console): the reason goes under the name. */
+  @container (max-width: 620px) {
+    .sus { flex-wrap: wrap; row-gap: 2px; }
+    .who { width: auto; max-width: calc(100% - 6rem); }
+    .grade { width: auto; }
+    .why { flex-basis: 100%; padding-left: 25px; }
   }
 </style>
