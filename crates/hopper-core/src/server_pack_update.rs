@@ -463,33 +463,59 @@ fn jars_in(dir: &Path) -> HashMap<String, u64> {
         .collect()
 }
 
+/// Turned-off jars in `dir` (`foo.jar.disabled`), by the name without
+/// `.disabled` → (file name on disk, size).
+fn disabled_in(dir: &Path) -> HashMap<String, (String, u64)> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let base = name.strip_suffix(".disabled").filter(|b| b.to_ascii_lowercase().ends_with(".jar"))?;
+            let md = e.metadata().ok()?;
+            md.is_file().then(|| (base.to_string(), (name.clone(), md.len())))
+        })
+        .collect()
+}
+
+/// The file name a pack jar is written under: off stays off.
+fn dest_name(m: &ModChange) -> String {
+    if m.from.to_ascii_lowercase().ends_with(".disabled") {
+        format!("{}.disabled", m.to)
+    } else {
+        m.to.clone()
+    }
+}
+
 /// Server mods that stay as they are, by why.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeptMods {
     /// Not the pack's: you added them.
     pub added: usize,
-    /// The pack's mod in another version than the pack ships, where the
-    /// pack didn't change it: your version stays.
+    /// No longer set: the pack's version always wins. Kept so older
+    /// Hopper Servers and clients still read plans.
     pub yours: usize,
-    /// The pack's mods the server doesn't have (you left them off), where
-    /// the pack didn't add them in this version: not added.
+    /// No longer set: every pack mod the server lacks is added.
     pub left_off: usize,
 }
 
-/// The server's mods against the new server pack's jars, three-way with
-/// the old server pack (`base`) like a modpack update: the pack's changes
-/// are applied, yours stay. Same name and size is the same file; a jar
-/// with the same name stem is another version of the mod.
+/// The server's mods against the new server pack's jars. Like the
+/// CurseForge app, the server ends up with every mod the server pack
+/// ships, in the pack's version. Same name and size is the same file; a
+/// jar with the same name stem is another version of the mod.
 ///
-/// - a jar new in the pack is added; one the old pack had too but the
-///   server lacks was left off and stays off;
-/// - a jar the pack changed replaces the server's version; where the pack
-///   didn't change it, the server's other version stays;
-/// - a jar the pack dropped is removed when the server has the pack's
-///   exact file, kept otherwise.
+/// - a pack jar the server lacks is added, even one an older server pack
+///   had too (a missed or failed update must not keep it off for good);
+/// - a pack jar the server has in another version is replaced by it;
+/// - a jar the old server pack (`base`) shipped and the new one drops is
+///   removed when the server has that exact file;
+/// - a pack mod you turned off (`.jar.disabled`) stays off: it isn't
+///   added again, and a new version arrives turned off (`from` is the
+///   `.disabled` file);
+/// - every other server jar is yours and stays.
 ///
-/// Without `base` every difference is taken from the pack, nothing is
-/// removed.
+/// Without `base` nothing is removed.
 fn mod_changes(
     dir: &Path,
     new: &HashMap<String, u64>,
@@ -497,17 +523,16 @@ fn mod_changes(
 ) -> (Vec<ModChange>, KeptMods, Vec<String>) {
     let have = jars_in(dir);
     let low = |s: &str| s.to_ascii_lowercase();
+    let off: HashMap<String, (String, u64)> =
+        disabled_in(dir).into_iter().map(|(k, v)| (low(&k), v)).collect();
+    let mut off_stems: Vec<(String, &(String, u64))> =
+        off.iter().map(|(k, v)| (serverpack::jar_stem(k), v)).collect();
+    off_stems.sort_by(|a, b| a.1.0.cmp(&b.1.0));
+    let mut off_used: HashSet<String> = HashSet::new();
     let have_low: HashMap<String, &String> = have.keys().map(|k| (low(k), k)).collect();
     let new_low: HashSet<String> = new.keys().map(|k| low(k)).collect();
     let base_low: Option<HashMap<String, u64>> =
         base.map(|b| b.iter().map(|(k, v)| (low(k), *v)).collect());
-    let base_stems: HashSet<String> = base
-        .map(|b| b.keys().map(|k| serverpack::jar_stem(k)).collect())
-        .unwrap_or_default();
-    // The pack shipped this exact jar before too: it didn't change it.
-    let unchanged = |name: &str, size: u64| {
-        base_low.as_ref().is_some_and(|b| b.get(&low(name)) == Some(&size))
-    };
     let mut by_stem: HashMap<String, Vec<&String>> = HashMap::new();
     let mut have_sorted: Vec<&String> = have.keys().collect();
     have_sorted.sort();
@@ -532,11 +557,15 @@ fn mod_changes(
         if let Some(h) = have_low.get(&low(name)) {
             used.insert(low(h));
             if have[*h] != size {
-                if unchanged(name, size) {
-                    kept.yours += 1;
-                } else {
-                    out.push(update(h));
-                }
+                out.push(update(h));
+            }
+            continue;
+        }
+        // You turned this exact jar off: it stays off.
+        if let Some((file, s)) = off.get(&low(name)) {
+            off_used.insert(low(file));
+            if *s != size {
+                out.push(update(file));
             }
             continue;
         }
@@ -548,20 +577,28 @@ fn mod_changes(
         match other {
             Some(h) => {
                 used.insert(low(h));
-                if unchanged(name, size) {
-                    kept.yours += 1;
-                } else {
-                    out.push(update(h));
+                out.push(update(h));
+            }
+            None => {
+                // Another version you turned off: the new one arrives off.
+                let off_other = off_stems
+                    .iter()
+                    .find(|(s, (f, _))| *s == stem && !off_used.contains(&low(f)))
+                    .map(|(_, v)| v.0.clone());
+                match off_other {
+                    Some(file) => {
+                        off_used.insert(low(&file));
+                        out.push(update(&file));
+                    }
+                    None => out.push(ModChange {
+                        name: stem,
+                        from: String::new(),
+                        to: name.clone(),
+                        action: ModAction::Add,
+                        ..Default::default()
+                    }),
                 }
             }
-            None if base.is_some() && base_stems.contains(&stem) => kept.left_off += 1,
-            None => out.push(ModChange {
-                name: stem,
-                from: String::new(),
-                to: name.clone(),
-                action: ModAction::Add,
-                ..Default::default()
-            }),
         }
     }
     let mut gone: Vec<&String> = have
@@ -676,11 +713,12 @@ pub fn apply(
     let plan = &p.plan;
     let prefix = plan.prefixes.first().cloned().unwrap_or_default();
     let mut z = zip::ZipArchive::new(fs::File::open(&plan.new_zip)?)?;
-    let mut extract = |rel: &str| -> anyhow::Result<()> {
+    // `rel` in the server pack, written to `dest_rel` in the server folder.
+    let mut extract = |rel: &str, dest_rel: &str| -> anyhow::Result<()> {
         let mut e = z
             .by_name(&packdiff::entry_name(&prefix, rel))
             .with_context(|| format!("{rel} isn't in the server pack"))?;
-        let dest = root.join(rel);
+        let dest = root.join(dest_rel);
         fs::create_dir_all(dest.parent().unwrap_or(root))?;
         let mut f = fs::File::create(&dest).with_context(|| format!("writing {}", dest.display()))?;
         std::io::copy(&mut e, &mut f).with_context(|| format!("extracting {rel}"))?;
@@ -699,7 +737,7 @@ pub fn apply(
             stash(&format!("mods/{}", m.from), false)?;
         }
         if !m.to.is_empty() {
-            extract(&format!("mods/{}", m.to))?;
+            extract(&format!("mods/{}", m.to), &format!("mods/{}", dest_name(m)))?;
         }
         report.mods[match m.action {
             ModAction::Add => 0,
@@ -726,7 +764,7 @@ pub fn apply(
             _ => false,
         };
         if write {
-            extract(&f.rel)?;
+            extract(&f.rel, &f.rel)?;
             report.files += 1;
         }
     }
@@ -822,13 +860,39 @@ mod tests {
             ("added-2.0.jar", 1),
         ]);
         let (ch, kept, _) = mod_changes(&dir, &new, Some(&base));
-        assert_eq!(by_action(&ch, ModAction::Add), vec![(String::new(), "added-2.0.jar".into())]);
+        // Like CurseForge: every pack mod ends up on the server.
+        assert_eq!(
+            by_action(&ch, ModAction::Add),
+            vec![(String::new(), "added-2.0.jar".into()), (String::new(), "offmod-1.0.jar".into())]
+        );
         assert_eq!(
             by_action(&ch, ModAction::Update),
-            vec![("jei-neoforge-1.21.1-19.0.jar".into(), "jei-neoforge-1.21.1-19.5.jar".into())]
+            vec![
+                ("jei-neoforge-1.21.1-19.0.jar".into(), "jei-neoforge-1.21.1-19.5.jar".into()),
+                ("mine-2.0.jar".into(), "mine-1.0.jar".into()),
+            ]
         );
         assert_eq!(by_action(&ch, ModAction::Remove), vec![("dropped-1.0.jar".into(), String::new())]);
-        assert_eq!(kept, KeptMods { added: 2, yours: 1, left_off: 1 });
+        assert_eq!(kept, KeptMods { added: 2, yours: 0, left_off: 0 });
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// TNP-LL8 (2026-10-28): a broken 1.78.0 update recorded 1.78.0's
+    /// server pack without adding its new mods; the 1.78.1 update then
+    /// read them as left off and skipped Create Aeronautics and others.
+    /// A pack mod the server lacks is added, whatever the old pack had.
+    #[test]
+    fn missed_mods_from_an_older_pack_are_added() {
+        let dir = server_dir("miss", &[("create-6.0.jar", 1), ("mine.jar", 1)]);
+        let base = jars(&[("create-6.0.jar", 1), ("aeronautics-1.3.2.jar", 1), ("sable-2.0.6.jar", 1)]);
+        let new = jars(&[("create-6.0.jar", 1), ("aeronautics-1.3.2.jar", 1), ("sable-2.0.6.jar", 1)]);
+        let (ch, kept, _) = mod_changes(&dir, &new, Some(&base));
+        assert_eq!(
+            by_action(&ch, ModAction::Add),
+            vec![(String::new(), "aeronautics-1.3.2.jar".into()), (String::new(), "sable-2.0.6.jar".into())]
+        );
+        assert!(by_action(&ch, ModAction::Update).is_empty());
+        assert_eq!(kept.added, 1, "mine.jar stays");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -841,6 +905,30 @@ mod tests {
         assert_eq!(base_server_pack(None, 9300000, 9324083), 9300000);
         assert_eq!(base_server_pack(Some(9324083), 9324083, 9324083), 9324083);
         assert_eq!(base_server_pack(None, 0, 9324083), 0);
+    }
+
+    /// A pack mod you turned off on the server stays off: not added again,
+    /// and a new version arrives as `.disabled`.
+    #[test]
+    fn turned_off_mods_stay_off() {
+        let dir = server_dir(
+            "off",
+            &[("same-1.0.jar.disabled", 1), ("old-1.0.jar.disabled", 1), ("changed-1.0.jar.disabled", 1)],
+        );
+        let new = jars(&[("same-1.0.jar", 1), ("old-2.0.jar", 1), ("changed-1.0.jar", 5)]);
+        let (ch, _, _) = mod_changes(&dir, &new, None);
+        assert!(by_action(&ch, ModAction::Add).is_empty(), "nothing turned back on");
+        assert_eq!(
+            by_action(&ch, ModAction::Update),
+            vec![
+                ("changed-1.0.jar.disabled".into(), "changed-1.0.jar".into()),
+                ("old-1.0.jar.disabled".into(), "old-2.0.jar".into()),
+            ]
+        );
+        for c in &ch {
+            assert!(dest_name(c).ends_with(".jar.disabled"), "{} arrives off", c.to);
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
