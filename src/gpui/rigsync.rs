@@ -505,6 +505,16 @@ impl SyncPanel {
         Some((s, inst))
     }
 
+    /// Where jars the sync replaces or removes end up: a Hopper Server keeps
+    /// them in its own trash, on its PC.
+    fn kept_in(&self) -> &'static str {
+        if self.server.as_deref().is_some_and(hopper::hopperd::is_remote_root) {
+            "Hopper Server's trash"
+        } else {
+            ".hopper-backups"
+        }
+    }
+
     /// The server and its pack's header (no mod list), for drawing.
     fn pair_header(&self, cx: &App) -> Option<(ServerInfo, Instance)> {
         let store = self.store.read(cx);
@@ -743,7 +753,11 @@ impl SyncPanel {
         };
         let server_nf = hopper::server_update::server_neoforge(&server.root);
         let pack_nf = inst.loader.strip_prefix("neoforge-").map(str::to_string);
+        let remote = server.remote.is_some();
         let what = match (&pack_nf, &server_nf) {
+            (Some(p), Some(sv)) if p != sv && remote => {
+                format!("have Hopper Server install NeoForge {p} (it backs the server up first), then sync mods")
+            }
             (Some(p), Some(sv)) if p != sv => {
                 format!("install NeoForge {p}, point run.bat at it, and sync mods")
             }
@@ -752,8 +766,9 @@ impl SyncPanel {
         let store = self.store.clone();
         let name = server.name.clone();
         let body = format!(
-            "This will {what} in {}. Replaced files go to .hopper-backups.",
-            server.place(&self.store.read(cx).settings().hopper_panels)
+            "This will {what} in {}. Replaced files go to {}.",
+            server.place(&self.store.read(cx).settings().hopper_panels),
+            self.kept_in(),
         );
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (store, server, inst) = (store.clone(), server.clone(), inst.clone());
@@ -818,12 +833,17 @@ impl SyncPanel {
         let view = cx.entity();
         let up = ops.up.clone();
         let down = ops.down.clone();
+        let undo = if self.kept_in() == ".hopper-backups" {
+            "Removed and replaced jars go to .hopper-backups, and the change log in History can put them back."
+        } else {
+            "Removed jars go to Hopper Server's trash, where you can restore them."
+        };
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (view, up, down) = (view.clone(), up.clone(), down.clone());
             alert
                 .title(format!("Sync {n_sel} mod{} to the server?", if n_sel == 1 { "" } else { "s" }))
                 .description(format!(
-                    "{n_remove} will be removed from the server. Removed and replaced jars go to .hopper-backups, and the change log in History can put them back."
+                    "{n_remove} will be removed from the server. {undo}"
                 ))
                 .confirm()
                 .ok_text("Sync to server")
@@ -964,11 +984,17 @@ impl SyncPanel {
         let store = self.store.clone();
         let name = server.name.clone();
         let older = hopper::scan::compare_versions(&want, &have) == std::cmp::Ordering::Less;
-        let body = format!(
-            "Installs NeoForge {want} in {} and points run.bat at it{}. Mods aren't touched. The old run.bat is kept in .hopper-backups.",
-            server.place(&self.store.read(cx).settings().hopper_panels),
-            if older { " (an older build than the server has now)" } else { "" },
-        );
+        let place = server.place(&self.store.read(cx).settings().hopper_panels);
+        let older = if older { " (an older build than the server has now)" } else { "" };
+        let body = if server.remote.is_some() {
+            format!(
+                "Hopper Server backs up {place} first, then installs NeoForge {want} there{older}. Mods aren't touched. Undo is on the server's Version page in Hopper Server."
+            )
+        } else {
+            format!(
+                "Installs NeoForge {want} in {place} and points run.bat at it{older}. Mods aren't touched. The old run.bat is kept in .hopper-backups."
+            )
+        };
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (store, server, want) = (store.clone(), server.clone(), want.clone());
             alert
@@ -1457,6 +1483,7 @@ impl SyncPanel {
         };
         let online = self.online(cx);
         let theme = cx.theme();
+        let remote = self.kept_in() != ".hopper-backups";
         let rows = c.hits.iter().map(|h| {
             let jar = server_mods
                 .iter()
@@ -1517,7 +1544,7 @@ impl SyncPanel {
                             .xsmall()
                             .outline()
                             .label("Remove from server")
-                            .tooltip(format!("Moves {j} to .hopper-backups (undo from History)"))
+                            .tooltip(if remote { format!("Moves {j} to Hopper Server's trash") } else { format!("Moves {j} to .hopper-backups (undo from History)") })
                             .disabled(online || self.running)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(root) = &server {
@@ -1792,9 +1819,9 @@ impl SyncPanel {
                 // Picked rows have their own filled button below.
                 .map(|b| if to_change > 0 && n_sel == 0 { b.primary() } else { b.outline() })
                 .tooltip(if online {
-                    "Stop the server first: mods load at startup."
+                    SharedString::from("Stop the server first: mods load at startup.")
                 } else {
-                    "Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. Asks first; replaced files go to .hopper-backups."
+                    SharedString::from(format!("Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. Asks first; replaced files go to {}.", self.kept_in()))
                 })
                 .disabled(online || self.running)
                 .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)))
@@ -1944,7 +1971,7 @@ impl SyncPanel {
                     .map(|b| if n_sel > 0 { b.primary() } else { b.outline() })
                     .icon(IconName::Upload)
                     .label(if n_sel > 0 { format!("Sync to server ({n_sel})") } else { "Sync to server".to_string() })
-                    .tooltip("Pushes added and updated jars to the server and removes the ones it no longer needs. Replaced and removed jars are kept in .hopper-backups.")
+                    .tooltip(format!("Pushes added and updated jars to the server and removes the ones it no longer needs. Replaced and removed jars are kept in {}.", self.kept_in()))
                     .disabled(ops.is_empty() || blocked)
                     .on_click(cx.listener(move |this, _, w, cx| {
                         let ops = Ops {
@@ -2218,6 +2245,12 @@ impl SyncPanel {
         let blocked = self.running || (online && !self.allow_online);
         let anyway = self.store.read(cx).settings().sync_anyway.clone();
         let pair = self.pair_header(cx);
+        let kept = self.kept_in();
+        let remove_tip = if kept == ".hopper-backups" {
+            "Moves the jar to the server's .hopper-backups (undo from History)"
+        } else {
+            "Moves the jar to Hopper Server's trash"
+        };
         let icon = self.store.read(cx).image(&m.icon).map(Path::to_path_buf);
         let pid = d
             .client
@@ -2341,7 +2374,7 @@ impl SyncPanel {
                 } else {
                     act("Update", "Update server", IconName::ArrowUp, ("Updating", "Updated"), RowAct::Push, false)
                         .when(!compact, |b| {
-                            b.tooltip("Puts the pack's version on the server (the old jar goes to .hopper-backups)")
+                            b.tooltip(format!("Puts the pack's version on the server (the old jar goes to {})", kept))
                         })
                 };
                 match pair.as_ref().filter(|_| pid != 0 && d.client.is_some()) {
@@ -2373,7 +2406,7 @@ impl SyncPanel {
                     RowAct::Remove,
                     true,
                 )
-                .when(!compact, |b| b.tooltip("Moves the jar to the server's .hopper-backups (undo from History)"))
+                .when(!compact, |b| b.tooltip(remove_tip))
                 .into_any_element(),
                 cx,
             ),

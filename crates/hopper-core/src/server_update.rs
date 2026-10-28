@@ -239,6 +239,10 @@ pub fn set_server_neoforge(
     panel: Option<&dyn crate::panel::ServerPanel>,
     job: &Job,
 ) -> anyhow::Result<String> {
+    // Its folder is on the other PC: the panel installs it there.
+    if let Some(r) = &server.remote {
+        return set_remote_neoforge(r, want, job);
+    }
     if matches!(server::ping(host, server.port()), Status::Online { .. }) {
         bail!("{} is running. Stop it first.", server.name);
     }
@@ -260,6 +264,36 @@ pub fn set_server_neoforge(
     })
 }
 
+/// Switches a server on a Hopper Server to NeoForge `want` with the panel's
+/// own version change. Its folder is on the server's PC, so the installer
+/// has to run there; the panel backs the server up first (Undo is on its
+/// Version page) and refuses while it's running.
+pub fn set_remote_neoforge(r: &crate::hopperd::Remote, want: &str, job: &Job) -> anyhow::Result<String> {
+    use crate::hopperd::Client;
+    use crate::hosting::version_change::{Installed, Record};
+    let c = Client::for_remote(r)?;
+    job.detail("Asking Hopper Server what the server runs");
+    let v = c.get(&Client::server_path(&r.id, "/version"))?;
+    let have: Installed = serde_json::from_value(v["installed"].clone()).unwrap_or_default();
+    if have.kind != "neoforge" {
+        bail!("Hopper Server doesn't see NeoForge on this server, so it can't switch it.");
+    }
+    if have.version == want {
+        return Ok(format!("Already on NeoForge {want}"));
+    }
+    job.detail(format!("Hopper Server is installing NeoForge {want}"));
+    let done = c.run_job(
+        &Client::server_path(&r.id, "/version/change"),
+        serde_json::json!({ "minecraft": have.minecraft, "loader_version": want }),
+        job,
+    )?;
+    let rec: Record = serde_json::from_value(done).unwrap_or_default();
+    let mut parts = vec![format!("NeoForge {} » {want}", have.version)];
+    parts.extend(rec.checks.iter().filter(|c| !c.ok).map(|c| c.text.clone()));
+    parts.push("backup and Undo in Hopper Server".to_string());
+    Ok(parts.join(" · "))
+}
+
 /// Brings `server` up to `inst`: loader first, then mods with the usual
 /// skip rules. Refuses while the server answers a ping. A `panel` that keeps
 /// its own launch command (Crafty's Server Execution Command) is pointed at
@@ -273,13 +307,20 @@ pub fn update_server(
     panel: Option<&dyn crate::panel::ServerPanel>,
     job: &Job,
 ) -> anyhow::Result<Report> {
-    if matches!(server::ping(host, server.port()), Status::Online { .. }) {
+    if server.remote.is_none() && matches!(server::ping(host, server.port()), Status::Online { .. }) {
         bail!("{} is running. Stop it in Crafty/MCSS first.", server.name);
     }
     let mut report = Report::default();
 
-    // Loader.
-    if let (Some(want), Some(have)) = (
+    // Loader. A server on a Hopper Server changes it there (its panel
+    // keeps its own launch line in step), and refuses while it runs.
+    if let (Some(r), Some(want)) = (&server.remote, inst.loader.strip_prefix("neoforge-")) {
+        let have = server_neoforge(&server.root);
+        if have.as_deref().is_some_and(|h| h != want) {
+            set_remote_neoforge(r, want, job)?;
+            report.loader = have.map(|h| (h, want.to_string()));
+        }
+    } else if let (Some(want), Some(have)) = (
         inst.loader.strip_prefix("neoforge-"),
         server_neoforge(&server.root),
     ) && want != have
@@ -290,14 +331,15 @@ pub fn update_server(
     }
     // The panel's copy of the launch line, checked even when run.bat was
     // already right (an earlier update, or a hand edit).
-    if let (Some(want), Some(panel)) = (inst.loader.strip_prefix("neoforge-"), panel) {
+    if let (Some(want), Some(panel)) = (inst.loader.strip_prefix("neoforge-"), panel.filter(|_| server.remote.is_none())) {
         report.panel = point_panel(server, want, panel, job);
     }
 
     // Mods.
     job.detail("Comparing mods");
     let mut client = crate::scan::scan_folder(&inst.mods_dir())?;
-    let theirs = crate::scan::scan_folder(&server.mods_dir())?;
+    // Read by the panel when the server is on a Hopper Server.
+    let theirs = crate::rigsync::server_mods(server)?;
     crate::serverpack::annotate(&mut client, inst, sync_anyway);
     let diff = crate::diff::compute_diff(&client, &theirs);
     let ops = crate::sync::plan(&diff, &inst.mods_dir(), &server.mods_dir());
@@ -394,4 +436,33 @@ fn real_neoforge_server() {
         fs::read_to_string(root.join("run.bat")).unwrap().trim()
     );
     let _ = fs::remove_dir_all(&root);
+}
+
+/// Against a scratch Hopper Server (never a real one): switches its server
+/// to another NeoForge build through the panel, then runs a full update
+/// with an empty instance. `HOPPER_REMOTE_LOADER="<base>|<id>|<ca.pem>|<version>"`,
+/// the token in `HOPPER_PANEL_TOKEN`.
+/// `cargo test remote_loader_live -- --ignored --nocapture`
+#[cfg(test)]
+#[test]
+#[ignore]
+fn remote_loader_live() {
+    let Ok(spec) = std::env::var("HOPPER_REMOTE_LOADER") else { return };
+    let p: Vec<&str> = spec.split('|').collect();
+    let ca = fs::read_to_string(p[2]).unwrap();
+    let remote = crate::hopperd::Remote { base: p[0].into(), id: p[1].into(), ca, panel: String::new() };
+    let root = crate::hopperd::panel_root("", p[1]);
+    crate::hopperd::register(&root, &remote);
+    let server = ServerInfo { name: p[1].into(), root, remote: Some(remote.clone()), ..crate::server::load(Path::new("")) };
+    let jobs = crate::jobs::Jobs::default();
+    let job = jobs.start("loader");
+    println!("before: {:?}", server_neoforge(&server.root));
+    let r = set_server_neoforge(&server, p[3], "127.0.0.1", Path::new("java"), None, &job);
+    println!("set_server_neoforge: {r:?}");
+    let inst_root = std::env::temp_dir().join("hopper-remote-loader-inst");
+    fs::create_dir_all(inst_root.join("mods")).unwrap();
+    let inst = Instance { root: inst_root, loader: format!("neoforge-{}", p[3]), ..Default::default() };
+    let u = update_server(&server, &inst, "127.0.0.1", &Default::default(), Path::new("java"), None, &job);
+    println!("update_server: {:?}", u.map(|r| r.summary()));
+    println!("after: {:?}", server_neoforge(&server.root));
 }
