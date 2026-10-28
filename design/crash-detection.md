@@ -63,6 +63,39 @@ expecting Mekanism Magic Certain, OmegaConfig and Architectury Possible, and
 the hint naming Forbidden & Arcanus; plus `detect_live` on the real
 instance (read only).
 
+## Servers (2026-10-28: built; `crashdetect::server`)
+
+A dedicated server's crash gets the same reading and the same card, in
+Hopper Server (`ServerCrash.svelte`) and on desktop's server banner
+(`rigsync.rs`, shared parts in `src/gpui/crash_view.rs`).
+
+- **Which crash:** the newest `crash-reports/*.txt` (`-server.txt`,
+  `-fml.txt`) or `hs_err_pid*.log` in the server folder, when it is from the
+  run `logs/latest.log` holds: the log names the report ("This crash report
+  has been saved to"), or ended within a minute of it. A server that
+  started again since hasn't crashed.
+- **Stop at the crash.** Logs are read up to the line where the crash report
+  is written. After it the server shuts down, and mods can fail there too.
+  Case: TNP-LL8's server, 2026-10-28. Mystical Agriculture Plus failed while
+  the server started; on the way down Small Ships' config failed to unload.
+  Stuck threads kept the log going for minutes, so the old scan skipped the
+  report and blamed Small Ships from the log's last lines.
+- **Not a knock-on when the report names it.** When the report's own loader
+  list names the mod that failed first, the crash is that failure: no "what
+  happened" story, and the mods in the trace "set off the step where it
+  failed" (Possible).
+- **Client-only mods** (crashscan's signatures: a client class loaded on the
+  server, a client mixin, a missing client class; and a report whose own
+  error is a client class, which names the first mod in its trace) are
+  Certain, marked `client_only`, and offered **Remove from server** instead
+  of Turn off.
+- **Fixes on the server:** Put back (`POST /servers/{id}/crash/put-back`,
+  read again on the server so only a change the crash names can be put
+  back; the newer jar goes to `.hopper-backups`), Turn off (the Mods tab's
+  toggle), Remove from server (to backups, with Undo).
+- Wording says "server" where the game card says "game": "stopped the
+  server from starting", "Then the server crashed in".
+
 ## Goal
 
 When a game started from Hopper crashes, Hopper tells the player which mods
@@ -185,7 +218,6 @@ not its id.
 - Lists of known problem mods or known fixes.
 - Checking jars or config files for damage.
 - Graphics-driver or hardware detection.
-- Servers: their crash banner (`crashscan.rs`) stays as it is.
 
 ## Code
 

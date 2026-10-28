@@ -83,7 +83,7 @@ fn tools() -> Vec<Value> {
             true,
         ),
         tool("list_mods", "The server's mods: name, version, file, whether it's on.", json!({ "server": server }), &["server"], true),
-        tool("last_crash", "The server's last crash: the likely cause, from crash reports and logs.", json!({ "server": server }), &["server"], true),
+        tool("last_crash", "The server's last crash: the mods it names (Certain, Likely or Possible, with why), the mod that stopped the server from starting, and a mod updated lately that its error names.", json!({ "server": server }), &["server"], true),
         tool("list_backups", "The server's backups, newest first.", json!({ "server": server }), &["server"], true),
     ]
 }
@@ -285,7 +285,7 @@ async fn call(app: &Arc<App>, who: &Who, name: &str, args: &Value) -> Value {
                     .collect();
                 as_text(&short)
             }
-            "last_crash" => match hopper_core::crashscan::last_crash(&entry.unwrap().root) {
+            "last_crash" => match hopper_core::crashdetect::server(&entry.unwrap().root) {
                 Some(c) => as_text(&c),
                 None => text("No crash found."),
             },

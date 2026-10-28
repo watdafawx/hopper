@@ -1,11 +1,10 @@
-//! Which mods made a server crash on start. A client-only mod on a server
-//! usually dies with a recognisable signature ("Attempted to load class …
-//! for invalid dist DEDICATED_SERVER", a client mixin, a client class not
-//! found, or NeoForge's loading-errors list). Ported from mod-sync's
-//! `crashscan.go`.
+//! Signatures a client-only mod on a server leaves ("Attempted to load
+//! class … for invalid dist DEDICATED_SERVER", a client mixin, a client
+//! class not found), plus the loader's failed-mod lists. Ported from
+//! mod-sync's `crashscan.go`. The server crash card itself comes from
+//! `crashdetect`, which uses these as one of its signals.
 
 use regex::Regex;
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -15,15 +14,6 @@ pub struct Hit {
     pub file_name: String,
     pub reason: String,
     pub class: String,
-}
-
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct ServerCrash {
-    pub source: String,
-    pub headline: String,
-    pub hits: Vec<Hit>,
-    /// At least one hit looks like a client-only mod.
-    pub client_only: bool,
 }
 
 fn re(p: &str) -> Regex {
@@ -165,10 +155,10 @@ pub fn hits(text: &str) -> (Vec<Hit>, bool) {
     (out, client_only)
 }
 
-/// The last start's crash, if the server's last start crashed: its newest
-/// crash report was written as latest.log stopped (a server that kept
-/// running, or started again, writes to its log long after).
-pub fn last_crash(root: &Path) -> Option<ServerCrash> {
+/// The last start's crash of the server in `root`, with the same analysis
+/// game crashes get ([`crate::crashdetect::server`]); these signatures are
+/// one of its signals. Hopper Server answers for the folders it manages.
+pub fn last_crash(root: &Path) -> Option<crate::crashdetect::Crash> {
     if let Some(r) = crate::hopperd::locate(root) {
         return r
             .and_then(|(c, id, _)| c.crash(&id))
@@ -176,58 +166,7 @@ pub fn last_crash(root: &Path) -> Option<ServerCrash> {
             .ok()
             .flatten();
     }
-    let newest = std::fs::read_dir(root.join("crash-reports"))
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "txt"))
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max_by_key(|(t, _)| *t);
-    let log_end = std::fs::metadata(root.join("logs").join("latest.log")).ok()?.modified().ok()?;
-    match &newest {
-        Some((t, _)) if *t + std::time::Duration::from_secs(60) >= log_end => {}
-        _ => return None,
-    }
-    let mut sources: BTreeMap<u8, (String, String)> = BTreeMap::new();
-    if let Some((_, p)) = newest
-        && let Ok(t) = std::fs::read_to_string(&p)
-    {
-        sources.insert(
-            0,
-            (
-                p.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                t,
-            ),
-        );
-    }
-    if let Ok(t) = std::fs::read_to_string(root.join("logs/latest.log")) {
-        let tail: Vec<&str> = t.lines().rev().take(800).collect();
-        let tail: Vec<&str> = tail.into_iter().rev().collect();
-        sources.insert(1, ("logs/latest.log".into(), tail.join("\n")));
-    }
-    for (_, (name, text)) in sources {
-        let (hits, client_only) = hits(&text);
-        if hits.is_empty() {
-            continue;
-        }
-        let headline = text
-            .find("Description:")
-            .and_then(|i| text[i + 12..].lines().next())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "Mod loading failed".into());
-        return Some(ServerCrash {
-            source: name,
-            headline,
-            hits,
-            client_only,
-        });
-    }
-    None
+    crate::crashdetect::server(root)
 }
 
 #[cfg(test)]
@@ -278,11 +217,7 @@ Details:
     fn real_servers() {
         for e in std::fs::read_dir(r"Q:\Minecraft\packs").unwrap().flatten() {
             let c = last_crash(&e.path());
-            println!(
-                "{}: {:?}",
-                e.file_name().to_string_lossy(),
-                c.map(|c| (c.headline, c.hits.len(), c.client_only))
-            );
+            println!("{}: {:?}", e.file_name().to_string_lossy(), c.map(|c| (c.headline, c.suspects)));
         }
     }
 }

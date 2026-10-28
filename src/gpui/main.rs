@@ -21,6 +21,7 @@ mod drag_pick;
 #[cfg(windows)]
 mod fetch_window;
 mod crash_help;
+mod crash_view;
 mod host_dialog;
 mod hopper_versions;
 mod inst_settings;

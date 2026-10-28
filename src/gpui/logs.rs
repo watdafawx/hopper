@@ -743,7 +743,7 @@ impl LogsView {
     /// The last game crash, as Hopper read it: what happened, and which mods
     /// it names, each with how sure Hopper is and why.
     fn crash_card(&mut self, root: &Path, c: &hopper::crashdetect::Crash, cx: &mut Context<Self>) -> AnyElement {
-        use hopper::crashdetect::{Certainty, CrashKind};
+        use hopper::crashdetect::Certainty;
         let theme = cx.theme().clone();
         let store = self.store.read(cx);
         let inst = store.instance(root);
@@ -772,18 +772,8 @@ impl LogsView {
                 for (id, n) in &named {
                     why = why.replace(&format!(" {id},"), &format!(" {n},")).replace(&format!(" {id} "), &format!(" {n} "));
                 }
-                let tag = match s.certainty {
-                    Certainty::Certain => widgets::chip(cx.theme().danger),
-                    Certainty::Likely => widgets::chip(cx.theme().warning),
-                    Certainty::Possible => widgets::chip(cx.theme().muted_foreground),
-                };
                 let (store2, root2) = (self.store.clone(), root.to_path_buf());
-                h_flex()
-                    .gap_3()
-                    .items_start()
-                    .py_1()
-                    .child(
-                        widgets::mod_link(
+                let link = widgets::mod_link(
                             ElementId::Name(format!("crash-suspect:{i}").into()),
                             name,
                             icon.as_deref(),
@@ -794,19 +784,9 @@ impl LogsView {
                             },
                             cx,
                         )
-                        .w(rems(16.))
                         .flex_none()
-                        .text_sm()
-                        .font_semibold(),
-                    )
-                    .child(div().flex_none().w(rems(5.)).child(tag.xsmall().outline().child(s.certainty.label())))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(widgets::caption(why, cx).text_xs().whitespace_normal())
-                            .children(s.needs.iter().enumerate().map(|(k, (id, ver))| {
+                        .into_any_element();
+                let below: Vec<AnyElement> = s.needs.iter().enumerate().map(|(k, (id, ver))| {
                                 let loader = ["minecraft", "neoforge", "forge", "fabricloader", "quilt_loader", "java"]
                                     .contains(&id.as_str());
                                 // Installed since the crash: a jar named like it that provides it.
@@ -852,17 +832,12 @@ impl LogsView {
                                             )
                                         }
                                     })
-                            })),
-                    )
-                    .into_any_element()
+                                    .into_any_element()
+                            }).collect();
+                crate::crash_view::suspect_row(link, s, why, below, cx).into_any_element()
             })
             .collect();
-        let note: Option<&str> = match c.kind {
-            CrashKind::Mods => None,
-            CrashKind::Memory => Some("Java ran out of memory. Give this instance more in Settings › Memory."),
-            CrashKind::Native => Some("Java itself crashed. Try another Java in Settings › Java, or update your graphics driver."),
-            CrashKind::Unknown => Some("Hopper couldn't tell which mod. The crash report has the details."),
-        };
+        let note = crate::crash_view::note(c);
         // The lead: what broke, and the mods most likely behind it.
         let likely: Vec<String> = c
             .suspects

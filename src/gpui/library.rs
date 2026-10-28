@@ -233,7 +233,7 @@ pub struct LibraryView {
     sizes: HashMap<PathBuf, Option<u64>>,
     /// Each paired server's last start crash, read when its instance is
     /// picked (the header's status dot); the Server tab's own read wins.
-    crashes: HashMap<PathBuf, Option<hopper::crashscan::ServerCrash>>,
+    crashes: HashMap<PathBuf, Option<hopper::crashdetect::Crash>>,
     /// The work area's width in rem, as of the last render.
     detail_w: f32,
     addons: Entity<AddonsView>,

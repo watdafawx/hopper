@@ -1,0 +1,31 @@
+---- Minecraft Crash Report ----
+// Who set us up the TNT?
+
+Time: 2026-10-26 00:46:13
+Description: Mod loading failures have occurred; consult the issue messages for more details
+
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Mod loading issue for: logisticsnetworks --
+Details:
+	Mod file: /G:/Minecraft/packs/TNP-LL8/mods/logisticsnetworks-1.21.1-1.17.2.jar
+	Failure message: Mod logisticsnetworks only supports buildinggadgets2 1.3.8 or above, and below 1.4
+		Currently, buildinggadgets2 is 21.1.1
+	Mod version: 1.17.2
+	Mod issues URL: <No issues URL found>
+	Exception message: <No associated exception found>
+
+-- Mod loading issue for: buildinggadgetsextra --
+Details:
+	Mod file: /G:/Minecraft/packs/TNP-LL8/mods/building-gadgets-extra-neoforge-1.21.1-0.0.7.jar
+	Failure message: Mod buildinggadgetsextra requires buildinggadgets2 1.3.9 or above, and below 1.4.0
+		Currently, buildinggadgets2 is 21.1.1
+		Reason for the dependency: Building Gadgets Extra extends the Building Gadgets 2 copy/paste gadgets
+	Mod version: 0.0.7
+	Mod issues URL: https://github.com/UpperMoon0/Building-Gadgets-Extra/issues
+	Exception message: <No associated exception found>
+

@@ -70,6 +70,9 @@ pub struct Suspect {
     /// Another mod its error names that changed lately, with its older copy.
     #[serde(default)]
     pub changed: Option<Changed>,
+    /// A client-only mod on a dedicated server: it goes, not just off.
+    #[serde(default)]
+    pub client_only: bool,
 }
 
 /// A mod that changed before the crash, which a suspect's error names:
@@ -128,6 +131,9 @@ pub struct Crash {
     /// say so and turn back on.
     #[serde(default)]
     pub switched_off: Vec<crate::configswitch::Switch>,
+    /// A dedicated server's crash (the cards say "server", not "game").
+    #[serde(default)]
+    pub server: bool,
 }
 
 /// The config switches for the items the crash names, of its Certain and
@@ -150,8 +156,10 @@ fn re(p: &str) -> Regex {
     Regex::new(p).expect("static regex")
 }
 
-/// `-- Mod loading issue for: somemod --`
-static LOADING_ISSUE: LazyLock<Regex> = LazyLock::new(|| re(r"^-- Mod loading issue for: ([\w.-]+) --"));
+/// `-- Mod loading issue for: somemod --` (NeoForge), `-- MOD somemod --`
+/// (Forge's list of mods that failed).
+static LOADING_ISSUE: LazyLock<Regex> =
+    LazyLock::new(|| re(r"^-- (?:Mod loading issue for: ([\w.-]+)|MOD ([\w.-]+)) --"));
 /// `Mod file: /G:/…/mods/somemod-1.0.jar`
 static MOD_FILE: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)^\s*Mod file:\s*.*?([^\\/]+\.jar)\s*$"));
 /// `at TRANSFORMER/somemod@1.0/com.x.Y.z(Y.java:1) ~[somemod-1.0.jar%23123!/:1.0]`
@@ -190,7 +198,7 @@ pub fn signals(text: &str) -> Vec<Raw> {
     // NeoForge's loading issues: the mod, its file and the loader's reason.
     for (i, l) in lines.iter().enumerate() {
         let Some(m) = LOADING_ISSUE.captures(l.trim_start()) else { continue };
-        let id = m[1].to_string();
+        let Some(id) = m.get(1).or(m.get(2)).map(|g| g.as_str().to_string()) else { continue };
         let mut jar = String::new();
         let mut why = String::new();
         for (k, l) in lines.iter().enumerate().skip(i + 1).take(30) {
@@ -616,7 +624,7 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
     let now = crate::time::now();
     let text = report.as_deref().map(|p| tail(p, 2 << 20)).unwrap_or_default();
     let log_path = root.join("logs").join("latest.log");
-    let log = tail(&log_path, 2 << 20);
+    let log = before_crash(&tail(&log_path, 2 << 20)).to_string();
     let loading = loading_lines(&log_path);
     // Backups made after this crash (by a fix) aren't what changed before it.
     let before = report.as_deref().and_then(modified_secs).unwrap_or(now);
@@ -638,7 +646,7 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         _ => String::new(),
     };
     let (switches, switched_off) = switches(root, &text, &suspects);
-    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off })
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false })
 }
 
 /// A saved crash read again from its report with today's rules (which mods
@@ -692,7 +700,8 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
     }
     let log_path = root.join("logs").join("latest.log");
     let same_run = modified_secs(&log_path).is_some_and(|t| (t - written).abs() < 300);
-    let (log, loading) = if same_run { (tail(&log_path, 2 << 20), loading_lines(&log_path)) } else { (String::new(), String::new()) };
+    let (log, loading) =
+        if same_run { (before_crash(&tail(&log_path, 2 << 20)).to_string(), loading_lines(&log_path)) } else { (String::new(), String::new()) };
     let (suspects, stopped) = analyze(root, &text, &log, &loading, written, mods, &ids);
     let kind = if !suspects.is_empty() {
         CrashKind::Mods
@@ -702,7 +711,137 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
         CrashKind::Unknown
     };
     let (switches, switched_off) = switches(root, &text, &suspects);
-    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off })
+    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false })
+}
+
+/// What the game or server logs as it writes its crash report. After it
+/// comes the shutdown, where mods can fail too (a config that won't
+/// unload): those errors follow from the crash, so the scan stops here.
+const CRASH_SAVED: [&str; 3] = ["Preparing crash report with UUID", "This crash report has been saved to", "Crash report saved to"];
+
+/// A log up to the line where the crash report is written.
+pub fn before_crash(log: &str) -> &str {
+    match CRASH_SAVED.iter().filter_map(|m| log.find(m)).min() {
+        Some(i) => &log[..log[..i].rfind('\n').map_or(0, |n| n + 1)],
+        None => log,
+    }
+}
+
+/// The reason a client-only mod on a dedicated server gets.
+pub const CLIENT_ONLY_WHY: &str =
+    "It's a client-only mod: it uses parts of the game that only exist on players' computers, not on a server.";
+
+/// A dedicated server's last start, if it crashed: its newest crash report
+/// (`crash-reports/crash-…-server.txt` or `-fml.txt`) or Java crash file
+/// (`hs_err_pid*.log`), when it's from the run `logs/latest.log` holds (the
+/// log names it, or ended within a minute of it). A server that ran on, or
+/// started again since, hasn't crashed.
+pub fn server(root: &Path) -> Option<Crash> {
+    let log_path = root.join("logs").join("latest.log");
+    let log_end = modified_secs(&log_path)?;
+    let log = tail(&log_path, 2 << 20);
+    let this_run = |p: &Path| {
+        p.file_name().is_some_and(|n| log.contains(&*n.to_string_lossy())) || modified_secs(p).is_some_and(|t| t + 60 >= log_end)
+    };
+    let report = crate::logs::crash_reports(root)
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "txt"))
+        .filter(|p| this_run(p));
+    let native = fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("hs_err_pid")))
+        .filter_map(|p| Some((modified_secs(&p)?, p)))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, p)| p)
+        .filter(|p| this_run(p));
+    if report.is_none() && native.is_none() {
+        return None;
+    }
+    // Each jar's own mod ids, read once (matching asks many times).
+    let dir = root.join("mods");
+    let mods: Vec<String> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+        .collect();
+    let own: std::collections::HashMap<String, Vec<String>> =
+        mods.iter().map(|m| (m.clone(), crate::deps::own_ids(&dir.join(m)).0)).collect();
+    let ids = |f: &str| own.get(f).cloned().unwrap_or_default();
+    let text = report.as_deref().map(|p| tail(p, 2 << 20)).unwrap_or_default();
+    let log = before_crash(&log);
+    let loading = loading_lines(&log_path);
+    let when = report.as_deref().or(native.as_deref()).and_then(modified_secs).unwrap_or(log_end);
+    let (mut suspects, stopped) = analyze(root, &text, log, &loading, when, &mods, &ids);
+    client_only(&text, log, &mut suspects, &mods, &ids);
+    for s in &mut suspects {
+        s.why = s.why.replace("while the game was loading", "while the server was loading").replace("the game ran its", "the server ran its");
+    }
+    let kind = if !suspects.is_empty() {
+        CrashKind::Mods
+    } else if text.contains("OutOfMemoryError") || log.contains("java.lang.OutOfMemoryError") {
+        CrashKind::Memory
+    } else if native.is_some() && report.is_none() {
+        CrashKind::Native
+    } else {
+        CrashKind::Unknown
+    };
+    let headline = match (&report, &native) {
+        (Some(_), _) => headline(&text),
+        (None, Some(n)) => native_line(&tail(n, 64 << 10)),
+        _ => String::new(),
+    };
+    let (switches, switched_off) = switches(root, &text, &suspects);
+    let source = report.or(native).unwrap_or_default();
+    Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true })
+}
+
+/// Client-only mods on a dedicated server, from what they leave in the
+/// crash report and the log's last lines before it (a client class loaded
+/// on the server, a client mixin that failed, a client class missing; see
+/// `crashscan`): certain, and they go from the server rather than off.
+fn client_only(text: &str, log: &str, suspects: &mut Vec<Suspect>, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) {
+    let mut last: Vec<&str> = log.lines().rev().take(800).collect();
+    last.reverse();
+    let last = last.join("\n");
+    let mut files: Vec<String> = Vec::new();
+    for t in [text, last.as_str()] {
+        for h in crate::crashscan::hits(t).0.into_iter().filter(|h| h.reason.contains("client")) {
+            let r = Raw { mod_id: h.mod_id, jar: h.file_name, certainty: Certainty::Certain, why: String::new(), class: String::new(), needs: Vec::new() };
+            if let Some(f) = match_jar(&r, mods, ids)
+                && !files.contains(&f)
+            {
+                files.push(f);
+            }
+        }
+    }
+    // The report's own error is a client class on the server: the mod
+    // whose code asked for it (the first in its trace) is the one.
+    if files.is_empty() && headline(text).contains("for invalid dist DEDICATED_SERVER") {
+        files.extend(suspects.iter().find(|s| s.certainty == Certainty::Likely).map(|s| s.file_name.clone()));
+    }
+    for f in files {
+        match suspects.iter_mut().find(|s| s.file_name == f) {
+            Some(s) => {
+                s.certainty = Certainty::Certain;
+                s.client_only = true;
+                s.why = CLIENT_ONLY_WHY.into();
+            }
+            None => suspects.push(Suspect {
+                mod_id: ids(&f).into_iter().next().unwrap_or_default(),
+                file_name: f,
+                certainty: Certainty::Certain,
+                why: CLIENT_ONLY_WHY.into(),
+                needs: Vec::new(),
+                changed: None,
+                client_only: true,
+            }),
+        }
+    }
+    suspects.sort_by_key(|s| s.certainty);
 }
 
 /// Whether `report` was written after the crash `saved` came from, so the
@@ -728,6 +867,13 @@ fn analyze(
     ids: &impl Fn(&str) -> Vec<String>,
 ) -> (Vec<Suspect>, Option<Stopped>) {
     let mut raws = signals(text);
+    // The report's own loader list names the mod that failed first: the
+    // crash is that failure itself, not a knock-on effect of it.
+    let direct = loading_failures(loading)
+        .1
+        .first()
+        .is_some_and(|(f, _)| raws.iter().any(|r| r.certainty == Certainty::Certain && same(r, &f.mod_id, &f.jar)));
+    let loading = if direct { "" } else { loading };
     for r in signals(log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
         add(&mut raws, r);
     }
@@ -754,7 +900,7 @@ fn analyze(
         if suspects.iter().any(|s| s.file_name == file) {
             continue;
         }
-        suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs, changed: None });
+        suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs, changed: None, client_only: false });
     }
     demote_libraries(&mut suspects, &crate::deps::dependents(&root.join("mods")), ids);
     // What the loader names may say which other mod it wanted: if that one
@@ -796,6 +942,29 @@ pub fn put_back(root: &Path, c: &Changed) -> anyhow::Result<PathBuf> {
         crate::backups::record(&dir, &aside, &format!("mods/{}", c.file_name));
     }
     crate::backups::restore(root, &saved)
+}
+
+/// Turns these jars off in a server folder, as Hopper Server does: through
+/// the folder's mod list when it has one (its entry follows), else by
+/// renaming each to `.disabled`.
+pub fn turn_off_in(root: &Path, files: &[String]) -> anyhow::Result<()> {
+    let mut inst = crate::instances::load(root).filter(|i| i.unreadable.is_none());
+    for f in files {
+        let bare = f.trim_end_matches(".disabled");
+        let listed = inst
+            .as_mut()
+            .and_then(|i| Some((i.addons.iter().position(|a| a.file_name.eq_ignore_ascii_case(bare) && a.folder() == "mods")?, i)));
+        match listed {
+            Some((idx, i)) => crate::install::set_enabled(i, idx, false).map_err(crate::install::explain_locked)?,
+            None => {
+                let p = root.join("mods").join(bare);
+                if p.is_file() {
+                    fs::rename(&p, root.join("mods").join(format!("{bare}.disabled")))?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `Skipping Mod Construction task for mod x because a dependency threw an exception.`
@@ -891,6 +1060,9 @@ pub fn loading_lines(p: &Path) -> String {
     let (mut out, mut buf, mut keep) = (String::new(), Vec::new(), 0usize);
     while r.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
         let l = String::from_utf8_lossy(&buf);
+        if CRASH_SAVED.iter().any(|m| l.contains(m)) {
+            break;
+        }
         if LOADING_MARKS.iter().any(|m| l.contains(m)) {
             keep = 60;
         } else if l.starts_with('[') {
@@ -1144,6 +1316,7 @@ impl LiveWatch {
                     why: "Its changes to the game's code (a mixin) failed to apply while you played. It may misbehave or crash later.".into(),
                     needs: Vec::new(),
                     changed: None,
+                    client_only: false,
                 });
             }
         }
@@ -1189,7 +1362,7 @@ mod tests {
     use super::*;
 
     fn sus(file: &str, id: &str, c: Certainty) -> Suspect {
-        Suspect { file_name: file.into(), mod_id: id.into(), certainty: c, why: String::new(), needs: Vec::new(), changed: None }
+        Suspect { file_name: file.into(), mod_id: id.into(), certainty: c, why: String::new(), needs: Vec::new(), changed: None, client_only: false }
     }
 
     #[test]
@@ -1257,6 +1430,29 @@ net.neoforged.fml.ModLoadingException: Loading errors encountered:\n\
             println!("{:?} {} ({}): {}", s.certainty, s.file_name, s.mod_id, s.why);
             if let Some(ch) = &s.changed {
                 println!("   changed: {} {} -> {} at {} (old copy {})", ch.name, ch.from, ch.to, ch.when, ch.backup.display());
+            }
+        }
+        if let Some(st) = &c.stopped {
+            println!("stopped: {} | error: {} | skipped: {:?}", st.file_name, st.error, st.skipped);
+        }
+    }
+
+    /// The last crash of the server in `HOPPER_SERVER_ROOT` (read only).
+    /// `cargo test server_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn server_live() {
+        let Ok(root) = std::env::var("HOPPER_SERVER_ROOT") else { return };
+        let Some(c) = server(Path::new(&root)) else {
+            println!("no crash");
+            return;
+        };
+        println!("headline: {}
+source: {}", c.headline, c.source.display());
+        for s in &c.suspects {
+            println!("{:?} {} ({}){}: {}", s.certainty, s.file_name, s.mod_id, if s.client_only { " client-only" } else { "" }, s.why);
+            if let Some(ch) = &s.changed {
+                println!("   changed: {} {} -> {}", ch.name, ch.from, ch.to);
             }
         }
         if let Some(st) = &c.stopped {
@@ -1611,6 +1807,7 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
             why: failed[0].0.why.clone(),
             needs: Vec::new(),
             changed: None,
+            client_only: false,
         };
         let c = what_changed(&root, &s, &list, &crate::backups::list(&root)).expect("a change");
         assert_eq!(
@@ -1634,6 +1831,117 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         assert!(mentions("requires Create 6.0", "create"));
         assert!(!mentions("Failed to create mod instance", "Create"), "a word, not a name");
         assert!(!mentions("needs JEI", "jei"), "too short to trust");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A jar with just enough metadata to name its mod.
+    fn fake_jar(p: &Path, id: &str, name: &str, ver: &str) {
+        use std::io::Write;
+        let mut z = zip::ZipWriter::new(fs::File::create(p).unwrap());
+        z.start_file::<_, ()>("META-INF/neoforge.mods.toml", Default::default()).unwrap();
+        write!(z, "modLoader=\"javafml\"\n[[mods]]\nmodId=\"{id}\"\nversion=\"{ver}\"\ndisplayName=\"{name}\"\n").unwrap();
+        z.finish().unwrap();
+    }
+
+    /// A server folder with these mods, its crash report and log.
+    fn server_root(tag: &str, mods: &[(&str, &str, &str)], report: (&str, &str), log: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("hopper-srvcrash-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for (file, id, name) in mods {
+            fake_jar(&root.join("mods").join(file), id, name, "1.0");
+        }
+        fs::write(root.join("crash-reports").join(report.0), report.1).unwrap();
+        fs::write(root.join("logs/latest.log"), log).unwrap();
+        root
+    }
+
+    const TNP_REPORT: &str = include_str!("crashdetect_fixtures/tnp-server-crash.txt");
+    const TNP_LOG: &str = include_str!("crashdetect_fixtures/tnp-server-latest.log");
+    const TNP_FML: &str = include_str!("crashdetect_fixtures/tnp-fml-crash.txt");
+
+    /// TNP Limitless 8's server, 2026-10-28, cut down: Mystical Agriculture
+    /// Plus failed while the server started. While it shut down (after the
+    /// report was written), Small Ships' config failed to unload: the old
+    /// scan blamed that one. Stuck threads kept the log going for minutes.
+    #[test]
+    fn a_server_crash_names_the_mod_and_not_the_shutdown() {
+        let mods = [
+            ("MysticalAgriculturePlus-1.0.1.jar", "mysticalagricultureplus", "Mystical Agriculture Plus"),
+            ("cc-tweaked-1.21.1-forge-1.120.2.jar", "computercraft", "CC: Tweaked"),
+            ("smallships-neoforge-1.21.1-2.0.2.jar", "smallships", "Small Ships"),
+        ];
+        let root = server_root("tnp", &mods, ("crash-2026-10-28_22.47.24-server.txt", TNP_REPORT), TNP_LOG);
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        fs::File::options().write(true).open(root.join("logs/latest.log")).unwrap().set_modified(later).unwrap();
+        let c = server(&root).expect("the log names the report: this run's crash");
+        assert!(c.server);
+        assert_eq!(c.kind, CrashKind::Mods);
+        let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.mod_id.as_str(), s.certainty)).collect();
+        assert_eq!(got, [("mysticalagricultureplus", Certainty::Certain), ("computercraft", Certainty::Possible)]);
+        assert!(c.suspects[0].why.contains("while the server ran its BuildCreativeModeTabContents step"), "{}", c.suspects[0].why);
+        assert!(c.suspects[1].why.contains("set off the step where mysticalagricultureplus failed"), "{}", c.suspects[1].why);
+        assert!(c.stopped.is_none(), "the report itself names it: no knock-on story");
+        assert!(!c.suspects.iter().any(|s| s.client_only));
+        assert!(c.headline.contains("fe_seeds does not exist"));
+        assert!(!before_crash(TNP_LOG).contains("smallships") && TNP_LOG.contains("smallships"));
+        assert!(!loading_lines(&root.join("logs/latest.log")).contains("smallships"));
+
+        // Started again since: a new log that doesn't name the report.
+        fs::write(root.join("logs/latest.log"), "[29Oct2026 10:00:00.000] [main/INFO] [x/]: Starting\n").unwrap();
+        fs::File::options().write(true).open(root.join("logs/latest.log")).unwrap().set_modified(later).unwrap();
+        assert!(server(&root).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same server, 2026-10-26: two mods refused the Building Gadgets 2
+    /// version installed.
+    #[test]
+    fn a_server_fml_report_names_each_mod_that_failed() {
+        let mods = [
+            ("logisticsnetworks-1.21.1-1.17.2.jar", "logisticsnetworks", "Logistics Networks"),
+            ("building-gadgets-extra-neoforge-1.21.1-0.0.7.jar", "buildinggadgetsextra", "Building Gadgets Extra"),
+            ("buildinggadgets2-21.1.1.jar", "buildinggadgets2", "Building Gadgets 2"),
+        ];
+        let root = server_root("fml", &mods, ("crash-2026-10-26_00.46.13-fml.txt", TNP_FML), "[x] [main/INFO] [x/]: Loading\n");
+        let c = server(&root).unwrap();
+        let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.file_name.as_str(), s.certainty)).collect();
+        assert_eq!(
+            got,
+            [
+                ("logisticsnetworks-1.21.1-1.17.2.jar", Certainty::Certain),
+                ("building-gadgets-extra-neoforge-1.21.1-0.0.7.jar", Certainty::Certain)
+            ]
+        );
+        assert!(c.suspects[0].why.contains("only supports buildinggadgets2 1.3.8 or above"), "{}", c.suspects[0].why);
+        assert!(c.headline.starts_with("Mod loading failures have occurred"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// What the old server scan caught stays caught: a client-only mod on
+    /// the server is certain, and marked to remove.
+    #[test]
+    fn a_client_only_mod_on_a_server_is_certain() {
+        // Forge's list of failed mods.
+        let forge = "Description: Mod loading error has occurred\n\njava.lang.RuntimeException: Attempted to load class net/minecraft/client/gui/screens/Screen for invalid dist DEDICATED_SERVER\n\n-- MOD fancymenu --\nDetails:\n\tMod File: /server/mods/fancymenu_neoforge_3.2.jar\n\tFailure message: FancyMenu has failed to load correctly\n\n";
+        let mods = [("fancymenu_neoforge_3.2.jar", "fancymenu", "FancyMenu"), ("other-1.0.jar", "other", "Other")];
+        let root = server_root("client", &mods, ("crash-2026-10-20_10.00.00-fml.txt", forge), "");
+        let c = server(&root).unwrap();
+        assert_eq!(c.suspects.len(), 1);
+        let s = &c.suspects[0];
+        assert_eq!((s.file_name.as_str(), s.certainty, s.client_only), ("fancymenu_neoforge_3.2.jar", Certainty::Certain, true));
+        assert_eq!(s.why, CLIENT_ONLY_WHY);
+
+        // NeoForge: the class is the report's own error; the first mod in
+        // its trace asked for it.
+        let neo = "Description: Exception in server tick loop\n\njava.lang.RuntimeException: Attempted to load class net/minecraft/client/Minecraft for invalid dist DEDICATED_SERVER\n\tat MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.X.y(X.java:1) ~[loader-4.0.45.jar%2359!/:4.0] {}\n\tat TRANSFORMER/other@1.0/com.other.Thing.tick(Thing.java:9) ~[other-1.0.jar%23300!/:1.0] {}\n\tat java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {}\n";
+        fs::remove_file(root.join("crash-reports/crash-2026-10-20_10.00.00-fml.txt")).unwrap();
+        fs::write(root.join("crash-reports/crash-2026-10-21_10.00.00-server.txt"), neo).unwrap();
+        let c = server(&root).unwrap();
+        let s = &c.suspects[0];
+        assert_eq!((s.file_name.as_str(), s.certainty, s.client_only), ("other-1.0.jar", Certainty::Certain, true));
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -320,8 +320,25 @@ impl Client {
     }
 
     /// The server's last crash, read by the panel from its logs.
-    pub fn crash(&self, id: &str) -> anyhow::Result<Option<crate::crashscan::ServerCrash>> {
-        Ok(serde_json::from_value(self.get(&format!("/servers/{}/crash", enc(id)))?["crash"].clone())?)
+    pub fn crash(&self, id: &str) -> anyhow::Result<Option<crate::crashdetect::Crash>> {
+        let v = self.get(&format!("/servers/{}/crash", enc(id)))?["crash"].clone();
+        // Hopper Server before 0.14 sends its old scan: say it crashed, with
+        // its headline, but no mods (that scan's guesses were often wrong).
+        if v.get("hits").is_some() {
+            return Ok(Some(crate::crashdetect::Crash {
+                headline: v["headline"].as_str().unwrap_or_default().to_string(),
+                server: true,
+                ..Default::default()
+            }));
+        }
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// Puts back the older copy of the mod the server's last crash names
+    /// (`file`: the jar there now), as [`crate::crashdetect::put_back`].
+    pub fn crash_put_back(&self, id: &str, file: &str) -> anyhow::Result<()> {
+        self.post(&format!("/servers/{}/crash/put-back", enc(id)), serde_json::json!({ "file": file }))?;
+        Ok(())
     }
 
     /// The NeoForge version the server's run.bat starts.

@@ -1,0 +1,89 @@
+[28Oct2026 22:47:24.526] [Server thread/ERROR] [net.neoforged.fml.javafmlmod.FMLModContainer/]: Exception caught during firing event: Itemstack 1 mysticalagricultureplus:fe_seeds does not exist in tab's list
+	Index: 0
+	Listeners:
+		0: com.dragon.mysticalagricultureplus.MysticalAgriculturePlus$$Lambda/0x000001fc00707988@63deb39c
+java.lang.IllegalArgumentException: Itemstack 1 mysticalagricultureplus:fe_seeds does not exist in tab's list
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.assertTargetExists(BuildCreativeModeTabContentsEvent.java:190)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.insertAfter(BuildCreativeModeTabContentsEvent.java:114)
+	at TRANSFORMER/mysticalagricultureplus@1.0.1/com.dragon.mysticalagricultureplus.MysticalAgriculturePlus.onBuildCreativeTab(MysticalAgriculturePlus.java:279)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27)
+[28Oct2026 22:47:24.526] [Server thread/ERROR] [net.neoforged.fml.ModContainer/LOADING]: Caught exception during event net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent@7d44df90 dispatch for modid mysticalagricultureplus
+java.lang.IllegalArgumentException: Itemstack 1 mysticalagricultureplus:fe_seeds does not exist in tab's list
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.assertTargetExists(BuildCreativeModeTabContentsEvent.java:190) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.insertAfter(BuildCreativeModeTabContentsEvent.java:114) ~[?:?]
+	at TRANSFORMER/mysticalagricultureplus@1.0.1/com.dragon.mysticalagricultureplus.MysticalAgriculturePlus.onBuildCreativeTab(MysticalAgriculturePlus.java:279) ~[?:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27) ~[bus-8.0.5.jar%2362!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.5.jar%2362!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:342) ~[bus-8.0.5.jar%2362!/:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:177) ~[loader-4.0.45.jar%2359!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$postEvent$13(ModLoader.java:358) ~[loader-4.0.45.jar%2359!/:4.0]
+[28Oct2026 22:47:24.527] [Server thread/ERROR] [net.neoforged.bus.EventBus/EVENTBUS]: Exception caught during firing event: Loading errors encountered:
+	- Mystical Agriculture Plus (mysticalagricultureplus) encountered an error while dispatching the net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent event
+	  java.lang.IllegalArgumentException: Itemstack 1 mysticalagricultureplus:fe_seeds does not exist in tab's list
+
+	Index: 67
+	Listeners:
+		0: org.cyclops.cyclopscore.infobook.InfoBookRegistry$$Lambda/0x000001fbf92dcb50@1ecf979a
+		1: net.neoforged.bus.EventListenerFactory$event/0x000001fbfd5a1800@58f4884d
+		2: net.neoforged.bus.EventListenerFactory$onServerStarted/0x000001fbf775c400@7325c80
+		3: io.github.jason13official.monolib.MonoLibNeoForge$$Lambda/0x000001fbf792dd08@3c5017a4
+[28Oct2026 22:47:24.527] [Server thread/ERROR] [net.minecraft.server.MinecraftServer/]: Encountered an unexpected exception
+net.neoforged.fml.ModLoadingException: Loading errors encountered:
+	- Mystical Agriculture Plus (mysticalagricultureplus) encountered an error while dispatching the net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent event
+	  java.lang.IllegalArgumentException: Itemstack 1 mysticalagricultureplus:fe_seeds does not exist in tab's list
+
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:181) ~[loader-4.0.45.jar%2359!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$postEvent$13(ModLoader.java:358) ~[loader-4.0.45.jar%2359!/:4.0]
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75) ~[?:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174) ~[loader-4.0.45.jar%2359!/:4.0]
+[28Oct2026 22:47:24.762] [Server thread/FATAL] [net.neoforged.neoforge.common.NeoForgeMod/]: Preparing crash report with UUID 5998b942-ac0e-439f-ace2-82dcdc898405
+[28Oct2026 22:47:26.843] [Server thread/ERROR] [net.minecraft.server.MinecraftServer/]: This crash report has been saved to: G:\Minecraft\packs\TNP-LL8\crash-reports\crash-2026-10-28_22.47.24-server.txt
+[28Oct2026 22:47:26.866] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Stopping server
+[28Oct2026 22:47:26.866] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving players
+[28Oct2026 22:47:26.867] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Saving worlds
+[28Oct2026 22:47:31.541] [Server thread/INFO] [Puzzles Lib/]: Dispatching unloading event for config pickupnotifier\pickupnotifier-server.toml
+[28Oct2026 22:47:31.545] [Server thread/INFO] [Puzzles Lib/]: Dispatching unloading event for config enchantinginfuser-server.toml
+[28Oct2026 22:47:31.559] [Server thread/INFO] [Puzzles Lib/]: Dispatching unloading event for config easyanvils-server.toml
+[28Oct2026 22:47:31.559] [Server thread/INFO] [Puzzles Lib/]: Dispatching unloading event for config leavesbegone-server.toml
+[28Oct2026 22:47:31.567] [Server thread/ERROR] [net.neoforged.fml.javafmlmod.FMLModContainer/]: Exception caught during firing event: Cannot call getFullPath() on non-file config null at path smallships-server.toml
+	Index: 0
+	Listeners:
+		0: net.neoforged.bus.EventListenerFactory$initRegisterConfigs/0x000001fbfdbf8c00@644a7792
+java.lang.IllegalStateException: Cannot call getFullPath() on non-file config null at path smallships-server.toml
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ModConfig.getFullPath(ModConfig.java:69)
+	at TRANSFORMER/smallships@2.0.2/com.talhanation.smallships.neoforge.common.CommonModBus.initRegisterConfigs(CommonModBus.java:53)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:328)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:158)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ModConfig.setConfig(ModConfig.java:79)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ConfigTracker.unloadConfig(ConfigTracker.java:236)
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75)
+	at java.base/java.util.Collections$SynchronizedCollection.forEach(Collections.java:2351)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ConfigTracker.unloadConfigs(ConfigTracker.java:129)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.server.ServerLifecycleHooks.handleServerStopped(ServerLifecycleHooks.java:134)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.runServer(MinecraftServer.java:750)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.lambda$spin$2(MinecraftServer.java:267)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+
+[28Oct2026 22:47:31.567] [Server thread/ERROR] [net.neoforged.fml.ModContainer/LOADING]: Caught exception during event net.neoforged.fml.event.config.ModConfigEvent$Unloading@1e2b1bfa dispatch for modid smallships
+java.lang.IllegalStateException: Cannot call getFullPath() on non-file config null at path smallships-server.toml
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ModConfig.getFullPath(ModConfig.java:69) ~[loader-4.0.45.jar%2359!/:4.0]
+	at TRANSFORMER/smallships@2.0.2/com.talhanation.smallships.neoforge.common.CommonModBus.initRegisterConfigs(CommonModBus.java:53) ~[?:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.5.jar%2362!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:328) ~[bus-8.0.5.jar%2362!/:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:158) ~[loader-4.0.45.jar%2359!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ModConfig.setConfig(ModConfig.java:79) ~[loader-4.0.45.jar%2359!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ConfigTracker.unloadConfig(ConfigTracker.java:236) ~[loader-4.0.45.jar%2359!/:4.0]
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75) ~[?:?]
+	at java.base/java.util.Collections$SynchronizedCollection.forEach(Collections.java:2351) ~[?:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ConfigTracker.unloadConfigs(ConfigTracker.java:129) ~[loader-4.0.45.jar%2359!/:4.0]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.server.ServerLifecycleHooks.handleServerStopped(ServerLifecycleHooks.java:134) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.runServer(MinecraftServer.java:750) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.lambda$spin$2(MinecraftServer.java:267) ~[?:?]
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?]
+[28Oct2026 22:47:31.567] [Server thread/ERROR] [net.minecraft.server.MinecraftServer/]: Uncaught exception in server thread
+net.neoforged.fml.ModLoadingException: Loading errors encountered:
+	- Small Ships (smallships) encountered an error while dispatching the net.neoforged.fml.event.config.ModConfigEvent$Unloading event
+	  java.lang.IllegalStateException: Cannot call getFullPath() on non-file config null at path smallships-server.toml
+
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:162) ~[loader-4.0.45.jar%2359!/:4.0]

@@ -1,0 +1,58 @@
+---- Minecraft Crash Report ----
+
+// I am capable of so much more than being a crash log. There has to be more to this world.
+Please make sure this issue is not caused by Sable before reporting it to other mod authors.
+If you cannot reproduce it without Sable, file a report on the issue tracker
+https://github.com/ryanhcode/sable/issues
+
+// Hey, that tickles! Hehehe!
+
+Time: 2026-10-28 22:47:24
+Description: Exception in server tick loop
+
+net.neoforged.fml.ModLoadingException: Loading errors encountered:
+	- Mystical Agriculture Plus (mysticalagricultureplus) encountered an error while dispatching the net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent event
+	  java.lang.IllegalArgumentException: Itemstack 1 mysticalagricultureplus:fe_seeds does not exist in tab's list
+
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:181) ~[loader-4.0.45.jar%2359!/:4.0] {re:mixin}
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$postEvent$13(ModLoader.java:358) ~[loader-4.0.45.jar%2359!/:4.0] {}
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75) ~[?:?] {re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174) ~[loader-4.0.45.jar%2359!/:4.0] {re:mixin}
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.postEvent(ModLoader.java:358) ~[loader-4.0.45.jar%2359!/:4.0] {}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.event.EventHooks.onCreativeModeTabBuildContents(EventHooks.java:1134) ~[neoforge-21.1.265-universal.jar%231101!/:?] {re:mixin,re:classloading,pl:mixin:APP:aether.mixins.json:common.EventHooksMixin from mod aether,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents$mixinextras$wrapped$48(CreativeModeTab.java:145) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:mixin:APP:l2core.mi
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.mixinextras$bridge$buildContents$mixinextras$wrapped$48$49(CreativeModeTab.java) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:m
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.wrapMethod$zek000$modernfix$buildContentsIfChanged(CreativeModeTab.java:532) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:mixin
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents$mixinextras$wrapped$50(CreativeModeTab.java) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:mixin:APP:l2core.mixins
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.mixinextras$bridge$buildContents$mixinextras$wrapped$50$51(CreativeModeTab.java) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:m
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.wrapMethod$dhj000$simulated$buildContents(CreativeModeTab.java:1532) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:mixin:APP:l2c
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents$mixinextras$wrapped$52(CreativeModeTab.java) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:mixin:APP:l2core.mixins
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.mixinextras$bridge$buildContents$mixinextras$wrapped$52$53(CreativeModeTab.java) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:m
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.wrapMethod$ejl000$fancytabsections$fts$buildContents(CreativeModeTab.java:3032) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:mi
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents(CreativeModeTab.java) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.memoize_creative_tab_build.CreativeModeTabMixin from mod modernfix,pl:mixin:APP:l2core.mixins.json:CreativeModeTabMi
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.lambda$buildAllTabContents$48(CreativeModeTabs.java:2166) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,xf:fml:apothic_enchanting:ench_info_redirects,re:classloading,pl:accesstransformer:B,xf:fml:apothic_enchanting:ench_info_redirects,pl:mixin:APP:create_connected.mixins.json:featureto
+	at java.base/java.util.stream.ForEachOps$ForEachOp$OfRef.accept(ForEachOps.java:184) ~[?:?] {}
+	at java.base/java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:179) ~[?:?] {}
+	at java.base/java.util.Iterator.forEachRemaining(Iterator.java:133) ~[?:?] {re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+	at java.base/java.util.Spliterators$IteratorSpliterator.forEachRemaining(Spliterators.java:1939) ~[?:?] {}
+	at java.base/java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:509) ~[?:?] {}
+	at java.base/java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:499) ~[?:?] {}
+	at java.base/java.util.stream.ForEachOps$ForEachOp.evaluateSequential(ForEachOps.java:151) ~[?:?] {}
+	at java.base/java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(ForEachOps.java:174) ~[?:?] {}
+	at java.base/java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:234) ~[?:?] {}
+	at java.base/java.util.stream.ReferencePipeline.forEach(ReferencePipeline.java:596) ~[?:?] {}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.buildAllTabContents(CreativeModeTabs.java:2166) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,xf:fml:apothic_enchanting:ench_info_redirects,re:classloading,pl:accesstransformer:B,xf:fml:apothic_enchanting:ench_info_redirects,pl:mixin:APP:create_connected.mixins.json:featuretoggle.Creat
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.tryRebuildTabContents(CreativeModeTabs.java:2177) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,xf:fml:apothic_enchanting:ench_info_redirects,re:classloading,pl:accesstransformer:B,xf:fml:apothic_enchanting:ench_info_redirects,pl:mixin:APP:create_connected.mixins.json:featuretoggle.Cre
+	at TRANSFORMER/computercraft@1.120.2/dan200.computercraft.shared.CommonHooks.onServerStarted(CommonHooks.java:97) ~[cc-tweaked-1.21.1-forge-1.120.2.jar%231274!/:1.120.2] {re:classloading}
+	at TRANSFORMER/computercraft@1.120.2/dan200.computercraft.shared.ForgeCommonHooks.onServerStarted(ForgeCommonHooks.java:54) ~[cc-tweaked-1.21.1-forge-1.120.2.jar%231274!/:1.120.2] {re:classloading}
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.5.jar%2362!/:?] {}
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:328) ~[bus-8.0.5.jar%2362!/:?] {}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.server.ServerLifecycleHooks.handleServerStarted(ServerLifecycleHooks.java:113) ~[neoforge-21.1.265-universal.jar%231101!/:?] {re:mixin,re:classloading,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.runServer(MinecraftServer.java:674) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.fix_loop_spin_waiting.MinecraftServerMixin from mod modernfix,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.dedicate
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.lambda$spin$2(MinecraftServer.java:267) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.fix_loop_spin_waiting.MinecraftServerMixin from mod modernfix,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.dedi
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+

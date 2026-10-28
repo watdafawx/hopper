@@ -132,6 +132,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/servers/infos", get(infos))
         .route("/api/v1/servers/{id}/mods", get(mods))
         .route("/api/v1/servers/{id}/crash", get(crash))
+        .route("/api/v1/servers/{id}/crash/put-back", post(crash_put_back))
         .route("/api/v1/servers/{id}/neoforge", get(neoforge))
         .route("/api/v1/servers/{id}", get(server))
         .route("/api/v1/servers/{id}/power", post(power))
@@ -571,7 +572,9 @@ async fn mods(
     Ok(Json(json!({ "mods": mods })))
 }
 
-/// The server's last crash, from its logs and crash reports.
+/// The server's last crash, read like Hopper reads a game's: the mods it
+/// names with how sure, what happened in order, and what changed lately.
+/// `report` is the crash file inside the server folder, to open or share.
 async fn crash(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -580,8 +583,62 @@ async fn crash(
 ) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
-    let c = tokio::task::spawn_blocking(move || hopper_core::crashscan::last_crash(&e.root)).await.map_err(bad)?;
-    Ok(Json(json!({ "crash": c })))
+    let root = e.root.clone();
+    let c = tokio::task::spawn_blocking(move || hopper_core::crashdetect::server(&root)).await.map_err(bad)?;
+    let report = c
+        .as_ref()
+        .and_then(|c| c.source.strip_prefix(&e.root).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"));
+    Ok(Json(json!({ "crash": c, "report": report })))
+}
+
+#[derive(serde::Deserialize)]
+struct PutBackBody {
+    /// The jar in the mods folder now (the newer one).
+    file: String,
+}
+
+/// Puts back the older copy of the mod the last crash's error names: the
+/// jar there now goes to `.hopper-backups` first. Read again here, so only
+/// a change this crash names can be undone this way.
+async fn crash_put_back(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<PutBackBody>,
+) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    if e.server.state().is_alive() {
+        return Err(bad("Stop the server first."));
+    }
+    let root = e.root.clone();
+    let back = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let c = hopper_core::crashdetect::server(&root).ok_or_else(|| anyhow::anyhow!("The server's last start didn't crash."))?;
+        let ch = c
+            .suspects
+            .iter()
+            .filter_map(|s| s.changed.as_ref())
+            .find(|ch| ch.file_name == b.file)
+            .ok_or_else(|| anyhow::anyhow!("The crash doesn't name a change to {}.", b.file))?;
+        let back = hopper_core::crashdetect::put_back(&root, ch)?;
+        let name = back.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        // The mod list's entry follows the jar that's back.
+        if let Some(mut inst) = hopper_core::instances::load(&root)
+            && let Some(a) = inst.addons.iter_mut().find(|a| a.file_name == ch.file_name)
+        {
+            a.file_name = name.clone();
+            inst.save()?;
+        }
+        Ok(name)
+    })
+    .await
+    .map_err(bad)?
+    .map_err(|e| bad(format!("{e:#}")))?;
+    log::info!("{}: put back {back} after a crash", e.name);
+    crate::mods_api::forget_updates(&id);
+    Ok(Json(json!({ "back": back })))
 }
 
 /// The NeoForge version the server's run.bat starts.
