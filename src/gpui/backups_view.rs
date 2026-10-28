@@ -310,6 +310,8 @@ impl BackupsView {
         let total = c.total() + usize::from(c.meta);
         let title = snap.label();
         let when = hopper::snapshots::when_label(snap.when);
+        // "Snapshot first" is off unless ticked: backups are the player's to make.
+        let first = std::rc::Rc::new(std::cell::Cell::new(false));
         window.open_alert_dialog(cx, move |alert, _, cx| {
             let theme = cx.theme();
             let line = |k: &'static str, v: String| {
@@ -319,6 +321,7 @@ impl BackupsView {
                     .child(div().flex_1().min_w_0().child(v))
             };
             let (view, id) = (view.clone(), snap.id.clone());
+            let (f2, f3) = (first.clone(), first.clone());
             alert
                 .title(format!("Restore \"{title}\"?"))
                 .description(
@@ -333,20 +336,32 @@ impl BackupsView {
                                 .child(line("Configs", files.clone()))
                                 .child(line("Worlds", "Never part of snapshots".into())),
                         )
-                        .child(div().text_color(theme.muted_foreground).child(
-                            "A \"Before restoring\" snapshot is taken first, so this can be undone. Close the game before restoring.",
-                        )),
+                        .child(
+                            gpui_kit::component::checkbox::Checkbox::new("restore-snap-first")
+                                .label("Take a snapshot first, so this can be undone")
+                                .checked(f2.get())
+                                .on_click(move |v: &bool, window, _| {
+                                    f3.set(*v);
+                                    window.refresh();
+                                }),
+                        )
+                        .child(div().text_color(theme.muted_foreground).child(if f2.get() {
+                            "Close the game before restoring."
+                        } else {
+                            "Without one, mods and configs it takes away go to .hopper-backups. Close the game before restoring."
+                        })),
                 )
                 .confirm()
                 .ok_text(format!("Restore {total} change{}", if total == 1 { "" } else { "s" }))
                 .on_ok(move |_, window, cx| {
-                    view.update(cx, |this, cx| this.restore_snapshot(id.clone(), window, cx));
+                    let first = f2.get();
+                    view.update(cx, |this, cx| this.restore_snapshot(id.clone(), first, window, cx));
                     true
                 })
         });
     }
 
-    fn restore_snapshot(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn restore_snapshot(&mut self, id: String, snapshot_first: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy.is_some() {
             return;
         }
@@ -359,19 +374,25 @@ impl BackupsView {
         cx.notify();
         let root = self.root.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let r = cx.background_spawn(async move { hopper::snapshots::restore(&root, &id) }).await;
+            let r = cx.background_spawn(async move { hopper::snapshots::restore(&root, &id, snapshot_first) }).await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
                 match r {
-                    Ok(r) => window.push_notification(
-                        Notification::success(format!(
-                            "Restored \"{label}\" ({} file{}). To undo, restore \"{}\".",
-                            r.changed,
-                            if r.changed == 1 { "" } else { "s" },
-                            r.safety.label()
-                        )),
-                        cx,
-                    ),
+                    Ok(r) => {
+                        let undo = match (&r.safety, &r.aside) {
+                            (Some(s), _) => format!(" To undo, restore \"{}\".", s.label()),
+                            (None, Some(_)) => " What it took away is in .hopper-backups.".to_string(),
+                            (None, None) => String::new(),
+                        };
+                        window.push_notification(
+                            Notification::success(format!(
+                                "Restored \"{label}\" ({} file{}).{undo}",
+                                r.changed,
+                                if r.changed == 1 { "" } else { "s" },
+                            )),
+                            cx,
+                        )
+                    }
                     Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
                 }
                 this.changed(cx);

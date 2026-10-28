@@ -4139,7 +4139,7 @@ impl Render for UpdateReview {
                 v_flex()
                     .gap_2()
                     .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
-                        "Old files go to .hopper-backups, and you can undo when it's done. A snapshot of the whole set is saved first: restore it from Backups.",
+                        "Old files go to .hopper-backups, and you can undo when it's done.",
                     ))
                     .child(summary)
                     .children(bad_note),
@@ -4226,7 +4226,8 @@ impl BulkSum {
                     note.dismiss(window, cx);
                 }))
         })
-        // A snapshot in Backups keeps the undo; the toast shouldn't linger.
+        // History keeps the undo (the old jars are in .hopper-backups); the
+        // toast shouldn't linger.
         .autohide(true);
         window.push_notification(note, cx);
     }

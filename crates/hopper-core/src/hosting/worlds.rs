@@ -267,8 +267,9 @@ fn random_seed() -> String {
 
 /// Resets a world: its folders go through `trash` (rel paths, so they can
 /// come back from the panel's trash), and the next start makes it again
-/// with the chosen seed. `keep_dims` keeps the Nether and End. Make a
-/// backup first ([`backup_world`]) and stop the server; returns the seed.
+/// with the chosen seed. `keep_dims` keeps the Nether and End. Stop the
+/// server first (a backup, [`backup_world`], only when the person asks for
+/// one); returns the seed.
 pub fn reset(root: &Path, name: &str, seed: &SeedChoice, keep_dims: bool, trash: &dyn Fn(&str) -> anyhow::Result<()>) -> anyhow::Result<String> {
     check_name(name)?;
     let dir = root.join(name);

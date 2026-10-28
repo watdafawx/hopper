@@ -132,12 +132,12 @@
     asking = { b, paths, changes };
   }
 
-  async function doRestore() {
+  async function doRestore(backupFirst = false) {
     const { b, paths } = asking;
     asking = null;
     busy = 'Restoring';
     try {
-      const { job } = await post(`${base}/backups/${encodeURIComponent(b.name)}/restore`, { paths });
+      const { job } = await post(`${base}/backups/${encodeURIComponent(b.name)}/restore`, { paths, backup_first: backupFirst });
       await run('Restoring', job, (r) => {
         say(`Restored "${title(b)}" (${plural(r.files, 'file')}).${r.safety_note ? ` To undo, restore "${r.safety_note}".` : ''}`);
         pick = new Set();

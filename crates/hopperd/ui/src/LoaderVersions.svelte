@@ -1,8 +1,8 @@
 <script>
   // The server's mod loader builds and what each changed, as Hopper
   // desktop's "Loader versions and changelog". "Use this version" installs
-  // that build right away (the panel backs the server up first; Settings ›
-  // Version has Undo).
+  // that build right away (no backup: Settings › Version's Undo puts the
+  // old start files back).
   import { X, Check } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { followJob } from './lib/jobs.js';

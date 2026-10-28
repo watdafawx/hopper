@@ -850,16 +850,11 @@ pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, f
                                 window.close_dialog(cx);
                                 window
                                     .spawn(cx, async move |cx| {
-                                        let (r2, n2) = (root.clone(), name.clone());
+                                        let r2 = root.clone();
                                         let r = cx
                                             .background_spawn(async move {
-                                                // A snapshot first, so Backups can put it back.
-                                                if let Err(e) = hopper::snapshots::take(
-                                                    &r2,
-                                                    hopper::snapshots::Reason::ConfigReset { name: n2.to_string() },
-                                                ) {
-                                                    log::warn!("snapshot: {e:#}");
-                                                }
+                                                // The files go to .hopper-backups; no snapshot
+                                                // (backups are the player's to make).
                                                 hopper::modconfig::reset(&r2, &files)
                                             })
                                             .await;

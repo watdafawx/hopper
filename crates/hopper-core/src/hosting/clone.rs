@@ -32,6 +32,7 @@ pub const NOT_COPIED: &[&str] = &[
     super::process::RUN_FILE,
     ".hopper-crash.json",
     super::version_change::RECORD,
+    super::version_change::KEPT_DIR,
 ];
 
 /// Also left out of templates: who plays there, and the EULA (the person
