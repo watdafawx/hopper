@@ -45,7 +45,7 @@ export function queueUploads(server, items, overwrite = false) {
     files.set(id, file);
     transfers.list.push({
       id, kind: 'up', server, path, name: file.name, size: file.size, done: 0, speed: 0,
-      state: 'queued', error: '', upload: null, overwrite, samples: [],
+      state: 'queued', error: '', upload: null, overwrite, samples: [], gen: 0,
     });
   }
   transfers.open = true;
@@ -93,10 +93,15 @@ function putChunk(t, offset, blob) {
 async function run(id) {
   const t = find(id);
   const file = files.get(id);
+  // A pause and resume while this run waits on the panel starts a new run;
+  // this one then stops instead of sending the same chunks alongside it.
+  const gen = ++t.gen;
+  const mine = () => find(id)?.state === 'running' && t.gen === gen;
   try {
     let offset = 0;
     if (!t.upload) {
       const r = await post(`/fs/${encodeURIComponent(t.server)}/uploads`, { path: t.path, size: file.size, overwrite: t.overwrite });
+      if (t.gen !== gen) return;
       t.upload = r.id;
     } else {
       offset = (await api(`/fs/${encodeURIComponent(t.server)}/uploads/${t.upload}`)).offset;
@@ -105,8 +110,9 @@ async function run(id) {
     if (file.size === 0) {
       await putChunk(t, 0, new Blob([]));
     }
+    if (!mine()) return;
     while (offset < file.size) {
-      if (find(id)?.state !== 'running') return;
+      if (!mine()) return;
       try {
         const r = await putChunk(t, offset, file.slice(offset, offset + CHUNK));
         offset = r.offset;
@@ -114,7 +120,7 @@ async function run(id) {
         fails = 0;
         if (r.done) break;
       } catch (e) {
-        if (e.aborted) return;
+        if (e.aborted || !mine()) return;
         if (!e.network || ++fails > RETRIES) throw e;
         t.error = `Connection lost, retrying (${fails}/${RETRIES})…`;
         await new Promise((r) => setTimeout(r, 500 * 2 ** fails));
@@ -122,6 +128,7 @@ async function run(id) {
         t.error = '';
       }
     }
+    if (!mine()) return;
     t.state = 'done';
     t.done = file.size;
     t.speed = 0;
@@ -129,6 +136,7 @@ async function run(id) {
     const folder = t.path.split('/').slice(0, -1).join('/');
     for (const fn of listeners) fn(t.server, folder);
   } catch (e) {
+    if (!mine()) return;
     t.state = 'failed';
     t.error = e.message;
   } finally {

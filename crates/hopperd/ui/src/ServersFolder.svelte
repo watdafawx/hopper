@@ -110,7 +110,6 @@
 </script>
 
 <div class="page">
-  <h1>Panel folder</h1>
   <div class="card col">
     <div class="row">
       <FolderCog size={16} />
@@ -128,7 +127,7 @@
     {/if}
     {#if info?.extra?.length}<div class="tiny muted">Outside it, running where they are: {info.extra.join(', ')}. Move them in or remove them from the panel.</div>{/if}
   </div>
-  <h2>Servers folder</h2>
+  <h2 class="lbl">Servers folder</h2>
   <div class="card col">
     <div class="row">
       <FolderOpen size={16} />
@@ -137,7 +136,7 @@
     </div>
     <div class="small muted">Inside the panel folder: new servers go here, and every server folder in it shows up on its own.</div>
     {#if picking}<FolderPicker start={info?.path || info?.home || ''} pickLabel="Look in this folder" onPick={pick} onCancel={() => (picking = false)} />{/if}
-    {#if busy}<div class="busy small"><span class="spin"></span>{busy}</div>{/if}
+    {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
 
     {#if found}
       <h4>In {found.path}</h4>
@@ -174,7 +173,7 @@
   </div>
 
   {#if info?.deleted?.length}
-    <h2>Deleted servers</h2>
+    <h2 class="lbl">Deleted servers</h2>
     <div class="card col">
       <div class="small muted">Kept 30 days in .hopper-deleted, then removed.</div>
       {#each info.deleted as d (d.name)}
@@ -189,13 +188,13 @@
 </div>
 
 <style>
-  .page { max-width: 860px; display: flex; flex-direction: column; gap: 12px; }
-  .page h1 { font-size: 18px; margin: 0; }
-  .page h2 { font-size: 14px; margin: 8px 0 0; }
+  .page { display: flex; flex-direction: column; gap: 12px; }
+  /* Section titles like desktop Settings: small, uppercase, muted. */
+  .page h2 { margin: 8px 4px 0; }
   .col { display: flex; flex-direction: column; gap: 10px; }
   .grow { flex: 1; min-width: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; }
+  .list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius-lg); }
   .it { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--line); }
   .it:last-child { border: 0; }
   .it.dim { opacity: 0.55; }
@@ -206,8 +205,5 @@
   .eula { display: flex; gap: 8px; align-items: center; }
   .end { justify-content: flex-end; gap: 8px; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
-  .spin { width: 12px; height: 12px; border: 2px solid var(--gold); border-right-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; }
-  @keyframes s { to { transform: rotate(360deg); } }
   .bad { color: var(--red); }
-  .icon { padding: 3px 5px; }
 </style>

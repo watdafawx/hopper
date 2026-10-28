@@ -85,15 +85,15 @@
   <div class="ctl"><button class="btn sm" disabled={alive} title={alive ? 'Stop the server first' : ''} onclick={openClone}><Copy size={13} />Clone…</button></div>
 </div>
 <div class="fl">
-  <div class="lab"><div>Template</div><div class="tiny muted">{saving ? saving : 'Mods, configs and start files, no world. New server › Template starts from it.'}</div></div>
+  <div class="lab"><div>Template</div><div class="tiny muted">{#if saving}<span class="row busy"><span class="spinner"></span>{saving}</span>{:else}Mods, configs and start files, no world. New server › Template starts from it.{/if}</div></div>
   <div class="ctl"><button class="btn sm" disabled={alive || !!saving} title={alive ? 'Stop the server first' : ''} onclick={template}><LayoutTemplate size={13} />Save as template…</button></div>
 </div>
 {#if alive}<div class="tiny warn">Stop the server first to copy it.</div>{/if}
 
 {#if open}
-  <div class="back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && (open = false)}>
-    <div class="box card">
-      <h3><Copy size={15} />Clone {server.name}<span class="sp"></span><button class="btn sm icon ghost" disabled={!!busy} onclick={() => (open = false)}><X size={14} /></button></h3>
+  <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && (open = false)}>
+    <div class="box popover" role="dialog" aria-modal="true" aria-label="Clone {server.name}">
+      <h3><Copy size={15} />Clone {server.name}<span class="sp"></span><button class="btn sm icon ghost" title="Close" disabled={!!busy} onclick={() => (open = false)}><X size={14} /></button></h3>
       <label class="lbl" for="cl-name">Name</label>
       <div class="input"><input id="cl-name" bind:value={name} disabled={!!busy} oninput={() => info?.domain && (addr = slug(name))} /></div>
       <span class="lbl">World</span>
@@ -113,7 +113,7 @@
         Not copied: backups, logs, crash reports, the schedule, the address. Players, ops and the whitelist are copied.
       </div>
       {#if error}<div class="err">{error}</div>{/if}
-      {#if busy}<div class="busy small"><span class="spin"></span>{busy}</div>{/if}
+      {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
       <div class="row end"><span class="sp"></span><button class="btn" disabled={!!busy} onclick={() => (open = false)}>Cancel</button><button class="btn pri" disabled={!!busy || !name.trim() || !info} onclick={clone}><Copy size={13} />Clone</button></div>
     </div>
   </div>
@@ -124,9 +124,8 @@
   .lab > div:first-child { font-weight: 500; }
   .ctl { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
   .warn { color: var(--gold); margin-top: 4px; }
-  .back { position: fixed; inset: 0; background: #0008; display: flex; justify-content: center; align-items: flex-start; z-index: 55; padding: 56px 16px 16px; overflow: auto; }
-  .box { width: min(500px, 100%); display: flex; flex-direction: column; gap: 8px; box-shadow: 0 24px 60px #000c; }
-  .box h3 { margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+  .box { width: min(500px, 100%); display: flex; flex-direction: column; gap: 8px; padding: 14px; }
+  .box h3 { margin: 0 0 4px; display: flex; align-items: center; gap: 8px; font-size: 14px; }
   .two { display: grid; grid-template-columns: 140px 1fr; gap: 12px; }
   .two > div { display: flex; flex-direction: column; gap: 6px; }
   .grow { flex: 1; min-width: 0; }
@@ -137,7 +136,5 @@
   .note { border: 1px solid var(--line); background: var(--base); border-radius: 8px; padding: 8px 10px; color: var(--subtle); }
   .end { margin-top: 6px; gap: 8px; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
-  .spin { width: 12px; height: 12px; border: 2px solid var(--gold); border-right-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; }
-  @keyframes s { to { transform: rotate(360deg); } }
   @media (max-width: 900px) { .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; } .two { grid-template-columns: 1fr; } }
 </style>

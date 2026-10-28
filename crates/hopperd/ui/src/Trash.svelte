@@ -14,24 +14,33 @@
   let loading = $state(true);
   const base = $derived(`/fs/${encodeURIComponent(server.id)}`);
 
+  let seq = 0;
   async function load() {
+    const n = ++seq;
     loading = true;
     try {
-      items = (await api(`${base}/trash`)).items;
+      const r = (await api(`${base}/trash`)).items;
+      if (n === seq) items = r;
     } catch (e) {
       say(e.message, true);
     } finally {
-      loading = false;
+      if (n === seq) loading = false;
     }
   }
 
+  /** Items being restored or deleted (a second click does nothing). */
+  let busy = $state(new Set());
   async function restore(i) {
+    if (busy.has(i.id)) return;
+    busy = new Set([...busy, i.id]);
     try {
       const r = await post(`${base}/trash/restore`, { id: i.id });
       say(i.kind === 'saved-over' ? `Restored the older ${r.path}` : `Restored ${r.path}`);
-      load();
+      await load();
     } catch (e) {
       say(e.message, true);
+    } finally {
+      busy = new Set([...busy].filter((x) => x !== i.id));
     }
   }
 
@@ -69,17 +78,21 @@
   </div>
   <div class="list">
     {#each items as i (i.id)}
-      <div class="row it">
+      <div class="row it row-hover">
         {#if i.dir}<Folder size={15} color="var(--acc)" />{:else if i.kind === 'saved-over'}<FileClock size={15} color="var(--blue)" />{:else}<File size={15} color="var(--muted)" />{/if}
         <div class="nmw">
           <div class="nm">{i.path}</div>
           <div class="tiny muted">{i.kind === 'saved-over' ? 'Version before a save' : 'Deleted'} · {when(i.at)} · {bytes(i.size)}</div>
         </div>
-        <button class="btn sm" onclick={() => restore(i)}><RotateCcw size={13} />Restore</button>
-        <button class="btn sm icon ghost" title="Delete for good" onclick={() => purge([i.id])}><Trash2 size={13} /></button>
+        <button class="btn sm" disabled={busy.has(i.id)} onclick={() => restore(i)}>{#if busy.has(i.id)}<span class="spinner"></span>{:else}<RotateCcw size={13} />{/if}Restore</button>
+        <button class="btn sm icon ghost" title="Delete for good" disabled={busy.has(i.id)} onclick={() => purge([i.id])}><Trash2 size={13} /></button>
       </div>
     {:else}
-      <div class="msg muted">{loading ? 'Loading…' : 'The trash is empty.'}</div>
+      {#if loading}
+        <div class="skels">{#each [44, 30, 56, 38] as w, i (i)}<div class="skel"><i style:width="{w}%"></i></div>{/each}</div>
+      {:else}
+        <div class="empty-state"><span class="es-ic"><Trash2 size={18} /></span><b>The trash is empty</b><p>Deleted files and the version before each save land here for 30 days.</p></div>
+      {/if}
     {/each}
   </div>
 </div>
@@ -91,5 +104,5 @@
   .it { padding: 8px 12px; border-bottom: 1px solid #26262c; }
   .nmw { flex: 1; min-width: 0; }
   .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .msg { padding: 24px; text-align: center; }
+  .skels { padding: 8px 4px; }
 </style>

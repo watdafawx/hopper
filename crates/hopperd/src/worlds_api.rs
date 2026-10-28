@@ -81,6 +81,18 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, P
     let v = blocking(move || {
         let ws = worlds::list(&root);
         let total: u64 = ws.iter().map(|w| w.size).sum();
+        // As desktop's world cards: the world's icon.png and its data packs.
+        let ws: Vec<Value> = ws
+            .into_iter()
+            .map(|w| {
+                let dir = root.join(&w.name);
+                let packs = crate::parity_worlds::datapacks(&dir.join("datapacks"));
+                let mut v = json!(w);
+                v["icon"] = json!(dir.join("icon.png").is_file());
+                v["datapacks"] = json!(packs);
+                v
+            })
+            .collect();
         Ok(json!({
             "worlds": ws,
             "total_size": total,
@@ -200,10 +212,21 @@ async fn import(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     crate::files::resolve(&e.root, &b.zip).map_err(bad)?;
     log::info!("{}: importing world {} from {}", e.name, b.name.trim(), b.zip);
     let job = crate::pack_api::spawn(&app, format!("Adding world {} to {}", b.name.trim(), e.name), move |job| {
-        worlds::import_zip(&e.root, &b.zip, b.name.trim(), job)?;
+        let r = worlds::import_zip(&e.root, &b.zip, b.name.trim(), job);
+        // The Worlds tab's upload is only a carrier: don't leave it in the
+        // server folder when it couldn't be unpacked (on success it's gone).
+        if r.is_err() && is_world_upload(&b.zip) {
+            let _ = std::fs::remove_file(e.root.join(&b.zip));
+        }
+        r?;
         Ok(json!({ "ok": true }))
     });
     Ok(Json(json!({ "job": job })))
+}
+
+/// The Worlds tab's upload name: `world-upload-<ms>.zip` in the server folder.
+fn is_world_upload(rel: &str) -> bool {
+    rel.strip_prefix("world-upload-").and_then(|r| r.strip_suffix(".zip")).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[derive(Deserialize)]
@@ -385,4 +408,17 @@ async fn pregen_op(State(app): State<Arc<App>>, headers: HeaderMap, method: Meth
         let _ = app.servers.command(&e, "chunky confirm");
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::is_world_upload;
+
+    #[test]
+    fn world_upload_names() {
+        assert!(is_world_upload("world-upload-1761650000000.zip"));
+        for no in ["world-upload-.zip", "world.zip", "mods/world-upload-1.zip", "world-upload-1.zip.bak", "world-upload-../x.zip"] {
+            assert!(!is_world_upload(no), "{no}");
+        }
+    }
 }

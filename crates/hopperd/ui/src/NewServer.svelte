@@ -4,8 +4,9 @@
   // a Server pack zip (uploaded or on this machine), a CurseForge /
   // Modrinth pack or a Template. Name, memory, port, address and the EULA
   // are shared. The dialog keeps one height; its body scrolls.
-  import { onMount } from 'svelte';
-  import { X, Server, Search, Upload, FolderOpen, FileArchive, Sparkles, Package, LayoutTemplate } from '@lucide/svelte';
+  import { onMount, untrack } from 'svelte';
+  import { X, Server, Search, Upload, FolderOpen, FileArchive, Sparkles, Package, LayoutTemplate, Hammer, ExternalLink } from '@lucide/svelte';
+  import { SITE, LOADER_NAME, store } from './lib/browse.js';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { followJob } from './lib/jobs.js';
@@ -77,8 +78,8 @@
   let zipInfo = $state(null);
   let zipPicking = $state(false);
   let progress = $state(0);
-  // Pack
-  let source = $state('modrinth');
+  // Pack: searched like Browse (both sites at once, or one), popular first.
+  let source = $state(store('browse.source') || 'both');
   let query = $state('');
   let results = $state([]);
   let searching = $state(false);
@@ -86,6 +87,9 @@
   let packVersions = $state([]);
   let packFile = $state('');
   let cfKey = $state(true);
+  // A pack from Browse shows as picked; Change opens the search.
+  let showSearch = $state(true);
+  let searchTimer;
 
   const options = $derived(loaders[loader] || []);
   const domain = $derived(router?.config?.enabled ? router.config.domain : '');
@@ -120,13 +124,13 @@
     if (from === 'zip' && !(zipFile || zipPath)) return 'Pick a zip.';
     if (from === 'zip' && !zipInfo) return error ? '' : 'Reading the zip…';
     if (from === 'pack' && !pack) return 'Pick a modpack.';
-    if (from === 'pack' && !packFile) return 'Pick a version.';
+    if (from === 'pack' && !packFile) return loadingVersions ? 'Loading its versions…' : 'Pick a version.';
     if (from === 'fresh' || needsPick) {
       if (!mc) return 'Pick a Minecraft version.';
-      if (!OPTIONAL_VERSION.includes(loader) && !lv) return loadingLoaders ? `Looking up ${loaderLabel(loader)} versions…` : `No ${loaderLabel(loader)} for Minecraft ${mc}: pick another version.`;
+      if (!OPTIONAL_VERSION.includes(loader) && !lv) return loadingLoaders ? 'Loading builds' : `No ${loaderLabel(loader)} builds for ${mc}: pick another version.`;
     }
     if (!name.trim()) return 'Name the server.';
-    if (!eula) return 'Agree to the Minecraft EULA.';
+    if (!eula) return 'Agree to the Minecraft EULA to make a server.';
     return '';
   });
   api('/router').then((r) => (router = r), () => {});
@@ -169,8 +173,10 @@
     mc;
     loadLoaders();
   });
+  // The build desktop picks: the loader's recommended one when it lists it, else the newest.
   $effect(() => {
-    lv = options[0] || '';
+    const rec = recommended[loader];
+    lv = rec && options.includes(rec) ? rec : options[0] || '';
   });
   $effect(() => {
     if (from === 'fresh') memory = loader === 'vanilla' || PLUGINS.includes(loader) ? 2 : 6;
@@ -222,32 +228,75 @@
     await inspect(`path=${encodeURIComponent(p)}`);
   }
 
+  let searchSeq = 0;
   async function search(e) {
     e?.preventDefault();
+    clearTimeout(searchTimer);
+    const my = ++searchSeq;
     searching = true;
     error = '';
     try {
-      results = (await api(`/packs/search?q=${encodeURIComponent(query)}&source=${source}`)).results;
+      const r = await api(`/browse/search?${new URLSearchParams({ type: 'modpacks', q: query, source, sort: 'popularity', page: '0' })}`);
+      if (my !== searchSeq) return;
+      cfKey = r.curseforge;
+      // Browse's cards: `num` is the id New server's pack routes take.
+      results = r.results.map((c) => ({ ...c, id: c.num }));
     } catch (err) {
+      if (my !== searchSeq) return;
       error = err.message;
       results = [];
     } finally {
-      searching = false;
+      if (my === searchSeq) searching = false;
     }
   }
+  function searchSoon() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(search, 350);
+  }
+  function setSource(s) {
+    if (s === source) return;
+    source = s;
+    store('browse.source', s);
+    search();
+  }
+  // The pack tab opens on the popular packs, like Browse.
+  let listed = false;
+  $effect(() => {
+    if (from === 'pack' && showSearch && !listed) {
+      listed = true;
+      if (results.length <= 1 && !query) untrack(() => search());
+    }
+  });
+  /** "NeoForge 1.21.1": what a pack version runs on. */
+  function runsOn(v) {
+    const l = (v?.loaders || []).map((x) => LOADER_NAME[String(x).toLowerCase()] || '').find(Boolean) || pack?.loaders?.[0] || '';
+    return `${l || 'Minecraft'} ${v?.mc_version || ''}`.trim();
+  }
 
+  let packSeq = 0;
+  let loadingVersions = $state(false);
   async function choosePack(r, file = '', version = null) {
+    const my = ++packSeq;
+    // A name that came from the last pack follows the new one.
+    if (!name.trim() || name === pack?.name) name = r.name;
     pack = r;
-    packVersions = [];
-    packFile = '';
-    if (!name.trim()) name = r.name;
+    packVersions = version ? [version] : [];
+    packFile = version?.id || '';
+    error = '';
+    // Picked: the search folds away (Change opens it again), like a pack from Browse.
+    showSearch = false;
+    loadingVersions = true;
     try {
-      packVersions = (await api(`/packs/versions?project=${r.id}&source=${r.source}`)).versions;
+      let list = (await api(`/packs/versions?${new URLSearchParams({ project: r.id, source: r.source })}`)).versions || [];
+      if (my !== packSeq) return;
       // An older version picked in Browse may be past the newest 50.
-      if (version && !packVersions.some((v) => v.id === version.id)) packVersions = [version, ...packVersions];
-      packFile = (file && packVersions.some((v) => v.id === file) ? file : '') || (packVersions.find((v) => /release/i.test(v.type)) || packVersions[0])?.id || '';
+      if (version && !list.some((v) => v.id === version.id)) list = [version, ...list];
+      packVersions = list;
+      packFile = (file && list.some((v) => v.id === file) ? file : '') || (list.find((v) => /release/i.test(v.type)) || list[0])?.id || '';
     } catch (err) {
-      error = err.message;
+      if (my === packSeq) error = err.message;
+    } finally {
+      if (my === packSeq) loadingVersions = false;
     }
   }
 
@@ -290,7 +339,7 @@
   // Escape closes (unless a confirm dialog is on top); Enter in one of
   // its fields makes the server (the pack search box has no id: it searches).
   function onWindowKey(e) {
-    if (e.key === 'Escape' && !dialog.open && !busy) {
+    if (e.key === 'Escape' && !e.defaultPrevented && !dialog.open && !busy) {
       e.preventDefault();
       close();
     }
@@ -307,7 +356,7 @@
   onMount(async () => {
     if (preset) {
       from = 'pack';
-      source = preset.source;
+      showSearch = false;
       results = [preset];
       choosePack(preset, preset.file, preset.version);
     }
@@ -345,7 +394,7 @@
         {#if options.length}
           <select id="ns-lv" class="sel" bind:value={lv} disabled={!!busy}>{#each options as o (o)}<option value={o}>{o}{o === recommended[loader] ? (loader === 'forge' ? ' · recommended' : ' · latest stable') : ''}</option>{/each}</select>
         {:else}
-          <div class="sel ghost small muted">{loadingLoaders ? 'Looking up versions…' : mc ? `No ${loaderLabel(loader)} for Minecraft ${mc}.` : '–'}</div>
+          <div class="sel ghost small muted">{loadingLoaders ? 'Loading builds' : mc ? `No ${loaderLabel(loader)} builds for ${mc}` : '–'}</div>
         {/if}
         {#if PLUGINS.includes(loader)}
           <div class="tiny muted">Plugins (.jar files from Hangar, Modrinth or SpigotMC) go in the <code>plugins</code> folder. {loaderLabel(loader)} doesn't run Forge or Fabric mods.</div>
@@ -355,9 +404,9 @@
   </div>
 {/snippet}
 
-<div class="back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && close()}>
-  <div class="box card" role="dialog" aria-modal="true" aria-labelledby="ns-title" tabindex="-1" onkeydown={onBoxKey}>
-    <h3 id="ns-title" class="head"><Server size={15} />New server<span class="sp"></span>
+<div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && close()}>
+  <div class="box popover" role="dialog" aria-modal="true" aria-labelledby="ns-title" tabindex="-1" onkeydown={onBoxKey}>
+    <h3 id="ns-title" class="head row"><Server size={15} />New server<span class="sp"></span>
       <button class="btn sm icon ghost" title="Close (Esc)" aria-label="Close" disabled={!!busy} onclick={close}><X size={14} /></button></h3>
 
     <div class="body">
@@ -365,7 +414,7 @@
         <span class="lbl">Start from</span>
         <div class="tabs" role="tablist">
           {#each fromList as [k, label, Icon] (k)}
-            <button role="tab" aria-selected={from === k} class:on={from === k} disabled={!!busy} onclick={() => pickFrom(k)}><Icon size={14} /><span>{label}</span></button>
+            <button role="tab" aria-selected={from === k} class:tab-sel={from === k} disabled={!!busy} onclick={() => pickFrom(k)}><Icon size={14} /><span>{label}</span></button>
           {/each}
         </div>
         <div class="tiny muted desc">{fromDesc}</div>
@@ -397,7 +446,7 @@
         {#if from === 'template'}
           <div class="results">
             {#each templates as t (t.id)}
-              <button class="res" class:on={tpl === t.id} onclick={() => { tpl = t.id; if (!name.trim()) name = t.name; if (t.memory_mb) memory = t.memory_mb / 1024; }}>
+              <button class="res row-hover" class:row-sel={tpl === t.id} onclick={() => { tpl = t.id; if (!name.trim()) name = t.name; if (t.memory_mb) memory = t.memory_mb / 1024; }}>
                 <span class="ph"><LayoutTemplate size={16} /></span>
                 <span class="grow"><b>{t.name}</b> <span class="tiny muted">from {t.from}</span><span class="tiny muted ell blk">{t.loader || 'Minecraft'}{t.minecraft ? ` · Minecraft ${t.minecraft}` : ''} · {t.mods} mod{t.mods === 1 ? '' : 's'} · no world</span></span>
               </button>
@@ -424,29 +473,41 @@
             {#if needsPick}<div class="small warn">The zip doesn't say which Minecraft and loader it's for: pick them.</div>{@render gameFields()}{/if}
           {/if}
         {:else if from === 'pack'}
-          <form class="row search" onsubmit={search}>
-            <div class="seg">
-              <button type="button" class:on={source === 'modrinth'} disabled={!!busy} onclick={() => (source = 'modrinth')}>Modrinth</button>
-              <button type="button" class:on={source === 'curseforge'} disabled={!cfKey || !!busy} title={cfKey ? '' : 'Needs a CurseForge API key (Access & devices)'} onclick={() => (source = 'curseforge')}>CurseForge</button>
+          {#if !showSearch && pack}
+            <div class="row picked">
+              {#if pack.icon}<img class="pi" src={pack.icon} alt="" width="34" height="34" />{:else}<span class="ph"><Package size={16} /></span>{/if}
+              <span class="grow"><b>{pack.name}</b> <span class="tiny {pack.source}">{SITE[pack.source]}</span><span class="tiny muted ell blk">{pack.author ? `by ${pack.author}` : pack.summary}</span></span>
+              {#if pack.url}<a class="btn sm ghost" href={pack.url} target="_blank" rel="noreferrer noopener" title="Open on {SITE[pack.source]}"><ExternalLink size={13} /></a>{/if}
+              <button class="btn sm ghost" disabled={!!busy} onclick={() => (showSearch = true)}>Change</button>
             </div>
-            <div class="input grow"><Search size={13} /><input bind:value={query} placeholder="Search modpacks" /></div>
-            <button class="btn sm" disabled={searching}>Search</button>
-          </form>
-          <div class="results">
-            {#each results as r (r.source + r.id)}
-              <button class="res" class:on={pack?.id === r.id} onclick={() => choosePack(r)}>
-                {#if r.icon}<img src={r.icon} alt="" width="34" height="34" loading="lazy" />{:else}<span class="ph"><Package size={16} /></span>{/if}
-                <span class="grow"><b>{r.name}</b> <span class="tiny muted">{r.author}</span><span class="tiny muted ell blk">{r.summary}</span></span>
-              </button>
-            {:else}<div class="small muted empty">{searching ? 'Searching…' : 'Search for a modpack.'}</div>{/each}
-          </div>
+          {:else}
+            <form class="row search" onsubmit={search}>
+              <div class="seg">
+                <button type="button" class:on={source === 'both'} disabled={!!busy} title={cfKey ? 'CurseForge and Modrinth together' : 'Modrinth only until a CurseForge key is added'} onclick={() => setSource('both')}>Both</button>
+                <button type="button" class:on={source === 'curseforge'} disabled={!cfKey || !!busy} title={cfKey ? '' : 'Needs a CurseForge API key (Access & devices)'} onclick={() => setSource('curseforge')}>CurseForge</button>
+                <button type="button" class:on={source === 'modrinth'} disabled={!!busy} onclick={() => setSource('modrinth')}>Modrinth</button>
+              </div>
+              <div class="input grow"><Search size={13} /><input bind:value={query} oninput={searchSoon} placeholder={source === 'both' ? 'Search modpacks on CurseForge and Modrinth' : `Search modpacks on ${SITE[source]}`} /></div>
+            </form>
+            <div class="results">
+              {#each results as r (r.source + r.id)}
+                <button class="res row-hover" class:row-sel={pack?.id === r.id && pack?.source === r.source} onclick={() => choosePack(r)}>
+                  {#if r.icon}<img src={r.icon} alt="" width="34" height="34" loading="lazy" />{:else}<span class="ph"><Package size={16} /></span>{/if}
+                  <span class="grow"><b>{r.name}</b> {#if source === 'both'}<span class="tiny {r.source}">{SITE[r.source]}</span>{/if} <span class="tiny muted">{r.author}</span>
+                    <span class="tiny muted ell blk">{[r.mc_versions?.[0], r.loaders?.[0]].filter(Boolean).join(' ')}{r.mc_versions?.[0] || r.loaders?.[0] ? ' · ' : ''}{r.server_files === false ? 'no server files: built from the client pack, client-only mods left out' : r.server_files ? 'server files' : r.summary}</span></span>
+                  {#if r.server_files === false}<span class="flag" title="No official server files: built from the client pack"><Hammer size={13} /></span>{:else if r.server_files}<span class="flag ok" title="The pack author's own server files"><Server size={13} /></span>{/if}
+                </button>
+              {:else}<div class="small muted empty">{searching ? 'Searching…' : query ? `No packs match “${query}”.` : 'Search for a modpack.'}</div>{/each}
+            </div>
+          {/if}
           {#if pack}
             <div class="f">
               <label class="lbl" for="ns-pv">Version</label>
-              <select id="ns-pv" class="sel" bind:value={packFile} disabled={!!busy}>
+              <select id="ns-pv" class="sel" bind:value={packFile} disabled={!!busy || (loadingVersions && !packVersions.length)}>
+                {#if !packVersions.length}<option value="">{loadingVersions ? 'Loading versions…' : 'No versions'}</option>{/if}
                 {#each packVersions as v (v.id)}<option value={v.id}>{v.name}{v.mc_version ? ` · ${v.mc_version}` : ''}{v.server_files ? ' · server files' : ''}</option>{/each}
               </select>
-              {#if pickedVersion}<div class="tiny muted">{pickedVersion.server_files ? 'Uses the pack’s server files: the mods its author picked for servers.' : 'No server files: built from the client pack, client-only mods left out.'}</div>{/if}
+              {#if pickedVersion}<div class="tiny muted">{pickedVersion.server_files ? `The pack author's server mods and configs, on ${runsOn(pickedVersion)}. Often a big download.` : `Built from the client pack on ${runsOn(pickedVersion)}, client-only mods left out.`}</div>{/if}
             </div>
           {/if}
         {/if}
@@ -461,10 +522,11 @@
           </div>
           <div class="f">
             <label class="lbl" for="ns-port">Port</label>
-            <div class="input"><input id="ns-port" type="number" min="1" max="65535" bind:value={port} placeholder="First free one" disabled={!!busy} /></div>
+            <div class="input"><input id="ns-port" type="number" min="1" max="65535" bind:value={port} placeholder="Auto" disabled={!!busy} /></div>
+            <div class="tiny muted">Empty: the panel picks a free one.</div>
           </div>
           <div class="f span">
-            <div class="row"><label class="lbl" for="ns-mem">Memory</label><span class="sp"></span><span class="small"><b>{memory} GB</b>{#if hostGb}<span class="muted"> of {Math.round(hostGb)} GB on {hostInfo.hostname || host}</span>{/if}</span></div>
+            <div class="row"><label class="lbl" for="ns-mem">Memory</label><span class="sp"></span><span class="small"><b>{Number(memory).toFixed(1)} GB</b>{#if hostGb}<span class="muted"> of {Math.round(hostGb)} GB on {hostInfo.hostname || host}</span>{/if}</span></div>
             <input id="ns-mem" class="range" type="range" min="1" max={Math.max(memMax, memory)} step="0.5" bind:value={memory} disabled={!!busy} />
             {#if hostGb && memory > hostGb * 0.75}<div class="tiny warn">That leaves little for {hostInfo.hostname || 'the host'} and its other servers.</div>{/if}
           </div>
@@ -475,17 +537,18 @@
                 <div class="input grow"><input id="ns-addr" class="mono" value={addrName} oninput={(e) => (addrEdit = e.currentTarget.value.trim().toLowerCase())} placeholder={domain ? 'survival' : 'survival.example.com (optional)'} disabled={!!busy} /></div>
                 {#if domain && !addrName.includes('.')}<span class="mono small muted">.{domain}</span>{/if}
               </div>
+              <div class="tiny muted">A name players join by, when the panel's server addresses are on.</div>
             </div>
           {/if}
         </div>
-        <label class="eula small"><input type="checkbox" bind:checked={eula} disabled={!!busy} />
-          <span>I agree to the <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer">Minecraft EULA</a>.</span></label>
+        <div class="row eula small"><label class="row"><input type="checkbox" bind:checked={eula} disabled={!!busy} /><span>I agree to the Minecraft EULA</span></label>
+          <a class="btn sm ghost" href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer">Read it</a></div>
       {/if}
     </div>
 
     <div class="foot">
       {#if error}<div class="err">{error}</div>{/if}
-      {#if busy}<div class="busy small"><span class="spin"></span>{busy}</div>{/if}
+      {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
       <div class="row">
         <span class="tiny muted hint">{why || (from === 'folder' ? '' : 'Java is found or downloaded for you.')}</span>
         <button class="btn pri" disabled={!canMake} title={why} onclick={make}>{from === 'folder' && !copy ? 'Add server' : 'Create server'}</button>
@@ -496,10 +559,9 @@
 
 <style>
   .grow { flex: 1; min-width: 0; }
-  .back { position: fixed; inset: 0; background: #0008; display: flex; justify-content: center; align-items: flex-start; z-index: 55; padding: 56px 16px 16px; }
   /* One height for every source, so the dialog doesn't jump; the body scrolls. */
-  .box { width: min(560px, 100%); height: min(660px, calc(100dvh - 72px)); display: flex; flex-direction: column; padding: 0; box-shadow: 0 24px 60px #000c; outline: none; }
-  .box .head { margin: 0; padding: 12px 10px 10px 16px; border-bottom: 1px solid var(--line); }
+  .box { width: min(560px, 100%); height: min(660px, calc(100dvh - var(--dialog-top) - 16px)); display: flex; flex-direction: column; outline: none; flex: none; }
+  .box .head { margin: 0; padding: 12px 10px 10px 16px; border-bottom: 1px solid var(--line); font-size: 13px; font-weight: 600; gap: 7px; }
   .body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
   .foot { border-top: 1px solid var(--line); padding: 10px 16px 12px; display: flex; flex-direction: column; gap: 6px; }
   .hint { flex: 1; min-width: 0; }
@@ -512,15 +574,18 @@
   .sel.ghost { border-style: dashed; }
   .range { width: 100%; accent-color: var(--acc); }
   .eula { display: flex; gap: 8px; align-items: center; }
+  .eula label { gap: 8px; cursor: pointer; }
+  .pi { border-radius: 6px; flex: none; }
+  .curseforge { color: var(--acc); }
+  .modrinth { color: #1bd96a; }
+  .flag { color: var(--gold); flex: none; display: grid; }
+  .flag.ok { color: var(--green); }
   .eula input { accent-color: var(--acc); }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
-  .spin { width: 12px; height: 12px; border: 2px solid var(--gold); border-right-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; }
-  @keyframes s { to { transform: rotate(360deg); } }
   /* Start from: underline tabs (desktop's tab rule), one line, scrolls if it must. */
   .tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
-  .tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 0; color: var(--subtle); border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; flex: none; }
+  .tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 0; color: var(--subtle); white-space: nowrap; flex: none; }
   .tabs button:hover:not(:disabled) { color: var(--text); }
-  .tabs button.on { color: var(--text); border-color: var(--acc); font-weight: 600; }
   .tabs button:disabled { opacity: 0.5; cursor: default; }
   .desc { min-height: 1.45em; }
   /* Secondary choices: a tint, not a filled button (one filled orange per region). */
@@ -537,8 +602,7 @@
   .drop { display: flex; align-items: center; justify-content: center; gap: 8px; border: 2px dashed var(--line2); border-radius: 10px; padding: 20px; color: var(--subtle); cursor: pointer; text-align: center; min-width: 0; }
   .drop.has { color: var(--text); border-style: solid; border-width: 1px; padding: 12px; }
   .drop:hover { border-color: #f9731688; }
-  .bar { height: 4px; border-radius: 2px; background: var(--line2); overflow: hidden; flex: none; }
-  .bar i { display: block; height: 100%; background: var(--acc); }
+  .bar { flex: none; }
   .warn { color: var(--gold); }
   .link { color: var(--acc); text-decoration: underline; }
   .search { flex-wrap: wrap; }
@@ -546,13 +610,10 @@
   .results { max-height: 240px; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 2px; flex: none; border: 1px solid var(--line); border-radius: 8px; padding: 4px; background: var(--base); }
   .empty { padding: 14px 8px; text-align: center; }
   .res { display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 6px; text-align: left; min-width: 0; }
-  .res:hover { background: #ffffff08; }
-  .res.on { background: var(--acc-dim); box-shadow: inset 3px 0 0 var(--acc); }
   .res img, .ph { width: 34px; height: 34px; border-radius: 6px; background: var(--raise); flex: none; }
   .ph { display: grid; place-items: center; color: var(--muted); }
   @media (max-width: 520px) {
-    .back { padding: 16px 12px; }
-    .box { height: calc(100dvh - 32px); }
+    .box { height: calc(100dvh - var(--dialog-top) - 16px); }
     .grid { grid-template-columns: 1fr; }
     .tabs { gap: 14px; }
     .body { padding: 12px; }

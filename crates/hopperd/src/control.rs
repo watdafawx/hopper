@@ -21,6 +21,9 @@ use std::sync::{Arc, OnceLock};
 
 /// Exit code that tells the tray to quit too (another copy is replacing it).
 pub const EXIT_TRAY_TOO: i32 = 76;
+/// Exit code that tells the tray the exe was updated: it starts the new
+/// exe's tray and closes (see `autoupdate`).
+pub const EXIT_UPDATED: i32 = 77;
 pub const HEADER: &str = "x-hopper-control";
 
 static TOKEN: OnceLock<Option<String>> = OnceLock::new();
@@ -53,6 +56,17 @@ pub async fn quitting() {
     } else {
         std::future::pending::<()>().await;
     }
+}
+
+/// Running under a tray (portable / Start with Windows).
+pub fn under_tray() -> bool {
+    token().is_some()
+}
+
+/// Quits so the tray restarts on the updated exe.
+pub fn exit_for_update() {
+    EXIT.store(EXIT_UPDATED, Ordering::Relaxed);
+    quit().notify_one();
 }
 
 /// The exit code the tray asked for.

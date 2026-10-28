@@ -3,10 +3,12 @@
   // and Alpha / beta, each ticked by default except test versions and ones
   // whose new file would stop the server loading; each row opens what
   // changed.
-  import { X, ChevronDown, ChevronRight, Download, ArrowRight, TriangleAlert } from '@lucide/svelte';
+  import { X, ChevronDown, ChevronRight, Download, ArrowRight, TriangleAlert, Lock } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import { api } from './lib/api.js';
   import { md } from './lib/md.js';
+  import { dialog } from './lib/dialog.svelte.js';
+  import { problems } from './lib/modops.js';
   import { paintDown, paintOver, paintClick } from './lib/dragpick.svelte.js';
 
   let { server, updates, mods = [], busy = '', onApply, onClose } = $props();
@@ -16,14 +18,16 @@
     ['pre', 'Alpha / beta', 'crashed', 'test versions, not marked as releases'],
   ];
   // Ticked when the dialog opens; later changes are the user's.
-  let picked = $state(untrack(() => new Set(updates.filter((u) => !u.pre_skip && !u.issues?.length).map((u) => u.project_id))));
+  // A version the user locked out (Lock 1.2.3) is left out too.
+  const keptOut = (u) => mods.some((m) => m.project_id === u.project_id && m.locked_version && m.locked_version === u.file);
+  let picked = $state(untrack(() => new Set(updates.filter((u) => !u.pre_skip && !problems(u).length && !keptOut(u)).map((u) => u.project_id))));
   let open = $state(null);
   let notes = $state({});
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const icon = (u) => mods.find((m) => m.project_id === u.project_id)?.icon;
   const groups = $derived(GROUPS.map(([k, label, tint, about]) => ({ k, label, tint, about, rows: updates.filter((u) => (u.risk || 'major') === k).sort((a, b) => a.name.localeCompare(b.name)) })).filter((g) => g.rows.length));
-  const bad = $derived(updates.filter((u) => u.issues?.length).length);
+  const bad = $derived(updates.filter((u) => problems(u).length).length);
 
   async function toggleNotes(u) {
     open = open === u.project_id ? null : u.project_id;
@@ -62,9 +66,11 @@
   }
 </script>
 
-<div class="back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
-  <div class="box card col">
-    <h3 class="row">Review {updates.length} update{updates.length === 1 ? '' : 's'}<span class="sp"></span><button class="btn sm ghost icon" disabled={!!busy} onclick={onClose}><X size={14} /></button></h3>
+<svelte:window onkeydown={(e) => e.key === 'Escape' && !busy && !dialog.open && onClose()} />
+
+<div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
+  <div class="box popover col">
+    <h3 class="row">Review {updates.length} update{updates.length === 1 ? '' : 's'}<span class="sp"></span><button class="btn sm ghost icon" title="Close" disabled={!!busy} onclick={onClose}><X size={14} /></button></h3>
     <div class="small subtle">The jars they replace go to Mods › Backups, so each one can be put back.{server.state === 'running' ? ' Restart the server afterwards to load them.' : ''}</div>
     <div class="row wrap small">
       {#each groups as g (g.k)}<span class="row gap4"><span class="chip {g.tint}">{g.label}</span><span class="muted">{g.rows.filter((u) => picked.has(u.project_id)).length} of {g.rows.length}</span></span>{/each}
@@ -79,20 +85,21 @@
         </div>
         {#each g.rows as u (u.project_id)}
           {@const on = picked.has(u.project_id)}
-          <div class="u" class:dim={!on} role="presentation" onpointerenter={(e) => paintOver(e, 'review', order.indexOf(u.project_id), paintAt)}>
+          <div class="u row-hover" class:dim={!on} role="presentation" onpointerenter={(e) => paintOver(e, 'review', order.indexOf(u.project_id), paintAt)}>
             <div class="row">
               <input type="checkbox" checked={on} onpointerdown={(e) => paintDown(e, 'review', order.indexOf(u.project_id), !on, paintAt)} onclick={(e) => paintClick(e, () => flip(u.project_id))} />
               {#if icon(u)}<img src={icon(u)} alt="" width="20" height="20" loading="lazy" />{:else}<span class="ph"></span>{/if}
               <button class="nm grow" onclick={() => toggleNotes(u)} title="What changed">{#if open === u.project_id}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}<span class="ell">{u.name}</span></button>
               <span class="vchip"><span class="ell muted">{u.from}</span><ArrowRight size={11} /><span class="ell to">{u.to}</span></span>
             </div>
-            {#if u.issues?.length}<div class="prob tiny" title="{u.issues.join('; ')}. Hopper doesn't add or turn on mods with an update."><TriangleAlert size={11} /><span class="ell">{u.issues.join('; ')}</span></div>{/if}
+            {#if keptOut(u)}<div class="kept tiny muted" title="Keep this version: the update stays listed, but only installs when ticked here or with Shift+click"><Lock size={11} />{u.to} is locked: you keep {u.from}</div>{/if}
+            {#if problems(u).length}<div class="prob tiny" title="{problems(u).join('; ')}. Hopper doesn't add or turn on mods with an update."><TriangleAlert size={11} /><span class="ell">{problems(u).join('; ')}</span></div>{/if}
             {#if open === u.project_id}<div class="notes small">{#if notes[u.project_id] === '…'}<span class="muted">Loading…</span>{:else if notes[u.project_id]}{@html md(notes[u.project_id])}{:else}<span class="muted">No changelog.</span>{/if}</div>{/if}
           </div>
         {/each}
       {/each}
     </div>
-    {#if busy}<div class="small gold">{busy}</div>{/if}
+    {#if busy}<div class="small gold row"><span class="spinner"></span>{busy}</div>{/if}
     <div class="row end">
       <button class="btn" disabled={!!busy} onclick={onClose}>Cancel</button>
       <button class="btn pri" disabled={!picked.size || !!busy} onclick={() => onApply([...picked])}><Download size={14} />Update {picked.size}</button>
@@ -101,15 +108,13 @@
 </div>
 
 <style>
-  .back { position: fixed; inset: 0; background: #0008; display: flex; justify-content: center; align-items: flex-start; padding: 64px 16px 16px; z-index: 60; }
-  .box { width: min(680px, 100%); max-height: calc(100vh - 80px); gap: 10px; box-shadow: 0 24px 60px #000c; }
-  .box h3 { margin: 0; font-size: 15px; }
+  .box { width: min(680px, 100%); max-height: calc(100vh - var(--dialog-top) - 16px); gap: 10px; padding: 18px; }
+  .box h3 { margin: 0; font-size: 15px; font-weight: 600; }
   .list { overflow: auto; display: flex; flex-direction: column; gap: 2px; min-height: 0; }
   .gh { gap: 8px; padding: 8px 4px 4px; }
   .gh .n { width: 28px; }
   .gap4 { gap: 4px; }
   .u { padding: 4px 4px 4px 24px; border-radius: 6px; }
-  .u:hover { background: #ffffff06; }
   .u.dim .nm, .u.dim img, .u.dim .vchip { opacity: 0.55; }
   .u img, .ph { width: 20px; height: 20px; border-radius: 4px; background: var(--raise); flex: none; }
   .nm { display: flex; gap: 6px; align-items: center; text-align: left; min-width: 0; font-size: 13px; }
@@ -118,6 +123,7 @@
   .vchip { display: inline-flex; align-items: center; gap: 4px; max-width: 240px; min-width: 0; padding: 1px 7px; border-radius: 6px; background: var(--acc-dim); font-size: 11.5px; color: var(--acc); flex: none; }
   .to { color: var(--acc); }
   .prob { display: flex; align-items: center; gap: 4px; color: var(--red); margin: 2px 0 0 52px; min-width: 0; }
+  .kept { display: flex; align-items: center; gap: 4px; margin: 2px 0 0 52px; }
   .redt { color: var(--red); gap: 6px; }
   .wrap { flex-wrap: wrap; }
   .notes { margin: 6px 0 2px 52px; background: var(--base); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; max-height: 240px; overflow: auto; overflow-wrap: anywhere; }

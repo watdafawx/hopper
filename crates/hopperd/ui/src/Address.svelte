@@ -95,7 +95,7 @@
 
 <div class="card side col">
   <h3><Globe size={14} />Address<span class="sp"></span>
-    {#if info?.addresses.length}<button class="btn sm ghost" disabled={checking} onclick={check} title="Check DNS"><SearchCheck size={13} />{checking ? 'Checking…' : 'Check'}</button>{/if}
+    {#if info?.addresses.length}<button class="btn sm ghost" disabled={checking} onclick={check} title="Check DNS"><SearchCheck size={13} />{checking ? 'Checking…' : 'Check DNS'}</button>{/if}
     <button class="btn sm pri" disabled={!dirty || saving} onclick={save}><Save size={13} />Save</button>
   </h3>
   {#if info && router}

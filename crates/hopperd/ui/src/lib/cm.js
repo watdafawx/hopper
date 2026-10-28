@@ -2,8 +2,8 @@
 // small.
 
 import { basicSetup } from 'codemirror';
-import { EditorView, keymap } from '@codemirror/view';
-import { EditorState } from '@codemirror/state';
+import { EditorView, keymap, Decoration } from '@codemirror/view';
+import { EditorState, StateField, StateEffect } from '@codemirror/state';
 import { StreamLanguage } from '@codemirror/language';
 import { json } from '@codemirror/lang-json';
 import { javascript } from '@codemirror/lang-javascript';
@@ -29,7 +29,21 @@ const look = EditorView.theme({
   '.cm-scroller': { fontFamily: 'var(--mono)', lineHeight: '1.6' },
   '.cm-gutters': { backgroundColor: 'var(--term)', borderRight: '1px solid var(--line)' },
   '&.cm-focused': { outline: 'none' },
+  '.cm-hopper-mark': { backgroundColor: '#f973162e', boxShadow: 'inset 3px 0 0 var(--acc)' },
 }, { dark: true });
+
+// The line a search hit or a setting opened at, tinted like desktop's
+// config editor marks it (until the text is edited).
+const markLine = StateEffect.define();
+const lineMark = Decoration.line({ class: 'cm-hopper-mark' });
+const marked = StateField.define({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    for (const e of tr.effects) if (e.is(markLine)) return e.value == null ? Decoration.none : Decoration.set([lineMark.range(e.value)]);
+    return tr.docChanged ? Decoration.none : deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 /** An editor in `parent`. Ctrl+S calls onSave; edits call onChange(text). */
 export function createEditor(parent, doc, name, { onSave, onChange }) {
@@ -43,6 +57,7 @@ export function createEditor(parent, doc, name, { onSave, onChange }) {
         language(name),
         oneDark,
         look,
+        marked,
         EditorView.lineWrapping,
         EditorView.updateListener.of((u) => u.docChanged && onChange(u.state.doc.toString())),
       ],
@@ -51,10 +66,13 @@ export function createEditor(parent, doc, name, { onSave, onChange }) {
   return {
     get: () => view.state.doc.toString(),
     set: (text) => view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } }),
-    /** Puts the cursor on 1-based `line`. */
-    goto: (line) => {
+    /** Puts the cursor on 1-based `line`, in the middle of the view; `mark` tints the line. */
+    goto: (line, mark = false) => {
       const l = view.state.doc.line(Math.max(1, Math.min(line, view.state.doc.lines)));
-      view.dispatch({ selection: { anchor: l.from }, scrollIntoView: true });
+      view.dispatch({
+        selection: { anchor: l.from },
+        effects: [EditorView.scrollIntoView(l.from, { y: 'center' }), markLine.of(mark ? l.from : null)],
+      });
       view.focus();
     },
     focus: () => view.focus(),

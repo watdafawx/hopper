@@ -3,9 +3,11 @@
   // installed one up to the update on offer, each with its changelog
   // (newest first, the installed one last), then the other versions to
   // update or roll back to. One view for the dialog and the side panel.
+  import { untrack } from 'svelte';
   import { X, Download, RotateCcw, Settings2, Lock, LockOpen, ChevronRight, ChevronDown } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { md } from './lib/md.js';
+  import { dialog as question } from './lib/dialog.svelte.js';
   import { installVersion, resetConfig, setLocked } from './lib/modops.js';
 
   let { server, mod, dialog = false, onChanged = () => {}, onClose = () => {} } = $props();
@@ -60,9 +62,12 @@
     }
   }
 
+  // Again only for another mod: the list hands over new objects on every
+  // reload, which mustn't fetch the versions again or close what's open.
   $effect(() => {
     key;
-    load();
+    base;
+    untrack(load);
   });
 </script>
 
@@ -76,19 +81,19 @@
   {#if info?.locked}
     <div class="locknote row small"><Lock size={14} /><span class="grow">Locked: Hopper keeps this version. Unlock it to update or switch.</span><button class="btn sm" onclick={unlock}><LockOpen size={13} />Unlock</button></div>
   {/if}
-  {#if busy}<div class="busy small"><span class="spin"></span>{busy}</div>{/if}
+  {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
   {#if !mod.source}
     <div class="small muted">Hopper doesn't know where this jar is from yet, so there are no versions or changelogs. Identify looks it up on CurseForge and Modrinth.</div>
   {:else if error}
     <div class="err small">{error}</div>
   {:else if !info}
-    <div class="small muted row"><span class="spin b"></span>Fetching versions</div>
+    <div class="small muted row"><span class="spinner blue"></span>Fetching versions</div>
   {:else}
     <div class="row status">
       <b class:ok={!info.behind}>{info.behind === 0 ? 'Up to date' : info.behind === 1 ? '1 version behind' : `${info.behind} versions behind · newest first`}</b>
       {#if info.latest && info.behind}<button class="btn sm pri" disabled={info.locked || !!busy} onclick={() => install(info.latest.file_id, 'Updating')}><Download size={13} />Update to {info.latest.version}</button>{/if}
     </div>
-    {#each info.entries as e, i (e.name)}
+    {#each info.entries as e, i (`${i}:${e.name}`)}
       <div class="vc" class:target={i === 0 && !e.installed} class:cur={e.installed}>
         <div class="row wrap"><b class="vname">{e.name}</b><span class="chip">{e.release}</span>{#if e.installed}<span class="chip running">Installed</span>{/if}</div>
         <div class="row wrap">
@@ -110,7 +115,7 @@
           <span class="tiny muted nowrap">{when(o.date)}</span>
           <button class="btn sm" disabled={info.locked || !!busy} onclick={() => install(o.file_id, o.older ? 'Rolling back' : 'Updating')}>{o.older ? 'Roll back to' : 'Update to'} {o.version || o.name}</button>
         </div>
-        {#if open[o.file_id] === null}<div class="small muted row"><span class="spin b"></span>Loading the changelog</div>
+        {#if open[o.file_id] === null}<div class="small muted row"><span class="spinner blue"></span>Loading the changelog</div>
         {:else if typeof open[o.file_id] === 'string'}
           {#if open[o.file_id].startsWith('!')}<div class="err small">{open[o.file_id].slice(1)}</div>
           {:else if open[o.file_id].trim()}<div class="notes small">{@html md(open[o.file_id])}</div>
@@ -121,9 +126,11 @@
   {/if}
 {/snippet}
 
+<svelte:window onkeydown={(e) => dialog && e.key === 'Escape' && !busy && !question.open && onClose()} />
+
 {#if dialog}
-  <div class="back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
-    <div class="box card col">
+  <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
+    <div class="box popover col">
       <h3 class="row">Versions and changelogs<span class="sp"></span><button class="btn sm ghost icon" title="Close" disabled={!!busy} onclick={onClose}><X size={14} /></button></h3>
       <div class="scroll col">{@render body()}</div>
     </div>
@@ -133,9 +140,8 @@
 {/if}
 
 <style>
-  .back { position: fixed; inset: 0; background: #0008; display: flex; justify-content: center; align-items: flex-start; padding: 64px 16px 16px; z-index: 60; }
-  .box { width: min(680px, 100%); max-height: calc(100vh - 80px); gap: 10px; box-shadow: 0 24px 60px #000c; }
-  .box h3 { margin: 0; font-size: 15px; }
+  .box { width: min(680px, 100%); max-height: calc(100vh - var(--dialog-top) - 16px); gap: 10px; padding: 18px; }
+  .box h3 { margin: 0; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
   .scroll { overflow: auto; gap: 10px; min-height: 0; padding-right: 2px; }
   .inl { gap: 8px; }
   .col { display: flex; flex-direction: column; }
@@ -152,7 +158,7 @@
   .vname { overflow-wrap: anywhere; min-width: 0; }
   .oth { background: #ffffff07; border-radius: 10px; padding: 7px 10px; display: flex; flex-direction: column; gap: 6px; }
   .ohead { gap: 6px; text-align: left; font-size: 12.5px; }
-  .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; padding-top: 4px; }
+  .lbl { padding-top: 4px; }
   .locknote { gap: 8px; background: var(--raise); border-radius: 8px; padding: 8px 10px; }
   .notes { background: var(--base); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-height: 320px; overflow: auto; overflow-wrap: anywhere; }
   .notes :global(ul) { margin: 4px 0 4px 18px; }
@@ -161,7 +167,5 @@
   .notes :global(img) { max-width: 100%; }
   .icon { padding: 3px 5px; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
-  .spin { width: 12px; height: 12px; border: 2px solid var(--gold); border-right-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; flex: none; }
-  .spin.b { border-color: var(--blue); border-right-color: transparent; }
-  @keyframes s { to { transform: rotate(360deg); } }
+  .spinner.blue { color: var(--blue); }
 </style>

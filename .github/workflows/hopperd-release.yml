@@ -78,8 +78,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v="${GITHUB_REF_NAME#hopperd-v}"
+          # Never "Latest": the README's and website's download link
+          # (releases/latest/download/hopper.exe) must stay on Hopper desktop.
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --title "Hopper Server $v" --notes "Hopper Server $v. Run hopperd, open http://localhost:8790, and see the README for setup, services and Docker."
+            gh release create "$GITHUB_REF_NAME" --latest=false --title "Hopper Server $v" --notes "Hopper Server $v. Run hopperd, open http://localhost:8790, and see the README for setup, services and Docker."
           gh release upload "$GITHUB_REF_NAME" "hopperd-$v-${{ matrix.asset }}" --clobber
       - name: Keep the binary for the Docker image
         if: matrix.docker

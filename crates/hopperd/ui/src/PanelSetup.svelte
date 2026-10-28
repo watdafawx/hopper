@@ -60,7 +60,7 @@
       The panel restarts to move its data in; running servers keep running.
     </div>
     {#if error}<div class="err small">{error}</div>{/if}
-    {#if busy}<div class="busy small"><span class="spin"></span>{busy}</div>{/if}
+    {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
     <div class="row end">
       {#if existing}<button class="btn ghost" disabled={!!busy} onclick={onLater}>Not now</button>{/if}
       <button class="btn pri" disabled={!target || isDrive || !!busy} onclick={use}>{target && !isDrive ? `Use ${name} and restart` : 'Use this folder'}</button>
@@ -75,6 +75,4 @@
   p { margin: 0; }
   .end { justify-content: flex-end; gap: 8px; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
-  .spin { width: 12px; height: 12px; border: 2px solid var(--gold); border-right-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; }
-  @keyframes s { to { transform: rotate(360deg); } }
 </style>

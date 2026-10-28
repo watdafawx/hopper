@@ -7,6 +7,7 @@
   import { api, post } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
+  import { copyText } from './lib/browse.js';
 
   let { server, path = '', crash = false, onClose } = $props();
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -32,15 +33,19 @@
     }
   }
 
+  // Only the preview of the log picked last shows (picking fast).
+  let lookSeq = 0;
   async function look() {
+    const n = ++lookSeq;
     info = null;
     err = '';
     showText = false;
     if (!pick) return;
     try {
-      info = await api(`${base}/logs/preview?path=${encodeURIComponent(pick)}`);
+      const r = await api(`${base}/logs/preview?path=${encodeURIComponent(pick)}`);
+      if (n === lookSeq) info = r;
     } catch (e) {
-      err = e.message;
+      if (n === lookSeq) err = e.message;
     }
   }
 
@@ -57,12 +62,8 @@
   }
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(url);
-      say('Link copied');
-    } catch {
-      say("Couldn't copy; select the link instead.", true);
-    }
+    if (await copyText(url)) say('Link copied');
+    else say("Couldn't copy; select the link instead.", true);
   }
 
   function keys(e) {
@@ -81,8 +82,8 @@
 
 <svelte:window onkeydown={keys} />
 
-<div class="back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
-  <div class="box card col">
+<div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
+  <div class="box popover col" role="dialog" aria-modal="true" aria-label="Share a log">
     <div class="row"><h3><Share2 size={14} />{url ? 'Shared' : 'Share a log publicly?'}</h3><span class="sp"></span>
       <button class="btn sm ghost icon" title="Close" disabled={busy} onclick={onClose}><X size={14} /></button></div>
     {#if url}
@@ -97,6 +98,7 @@
       <p class="small subtle">It's uploaded to <b>mclo.gs</b>. <b class="txt">Anyone with the link can read it</b>, and mclo.gs keeps it until 90 days after it was last opened.</p>
       <label class="row small"><span class="muted lab">Log</span>
         <select class="grow" bind:value={pick} disabled={busy}>
+          {#if pick && !logs.some((f) => f.path === pick)}<option value={pick}>{pick}</option>{/if}
           {#each logs as f (f.path)}<option value={f.path}>{label(f)} · {bytes(f.size)}</option>{/each}
         </select></label>
       {#if !logs.length && !err}<p class="small muted">{loaded ? 'This server has no logs yet.' : 'Loading…'}</p>{/if}
@@ -117,15 +119,14 @@
       {#if err}<div class="small err">{err}</div>{/if}
       <div class="row end">
         <button class="btn" disabled={busy} onclick={onClose}>Cancel</button>
-        <button class="btn pri" disabled={busy || !info} onclick={share}>{busy ? 'Uploading…' : 'Share publicly'}</button>
+        <button class="btn pri" disabled={busy || !info} onclick={share}>{#if busy}<span class="spinner"></span>Uploading to mclo.gs…{:else}Share publicly{/if}</button>
       </div>
     {/if}
   </div>
 </div>
 
 <style>
-  .back { position: fixed; inset: 0; background: #0008; display: flex; justify-content: center; align-items: flex-start; z-index: 60; padding: 72px 16px 16px; overflow: auto; }
-  .box { width: min(560px, 100%); display: flex; flex-direction: column; gap: 10px; box-shadow: 0 24px 60px #000c; }
+  .box { width: min(560px, 100%); display: flex; flex-direction: column; gap: 10px; padding: 14px; }
   .box h3 { margin: 0; font-size: 14px; display: flex; align-items: center; gap: 7px; }
   .wrap { flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
@@ -133,11 +134,9 @@
   .lab { width: 36px; }
   select { background: var(--base); border: 1px solid var(--line2); border-radius: 6px; padding: 5px 8px; color: var(--text); font: inherit; }
   .hid { background: var(--base); border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
-  .chip.acc { color: #fb923c; background: var(--acc-dim); }
   .txt { color: var(--text); }
   .lnk { color: var(--acc); font-size: inherit; padding: 0; }
   .pre { max-height: 260px; overflow: auto; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: var(--term); padding: 8px; border-radius: 6px; margin: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .link { background: var(--base); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
-  .err { color: var(--red); }
 </style>

@@ -1,19 +1,40 @@
+/* The shared look. Colours follow Hopper desktop's theme (src/gpui/theme.json,
+   "Hopper Dark"), and the hover / selected / chip rules follow CLAUDE.md's
+   design rules (widgets::row_hover, row_selected, tab_selected, chip). */
 :root {
-  --bg: #141418; --base: #1a1a1f; --side: #17171b; --surface: #212127; --raise: #28282f;
-  --line: #2f2f37; --line2: #3a3a44; --term: #0f0f12;
-  --text: #ececf1; --subtle: #a3a3ad; --muted: #6f6f7a;
-  --acc: #f97316; --acc-dim: #f9731622; --green: #22c55e; --green-dim: #22c55e1f;
-  --gold: #eab308; --gold-dim: #eab3081f; --blue: #60a5fa; --blue-dim: #60a5fa1f;
-  --red: #ef4444; --red-dim: #ef44441f; --violet: #a78bfa; --violet-dim: #a78bfa1f;
+  --bg: #121214; --base: #17171a; --side: #0e0e10; --surface: #1f1f23; --raise: #28282d;
+  --line: #26262b; --line2: #3a3a42; --term: #0c0c0e;
+  --text: #ededef; --subtle: #a8a8b0; --muted: #9a9aa3;
+  --acc: #f97316; --acc-dim: #f973161f; --green: #22c55e; --green-dim: #22c55e1a;
+  --gold: #facc15; --gold-dim: #facc151a; --blue: #38bdf8; --blue-dim: #38bdf81a;
+  --red: #ef4444; --red-dim: #ef44441a; --violet: #a78bfa; --violet-dim: #a78bfa1a;
+  --danger: #dc2626;
+  /* input.border, and the title bar / side bar edge (title_bar.border). */
+  --input-line: #64646e; --side-line: #202024;
+  /* widgets::alpha: hovered rows (foreground at 6%), selected rows (primary at 12%). */
+  --hover: #ededef0f; --sel: #f973161f;
+  --popover: #17171a; --overlay: #0000008c; --skeleton: #ffffff1a;
+  --radius: 6px; --radius-lg: 10px;
+  /* Title bar height, and where every dialog's top sits (widgets::DIALOG_TOP). */
+  --titlebar: 42px; --dialog-top: 56px;
   --mono: ui-monospace, 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
-body { background: var(--bg); color: var(--text); font: 13px/1.45 Inter, system-ui, -apple-system, 'Segoe UI', sans-serif; }
+body { background: var(--bg); color: var(--text); font: 13px/1.45 Inter, system-ui, -apple-system, 'Segoe UI', sans-serif; caret-color: var(--acc); }
+::selection { background: #f9731659; }
+* { scrollbar-color: #ffffff26 transparent; scrollbar-width: thin; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #ffffff26; border-radius: 9px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: #ffffff40; }
+::-webkit-scrollbar-track { background: transparent; }
 #app { height: 100%; }
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
 input { font: inherit; color: inherit; }
-a { color: var(--acc); text-decoration: none; }
+a { color: #fb923c; text-decoration: none; }
+a:hover { color: #fdba74; }
+/* The focus ring (widgets::focus_shadow): 2px in the accent, inside the edge, keyboard focus only. */
+button:focus-visible, a:focus-visible, summary:focus-visible, [role='button']:focus-visible, div[tabindex]:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--acc); }
 .mono { font-family: var(--mono); }
 .muted { color: var(--muted); } .subtle { color: var(--subtle); }
 .small { font-size: 12px; } .tiny { font-size: 11px; }
@@ -21,45 +42,106 @@ a { color: var(--acc); text-decoration: none; }
 .col { display: flex; flex-direction: column; gap: 8px; }
 .sp { flex: 1; }
 .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px; }
 .card h3 { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
-.btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line2); font-size: 12.5px; font-weight: 500; white-space: nowrap; background: var(--surface); }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: var(--radius); border: 1px solid var(--line2); font-size: 12.5px; font-weight: 500; white-space: nowrap; background: var(--surface); }
 a.btn { color: var(--text); }
 .btn:hover:not(:disabled) { background: var(--raise); }
+.btn:active:not(:disabled) { background: #2e2e34; }
 .btn:disabled { opacity: .5; cursor: default; }
-.btn.pri { background: var(--acc); border-color: var(--acc); color: #1a1a1f; font-weight: 600; }
+.btn.pri { background: var(--acc); border-color: var(--acc); color: #1c0d02; font-weight: 600; }
 .btn.pri:hover:not(:disabled) { background: #fb8a3c; }
-.btn.go { background: var(--green); border-color: var(--green); color: #0b1a10; font-weight: 600; }
+.btn.pri:active:not(:disabled) { background: #ea6a0c; }
+.btn.go { background: var(--green); border-color: var(--green); color: #04210f; font-weight: 600; }
 .btn.go:hover:not(:disabled) { background: #34d36d; }
+.btn.go:active:not(:disabled) { background: #16a34a; }
 .btn.bad { color: var(--red); border-color: #ef444455; }
+.btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
+.btn.danger:hover:not(:disabled) { background: #d42020; }
+.btn.danger:active:not(:disabled) { background: #b91c1c; }
 .btn.ghost { background: none; border-color: transparent; color: var(--subtle); }
+.btn.ghost:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.btn.ghost.on { background: var(--hover); color: var(--text); }
 .btn.sm { padding: 3px 8px; font-size: 12px; }
 .btn.icon { padding: 5px 6px; }
-/* Tinted, no border: the same rule as Hopper desktop's chips. */
-.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid transparent; background: #ffffff0d; color: var(--subtle); white-space: nowrap; }
+/* Tinted, no border, the theme's radius: the same rule as Hopper desktop's chips. */
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 1px 8px; border-radius: var(--radius); border: 1px solid transparent; background: #ededef14; color: var(--subtle); white-space: nowrap; }
 .chip.running { color: var(--green); border-color: transparent; background: var(--green-dim); }
 .chip.starting, .chip.stopping { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
 .chip.crashed { color: var(--red); border-color: transparent; background: var(--red-dim); }
 .chip.lan { color: var(--blue); border-color: transparent; background: var(--blue-dim); }
 .chip.ts { color: var(--violet); border-color: transparent; background: var(--violet-dim); }
 .chip.acc, .chip.on { color: var(--acc); border-color: transparent; background: var(--acc-dim); }
-.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted); }
-.dot.running { background: var(--green); box-shadow: 0 0 0 3px var(--green-dim); }
+/* A status pill (widgets::pill): coloured text on its tint, semibold, with a glowing dot. */
+.pill { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 20px; padding: 0 9px; border-radius: var(--radius); font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--muted); background: #9a9aa31a; }
+.pill.running { color: var(--green); background: var(--green-dim); }
+.pill.starting, .pill.stopping { color: var(--gold); background: var(--gold-dim); }
+.pill.crashed { color: var(--red); background: var(--red-dim); }
+.pill.acc { color: var(--acc); background: var(--acc-dim); }
+.pill .glow { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; flex: none; }
+/* A server's state light (widgets::status_dot). */
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); }
+.dot.running { background: var(--green); }
 .dot.starting, .dot.stopping { background: var(--gold); }
 .dot.crashed { background: var(--red); }
-.input { display: flex; align-items: center; gap: 7px; background: var(--base); border: 1px solid var(--line2); border-radius: 6px; padding: 7px 10px; color: var(--subtle); }
+/* Rows and nav items: quiet grey hover; selected is the accent wash with a 3px bar on the left. */
+.row-hover:hover { background: var(--hover); }
+.row-sel, .row-sel:hover { background-color: var(--sel); background-image: linear-gradient(var(--acc), var(--acc)); background-size: 3px calc(100% - 8px); background-position: 0 50%; background-repeat: no-repeat; color: var(--text); }
+/* Tabs and top nav: full-strength text and a 2px accent underline, no fill. */
+.tab-sel { color: var(--text) !important; box-shadow: inset 0 -2px 0 var(--acc); }
+.input { display: flex; align-items: center; gap: 7px; background: var(--base); border: 1px solid var(--input-line); border-radius: var(--radius); padding: 7px 10px; color: var(--subtle); }
 .input:focus-within { border-color: var(--acc); }
-.input input { background: none; border: 0; outline: 0; flex: 1; min-width: 0; color: var(--text); }
+.input input { background: none; border: 0; outline: 0; flex: 1; min-width: 0; color: var(--text); box-shadow: none; }
 .bar { height: 5px; border-radius: 9px; background: var(--raise); overflow: hidden; }
 .bar i { display: block; height: 100%; background: var(--acc); border-radius: 9px; transition: width .4s; }
 .bar.b i { background: var(--blue); } .bar.g i { background: var(--green); }
+/* A bar with no known total: a sliding stripe. */
+.bar.busy i { width: 35% !important; animation: bar-slide 1.2s ease-in-out infinite; }
+@keyframes bar-slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
 .err { color: var(--red); font-size: 12.5px; }
-.kbd { font: 11px var(--mono); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--subtle); }
+.kbd { font: 11px var(--mono); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--subtle); background: var(--surface); }
 .ic { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; font-weight: 800; color: #1a1a1f; flex: none; }
 .sic { width: 20px; height: 20px; border-radius: 5px; flex: none; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #1a1a1f; }
-.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--raise); border: 1px solid var(--line2); border-radius: 8px; padding: 9px 14px; box-shadow: 0 10px 30px #0008; z-index: 50; max-width: min(560px, calc(100vw - 32px)); }
-.toast.bad { border-color: #ef444477; }
 .ic.big { width: 40px; height: 40px; font-size: 16px; }
+/* Notifications: desktop's look (popover, icon); bottom centre so they never cover a page's top-right actions. */
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); display: flex; align-items: flex-start; gap: 9px; background: var(--popover); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 14px; box-shadow: 0 16px 40px #000a; z-index: 100; cursor: default; width: max-content; max-width: min(380px, calc(100vw - 32px)); font-size: 12.5px; animation: toast-in .18s ease-out; }
+.toast.bad { border-color: #ef444466; }
+@keyframes toast-in { from { opacity: 0; } }
+/* An empty list (widgets::empty_state): a round icon, a title, a line on what to do next. */
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 32px 16px; text-align: center; width: 100%; }
+.empty-state .es-ic { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: var(--hover); color: var(--muted); }
+.empty-state b { font-size: 13px; font-weight: 600; }
+.empty-state p { max-width: 28rem; font-size: 11.5px; color: var(--muted); }
+/* Loading rows (widgets::skeleton_rows): <div class="skel"><i></i></div> per row, a 24px square and a
+   10px line. Only that exact shape gets this look (zero specificity), so pages with their own .skel keep theirs. */
+:where(.skel:has(> i:only-child)) { display: flex; align-items: center; gap: 12px; height: 34px; padding: 0 8px; }
+:where(.skel:has(> i:only-child)) + :where(.skel:has(> i:only-child)) { margin-top: 4px; }
+:where(.skel:has(> i:only-child))::before { content: ''; width: 24px; height: 24px; border-radius: var(--radius); background: var(--skeleton); flex: none; }
+:where(.skel:has(> i:only-child)) > i { display: block; height: 10px; border-radius: 99px; background: var(--skeleton); width: 25%; animation: skel 1.4s ease-in-out infinite; }
+:where(.skel:nth-child(4n + 2):has(> i:only-child)) > i { width: 70%; } :where(.skel:nth-child(4n + 3):has(> i:only-child)) > i { width: 55%; } :where(.skel:nth-child(4n):has(> i:only-child)) > i { width: 40%; }
+@keyframes skel { 50% { opacity: .45; } }
+/* Popovers and menus: the popover colour, a line, the large radius. */
+.popover { background: var(--popover); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: 0 20px 50px #000b; max-width: calc(100vw - 16px); }
+.menu { padding: 4px; min-width: 180px; }
+.menu-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 10px; border-radius: var(--radius); text-align: left; color: var(--text); font-size: 12.5px; }
+.menu-item:hover { background: var(--hover); }
+.menu-sep { height: 1px; background: var(--line); margin: 4px 2px; }
+/* A modal's backdrop: dialogs open at the same height, under the title bar (widgets::DIALOG_TOP). */
+.dialog-back { position: fixed; inset: 0; background: var(--overlay); display: flex; justify-content: center; align-items: flex-start; padding: var(--dialog-top) 16px 16px; z-index: 60; overflow: auto; }
+/* A dialog never runs past the window (widgets::dialog_room): its own content scrolls. */
+.dialog-back > * { max-height: calc(100dvh - var(--dialog-top) - 16px); overflow: auto; }
+.spinner { width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; flex: none; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
 /* Drag across rows (lib/dragpick): the label beside the pointer, and no text picking meanwhile. */
 .pick-chip { position: fixed; z-index: 200; pointer-events: none; background: var(--acc); color: #1a1a1f; font-size: 11.5px; font-weight: 600; border-radius: 6px; padding: 1px 8px; box-shadow: 0 6px 18px #000a; white-space: nowrap; }
 body.picking, body.picking * { user-select: none !important; cursor: grabbing !important; }
+/* An on/off switch: <label class="switch"><input type="checkbox" …><span></span></label>. Off grey, on accent (desktop's Switch). */
+.switch { position: relative; display: inline-block; width: 32px; height: 18px; flex: none; cursor: pointer; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; background: #64646e; border-radius: 99px; transition: background .15s; }
+.switch span::after { content: ''; position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #fff; top: 2px; left: 2px; transition: left .15s; }
+.switch input:checked + span { background: var(--acc); }
+.switch input:checked + span::after { left: 16px; }
+.switch input:focus-visible + span { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--acc); }
+.switch input:disabled + span { opacity: .5; }
+.switch:has(input:disabled) { cursor: default; }
