@@ -277,6 +277,12 @@ impl Client {
         reply(self.agent.delete(&self.url(path)).header("Authorization", &self.auth()).call(), &self.base)
     }
 
+    /// Unpairs this PC in the panel, so it leaves Access & devices and the
+    /// token stops working there. Panels before this route answer 403.
+    pub fn unpair(&self) -> anyhow::Result<()> {
+        self.delete("/devices/me").map(|_| ())
+    }
+
     /// Starts a job with a POST and follows it to the end (see [`Client::follow`]).
     pub fn run_job(&self, path: &str, body: Value, job: &crate::jobs::Job) -> anyhow::Result<Value> {
         let v = self.post(path, body)?;

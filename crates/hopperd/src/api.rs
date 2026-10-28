@@ -124,6 +124,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/pair/pending", get(pair_pending))
         .route("/api/v1/pair/{id}/answer", post(pair_answer))
         .route("/api/v1/devices", get(devices))
+        .route("/api/v1/devices/me", axum::routing::delete(unpair_self))
         .route("/api/v1/devices/{id}", axum::routing::delete(forget_device))
         .route("/api/v1/host", get(host))
         .route("/api/v1/servers", get(servers))
@@ -496,6 +497,18 @@ async fn forget_device(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     require_owner(&app, &headers, &method)?;
+    if !app.auth.forget_device(&id) {
+        return Err(not_found("device"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// A paired PC unpairs itself (Remove in Hopper's settings). Only a
+/// device's own token can do this, and it only removes that device.
+async fn unpair_self(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    let Who::Device { id, .. } = require(&app, &headers, &method)? else {
+        return Err(bad("Only a paired device can unpair itself."));
+    };
     if !app.auth.forget_device(&id) {
         return Err(not_found("device"));
     }
