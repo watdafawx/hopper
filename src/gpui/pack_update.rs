@@ -76,15 +76,29 @@ fn server_reviews<T>(f: impl FnOnce(&mut HashMap<u64, ServerReview>) -> T) -> T 
     f(g.get_or_insert_with(HashMap::new))
 }
 
+/// Server updates still running, by job: what was applied (with its plan),
+/// so the dialog opens again on its progress instead of comparing anew.
+static APPLYING: std::sync::Mutex<Option<HashMap<u64, ServerTarget>>> = std::sync::Mutex::new(None);
+
+fn applying<T>(f: impl FnOnce(&mut HashMap<u64, ServerTarget>) -> T) -> T {
+    let mut g = APPLYING.lock().unwrap_or_else(|e| e.into_inner());
+    f(g.get_or_insert_with(HashMap::new))
+}
+
 /// Whether job `id` has a review to open: a finished pack comparison, or
-/// a server comparison, finished or still running.
+/// a server comparison or update, finished or still running.
 pub fn has_review(id: u64, done: bool) -> bool {
     (done && REVIEWS.lock().ok().and_then(|g| g.as_ref().map(|m| m.contains_key(&id))).unwrap_or(false))
         || server_reviews(|m| m.contains_key(&id))
+        || applying(|m| m.contains_key(&id))
 }
 
 /// Opens the review job `id` made (or is making), without comparing again.
 pub fn reopen(store: Entity<Store>, id: u64, window: &mut Window, cx: &mut App) {
+    if let Some(t) = applying(|m| m.get(&id).cloned()) {
+        show_server(store, t, None, window, cx);
+        return;
+    }
     if let Some((t, _)) = server_reviews(|m| m.get(&id).cloned()) {
         show_server(store, t, Some(id), window, cx);
         return;
@@ -113,6 +127,9 @@ struct ServerTarget {
     job: Option<u64>,
     /// That job's detail and progress while it runs.
     status: Option<(String, Option<f32>)>,
+    /// The update job, once "Update server" was clicked: the dialog stays
+    /// open and its button shows how far it got.
+    apply: Option<u64>,
 }
 
 pub struct UpdatePreview {
@@ -149,6 +166,12 @@ pub struct UpdatePreview {
     compare: bool,
     /// The pack version updated to (instance mode), to compare again.
     file: Option<cf::File>,
+    /// Instance mode: the comparison job, while it runs (the button shows
+    /// its progress).
+    plan_job: Option<u64>,
+    /// Instance mode, once Update was clicked: the job the button follows,
+    /// and whether it's the update itself (not the snapshot before it).
+    update: Option<(u64, bool)>,
     /// The summary line whose list is open.
     section: Option<Section>,
     /// The open list's filter tab, and (What stays) which tab.
@@ -216,6 +239,8 @@ impl UpdatePreview {
             reinstall: false,
             compare: false,
             file: None,
+            plan_job: None,
+            update: None,
             section: None,
             filter: 0,
             folders: HashSet::new(),
@@ -308,15 +333,8 @@ impl UpdatePreview {
                 format!("Changes · {} mods · {files} files", p.mods.len())
             }
             Some(Err(_)) => "Changes · couldn't prepare".into(),
-            None => {
-                let pct = self
-                    .server
-                    .as_ref()
-                    .and_then(|t| t.status.as_ref())
-                    .and_then(|s| s.1)
-                    .map(|p| format!(" {:.0}%", p * 100.));
-                format!("Changes · preparing{}", pct.unwrap_or_else(|| "…".into()))
-            }
+            // The footer button shows how far it got.
+            None => "Changes · preparing…".into(),
         }
     }
 
@@ -468,6 +486,8 @@ impl UpdatePreview {
             .read(cx)
             .jobs()
             .start(format!("Comparing {} with {}", inst.name, file.display_name));
+        self.plan_job = Some(job.id());
+        self.redraw_while(job.id(), cx);
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
@@ -587,6 +607,55 @@ impl UpdatePreview {
         .detach();
     }
 
+    /// Server mode: the footer's close label and its "Update server"
+    /// button, which fills with the download, then the update, as they run.
+    fn server_footer(&self, cx: &App) -> (&'static str, AnyElement) {
+        let Some(t) = self.server.as_ref() else {
+            return ("Cancel", div().into_any_element());
+        };
+        let icon = IconName::ServerCog;
+        if let Some(id) = t.apply {
+            let j = self.store.read(cx).job_state(id);
+            return ("Close", job_button("supd-go", icon, j.as_ref(), "Server updated", cx));
+        }
+        if t.splan.is_some() {
+            return ("Cancel", go_button("supd-go", icon, "Update server").into_any_element());
+        }
+        let (detail, p) = t.status.clone().unwrap_or_else(|| ("Finding the server pack".into(), None));
+        ("Cancel", busy_button("supd-go", icon, widgets::job_label(&detail, p), p, cx))
+    }
+
+    /// Instance mode: the same, for "Update" (or "Reinstall").
+    fn instance_footer(&self, cx: &App) -> (&'static str, AnyElement) {
+        let (icon, go, done) = if self.reinstall {
+            (IconName::RotateCcw, "Reinstall", "Reinstalled")
+        } else {
+            (IconName::Download, "Update", "Updated")
+        };
+        let jobs = |id| self.store.read(cx).job_state(id);
+        match self.update {
+            // The snapshot before the update: the update starts after it.
+            Some((id, false)) => {
+                let label = match jobs(id) {
+                    Some(j) if !j.done => widgets::job_label(&j.detail, j.progress),
+                    _ => "Starting the update".into(),
+                };
+                return ("Close", busy_button("upd-go", icon, label, None, cx));
+            }
+            Some((id, true)) => return ("Close", job_button("upd-go", icon, jobs(id).as_ref(), done, cx)),
+            None => {}
+        }
+        match &self.plan {
+            Some(Ok(_)) => ("Cancel", go_button("upd-go", icon, go).into_any_element()),
+            Some(Err(_)) => ("Cancel", go_button("upd-go", icon, go).disabled(true).into_any_element()),
+            None => {
+                let j = self.plan_job.and_then(jobs).filter(|j| !j.done);
+                let (label, p) = j.map_or(("Comparing".into(), None), |j| (widgets::job_label(&j.detail, j.progress), j.progress));
+                ("Cancel", busy_button("upd-go", icon, label, p, cx))
+            }
+        }
+    }
+
     fn take_result(&mut self, id: u64, r: ServerResult) {
         match r {
             Ok((targets, p, on)) => {
@@ -621,10 +690,17 @@ impl UpdatePreview {
         cx.notify();
     }
 
+    /// Starts the update; the dialog stays open on its progress (closing
+    /// it doesn't stop the update). Returns whether the dialog may close.
     fn apply_server(view: &Entity<Self>, cx: &mut App) -> bool {
         let v = view.read(cx);
         let Some(t) = &v.server else { return false };
+        // Already started: the button only closes once it's done.
+        if let Some(id) = t.apply {
+            return v.store.read(cx).job_state(id).is_none_or(|j| j.done);
+        }
         let Some(mut p) = t.splan.clone() else { return false };
+        let shown = t.clone();
         // Dropped mods one of the server's own mods needs, kept.
         p.plan
             .mods
@@ -639,9 +715,11 @@ impl UpdatePreview {
         let host = s.settings().server_host.clone();
         let java = hopper::launch::installer_java(std::path::Path::new(&s.settings().launcher_dir));
         let panel = hopper::panel::for_server(s.settings(), &server);
-        s.spawn_job(format!("{} → {}", server.name, p.plan.file.display_name), move |job| {
+        let id = s.spawn_job_id(format!("{} → {}", server.name, p.plan.file.display_name), move |job| {
             job.announce();
-            let r = hopper::server_pack_update::apply(&server, &p, &take, &host, &java, panel.as_deref(), job)?;
+            let r = hopper::server_pack_update::apply(&server, &p, &take, &host, &java, panel.as_deref(), job);
+            applying(|m| m.remove(&job.id()));
+            let r = r?;
             job.detail(r.summary());
             if let Some(b) = &r.backups {
                 job.note(format!("Replaced and removed files: {}", b.display()));
@@ -664,7 +742,40 @@ impl UpdatePreview {
             }
             Ok(crate::store::Msg::ServersChanged)
         });
-        true
+        applying(|m| m.insert(id, ServerTarget { apply: Some(id), ..shown }));
+        view.update(cx, |v, cx| {
+            if let Some(t) = v.server.as_mut() {
+                t.apply = Some(id);
+            }
+            v.follow_apply(cx);
+        });
+        false
+    }
+
+    /// Server mode: redraws while the update runs.
+    fn follow_apply(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.server.as_ref().and_then(|t| t.apply) {
+            self.redraw_while(id, cx);
+        }
+    }
+
+    /// Redraws while job `id` runs, so the footer button shows its progress.
+    fn redraw_while(&mut self, id: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let done = this
+                    .update(cx, |this, cx| {
+                        cx.notify();
+                        this.store.read(cx).job_state(id).is_none_or(|j| j.done)
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(300)).await;
+            }
+        })
+        .detach();
     }
 
     /// Server mode: the version choice, loader change and caveats.
@@ -992,8 +1103,14 @@ impl UpdatePreview {
         cx.notify();
     }
 
+    /// Starts the update; the dialog stays open on its progress (closing
+    /// it doesn't stop the update). Returns whether the dialog may close.
     fn apply(view: &Entity<Self>, cx: &mut App) -> bool {
         let v = view.read(cx);
+        // Already started: the button only closes once it's done.
+        if let Some((id, real)) = v.update {
+            return real && v.store.read(cx).job_state(id).is_none_or(|j| j.done);
+        }
         let Some(Ok(plan)) = &v.plan else {
             return false;
         };
@@ -1015,6 +1132,12 @@ impl UpdatePreview {
             .unwrap_or_default();
         let reason = hopper::snapshots::Reason::PackUpdate { from, to: file.display_name.clone() };
         let job = store.read(cx).jobs().start(format!("Snapshot before updating {}", file.display_name));
+        let snap = job.id();
+        view.update(cx, |v, cx| {
+            v.update = Some((snap, false));
+            v.redraw_while(snap, cx);
+        });
+        let view = view.downgrade();
         cx.spawn(async move |cx| {
             let r2 = root.clone();
             let r = cx
@@ -1028,13 +1151,26 @@ impl UpdatePreview {
                 // The update still runs: its replaced files go to backups as before.
                 log::warn!("snapshot before pack update failed: {e:#}");
             }
-            store.update(cx, |s, cx| {
-                s.update_pack(&root, file, Some(overrides), backup);
+            let id = store.update(cx, |s, cx| {
+                let id = s.update_pack(&root, file, Some(overrides), backup);
                 cx.notify();
+                id
             });
+            // The dialog follows the update itself now (if still open).
+            view.update(cx, |v, cx| {
+                match id {
+                    Some(id) => {
+                        v.update = Some((id, true));
+                        v.redraw_while(id, cx);
+                    }
+                    None => v.update = None,
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
-        true
+        false
     }
 
     /// Opens a summary line's list (closing any other), or closes it.
@@ -2158,6 +2294,41 @@ impl Render for UpdatePreview {
     }
 }
 
+/// A dialog's main button, ready.
+fn go_button(id: &'static str, icon: IconName, label: &'static str) -> Button {
+    Button::new(id).primary().w_full().icon(icon).label(label)
+}
+
+/// A dialog's main button while its job runs: filled as far as it got.
+/// Outline, like every other button that fills (the fill wouldn't show on
+/// a filled one); loading keeps it from being clicked.
+fn busy_button(id: &'static str, icon: IconName, label: String, p: Option<f32>, cx: &App) -> AnyElement {
+    widgets::progress_fill(Button::new(id).outline().w_full().icon(icon).loading(true).label(label), p, cx)
+        .w_full()
+        .into_any_element()
+}
+
+/// A dialog's main button following job `j`: its progress while it runs,
+/// then a green `done` mark (or why it failed).
+fn job_button(id: &'static str, icon: IconName, j: Option<&hopper::jobs::JobState>, done: &'static str, cx: &App) -> AnyElement {
+    match j {
+        Some(j) if !j.done => busy_button(id, icon, widgets::job_label(&j.detail, j.progress), j.progress, cx),
+        Some(j) if j.error.is_some() => Button::new(id)
+            .danger()
+            .outline()
+            .w_full()
+            .icon(IconName::TriangleAlert)
+            .label("Failed: details in the task list")
+            .disabled(true)
+            .into_any_element(),
+        _ => widgets::done_mark(SharedString::from(format!("{id}-done")), done, false, cx)
+            .w_full()
+            .h(rems(2.))
+            .justify_center()
+            .into_any_element(),
+    }
+}
+
 /// Previews updating an instance's modpack to `file`, then updates it.
 pub fn open(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut Window, cx: &mut App) {
     show(store, root, file, None, window, cx)
@@ -2212,8 +2383,8 @@ fn show(
     });
     let title = format!("{} {}", if reinstall { "Reinstall" } else { "Update" }, inst.name);
     window.open_dialog(cx, move |dialog, window, cx| {
-        let ready = matches!(view.read(cx).plan, Some(Ok(_)));
         let v2 = view.clone();
+        let (close, go) = view.read(cx).instance_footer(cx);
         dialog
             .title(title.clone())
             .w(rems(if view.read(cx).peek.is_some() { 86. } else { 54. }).to_pixels(window.rem_size()))
@@ -2221,19 +2392,8 @@ fn show(
             .child(view.clone())
             .footer(
                 DialogFooter::new()
-                    .child(DialogClose::new().child(Button::new("upd-cancel").outline().label("Cancel")))
-                    .child(DialogAction::new().child(
-                        Button::new("upd-go")
-                            .primary()
-                            .icon(if reinstall { IconName::RotateCcw } else { IconName::Download })
-                            .label(match (reinstall, ready) {
-                                (true, true) => "Reinstall",
-                                (false, true) => "Update",
-                                (true, false) => "Reinstall (preparing…)",
-                                (false, false) => "Update (preparing…)",
-                            })
-                            .disabled(!ready),
-                    )),
+                    .child(DialogClose::new().child(Button::new("upd-cancel").outline().label(close)))
+                    .child(DialogAction::new().child(go)),
             )
             .on_ok(move |_, _, cx| UpdatePreview::apply(&v2, cx))
     });
@@ -2254,6 +2414,11 @@ pub fn open_server(store: Entity<Store>, server: ServerInfo, inst: Instance, win
         show_server(store, t, Some(id), window, cx);
         return;
     }
+    // An update to it still running: show its progress.
+    if let Some(t) = applying(|m| m.values().find(|t| t.server.root == server.root).cloned()) {
+        show_server(store, t, None, window, cx);
+        return;
+    }
     let latest = store.read(cx).pack_update(&inst).cloned();
     let t = ServerTarget {
         server,
@@ -2265,27 +2430,45 @@ pub fn open_server(store: Entity<Store>, server: ServerInfo, inst: Instance, win
         via: None,
         job: None,
         status: None,
+        apply: None,
     };
     show_server(store, t, None, window, cx);
 }
 
-/// The server pack dialog for `t`: following comparison `job`, or starting
-/// one when `None`.
+/// The server pack dialog for `t`: following its update when one runs,
+/// else comparison `job`, or starting one when `None`.
 fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: &mut Window, cx: &mut App) {
     let server = t.server.clone();
     let title = format!("Update {} from the server pack", server.name);
     let view = cx.new(|cx| {
+        let applying = t.apply.is_some();
+        let job = if applying { t.job } else { job };
         let mut v = UpdatePreview::new(store, server.root.clone(), Some(ServerTarget { job, ..t }), String::new(), window, cx);
-        match job {
-            Some(_) => v.follow(cx),
-            None => v.plan_server(cx),
+        if applying {
+            // Shows the plan being applied, without comparing again.
+            let t = v.server.as_ref().and_then(|t| {
+                let on = t.via.clone().unwrap_or_else(|| t.server.clone());
+                t.splan.clone().map(|p| (t.targets.clone(), p, on))
+            });
+            if let Some(r) = t {
+                v.take_result(0, Ok(r));
+                if let Some(Ok(p)) = v.plan.clone() {
+                    v.loaded(&p, cx);
+                }
+            }
+            v.follow_apply(cx);
+        } else {
+            match job {
+                Some(_) => v.follow(cx),
+                None => v.plan_server(cx),
+            }
         }
         v.load_log(cx);
         v
     });
     window.open_dialog(cx, move |dialog, window, cx| {
-        let ready = view.read(cx).server.as_ref().is_some_and(|t| t.splan.is_some());
         let v2 = view.clone();
+        let (close, go) = view.read(cx).server_footer(cx);
         dialog
             .title(title.clone())
             .w(rems(if view.read(cx).peek.is_some() { 86. } else { 54. }).to_pixels(window.rem_size()))
@@ -2293,14 +2476,8 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
             .child(view.clone())
             .footer(
                 DialogFooter::new()
-                    .child(DialogClose::new().child(Button::new("supd-cancel").outline().label("Cancel")))
-                    .child(DialogAction::new().child(
-                        Button::new("supd-go")
-                            .primary()
-                            .icon(IconName::ServerCog)
-                            .label(if ready { "Update server" } else { "Update server (preparing…)" })
-                            .disabled(!ready),
-                    )),
+                    .child(DialogClose::new().child(Button::new("supd-cancel").outline().label(close)))
+                    .child(DialogAction::new().child(go)),
             )
             .on_ok(move |_, _, cx| UpdatePreview::apply_server(&v2, cx))
     });

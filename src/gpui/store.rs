@@ -1917,12 +1917,12 @@ impl Store {
         file: hopper::cf::File,
         overrides: Option<hopper::modpack::Overrides>,
         backup_worlds: bool,
-    ) {
+    ) -> Option<u64> {
         let Some(mut full) = self.instance(root).cloned() else {
-            return;
+            return None;
         };
         let Some(pid) = full.pack.as_ref().map(|p| p.project_id) else {
-            return;
+            return None;
         };
         self.pack_updates.remove(&pid);
         let server = self
@@ -1946,7 +1946,7 @@ impl Store {
         let dir = PathBuf::from(&self.settings.launcher_dir);
         let defaults = self.launch_defaults();
         let native = self.settings.launch_native;
-        self.spawn_instance_job(&full.root.clone(), format!("{} → {}", full.name, file.display_name), move |job| {
+        let id = self.spawn_instance_job_id(&full.root.clone(), format!("{} → {}", full.name, file.display_name), move |job| {
             job.announce();
             let loader_before = (full.loader.clone(), full.game_version.clone());
             if backup_worlds {
@@ -1985,6 +1985,7 @@ impl Store {
             let pages = hopper::modpack::pending_urls_at(&full.root);
             Ok(Msg::Updated(full.root.clone(), Vec::new(), pages))
         });
+        Some(id)
     }
 
     pub fn updates(&self, root: &Path) -> Option<&Updates> {

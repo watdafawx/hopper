@@ -1343,6 +1343,23 @@ pub fn progress_fill(el: impl IntoElement, p: Option<f32>, cx: &App) -> Div {
     })
 }
 
+/// A running job's detail as a button label, with its percent:
+/// "Downloading 42% · 311 MB of 740 MB · 13.5 MB/s" (the file name and time
+/// left dropped, for room), or "Updating mods 83% · 40/48".
+pub fn job_label(detail: &str, p: Option<f32>) -> String {
+    let pct = p.map(|p| format!(" {}%", (p.clamp(0.0, 1.0) * 100.0).floor() as u32)).unwrap_or_default();
+    // "Downloading <file>: <size> · <speed> · about N s left"
+    if let Some(rest) = detail.strip_prefix("Downloading ").and_then(|d| d.split_once(": ").map(|(_, r)| r)) {
+        let parts: Vec<&str> = rest.split(" · ").filter(|s| !s.starts_with("about ")).collect();
+        return format!("Downloading{pct} · {}", parts.join(" · "));
+    }
+    // "Updating mods (40/48)"
+    if let Some((verb, count)) = detail.strip_suffix(')').and_then(|d| d.rsplit_once(" (")) {
+        return format!("{verb}{pct} · {count}");
+    }
+    format!("{detail}{pct}")
+}
+
 /// A finished action's mark where its button was: a check and a word.
 pub fn done_mark(id: impl Into<ElementId>, label: impl Into<SharedString>, small: bool, cx: &App) -> Stateful<Div> {
     let ok = cx.theme().success;
@@ -1796,5 +1813,20 @@ impl Anchored {
             el = el.bottom(b);
         }
         el
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::job_label;
+
+    #[test]
+    fn job_label_shortens_job_details() {
+        assert_eq!(
+            job_label("Downloading LL8 Server Files v1.78.1.zip: 311.4 MB of 740.2 MB · 13.5 MB/s · about 32 s left", Some(0.42)),
+            "Downloading 42% · 311.4 MB of 740.2 MB · 13.5 MB/s"
+        );
+        assert_eq!(job_label("Updating mods (40/48)", Some(0.833)), "Updating mods 83% · 40/48");
+        assert_eq!(job_label("Comparing files", None), "Comparing files");
     }
 }

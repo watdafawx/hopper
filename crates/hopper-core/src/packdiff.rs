@@ -543,6 +543,8 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
             .inspect_err(|e| log::warn!("installed pack version: {e:#}"))
             .ok()
     };
+    // A finished download's 100% isn't the comparing's.
+    job.progress(0, 0);
 
     let mut updated = Vec::new();
     let (prefixes, mut mods, mut removed) = if mr {

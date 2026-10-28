@@ -218,6 +218,8 @@ pub fn plan(
 
     job.detail("Reading the pack's loader");
     let manifest = modpack::read_manifest(&modpack::fetch_pack_zip(pack, job)?)?;
+    // A finished download's 100% isn't the next step's.
+    job.progress(0, 0);
     let loader = match (
         manifest.loader().strip_prefix("neoforge-").map(str::to_string),
         crate::server_update::server_neoforge(&server.root),
@@ -230,6 +232,7 @@ pub fn plan(
     let new_zip = modpack::fetch_pack_zip(&file, job)?;
     job.check_cancelled()?;
     job.detail("Reading the server pack");
+    job.progress(0, 0);
     let names = sp::zip_names(&new_zip)?;
     let mut z = zip::ZipArchive::new(fs::File::open(&new_zip)?)?;
     let (new, prefix) = side(&names, &level, |i| {
