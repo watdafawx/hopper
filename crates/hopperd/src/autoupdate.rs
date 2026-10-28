@@ -17,11 +17,16 @@
 //!
 //! `GET /api/v1/panel/update` is the state, `PUT` sets auto-update (owner),
 //! `POST /api/v1/panel/update/now` checks and installs now (owner).
+//! `GET /api/v1/panel/releases` lists the releases with their notes (the
+//! version window by the logo), and `POST /api/v1/panel/update/install`
+//! installs one of them, older ones too (owner). Rolling back makes
+//! auto-update skip the version it came from and older ones, so it doesn't
+//! put that version straight back; a newer release still installs.
 
 use crate::App;
 use crate::api::{ApiResult, bad, require, require_owner};
 use anyhow::{Context as _, bail};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, Method};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -59,6 +64,8 @@ pub struct Status {
     /// "ready" (installed, used from the next start), "error".
     pub state: String,
     pub error: Option<String>,
+    /// The version being installed (an update, or an older one).
+    pub target: String,
 }
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
@@ -98,6 +105,8 @@ struct GhRelease {
     #[serde(default)]
     html_url: String,
     #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
     assets: Vec<GhAsset>,
 }
 
@@ -109,17 +118,63 @@ struct GhAsset {
     size: u64,
 }
 
+#[derive(Clone)]
 struct Release {
     version: String,
     url: String,
     size: u64,
     notes: String,
     page: String,
+    /// 2026-10-18T09:08:51Z.
+    published: String,
 }
 
-/// The newest Hopper Server release newer than this build, with a Windows zip.
-fn newest() -> anyhow::Result<Option<Release>> {
-    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=30");
+/// Hopper Server's releases with a Windows zip, newest first, from GitHub's
+/// answer.
+fn parse_releases(all: Vec<GhRelease>) -> Vec<Release> {
+    let mut found: Vec<Release> = all
+        .into_iter()
+        .filter(|r| !r.draft && !r.prerelease)
+        .filter_map(|r| {
+            let version = r.tag_name.strip_prefix(TAG)?.to_string();
+            let a = r.assets.iter().find(|a| a.name.to_lowercase().ends_with("-windows-x64.zip"))?;
+            Some(Release {
+                version,
+                url: a.browser_download_url.clone(),
+                size: a.size,
+                notes: r.body.unwrap_or_default(),
+                page: r.html_url,
+                published: r.published_at.unwrap_or_default(),
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| {
+        if hopper_core::selfupdate::is_newer(&a.version, &b.version) {
+            std::cmp::Ordering::Less
+        } else if a.version == b.version {
+            std::cmp::Ordering::Equal
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    });
+    found
+}
+
+/// The last list read, so opening the version window again doesn't ask
+/// GitHub each time (it allows 60 calls an hour without a token).
+static LISTED: Mutex<Option<(std::time::Instant, Vec<Release>)>> = Mutex::new(None);
+const LIST_FOR: Duration = Duration::from_secs(5 * 60);
+
+/// Hopper Server's releases, newest first. `fresh` always asks GitHub (the
+/// update check); otherwise a list from the last few minutes is reused.
+fn releases(fresh: bool) -> anyhow::Result<Vec<Release>> {
+    if !fresh
+        && let Some((at, list)) = LISTED.lock().unwrap().as_ref()
+        && at.elapsed() < LIST_FOR
+    {
+        return Ok(list.clone());
+    }
+    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=50");
     let all: Vec<GhRelease> = hopper_core::cf::agent()
         .get(&url)
         .header("Accept", "application/vnd.github+json")
@@ -128,26 +183,34 @@ fn newest() -> anyhow::Result<Option<Release>> {
         .body_mut()
         .read_json()
         .context("reading the releases")?;
-    let mut found: Vec<Release> = all
-        .into_iter()
-        .filter(|r| !r.draft && !r.prerelease)
-        .filter_map(|r| {
-            let version = r.tag_name.strip_prefix(TAG)?.to_string();
-            if !hopper_core::selfupdate::is_newer(&version, &current()) {
-                return None;
-            }
-            let a = r.assets.iter().find(|a| a.name.to_lowercase().ends_with("-windows-x64.zip"))?;
-            Some(Release { version, url: a.browser_download_url.clone(), size: a.size, notes: r.body.unwrap_or_default(), page: r.html_url })
-        })
-        .collect();
-    found.sort_by(|a, b| {
-        if hopper_core::selfupdate::is_newer(&a.version, &b.version) {
-            std::cmp::Ordering::Less
-        } else {
-            std::cmp::Ordering::Greater
-        }
-    });
-    Ok(found.into_iter().next())
+    let list = parse_releases(all);
+    *LISTED.lock().unwrap() = Some((std::time::Instant::now(), list.clone()));
+    Ok(list)
+}
+
+/// The newest Hopper Server release newer than this build, with a Windows zip.
+fn newest() -> anyhow::Result<Option<Release>> {
+    let cur = current();
+    Ok(releases(true)?.into_iter().find(|r| hopper_core::selfupdate::is_newer(&r.version, &cur)))
+}
+
+/// Whether auto-update leaves `version` alone: it's at or below the version
+/// a rollback came from.
+fn skipped(skip: Option<&str>, version: &str) -> bool {
+    skip.is_some_and(|s| !hopper_core::selfupdate::is_newer(version, s))
+}
+
+/// The skip mark after installing `to` over `from` by hand. Going back
+/// skips everything out so far (`newest`, `from`, or what a rollback
+/// skipped already), so auto-update doesn't undo it; the next release
+/// still installs. Going forward to or past the skipped version clears it.
+fn skip_after(skip: Option<&str>, from: &str, to: &str, newest: Option<&str>) -> Option<String> {
+    use hopper_core::selfupdate::is_newer;
+    if is_newer(from, to) {
+        let top = [skip, newest].into_iter().flatten().fold(from, |a, b| if is_newer(b, a) { b } else { a });
+        return Some(top.to_string());
+    }
+    skip.filter(|s| is_newer(s, to)).map(str::to_string)
 }
 
 /// This build's version; `HOPPERD_TEST_VERSION` pretends to be another
@@ -240,10 +303,11 @@ pub fn download_newest(dir: &Path) -> anyhow::Result<(String, PathBuf)> {
 }
 
 /// Checks now on this thread (the tray's "Check for updates"); installs too
-/// when `install_it`. Returns once the check is done; with one running
-/// already, returns at once (the status says "checking").
+/// when `install_it` (someone asked, so a rollback's skip doesn't apply).
+/// Returns once the check is done; with one running already, returns at
+/// once (the status says "checking").
 pub fn check(app: &Arc<App>, install_it: bool) {
-    run_once(app, install_it);
+    run_once(app, install_it, true);
 }
 
 /// What an earlier update left beside the exe; at start.
@@ -257,8 +321,9 @@ pub fn clean_up(boot: &Path) {
 }
 
 /// Looks for a newer version; installs and restarts into it when `install`
-/// (auto-update on, or "Update now").
-fn run_once(app: &Arc<App>, install_it: bool) {
+/// (auto-update on, or "Update now"). `asked`: someone asked for it, so
+/// the version a rollback came from installs too.
+fn run_once(app: &Arc<App>, install_it: bool, asked: bool) {
     if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -290,15 +355,71 @@ fn run_once(app: &Arc<App>, install_it: bool) {
     if !install_it || why_not().is_some() {
         return;
     }
-    log::info!("updating Hopper Server {} → {}", current(), r.version);
-    set(|s| s.state = "downloading".into());
-    if let Err(e) = install(&r) {
+    if !asked && skipped(app.cfg.read().unwrap().skip_auto_up_to.as_deref(), &r.version) {
+        log::info!("auto-update leaves {} alone: the panel was rolled back from it", r.version);
+        return;
+    }
+    install_and_restart(app, &r);
+}
+
+/// Installs one release, older ones too ("Roll back to X"); on its own
+/// thread. Fails at once when an update is already running.
+fn install_version(app: &Arc<App>, version: &str) -> anyhow::Result<()> {
+    if BUSY.swap(true, Ordering::SeqCst) {
+        bail!("An update is already running.");
+    }
+    let r = releases(false).and_then(|list| {
+        list.into_iter()
+            .find(|r| r.version == version)
+            .with_context(|| format!("Hopper Server {version} has no Windows download."))
+    });
+    let r = match r {
+        Ok(r) if r.version == current() => Err(anyhow::anyhow!("The panel already runs {version}.")),
+        r => r,
+    };
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => {
+            BUSY.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+    let a = app.clone();
+    std::thread::spawn(move || {
+        let _guard = scopeguard(|| BUSY.store(false, Ordering::SeqCst));
+        set(|s| s.error = None);
+        install_and_restart(&a, &r);
+    });
+    Ok(())
+}
+
+/// Downloads `r`, puts it in place, and restarts into it once no job runs.
+fn install_and_restart(app: &Arc<App>, r: &Release) {
+    let from = current();
+    log::info!("updating Hopper Server {from} → {}", r.version);
+    set(|s| {
+        s.state = "downloading".into();
+        s.target = r.version.clone();
+    });
+    if let Err(e) = install(r) {
         log::warn!("update to {}: {e:#}", r.version);
         set(|s| {
             s.state = "error".into();
             s.error = Some(format!("{e:#}"));
         });
         return;
+    }
+    // Going back: auto-update mustn't put the newer one straight back.
+    {
+        let mut cfg = app.cfg.write().unwrap();
+        let newest = LISTED.lock().unwrap().as_ref().and_then(|(_, l)| l.first().map(|r| r.version.clone()));
+        let skip = skip_after(cfg.skip_auto_up_to.as_deref(), &from, &r.version, newest.as_deref());
+        if skip != cfg.skip_auto_up_to {
+            cfg.skip_auto_up_to = skip;
+            if let Err(e) = cfg.save(&app.data_dir) {
+                log::warn!("saving the skipped version: {e:#}");
+            }
+        }
     }
     // Long work (a pack update, a backup) finishes first.
     set(|s| s.state = "waiting".into());
@@ -347,7 +468,7 @@ pub fn start(app: Arc<App>) {
         std::thread::sleep(Duration::from_secs(first));
         loop {
             let auto = app.cfg.read().unwrap().auto_update;
-            run_once(&app, auto);
+            run_once(&app, auto, false);
             std::thread::sleep(EVERY);
         }
     });
@@ -359,17 +480,74 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/v1/panel/update", get(get_status).put(put_auto))
         .route("/api/v1/panel/update/now", post(now))
+        .route("/api/v1/panel/update/install", post(install_one))
+        .route("/api/v1/panel/releases", get(list_releases))
 }
 
 async fn get_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
     let s = status();
     Ok(Json(json!({
-        "current": s.current, "latest": s.latest, "notes": s.notes, "page": s.page, "checked": s.checked,
-        "state": s.state, "error": s.error,
+        "current": current(), "latest": s.latest, "notes": s.notes, "page": s.page, "checked": s.checked,
+        "state": s.state, "error": s.error, "target": s.target,
         "auto": app.cfg.read().unwrap().auto_update,
+        "skip": app.cfg.read().unwrap().skip_auto_up_to,
         "why_not": why_not(),
     })))
+}
+
+#[derive(Deserialize)]
+struct ListQuery {
+    /// 1: ask GitHub now ("Check for updates").
+    fresh: Option<u8>,
+}
+
+/// The releases for the version window, newest first, with their notes.
+async fn list_releases(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Query<ListQuery>) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let fresh = q.fresh.is_some_and(|f| f != 0);
+    let list = tokio::task::spawn_blocking(move || releases(fresh)).await.map_err(bad)?.map_err(|e| bad(format!("{e:#}")))?;
+    // The list doubles as an update check (as in Hopper desktop): the
+    // version by the logo shows what it found.
+    let cur = current();
+    let up = list.iter().find(|r| hopper_core::selfupdate::is_newer(&r.version, &cur));
+    set(|s| {
+        if s.state.is_empty() || s.state == "error" {
+            s.state = String::new();
+            s.error = None;
+        }
+        s.checked = now_secs();
+        s.latest = up.map(|r| r.version.clone());
+        s.notes = up.map(|r| r.notes.clone()).unwrap_or_default();
+        s.page = up.map(|r| r.page.clone()).unwrap_or_default();
+    });
+    let list: Vec<Value> = list
+        .iter()
+        .map(|r| {
+            json!({
+                "version": r.version, "published": r.published, "page": r.page,
+                "notes": hopper_core::selfupdate::clean_notes(&r.notes),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "current": current(), "releases": list })))
+}
+
+#[derive(Deserialize)]
+struct InstallBody {
+    version: String,
+}
+
+/// "Update to X" / "Roll back to X" from the version window.
+async fn install_one(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<InstallBody>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    if let Some(w) = why_not() {
+        return Err(bad(w));
+    }
+    let a = app.clone();
+    let v = b.version.trim().to_string();
+    tokio::task::spawn_blocking(move || install_version(&a, &v)).await.map_err(bad)?.map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -394,12 +572,57 @@ async fn now(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) ->
         return Err(bad(w));
     }
     let a = app.clone();
-    std::thread::spawn(move || run_once(&a, true));
+    std::thread::spawn(move || run_once(&a, true, true));
     Ok(Json(json!({ "ok": true })))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{skip_after, skipped};
+
+    #[test]
+    fn rollback_skips_the_version_it_left() {
+        // Back from 0.13.7 to 0.13.4: 0.13.5–0.13.7 stay out, 0.13.8 comes in.
+        let s = skip_after(None, "0.13.7", "0.13.4", Some("0.13.7"));
+        assert_eq!(s.as_deref(), Some("0.13.7"));
+        assert!(skipped(s.as_deref(), "0.13.7"));
+        assert!(skipped(s.as_deref(), "0.13.5"));
+        assert!(!skipped(s.as_deref(), "0.13.8"));
+        assert!(!skipped(None, "0.13.8"));
+        // Back again from 0.13.4 to 0.13.2: still skips up to 0.13.7.
+        assert_eq!(skip_after(s.as_deref(), "0.13.4", "0.13.2", Some("0.13.7")).as_deref(), Some("0.13.7"));
+        // Back from an older one while 0.13.9 is out: up to 0.13.9 stays out.
+        assert_eq!(skip_after(None, "0.13.4", "0.13.2", Some("0.13.9")).as_deref(), Some("0.13.9"));
+        // No list read: the version it came from.
+        assert_eq!(skip_after(None, "0.13.4", "0.13.2", None).as_deref(), Some("0.13.4"));
+        // Forward by hand to 0.13.5: 0.13.6 and 0.13.7 stay skipped.
+        assert_eq!(skip_after(s.as_deref(), "0.13.4", "0.13.5", Some("0.13.7")).as_deref(), Some("0.13.7"));
+        // Forward to the skipped one or past it: cleared.
+        assert_eq!(skip_after(s.as_deref(), "0.13.4", "0.13.7", Some("0.13.7")), None);
+        assert_eq!(skip_after(s.as_deref(), "0.13.4", "0.14.0", Some("0.14.0")), None);
+        assert_eq!(skip_after(None, "0.13.4", "0.13.5", Some("0.13.7")), None);
+    }
+
+    #[test]
+    fn releases_need_a_windows_zip_and_sort_newest_first() {
+        let gh: Vec<super::GhRelease> = serde_json::from_value(serde_json::json!([
+            { "tag_name": "hopperd-v0.13.5", "html_url": "p5", "published_at": "2026-10-28T01:00:00Z",
+              "assets": [{ "name": "hopperd-0.13.5-windows-x64.zip", "browser_download_url": "u5", "size": 5 }] },
+            { "tag_name": "hopperd-v0.13.10", "body": "notes",
+              "assets": [{ "name": "hopperd-0.13.10-windows-x64.zip", "browser_download_url": "u10" }] },
+            { "tag_name": "hopperd-v0.13.6", "assets": [{ "name": "hopperd-0.13.6-linux-x64.tar.gz", "browser_download_url": "x" }] },
+            { "tag_name": "v0.15.10", "assets": [{ "name": "hopper-windows-x64.zip", "browser_download_url": "d" }] },
+            { "tag_name": "hopperd-v0.14.0", "prerelease": true,
+              "assets": [{ "name": "hopperd-0.14.0-windows-x64.zip", "browser_download_url": "u14" }] }
+        ]))
+        .unwrap();
+        let list = super::parse_releases(gh);
+        let v: Vec<&str> = list.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(v, ["0.13.10", "0.13.5"]);
+        assert_eq!(list[1].published, "2026-10-28T01:00:00Z");
+        assert_eq!(list[0].notes, "notes");
+    }
+
     #[test]
     fn exe_from_zip_finds_it() {
         let d = std::env::temp_dir().join(format!("hopperd-upd-{}", std::process::id()));

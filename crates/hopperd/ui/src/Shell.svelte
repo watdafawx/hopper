@@ -29,6 +29,9 @@
   import Dialog from './Dialog.svelte';
   import Transfers from './Transfers.svelte';
   import { refreshPackUpdates } from './lib/packs.svelte.js';
+  import VersionChip from './VersionChip.svelte';
+  import PanelVersions from './PanelVersions.svelte';
+  import { upd } from './lib/panelupdate.svelte.js';
 
   let { hello, me, onSignOut } = $props();
   const owner = $derived(me?.role === 'owner');
@@ -288,6 +291,7 @@
     <div class="brand">
       <img class="logo" src="/logo.svg" alt="" />
       <span class="bname">Hopper Server</span>
+      <VersionChip />
       <span class="chip tiny host" title="This panel's PC">{hello.name}</span>
     </div>
     <div class="arrows">
@@ -353,6 +357,7 @@
 </div>
 
 {#if making}<NewServer close={() => (making = false)} />{/if}
+{#if upd.open}<PanelVersions />{/if}
 {#if palette}<Palette items={palette.items} context={palette.context} onClose={() => (palette = null)} />{/if}
 <Transfers />
 <Dialog />

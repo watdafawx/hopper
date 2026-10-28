@@ -2,28 +2,17 @@
   // Hopper Server's own updates: the version, whether a newer one is out,
   // "Update now", and auto-update (on by default). An update restarts the
   // panel only; Minecraft servers keep running. The tray icon comes back on
-  // the new version by itself.
-  import { RefreshCw, Download, ExternalLink, CircleCheck, TriangleAlert } from '@lucide/svelte';
+  // the new version by itself. "Other versions" opens the same window as
+  // the version beside the logo (notes, and rolling back).
+  import { RefreshCw, Download, ScrollText, CircleCheck, TriangleAlert, RotateCcw } from '@lucide/svelte';
   import { onDestroy } from 'svelte';
   import { api, post } from './lib/api.js';
   import { session } from './lib/me.svelte.js';
   import { say } from './lib/toast.svelte.js';
+  import { upd, followUpdate, loadUpdate } from './lib/panelupdate.svelte.js';
 
-  let st = $state(null);
-  let timer = null;
-
-  async function load() {
-    try {
-      st = await api('/panel/update');
-    } catch {
-      st = null;
-    }
-    clearTimeout(timer);
-    // Follow a running update; the panel goes away while it restarts.
-    if (['checking', 'downloading', 'waiting', 'restarting'].includes(st?.state)) timer = setTimeout(load, 1500);
-  }
-  load();
-  onDestroy(() => clearTimeout(timer));
+  onDestroy(followUpdate());
+  const st = $derived(upd.st);
 
   async function setAuto(on) {
     try {
@@ -38,7 +27,7 @@
     try {
       await post('/panel/update/now');
       st.state = 'checking';
-      timer = setTimeout(load, 1000);
+      loadUpdate();
     } catch (e) {
       say(e.message, true);
     }
@@ -64,7 +53,8 @@
       <b>Hopper Server {st.current}</b>
       {#if st.latest}<span class="chip acc">{st.latest} is out</span>{:else if st.checked}<span class="chip running"><CircleCheck size={11} />Up to date</span>{/if}
       <span class="sp"></span>
-      {#if st.page}<a class="btn sm ghost" href={st.page} target="_blank" rel="noreferrer noopener"><ExternalLink size={13} />What's new</a>{/if}
+      {#if st.latest}<button class="btn sm ghost" onclick={() => (upd.open = true)}><ScrollText size={13} />What's new</button>{/if}
+      <button class="btn sm ghost" title="Every release with its notes, including older ones to roll back to" onclick={() => (upd.open = true)}><RotateCcw size={13} />Other versions</button>
       {#if session.owner && !st.why_not}
         {#if st.latest}<button class="btn sm pri" disabled={!!STATE[st.state] && st.state !== 'ready'} onclick={now}><Download size={13} />Update now</button>
         {:else}<button class="btn sm" disabled={st.state === 'checking'} onclick={now}><RefreshCw size={13} />Check now</button>{/if}
@@ -79,6 +69,7 @@
         <input type="checkbox" checked={st.auto} disabled={!session.owner} onchange={(e) => setAuto(e.currentTarget.checked)} />
         <span><span>Update by itself</span><span class="tiny muted">Installs new versions when they're out and restarts the panel once nothing is running. Minecraft servers keep running, and the tray icon comes back on the new version.</span></span>
       </label>
+      {#if st.skip}<div class="tiny muted">Rolled back: it won't install {st.skip} or older by itself. The next new release still installs.</div>{/if}
     {/if}
   </div>
 {/if}
