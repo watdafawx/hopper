@@ -55,6 +55,9 @@ pub struct Config {
     /// Update Hopper Server by itself when a new version is out (Windows;
     /// not in Docker, where the image is updated instead).
     pub auto_update: bool,
+    /// Set by rolling back: auto-update doesn't install this version or
+    /// older ones again (a newer release still installs).
+    pub skip_auto_up_to: Option<String>,
 }
 
 impl Default for Config {
@@ -79,6 +82,7 @@ impl Default for Config {
             router: Default::default(),
             trust_local_setup: true,
             auto_update: true,
+            skip_auto_up_to: None,
         }
     }
 }
