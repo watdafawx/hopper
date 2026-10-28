@@ -1217,7 +1217,9 @@ fn handle(sup: &Arc<Supervisor>, cmd: Cmd) -> bool {
                         set_busy("Stopping servers…");
                         let _ = sup.request("POST", "stop-servers");
                         let t = Instant::now();
-                        while t.elapsed() < Duration::from_secs(180) {
+                        // As long as a stop may wait for a big world to save.
+                        let longest = hopper_core::hosting::process::StopWait::default().longest();
+                        while t.elapsed() < longest {
                             std::thread::sleep(Duration::from_secs(1));
                             let left = sup.request("GET", "status").and_then(|s| s["servers_up"].as_array().map(Vec::len)).unwrap_or(0);
                             if left == 0 {

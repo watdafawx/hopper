@@ -44,6 +44,8 @@ pub struct Summary {
     pub players: Vec<String>,
     pub max_players: u32,
     pub uptime_secs: Option<u64>,
+    /// Stopping and saving its worlds (shown as "Saving worlds…").
+    pub saving: bool,
     /// Addresses players join it by (server addresses / the router).
     pub addresses: Vec<String>,
     /// Sleeps after this many minutes with nobody on; 0: never.
@@ -202,6 +204,7 @@ impl Servers {
             path: e.root.to_string_lossy().into_owned(),
             port: props.port(),
             state: state_name(&state),
+            saving: state == ServerState::Stopping && t.saving_at.is_some() && t.saved_at.is_none(),
             exit_code: match state {
                 ServerState::Crashed(c) => c,
                 _ => None,

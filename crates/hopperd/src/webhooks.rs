@@ -437,6 +437,7 @@ mod tests {
             players: players.iter().map(|p| p.to_string()).collect(),
             max_players: 0,
             uptime_secs: None,
+            saving: false,
             addresses: Vec::new(),
             sleep_after_minutes: 0,
             icon: None,

@@ -30,6 +30,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        # Full history and tags: the release notes come from the
+        # "Hopper Server x.y.z" commit and the commits since the last tag.
+        with:
+          fetch-depth: 0
       - name: rustup (the arm64 runner may not have it)
         if: runner.os == 'Linux'
         shell: bash
@@ -80,8 +84,12 @@ jobs:
           v="${GITHUB_REF_NAME#hopperd-v}"
           # Never "Latest": the README's and website's download link
           # (releases/latest/download/hopper.exe) must stay on Hopper desktop.
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --latest=false --title "Hopper Server $v" --notes "Hopper Server $v. Run hopperd, open http://localhost:8790, and see the README for setup, services and Docker."
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # Notes: the release commit's body, then the commits since the
+            # last hopperd-v* tag (pwsh is on every GitHub runner).
+            pwsh -NoProfile -File scripts/release-notes.ps1 "$GITHUB_REF_NAME" "${{ github.repository }}" > notes.md
+            gh release create "$GITHUB_REF_NAME" --latest=false --title "Hopper Server $v" --notes-file notes.md
+          fi
           gh release upload "$GITHUB_REF_NAME" "hopperd-$v-${{ matrix.asset }}" --clobber
       - name: Keep the binary for the Docker image
         if: matrix.docker

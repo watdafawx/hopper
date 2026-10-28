@@ -16,8 +16,24 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Console lines kept per server.
 pub const MAX_LINES: usize = 2000;
-/// How long a graceful stop waits for the world to save before killing.
-pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest a graceful stop waits, however busy the save. Big packs can
+/// take minutes to save their worlds, and killing Java mid-save can corrupt
+/// them, so this is generous.
+pub const STOP_HARD_CAP: Duration = Duration::from_secs(10 * 60);
+/// How long a stopped server may say nothing at all, before it starts
+/// saving, until it counts as hung.
+pub const STOP_SILENT: Duration = Duration::from_secs(120);
+/// Once it is saving, how long it may go without a new console line.
+pub const SAVE_QUIET: Duration = Duration::from_secs(5 * 60);
+/// What a stopping server says while it saves its worlds.
+const SAVING: &[&str] = &[
+    "Saving chunks for level",
+    "Saving worlds",
+    "Saving players",
+    "ThreadedAnvilChunkStorage",
+    "All chunks are saved",
+    "All dimensions are saved",
+];
 /// How long Java may keep running once the server has stopped and saved its
 /// worlds. Mods' threads that never end (Distant Horizons' timers, say) can
 /// keep it alive for good; past this it is ended.
@@ -62,10 +78,16 @@ pub struct Tracker {
     /// When the stopping server said its worlds were saved: all that's left
     /// is for Java to exit.
     pub saved_at: Option<Instant>,
+    /// When the stopping server last said it was saving.
+    pub saving_at: Option<Instant>,
+    /// When the console last said anything.
+    pub heard_at: Option<Instant>,
 }
 
 impl Tracker {
     pub fn push(&mut self, line: String) {
+        let now = Instant::now();
+        self.heard_at = Some(now);
         match parse_line(&line) {
             Some(LogEvent::Done) => self.done = true,
             Some(LogEvent::Joined(n)) => {
@@ -94,7 +116,10 @@ impl Tracker {
         // chunks are saved" per world, the last one at the end. A `save-all
         // flush` says it too, so only after "Stopping server".
         if self.stopping && (line.contains("All dimensions are saved") || line.contains("All chunks are saved")) {
-            self.saved_at = Some(Instant::now());
+            self.saved_at = Some(now);
+        }
+        if self.stopping && SAVING.iter().any(|m| line.contains(m)) {
+            self.saving_at = Some(now);
         }
         if self.lines.len() >= MAX_LINES {
             self.lines.pop_front();
@@ -112,6 +137,55 @@ impl Tracker {
         let new = (self.total - seen).min(self.lines.len() as u64) as usize;
         let skip = self.lines.len() - new;
         (self.lines.iter().skip(skip).cloned().collect(), self.total)
+    }
+}
+
+/// How long a graceful stop waits before ending Java. It waits as long as
+/// the server is visibly getting there: every console line pushes the
+/// deadline back, by a lot once it is saving its worlds, up to a hard cap.
+/// Once the worlds are saved, Java gets [`LINGER_AFTER_STOP`] to exit (the
+/// console reader ends it then; this is only the backstop).
+#[derive(Clone, Copy, Debug)]
+pub struct StopWait {
+    pub hard: Duration,
+    pub silent: Duration,
+    pub saving_quiet: Duration,
+    pub linger: Duration,
+}
+
+impl Default for StopWait {
+    fn default() -> Self {
+        StopWait { hard: STOP_HARD_CAP, silent: STOP_SILENT, saving_quiet: SAVE_QUIET, linger: LINGER_AFTER_STOP }
+    }
+}
+
+impl StopWait {
+    /// When a stop asked for at `asked` gives up, given what the console
+    /// said so far.
+    pub fn deadline(&self, asked: Instant, t: &Tracker) -> Instant {
+        if let Some(saved) = t.saved_at {
+            return saved + self.linger + Duration::from_secs(5);
+        }
+        let heard = t.heard_at.map_or(asked, |h| h.max(asked));
+        let quiet = if t.saving_at.is_some() { self.saving_quiet } else { self.silent };
+        (heard + quiet).min(asked + self.hard)
+    }
+
+    /// The longest any stop can take, for callers that wait for one.
+    pub fn longest(&self) -> Duration {
+        self.hard + self.linger + Duration::from_secs(10)
+    }
+}
+
+/// "45 seconds", "3 minutes", "10 minutes 20 seconds".
+fn wait_text(d: Duration) -> String {
+    let s = d.as_secs();
+    let (m, s) = (s / 60, s % 60);
+    let unit = |n: u64, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    match (m, s) {
+        (0, s) => unit(s, "second"),
+        (m, 0) => unit(m, "minute"),
+        (m, s) => format!("{} {}", unit(m, "minute"), unit(s, "second")),
     }
 }
 
@@ -159,6 +233,8 @@ struct Shared {
     run: u64,
     /// [`LINGER_AFTER_STOP`], shorter in tests.
     linger: Option<Duration>,
+    /// [`StopWait::default`], shorter in tests.
+    stop_wait: Option<StopWait>,
 }
 
 impl Shared {
@@ -272,6 +348,12 @@ impl LocalServer {
     /// How long Java may run on after the server stopped (tests).
     pub fn set_linger(&self, d: Duration) {
         self.lock().linger = Some(d);
+    }
+
+    /// Shorter stop waits, for tests.
+    #[doc(hidden)]
+    pub fn set_stop_wait(&self, w: StopWait) {
+        self.lock().stop_wait = Some(w);
     }
 
     pub fn started_at(&self) -> Option<SystemTime> {
@@ -467,9 +549,10 @@ impl LocalServer {
         self.command("list")
     }
 
-    /// Sends "stop", then kills the process if it is still there after
-    /// `timeout`. Returns at once.
-    pub fn stop(&self, timeout: Duration) -> anyhow::Result<()> {
+    /// Sends "stop", then waits for Java to exit while the server is still
+    /// getting there (see [`StopWait`]), and ends it only past that.
+    /// Returns at once.
+    pub fn stop(&self) -> anyhow::Result<()> {
         if !self.state().is_alive() {
             self.dismiss_crash();
             return Ok(());
@@ -479,41 +562,62 @@ impl LocalServer {
             return self.kill();
         }
         let shared = self.shared.clone();
+        let asked = Instant::now();
         std::thread::Builder::new()
             .name("server-stop".into())
             .spawn(move || {
-                let end = Instant::now() + timeout;
-                while Instant::now() < end {
+                let mut told_saving = false;
+                loop {
                     {
                         let mut g = shared.lock().unwrap_or_else(|e| e.into_inner());
                         reap(&mut g);
                         if g.run != run || g.proc.is_none() {
                             return;
                         }
+                        let mut wait = g.stop_wait.unwrap_or_default();
+                        wait.linger = g.linger.unwrap_or(wait.linger);
+                        if !told_saving && g.tracker.saving_at.is_some() && g.tracker.saved_at.is_none() {
+                            told_saving = true;
+                            g.note(SAVING_NOTE);
+                        }
+                        if Instant::now() >= wait.deadline(asked, &g.tracker) {
+                            let took = wait_text(asked.elapsed());
+                            if g.tracker.saved_at.is_some() {
+                                log::warn!("{}: Java kept running after the server stopped; killing it", g.root.display());
+                                g.note(LINGER_NOTE);
+                            } else if g.tracker.saving_at.is_some() {
+                                log::warn!("{}: still saving {took} after the stop; killing it", g.root.display());
+                                g.note(&format!(
+                                    "[Hopper] The server was still saving its worlds {took} after the stop; ended it. The last changes may not be saved."
+                                ));
+                            } else {
+                                log::warn!("{}: didn't stop in {took}; killing it", g.root.display());
+                                g.note(&format!("[Hopper] The server didn't stop in {took} and wasn't saving; ended it."));
+                            }
+                            kill_locked(&mut g);
+                            return;
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(250));
-                }
-                let mut g = shared.lock().unwrap_or_else(|e| e.into_inner());
-                if g.run == run {
-                    if g.tracker.saved_at.is_some() {
-                        log::warn!("{}: Java kept running after the server stopped; killing it", g.root.display());
-                        g.note(LINGER_NOTE);
-                    } else {
-                        log::warn!("server did not stop in {timeout:?}; killing it");
-                        g.note("[Hopper] The server didn't stop in time; ending it.");
-                    }
-                    kill_locked(&mut g);
                 }
             })?;
         Ok(())
     }
 
-    /// Stops and waits (up to `timeout`, then kills). For app shutdown.
-    pub fn stop_blocking(&self, timeout: Duration) {
-        if self.stop(timeout).is_err() {
+    /// The longest [`Self::stop`] can take, for callers that wait for it.
+    pub fn stop_longest(&self) -> Duration {
+        let g = self.lock();
+        let mut wait = g.stop_wait.unwrap_or_default();
+        wait.linger = g.linger.unwrap_or(wait.linger);
+        wait.longest()
+    }
+
+    /// Stops and waits (then kills, like [`Self::stop`]). For app shutdown.
+    pub fn stop_blocking(&self) {
+        if self.stop().is_err() {
             let _ = self.kill();
         }
-        let end = Instant::now() + timeout + Duration::from_secs(2);
+        let end = Instant::now() + self.stop_longest();
         while self.state().is_alive() && Instant::now() < end {
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -620,6 +724,9 @@ fn kill_locked(g: &mut Shared) {
     }
     end_process(g);
 }
+
+/// What the console says while a stopping server saves its worlds.
+const SAVING_NOTE: &str = "[Hopper] Saving worlds… Hopper waits until they're saved.";
 
 /// What the console says when Java is ended for running on after the stop.
 const LINGER_NOTE: &str = "[Hopper] Java kept running after the server stopped; ended it.";
@@ -960,6 +1067,149 @@ mod tests {
         assert!(t.saved_at.is_some(), "older versions' line");
         t.push("[x] [Server thread/FATAL]: Preparing crash report with UUID 1234".into());
         assert!(t.crashed);
+    }
+
+    const SAVING_LINE: &str = "[10:01:00] [Server thread/INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld";
+
+    /// A tracker fed `lines` as if each came `at` seconds after the stop.
+    fn heard(asked: Instant, lines: &[(u64, &str)]) -> Tracker {
+        let mut t = Tracker::default();
+        for &(at, l) in lines {
+            let (saving, saved) = (t.saving_at.take(), t.saved_at.take());
+            t.push(l.into());
+            // The times push just set (it uses the clock) become `at`.
+            let when = Some(asked + Duration::from_secs(at));
+            t.heard_at = when;
+            t.saving_at = if t.saving_at.is_some() { when } else { saving };
+            t.saved_at = if t.saved_at.is_some() { when } else { saved };
+        }
+        t
+    }
+
+    #[test]
+    fn a_silent_server_gets_the_short_wait() {
+        let w = StopWait::default();
+        let asked = Instant::now();
+        let t = heard(asked, &[(0, DONE)]);
+        assert_eq!(w.deadline(asked, &t), asked + STOP_SILENT);
+        // Any line before the save starts still counts as progress.
+        let t = heard(asked, &[(0, DONE), (0, STOPPING), (50, "[x] [Server thread/INFO]: Unloading mods")]);
+        assert_eq!(w.deadline(asked, &t), asked + Duration::from_secs(50) + STOP_SILENT);
+    }
+
+    #[test]
+    fn saving_lines_push_the_deadline_back() {
+        let w = StopWait::default();
+        let asked = Instant::now();
+        let t = heard(asked, &[(0, DONE), (0, STOPPING), (5, SAVING_LINE)]);
+        assert!(t.saving_at.is_some() && t.saved_at.is_none());
+        assert_eq!(w.deadline(asked, &t), asked + Duration::from_secs(5) + SAVE_QUIET);
+        // Past the silent cap, still saving: not given up on.
+        let t = heard(asked, &[(0, DONE), (0, STOPPING), (5, SAVING_LINE), (200, SAVING_LINE)]);
+        assert_eq!(w.deadline(asked, &t), asked + Duration::from_secs(200) + SAVE_QUIET);
+        // But never past the hard cap.
+        let t = heard(asked, &[(0, DONE), (0, STOPPING), (5, SAVING_LINE), (500, SAVING_LINE)]);
+        assert_eq!(w.deadline(asked, &t), asked + STOP_HARD_CAP);
+    }
+
+    #[test]
+    fn a_save_before_the_stop_is_not_saving() {
+        let mut t = Tracker::default();
+        t.push(DONE.into());
+        t.push("[x] [Server thread/INFO]: Saving the game (this may take a moment!)".into());
+        t.push(SAVING_LINE.into());
+        assert!(t.saving_at.is_none());
+    }
+
+    #[test]
+    fn once_saved_the_linger_takes_over() {
+        let w = StopWait::default();
+        let asked = Instant::now();
+        let t = heard(asked, &[(0, DONE), (0, STOPPING), (5, SAVING_LINE), (400, SAVED)]);
+        assert!(t.saved_at.is_some());
+        // Past the hard cap is fine here: the worlds are saved.
+        assert_eq!(w.deadline(asked, &t), asked + Duration::from_secs(400) + LINGER_AFTER_STOP + Duration::from_secs(5));
+    }
+
+    #[test]
+    fn wait_texts() {
+        assert_eq!(wait_text(Duration::from_secs(1)), "1 second");
+        assert_eq!(wait_text(Duration::from_secs(45)), "45 seconds");
+        assert_eq!(wait_text(Duration::from_secs(600)), "10 minutes");
+        assert_eq!(wait_text(Duration::from_secs(61)), "1 minute 1 second");
+    }
+
+    /// A fake server: says it's ready, waits for "stop", then runs `after`
+    /// (PowerShell) and exits. Short stop waits so tests are quick.
+    #[cfg(windows)]
+    fn stoppable(tag: &str, after: &str) -> (LocalServer, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("hopper-host-stopwait-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = LocalServer::new(&dir);
+        s.set_linger(Duration::from_secs(2));
+        s.set_stop_wait(StopWait {
+            hard: Duration::from_secs(30),
+            silent: Duration::from_secs(2),
+            saving_quiet: Duration::from_secs(3),
+            linger: Duration::from_secs(2),
+        });
+        let say = |l: &str| format!("[Console]::Out.WriteLine('{}'); [Console]::Out.Flush(); ", l.replace('\'', "''"));
+        let after = after.replace("SAY ", "").replace("STOPPING", &say(STOPPING)).replace("SAVING", &say(SAVING_LINE)).replace("SAVED", &say(SAVED));
+        let script = format!(
+            "{}while (($l = [Console]::In.ReadLine()) -ne $null) {{ if ($l -eq 'stop') {{ break }} }}; {after}",
+            say(DONE)
+        );
+        s.spawn(&Launch { note: None, java: "powershell".into(), args: vec!["-NoProfile".into(), "-Command".into(), script] })
+            .unwrap();
+        assert!(wait_for(&s, DONE), "{:?}", s.console());
+        (s, dir)
+    }
+
+    /// Saving slowly, a line a second for longer than the silent cap: the
+    /// stop waits for it and the server exits on its own.
+    #[cfg(windows)]
+    #[test]
+    fn a_slow_save_is_waited_for() {
+        let (s, dir) = stoppable("slow", "STOPPING 1..6 | % { SAVING Start-Sleep -Seconds 1 }; SAVED exit 0");
+        s.stop().unwrap();
+        assert!(wait_dead(&s, Duration::from_secs(25)), "{:?}", s.console());
+        std::thread::sleep(Duration::from_millis(400));
+        let console = s.console();
+        assert_eq!(s.state(), ServerState::Stopped);
+        assert!(console.iter().any(|l| l == SAVED), "{console:?}");
+        assert!(console.iter().any(|l| l == SAVING_NOTE), "{console:?}");
+        assert!(!console.iter().any(|l| l.contains("ended it")), "{console:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Says nothing after the stop: ended after the short cap.
+    #[cfg(windows)]
+    #[test]
+    fn a_silent_stop_is_ended_after_the_short_wait() {
+        let (s, dir) = stoppable("silent", "Start-Sleep -Seconds 60");
+        let t = Instant::now();
+        s.stop().unwrap();
+        assert!(wait_dead(&s, Duration::from_secs(15)), "{:?}", s.console());
+        assert!(t.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(400));
+        let console = s.console();
+        assert!(console.iter().any(|l| l.contains("didn't stop in") && l.contains("wasn't saving")), "{console:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Starts saving, then hangs mid-save: ended, and the console says it
+    /// was saving.
+    #[cfg(windows)]
+    #[test]
+    fn a_hung_save_is_ended_and_says_so() {
+        let (s, dir) = stoppable("hung", "STOPPING SAVING Start-Sleep -Seconds 60");
+        s.stop().unwrap();
+        assert!(wait_dead(&s, Duration::from_secs(15)), "{:?}", s.console());
+        std::thread::sleep(Duration::from_millis(400));
+        let console = s.console();
+        assert!(console.iter().any(|l| l.contains("still saving its worlds") && l.contains("seconds after the stop")), "{console:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn wait_for(s: &LocalServer, line: &str) -> bool {

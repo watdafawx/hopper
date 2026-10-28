@@ -7,7 +7,7 @@
   import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown } from '@lucide/svelte';
   import { live, history, follow, unfollow } from './lib/live.svelte.js';
   import { api, post } from './lib/api.js';
-  import { bytes, uptime, xmx, stateLabel } from './lib/format.js';
+  import { bytes, uptime, xmx, stateText } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
   import { ask } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
@@ -159,7 +159,7 @@
     <div class="ttl">
       <div class="row wrap">
         <h2>{s.name}</h2>
-        <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateLabel[s.state]}{alive ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
+        <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateText(s)}{alive ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
         {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />
         {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => openUpdate()}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
       </div>
@@ -228,7 +228,7 @@
         <div class="t">CPU<b>{alive ? `${Math.round(s.cpu)} %` : '—'}</b></div>
         {#if alive}<Spark values={history[`${id}.cpu`]} color="var(--acc)" />{/if}
         <div class="t gap">RAM<b>{alive ? `${bytes(s.mem_bytes)}${cap ? ` / ${bytes(cap)}` : ''}` : cap ? `— / ${bytes(cap)}` : '—'}</b></div>
-        {#if alive}<Spark values={history[`${id}.mem`]} color="var(--blue)" />{:else}<div class="tiny muted gap">{stateLabel[s.state]}</div>{/if}
+        {#if alive}<Spark values={history[`${id}.mem`]} color="var(--blue)" />{:else}<div class="tiny muted gap">{stateText(s)}</div>{/if}
         <ServerAlerts server={s} part="live" />
       </div>
       <div class="card">
@@ -236,7 +236,7 @@
         {#each s.players as p (p)}
           <button class="pl row-hover" aria-haspopup="menu" title="Kick, operator, whitelist" onclick={(e) => openPlayer(e, p)}><img src={head(p, 20)} alt="" width="20" height="20" loading="lazy" /><span class="grow">{p}</span><ChevronDown size={12} /></button>
         {:else}
-          <div class="small muted">{s.state === 'running' ? 'Nobody online.' : s.state === 'starting' ? 'Starting…' : s.state === 'stopping' ? 'Stopping…' : 'The server is stopped.'}</div>
+          <div class="small muted">{s.state === 'running' ? 'Nobody online.' : s.state === 'starting' ? 'Starting…' : s.state === 'stopping' ? (s.saving ? 'Saving worlds…' : 'Stopping…') : 'The server is stopped.'}</div>
         {/each}
       </div>
       <div class="card">

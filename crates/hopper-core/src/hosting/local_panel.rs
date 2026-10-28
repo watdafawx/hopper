@@ -5,7 +5,7 @@
 //! [`crate::panel::match_server`] pairs it with the [`crate::server::ServerInfo`]
 //! of the same folder by name.
 
-use super::process::{LocalServer, STOP_TIMEOUT, ServerState};
+use super::process::{LocalServer, ServerState};
 use super::properties::Properties;
 use crate::panel::{PanelAction, PanelServer, PanelStats, ServerPanel};
 use anyhow::bail;
@@ -92,7 +92,7 @@ impl LocalPanel {
         let running: Vec<_> = self.all().into_iter().filter(|s| s.state().is_alive()).collect();
         std::thread::scope(|sc| {
             for s in &running {
-                sc.spawn(move || s.stop_blocking(STOP_TIMEOUT));
+                sc.spawn(move || s.stop_blocking());
             }
         });
     }
@@ -190,17 +190,18 @@ impl ServerPanel for LocalPanel {
         let s = self.server(id)?;
         match action {
             PanelAction::Start => s.start(),
-            PanelAction::Stop => s.stop(STOP_TIMEOUT),
+            PanelAction::Stop => s.stop(),
             PanelAction::Kill => s.kill(),
             PanelAction::Restart => {
                 if !s.state().is_alive() {
                     return s.start();
                 }
-                s.stop(STOP_TIMEOUT)?;
+                s.stop()?;
                 std::thread::Builder::new()
                     .name("server-restart".into())
                     .spawn(move || {
-                        let end = std::time::Instant::now() + STOP_TIMEOUT + std::time::Duration::from_secs(5);
+                        // As long as the stop may take: a big world can save for minutes.
+                        let end = std::time::Instant::now() + s.stop_longest();
                         while s.state().is_alive() && std::time::Instant::now() < end {
                             std::thread::sleep(std::time::Duration::from_millis(250));
                         }

@@ -11,7 +11,7 @@
 //! step through a day with fake servers instead of sleeping.
 
 use super::local_panel::LocalPanel;
-use super::process::{LocalServer, STOP_TIMEOUT, ServerState};
+use super::process::{LocalServer, ServerState};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -303,7 +303,7 @@ impl ScheduledServer for LocalServer {
         LocalServer::start(self)
     }
     fn stop(&self) -> anyhow::Result<()> {
-        LocalServer::stop(self, STOP_TIMEOUT)
+        LocalServer::stop(self)
     }
     fn command(&self, line: &str) -> anyhow::Result<()> {
         LocalServer::command(self, line)

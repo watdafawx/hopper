@@ -11,7 +11,7 @@
   import { say } from './lib/toast.svelte.js';
   import { live } from './lib/live.svelte.js';
   import { packUpdates } from './lib/packs.svelte.js';
-  import { stateLabel } from './lib/format.js';
+  import { stateText } from './lib/format.js';
   import Avatar from './Avatar.svelte';
 
   let { selected = null, owner = false, canPower = true, onNew, onRescan } = $props();
@@ -45,7 +45,7 @@
   /** The pill: players while it runs, else its state; none when stopped. */
   function pill(s) {
     if (s.state === 'running') return { text: `${s.players.length}/${s.max_players}`, glow: true };
-    if (s.state === 'starting' || s.state === 'stopping' || s.state === 'crashed') return { text: stateLabel[s.state], glow: false };
+    if (s.state === 'starting' || s.state === 'stopping' || s.state === 'crashed') return { text: stateText(s), glow: false };
     return null;
   }
 

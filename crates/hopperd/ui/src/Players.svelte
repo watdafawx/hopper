@@ -84,7 +84,7 @@
           <button class="btn sm ghost red" onclick={() => kickOrBan('ban', p)}><Ban size={13} />Ban</button>
         </div>
       {:else}
-        <p class="small muted empty">{running ? 'Nobody online.' : server.state === 'starting' ? 'Starting…' : server.state === 'stopping' ? 'Stopping…' : 'The server is stopped.'}</p>
+        <p class="small muted empty">{running ? 'Nobody online.' : server.state === 'starting' ? 'Starting…' : server.state === 'stopping' ? (server.saving ? 'Saving worlds…' : 'Stopping…') : 'The server is stopped.'}</p>
       {/each}
     </section>
 
