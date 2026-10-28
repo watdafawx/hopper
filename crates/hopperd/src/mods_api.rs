@@ -333,6 +333,10 @@ async fn list(
                 "date_added": a.date_added, "file_date": a.file_date,
                 "categories": cats.get(&a.file_name.to_lowercase()).cloned().unwrap_or_default(),
                 "requires": a.requires.iter().map(|r| id_str(*r)).collect::<Vec<_>>(),
+                // Desktop's version chip, its Browse link and a locked-out offer.
+                "short_version": hopper_core::scan::short_version(&a.file_name),
+                "mr_project": if !a.mr_project.is_empty() { a.mr_project.clone() } else if modrinth::is_mr(a.project_id) { modrinth::real_id(a.project_id).unwrap_or_default() } else { String::new() },
+                "locked_version": a.locked_version,
             }));
         }
         // Jars Hopper doesn't know yet.
@@ -347,11 +351,14 @@ async fn list(
             if known.contains(&base.to_lowercase()) {
                 continue;
             }
+            // A jar there both on and off: one row (the table keys rows by file).
+            known.insert(base.to_lowercase());
             let s = scanned.get(&base.to_lowercase());
             rows.push(json!({
                 "file": base, "name": s.map(|s| s.mod_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| base.clone()),
                 "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": "", "enabled": enabled,
                 "side": s.map(|s| s.side.clone()).unwrap_or_default(), "project_id": "0", "source": "", "from_pack": false, "page": "", "author": "",
+                "short_version": hopper_core::scan::short_version(&base),
             }));
         }
         rows.sort_by_key(|r| r["name"].as_str().unwrap_or("").to_lowercase());
@@ -643,8 +650,16 @@ async fn updates(
                         Some(_) => issues.push("needs a mod that isn't installed".to_string()),
                     }
                 }
+                // The turned-on mods this update would stop loading (desktop's
+                // "breaks X" chip): each needs this mod at a range the new
+                // version leaves.
+                let breaks: Vec<Value> = hopper_core::deps::broken_by(&inst.mods_dir(), &a.file_name, &from, &to)
+                    .into_iter()
+                    .map(|(name, needs)| json!({ "name": name, "needs": needs }))
+                    .collect();
                 json!({
                     "project_id": id_str(u.project_id), "name": u.name, "from": from, "to": to, "file": u.file.file_name,
+                    "breaks": breaks,
                     "file_id": id_str(u.file.id), "date": u.file.file_date, "release_type": u.file.release_type,
                     "from_file": a.file_name,
                     "risk": risk.key(), "issues": issues,

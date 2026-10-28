@@ -5,6 +5,11 @@
   import { color } from './lib/format.js';
   let { server, cls = 'ic' } = $props();
   let broken = $state(false);
+  // A new icon gets another try.
+  $effect(() => {
+    server.icon;
+    broken = false;
+  });
   const src = $derived(server.icon && !broken ? `/api/v1/servers/${encodeURIComponent(server.id)}/icon?v=${server.icon}` : '');
 </script>
 

@@ -307,10 +307,11 @@ async fn check(
 /// from, to, count } }`. Servers whose check is old are checked in the
 /// background, for the next call.
 async fn all_updates(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
-    require(&app, &headers, &method)?;
+    let who = require(&app, &headers, &method)?;
     let mut out = serde_json::Map::new();
     let mut stale = Vec::new();
-    for e in app.servers.list() {
+    // Only the servers this one may see (a scoped token or user).
+    for e in app.servers.list().into_iter().filter(|e| who.sees(&e.id)) {
         let Some(link) = pack_of(&e.root) else { continue };
         match cached(&e.id, &link) {
             Some(v) => {

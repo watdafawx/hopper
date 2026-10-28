@@ -12,8 +12,8 @@ function show(opts) {
 }
 
 /** Asks for text; resolves to the text, or null if cancelled. */
-export function ask(title, value = '', { body = '', ok = 'OK', placeholder = '' } = {}) {
-  return show({ title, body, ok, input: { value, placeholder } });
+export function ask(title, value = '', { body = '', ok = 'OK', placeholder = '', danger = false } = {}) {
+  return show({ title, body, ok, danger, input: { value, placeholder } });
 }
 
 /** Asks yes or no; resolves to true or false. */

@@ -52,6 +52,9 @@ pub struct Config {
     /// Until there's an owner, a browser on this PC itself sets the owner
     /// password without the setup code. Off in Docker regardless.
     pub trust_local_setup: bool,
+    /// Update Hopper Server by itself when a new version is out (Windows;
+    /// not in Docker, where the image is updated instead).
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -75,6 +78,7 @@ impl Default for Config {
             sftp_port: 8022,
             router: Default::default(),
             trust_local_setup: true,
+            auto_update: true,
         }
     }
 }

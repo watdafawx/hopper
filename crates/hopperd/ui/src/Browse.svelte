@@ -13,23 +13,26 @@
   // A project's page opens over the list, which stays mounted underneath,
   // so Back keeps its filters and scroll.
   import { onMount, untrack } from 'svelte';
-  import { Search, Flame, Sparkles, RefreshCw, Download, ArrowDownAZ, Server, Hammer, SlidersHorizontal, X, SearchX, KeyRound, Package, Puzzle, Braces, Check, Plus, Monitor } from '@lucide/svelte';
+  import { Search, Flame, Sparkles, RefreshCw, Download, ArrowDownAZ, Server, Hammer, SlidersHorizontal, X, SearchX, KeyRound, Package, Puzzle, Braces, Check, Monitor, Layers, Tag, Star, Plus } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { session } from './lib/me.svelte.js';
   import { live } from './lib/live.svelte.js';
   import { say } from './lib/toast.svelte.js';
   import { followJob } from './lib/jobs.js';
-  import { SITE, TYPES, count, ago, preset, store, browseHash } from './lib/browse.js';
+  import { SITE, TYPES, count, ago, preset, store, browseHash, andList } from './lib/browse.js';
   import BrowsePack from './BrowsePack.svelte';
+  import BrowseMenu from './BrowseMenu.svelte';
   import NewServer from './NewServer.svelte';
 
   let { segs = [] } = $props();
 
+  // Desktop's sorts, in its order and words.
   const SORTS = [
-    ['popularity', 'Popular', Flame],
-    ['newest', 'Newest', Sparkles],
-    ['updated', 'Updated', RefreshCw],
+    ['popularity', 'Popularity', Flame],
+    ['featured', 'Featured', Star],
     ['downloads', 'Downloads', Download],
+    ['updated', 'Last updated', RefreshCw],
+    ['newest', 'Newest', Sparkles],
     ['name', 'Name', ArrowDownAZ],
   ];
   const LOADERS = [['', 'Any loader'], ['neoforge', 'NeoForge'], ['forge', 'Forge'], ['fabric', 'Fabric'], ['quilt', 'Quilt']];
@@ -69,6 +72,11 @@
   let showFilters = $state(false);
   let making = $state(null);
   let busy = $state({}); // source:id → what the install is doing
+  // What installing a mod into the target also downloads, by server and
+  // source:id (asked when its card is hovered, like desktop): 'loading',
+  // the plan, or { error }.
+  let plans = $state({});
+  let menu = $state(null); // a card's right-click menu: { r, x, y }
   let listEl = $state();
   let sentinel = $state();
   let seq = 0;
@@ -104,6 +112,8 @@
 
   async function run(append = false) {
     const my = ++seq;
+    // A search now replaces one still waiting on the typing pause.
+    if (!append) clearTimeout(timer);
     const p = append ? page + 1 : 0;
     loading = true;
     error = '';
@@ -232,9 +242,36 @@
     run(false);
   }
 
+  function openMenu(e, r) {
+    e.preventDefault();
+    wantPlan(r);
+    menu = { r, x: e.clientX, y: e.clientY };
+  }
+
   function open(r) {
     saved = scroller()?.scrollTop || 0;
     location.hash = `${browseHash(type, into)}/${r.source}/${encodeURIComponent(r.id)}`;
+  }
+
+  /** Asks once what installing mod `r` into the target would also download. */
+  function wantPlan(r) {
+    if (type !== 'mods' || !target?.loader || r.installed) return;
+    const key = `${target.id}|${r.source}:${r.id}`;
+    if (plans[key]) return;
+    plans = { ...plans, [key]: 'loading' };
+    api(`/browse/plan?into=${encodeURIComponent(target.id)}&project=${r.num}`).then(
+      (p) => (plans = { ...plans, [key]: p }),
+      (e) => (plans = { ...plans, [key]: { error: e.message } }),
+    );
+  }
+  /** Whether a card's Install can run now (the button and its menu item). */
+  const canAdd = (r) => !!target && !(type === 'mods' && !target.loader) && r.distribution !== false;
+  const planOf = (r) => (target ? plans[`${target.id}|${r.source}:${r.id}`] : null);
+
+  /** A card's category in the filter list (by name), so a click filters by it. */
+  function catOf(name) {
+    const n = name.toLowerCase();
+    return catList.find((c) => c.name.toLowerCase() === n) || null;
   }
 
   /**
@@ -252,7 +289,9 @@
     try {
       const { job } = await post('/browse/install', { into: target.id, type, project: r.num, file: v?.id || null, dest });
       const res = await followJob(job, (st) => (busy = { ...busy, [key]: st.detail || 'Adding…' }));
-      results = results.map((x) => (x.source === r.source && x.id === r.id ? { ...x, installed: true } : x));
+      results = results.map((x) => (x.source === r.source && x.id === r.id ? { ...x, installed: { same_project: true, enabled: x.installed?.enabled ?? true, from: r.source } } : x));
+      // What other mods would pull in may be on the server now: ask again.
+      plans = {};
       const where = type === 'datapacks' ? (target.datapack_dirs.find((d) => d.path === dest)?.label || dest) : target.name;
       say(`Added ${res?.name || r.name}${v ? ` ${v.name}` : ''} to ${where}.${res?.restart_needed ? ' Restart the server to load it.' : ''}`);
       return res || {};
@@ -311,7 +350,7 @@
       <div class="cats">
         {#each typeList as [k, t] (k)}
           {@const Icon = ICON[k]}
-          <button class="cat" class:on={type === k} onclick={() => setType(k)}><Icon size={14} />{t.label}</button>
+          <button class="cat row-hover" class:row-sel={type === k} onclick={() => setType(k)}><Icon size={14} />{t.label}</button>
         {/each}
       </div>
       {#if intoServer}
@@ -323,7 +362,7 @@
         </select>
         {#if targetError}<div class="tiny err">{targetError}</div>{/if}
         {#if type === 'datapacks' && target?.datapack_dirs?.length > 1}
-          <label class="lbl" for="br-dest">Data pack folder</label>
+          <label class="lbl" for="br-dest">Data packs go to</label>
           <select id="br-dest" class="sel" bind:value={dest}>
             {#each target.datapack_dirs as d (d.path)}<option value={d.path}>{d.label}</option>{/each}
           </select>
@@ -346,9 +385,9 @@
       {/if}
       <span class="lbl">Category</span>
       <div class="cats">
-        <button class="cat" class:on={!category} onclick={() => { category = null; run(false); }}>All</button>
+        <button class="cat row-hover" class:row-sel={!category} onclick={() => { category = null; run(false); }}>All</button>
         {#each catList as c (c.name)}
-          <button class="cat" class:on={category?.name === c.name} onclick={() => { category = c; run(false); }}>
+          <button class="cat row-hover" class:row-sel={category?.name === c.name} onclick={() => { category = c; run(false); }}>
             {#if c.icon}<img src={c.icon} alt="" width="14" height="14" loading="lazy" />{/if}{c.name}
           </button>
         {/each}
@@ -372,24 +411,34 @@
           {#each SORTS as [k, label, Icon] (k)}<button class:on={sort === k} title={label} onclick={() => setSort(k)}><Icon size={13} /><span class="sl">{label}</span></button>{/each}
         </div>
       </div>
+      {#if type === 'mods' && target?.pack_source && !both && source !== target.pack_source}
+        <div class="small warn row note-bar">You're browsing {SITE[source]}. {target.name} is a {SITE[target.pack_source]} pack: mods installed from here (and what they need) come from {SITE[source]}.
+          <button class="btn sm" onclick={() => setSource(target.pack_source)}>Switch to {SITE[target.pack_source]}</button></div>
+      {/if}
       {#each warnings.filter((w) => w !== 'nokey') as w (w)}<div class="small warn">{w}</div>{/each}
       {#if warnings.includes('nokey') && both}<div class="small muted row"><KeyRound size={13} />Showing Modrinth only: add a CurseForge API key in Access &amp; devices to search both.</div>{/if}
 
       <div class="list">
         {#each results as r (r.source + ':' + r.id)}
           {@const b = busy[r.source + ':' + r.id]}
-          <div class="rc" role="button" tabindex="0" onclick={() => open(r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), open(r))}>
+          {@const plan = planOf(r)}
+          {@const extra = plan?.extra?.map((d) => d.name) || []}
+          {@const have = r.installed}
+          <div class="rc" role="button" tabindex="0" onclick={() => open(r)} onmouseenter={() => wantPlan(r)} oncontextmenu={(e) => openMenu(e, r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), open(r))}>
             {#if r.icon}<img class="ico" src={r.icon} alt="" width="48" height="48" loading="lazy" decoding="async" />{:else}<span class="ico ph"></span>{/if}
             <div class="body">
               <div class="t"><b>{r.name}</b>{#if r.author}<span class="muted">{` by ${r.author}`}</span>{/if}</div>
               <div class="s ell">{r.summary}</div>
               <div class="meta">
                 <span class="dl"><Download size={11} />{count(r.downloads)}</span>
-                {#if r.updated}<span><RefreshCw size={11} />{ago(r.updated)}</span>{/if}
+                {#if ago(r.updated)}<span class="up"><RefreshCw size={11} />{ago(r.updated)}</span>{/if}
                 {#if both}<span class="chip {r.source}">{SITE[r.source]}</span>{#if r.also_on}<span class="chip {r.also_on}" title="Also on {SITE[r.also_on]}; this page shows the {SITE[r.source]} one">{SITE[r.also_on]}</span>{/if}{/if}
                 {#if useLoader}{#each r.loaders.slice(0, 2) as l (l)}<span class="chip lan">{l}</span>{/each}{/if}
                 {#if r.mc_versions[0]}<span class="chip">{r.mc_versions[0]}</span>{/if}
-                {#if r.categories.length}<span class="catline ell">{r.categories.slice(0, 3).join(' · ')}</span>{/if}
+                {#if r.categories.length}
+                  {@const cs = r.categories.slice(0, 3)}
+                  <span class="catline ell"><Tag size={11} />{#each cs as c, i (c)}{@const cat = catOf(c)}{#if cat}<button class="catlink" title="Show only {c}" onclick={(e) => { e.stopPropagation(); category = cat; run(false); }}>{c}</button>{:else}<span>{c}</span>{/if}{i + 1 < cs.length ? ', ' : ''}{/each}</span>
+                {/if}
               </div>
             </div>
             <div class="act">
@@ -399,19 +448,24 @@
                 {#if session.owner}<button class="btn sm" onclick={(e) => { e.stopPropagation(); making = preset(r); }}>Make a server</button>{/if}
               {:else}
                 {#if r.side === 'client'}<span class="chip starting" title="Modrinth says this runs on the client only: a server doesn't need it"><Monitor size={11} />Client only</span>{/if}
-                {#if b}<span class="busy small"><span class="spin"></span><span class="ell">{b}</span></span>
-                {:else if r.installed}<span class="chip running" title="{target?.name} has this already"><Check size={11} />Installed</span>
-                {:else}<button class="btn sm" disabled={!target || (type === 'mods' && !target.loader)} title={target ? `Add the newest file for ${[target.game_version, useLoader ? target.loader_name : ''].filter(Boolean).join(' ')}${type === 'mods' ? ', with what it needs' : ''}` : 'Pick a server under Install into first'} onclick={(e) => { e.stopPropagation(); install(r); }}><Plus size={13} />Install</button>{/if}
+                {#if have && have.enabled === false}<span class="chip starting" title="Off in {target?.name}. Updating keeps it off.">Off</span>{/if}
+                {#if b}<span class="busy small"><span class="spinner"></span><span class="ell">{b}</span></span>
+                {:else if have?.update}<button class="btn sm" title={have.enabled === false ? 'A newer file is out; replaces the installed one, which stays disabled' : 'A newer file is out; replaces the installed one'} onclick={(e) => { e.stopPropagation(); install(r); }}><Download size={13} />Update</button>
+                {:else if have}<span class="chip running" title="{target?.name} has this already{have.file ? `: ${have.file}` : ''}"><Check size={11} />{have.same_project === false && have.from && have.from !== r.source ? `Installed (${SITE[have.from]})` : 'Installed'}</span>
+                {:else}
+                  {#if extra.length}<span class="deps" title="Also downloads {andList(extra)}"><Layers size={11} />+{extra.length} {extra.length === 1 ? 'dep' : 'deps'}</span>{/if}
+                  <button class="btn sm" disabled={!canAdd(r)} title={!target ? 'Pick a server under Install into first' : r.distribution === false ? 'The author only allows downloads from the CurseForge website' : extra.length ? `Also downloads ${andList(extra)}` : `Add the newest file for ${[target.game_version, useLoader ? target.loader_name : ''].filter(Boolean).join(' ')}`} onclick={(e) => { e.stopPropagation(); install(r); }}><Download size={13} />Install</button>
+                {/if}
               {/if}
             </div>
           </div>
         {/each}
         {#if loading}
-          {#each Array(results.length ? 2 : 6) as _, i (i)}<div class="skel" style:opacity={1 - i * 0.12}></div>{/each}
+          {#each Array(results.length ? 2 : 6) as _, i (i)}<div class="skel csk" style:opacity={1 - i * 0.12}><i></i></div>{/each}
         {:else if error}
-          <div class="empty"><SearchX size={22} /><b>Couldn't search</b><span class="small">{error}</span><button class="btn sm" onclick={() => run(false)}>Try again</button></div>
+          <div class="empty-state"><span class="es-ic"><SearchX size={18} /></span><b>Couldn't load results</b><p>Check your connection and try again. ({error})</p><button class="btn sm" onclick={() => run(false)}>Retry</button></div>
         {:else if !results.length}
-          <div class="empty"><SearchX size={22} /><b>No {T.many} match</b><span class="small">Nothing{query ? ` for “${query}”` : ''}{filterText ? ` on ${filterText}` : ''}{category ? ` in ${category.name}` : ''}.</span>
+          <div class="empty-state"><span class="es-ic"><SearchX size={18} /></span><b>No {T.many} match</b><p>Nothing{query ? ` for “${query}”` : ''}{filterText ? ` on ${filterText}` : ''}{category ? ` in ${category.name}` : ''}.</p>
             {#if query || category || mc !== (target?.game_version || '') || loader !== (target?.loader || '')}<button class="btn sm" onclick={clearFilters}>Clear filters</button>{/if}</div>
         {/if}
         <div bind:this={sentinel} class="sentinel"></div>
@@ -423,10 +477,23 @@
 {#if openSite && type === hType && into === hInto && (!intoServer || !into || target || targetError)}
   {#key openSite + openId}
     <BrowsePack source={openSite} id={openId} {type} target={intoServer ? target : null} {mc} loader={useLoader ? loader : ''}
-      back={browseHash(type, into)} busy={busy[openSite + ':' + openId]} onMake={(p) => (making = p)} onInstall={install} />
+      back={browseHash(type, into)} busy={busy[openSite + ':' + openId]} onMake={(p) => (making = p)} onInstall={install}
+      canFilter={(n) => !!catOf(n)} onCategory={(n) => { category = catOf(n); saved = 0; location.hash = browseHash(type, into); run(false); }} />
   {/key}
 {/if}
 {#if making}<NewServer preset={making} close={() => (making = null)} />{/if}
+{#if menu && !openSite}
+  {@const r = menu.r}
+  <BrowseMenu at={menu} onClose={() => (menu = null)} onOpen={() => open(r)}>
+    {#snippet extra(act)}
+      {#if type === 'modpacks'}
+        {#if session.owner}<button class="menu-item" role="menuitem" onclick={() => act(() => (making = preset(r)))}><Plus size={14} />Make a server</button>{/if}
+      {:else if !busy[r.source + ':' + r.id] && (!r.installed || r.installed.update) && canAdd(r)}
+        <button class="menu-item" role="menuitem" onclick={() => act(() => install(r))}><Download size={14} />{r.installed ? 'Update' : `Install into ${target.name}`}</button>
+      {/if}
+    {/snippet}
+  </BrowseMenu>
+{/if}
 
 <style>
   .browse { display: flex; flex-direction: column; gap: 12px; min-height: 0; padding: 18px; }
@@ -448,8 +515,7 @@
   .cats { display: flex; flex-direction: column; gap: 1px; }
   .cat { display: flex; align-items: center; gap: 7px; padding: 5px 9px; border-radius: 6px; color: var(--subtle); text-align: left; font-size: 12.5px; }
   .cat img { border-radius: 3px; flex: none; }
-  .cat:hover:not(.on) { background: #ffffff0a; }
-  .cat.on { background: var(--acc-dim); box-shadow: inset 3px 0 0 var(--acc); color: var(--text); font-weight: 600; }
+  .cat.row-sel { color: var(--text); font-weight: 600; }
   .reset { align-self: flex-start; white-space: normal; text-align: left; }
   .note { margin-top: 6px; }
   .note-bar { flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--base); }
@@ -465,8 +531,7 @@
   .list { display: flex; flex-direction: column; gap: 6px; }
   /* Cards off screen skip layout and paint: long lists stay quick. */
   .rc { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--base); cursor: pointer; content-visibility: auto; contain-intrinsic-size: auto 72px; }
-  .rc:hover { background: var(--surface); }
-  .rc:focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
+  .rc:hover { background: var(--hover); }
   .ico { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; background: var(--raise); }
   .ph { display: block; }
   .body { min-width: 0; }
@@ -477,17 +542,20 @@
   .meta { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); margin-top: 3px; flex-wrap: wrap; min-width: 0; }
   .meta > span:not(.chip) { display: inline-flex; align-items: center; gap: 3px; }
   .meta .dl { color: var(--blue); }
-  .meta .catline { max-width: 260px; display: inline-block; }
+  .meta .up { color: var(--green); }
+  .meta .catline { max-width: 300px; display: inline-block; }
+  .meta .catline :global(svg) { vertical-align: -1px; margin-right: 3px; }
+  .catlink { color: inherit; font: inherit; padding: 0; }
+  .catlink:hover { color: var(--text); text-decoration: underline; }
+  .deps { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px solid var(--line2); border-radius: 6px; background: var(--raise); font-size: 11px; color: var(--text); white-space: nowrap; }
+  .deps :global(svg) { color: var(--muted); }
   .chip.curseforge { color: var(--acc); background: var(--acc-dim); }
   .chip.modrinth { color: #1bd96a; background: #1bd96a1a; }
   .act { display: flex; align-items: center; gap: 8px; }
   .busy { display: inline-flex; align-items: center; gap: 6px; color: var(--gold); max-width: 220px; min-width: 0; }
-  .spin { width: 12px; height: 12px; flex: none; border: 2px solid var(--gold); border-right-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; }
-  @keyframes s { to { transform: rotate(360deg); } }
-  .skel { height: 70px; border-radius: 8px; border: 1px solid var(--line); background: linear-gradient(90deg, var(--base) 0%, var(--surface) 50%, var(--base) 100%); background-size: 200% 100%; animation: sh 1.2s linear infinite; }
-  @keyframes sh { to { background-position: -200% 0; } }
-  .empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 36px 16px; border: 1px dashed var(--line2); border-radius: 10px; color: var(--subtle); text-align: center; }
-  .empty b { color: var(--text); }
+  /* Loading cards: the shared skeleton row (app.css .skel) at a card's size. */
+  .csk { height: 70px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; }
+  .csk::before { width: 48px; height: 48px; border-radius: 8px; }
   .warn { color: var(--gold); }
   .sentinel { height: 1px; }
   @media (max-width: 1100px) {

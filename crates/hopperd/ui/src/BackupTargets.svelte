@@ -7,6 +7,7 @@
   import { api, post, del } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt, ask } from './lib/dialog.svelte.js';
+  import { whenLabel, fullDate } from './lib/worlds.js';
 
   const KINDS = [
     { id: 'folder', label: 'Folder' },
@@ -51,9 +52,11 @@
     Object.assign(form, PRESETS[p]);
   }
 
+  // A target as the panel takes it: without the list's own fields.
+  const plain = ({ replace: _r, preset: _p, secret_set: _s, servers: _v, place: _pl, ...t }) => t;
   const body = () => {
-    const { replace, preset: _p, secret_set: _s, servers: _v, place: _pl, ...t } = form;
-    return { ...t, port: Number(t.port) || 0, secret: replace ? t.secret : '' };
+    const t = plain(form);
+    return { ...t, port: Number(t.port) || 0, secret: form.replace ? t.secret : '' };
   };
 
   async function test() {
@@ -85,13 +88,16 @@
     }
   }
 
-  async function toggle(t) {
+  async function toggle(t, e) {
+    const sw = e.currentTarget;
     try {
-      await api(`/backup-targets/${t.id}`, { method: 'PUT', body: { ...t, enabled: !t.enabled, secret: '' } });
-      load();
-    } catch (e) {
-      say(e.message, true);
+      await api(`/backup-targets/${t.id}`, { method: 'PUT', body: { ...plain(t), enabled: !t.enabled, secret: '' } });
+    } catch (err) {
+      // The switch flipped itself: put it back to what's saved.
+      sw.checked = t.enabled;
+      say(err.message, true);
     }
+    load();
   }
 
   async function remove(t) {
@@ -146,7 +152,7 @@
     }
   }
 
-  const ago = (t) => (t ? new Date(t * 1000).toLocaleString() : 'not yet');
+  const ago = (t) => (t ? whenLabel(t) : 'not yet');
   const label = (k) => KINDS.find((x) => x.id === k)?.label || k;
 
   onMount(load);
@@ -220,7 +226,7 @@
           <div class="tiny muted">{t.servers.length ? t.servers.map((s) => `${s.name}: ${s.copies} backup${s.copies === 1 ? '' : 's'}${s.pending ? `, ${s.pending} waiting` : ''}`).join(' · ') : 'No server copies here yet; pick it in a server\'s Backups tab.'}</div>
           {#if bad}<div class="tiny err"><AlertTriangle size={11} /> {bad.name}: {bad.last_error}</div>{/if}
         </div>
-        <label class="sw" title={t.enabled ? 'Pause copies' : 'Resume copies'}><input type="checkbox" checked={t.enabled} onchange={() => toggle(t)} /><span></span></label>
+        <label class="switch" title={t.enabled ? 'Pause copies' : 'Resume copies'}><input type="checkbox" checked={t.enabled} aria-label="Copy to {t.name}" onchange={(e) => toggle(t, e)} /><span></span></label>
         <button class="btn sm icon ghost" title="Edit" onclick={() => edit(t)}><Pencil size={13} /></button>
         <button class="btn sm icon ghost" title="Remove" onclick={() => remove(t)}><Trash2 size={13} /></button>
       </div>
@@ -238,7 +244,7 @@
         </div>
       {/if}
       {#each receive as r (r.id)}
-        <div class="row small rcv"><span class="grow">{r.name} <span class="tiny muted">· since {ago(r.at)} · {r.files} files</span></span>
+        <div class="row small rcv"><span class="grow">{r.name} <span class="tiny muted" title={r.at ? fullDate(r.at) : ''}>· since {ago(r.at)} · {r.files} files</span></span>
           <button class="btn sm icon ghost" title="Stop taking copies" onclick={() => removeReceive(r)}><Trash2 size={13} /></button></div>
       {:else}
         {#if !newReceive}<div class="tiny muted">Other Hopper Servers can copy their backups here with a key you make.</div>{/if}
@@ -248,10 +254,8 @@
 </div>
 
 <style>
-  .col { display: flex; flex-direction: column; gap: 8px; }
   .chips { display: flex; flex-wrap: wrap; gap: 5px; }
   .chips .chip { cursor: pointer; }
-  .chip.acc { color: #fb923c; background: var(--acc-dim); }
   .f { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
   .f > span:first-child { width: 86px; flex: none; color: var(--muted); }
   .f0 { margin-left: 94px; }
@@ -264,12 +268,6 @@
   .hook.off { opacity: 0.55; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .err { color: var(--red); display: flex; align-items: center; gap: 4px; }
-  .sw { position: relative; width: 30px; height: 17px; flex: none; cursor: pointer; }
-  .sw input { opacity: 0; width: 0; height: 0; }
-  .sw span { position: absolute; inset: 0; background: var(--line2); border-radius: 9px; transition: 0.15s; }
-  .sw span::after { content: ''; position: absolute; width: 13px; height: 13px; border-radius: 50%; background: #fff; top: 2px; left: 2px; transition: 0.15s; }
-  .sw input:checked + span { background: var(--acc); }
-  .sw input:checked + span::after { left: 15px; }
   .keybox { background: var(--acc-dim); border: 1px solid #f9731640; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
   .key { background: var(--base); padding: 4px 8px; border-radius: 5px; font-size: 11.5px; word-break: break-all; }
   .end { justify-content: flex-end; }

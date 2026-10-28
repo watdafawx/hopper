@@ -107,10 +107,10 @@
       <div class="hook" class:off={!h.enabled}>
         <div class="grow">
           <div>{h.name} <span class="chip">{h.kind === 'discord' ? 'Discord' : 'JSON'}</span></div>
-          <div class="tiny muted ell">{h.events.join(', ')}{h.servers.length ? ` · ${h.servers.length} server${h.servers.length === 1 ? '' : 's'}` : ''}</div>
+          <div class="tiny muted ell">{h.events.map((id) => events.find((ev) => ev.id === id)?.label || id).join(', ')}{h.servers.length ? ` · ${h.servers.length} server${h.servers.length === 1 ? '' : 's'}` : ''}</div>
           {#if h.last_error}<div class="tiny bad"><AlertTriangle size={11} /> {h.last_error}</div>{/if}
         </div>
-        <label class="sw" title={h.enabled ? 'Turn off' : 'Turn on'}><input type="checkbox" checked={h.enabled} onchange={() => toggle(h)} /><span></span></label>
+        <label class="switch" title={h.enabled ? 'Turn off' : 'Turn on'}><input type="checkbox" checked={h.enabled} onchange={() => toggle(h)} /><span></span></label>
         <button class="btn sm icon ghost" title="Send a test" onclick={() => test(h)}><Send size={13} /></button>
         <button class="btn sm icon ghost" title="Edit" onclick={() => edit(h)}><Pencil size={13} /></button>
         <button class="btn sm icon ghost" title="Remove" onclick={() => remove(h)}><Trash2 size={13} /></button>
@@ -131,10 +131,4 @@
   .grow { flex: 1; min-width: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bad { color: var(--red); display: flex; align-items: center; gap: 4px; }
-  .sw { position: relative; width: 30px; height: 17px; flex: none; cursor: pointer; }
-  .sw input { opacity: 0; width: 0; height: 0; }
-  .sw span { position: absolute; inset: 0; background: var(--line2); border-radius: 9px; transition: 0.15s; }
-  .sw span::after { content: ''; position: absolute; width: 13px; height: 13px; border-radius: 50%; background: #fff; top: 2px; left: 2px; transition: 0.15s; }
-  .sw input:checked + span { background: var(--acc); }
-  .sw input:checked + span::after { left: 15px; }
 </style>

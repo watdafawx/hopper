@@ -155,6 +155,13 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::fs_zip::routes())
         .merge(crate::control::routes())
         .merge(crate::worlds_api::routes())
+        .merge(crate::autoupdate::routes())
+        .merge(crate::parity_overview::routes())
+        .merge(crate::parity_mods::routes())
+        .merge(crate::parity_files::routes())
+        .merge(crate::parity_worlds::routes())
+        .merge(crate::parity_console::routes())
+        .merge(crate::parity_browse::routes())
         .fallback(crate::ui::serve)
         .layer(axum::middleware::from_fn_with_state(app.clone(), crate::security::guard))
         .with_state(app)
@@ -618,6 +625,10 @@ async fn power(
         other => return Err(bad(format!("Unknown action \"{other}\". Use start, stop, restart or kill."))),
     };
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    // A restore is writing the server's files: starting now would load a half-written world.
+    if matches!(action, PanelAction::Start | PanelAction::Restart) && crate::backups_api::is_restoring(&id) {
+        return Err(ApiError(StatusCode::CONFLICT, format!("{} is being restored from a backup. Start it once that's done.", e.name)));
+    }
     log::info!("{} {} by {}", b.action, e.name, who_name(&who));
     let a = app.clone();
     tokio::task::spawn_blocking(move || a.servers.act(&e, action))

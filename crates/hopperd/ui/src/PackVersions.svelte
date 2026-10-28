@@ -8,6 +8,7 @@
   import { api } from './lib/api.js';
   import { ago } from './lib/browse.js';
   import BrowseRich from './BrowseRich.svelte';
+  import { dialog } from './lib/dialog.svelte.js';
 
   let { server, check, onPick, onClose } = $props();
   const pack = $derived(check.pack);
@@ -46,8 +47,10 @@
   const verb = (v) => (curIx >= 0 && ix(v) > curIx ? 'Switch to this' : 'Update to this');
 </script>
 
-<div class="back" role="presentation" onclick={(e) => e.target === e.currentTarget && onClose()}>
-  <div class="box card col">
+<svelte:window onkeydown={(e) => e.key === 'Escape' && !e.defaultPrevented && !dialog.open && (e.preventDefault(), onClose())} />
+
+<div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && onClose()}>
+  <div class="box popover col">
     <h3 class="row">Versions and changelogs<span class="sp"></span><button class="btn sm ghost icon" title="Close" onclick={onClose}><X size={14} /></button></h3>
     <div class="row hd">
       {#if pack.icon}<img class="pi" src={pack.icon} alt="" width="40" height="40" />{:else}<span class="pi ph"><Package size={18} /></span>{/if}
@@ -86,7 +89,7 @@
           </div>
           {#if open[v.id]}
             <div class="notes small">
-              {#if logs[v.id] === 'loading' || !logs[v.id]}<span class="muted row"><span class="spin"></span>Loading the changelog</span>
+              {#if logs[v.id] === 'loading' || !logs[v.id]}<span class="muted row"><span class="spinner"></span>Loading the changelog</span>
               {:else if logs[v.id].error}<span class="muted">Couldn't load the changelog: {logs[v.id].error}</span>
               {:else}<BrowseRich blocks={logs[v.id]} empty="No changelog for this version." />{/if}
             </div>
@@ -98,9 +101,8 @@
 </div>
 
 <style>
-  .back { position: fixed; inset: 0; background: #0008; display: flex; justify-content: center; align-items: flex-start; padding: 56px 16px 16px; z-index: 60; }
-  .box { width: min(820px, 100%); height: calc(100vh - 80px); gap: 12px; box-shadow: 0 24px 60px #000c; }
-  .box h3 { margin: 0; font-size: 15px; }
+  .box { width: min(820px, 100%); height: calc(100dvh - var(--dialog-top) - 24px); gap: 12px; padding: 14px; }
+  .box h3 { margin: 0; font-size: 15px; font-weight: 600; }
   .hd { gap: 12px; }
   .pi { border-radius: 8px; background: var(--raise); flex: none; display: grid; place-items: center; width: 40px; height: 40px; }
   .g2 { gap: 2px; min-width: 0; }
@@ -115,7 +117,5 @@
   .vh:hover b { color: var(--acc); }
   .chip.xs { font-size: 10.5px; padding: 0 6px; }
   .notes { padding: 4px 4px 4px 22px; overflow-wrap: anywhere; }
-  .spin { width: 11px; height: 11px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 99px; animation: rot .8s linear infinite; flex: none; }
-  @keyframes rot { to { transform: rotate(360deg); } }
   .icon { padding: 3px 5px; }
 </style>

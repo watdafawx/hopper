@@ -4,20 +4,24 @@
   // preview pane, a right-click menu, cut/copy/paste, drag to move (Ctrl to
   // copy), rubber-band select, and double-click opens by type. Uploads are
   // resumable; deletes go to the server's trash.
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import {
     Folder, FolderOpen, File, FileText, FileArchive, Image, HardDrive, Search, FolderPlus, Upload, FolderUp,
     Download, Copy, Pencil, Trash2, RefreshCw, ArrowUp, ArrowLeft, ArrowRight, FilePlus, TextSearch, X,
-    List, LayoutGrid, PanelLeft, PanelRight, Scissors, ClipboardPaste, Info, Package, ExternalLink,
+    List, LayoutGrid, PanelLeft, PanelRight, Scissors, ClipboardPaste, Info, Package, ExternalLink, Layers, TriangleAlert,
+    Link,
   } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
-  import { ask, confirmIt } from './lib/dialog.svelte.js';
+  import { ask, confirmIt, dialog } from './lib/dialog.svelte.js';
   import { queueUploads, onUploaded, download } from './lib/transfers.svelte.js';
-  import { historyOf, clip, prefs, store, TEXT, ARCHIVE, PACKED, IMAGE } from './lib/files.svelte.js';
+  import { historyOf, clip, prefs, store, jump, TEXT, ARCHIVE, PACKED, IMAGE } from './lib/files.svelte.js';
+  import { configOwners, ownerOf } from './lib/files-config.js';
+  import { startPick, clickSwallowed, tickLabel } from './lib/dragpick.svelte.js';
   import FileTree from './FileTree.svelte';
   import FileViewer from './FileViewer.svelte';
+  import ModPeek from './ModPeek.svelte';
 
   let { server, path = '', go, openFile, openTrash } = $props();
   // The live feed hands over a new `server` object every second; effects
@@ -49,6 +53,10 @@
   let overDir = $state(null);
   let band = $state(null);
   let treeVersion = $state(0);
+  /** Which mod each entry of config/ belongs to (files-config.js). */
+  let owners = $state(null);
+  /** The mod whose panel is open beside the list (its jar's name). */
+  let peekJar = $state('');
 
   const base = $derived(`/fs/${encodeURIComponent(server.id)}`);
   const crumbs = $derived(path ? path.split('/') : []);
@@ -56,8 +64,37 @@
     const q = filter.trim().toLowerCase();
     return q ? entries.filter((e) => e.name.toLowerCase().includes(q)) : entries;
   });
+  // In config/, files sit under the mod they belong to, like desktop opens
+  // a mod's config from the mod: a heading row per mod, then its files.
+  const inConfig = $derived(path === 'config');
+  const grouped = $derived(inConfig && prefs.group && prefs.view === 'list' && !!owners);
+  const modOf = (e, dir = path) => ownerOf(owners, join(e.name, dir));
+  /** The rows the list draws: entries, and mod headings (with a key) when grouped. */
+  const items = $derived.by(() => {
+    if (!grouped) return shown;
+    const by = new Map();
+    const rest = [];
+    for (const e of shown) {
+      const m = modOf(e);
+      if (!m) rest.push(e);
+      else {
+        if (!by.has(m.file)) by.set(m.file, { m, list: [] });
+        by.get(m.file).list.push(e);
+      }
+    }
+    const out = [];
+    for (const { m, list } of [...by.values()].sort((a, b) => a.m.name.localeCompare(b.m.name))) {
+      out.push({ head: m, n: list.length, key: `@${m.file}` });
+      out.push(...list);
+    }
+    if (rest.length && out.length) out.push({ head: null, n: rest.length, key: '@rest' });
+    out.push(...rest);
+    return out;
+  });
+  /** The entries in the order they're drawn (shift-click ranges, Ctrl+A). */
+  const ordered = $derived(grouped ? items.filter((x) => x.key == null) : shown);
   const first = $derived(Math.max(0, Math.floor(scrollTop / ROW) - 10));
-  const slice = $derived(shown.slice(first, first + Math.ceil(viewH / ROW) + 20));
+  const slice = $derived(items.slice(first, first + Math.ceil(viewH / ROW) + 20));
   const selList = $derived(entries.filter((e) => selected.has(e.name)));
   const selSize = $derived(selList.reduce((n, e) => n + e.size, 0));
   const hist = $derived(historyOf(sid));
@@ -93,18 +130,33 @@
     if (path) navTo(parentOf(path));
   }
 
+  /** A name to select once the folder has loaded (a search hit on a file's name). */
+  let reveal = '';
+  let loadSeq = 0;
   async function load() {
+    const seq = ++loadSeq;
     loading = true;
     error = '';
     try {
       const r = await api(`${base}/list?path=${encodeURIComponent(path)}`);
+      // A slower answer for a folder already left behind.
+      if (seq !== loadSeq) return;
       entries = r.entries;
-      selected = new Set([...selected].filter((n) => entries.some((e) => e.name === n)));
+      if (reveal && entries.some((e) => e.name === reveal)) {
+        selected = new Set([reveal]);
+        last = reveal;
+        const ix = items.findIndex((e) => e.key == null && e.name === reveal);
+        if (scroller && prefs.view === 'list' && ix >= 0) scroller.scrollTop = Math.max(0, ix * ROW - viewH / 3);
+      } else {
+        selected = new Set([...selected].filter((n) => entries.some((e) => e.name === n)));
+      }
+      reveal = '';
     } catch (e) {
+      if (seq !== loadSeq) return;
       error = e.message;
       entries = [];
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
@@ -113,25 +165,67 @@
     treeVersion++;
   }
 
+  // Runs on a new folder or server only: everything else it touches is
+  // untracked (the list's element comes and goes with search results, and
+  // the history counter is written here), so it never loads twice.
+  let prevSid = null;
   $effect(() => {
     const p = path;
-    sid;
-    if (prevPath !== null && prevPath !== p && !viaHistory) {
-      hist.back.push(prevPath);
-      if (hist.back.length > 100) hist.back.shift();
-      hist.fwd.length = 0;
-      histTick++;
-    }
-    viaHistory = false;
-    prevPath = p;
-    selected = new Set();
-    filter = '';
-    found = null;
-    preview = null;
-    editingPath = false;
-    if (scroller) scroller.scrollTop = 0;
-    load();
+    const s = sid;
+    untrack(() => {
+      if (s !== prevSid) {
+        prevSid = s;
+        prevPath = null;
+        owners = null;
+        peekJar = '';
+      }
+      if (prevPath !== null && prevPath !== p && !viaHistory) {
+        hist.back.push(prevPath);
+        if (hist.back.length > 100) hist.back.shift();
+        hist.fwd.length = 0;
+        histTick++;
+      }
+      viaHistory = false;
+      prevPath = p;
+      selected = new Set();
+      filter = '';
+      found = null;
+      preview = null;
+      editingPath = false;
+      if (scroller) scroller.scrollTop = 0;
+      load();
+    });
   });
+
+  // Mods' icons and names beside config files, loaded the first time
+  // config/ (or a search) shows any.
+  $effect(() => {
+    const want = path === 'config' || path.startsWith('config/') || (found?.hits || []).some((h) => h.path.startsWith('config/'));
+    const s = sid;
+    if (want && !owners) configOwners(s).then((o) => s === sid && (owners = o));
+  });
+  const peekMod = $derived(peekJar ? owners?.mods.get(peekJar) : null);
+  /** A mod's panel beside the list (the Mods tab when it isn't listed there). */
+  function showMod(m) {
+    if (!owners?.mods.get(m.file)) return openMods();
+    peekJar = peekJar === m.file ? '' : m.file;
+  }
+  /** Opens a search hit at its line. */
+  function openHit(p, line = 0) {
+    // A name hit on something that isn't text (a jar, an image, a folder's
+    // file): show it in its folder, selected, instead of opening it as text.
+    if (!line && !TEXT.test(p)) {
+      const dir = parentOf(p);
+      reveal = p.split('/').pop();
+      found = null;
+      if (dir !== path) navTo(dir);
+      else load();
+      return;
+    }
+    jump.path = p;
+    jump.line = line;
+    openFile(p, 0);
+  }
 
   function startEditPath() {
     pathText = path;
@@ -176,12 +270,13 @@
 
   let suppressClick = false;
   function click(e, ev) {
-    if (suppressClick) return;
+    // A tick sweep let go over a row's own name lands its click on the row.
+    if (suppressClick || clickSwallowed()) return;
     const s = new Set(selected);
     if (ev.shiftKey && last) {
-      const a = shown.findIndex((x) => x.name === last);
-      const b = shown.findIndex((x) => x.name === e.name);
-      for (const x of shown.slice(Math.min(a, b), Math.max(a, b) + 1)) s.add(x.name);
+      const a = ordered.findIndex((x) => x.name === last);
+      const b = ordered.findIndex((x) => x.name === e.name);
+      for (const x of ordered.slice(Math.min(a, b), Math.max(a, b) + 1)) s.add(x.name);
     } else if (ev.ctrlKey || ev.metaKey) {
       s.has(e.name) ? s.delete(e.name) : s.add(e.name);
     } else {
@@ -190,6 +285,18 @@
     }
     last = e.name;
     selected = s;
+  }
+
+  // Press a row's tick box and drag across rows: each row crossed takes the
+  // same tick (desktop's drag_pick).
+  function tickDown(ev, e, ix) {
+    const on = !selected.has(e.name);
+    startPick(ev, {
+      list: 'files', kind: 'tick', ix, on, selected,
+      keyAt: (i) => (items[i] && items[i].key == null ? items[i].name : null),
+      onTick: (s) => (selected = s),
+      label: tickLabel(on),
+    });
   }
 
   function toggle(e) {
@@ -220,8 +327,8 @@
     if (prefs.view === 'list') {
       const head = 0;
       const a = Math.max(0, Math.floor((top - head) / ROW));
-      const b = Math.min(shown.length - 1, Math.floor((bottom - head) / ROW));
-      for (let i = a; i <= b; i++) s.add(shown[i].name);
+      const b = Math.min(items.length - 1, Math.floor((bottom - head) / ROW));
+      for (let i = a; i <= b; i++) if (items[i].key == null) s.add(items[i].name);
     } else {
       const left = Math.min(band.x0, band.x1) + box.left - scroller.scrollLeft;
       const right = Math.max(band.x0, band.x1) + box.left - scroller.scrollLeft;
@@ -297,10 +404,22 @@
 
   async function newFile() {
     const name = await ask('New file', '', { ok: 'Create', placeholder: 'name.toml' });
-    if (!name?.trim()) return;
+    const rel = join(name?.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') || '');
+    if (!name?.trim() || rel === path) return;
     try {
-      await api(`${base}/text`, { method: 'PUT', body: { path: join(name.trim()), content: '', force: true } });
-      openFile(join(name.trim()), 0);
+      // A name that's taken opens that file; it's never emptied.
+      const dir = parentOf(rel);
+      const leaf = rel.split('/').pop();
+      const here = dir === path ? entries : await api(`${base}/list?path=${encodeURIComponent(dir)}`).then((r) => r.entries, () => []);
+      const there = here.find((e) => e.name.toLowerCase() === leaf.toLowerCase());
+      if (there?.dir) return say(`${leaf} is a folder.`);
+      if (there) {
+        say(`${rel.split('/').pop()} already exists, so it opened as it is.`);
+      } else {
+        // Empty text isn't valid JSON or TOML yet, hence force.
+        await api(`${base}/text`, { method: 'PUT', body: { path: rel, content: '', force: true } });
+      }
+      openFile(rel, 0);
     } catch (e) {
       say(e.message, true);
     }
@@ -484,19 +603,32 @@
   // ---- keys and mouse buttons ------------------------------------------------------
 
   function keys(ev) {
-    if (viewer || props) return;
-    if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA' || ev.target.isContentEditable) return;
+    // A dialog (rename, confirm) has the keys: Enter there mustn't also open
+    // the selected file, nor Delete trash it again.
+    if (props && ev.key === 'Escape' && !dialog.open) {
+      props = null;
+      return;
+    }
+    if (viewer || props || dialog.open || ev.defaultPrevented) return;
+    if (['INPUT', 'TEXTAREA', 'SELECT'].includes(ev.target.tagName) || ev.target.isContentEditable) return;
+    if (ev.key === 'Enter' && ev.target.closest?.('button, a, [role="button"]')) return;
     const mod = ev.ctrlKey || ev.metaKey;
+    // Ctrl+C / X on text picked in the preview copies that text.
+    if (mod && (ev.key === 'c' || ev.key === 'x') && String(getSelection?.() || '').trim()) return;
     if (ev.altKey && ev.key === 'ArrowLeft') { ev.preventDefault(); back(); }
     else if (ev.altKey && ev.key === 'ArrowRight') { ev.preventDefault(); forward(); }
     else if (ev.altKey && ev.key === 'ArrowUp') { ev.preventDefault(); up(); }
     else if (ev.altKey && ev.key === 'Enter' && selList.length) { ev.preventDefault(); showProps(selList); }
-    else if (ev.key === 'Escape') { ctx = null; selected = new Set(); }
+    else if (ev.key === 'Escape') {
+      if (ctx) ctx = null;
+      else if (peekJar) peekJar = '';
+      else selected = new Set();
+    }
     else if (ev.key === 'Delete' && selList.length) trash();
     else if (ev.key === 'F2' && selList.length === 1) rename();
     else if (ev.key === 'F5') { ev.preventDefault(); refresh(); }
     else if (ev.key === 'Backspace' && path) up();
-    else if (mod && ev.key === 'a') { ev.preventDefault(); selected = new Set(shown.map((e) => e.name)); }
+    else if (mod && ev.key === 'a') { ev.preventDefault(); selected = new Set(ordered.map((e) => e.name)); }
     else if (mod && ev.key === 'x') cutCopy('move');
     else if (mod && ev.key === 'c') cutCopy('copy');
     else if (mod && ev.key === 'v') paste();
@@ -595,6 +727,7 @@
       <button class:on={prefs.view === 'list'} title="List" onclick={() => setView('list')}><List size={14} /></button>
       <button class:on={prefs.view === 'tiles'} title="Tiles" onclick={() => setView('tiles')}><LayoutGrid size={14} /></button>
     </div>
+    {#if inConfig && prefs.view === 'list'}<button class="btn sm icon" class:on={prefs.group} title="Group by mod" onclick={() => flipPane('group')}><Layers size={14} /></button>{/if}
     <button class="btn sm icon" class:on={prefs.tree} title="Folder tree" onclick={() => flipPane('tree')}><PanelLeft size={14} /></button>
     <button class="btn sm icon" class:on={prefs.preview} title="Preview pane" onclick={() => flipPane('preview')}><PanelRight size={14} /></button>
     <button class="btn sm icon" title="Refresh (F5)" onclick={refresh}><RefreshCw size={14} /></button>
@@ -615,19 +748,24 @@
     <div class="main">
       {#if found || finding}
         <div class="found">
-          <div class="fh"><span class="small">{finding ? 'Searching…' : `${found.hits.length}${found.more ? '+' : ''} matches in ${groups.length} file${groups.length === 1 ? '' : 's'}`}</span><span class="sp"></span>
+          <div class="fh">{#if finding}<span class="spinner muted"></span>{/if}<span class="small">{finding ? 'Searching…' : `${found.hits.length}${found.more ? '+' : ''} matches in ${groups.length} file${groups.length === 1 ? '' : 's'}`}</span><span class="sp"></span>
             <button class="btn sm icon ghost" title="Close search" onclick={() => (found = null)}><X size={13} /></button></div>
           {#if found}
             {#each groups as [p, hits] (p)}
+              {@const hm = ownerOf(owners, p)}
               <div class="fg">
-                <button class="fp mono small" onclick={() => openFile(p, 0)}>{p}</button>
+                <div class="fpr">
+                  {#if hm}<button class="modic" title="Show {hm.name}" onclick={() => showMod(hm)}>{#if hm.icon}<img src={hm.icon} alt="" />{:else}<Package size={13} />{/if}</button>{/if}
+                  <button class="fp mono small" onclick={() => openHit(p)}>{p}</button>
+                  {#if hm}<button class="tiny muted modn" onclick={() => showMod(hm)}>{hm.name}</button>{/if}
+                </div>
                 {#each hits.slice(0, 20) as h (h.line)}
-                  <button class="hit mono tiny" onclick={() => openFile(p, 0)}><span class="muted ln">{h.line}</span>{h.text}</button>
+                  <button class="hit mono tiny" onclick={() => openHit(p, h.line)}><span class="muted ln">{h.line}</span>{h.text}</button>
                 {/each}
                 {#if hits.length > 20}<div class="tiny muted ln2">and {hits.length - 20} more</div>{/if}
               </div>
             {:else}
-              <p class="small muted msg">Nothing found.</p>
+              <div class="empty-state"><span class="es-ic"><TextSearch size={18} /></span><b>Nothing found</b><p>No file names or lines here and below match. Try fewer words, or the .* switch for a pattern.</p></div>
             {/each}
           {/if}
         </div>
@@ -647,21 +785,39 @@
           tabindex="-1"
         >
           {#if error}
-            <div class="msg err">{error}</div>
+            <div class="empty-state"><span class="es-ic"><TriangleAlert size={18} /></span><b>Can't open this folder</b><p class="err">{error}</p></div>
+          {:else if loading && !entries.length}
+            <div class="skels">{#each [38, 52, 30, 46, 60, 34, 44, 28] as w, i (i)}<div class="skel"><i style:width="{w}%"></i></div>{/each}</div>
           {:else if !loading && !shown.length}
-            <div class="msg muted">{filter ? 'Nothing matches.' : 'This folder is empty. Drop files here to upload them.'}</div>
+            {#if filter}
+              <div class="empty-state"><span class="es-ic"><Search size={18} /></span><b>Nothing matches</b><p>Press Enter to search inside the files here and below.</p></div>
+            {:else}
+              <div class="empty-state"><span class="es-ic"><FolderOpen size={18} /></span><b>This folder is empty</b><p>Drop files here to upload them, or make a new file or folder.</p></div>
+            {/if}
           {/if}
           {#if prefs.view === 'list'}
-            <div style:height="{shown.length * ROW}px" class="spacer">
-              {#each slice as e, i (e.name)}
+            <div style:height="{items.length * ROW}px" class="spacer" data-pick-list="files">
+              {#each slice as e, i (e.key ?? e.name)}
+                {#if e.key != null}
+                  <div class="frow ghead" style:top="{(first + i) * ROW}px" role="row">
+                    {#if e.head}
+                      <button class="gh" title="Show {e.head.name}" onclick={() => showMod(e.head)}>{#if e.head.icon}<img src={e.head.icon} alt="" />{:else}<span class="ph"><Package size={12} /></span>{/if}<b class="nm">{e.head.name}</b></button>
+                    {:else}
+                      <span class="gh"><span class="ph"></span><b class="nm muted">Not a mod's settings</b></span>
+                    {/if}
+                    <span class="tiny muted">{e.n}</span>
+                  </div>
+                {:else}
                 {@const Icon = icon(e)}
+                {@const m = inConfig && !grouped ? modOf(e) : null}
                 <div
-                  class="frow"
-                  class:sel={selected.has(e.name)}
+                  class="frow row-hover"
+                  class:row-sel={selected.has(e.name)}
                   class:cut={clip.op === 'move' && clip.sid === sid && clip.paths.includes(join(e.name))}
                   class:over={overDir === e.name}
                   style:top="{(first + i) * ROW}px"
                   data-name={e.name}
+                  data-pick-ix={first + i}
                   role="row"
                   tabindex="-1"
                   onclick={(ev) => click(e, ev)}
@@ -672,12 +828,14 @@
                   ondrop={(ev) => e.dir && dropOn(ev, join(e.name))}
                   onkeydown={() => {}}
                 >
-                  <input type="checkbox" checked={selected.has(e.name)} onclick={(ev) => { ev.stopPropagation(); toggle(e); }} />
-                  <span class="c-name"><span class="dragh" draggable="true" ondragstart={(ev) => dragStart(ev, e)} role="presentation"><Icon size={15} class={e.dir ? 'fold' : 'fic'} /><span class="nm">{e.name}</span></span></span>
+                  <input type="checkbox" checked={selected.has(e.name)} onpointerdown={(ev) => tickDown(ev, e, first + i)} onclick={(ev) => { ev.stopPropagation(); if (clickSwallowed()) { ev.preventDefault(); return; } toggle(e); }} />
+                  <span class="c-name"><span class="dragh" draggable="true" ondragstart={(ev) => dragStart(ev, e)} role="presentation"><Icon size={15} class={e.dir ? 'fold' : 'fic'} /><span class="nm">{e.name}</span></span>
+                    {#if m}<button class="modtag" title="Show {m.name}" onclick={(ev) => { ev.stopPropagation(); showMod(m); }}>{#if m.icon}<img src={m.icon} alt="" />{/if}<span class="ell">{m.name}</span></button>{/if}</span>
                   <span class="c-date muted">{when(e.modified)}</span>
                   <span class="c-kind muted">{kind(e)}</span>
                   <span class="c-size muted">{e.dir ? '' : bytes(e.size)}</span>
                 </div>
+                {/if}
               {/each}
             </div>
           {:else}
@@ -685,7 +843,7 @@
               {#each shown as e (e.name)}
                 {@const Icon = icon(e)}
                 <div
-                  class="tile"
+                  class="tile row-hover"
                   class:sel={selected.has(e.name)}
                   class:cut={clip.op === 'move' && clip.sid === sid && clip.paths.includes(join(e.name))}
                   class:over={overDir === e.name}
@@ -727,12 +885,16 @@
       {/if}
     </div>
 
-    {#if prefs.preview}
+    {#if peekMod}
+      <div class="peekpane"><ModPeek {server} mod={peekMod} onClose={() => (peekJar = '')} onChanged={async () => (owners = await configOwners(sid, true))} onUpdate={openMods} /></div>
+    {:else if prefs.preview}
       <aside class="prev">
         {#if preview}
           {@const Icon = icon(preview.e)}
           <div class="pv-h"><Icon size={18} class={preview.e.dir ? 'fold' : 'fic'} /><b class="ell">{preview.e.name}</b></div>
           <div class="tiny muted">{kind(preview.e)}{preview.e.dir ? '' : ` · ${bytes(preview.e.size)}`}{preview.e.modified ? ` · ${new Date(preview.e.modified * 1000).toLocaleString()}` : ''}</div>
+          {@const pm = ownerOf(owners, preview.p)}
+          {#if pm}<button class="modtag big" title="Show {pm.name}" onclick={() => showMod(pm)}>{#if pm.icon}<img src={pm.icon} alt="" />{:else}<Package size={13} />{/if}<span class="ell">{pm.name}'s config</span></button>{/if}
           <div class="row wrap">
             <button class="btn sm" onclick={() => open(preview.e)}><ExternalLink size={12} />Open</button>
             {#if !preview.e.dir}<button class="btn sm ghost" onclick={() => downloadSel([preview.e])}><Download size={12} />Download</button>{/if}
@@ -765,38 +927,38 @@
 </div>
 
 {#if ctx}
-  <div class="ctx card" style:left="{ctx.x}px" style:top="{ctx.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+  <div class="popover menu ctx" style:left="{ctx.x}px" style:top="{ctx.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
     {#if ctx.e}
-      <button onclick={() => act(() => open(ctx.e))}><span>Open</span><kbd>Enter</kbd></button>
-      {#if !ctx.e.dir && (TEXT.test(ctx.e.name) || ctx.e.size < 64 * 1024)}<button onclick={() => act(() => openFile(join(ctx.e.name), ctx.e.size))}><span>Edit as text</span><kbd></kbd></button>{/if}
-      <button onclick={() => act(() => downloadSel())}><span>{selList.length === 1 && !ctx.e.dir ? 'Download' : 'Download as zip'}</span><kbd></kbd></button>
-      {#if /\.jar$/i.test(ctx.e.name) && path.startsWith('mods')}<button onclick={() => act(openMods)}><span>Show in Mods tab</span><kbd></kbd></button>{/if}
-      <hr />
-      <button onclick={() => act(() => cutCopy('move'))}><span>Cut</span><kbd>Ctrl+X</kbd></button>
-      <button onclick={() => act(() => cutCopy('copy'))}><span>Copy</span><kbd>Ctrl+C</kbd></button>
-      {#if ctx.e.dir && clip.paths.length && clip.sid === sid}<button onclick={() => act(() => paste(join(ctx.e.name)))}><span>Paste into {ctx.e.name}</span><kbd></kbd></button>{/if}
-      {#if selList.length === 1}<button onclick={() => act(rename)}><span>Rename</span><kbd>F2</kbd></button>{/if}
-      <button class="bad" onclick={() => act(trash)}><span>Move to trash</span><kbd>Del</kbd></button>
-      <hr />
-      <button onclick={() => act(() => copyPath(join(ctx.e.name)))}><span>Copy path</span><kbd></kbd></button>
-      <button onclick={() => act(() => showProps(selList))}><span>Properties</span><kbd>Alt+Enter</kbd></button>
+      <button class="menu-item" role="menuitem" onclick={() => act(() => open(ctx.e))}><ExternalLink size={13} /><span class="sp">Open</span><kbd>Enter</kbd></button>
+      {#if !ctx.e.dir && (TEXT.test(ctx.e.name) || ctx.e.size < 64 * 1024)}<button class="menu-item" role="menuitem" onclick={() => act(() => openFile(join(ctx.e.name), ctx.e.size))}><FileText size={13} /><span class="sp">Edit as text</span></button>{/if}
+      <button class="menu-item" role="menuitem" onclick={() => act(() => downloadSel())}><Download size={13} /><span class="sp">{selList.length === 1 && !ctx.e.dir ? 'Download' : 'Download as zip'}</span></button>
+      {#if /\.jar$/i.test(ctx.e.name) && path.startsWith('mods')}<button class="menu-item" role="menuitem" onclick={() => act(openMods)}><Package size={13} /><span class="sp">Show in Mods tab</span></button>{/if}
+      <div class="menu-sep"></div>
+      <button class="menu-item" role="menuitem" onclick={() => act(() => cutCopy('move'))}><Scissors size={13} /><span class="sp">Cut</span><kbd>Ctrl+X</kbd></button>
+      <button class="menu-item" role="menuitem" onclick={() => act(() => cutCopy('copy'))}><Copy size={13} /><span class="sp">Copy</span><kbd>Ctrl+C</kbd></button>
+      {#if ctx.e.dir && clip.paths.length && clip.sid === sid}<button class="menu-item" role="menuitem" onclick={() => act(() => paste(join(ctx.e.name)))}><ClipboardPaste size={13} /><span class="sp ell">Paste into {ctx.e.name}</span></button>{/if}
+      {#if selList.length === 1}<button class="menu-item" role="menuitem" onclick={() => act(rename)}><Pencil size={13} /><span class="sp">Rename</span><kbd>F2</kbd></button>{/if}
+      <button class="menu-item bad" role="menuitem" onclick={() => act(trash)}><Trash2 size={13} /><span class="sp">Move to trash</span><kbd>Del</kbd></button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" role="menuitem" onclick={() => act(() => copyPath(join(ctx.e.name)))}><Link size={13} /><span class="sp">Copy path</span></button>
+      <button class="menu-item" role="menuitem" onclick={() => act(() => showProps(selList))}><Info size={13} /><span class="sp">Properties</span><kbd>Alt+Enter</kbd></button>
     {:else}
-      <button disabled={!clip.paths.length || clip.sid !== sid} onclick={() => act(() => paste())}><span>Paste{clip.paths.length && clip.sid === sid ? ` ${clip.paths.length}` : ''}</span><kbd>Ctrl+V</kbd></button>
-      <hr />
-      <button onclick={() => act(newFile)}><span>New file</span><kbd></kbd></button>
-      <button onclick={() => act(mkdir)}><span>New folder</span><kbd></kbd></button>
-      <button onclick={() => act(() => filePick.click())}><span>Upload files</span><kbd></kbd></button>
-      <hr />
-      <button onclick={() => act(refresh)}><span>Refresh</span><kbd>F5</kbd></button>
-      <button onclick={() => act(() => copyPath(path || '/'))}><span>Copy this folder's path</span><kbd></kbd></button>
+      <button class="menu-item" role="menuitem" disabled={!clip.paths.length || clip.sid !== sid} onclick={() => act(() => paste())}><ClipboardPaste size={13} /><span class="sp">Paste{clip.paths.length && clip.sid === sid ? ` ${clip.paths.length}` : ''}</span><kbd>Ctrl+V</kbd></button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" role="menuitem" onclick={() => act(newFile)}><FilePlus size={13} /><span class="sp">New file</span></button>
+      <button class="menu-item" role="menuitem" onclick={() => act(mkdir)}><FolderPlus size={13} /><span class="sp">New folder</span></button>
+      <button class="menu-item" role="menuitem" onclick={() => act(() => filePick.click())}><Upload size={13} /><span class="sp">Upload files</span></button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" role="menuitem" onclick={() => act(refresh)}><RefreshCw size={13} /><span class="sp">Refresh</span><kbd>F5</kbd></button>
+      <button class="menu-item" role="menuitem" onclick={() => act(() => copyPath(path || '/'))}><Link size={13} /><span class="sp">Copy this folder's path</span></button>
     {/if}
   </div>
 {/if}
 
 {#if props}
-  <div class="pback" role="presentation" onclick={(e) => e.target === e.currentTarget && (props = null)} onkeydown={(e) => e.key === 'Escape' && (props = null)}>
-    <div class="pbox card col">
-      <h3><Info size={14} />{props.title}<span class="sp"></span><button class="btn sm ghost icon" onclick={() => (props = null)}><X size={14} /></button></h3>
+  <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && (props = null)}>
+    <div class="pbox popover col">
+      <h3 class="row"><Info size={14} />{props.title}<span class="sp"></span><button class="btn sm ghost icon" title="Close (Esc)" onclick={() => (props = null)}><X size={14} /></button></h3>
       <div class="kv">{#each props.rows as [k, v] (k)}<span class="muted">{k}</span><span class="mono small sel-t">{v}</span>{/each}</div>
     </div>
   </div>
@@ -825,20 +987,36 @@
   .treepane { width: 220px; flex: none; border-right: 1px solid var(--line); overflow: auto; }
   .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .found { flex: 1; overflow: auto; min-height: 200px; }
-  .fh { display: flex; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--base); }
+  .fh { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--base); }
   .fg { padding: 6px 0; border-bottom: 1px solid var(--line); }
   .fp { display: block; padding: 2px 12px; color: var(--acc); text-align: left; }
   .hit { display: flex; gap: 10px; width: 100%; text-align: left; padding: 1px 12px 1px 24px; white-space: pre; overflow: hidden; text-overflow: ellipsis; color: var(--subtle); }
-  .hit:hover, .fp:hover { background: var(--raise); }
+  .hit:hover, .fp:hover { background: var(--hover); }
   .ln { min-width: 34px; text-align: right; flex: none; }
   .ln2 { padding-left: 24px; }
   .head { padding: 6px 12px 6px 40px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11.5px; font-weight: 500; }
   .list { flex: 1; overflow: auto; position: relative; min-height: 200px; user-select: none; }
   .spacer { position: relative; }
   .frow { position: absolute; left: 0; right: 0; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid #26262c; cursor: default; }
-  .frow:hover, .tile:hover { background: #ffffff06; }
-  .frow.sel, .tile.sel { background: var(--acc-dim); }
-  .frow.over, .tile.over { background: var(--acc-dim); outline: 1px dashed var(--acc); outline-offset: -2px; }
+  .tile.sel, .tile.sel:hover { background: var(--sel); box-shadow: inset 0 0 0 1px #f9731655; }
+  .ghead { background: var(--base); gap: 8px; }
+  .gh { display: inline-flex; align-items: center; gap: 8px; min-width: 0; padding: 2px 6px 2px 2px; border-radius: 5px; font-size: 12.5px; }
+  button.gh:hover { background: var(--hover); }
+  .gh img, .gh .ph { width: 18px; height: 18px; border-radius: 4px; flex: none; background: var(--raise); display: grid; place-items: center; color: var(--muted); }
+  .modtag { display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; padding: 1px 7px 1px 3px; border-radius: 99px; background: #ffffff0d; color: var(--subtle); font-size: 11px; max-width: 200px; min-width: 0; flex: 0 1 auto; }
+  .modtag:hover { background: #ffffff1a; color: var(--text); }
+  .modtag img { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+  .modtag.big { margin: 0; align-self: flex-start; font-size: 12px; padding: 3px 9px 3px 4px; max-width: 100%; }
+  .modtag.big img { width: 18px; height: 18px; }
+  .fpr { display: flex; align-items: center; gap: 6px; padding-left: 12px; }
+  .fpr .fp { padding-left: 0; }
+  .modic { display: grid; place-items: center; width: 16px; height: 16px; color: var(--muted); }
+  .modic img { width: 16px; height: 16px; border-radius: 3px; }
+  .modn:hover { color: var(--text); }
+  .peekpane { flex: none; border-left: 1px solid var(--line); padding: 8px; overflow: auto; }
+  .peekpane :global(.peek) { width: 340px; max-height: none; position: static; }
+  .skels { display: flex; flex-direction: column; padding: 0 4px 0 32px; }
+  .frow.over, .tile.over { background: var(--sel); outline: 1px dashed var(--acc); outline-offset: -2px; }
   .frow.cut, .tile.cut { opacity: 0.5; }
   .frow input { accent-color: var(--acc); }
   .c-name { flex: 1; min-width: 0; display: flex; align-items: center; }
@@ -855,7 +1033,6 @@
   .dragh.big img { width: 56px; height: 56px; object-fit: contain; image-rendering: pixelated; background: var(--raise); border-radius: 6px; }
   .tn { font-size: 11.5px; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .band { position: absolute; border: 1px solid var(--acc); background: #f9731622; pointer-events: none; z-index: 3; }
-  .msg { padding: 24px; text-align: center; }
   .selbar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--surface); flex-wrap: wrap; }
   .prev { width: 280px; flex: none; border-left: 1px solid var(--line); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
   .pv-h { display: flex; align-items: center; gap: 8px; }
@@ -869,16 +1046,12 @@
   .row.wrap { flex-wrap: wrap; }
   .drop { position: absolute; inset: 0; border: 2px dashed var(--acc); border-radius: 10px; background: #f9731614; display: grid; place-items: center; text-align: center; color: var(--text); pointer-events: none; }
   .drop > div { display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--surface); padding: 16px 22px; border-radius: 10px; }
-  .ctx { position: fixed; z-index: 80; width: 230px; padding: 4px; display: flex; flex-direction: column; box-shadow: 0 14px 40px #000c; }
-  .ctx button { display: flex; justify-content: space-between; gap: 10px; padding: 6px 10px; border-radius: 5px; font-size: 12.5px; text-align: left; }
-  .ctx button:hover:not(:disabled) { background: var(--raise); }
-  .ctx button:disabled { opacity: 0.45; }
-  .ctx button.bad { color: var(--red); }
+  .ctx { position: fixed; z-index: 80; width: 240px; }
+  .ctx .menu-item:disabled { opacity: 0.45; cursor: default; background: none; }
+  .ctx .menu-item.bad { color: var(--red); }
   .ctx kbd { color: var(--muted); font: 11px var(--mono); }
-  .ctx hr { border: 0; border-top: 1px solid var(--line); margin: 3px 0; }
-  .pback { position: fixed; inset: 0; background: #0008; display: grid; place-items: center; z-index: 75; }
-  .pbox { width: min(480px, 100%); gap: 10px; }
-  .pbox h3 { margin: 0; }
+  .pbox { width: min(480px, 100%); gap: 10px; padding: 16px 18px; }
+  .pbox h3 { margin: 0; font-size: 14px; font-weight: 600; gap: 7px; }
   .kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; }
   .sel-t { user-select: text; word-break: break-all; }
   .icon { padding: 4px 6px; }

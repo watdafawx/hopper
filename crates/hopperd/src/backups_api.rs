@@ -31,6 +31,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/backups/{name}", axum::routing::delete(delete))
         .route("/api/v1/servers/{id}/backups/{name}/entries", get(entries))
         .route("/api/v1/servers/{id}/backups/{name}/restore", post(restore))
+        .route("/api/v1/servers/{id}/backups/{name}/changes", get(changes))
         .route("/api/v1/servers/{id}/backups/{name}/download", get(download))
         .route("/api/v1/servers/{id}/backups/{name}/convert", post(convert))
         .route("/api/v1/backup-targets", get(targets).post(add_target))
@@ -140,12 +141,203 @@ async fn restore(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
     if e.server.state().is_alive() {
         return Err(conflict(format!("Stop {} before restoring a backup.", e.name)));
     }
+    backup::check(&name).map_err(bad)?;
+    // One restore per server at a time: a second would back up and write
+    // over the first one's half-done files.
+    let guard = Restoring::start(&e.id).ok_or_else(|| conflict(format!("{} is already being restored.", e.name)))?;
     log::info!("{}: restoring {name} ({} paths)", e.name, if b.paths.is_empty() { "all".into() } else { b.paths.len().to_string() });
     let job = crate::pack_api::spawn(&app, format!("Restoring {}", e.name), move |job| {
-        let n = backup::restore(&e.root, &name, &b.paths, job)?;
-        Ok(json!({ "files": n }))
+        let _guard = guard;
+        let old = backup::list(&e.root).into_iter().find(|x| x.name == name).ok_or_else(|| anyhow::anyhow!("That backup is gone."))?;
+        // Picked files that aren't in it: say so before backing anything up.
+        if !b.paths.is_empty() {
+            let names: Vec<String> = backup::entries(&e.root, &name)?.into_iter().map(|(p, _)| p).collect();
+            if matching(&names, &b.paths) == 0 {
+                anyhow::bail!("None of the picked files are in that backup.");
+            }
+        }
+        // As desktop: a "Before restoring" backup first, so this can be
+        // undone (only what changed is stored again, so it's quick). It
+        // must be complete before any file is touched: an error stops here.
+        let label = if old.note.trim().is_empty() { format!("the {} backup", hopper_core::time::date(old.at as i64)) } else { format!("\"{}\"", old.note.trim()) };
+        job.detail("Backing up first, so this can be undone");
+        let scope = if b.paths.is_empty() { old.scope } else { Scope::Full };
+        let safety = backup::make(&e.root, scope, Kind::Safety, &format!("Before restoring {label}"), None, job)?;
+        offsite::kick();
+        // Started while that ran: writing under a running server corrupts
+        // its world, so stop with nothing changed.
+        if e.server.state().is_alive() {
+            anyhow::bail!("{} was started while it was being backed up, so nothing was restored. Stop it and restore again.", e.name);
+        }
+        let n = backup::restore(&e.root, &name, &b.paths, job).map_err(|err| {
+            log::warn!("{}: restore of {name} failed: {err:#}", e.name);
+            anyhow::anyhow!("{err:#}. If some files were already put back, restore \"{}\" to undo it.", safety.note)
+        })?;
+        Ok(json!({ "files": n, "safety": safety.name, "safety_note": safety.note }))
     });
     Ok(Json(json!({ "job": job })))
+}
+
+/// A server being restored; dropped when its restore job ends.
+struct Restoring(String);
+
+impl Restoring {
+    fn set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+        static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+        S.get_or_init(Default::default)
+    }
+
+    /// None when that server is already being restored.
+    fn start(id: &str) -> Option<Self> {
+        Self::set().lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string()).then(|| Restoring(id.to_string()))
+    }
+}
+
+/// True while a restore runs on that server: starting it then would load
+/// half-written worlds. (For the power route to refuse a start.)
+pub(crate) fn is_restoring(id: &str) -> bool {
+    Restoring::set().lock().unwrap_or_else(|e| e.into_inner()).contains(id)
+}
+
+impl Drop for Restoring {
+    fn drop(&mut self) {
+        Self::set().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+/// How many of a backup's paths a restore of `only` (files, or folders
+/// ending in `/`) puts back, as hopper-core's restore picks them.
+fn matching(names: &[String], only: &[String]) -> usize {
+    names.iter().filter(|n| only.iter().any(|o| *n == o || (o.ends_with('/') && n.starts_with(o.as_str())))).count()
+}
+
+/// What changed on the server since a backup, as desktop's "Since then".
+#[derive(Debug, Default, PartialEq, Serialize)]
+struct Changes {
+    /// In the backup and now, but different: a restore puts the old copy back.
+    changed: Vec<String>,
+    /// In the backup, gone now: a restore puts them back.
+    removed: Vec<String>,
+    /// New in a world the backup holds: a whole restore moves them aside
+    /// with the world.
+    added: Vec<String>,
+}
+
+/// One file as it is now: size, and whether it holds what the backup has
+/// (None: not known without reading it).
+type Now = (u64, Option<bool>);
+
+/// Sorts the backup's files (path, size) against `now` (the same paths as
+/// they are on the server) and `extra` (files now in the backup's worlds).
+fn diff(then: &[(String, u64)], now: &HashMap<String, Now>, extra: &[String]) -> Changes {
+    let mut c = Changes::default();
+    let known: std::collections::HashSet<&str> = then.iter().map(|(p, _)| p.as_str()).collect();
+    for (p, size) in then {
+        match now.get(p) {
+            None => c.removed.push(p.clone()),
+            Some((s, same)) if s != size || *same == Some(false) => c.changed.push(p.clone()),
+            Some(_) => {}
+        }
+    }
+    c.added = extra.iter().filter(|p| !known.contains(p.as_str()) && !p.ends_with("session.lock")).cloned().collect();
+    for l in [&mut c.changed, &mut c.removed, &mut c.added] {
+        l.sort();
+    }
+    c
+}
+
+/// Every file under `dir`, as paths from `root` with `/`.
+fn files_under(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => files_under(root, &p, out),
+            Ok(t) if t.is_file() => {
+                if let Ok(rel) = p.strip_prefix(root) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// True when `path` holds exactly what the backup's copy of it has.
+fn same_bytes(st: &chunkstore::Store, f: &chunkstore::FileRef, path: &std::path::Path) -> anyhow::Result<bool> {
+    use std::io::Read as _;
+    let mut a = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
+    let mut b = st.reader(f);
+    let (mut x, mut y) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
+    loop {
+        let n = a.read(&mut x)?;
+        if n == 0 {
+            return Ok(b.read(&mut y[..1])? == 0);
+        }
+        let mut got = 0;
+        while got < n {
+            let m = b.read(&mut y[got..n])?;
+            if m == 0 {
+                return Ok(false);
+            }
+            got += m;
+        }
+        if x[..n] != y[..n] {
+            return Ok(false);
+        }
+    }
+}
+
+/// What a whole restore of a backup would change, against the server now.
+async fn changes(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, name)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    backup::check(&name).map_err(bad)?;
+    let c = blocking(move || {
+        let root = &e.root;
+        let snap = name.ends_with(chunkstore::EXT);
+        let st = backup::store(root);
+        // Snapshots know each file's time and chunks; old zips only sizes.
+        let files: Vec<chunkstore::FileRef> = if snap {
+            st.manifest(&name)?.files
+        } else {
+            backup::entries(root, &name)?.into_iter().map(|(path, size)| chunkstore::FileRef { path, size, mtime: 0, chunks: Vec::new() }).collect()
+        };
+        let mut now = HashMap::new();
+        for f in &files {
+            let p = root.join(&f.path);
+            let Ok(m) = std::fs::metadata(&p) else { continue };
+            if !m.is_file() {
+                continue;
+            }
+            let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+            // Same size and time: unchanged (what the next backup trusts too).
+            // Same size, other time (e.g. after a restore): read and compare.
+            let same = if m.len() != f.size {
+                Some(false)
+            } else if f.mtime != 0 && f.mtime == mtime {
+                Some(true)
+            } else if snap {
+                Some(same_bytes(&st, f, &p).unwrap_or(false))
+            } else {
+                None
+            };
+            now.insert(f.path.clone(), (m.len(), same));
+        }
+        // The worlds it holds: a whole restore swaps them, new files too.
+        let mut extra = Vec::new();
+        for w in hopper_core::hosting::worlds::list(root) {
+            for folder in &w.folders {
+                let pre = format!("{folder}/");
+                if files.iter().any(|f| f.path.starts_with(&pre)) {
+                    files_under(root, &root.join(folder), &mut extra);
+                }
+            }
+        }
+        let then: Vec<(String, u64)> = files.into_iter().map(|f| (f.path, f.size)).collect();
+        Ok(diff(&then, &now, &extra))
+    })
+    .await?;
+    Ok(Json(json!(c)))
 }
 
 async fn convert(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, name)): Path<(String, String)>) -> ApiResult<Json<Value>> {
@@ -582,4 +774,52 @@ async fn store_op(State(app): State<Arc<App>>, headers: HeaderMap, Path(op): Pat
     .await
     .map_err(bad)?;
     r.map_err(|e| bad(format!("{e:#}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn restore_picks_match_like_core() {
+        let names = s(&["world/level.dat", "world/region/r.0.0.mca", "server.properties", "worldly/x"]);
+        assert_eq!(matching(&names, &s(&["server.properties"])), 1);
+        assert_eq!(matching(&names, &s(&["world/"])), 2);
+        // A folder without its slash isn't a folder pick (as hopper-core).
+        assert_eq!(matching(&names, &s(&["world"])), 0);
+        assert_eq!(matching(&names, &s(&["gone.txt", "mods/"])), 0);
+    }
+
+    #[test]
+    fn changes_since_a_backup() {
+        let then = vec![("a".to_string(), 3), ("b".to_string(), 5), ("c".to_string(), 7), ("d".to_string(), 1), ("w/x".to_string(), 2)];
+        let now: HashMap<String, Now> = [
+            ("a".to_string(), (3, Some(true))),  // same
+            ("b".to_string(), (6, Some(false))), // grew
+            ("c".to_string(), (7, Some(false))), // same size, other bytes
+            ("d".to_string(), (1, None)),        // a zip's: size only
+            ("w/x".to_string(), (2, Some(true))),
+        ]
+        .into_iter()
+        .collect();
+        let extra = s(&["w/x", "w/new.dat", "w/session.lock"]);
+        let c = diff(&then, &now, &extra);
+        assert_eq!(c, Changes { changed: s(&["b", "c"]), removed: Vec::new(), added: s(&["w/new.dat"]) });
+        let c = diff(&then, &HashMap::new(), &[]);
+        assert_eq!(c.removed.len(), 5);
+        assert!(c.changed.is_empty() && c.added.is_empty());
+    }
+
+    #[test]
+    fn one_restore_per_server() {
+        let a = Restoring::start("test-srv-a").unwrap();
+        assert!(Restoring::start("test-srv-a").is_none());
+        assert!(Restoring::start("test-srv-b").is_some());
+        drop(a);
+        assert!(Restoring::start("test-srv-a").is_some());
+    }
 }

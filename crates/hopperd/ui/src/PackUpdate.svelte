@@ -17,6 +17,7 @@
   import { paintDown, paintOver } from './lib/dragpick.svelte.js';
   import BrowseRich from './BrowseRich.svelte';
   import BrowsePack from './BrowsePack.svelte';
+  import { dialog } from './lib/dialog.svelte.js';
 
   // `file`: the pack version to update to (the newest by default);
   // `onOtherVersion`: opens the pack's Versions and changelogs to pick another.
@@ -121,6 +122,15 @@
   onDestroy(() => {
     cancelJob();
   });
+
+  // Escape closes the mod page beside it first, then the window (not while
+  // it updates, nor under a confirm dialog or the screenshot viewer).
+  function onKey(e) {
+    if (e.key !== 'Escape' || e.defaultPrevented || dialog.open) return;
+    e.preventDefault();
+    if (peek) peek = null;
+    else close();
+  }
 
   // ---- the plan ----
   const mods = $derived(plan?.mods || []);
@@ -333,7 +343,7 @@
 </script>
 
 {#snippet sumRow(Icon, tint, open, onclick, body)}
-  <button class="sum" class:click={open != null} disabled={open == null} {onclick}>
+  <button class="sum" class:click={open != null} class:row-hover={open != null} disabled={open == null} {onclick}>
     <span class="si {tint}"><Icon size={13} /></span>
     <span class="sb">{@render body()}</span>
     {#if open != null}<span class="show">{open ? 'Hide' : 'Show'}{#if open}<ChevronDown size={12} />{:else}<Caret size={12} />{/if}</span>{/if}
@@ -381,13 +391,15 @@
 {/snippet}
 
 {#snippet diffBlock(d)}
-  {#if d === 'loading'}<div class="tiny muted row diff"><span class="spin"></span>Loading</div>
+  {#if d === 'loading'}<div class="tiny muted row diff"><span class="spinner"></span>Loading</div>
   {:else}<pre class="diff">{#each d.split('\n').slice(0, 400) as l, i (i)}<span class={lineKind(l)}>{l.replaceAll('\t', '    ')}{'\n'}</span>{/each}</pre>{/if}
 {/snippet}
 
-<div class="back" role="presentation" onclick={(e) => e.target === e.currentTarget && !applying && close()}>
+<svelte:window onkeydown={onKey} />
+
+<div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !applying && close()}>
   <div class="pair">
-    <div class="box card col">
+    <div class="box popover col">
       <h3 class="row">
         {#if pack.icon}<img class="pi" src={pack.icon} alt="" width="22" height="22" />{:else}<Package size={16} />{/if}
         <span class="ell">Update {server.name}</span><span class="sp"></span>
@@ -420,13 +432,13 @@
         {/if}
 
         <nav class="tabs">
-          <button class:on={tab === 0} onclick={() => (tab = 0)}>What's new</button>
-          <button class:on={tab === 1} onclick={() => (tab = 1)}>{changesLabel}</button>
+          <button class:tab-sel={tab === 0} onclick={() => (tab = 0)}>What's new</button>
+          <button class:tab-sel={tab === 1} onclick={() => (tab = 1)}>{changesLabel}</button>
         </nav>
 
         <div class="scroll col">
           {#if tab === 0}
-            {#if !log}<div class="small muted row"><span class="spin"></span>Loading the changelog</div>
+            {#if !log}<div class="small muted row"><span class="spinner"></span>Loading the changelog</div>
             {:else if log.error}<div class="tiny muted">The changelog couldn't be loaded: {log.error}</div>
             {:else if !log.entries?.length}<div class="small muted">This pack has no changelog.</div>
             {:else}
@@ -443,7 +455,7 @@
                 </div>
               {/each}
             {/if}
-            <div class="strip small"><FileText size={14} class="acct" /><span class="grow">{strip}</span><button class="btn sm ghost" onclick={() => (tab = 1)}>See changes ›</button></div>
+            <div class="strip small"><span class="acct"><FileText size={14} /></span><span class="grow">{strip}</span><button class="btn sm ghost" onclick={() => (tab = 1)}>See changes ›</button></div>
           {:else if why}
             <div class="warn small row"><TriangleAlert size={14} /><span>{why}</span></div>
           {:else if planErr}
@@ -451,8 +463,8 @@
             <div><button class="btn sm" onclick={prepare}>Try again</button></div>
           {:else if !plan}
             <div class="col prep">
-              <div class="small row"><span class="spin"></span><span class="ell">{status?.detail || 'Preparing'}</span></div>
-              <div class="pbar"><i class:ind={status?.progress == null} style:width="{status?.progress == null ? 30 : Math.max(2, status.progress * 100)}%"></i></div>
+              <div class="small row"><span class="spinner"></span><span class="ell">{status?.detail || 'Preparing'}</span></div>
+              <div class="bar" class:busy={status?.progress == null}><i style:width="{status?.progress == null ? 30 : Math.max(2, status.progress * 100)}%"></i></div>
               <div class="tiny muted">{compare ? "The panel reads the old server pack's file list and compares it with the server's files." : 'The panel downloads the new server pack and compares it with the server.'} Nothing changes yet.</div>
             </div>
           {:else}
@@ -529,7 +541,7 @@
                   {:else}
                     <div class="list">
                       {#each modRows.slice(0, LIST_CAP) as r (r.m.name + r.m.from + r.m.to)}
-                        <div class="mr">{@render modCell(r.m)}<span class="tiny muted ell grow">{r.detail}</span><span class="chip {r.chip[1]} xs">{r.chip[0]}</span></div>
+                        <div class="mr row-hover">{@render modCell(r.m)}<span class="tiny muted ell grow">{r.detail}</span><span class="chip {r.chip[1]} xs">{r.chip[0]}</span></div>
                       {/each}
                       {#if modRows.length > LIST_CAP}<div class="tiny muted mr">…{modRows.length - LIST_CAP} more: search to narrow</div>{/if}
                     </div>
@@ -568,7 +580,7 @@
                     {:else}
                       <div class="list">
                         {#each stayMods.slice(0, LIST_CAP) as r (r.m.name + r.m.from)}
-                          <div class="mr">{@render modCell(r.m)}<span class="tiny muted ell grow">{r.need ? `⚠ needs ${r.need}, which the pack drops` : r.m.from}</span><span class="chip xs" class:starting={r.need}>Yours</span></div>
+                          <div class="mr row-hover">{@render modCell(r.m)}<span class="tiny muted ell grow">{r.need ? `⚠ needs ${r.need}, which the pack drops` : r.m.from}</span><span class="chip xs" class:starting={r.need}>Yours</span></div>
                         {/each}
                       </div>
                     {/if}
@@ -598,8 +610,8 @@
 
         {#if applying}
           <div class="col prep">
-            <div class="small gold row"><span class="spin"></span>{applying.detail || 'Updating'}</div>
-            <div class="pbar"><i class:ind={applying.progress == null} style:width="{applying.progress == null ? 30 : Math.max(2, applying.progress * 100)}%"></i></div>
+            <div class="small gold row"><span class="spinner"></span>{applying.detail || 'Updating'}</div>
+            <div class="bar" class:busy={applying.progress == null}><i style:width="{applying.progress == null ? 30 : Math.max(2, applying.progress * 100)}%"></i></div>
           </div>
         {/if}
         {#if plan && alive}<div class="small gold">Stop the server first.</div>{/if}
@@ -613,7 +625,7 @@
     </div>
 
     {#if peek}
-      <div class="peek card">
+      <div class="peek popover">
         {#key peek}<BrowsePack source="curseforge" id={peek} type="mods" onBack={() => (peek = null)} />{/key}
       </div>
     {/if}
@@ -621,12 +633,11 @@
 </div>
 
 <style>
-  .back { position: fixed; inset: 0; background: #0008; display: flex; justify-content: center; align-items: flex-start; padding: 56px 16px 16px; z-index: 60; }
   .pair { display: flex; gap: 14px; align-items: flex-start; max-width: 100%; }
-  .box { width: min(780px, calc(100vw - 32px)); height: calc(100vh - 80px); gap: 10px; box-shadow: 0 24px 60px #000c; }
-  .peek { width: 460px; flex: none; height: calc(100vh - 80px); overflow: auto; padding: 0; box-shadow: 0 24px 60px #000c; }
-  @media (max-width: 1300px) { .peek { position: fixed; right: 16px; top: 56px; z-index: 61; } }
-  .box h3 { margin: 0; font-size: 15px; }
+  .box { width: min(780px, calc(100vw - 32px)); height: calc(100dvh - var(--dialog-top) - 24px); gap: 10px; padding: 14px; }
+  .peek { width: 460px; flex: none; height: calc(100dvh - var(--dialog-top) - 24px); overflow: auto; }
+  @media (max-width: 1300px) { .peek { position: fixed; right: 16px; top: var(--dialog-top); z-index: 61; } }
+  .box h3 { margin: 0; font-size: 15px; font-weight: 600; }
   .pi { border-radius: 5px; background: var(--raise); flex: none; }
   .cap { gap: 10px; }
   .link { color: var(--acc); text-decoration: underline; }
@@ -634,7 +645,6 @@
   .notes { gap: 4px; }
   .tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--line); flex: none; }
   .tabs button { padding: 7px 0; color: var(--subtle); font-weight: 500; }
-  .tabs button.on { color: var(--text); box-shadow: inset 0 -2px var(--acc); }
   .scroll { overflow: auto; min-height: 0; flex: 1; gap: 16px; padding-right: 4px; }
   .grow { flex: 1; min-width: 0; }
   .wrap { flex-wrap: wrap; }
@@ -645,7 +655,7 @@
   .en { font-size: 15px; }
   .notesbody { overflow-wrap: anywhere; }
   .strip { display: flex; align-items: center; gap: 10px; background: var(--raise); border-radius: 8px; padding: 8px 10px; position: sticky; bottom: 0; }
-  :global(.acct) { color: var(--acc); flex: none; }
+  .acct { color: var(--acc); flex: none; display: grid; }
   .choice { border: 1px solid #f9731655; background: #f973160a; border-radius: 8px; padding: 10px 12px; gap: 8px; }
   .seg { display: inline-flex; flex-wrap: wrap; background: var(--base); border-radius: 7px; padding: 2px; gap: 2px; align-self: flex-start; flex: none; }
   .seg button { padding: 3px 10px; font-size: 12.5px; color: var(--subtle); border-radius: 5px; }
@@ -660,7 +670,6 @@
   .h { font-weight: 600; font-size: 13.5px; margin-bottom: 2px; }
   .sum { display: flex; align-items: center; gap: 10px; text-align: left; padding: 4px 6px; border-radius: 6px; width: 100%; cursor: default; }
   .sum.click { cursor: pointer; }
-  .sum.click:hover { background: #ffffff08; }
   .sum:disabled { opacity: 1; }
   .si { width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center; flex: none; }
   .si.blue { background: var(--blue-dim); color: var(--blue); } .si.acc { background: var(--acc-dim); color: var(--acc); }
@@ -674,7 +683,6 @@
   .find { padding: 3px 8px; width: 200px; }
   .list, .tree { border: 1px solid var(--line); border-radius: 6px; display: flex; flex-direction: column; max-height: 360px; overflow: auto; }
   .mr { display: flex; align-items: center; gap: 12px; padding: 3px 8px; border-bottom: 1px solid #ffffff08; }
-  .mr:hover { background: #ffffff06; }
   .mc { display: inline-flex; align-items: center; gap: 8px; width: 220px; flex: none; min-width: 0; font-size: 12.5px; text-align: left; }
   button.mc:hover { color: var(--acc); }
   .need .mc { width: auto; }
@@ -694,12 +702,6 @@
   .redt { color: var(--red); gap: 6px; align-items: flex-start; }
   .gold { color: var(--gold); }
   .prep { gap: 8px; }
-  .pbar { height: 6px; border-radius: 3px; background: var(--acc-dim); overflow: hidden; }
-  .pbar i { display: block; height: 100%; background: var(--acc); transition: width .3s; }
-  .pbar i.ind { animation: slide 1.2s ease-in-out infinite; }
-  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
-  .spin { width: 11px; height: 11px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 99px; animation: rot .8s linear infinite; flex: none; }
-  @keyframes rot { to { transform: rotate(360deg); } }
   .foot { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex: none; }
   .foot.one { grid-template-columns: 1fr; }
   .foot .btn { justify-content: center; padding: 7px; }

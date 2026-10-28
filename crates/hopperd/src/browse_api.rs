@@ -15,6 +15,7 @@
 
 use crate::App;
 use crate::api::{ApiResult, bad, require};
+use crate::auth::Who;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, Method};
 use axum::routing::{get, post};
@@ -25,7 +26,7 @@ use hopper_core::richtext::{self, Block, Kind, Span};
 use hopper_core::{browse, install, instance_ops, modrinth};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub fn routes() -> Router<Arc<App>> {
@@ -48,13 +49,20 @@ fn class_of(q: &HashMap<String, String>) -> u32 {
     }
 }
 
+/// A server `who` may see (a scoped token or user gets "not found" for the
+/// others, as the `/servers/{id}/…` routes do: `into` isn't in the path, so
+/// the scope guard can't check it).
+pub(crate) fn server_for(app: &App, who: &Who, id: &str) -> ApiResult<Arc<crate::servers::Entry>> {
+    app.servers.get(id).filter(|_| who.sees(id)).ok_or_else(|| crate::api::not_found("server"))
+}
+
 /// The server content goes into (`into`), as an instance; none when not given.
-fn target_of(app: &App, q: &HashMap<String, String>) -> ApiResult<Option<(Arc<crate::servers::Entry>, Instance)>> {
+pub(crate) fn target_of(app: &App, who: &Who, q: &HashMap<String, String>) -> ApiResult<Option<(Arc<crate::servers::Entry>, Instance)>> {
     let id = arg(q, "into");
     if id.is_empty() {
         return Ok(None);
     }
-    let e = app.servers.get(&id).ok_or_else(|| crate::api::not_found("server"))?;
+    let e = server_for(app, who, &id)?;
     let inst = crate::mods_api::instance_of(&e).map_err(|e| bad(format!("{e:#}")))?;
     Ok(Some((e, inst)))
 }
@@ -70,17 +78,17 @@ fn loader_key(l: Loader) -> &'static str {
     }
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
     tokio::task::spawn_blocking(f).await.map_err(bad)?.map_err(|e| bad(format!("{e:#}")))
 }
 
-type Q = Query<HashMap<String, String>>;
+pub(crate) type Q = Query<HashMap<String, String>>;
 
-fn arg(q: &HashMap<String, String>, k: &str) -> String {
+pub(crate) fn arg(q: &HashMap<String, String>, k: &str) -> String {
     q.get(k).map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
-fn has_cf_key() -> bool {
+pub(crate) fn has_cf_key() -> bool {
     cf::api_key().is_some()
 }
 
@@ -126,7 +134,7 @@ fn loaders_of(game_versions: &[String]) -> Vec<&'static str> {
 /// A search hit or project as the Browse cards show it. `id` is the site's
 /// own id (CurseForge's number, Modrinth's string); `num` is Hopper's
 /// number for it, which New server's pack endpoints take.
-fn card_of(m: &cf::Mod, server_files: Option<bool>, class: u32) -> Value {
+pub(crate) fn card_of(m: &cf::Mod, server_files: Option<bool>, class: u32) -> Value {
     let mr = m.modrinth.is_some();
     let mut cats: Vec<String> = m.categories.iter().map(|c| c.name.clone()).collect();
     // Modrinth lists loaders among its categories.
@@ -147,16 +155,72 @@ fn card_of(m: &cf::Mod, server_files: Option<bool>, class: u32) -> Value {
         "loaders": m.loaders(),
         "mc_versions": m.game_versions().into_iter().take(4).collect::<Vec<_>>(),
         "server_files": server_files,
-        // Modrinth's side support: "client" (client-only), "server", "both".
-        "side": m.side,
+        // Where it runs: "client" (client-only), "server", "both" (Modrinth's
+        // side support, else the newest files' Client / Server tags).
+        "side": m.side(),
+        // Browse's type it belongs to ("mods", "modpacks", "datapacks"…).
+        "kind": kind_of(m.class_id.unwrap_or(class)),
+        // CurseForge: the author only allows downloads from its website.
+        "distribution": m.allow_mod_distribution != Some(false),
         "url": if mr && class == cf::CLASS_MODPACKS { format!("https://modrinth.com/modpack/{}", m.slug) } else { m.page() },
     })
+}
+
+/// Browse's type for a CurseForge class.
+pub(crate) fn kind_of(class: u32) -> &'static str {
+    match class {
+        cf::CLASS_MODPACKS => "modpacks",
+        cf::CLASS_DATAPACKS => "datapacks",
+        cf::CLASS_RESOURCE_PACKS => "resourcepacks",
+        cf::CLASS_SHADERS => "shaders",
+        cf::CLASS_WORLDS => "worlds",
+        _ => "mods",
+    }
+}
+
+/// A server's mods, and the projects its last update check found newer
+/// files for, to mark what Browse shows.
+pub(crate) struct Have {
+    pub inst: Instance,
+    pub ups: HashSet<u64>,
+}
+
+impl Have {
+    pub(crate) fn of(app: &App, who: &Who, q: &HashMap<String, String>) -> ApiResult<Option<Have>> {
+        Ok(target_of(app, who, q)?.map(|(e, inst)| {
+            let ups = crate::mods_api::cached_updates(&e.id)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|u| u["project_id"].as_str()?.parse().ok())
+                .collect();
+            Have { inst, ups }
+        }))
+    }
+
+    /// What the server has of `m` (the same project, or the same mod from
+    /// the other site): its file, where it came from, whether it's on, and
+    /// whether a newer file is out (like desktop's Update on a card).
+    pub(crate) fn of_mod(&self, m: &cf::Mod) -> Value {
+        let Some(a) = browse::installed_addon(&self.inst, m) else { return Value::Null };
+        let same = a.project_id == m.id;
+        let newer = same
+            && !a.locked
+            && (self.ups.contains(&m.id)
+                || (m.modrinth.is_none()
+                    && install::newer_file_id(&self.inst, a, m, install::loader_of(&self.inst).api_id())
+                        .is_some_and(|b| b > a.file_id)));
+        let from = if a.project_id == 0 { "" } else if a.mr_project.is_empty() { "curseforge" } else { "modrinth" };
+        json!({
+            "file": a.file_name, "file_id": a.file_id.to_string(), "same_project": same, "from": from,
+            "enabled": a.enabled, "locked": a.locked, "update": newer,
+        })
+    }
 }
 
 // ---- search ---------------------------------------------------------------------------------
 
 async fn search(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Q) -> ApiResult<Json<Value>> {
-    require(&app, &headers, &method)?;
+    let who = require(&app, &headers, &method)?;
     let (use_cf, use_mr) = sites(&q);
     let picked_cf = arg(&q, "source") == "curseforge";
     if picked_cf && !has_cf_key() {
@@ -166,7 +230,7 @@ async fn search(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     let class = class_of(&q);
     // Marking what the server has needs its mod list: mods only (data
     // packs land as loose files with no project recorded).
-    let have = if class == cf::CLASS_MODS { target_of(&app, &q)?.map(|(_, i)| i) } else { None };
+    let have = if class == cf::CLASS_MODS { Have::of(&app, &who, &q)? } else { None };
     let base = cf::Search {
         class_id: class,
         text: arg(&q, "q"),
@@ -244,15 +308,15 @@ fn arg_both(q: &HashMap<String, String>) -> bool {
 
 /// A search hit's card; for a target server, whether it has the project
 /// already (the same project, or the same mod from the other site).
-fn hit(m: &cf::Mod, server_files: Option<bool>, class: u32, have: Option<&Instance>) -> Value {
+fn hit(m: &cf::Mod, server_files: Option<bool>, class: u32, have: Option<&Have>) -> Value {
     let mut c = card_of(m, server_files, class);
-    if let Some(inst) = have {
-        c["installed"] = json!(browse::installed_addon(inst, m).is_some());
+    if let Some(h) = have {
+        c["installed"] = h.of_mod(m);
     }
     c
 }
 
-fn cf_search(s: &cf::Search, have: Option<&Instance>) -> anyhow::Result<(Vec<Value>, cf::Pagination)> {
+fn cf_search(s: &cf::Search, have: Option<&Have>) -> anyhow::Result<(Vec<Value>, cf::Pagination)> {
     let (mods, p) = cf::search(s)?;
     let packs = s.class_id == cf::CLASS_MODPACKS;
     let cards = mods
@@ -262,7 +326,7 @@ fn cf_search(s: &cf::Search, have: Option<&Instance>) -> anyhow::Result<(Vec<Val
     Ok((cards, p))
 }
 
-fn mr_search(s: &cf::Search, have: Option<&Instance>) -> anyhow::Result<(Vec<Value>, cf::Pagination)> {
+fn mr_search(s: &cf::Search, have: Option<&Have>) -> anyhow::Result<(Vec<Value>, cf::Pagination)> {
     let (mods, p) = modrinth::search(s)?;
     if s.class_id != cf::CLASS_MODPACKS {
         return Ok((mods.iter().map(|m| hit(m, None, s.class_id, have)).collect(), p));
@@ -321,14 +385,15 @@ async fn categories(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
 // ---- a pack's page --------------------------------------------------------------------------
 
 async fn pack(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Q) -> ApiResult<Json<Value>> {
-    require(&app, &headers, &method)?;
+    let who = require(&app, &headers, &method)?;
     let mr = is_mr_source(&q)?;
     let id = arg(&q, "id");
     if id.is_empty() {
         return Err(bad("Which pack?"));
     }
     let class = class_of(&q);
-    let have = target_of(&app, &q)?.map(|(_, i)| i);
+    // What the server has: mods only (data packs land as loose files).
+    let have = if class == cf::CLASS_MODS { Have::of(&app, &who, &q)? } else { None };
     let v = blocking(move || {
         let (m, body) = if mr {
             let p = modrinth::project(&id)?;
@@ -354,12 +419,13 @@ async fn pack(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Q
         });
         let mut c = card_of(&m, server_files, class);
         // What the target server has of it, for the Versions list.
-        if let Some(inst) = &have {
-            c["installed"] = match browse::installed_addon(inst, &m) {
-                Some(a) => json!({ "file": a.file_name, "file_id": a.file_id.to_string(), "same_project": a.project_id == m.id }),
-                None => Value::Null,
-            };
+        if let Some(h) = &have {
+            c["installed"] = h.of_mod(&m);
+            // Where it runs, for this server's Minecraft and loader.
+            let loader = install::loader_of(&h.inst);
+            c["side"] = json!(m.side_for(&h.inst.game_version, (loader != Loader::Any).then(|| loader.name())));
         }
+        c["all_versions"] = json!(m.game_versions());
         let links: Vec<Value> = m.links.extra().into_iter().map(|(l, u)| json!({ "label": l, "url": u })).collect();
         c["links"] = json!(links);
         c["license"] = json!(m.license_type);
@@ -462,9 +528,8 @@ fn datapack_dirs(inst: &Instance) -> Vec<(String, String)> {
 /// A server as an "Install into" target: its Minecraft and loader (which
 /// set Browse's filters), whether it runs, and where data packs can go.
 async fn target(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Q) -> ApiResult<Json<Value>> {
-    require(&app, &headers, &method)?;
-    let id = arg(&q, "into");
-    let e = app.servers.get(&id).ok_or_else(|| crate::api::not_found("server"))?;
+    let who = require(&app, &headers, &method)?;
+    let e = server_for(&app, &who, &arg(&q, "into"))?;
     let running = e.server.state().is_alive();
     let v = blocking(move || {
         let inst = crate::mods_api::instance_of(&e)?;
@@ -474,6 +539,9 @@ async fn target(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
             "id": e.id, "name": e.name, "game_version": inst.game_version,
             "loader": loader_key(loader), "loader_name": if loader == Loader::Any { "" } else { loader.name() },
             "running": running, "datapack_dirs": dirs,
+            // The site its modpack is from: mods from the other one don't
+            // come from where the pack's do (desktop warns).
+            "pack_source": inst.pack.as_ref().map(|p| if modrinth::is_mr(p.project_id) { "modrinth" } else { "curseforge" }),
         }))
     })
     .await?;
@@ -518,7 +586,7 @@ struct InstallBody {
 /// a job. Its result says what was added and whether the server runs (so
 /// needs a restart to load it).
 async fn install_into(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<InstallBody>) -> ApiResult<Json<Value>> {
-    require(&app, &headers, &method)?;
+    let who = require(&app, &headers, &method)?;
     let class = match b.kind.as_str() {
         "mods" => cf::CLASS_MODS,
         "datapacks" => cf::CLASS_DATAPACKS,
@@ -526,7 +594,7 @@ async fn install_into(State(app): State<Arc<App>>, headers: HeaderMap, method: M
     };
     let project = b.project.num().ok_or_else(|| bad("Which project?"))?;
     let file = b.file.as_ref().and_then(Id::num);
-    let e = app.servers.get(&b.into).ok_or_else(|| crate::api::not_found("server"))?;
+    let e = server_for(&app, &who, &b.into)?;
     if class == cf::CLASS_MODS {
         crate::mods_api::forget_updates(&e.id);
     }

@@ -7,6 +7,7 @@
   import { api, post } from './lib/api.js';
   import { followJob } from './lib/jobs.js';
   import { say } from './lib/toast.svelte.js';
+  import { dialog } from './lib/dialog.svelte.js';
 
   let { server, onClose, onChanged = () => {} } = $props();
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -51,17 +52,19 @@
   }
 </script>
 
-<div class="back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
-  <div class="box card col">
+<svelte:window onkeydown={(e) => e.key === 'Escape' && !e.defaultPrevented && !busy && !dialog.open && (e.preventDefault(), onClose())} />
+
+<div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
+  <div class="box popover col">
     <h3 class="row">Loader versions and changelog<span class="sp"></span><button class="btn sm ghost icon" title="Close" disabled={!!busy} onclick={onClose}><X size={14} /></button></h3>
     {#if err}<div class="err">{err}</div>
-    {:else if !info}<div class="small muted row"><span class="spin"></span>Reading the changelog</div>
+    {:else if !info}<div class="small muted row"><span class="spinner"></span>Reading the changelog</div>
     {:else}
       <div class="tiny muted">Installed: {name} {info.installed || '(shows after the first start)'} · Minecraft {info.minecraft}</div>
       <div class="small subtle">{behind === 0 ? 'Up to date' : behind === 1 ? '1 build newer than yours' : `${behind} builds newer than yours, newest first`}</div>
       {#if info.error}<div class="tiny muted">The changelog couldn't be read: {info.error}</div>{/if}
       {#if alive}<div class="small gold">Stop the server to change its loader.</div>{/if}
-      {#if busy}<div class="small gold row"><span class="spin"></span>{busy}…</div>{/if}
+      {#if busy}<div class="small gold row"><span class="spinner"></span>{busy}…</div>{/if}
       <div class="scroll col">
         {#each log as c, i (c.version)}
           {@const installed = c.version === info.installed}
@@ -83,9 +86,8 @@
 </div>
 
 <style>
-  .back { position: fixed; inset: 0; background: #0008; display: flex; justify-content: center; align-items: flex-start; padding: 56px 16px 16px; z-index: 60; }
-  .box { width: min(680px, 100%); max-height: calc(100vh - 80px); gap: 10px; box-shadow: 0 24px 60px #000c; }
-  .box h3 { margin: 0; font-size: 15px; }
+  .box { width: min(680px, 100%); max-height: calc(100dvh - var(--dialog-top) - 24px); gap: 10px; padding: 14px; }
+  .box h3 { margin: 0; font-size: 15px; font-weight: 600; }
   .scroll { overflow: auto; min-height: 0; flex: 1; gap: 8px; padding-right: 4px; }
   .card2 { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
   .card2.top { border-color: var(--acc); }
@@ -93,7 +95,5 @@
   .txt { white-space: pre-wrap; color: var(--subtle); overflow-wrap: anywhere; }
   .chip.xs { font-size: 10.5px; padding: 0 6px; gap: 3px; }
   .gold { color: var(--gold); }
-  .spin { width: 11px; height: 11px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 99px; animation: rot .8s linear infinite; flex: none; }
-  @keyframes rot { to { transform: rotate(360deg); } }
   .icon { padding: 3px 5px; }
 </style>

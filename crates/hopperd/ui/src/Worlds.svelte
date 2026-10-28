@@ -3,14 +3,15 @@
   // per world (size, last played, seed), the one in level-name marked
   // Active. New world, Make active, Reset (backup first), delete, upload,
   // download, and pre-generation with Chunky on the active world.
-  import { Globe, FolderOpen, Download, Archive, RotateCcw, Trash2, Plus, Upload, ChevronRight, ChevronDown, Pause, Play, X, AlertTriangle } from '@lucide/svelte';
+  import { Globe, FolderOpen, Download, Archive, RotateCcw, Trash2, Plus, Upload, ChevronRight, ChevronDown, Pause, Play, X, AlertTriangle, Package } from '@lucide/svelte';
+  import { relative, fullDate, plural } from './lib/worlds.js';
   import { api, post, del } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
-  import { download, queueUploads, onUploaded } from './lib/transfers.svelte.js';
-  import { onDestroy } from 'svelte';
+  import { download, queueUploads, transfers } from './lib/transfers.svelte.js';
+  import { onDestroy, untrack } from 'svelte';
 
   let { server, openFiles, openBackups } = $props();
   const sid = $derived(server.id);
@@ -20,6 +21,8 @@
   let data = $state(null);
   let busy = $state('');
   let pgOpen = $state(true);
+  // Worlds whose Data packs are shown open (closed at first, as desktop).
+  let packsOpen = $state(new Set());
   let dlg = $state(null); // { kind: 'new' | 'reset' | 'pregen', ... }
   let error = $state('');
   let fileInput = $state();
@@ -45,15 +48,17 @@
   }, 2000);
   onDestroy(() => clearInterval(timer));
 
-  function ago(secs) {
-    if (!secs) return 'Never played';
-    const d = Date.now() / 1000 - secs;
-    if (d < 120) return 'Played just now';
-    if (d < 3600) return `Last played ${Math.round(d / 60)} minutes ago`;
-    if (d < 86400 * 2) return `Last played ${Math.round(d / 3600)} hours ago`;
-    if (d < 86400 * 60) return `Last played ${Math.round(d / 86400)} days ago`;
-    return `Last played ${new Date(secs * 1000).toLocaleDateString()}`;
+  // Desktop's caption: "Last played Today", "Last played 3 days ago".
+  const ago = (secs) => (secs ? `Last played ${relative(secs)}` : 'Never played');
+  const iconUrl = (w) => `/api/v1/fs/${enc(sid)}/file?path=${enc(`${w.name}/icon.png`)}&inline=1`;
+
+  function togglePacks(w) {
+    const s = new Set(packsOpen);
+    s.has(w.name) ? s.delete(w.name) : s.add(w.name);
+    packsOpen = s;
   }
+  // As desktop's Remove: no question, it can be got back (Files › Trash).
+  const removePack = (w, p) => run(`Moving ${p.name} to the trash`, () => del(`${base}/worlds/${enc(w.name)}/datapacks/${enc(p.name)}`), `${p.name} moved to the trash (Files › Trash).`);
 
   async function run(label, start, done) {
     busy = label;
@@ -122,29 +127,78 @@
   const chunkyName = $derived(data?.chunky?.kind ? (data.chunky.kind.kind === 'plugin' ? 'the Paper plugin' : `the ${data.chunky.kind.loader[0].toUpperCase()}${data.chunky.kind.loader.slice(1)} mod`) : '');
 
   // ---- upload ----
-  let pendingUpload = null;
+  // The zip goes up through the transfer queue (it shows the progress);
+  // once that upload is done it's unpacked into a new world.
+  let pendingUpload = $state(null);
+  /** A world folder name from the zip's, not one that's taken. */
+  function uploadName(file) {
+    const stem = file.replace(/\.zip$/i, '').replace(/[^A-Za-z0-9 _-]/g, '_').replace(/^[ .]+|[ .]+$/g, '').slice(0, 56) || 'uploaded';
+    const taken = new Set((data?.worlds || []).map((w) => w.name.toLowerCase()));
+    let name = stem;
+    for (let n = 2; taken.has(name.toLowerCase()); n++) name = `${stem}-${n}`;
+    return name;
+  }
   function pickZip(e) {
     const f = e.target.files?.[0];
     e.target.value = '';
     if (!f) return;
-    const name = f.name.replace(/\.zip$/i, '').replace(/[^A-Za-z0-9 _-]/g, '_').slice(0, 60) || 'uploaded';
-    pendingUpload = { file: `world-upload-${Date.now()}.zip`, name };
-    queueUploads(server, [{ file: f, path: pendingUpload.file }]);
+    if (pendingUpload) return say('A world is already uploading; wait for it to finish.', true);
+    pendingUpload = { file: `world-upload-${Date.now()}.zip`, name: uploadName(f.name), server: sid };
+    queueUploads(sid, [{ file: f, path: pendingUpload.file }]);
   }
-  const off = onUploaded((srv) => {
-    if (!pendingUpload || srv?.id !== sid) return;
+  $effect(() => {
     const u = pendingUpload;
-    pendingUpload = null;
-    run(`Unpacking ${u.name}`, () => post(`${base}/worlds/import`, { zip: u.file, name: u.name }), `${u.name} added. Make it active to play it.`);
+    if (!u) return;
+    const t = transfers.list.find((x) => x.server === u.server && x.path === u.file);
+    if (t?.state === 'done') {
+      pendingUpload = null;
+      untrack(() => run(`Unpacking ${u.name}`, () => post(`/servers/${enc(u.server)}/worlds/import`, { zip: u.file, name: u.name }), `${u.name} added. Make it active to play it.`));
+    } else if (!t || t.state === 'failed' || t.state === 'cancelled') {
+      pendingUpload = null;
+      if (t?.state === 'failed') say(`Uploading the world failed: ${t.error}`, true);
+    }
   });
-  onDestroy(off);
+
+  // ---- dialog keys: Escape closes (unless something runs), Tab stays inside ----
+  let box = $state();
+  const dlgOpen = $derived(!!dlg);
+  $effect(() => {
+    if (!dlgOpen) return;
+    const before = untrack(() => (document.activeElement instanceof HTMLElement ? document.activeElement : null));
+    queueMicrotask(() => box?.querySelector('input:not(:disabled), button.pri, button.danger')?.focus());
+    return () => before?.isConnected && before.focus();
+  });
+  function dlgKeys(e) {
+    if (!dlg) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!busy) dlg = null;
+    } else if (e.key === 'Tab' && box) {
+      const els = [...box.querySelectorAll('button:not(:disabled), input:not(:disabled)')];
+      if (!els.length) return;
+      const [first, last] = [els[0], els[els.length - 1]];
+      if (!box.contains(document.activeElement)) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  }
 </script>
 
+<svelte:window onkeydowncapture={dlgKeys} />
+
 <div class="top row">
-  <span class="small muted">{data ? `${data.worlds.length} ${data.worlds.length === 1 ? 'world' : 'worlds'} · ${bytes(data.total_size)}` : 'Loading…'}</span>
-  {#if busy}<span class="busy small"><span class="spin"></span>{busy}</span>{/if}
+  <span class="small muted">{data ? `${plural(data.worlds.length, 'world')} · ${bytes(data.total_size)}` : ''}</span>
+  {#if busy}<span class="busy small"><span class="spinner"></span>{busy}</span>{/if}
   <span class="sp"></span>
-  <button class="btn sm" disabled={!!busy} onclick={() => fileInput.click()} title="Upload a world as a zip"><Upload size={13} />Upload</button>
+  <button class="btn sm" disabled={!!busy || !!pendingUpload} onclick={() => fileInput.click()} title="Upload a world as a zip"><Upload size={13} />{pendingUpload ? 'Uploading…' : 'Upload world'}</button>
   <input type="file" accept=".zip" bind:this={fileInput} onchange={pickZip} hidden />
   <button class="btn sm" onclick={openBackups}><Archive size={13} />Backups</button>
   <button class="btn sm pri" disabled={!!busy} onclick={openNew}><Plus size={13} />New world</button>
@@ -154,15 +208,15 @@
   {#each data.worlds as w (w.name)}
     <div class="card world" class:act={w.active}>
       <div class="row">
-        <div class="wq" class:act={w.active}><Globe size={20} /></div>
+        {#if w.icon}<img class="wq" src={iconUrl(w)} alt="" />{:else}<div class="wq" class:act={w.active}><Globe size={20} /></div>{/if}
         <div class="t">
           <div class="nm">{w.name}{#if w.active}<span class="chip acc">Active</span>{/if}</div>
           <div class="small muted">
-            {w.created ? ago(w.last_played) : 'Made on the next start'}{w.created ? ` · ${bytes(w.size)}` : ''}{#if w.seed} · seed <span class="mono">{w.seed}</span>{:else if !w.created} · random seed{/if}
+            <span title={w.last_played ? fullDate(w.last_played) : ''}>{w.created ? ago(w.last_played) : 'Made on the next start'}</span>{w.created ? ` · ${bytes(w.size)}` : ''}{#if w.seed} · seed <span class="mono">{w.seed}</span>{:else if !w.created} · random seed{/if}
           </div>
         </div>
         {#if w.created}
-          <button class="btn sm icon ghost" title="Open in Files" onclick={() => openFiles(w.name)}><FolderOpen size={14} /></button>
+          <button class="btn sm icon ghost" title="Open world folder" onclick={() => openFiles(w.name)}><FolderOpen size={14} /></button>
           <button class="btn sm icon ghost" title="Download as zip" onclick={() => zip(w)}><Download size={14} /></button>
           <button class="btn sm" disabled={!!busy} onclick={() => backup(w)}><Archive size={13} />Back up</button>
         {/if}
@@ -174,10 +228,30 @@
         {/if}
       </div>
 
+      <button class="exp small" onclick={() => togglePacks(w)}>
+        {#if packsOpen.has(w.name)}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}Data packs ({(w.datapacks || []).length})
+      </button>
+      {#if packsOpen.has(w.name)}
+        <div class="packs">
+          {#each w.datapacks || [] as p (p.name)}
+            <div class="dp row-hover">
+              <Package size={14} class="muted" />
+              <span class="dpn">{p.name}</span>
+              {#if !p.dir}<span class="tiny muted">{bytes(p.size)}</span>{/if}
+              <button class="btn sm icon ghost" title="Move to the trash (Files › Trash)" disabled={!!busy} onclick={() => removePack(w, p)}><Trash2 size={13} /></button>
+            </div>
+          {/each}
+          <div class="row">
+            <a class="btn sm" href="#/browse/datapacks/{enc(sid)}"><Plus size={13} />Add data packs</a>
+            <button class="btn sm ghost" onclick={() => openFiles(`${w.name}/datapacks`)}><FolderOpen size={13} />Open folder</button>
+          </div>
+        </div>
+      {/if}
+
       {#if w.active}
         <button class="exp small" onclick={() => (pgOpen = !pgOpen)}>
           {#if pgOpen}<ChevronDown size={14} />{:else}<ChevronRight size={14} />{/if}Pre-generate
-          {#if !pgOpen && pgRunning}<span class="chip acc">{pg.percent.toFixed(1)}%</span>
+          {#if !pgOpen && pgRunning}<span class="pill acc"><span class="glow"></span>{pg.percent.toFixed(1)}%</span>
           {:else if !pgOpen && data.last_pregen?.world === w.name}<span class="chip">Pre-generated {data.last_pregen.radius.toLocaleString()} blocks</span>{/if}
         </button>
         {#if pgOpen}
@@ -215,13 +289,20 @@
       {/if}
     </div>
   {:else}
-    <div class="card empty"><Globe size={22} /><b>No worlds yet</b><span class="small muted">Start the server once to make one, add a new world, or upload one.</span></div>
+    <div class="empty-state">
+      <span class="es-ic"><Globe size={20} /></span>
+      <b>No worlds yet</b>
+      <p>Start the server once to create one, or upload a world to start from.</p>
+      <button class="btn sm" disabled={!!busy || !!pendingUpload} onclick={() => fileInput.click()}><Upload size={13} />Upload world</button>
+    </div>
   {/each}
+{:else}
+  {#each [0, 1, 2] as i (i)}<div class="skel"><i></i></div>{/each}
 {/if}
 
 {#if dlg}
-  <div class="back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && (dlg = null)}>
-    <div class="box card">
+  <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && (dlg = null)}>
+    <div class="box popover" role="dialog" aria-modal="true" aria-label={dlg.kind === 'new' ? 'New world' : dlg.kind === 'reset' ? `Reset ${dlg.w.name}` : 'Pre-generate'} bind:this={box}>
       {#if dlg.kind === 'new'}
         <h3><Plus size={15} />New world<span class="sp"></span><button class="btn sm icon ghost" disabled={!!busy} onclick={() => (dlg = null)}><X size={14} /></button></h3>
         <label class="lbl" for="w-name">Name (its folder)</label>
@@ -243,7 +324,7 @@
         <label class="cb small"><input type="checkbox" bind:checked={dlg.keep} />Keep the Nether and the End</label>
         <div class="note small">A backup of the world is made first ({bytes(dlg.w.size)}, Backups tab). The old folder goes to the server's trash for 30 days.</div>
         {#if error}<div class="err">{error}</div>{/if}
-        <div class="row end"><span class="sp"></span><button class="btn" disabled={!!busy} onclick={() => (dlg = null)}>Cancel</button><button class="btn badf" disabled={!!busy || (dlg.mode === 'custom' && !dlg.seed.trim())} onclick={submitReset}><RotateCcw size={13} />Back up and reset</button></div>
+        <div class="row end"><span class="sp"></span><button class="btn" disabled={!!busy} onclick={() => (dlg = null)}>Cancel</button><button class="btn danger" disabled={!!busy || (dlg.mode === 'custom' && !dlg.seed.trim())} onclick={submitReset}><RotateCcw size={13} />Back up and reset</button></div>
       {:else}
         <h3><Globe size={15} />Pre-generate {data.level}<span class="sp"></span><button class="btn sm icon ghost" disabled={!!busy} onclick={() => (dlg = null)}><X size={14} /></button></h3>
         <div class="small muted">Generates the overworld around a point now, so players don't wait for chunks later.</div>
@@ -269,7 +350,7 @@
         <div class="row end"><span class="sp"></span><button class="btn" disabled={!!busy} onclick={() => (dlg = null)}>Cancel</button>
           <button class="btn pri" disabled={!!busy || !(Number(dlg.radius) >= 16) || (!data.chunky.jar && data.running && data.players > 0)} onclick={submitPregen}>{!data.chunky.jar ? (data.running ? 'Install, restart and start' : 'Install, start and run') : data.running ? 'Start' : 'Start server and run'}</button></div>
       {/if}
-      {#if busy}<div class="busy small"><span class="spin"></span>{busy}</div>{/if}
+      {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
     </div>
   </div>
 {/if}
@@ -279,7 +360,7 @@
   .world { padding: 12px 14px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
   .world.act { border-color: #f9731655; }
   .world > .row { gap: 8px; }
-  .wq { width: 42px; height: 42px; border-radius: 6px; flex: none; display: grid; place-items: center; background: var(--surface); color: var(--subtle); }
+  .wq { width: 48px; height: 48px; border-radius: 6px; flex: none; display: grid; place-items: center; background: var(--raise); color: var(--subtle); object-fit: cover; image-rendering: pixelated; }
   .wq.act { background: var(--green-dim); color: var(--green); }
   .t { flex: 1; min-width: 0; max-width: 40rem; margin-left: 4px; }
   .t + * { margin-left: auto; }
@@ -288,19 +369,19 @@
   .exp:hover { color: var(--text); }
   .pg { margin-left: 50px; background: var(--base); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; display: flex; flex-direction: column; gap: 6px; }
   .pg .row { gap: 8px; }
-  .bar { flex: 1; height: 7px; border-radius: 99px; background: var(--surface); overflow: hidden; }
-  .bar i { display: block; height: 100%; background: var(--acc); transition: width 0.5s; }
+  .pg .bar { flex: 1; height: 7px; background: var(--surface); }
   .grow { flex: 1; min-width: 0; }
   .warnc { color: var(--gold); }
-  .empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 34px; color: var(--subtle); }
-  .bad { color: var(--red); border-color: #ef444466; }
-  .badf { background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; }
+  /* As desktop's widgets::empty_state and skeleton_rows. */
+  /* The shared loading row, at a world card's height and icon size. */
+  .skel { height: 74px; padding: 0 14px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: var(--radius-lg); }
+  .skel::before { width: 48px; height: 48px; }
+  .packs { margin-left: 50px; display: flex; flex-direction: column; gap: 4px; }
+  .dp { display: flex; align-items: center; gap: 10px; padding: 3px 8px; border-radius: 6px; font-size: 12.5px; }
+  .dpn { flex: 1; min-width: 0; max-width: 38.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
-  .spin { width: 12px; height: 12px; border: 2px solid var(--gold); border-right-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; }
-  @keyframes s { to { transform: rotate(360deg); } }
-  .back { position: fixed; inset: 0; background: #0008; display: flex; justify-content: center; align-items: flex-start; z-index: 55; padding: 56px 16px 16px; overflow: auto; }
-  .box { width: min(500px, 100%); display: flex; flex-direction: column; gap: 8px; box-shadow: 0 24px 60px #000c; }
-  .box h3 { margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+  .box { width: min(500px, 100%); display: flex; flex-direction: column; gap: 8px; padding: 18px; }
+  .box h3 { margin: 0 0 4px; display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }
   .seg { display: flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; }
   .seg button { padding: 5px 11px; font-size: 12.5px; color: var(--subtle); }
   .seg button + button { border-left: 1px solid var(--line2); }
@@ -316,5 +397,4 @@
   .note { border: 1px solid var(--line); background: var(--base); border-radius: 8px; padding: 8px 10px; color: var(--subtle); }
   .warnbox { display: flex; gap: 8px; align-items: flex-start; border: 1px solid #eab30840; background: var(--gold-dim); border-radius: 8px; padding: 8px 10px; color: #e6d27a; }
   .end { margin-top: 6px; gap: 8px; }
-  .tiny { font-size: 11.5px; }
 </style>

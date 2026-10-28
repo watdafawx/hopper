@@ -12,11 +12,12 @@
   let over = $state(null);
 
   async function loadKids(p) {
+    const b = base;
     try {
-      const r = await api(`${base}/list?path=${encodeURIComponent(p)}`);
-      kids[p] = r.entries.filter((e) => e.dir).map((e) => e.name);
+      const r = await api(`${b}/list?path=${encodeURIComponent(p)}`);
+      if (b === base) kids[p] = r.entries.filter((e) => e.dir).map((e) => e.name);
     } catch {
-      kids[p] = [];
+      if (b === base) kids[p] = [];
     }
   }
 
@@ -33,10 +34,18 @@
   // Open the way down to the current folder; reload what's open when the
   // list says something changed.
   let seenVersion = -1;
+  let seenBase = null;
   $effect(() => {
     const v = version;
     const cur = current;
+    const b = base;
     untrack(() => {
+      // Another server: nothing loaded so far is its.
+      if (b !== seenBase) {
+        seenBase = b;
+        kids = {};
+        open = new Set(['']);
+      }
       const fresh = v !== seenVersion;
       seenVersion = v;
       const parts = cur ? cur.split('/') : [];
@@ -56,15 +65,18 @@
   const join = (p, n) => (p ? `${p}/${n}` : n);
   function dragOver(ev, p) {
     ev.preventDefault();
-    ev.dataTransfer.dropEffect = ev.ctrlKey ? 'copy' : 'move';
+    // The folder takes it, not the list's "drop to upload here".
+    ev.stopPropagation();
+    const ours = ev.dataTransfer.types.includes('application/x-hopperd-files');
+    ev.dataTransfer.dropEffect = ours && !ev.ctrlKey ? 'move' : 'copy';
     over = p;
   }
 </script>
 
 {#snippet node(p, name, depth)}
   <div
-    class="n"
-    class:on={current === p}
+    class="n row-hover"
+    class:row-sel={current === p}
     class:over={over === p}
     style:padding-left="{6 + depth * 14}px"
     role="treeitem"
@@ -87,13 +99,11 @@
 <style>
   .tree { overflow: auto; padding: 6px 4px; font-size: 12.5px; }
   .n { display: flex; align-items: center; gap: 2px; border-radius: 5px; white-space: nowrap; }
-  .n:hover { background: #ffffff06; }
-  .n.on { background: var(--raise); box-shadow: inset 3px 0 0 var(--acc); }
-  .n.over { background: var(--acc-dim); outline: 1px dashed var(--acc); }
+  .n.over { background: var(--sel); outline: 1px dashed var(--acc); outline-offset: -1px; }
   .tw { width: 16px; height: 22px; display: grid; place-items: center; color: var(--muted); flex: none; }
   .sp0 { width: 12px; }
   .lab { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; padding: 3px 4px; text-align: left; color: var(--subtle); }
-  .n.on .lab { color: var(--text); }
+  .n.row-sel .lab { color: var(--text); font-weight: 500; }
   .lab :global(.fo) { color: var(--acc); flex: none; }
   .ell { overflow: hidden; text-overflow: ellipsis; }
 </style>

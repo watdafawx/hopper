@@ -95,7 +95,12 @@ async fn zip_entry(
     let inline = q.contains_key("inline");
     let mut z = open(&app, &headers, &method, &id, &rel)?;
     let (name, bytes) = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, Vec<u8>)> {
-        let mut f = z.by_name(&entry)?;
+        // Names are listed with forward slashes; a zip made on Windows may
+        // store backslashes.
+        let ix = z.index_for_name(&entry).or_else(|| {
+            (0..z.len()).find(|&i| z.name_for_index(i).is_some_and(|n| n.replace('\\', "/") == entry))
+        });
+        let mut f = z.by_index(ix.ok_or_else(|| anyhow::anyhow!("{entry} isn't in the zip."))?)?;
         anyhow::ensure!(f.is_file(), "That's a folder in the zip.");
         anyhow::ensure!(f.size() <= 512 * 1024 * 1024, "That entry is too big to download from inside the zip.");
         let mut out = Vec::with_capacity(f.size() as usize);
@@ -115,17 +120,18 @@ async fn zip_entry(
         "image/jpeg"
     } else if lower.ends_with(".gif") {
         "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
     } else {
         "text/plain; charset=utf-8"
     };
-    let safe: String = name.chars().filter(|c| !c.is_control() && *c != '"').collect();
-    let disposition = if inline { format!("inline; filename=\"{safe}\"") } else { format!("attachment; filename=\"{safe}\"") };
     Ok((
         [
-            (header::CONTENT_TYPE, kind.to_string()),
-            (header::CONTENT_DISPOSITION, disposition),
-            (header::CONTENT_SECURITY_POLICY, "sandbox; default-src 'none'; img-src 'self'".to_string()),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::CONTENT_TYPE, header::HeaderValue::from_static(kind)),
+            // Any name (accents, CJK) as a valid header, like file downloads.
+            (header::CONTENT_DISPOSITION, crate::fs_api::disposition(&name, inline)),
+            (header::CONTENT_SECURITY_POLICY, header::HeaderValue::from_static("sandbox; default-src 'none'; img-src 'self'")),
+            (header::X_CONTENT_TYPE_OPTIONS, header::HeaderValue::from_static("nosniff")),
         ],
         Body::from(bytes),
     )

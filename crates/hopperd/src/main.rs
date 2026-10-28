@@ -19,6 +19,7 @@
 mod alerts;
 mod api;
 mod auth;
+mod autoupdate;
 mod backups_api;
 mod browse_api;
 mod config;
@@ -42,6 +43,12 @@ mod security;
 mod net;
 mod offsite;
 mod pack_api;
+mod parity_browse;
+mod parity_console;
+mod parity_files;
+mod parity_mods;
+mod parity_overview;
+mod parity_worlds;
 mod router;
 mod servers;
 mod server_ops;
@@ -201,6 +208,7 @@ fn main() -> anyhow::Result<()> {
         let _ = std::fs::create_dir_all(&dir);
         let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("hopperd.log"))?;
         log.target(env_logger::Target::Pipe(Box::new(file))).init();
+        autoupdate::AS_SERVICE.store(true, std::sync::atomic::Ordering::SeqCst);
         #[cfg(windows)]
         return service::run_as_service();
         #[cfg(not(windows))]
@@ -300,6 +308,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         sftp_fingerprint: sftp::fingerprint(&data_dir),
     });
     app.rescan();
+    autoupdate::start(app.clone());
     // Read every server's mod jars once in the background; the Mods tab
     // then opens from the scan cache instead of opening hundreds of jars.
     {

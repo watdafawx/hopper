@@ -98,6 +98,12 @@ pub fn start() -> anyhow::Result<()> {
 pub fn tray_only() -> anyhow::Result<()> {
     hide_console();
     init_log();
+    // Started by the tray of the copy just updated: it closes first.
+    if let Some(pid) = std::env::var("HOPPERD_WAIT_PID").ok().and_then(|p| p.parse::<u32>().ok()) {
+        if !wait_exit(pid, Duration::from_secs(30)) {
+            log::warn!("the previous tray (pid {pid}) didn't close");
+        }
+    }
     if let Some(s) = service::installed() {
         return run_service_tray(s.data.unwrap_or_else(boot_dir));
     }
@@ -613,6 +619,23 @@ fn start_service_tray() {
     }
 }
 
+/// Starts the tray of the updated `exe` (it waits for this one to close),
+/// so the icon comes back on the new version.
+fn reopen_tray(exe: &Path) {
+    let r = Command::new(exe)
+        .arg("--tray")
+        .env("HOPPERD_WAIT_PID", std::process::id().to_string())
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match r {
+        Ok(_) => log::info!("reopening the tray from {}", exe.display()),
+        Err(e) => log::warn!("reopening the tray from {}: {e}", exe.display()),
+    }
+}
+
 /// `exe --tray`, detached. Stdio must be null: after `hide_console` our
 /// inherited console handles are dead, and Windows refuses to start a
 /// child with them ("The request is not supported", os error 50).
@@ -689,12 +712,27 @@ fn watch_service(boot: PathBuf, expected_stop: Arc<AtomicBool>) {
             (tray::Service::Starting, _) => "Service starting…".into(),
             _ => "Service stopped".into(),
         };
+        // The service was updated (by itself or by "Update"): this tray
+        // reopens on the new exe, so its icon keeps showing.
+        if let Some(v) = h.as_ref().and_then(|h| h["version"].as_str())
+            && newer(v, env!("CARGO_PKG_VERSION"))
+        {
+            log::info!("the service is on v{v}; reopening its tray");
+            reopen_tray(&inst.exe);
+            tray::close();
+            return;
+        }
         // The first address is the LAN one (lan_addresses ranks it first).
         ms.lan = h.as_ref().and_then(|h| h["addresses"].as_array()?.first()?.as_str().map(String::from));
         ms.startup = startup_on();
         ms.service = Some(state);
+        // Restarting into an update: the service manager starts it again.
+        let updating = std::fs::metadata(boot.join(crate::autoupdate::MARKER))
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().unwrap_or_default() < Duration::from_secs(180));
         if state == tray::Service::Stopped
             && last.is_some_and(|l| l != tray::Service::Stopped)
+            && !updating
             && !expected_stop.swap(false, Ordering::SeqCst)
         {
             tray::notify(&format!("{} stopped", service::display()), "The service isn't running. Click the icon to start it.", true);
@@ -760,6 +798,8 @@ fn handle_service(boot: &Path, expected_stop: &AtomicBool, cmd: Cmd) -> bool {
 
 struct Supervisor {
     token: String,
+    /// The exe this tray started from (an update puts the new one there).
+    exe: PathBuf,
     mode: Mutex<String>,
     child: Mutex<Option<Child>>,
     /// Keep the panel running (false while quitting or installing).
@@ -775,7 +815,7 @@ impl Supervisor {
     }
 
     fn spawn(&self) -> anyhow::Result<Child> {
-        let exe = std::env::current_exe()?;
+        let exe = self.exe.clone();
         let log = boot_dir().join("hopperd.log");
         let out = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
         let err = out.try_clone()?;
@@ -879,6 +919,13 @@ fn supervise(sup: Arc<Supervisor>) {
                 log::info!("panel restarting");
                 quick_fails = 0;
                 continue;
+            }
+            Some(control::EXIT_UPDATED) => {
+                log::info!("panel updated; reopening the tray on the new version");
+                sup.keep.store(false, Ordering::SeqCst);
+                reopen_tray(&sup.exe);
+                tray::close();
+                return;
             }
             Some(0) => {}
             other => log::warn!("panel stopped ({other:?})"),
@@ -1049,6 +1096,7 @@ fn run_tray(mode: String, open: bool) -> anyhow::Result<()> {
     }
     let sup = Arc::new(Supervisor {
         token: crate::auth::random_hex(24),
+        exe: std::env::current_exe()?,
         mode: Mutex::new(mode),
         child: Mutex::new(None),
         keep: AtomicBool::new(true),

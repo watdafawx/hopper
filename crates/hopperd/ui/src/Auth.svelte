@@ -11,6 +11,11 @@
   let otp = $state('');
   let name = $state('');
   let needCode = $state(false);
+  let otpEl = $state();
+  // The authenticator code is what's asked next: put the cursor there.
+  $effect(() => {
+    if (needCode && otpEl) otpEl.focus();
+  });
 
   const setup = $derived(hello.setup_needed);
   // Opened by Hopper Server on this PC (tray, first-run dialog): the setup
@@ -58,7 +63,7 @@
       </div>
     </div>
     {#if noCode}
-      <span class="pill"><CircleCheck size={13} /> {linked ? 'Opened from Hopper Server on this PC' : 'On this PC, no setup code needed'}</span>
+      <span class="pill running ok"><CircleCheck size={13} />{linked ? 'Opened from Hopper Server on this PC' : 'On this PC, no setup code needed'}</span>
       <p class="small subtle">Pick the owner password. You'll use it to sign in from any device.</p>
     {:else if setup}
       <p class="small subtle">
@@ -86,7 +91,7 @@
     {/if}
     {#if needCode}
       <label class="lbl" for="otp">Code from your authenticator app</label>
-      <div class="input"><KeyRound size={14} /><input id="otp" bind:value={otp} inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" /></div>
+      <div class="input"><KeyRound size={14} /><input id="otp" bind:this={otpEl} bind:value={otp} inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456" /></div>
     {/if}
     {#if location.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(location.hostname)}
       <p class="tiny muted">Not encrypted. Fine on your own LAN; from elsewhere use https://{location.host}.</p>
@@ -105,6 +110,6 @@
   .title { font-weight: 700; font-size: 16px; }
   .logo { width: 34px; height: 34px; image-rendering: pixelated; flex: none; }
   label { margin-top: 4px; }
-  .pill { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; font-size: 12px; padding: 3px 10px; border-radius: 99px; background: #22c55e1c; color: #22c55e; }
+  .ok { align-self: flex-start; height: 24px; }
   .big { justify-content: center; padding: 9px; margin-top: 6px; font-size: 13px; }
 </style>

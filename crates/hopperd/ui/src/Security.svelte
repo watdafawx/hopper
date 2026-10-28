@@ -100,6 +100,15 @@
     }
   }
 
+  async function copyToken() {
+    try {
+      await navigator.clipboard.writeText(made.token);
+      say('Copied');
+    } catch {
+      say("Can't copy here: select it and copy it by hand.", true);
+    }
+  }
+
   function toggleServer(id) {
     const s = new Set(tServers);
     s.has(id) ? s.delete(id) : s.add(id);
@@ -123,7 +132,7 @@
     <div class="qr">{@html setup.qr_svg}</div>
     <div class="tiny muted mono brk">{setup.secret}</div>
     <div class="row">
-      <div class="input grow"><input bind:value={code} inputmode="numeric" maxlength="6" placeholder="123456" /></div>
+      <div class="input grow"><input bind:value={code} inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="one-time-code" onkeydown={(e) => e.key === 'Enter' && code.length === 6 && enable()} /></div>
       <button class="btn pri sm" disabled={code.length !== 6} onclick={enable}>Turn on</button>
       <button class="btn sm ghost" onclick={() => (setup = null)}>Cancel</button>
     </div>
@@ -156,14 +165,14 @@
     <div class="made">
       <div class="small">Copy it now; it isn't shown again.</div>
       <div class="row"><span class="mono small brk grow">{made.token}</span>
-        <button class="btn sm" onclick={() => { navigator.clipboard?.writeText(made.token); say('Copied'); }}><Copy size={13} />Copy</button>
+        <button class="btn sm" onclick={() => copyToken()}><Copy size={13} />Copy</button>
         <button class="btn sm ghost" onclick={() => (made = null)}>Done</button></div>
     </div>
   {/if}
   {#each tokens as t (t.id)}
     <div class="row tk">
       <div class="grow">
-        <div>{t.name} <span class="chip">{t.read_only ? 'read only' : 'full'}</span>{#if t.servers.length}<span class="chip">{t.servers.join(', ')}</span>{/if}</div>
+        <div>{t.name} <span class="chip">{t.read_only ? 'read only' : 'full'}</span>{#if t.servers.length}<span class="chip">{t.servers.map((id) => live.servers.find((s) => s.id === id)?.name || id).join(', ')}</span>{/if}</div>
         <div class="tiny muted">made {when(t.created)} · used {when(t.last_used)}{t.expires ? ` · expires ${when(t.expires)}` : ''}</div>
       </div>
       <button class="btn sm icon ghost" title="Revoke" onclick={() => revoke(t)}><Trash2 size={13} /></button>

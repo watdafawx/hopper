@@ -38,6 +38,7 @@
       body: `Its folder moves to .hopper-deleted in the servers folder and stays there 30 days: restore it from Settings › Panel folder. Type ${server.name} to delete it.`,
       ok: 'Delete server',
       placeholder: server.name,
+      danger: true,
     });
     if (typed == null) return;
     try {
@@ -59,7 +60,7 @@
       {:else}It runs where it is{server.managed_by ? `, and ${server.managed_by} knows it too` : ''}: the panel can take it off its list, never delete its files.{/if}
     </div>
     <button class="btn sm bad" disabled={alive} onclick={takeOff}><EyeOff size={13} />Remove from panel</button>
-    {#if inRoot}<button class="btn sm badf" disabled={alive} onclick={del}><Trash2 size={13} />Delete server…</button>{/if}
+    {#if inRoot}<button class="btn sm danger" disabled={alive} onclick={del}><Trash2 size={13} />Delete server…</button>{/if}
   </div>
 </div>
 
@@ -68,6 +69,4 @@
   .grow { flex: 1; min-width: 200px; color: var(--subtle); }
   .wrap { flex-wrap: wrap; gap: 8px; }
   .warn { color: var(--gold); }
-  .bad { color: var(--red); border-color: #ef444466; }
-  .badf { background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; }
 </style>

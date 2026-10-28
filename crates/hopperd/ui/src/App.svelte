@@ -31,13 +31,15 @@
 </script>
 
 {#if failed}
-  <div class="center"><p class="err">Can't reach the panel: {failed}</p></div>
+  <div class="center"><div class="empty-state"><b>Can't reach this panel</b><p>{failed}</p><button class="btn sm" onclick={() => location.reload()}>Try again</button></div></div>
 {:else if hello && signedIn === false}
   <Auth {hello} onDone={() => { hello.setup_needed = false; load(); }} />
 {:else if hello && signedIn && me?.role === 'owner' && !me.panel_folder && !later}
   <PanelSetup onLater={() => (later = true)} />
 {:else if hello && signedIn}
   <Shell {hello} {me} onSignOut={() => (signedIn = false)} />
+{:else}
+  <div class="center muted"><span class="spinner"></span></div>
 {/if}
 
 <style>

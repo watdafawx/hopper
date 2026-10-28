@@ -71,19 +71,19 @@
   }
 </script>
 
-<svelte:window onclick={() => (open = false)} />
+<svelte:window onclick={() => (open = false)} onkeydown={(e) => e.key === 'Escape' && open && (open = false)} />
 
 <div class="wrapp">
   <button class="btn sm" onclick={toggleOpen} title="Switch which mods are on"><Layers size={13} />Profiles<ChevronDown size={12} /></button>
   {#if open}
-    <div class="pop card" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === 'Escape' && (open = false)}>
+    <div class="pop popover menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === 'Escape' && (open = false)}>
       <div class="hd">Switch which mods are enabled</div>
       {#if list === null}
-        <div class="hd">Loading…</div>
+        <div class="hd row"><span class="spinner"></span>Loading…</div>
       {:else}
         {#each list as p (p.name)}
-          <div class="it">
-            <button class="use" title={what(p)} onclick={() => use(p)}>
+          <div class="it row-hover">
+            <button class="use menu-item" title={what(p)} onclick={() => use(p)}>
               <span class="ell">Use “{p.name}”</span>
               {#if !p.turns_on && !p.turns_off}<span class="chip running">now</span>{:else}<span class="tiny muted">{p.turns_off ? `−${p.turns_off}` : ''}{p.turns_on && p.turns_off ? ' ' : ''}{p.turns_on ? `+${p.turns_on}` : ''}</span>{/if}
             </button>
@@ -93,8 +93,8 @@
           <div class="hd">No profiles yet.</div>
         {/each}
       {/if}
-      <hr />
-      <button class="row1" onclick={save}><Plus size={13} />Save current as…</button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" onclick={save}><Plus size={13} />Save current as…</button>
       {#if alive}<div class="hd">Switching while it runs: restart to load the change.</div>{/if}
     </div>
   {/if}
@@ -102,15 +102,12 @@
 
 <style>
   .wrapp { position: relative; }
-  .pop { position: absolute; z-index: 70; top: calc(100% + 4px); right: 0; width: 280px; padding: 4px; display: flex; flex-direction: column; box-shadow: 0 14px 40px #000c; }
+  .pop { position: absolute; z-index: 70; top: calc(100% + 4px); left: 0; width: 280px; display: flex; flex-direction: column; }
   .hd { color: var(--muted); font-size: 11.5px; padding: 5px 10px; }
-  .it { display: flex; align-items: center; gap: 2px; border-radius: 5px; }
-  .it:hover { background: var(--raise); }
-  .use, .row1 { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 5px; font-size: 12.5px; text-align: left; color: var(--text); flex: 1; min-width: 0; }
-  .row1:hover:not(:disabled) { background: var(--raise); }
-  .use:disabled, .row1:disabled { opacity: 0.5; }
+  .it { display: flex; align-items: center; gap: 2px; border-radius: var(--radius); }
+  .use { flex: 1; min-width: 0; }
+  .it .use:hover { background: none; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
   .ib { color: var(--muted); padding: 4px 6px; border-radius: 5px; display: grid; }
   .ib:hover { color: var(--red); background: #ffffff10; }
-  hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
 </style>

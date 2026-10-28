@@ -250,19 +250,40 @@ async fn remove_many(
     crate::mods_api::drop_updates_for(&id, &b.files);
     let running = e.server.state().is_alive();
     log::info!("{}: removing {} mods", e.name, b.files.len());
-    let n = blocking(move || {
+    let sid = id.clone();
+    let (n, undo) = blocking(move || {
         let mut inst = crate::mods_api::instance_of(&e)?;
+        let since = crate::parity_mods::undo_since();
+        // Where each jar was and its entry, for the toast's Undo.
+        let mut before = Vec::new();
         let mut n = 0;
+        let mut err = None;
         for f in &b.files {
             // Indexes move as entries go: look each one up again.
-            let i = crate::mods_api::index_of(&mut inst, f)?;
-            install::remove(&mut inst, i).map_err(install::explain_locked)?;
-            n += 1;
+            let r = crate::mods_api::index_of(&mut inst, f).and_then(|i| {
+                let a = inst.addons[i].clone();
+                let path = inst.addon_path(&a);
+                install::remove(&mut inst, i).map_err(install::explain_locked)?;
+                before.push((path, a));
+                Ok(())
+            });
+            match r {
+                Ok(()) => n += 1,
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
         }
-        Ok(n)
+        let undo = crate::parity_mods::remember_removed(&sid, &e.root, before, since);
+        // The ones that went can still be undone from Backups.
+        if let Some(e) = err {
+            return Err(if n > 0 { e.context(format!("removed {n} before this one")) } else { e });
+        }
+        Ok((n, undo))
     })
     .await?;
-    Ok(Json(json!({ "removed": n, "restart_needed": running && n > 0 })))
+    Ok(Json(json!({ "removed": n, "restart_needed": running && n > 0, "undo": undo })))
 }
 
 async fn lock_many(

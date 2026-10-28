@@ -146,8 +146,7 @@
   }
 
   async function startWatch() {
-    await power(server, 'start');
-    location.hash = `/server/${encodeURIComponent(server.id)}/console`;
+    if (await power(server, 'start')) location.hash = `/server/${encodeURIComponent(server.id)}/console`;
   }
 
   $effect(() => {
@@ -222,7 +221,7 @@
   {#if changed}
     <h4>Before you change</h4>
     <div class="box">
-      {#if checking}<div class="busy small"><span class="spin"></span>{checking}…</div>
+      {#if checking}<div class="busy small"><span class="spinner"></span>{checking}…</div>
       {:else if checkErr}<div class="err">{checkErr}</div>
       {:else if check}
         <div class="checks">
@@ -268,15 +267,15 @@
         {/if}
       {/if}
     </div>
-    {#if busy}<div class="busy small"><span class="spin"></span>{busy}</div>{/if}
+    {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
     <div class="row go-row">
       {#if alive}<span class="small warn">Stop the server first.</span>{/if}
       <span class="sp"></span>
-      <button class="btn sm ghost" disabled={!!busy} onclick={() => { mc = have.minecraft; lv = have.version; }}>Cancel</button>
+      <button class="btn sm ghost" disabled={!!busy} onclick={() => { mc = have.minecraft; lv = installedLv; }}>Cancel</button>
       <button class="btn pri" disabled={!!busy || !!checking || !check || alive} onclick={change}><ArrowRightLeft size={14} />Back up and change to {kind === 'vanilla' ? `Minecraft ${mc}` : mc !== have.minecraft ? `${label(kind, lv)} on ${mc}` : label(kind, lv)}</button>
     </div>
   {:else if busy}
-    <div class="busy small"><span class="spin"></span>{busy}</div>
+    <div class="busy small"><span class="spinner"></span>{busy}</div>
   {/if}
 {/if}
 
@@ -312,9 +311,6 @@
   .opts input { accent-color: var(--acc); }
   .go-row { margin-top: 10px; gap: 8px; }
   .warn { color: var(--gold); }
-  .err { color: var(--red); }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); margin-top: 8px; }
-  .spin { width: 12px; height: 12px; border: 2px solid var(--gold); border-right-color: transparent; border-radius: 50%; animation: s 0.8s linear infinite; }
-  @keyframes s { to { transform: rotate(360deg); } }
   @media (max-width: 900px) { .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; } .sel { width: 100%; } }
 </style>

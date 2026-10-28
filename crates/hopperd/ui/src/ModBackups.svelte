@@ -3,11 +3,13 @@
   // .hopper-backups: jars replaced by updates or removed, configs reset.
   // Restore puts files back; a jar coming back first moves the mod's current
   // jar into a new backup, so it can be undone the same way.
-  import { Undo2, Trash2, ChevronDown, ChevronRight } from '@lucide/svelte';
+  import { untrack } from 'svelte';
+  import { Undo2, Trash2, ChevronDown, ChevronRight, Archive } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { bytes } from './lib/format.js';
+  import { ago, dateOf } from './lib/modops.js';
 
   let { server, onChanged = () => {} } = $props();
   const sid = $derived(server.id);
@@ -25,7 +27,10 @@
     }
   }
 
+  // Asked first, as desktop does: the current jar moves aside, so it can be undone.
   async function restore(set, file = null) {
+    const what = file ? file.name : set.files.length > 1 ? `these ${set.files.length} files` : summary(set);
+    if (!(await confirmIt(`Put back ${what}?`, { body: "A mod's current jar moves to Backups first, so this can be undone the same way.", ok: 'Restore' }))) return;
     busy = true;
     try {
       const r = await post(`${base}/mod-backups/restore`, { when: set.when, name: file?.name ?? null });
@@ -58,12 +63,13 @@
     open = s;
   }
 
-  const when = (t) => new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  // "27/09/2026 · 3 days ago", as desktop's list says it.
+  const when = (t) => `${dateOf(new Date(t * 1000).toISOString())} · ${ago(new Date(t * 1000).toISOString())}`;
   const summary = (s) => (s.files.length === 1 ? s.files[0].name : `${s.files.length} files: ${s.files.slice(0, 3).map((f) => f.name.replace(/[-_]?(neoforge|forge|fabric|mc)?[-_]?\d.*$/i, '')).join(', ')}${s.files.length > 3 ? '…' : ''}`);
 
   $effect(() => {
     sid;
-    load();
+    untrack(load);
   });
 </script>
 
@@ -74,15 +80,15 @@
     {#if old.length}<button class="btn sm" disabled={busy} onclick={() => remove(old, `Delete ${old.length} backup${old.length === 1 ? '' : 's'} older than 30 days?`)}><Trash2 size={13} />Delete older than 30 days</button>{/if}
   </div>
   {#if !data}
-    <div class="small muted">Loading…</div>
+    <div class="skels">{#each [0, 1, 2, 3] as i (i)}<div class="skel"><i></i></div>{/each}</div>
   {:else if !data.sets.length}
-    <div class="small muted">Nothing set aside yet. Jars that updates replace and mods you remove land here.</div>
+    <div class="empty-state"><span class="es-ic"><Archive size={20} /></span><b>Nothing set aside yet</b><p>Jars that updates replace and mods you remove land here.</p></div>
   {:else}
     <div class="list">
       {#each data.sets as s (s.when)}
         <div class="set">
           <div class="row">
-            <button class="nm grow" onclick={() => flip(s.when)}>{#if open.has(s.when)}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}<span class="w">{when(s.when)}</span><span class="ell">{summary(s)}</span></button>
+            <button class="nm grow row-hover" onclick={() => flip(s.when)}>{#if open.has(s.when)}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}<span class="w">{when(s.when)}</span><span class="ell">{summary(s)}</span></button>
             <span class="tiny muted">{bytes(s.size)}</span>
             <button class="btn sm" disabled={busy} onclick={() => restore(s)}><Undo2 size={13} />{s.files.length === 1 ? 'Restore' : 'Restore all'}</button>
             <button class="btn sm ghost icon" title="Delete this backup" disabled={busy} onclick={() => remove([s], 'Delete this backup?')}><Trash2 size={13} /></button>
@@ -104,10 +110,11 @@
   .list { border: 1px solid var(--line); border-radius: 8px; }
   .set { padding: 6px 10px; border-bottom: 1px solid var(--line); }
   .set:last-child { border: 0; }
-  .nm { display: flex; align-items: center; gap: 8px; text-align: left; min-width: 0; }
-  .w { white-space: nowrap; color: var(--subtle); font-variant-numeric: tabular-nums; width: 150px; flex: none; }
+  .nm { display: flex; align-items: center; gap: 8px; text-align: left; min-width: 0; padding: 3px 6px; margin-left: -6px; border-radius: var(--radius); }
+  .w { white-space: nowrap; color: var(--subtle); font-variant-numeric: tabular-nums; width: 190px; flex: none; }
   .grow { flex: 1; min-width: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .file { padding: 3px 0 3px 30px; }
   .icon { padding: 3px 5px; }
+  .skels { display: flex; flex-direction: column; gap: 4px; }
 </style>
