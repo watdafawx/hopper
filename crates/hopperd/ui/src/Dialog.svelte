@@ -27,7 +27,7 @@
 
   function submit(e) {
     e.preventDefault();
-    answer(dialog.input ? dialog.input.value : true);
+    answer(dialog.input ? dialog.input.value : dialog.check ? { ticked: dialog.check.value } : true);
   }
 
   const cancel = () => answer(dialog.input ? null : false);
@@ -67,6 +67,9 @@
     <form class="f" onsubmit={submit}>
       <h3>{dialog.title}</h3>
       {#if dialog.body}<p class="small subtle">{dialog.body}</p>{/if}
+      {#if dialog.check}
+        <label class="row small"><input type="checkbox" bind:checked={dialog.check.value} />{dialog.check.label}</label>
+      {/if}
       {#if dialog.input}
         <div class="input"><input bind:this={field} bind:value={dialog.input.value} placeholder={dialog.input.placeholder} spellcheck="false" autocomplete="off" /></div>
       {/if}

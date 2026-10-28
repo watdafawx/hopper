@@ -134,6 +134,10 @@ async fn entries(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
 struct RestoreBody {
     #[serde(default)]
     paths: Vec<String>,
+    /// Back up what's there first (the "Back up first" tick; off unless
+    /// the person asks: backups are theirs to make).
+    #[serde(default)]
+    backup_first: bool,
 }
 
 async fn restore(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, name)): Path<(String, String)>, Json(b): Json<RestoreBody>) -> ApiResult<Json<Value>> {
@@ -156,24 +160,32 @@ async fn restore(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
                 anyhow::bail!("None of the picked files are in that backup.");
             }
         }
-        // As desktop: a "Before restoring" backup first, so this can be
-        // undone (only what changed is stored again, so it's quick). It
-        // must be complete before any file is touched: an error stops here.
-        let label = if old.note.trim().is_empty() { format!("the {} backup", hopper_core::time::date(old.at as i64)) } else { format!("\"{}\"", old.note.trim()) };
-        job.detail("Backing up first, so this can be undone");
-        let scope = if b.paths.is_empty() { old.scope } else { Scope::Full };
-        let safety = backup::make(&e.root, scope, Kind::Safety, &format!("Before restoring {label}"), None, job)?;
-        offsite::kick();
-        // Started while that ran: writing under a running server corrupts
-        // its world, so stop with nothing changed.
-        if e.server.state().is_alive() {
-            anyhow::bail!("{} was started while it was being backed up, so nothing was restored. Stop it and restore again.", e.name);
-        }
+        // A "Before restoring" backup only when the person ticked "Back up
+        // first". It must be complete before any file is touched: an error
+        // stops here.
+        let safety = if b.backup_first {
+            let label = if old.note.trim().is_empty() { format!("the {} backup", hopper_core::time::date(old.at as i64)) } else { format!("\"{}\"", old.note.trim()) };
+            job.detail("Backing up first, so this can be undone");
+            let scope = if b.paths.is_empty() { old.scope } else { Scope::Full };
+            let s = backup::make(&e.root, scope, Kind::Manual, &format!("Before restoring {label}"), None, job)?;
+            offsite::kick();
+            // Started while that ran: writing under a running server
+            // corrupts its world, so stop with nothing changed.
+            if e.server.state().is_alive() {
+                anyhow::bail!("{} was started while it was being backed up, so nothing was restored. Stop it and restore again.", e.name);
+            }
+            Some(s)
+        } else {
+            None
+        };
         let n = backup::restore(&e.root, &name, &b.paths, job).map_err(|err| {
             log::warn!("{}: restore of {name} failed: {err:#}", e.name);
-            anyhow::anyhow!("{err:#}. If some files were already put back, restore \"{}\" to undo it.", safety.note)
+            match &safety {
+                Some(s) => anyhow::anyhow!("{err:#}. If some files were already put back, restore \"{}\" to undo it.", s.note),
+                None => err,
+            }
         })?;
-        Ok(json!({ "files": n, "safety": safety.name, "safety_note": safety.note }))
+        Ok(json!({ "files": n, "safety": safety.as_ref().map(|s| &s.name), "safety_note": safety.as_ref().map(|s| &s.note) }))
     });
     Ok(Json(json!({ "job": job })))
 }

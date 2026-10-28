@@ -735,16 +735,22 @@ pub fn compare(root: &Path, snap: &Snapshot) -> anyhow::Result<Changes> {
 /// A restore's result.
 #[derive(Clone, Debug)]
 pub struct Restored {
-    /// Taken first, to undo the restore.
-    pub safety: Snapshot,
+    /// Taken first, to undo the restore, when the person asked for it.
+    pub safety: Option<Snapshot>,
+    /// Without that snapshot: where the files the restore took away went
+    /// (in `.hopper-backups`), if any did.
+    pub aside: Option<PathBuf>,
     /// Files removed or put back.
     pub changed: usize,
 }
 
 /// Puts the instance back as it was in snapshot `id`: mods, configs and
-/// metadata (play time is kept). Takes a "Before restoring" snapshot
-/// first, so this can be undone. Close the game first.
-pub fn restore(root: &Path, id: &str) -> anyhow::Result<Restored> {
+/// metadata (play time is kept). With `snapshot_first` (the person ticked
+/// it) a "Before restoring" snapshot comes first, so this can be undone;
+/// without it, the files it takes away or replaces are moved to
+/// `.hopper-backups/restore-<time>` instead of deleted, as a mod update
+/// does. Close the game first.
+pub fn restore(root: &Path, id: &str, snapshot_first: bool) -> anyhow::Result<Restored> {
     use anyhow::Context as _;
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let base = base(root);
@@ -759,11 +765,33 @@ pub fn restore(root: &Path, id: &str) -> anyhow::Result<Restored> {
             anyhow::bail!("The snapshot's copy of {} is missing or damaged, so nothing was changed", f.rel);
         }
     }
-    let safety = take_locked(root, Reason::BeforeRestore { of: snap.label() }, &|_, _| {})?;
-    let after = |e: anyhow::Error| {
-        e.context(format!("Restore stopped partway. \"{}\" in Backups has the instance as it was", safety.reason.label()))
+    let safety = if snapshot_first { Some(take_locked(root, Reason::BeforeRestore { of: snap.label() }, &|_, _| {})?) } else { None };
+    let aside_dir = root.join(crate::sync::BACKUP_DIR).join(format!("restore-{}", now_ms()));
+    let after = |e: anyhow::Error| match &safety {
+        Some(s) => e.context(format!("Restore stopped partway. \"{}\" in Backups has the instance as it was", s.reason.label())),
+        None => e.context(format!("Restore stopped partway. Files it took away are in {}", aside_dir.display())),
     };
-    let now: HashMap<&str, &str> = safety.files.iter().map(|f| (f.rel.as_str(), f.hash.as_str())).collect();
+    // What's there now, by hash: from the snapshot just taken, else read
+    // (hashes known from earlier snapshots are reused).
+    let now_owned: Vec<(String, String)> = match &safety {
+        Some(s) => s.files.iter().map(|f| (f.rel.clone(), f.hash.clone())).collect(),
+        None => {
+            let known = cache(&list(root));
+            let fresh_after = now_ms().saturating_sub(2000);
+            let mut out = Vec::new();
+            for (rel, path, md) in current(root) {
+                let key = (rel.clone(), md.len(), mtime_ms(&md));
+                let hash = match known.get(&key).filter(|_| key.2 < fresh_after) {
+                    Some(h) => h.clone(),
+                    None => hash_file(&path).with_context(|| format!("reading {rel}"))?,
+                };
+                out.push((rel, hash));
+            }
+            out
+        }
+    };
+    let now: HashMap<&str, &str> = now_owned.iter().map(|(r, h)| (r.as_str(), h.as_str())).collect();
+    let mut aside = None;
     let want: HashMap<&str, &str> =
         snap.files.iter().filter(|f| !skipped(&f.rel)).map(|f| (f.rel.as_str(), f.hash.as_str())).collect();
     let mut changed = 0;
@@ -775,7 +803,14 @@ pub fn restore(root: &Path, id: &str) -> anyhow::Result<Restored> {
             continue;
         }
         let p = root.join(rel);
-        fs::remove_file(&p).with_context(|| format!("removing {rel}")).map_err(after)?;
+        if safety.is_some() {
+            fs::remove_file(&p).with_context(|| format!("removing {rel}")).map_err(after)?;
+        } else {
+            let to = aside_dir.join(rel);
+            fs::create_dir_all(to.parent().unwrap_or(&aside_dir)).map_err(|e| after(e.into()))?;
+            fs::rename(&p, &to).with_context(|| format!("moving {rel} aside")).map_err(after)?;
+            aside = Some(aside_dir.clone());
+        }
         if !want.contains_key(rel) {
             changed += 1;
         }
@@ -819,7 +854,7 @@ pub fn restore(root: &Path, id: &str) -> anyhow::Result<Restored> {
     if want.contains_key(hopper) {
         keep_stats(root, old_json);
     }
-    Ok(Restored { safety, changed })
+    Ok(Restored { safety, aside, changed })
 }
 
 /// After hopper.json came back: keeps play time from before, and marks
@@ -992,7 +1027,7 @@ mod tests {
         let rels: Vec<&str> = s.files.iter().map(|f| f.rel.as_str()).collect();
         assert_eq!(rels, ["config/spark/config.json"]);
         // A restore doesn't touch what the snapshot left out.
-        restore(&root, &s.id).unwrap();
+        restore(&root, &s.id, false).unwrap();
         assert!(root.join("config/spark/mat/a.bin").is_file());
         assert!(root.join("config/spark/p.sparkprofile").is_file());
     }
@@ -1053,10 +1088,12 @@ mod tests {
         assert_eq!(c.files.len(), 3);
         assert!(c.meta);
 
-        let r = restore(&root, &snap.id).unwrap();
+        let r = restore(&root, &snap.id, true).unwrap();
         assert_eq!(state(&root), before);
         assert!(!root.join("config/fresh").exists());
-        assert!(matches!(r.safety.reason, Reason::BeforeRestore { .. }));
+        let safety = r.safety.unwrap();
+        assert!(matches!(safety.reason, Reason::BeforeRestore { .. }));
+        assert!(r.aside.is_none());
         // Play time stays; the mod list is the snapshot's.
         let j: serde_json::Value = serde_json::from_slice(&fs::read(root.join("hopper.json")).unwrap()).unwrap();
         assert_eq!(j["play_seconds"], 500);
@@ -1064,8 +1101,31 @@ mod tests {
         assert!(compare(&root, &snap).unwrap().mods.is_empty());
 
         // And undone.
-        restore(&root, &r.safety.id).unwrap();
+        restore(&root, &safety.id, true).unwrap();
         assert_eq!(state(&root), after);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn restore_without_a_snapshot_moves_what_it_takes_away_aside() {
+        let root = temp("restore-aside");
+        write(&root, "mods/jei-1.0.jar", "jei1");
+        write(&root, "config/a.toml", "a=1");
+        let snap = take(&root, Reason::Manual).unwrap();
+        let before = state(&root);
+        fs::remove_file(root.join("mods/jei-1.0.jar")).unwrap();
+        write(&root, "mods/jei-2.0.jar", "jei2");
+        replace(&root, "config/a.toml", "a=2");
+
+        let r = restore(&root, &snap.id, false).unwrap();
+        assert_eq!(state(&root), before);
+        assert!(r.safety.is_none());
+        // No new snapshot; what it took away is in .hopper-backups.
+        assert_eq!(list(&root).len(), 1);
+        let aside = r.aside.unwrap();
+        assert!(aside.starts_with(root.join(crate::sync::BACKUP_DIR)));
+        assert_eq!(fs::read_to_string(aside.join("mods/jei-2.0.jar")).unwrap(), "jei2");
+        assert_eq!(fs::read_to_string(aside.join("config/a.toml")).unwrap(), "a=2");
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1100,7 +1160,7 @@ mod tests {
         replace(&root, "mods/a.jar", "b");
         assert_eq!(fs::read_to_string(blob(&base(&root), &s.files[0].hash)).unwrap(), "a");
         fs::remove_file(blob(&base(&root), &s.files[0].hash)).unwrap();
-        assert!(restore(&root, &s.id).is_err());
+        assert!(restore(&root, &s.id, false).is_err());
         assert_eq!(fs::read_to_string(root.join("mods/a.jar")).unwrap(), "b");
         assert_eq!(list(&root).len(), 1);
         fs::remove_dir_all(&root).unwrap();

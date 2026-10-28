@@ -266,7 +266,7 @@ pub fn set_server_neoforge(
 
 /// Switches a server on a Hopper Server to NeoForge `want` with the panel's
 /// own version change. Its folder is on the server's PC, so the installer
-/// has to run there; the panel backs the server up first (Undo is on its
+/// has to run there; the panel keeps the old start files for Undo (on its
 /// Version page) and refuses while it's running.
 pub fn set_remote_neoforge(r: &crate::hopperd::Remote, want: &str, job: &Job) -> anyhow::Result<String> {
     use crate::hopperd::Client;
@@ -290,7 +290,7 @@ pub fn set_remote_neoforge(r: &crate::hopperd::Remote, want: &str, job: &Job) ->
     let rec: Record = serde_json::from_value(done).unwrap_or_default();
     let mut parts = vec![format!("NeoForge {} » {want}", have.version)];
     parts.extend(rec.checks.iter().filter(|c| !c.ok).map(|c| c.text.clone()));
-    parts.push("backup and Undo in Hopper Server".to_string());
+    parts.push("Undo in Hopper Server".to_string());
     Ok(parts.join(" · "))
 }
 

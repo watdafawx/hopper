@@ -216,7 +216,7 @@ impl BackupsTab {
         cx.notify();
     }
 
-    fn restore(&mut self, b: Backup, paths: Vec<String>, cx: &mut Context<Self>) {
+    fn restore(&mut self, b: Backup, paths: Vec<String>, backup_first: bool, cx: &mut Context<Self>) {
         let Some(t) = self.target.clone() else { return };
         self.busy = Some("Restoring".into());
         self.error = None;
@@ -227,12 +227,13 @@ impl BackupsTab {
             &t,
             "Restoring a backup",
             t.sp(&format!("/backups/{}/restore", q(&b.name))),
-            json!({ "paths": paths }),
+            json!({ "paths": paths, "backup_first": backup_first }),
             |v, r, _| {
                 v.busy = None;
                 match r {
                     Ok(j) => {
-                        v.status = Some(format!("Restored {} files.", n(&j, "files")));
+                        let undo = j["safety_note"].as_str().map(|s| format!(" To undo, restore \"{s}\".")).unwrap_or_default();
+                        v.status = Some(format!("Restored {} files.{undo}", n(&j, "files")));
                         v.open = None;
                     }
                     Err(e) => v.error = Some(e),
@@ -270,17 +271,33 @@ impl BackupsTab {
         } else {
             "Those files replace the ones on the server. The server has to be stopped."
         };
+        // "Back up first" is off unless ticked: backups are the player's to make.
+        let first = std::rc::Rc::new(std::cell::Cell::new(false));
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (this, b, paths) = (this.clone(), b.clone(), paths.clone());
+            let (f2, f3) = (first.clone(), first.clone());
             alert
                 .title(what.clone())
-                .description(body)
+                .description(
+                    v_flex()
+                        .gap_2()
+                        .child(body)
+                        .child(
+                            Checkbox::new("restore-backup-first")
+                                .label("Back up first, so this can be undone")
+                                .checked(f2.get())
+                                .on_click(move |v: &bool, window, _| {
+                                    f3.set(*v);
+                                    window.refresh();
+                                }),
+                        ),
+                )
                 .confirm()
                 .ok_text("Restore")
                 .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
                 .on_ok(move |_, _, cx| {
-                    let (b, paths) = (b.clone(), paths.clone());
-                    this.update(cx, |t, cx| t.restore(b, paths, cx));
+                    let (b, paths, first) = (b.clone(), paths.clone(), f2.get());
+                    this.update(cx, |t, cx| t.restore(b, paths, first, cx));
                     true
                 })
         });

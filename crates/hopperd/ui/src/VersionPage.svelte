@@ -2,9 +2,11 @@
   // Settings › Version: what the server runs, and changing it. Same two
   // pickers as desktop's instance settings (Minecraft, loader). Picking
   // something else checks it (Java, the loader's changelog, mods on
-  // CurseForge / Modrinth for a new Minecraft), then one button backs the
-  // whole server up and changes it. The result, with Undo, stays here
-  // until the next change; the backup is in Backups too.
+  // CurseForge / Modrinth for a new Minecraft), then one button changes
+  // it. No backup unless the person ticks "Back up the server first"
+  // (Minecraft changes only): a loader build switch is undone from the
+  // start files kept aside, a Minecraft change only from that backup. The
+  // result, with Undo when there is one, stays here until the next change.
   import { RotateCcw, Play, ArrowRightLeft, Check, CircleAlert, Info, Archive, ChevronDown, ChevronRight } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -33,6 +35,7 @@
   let update = $state(true);
   let offNone = $state(true);
   let offUnknown = $state(false);
+  let backupFirst = $state(false);
   let checkSeq = 0;
 
   const have = $derived(v?.installed);
@@ -106,6 +109,7 @@
         update_mods: update,
         off_none: offNone,
         off_unknown: offUnknown,
+        backup_first: !check?.same_minecraft && backupFirst,
       });
       const r = await followJob(job, (st) => (busy = st.detail || 'Working'));
       say(r.checks.every((c) => c.ok) ? `${server.name} is on ${label(r.to.kind, r.to.version)}, Minecraft ${r.to.minecraft}.` : 'Changed, but a check failed: see Version.', !r.checks.every((c) => c.ok));
@@ -124,9 +128,11 @@
   async function undo() {
     const rec = v.record;
     const ok = await confirmIt(`Undo the change to ${label(rec.to.kind, rec.to.version)}?`, {
-      body: `${server.name} goes back to ${label(rec.from.kind, rec.from.version)} on Minecraft ${rec.from.minecraft}: every file from the backup made before the change, ${rec.ran_since ? 'the world too (it has run since: the current world is kept aside in the backups folder)' : 'the world too'}. Mods added since move to .hopper-backups.`,
+      body: rec.backup
+        ? `${server.name} goes back to ${label(rec.from.kind, rec.from.version)} on Minecraft ${rec.from.minecraft}: every file from the backup made before the change, ${rec.ran_since ? 'the world too (it has run since: the current world is kept aside in the backups folder)' : 'the world too'}. Mods added since move to .hopper-backups.`
+        : `${server.name} starts ${label(rec.from.kind, rec.from.version)} again: the start files from before the change come back. Mods and worlds aren't touched.`,
       ok: 'Undo',
-      danger: rec.ran_since,
+      danger: !!rec.backup && rec.ran_since,
     });
     if (!ok) return;
     busy = 'Starting';
@@ -183,13 +189,19 @@
         <span class="muted small">was {label(r.from.kind, r.from.version)} · {r.from.minecraft}</span>
         <span class="sp"></span>
         {#if !alive}<button class="btn sm go" disabled={!!busy} onclick={startWatch}><Play size={13} />Start and watch</button>{/if}
-        <button class="btn sm" disabled={!!busy || alive} title={alive ? 'Stop the server first' : ''} onclick={undo}><RotateCcw size={13} />Undo</button>
+        {#if r.can_undo}<button class="btn sm" disabled={!!busy || alive} title={alive ? 'Stop the server first' : ''} onclick={undo}><RotateCcw size={13} />Undo</button>{/if}
       </div>
       <div class="checks">
         {#each r.checks as c, i (i)}<div class:bad={!c.ok}>{#if c.ok}<Check size={13} />{:else}<CircleAlert size={13} />{/if}{c.text}</div>{/each}
         {#each r.notes as n, i (i)}<div class="muted"><Info size={13} />{n}</div>{/each}
       </div>
-      <div class="tiny muted">Undo puts back every file from <span class="mono">{r.backup}</span>{r.ran_since ? ', the world too: it has run since the change' : ''}. It's in Backups as well.</div>
+      {#if r.backup}
+        <div class="tiny muted">Undo puts back every file from <span class="mono">{r.backup}</span>{r.ran_since ? ', the world too: it has run since the change' : ''}. It's in Backups as well.</div>
+      {:else if r.can_undo}
+        <div class="tiny muted">Undo puts the start files from before the change back, so it starts {label(r.from.kind, r.from.version)} again.</div>
+      {:else}
+        <div class="tiny muted">No backup was made before this change, so it can't be undone here. To go back, restore one of your own backups from Backups.</div>
+      {/if}
     </div>
   {/if}
 
@@ -238,8 +250,14 @@
               <button class="link" onclick={() => (showChanges = !showChanges)}>{#if showChanges}<ChevronDown size={12} />Hide{:else}<ChevronRight size={12} />Show{/if}</button></div>
             {#if showChanges}<div class="log mono">{#each check.changes as c (c.version)}<div><b>{c.version}</b> {c.text}</div>{/each}</div>{/if}
           {/if}
-          <div class="muted"><Archive size={13} />A full backup first ({bytes(check.backup_size)}), kept until you delete it</div>
+          {#if check.same_minecraft}
+            <div class="muted"><Info size={13} />No backup needed: Undo puts the start files back, and {label(kind, have.version)} stays installed next to the new build</div>
+          {/if}
         </div>
+        {#if !check.same_minecraft}
+          <label class="row small"><input type="checkbox" bind:checked={backupFirst} /><Archive size={13} />Back up the server first ({bytes(check.backup_size)}, Backups tab)</label>
+          {#if !backupFirst}<div class="small muted">Without a backup this can't be undone: a world opened on {mc} can't go back to {have.minecraft}.</div>{/if}
+        {/if}
 
         {#if !check.same_minecraft && fits.length}
           <div class="row wrap chips">
@@ -260,9 +278,8 @@
           </div>
           <div class="opts small">
             <label><input type="checkbox" bind:checked={update} /> Update the {count('update')} mods that have a file for {mc}</label>
-            <label><input type="checkbox" bind:checked={offNone} /> Turn off the {count('none')} with none (Undo brings them back)</label>
+            <label><input type="checkbox" bind:checked={offNone} /> Turn off the {count('none')} with none{backupFirst ? ' (Undo brings them back)' : ''}</label>
             <label><input type="checkbox" bind:checked={offUnknown} /> Turn off the {count('unknown')} unknown</label>
-            <div class="muted">A world opened on {mc} can't go back to {have.minecraft}: only the backup can.</div>
           </div>
         {/if}
       {/if}
@@ -272,7 +289,7 @@
       {#if alive}<span class="small warn">Stop the server first.</span>{/if}
       <span class="sp"></span>
       <button class="btn sm ghost" disabled={!!busy} onclick={() => { mc = have.minecraft; lv = installedLv; }}>Cancel</button>
-      <button class="btn pri" disabled={!!busy || !!checking || !check || alive} onclick={change}><ArrowRightLeft size={14} />Back up and change to {kind === 'vanilla' ? `Minecraft ${mc}` : mc !== have.minecraft ? `${label(kind, lv)} on ${mc}` : label(kind, lv)}</button>
+      <button class="btn pri" disabled={!!busy || !!checking || !check || alive} onclick={change}><ArrowRightLeft size={14} />{backupFirst && !check?.same_minecraft ? 'Back up and change' : 'Change'} to {kind === 'vanilla' ? `Minecraft ${mc}` : mc !== have.minecraft ? `${label(kind, lv)} on ${mc}` : label(kind, lv)}</button>
     </div>
   {:else if busy}
     <div class="busy small"><span class="spinner"></span>{busy}</div>

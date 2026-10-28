@@ -1,17 +1,25 @@
-//! Changing a stopped server's Minecraft or loader version, with a full
-//! backup first and one-step Undo.
+//! Changing a stopped server's Minecraft or loader version, with one-step
+//! Undo where it can be undone.
 //!
-//! The steps: a full backup ("safety"), the loader's server files
-//! installed over the folder (the same installers New server uses), the
-//! start script pointed at them (only the loader's token on the java line
-//! changes, so the server's own flags and Java stay; a script Hopper can't
-//! read is written new), `.hopper-server.json` and `hopper.json` updated,
-//! then the result checked. A step that fails puts the backup back.
+//! The steps: copies of the few files the change rewrites (start scripts,
+//! `user_jvm_args.txt`, `.hopper-server.json`) set aside, the loader's
+//! server files installed over the folder (the same installers New server
+//! uses), the start script pointed at them (only the loader's token on the
+//! java line changes, so the server's own flags and Java stay; a script
+//! Hopper can't read is written new), `.hopper-server.json` and
+//! `hopper.json` updated, then the result checked. A step that fails puts
+//! those copies back.
 //!
-//! Undo restores that backup; mod files added since (updated mods, ones
-//! turned off) are moved to `.hopper-backups` first so no mod is there
-//! twice. The world comes back too: the current one is kept aside by the
-//! restore.
+//! No backup is made unless the person asks for one ([`Change::backup`]):
+//! backups are theirs to make, by hand or on their schedule.
+//!
+//! Undo: a loader build switch on the same Minecraft puts the copies back,
+//! so the start script points at the old build again (an installer adds
+//! the new build's libraries next to the old one's; it doesn't remove
+//! them). A Minecraft change upgrades the world, which only a backup can
+//! take back: with one, Undo restores it (mod files added since are moved
+//! to `.hopper-backups` first so no mod is there twice, and the world comes
+//! back too); without one there's no Undo.
 //!
 //! Before a Minecraft change, [`mod_check`] looks every identified mod up
 //! on CurseForge / Modrinth for the new version and loader.
@@ -28,6 +36,12 @@ use std::path::{Path, PathBuf};
 
 /// The last change, kept for Undo.
 pub const RECORD: &str = ".hopper-version-change.json";
+
+/// Where the files a change rewrites are kept for Undo.
+pub const KEPT_DIR: &str = ".hopper-version-change";
+
+/// The files a change rewrites: what's needed to put a loader switch back.
+const REWRITTEN: [&str; 5] = ["run.bat", "run.sh", "start.bat", "user_jvm_args.txt", super::META_FILE];
 
 /// Files loader installers rewrite that hold the server's own settings.
 const KEEP_THROUGH_INSTALL: [&str; 5] = ["run.bat", "run.sh", "start.bat", "user_jvm_args.txt", "server.properties"];
@@ -132,7 +146,11 @@ pub struct Check {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Record {
+    /// The backup made first, when the person asked for one; "" if none.
     pub backup: String,
+    /// Of [`REWRITTEN`], the ones that weren't there before the change
+    /// (the rest are copied into [`KEPT_DIR`]).
+    pub absent: Vec<String>,
     pub from: Installed,
     pub to: Installed,
     /// Unix seconds.
@@ -164,6 +182,68 @@ impl Record {
 
     pub fn ok(&self) -> bool {
         self.checks.iter().all(|c| c.ok)
+    }
+
+    /// Whether Undo can put the server back: from the backup, or for a
+    /// loader build switch on the same Minecraft, from the kept files.
+    pub fn can_undo(&self) -> bool {
+        !self.backup.is_empty() || (!self.from.minecraft.is_empty() && self.from.minecraft == self.to.minecraft)
+    }
+}
+
+/// Copies of the files a change rewrites, held until the change is done.
+struct Kept {
+    files: Vec<(String, Vec<u8>)>,
+    absent: Vec<String>,
+}
+
+impl Kept {
+    fn take(root: &Path) -> Kept {
+        let (mut files, mut absent) = (Vec::new(), Vec::new());
+        for n in REWRITTEN {
+            match fs::read(root.join(n)) {
+                Ok(b) => files.push((n.to_string(), b)),
+                Err(_) => absent.push(n.to_string()),
+            }
+        }
+        Kept { files, absent }
+    }
+
+    /// Puts the files back as they were, and removes the ones that weren't
+    /// there.
+    fn put_back(&self, root: &Path) -> anyhow::Result<()> {
+        for (n, b) in &self.files {
+            fs::write(root.join(n), b).with_context(|| format!("putting {n} back"))?;
+        }
+        for n in &self.absent {
+            let _ = fs::remove_file(root.join(n));
+        }
+        Ok(())
+    }
+
+    /// Keeps the copies in [`KEPT_DIR`] for Undo.
+    fn save(&self, root: &Path) -> anyhow::Result<()> {
+        let dir = root.join(KEPT_DIR);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir)?;
+        for (n, b) in &self.files {
+            fs::write(dir.join(n), b)?;
+        }
+        Ok(())
+    }
+
+    /// The copies a change kept, by the record's list.
+    fn load(root: &Path, r: &Record) -> anyhow::Result<Kept> {
+        let dir = root.join(KEPT_DIR);
+        let mut files = Vec::new();
+        for n in REWRITTEN.iter().filter(|n| !r.absent.iter().any(|a| a == *n)) {
+            let p = dir.join(n);
+            if p.is_file() {
+                files.push((n.to_string(), fs::read(&p).with_context(|| format!("reading the kept {n}"))?));
+            }
+        }
+        anyhow::ensure!(!files.is_empty(), "The files kept from before the change are gone, so it can't be undone.");
+        Ok(Kept { files, absent: r.absent.clone() })
     }
 }
 
@@ -308,10 +388,13 @@ pub struct Change {
     /// A Java for the new version (runs installers; goes into the script
     /// only when the script's Java is too old).
     pub java: PathBuf,
+    /// Make a full backup first (the person ticked "Back up the server
+    /// first"). It's what lets a Minecraft change be undone.
+    pub backup: bool,
 }
 
-/// Changes the stopped server in `root`. A failed install puts the backup
-/// back and returns the error.
+/// Changes the stopped server in `root`. A failed install puts the files
+/// it rewrote back and returns the error.
 pub fn change(root: &Path, c: &Change, job: &Job) -> anyhow::Result<Record> {
     let from = installed(root);
     let to_kind = kind_of(&c.loader);
@@ -324,15 +407,21 @@ pub fn change(root: &Path, c: &Change, job: &Job) -> anyhow::Result<Record> {
     }
     let to = Installed { minecraft: c.minecraft.clone(), kind: to_kind, version: c.version.clone() };
 
-    job.detail("Backing up the whole server");
-    let b = backup::make(
-        root,
-        backup::Scope::Full,
-        backup::Kind::Safety,
-        &format!("Before changing to {} on Minecraft {} (was {} on {})", to.label(), to.minecraft, from.label(), from.minecraft),
-        None,
-        job,
-    )?;
+    let backup_name = if c.backup {
+        job.detail("Backing up the whole server");
+        backup::make(
+            root,
+            backup::Scope::Full,
+            backup::Kind::Manual,
+            &format!("Before changing to {} on Minecraft {} (was {} on {})", to.label(), to.minecraft, from.label(), from.minecraft),
+            None,
+            job,
+        )?
+        .name
+    } else {
+        String::new()
+    };
+    let kept = Kept::take(root);
 
     let work = (|| -> anyhow::Result<Vec<String>> {
         let mut notes = Vec::new();
@@ -367,20 +456,20 @@ pub fn change(root: &Path, c: &Change, job: &Job) -> anyhow::Result<Record> {
     let notes = match work {
         Ok(n) => n,
         Err(e) => {
-            job.detail("Putting the backup back");
-            let back = undo_files(root, &b.name, job);
-            return Err(match back {
-                Ok(_) => e.context("the change failed; the server is back as it was"),
-                Err(e2) => e.context(format!("the change failed, and putting {} back failed too: {e2:#}", b.name)),
+            job.detail("Putting the start files back");
+            return Err(match kept.put_back(root) {
+                Ok(_) => e.context("the change failed; the server starts as it did before"),
+                Err(e2) => e.context(format!("the change failed, and putting the start files back failed too: {e2:#}")),
             });
         }
     };
+    kept.save(root)?;
     job.detail("Checking the result");
     let target = match script::read_launch(root) {
         Ok((l, _)) => target_of(&l).unwrap_or(LaunchTarget::Jar("server.jar".into())),
         Err(_) => LaunchTarget::Jar("server.jar".into()),
     };
-    let r = Record { backup: b.name, checks: check(root, &to, &target), from, to, at: now(), notes };
+    let r = Record { backup: backup_name, absent: kept.absent, checks: check(root, &to, &target), from, to, at: now(), notes };
     r.save(root)?;
     Ok(r)
 }
@@ -411,11 +500,30 @@ fn undo_files(root: &Path, backup: &str, job: &Job) -> anyhow::Result<usize> {
     backup::restore(root, backup, &[], job)
 }
 
-/// Undoes the last change: its backup comes back (world too).
+/// Undoes the last change: its backup comes back (world too) when one
+/// was made; otherwise a loader switch on the same Minecraft gets its old
+/// start files back, pointing at the old build again.
 pub fn undo(root: &Path, job: &Job) -> anyhow::Result<Record> {
     let r = Record::load(root).context("There's no version change to undo.")?;
-    undo_files(root, &r.backup, job)?;
+    if !r.backup.is_empty() {
+        undo_files(root, &r.backup, job)?;
+    } else if r.can_undo() {
+        job.detail("Putting the start files back");
+        Kept::load(root, &r)?.put_back(root)?;
+        if root.join(instances::HOPPER_FILE).is_file() {
+            let (mc, loader) = (r.from.minecraft.clone(), r.from.instance_loader());
+            Instance::update_on_disk(root, |i| {
+                i.game_version = mc;
+                if !loader.is_empty() {
+                    i.loader = loader;
+                }
+            })?;
+        }
+    } else {
+        bail!("No backup was made before this Minecraft change, so it can't be undone.");
+    }
     let _ = fs::remove_file(root.join(RECORD));
+    let _ = fs::remove_dir_all(root.join(KEPT_DIR));
     Ok(r)
 }
 
@@ -658,6 +766,76 @@ mod tests {
         let i = installed(&root);
         assert_eq!((i.minecraft.as_str(), i.kind.as_str(), i.version.as_str()), ("1.21.4", "vanilla", ""));
         assert_eq!(i.label(), "Vanilla");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn inst(mc: &str, v: &str) -> Installed {
+        Installed { minecraft: mc.into(), kind: "neoforge".into(), version: v.into() }
+    }
+
+    #[test]
+    fn a_loader_switch_undoes_from_the_kept_start_files() {
+        let root = temp("kept");
+        fs::write(root.join("run.bat"), "java @libraries/net/neoforged/neoforge/21.1.259/win_args.txt nogui").unwrap();
+        fs::write(root.join("user_jvm_args.txt"), "-Xmx8G").unwrap();
+        let kept = Kept::take(&root);
+        assert!(kept.absent.iter().any(|n| n == "run.sh"));
+        kept.save(&root).unwrap();
+        let r = Record { from: inst("1.21.1", "21.1.259"), to: inst("1.21.1", "21.1.265"), absent: kept.absent.clone(), at: now(), ..Default::default() };
+        assert!(r.can_undo());
+        r.save(&root).unwrap();
+        // The switch: the script points at the new build, an installer
+        // left a run.sh, the old build's libraries stay.
+        fs::write(root.join("run.bat"), "java @libraries/net/neoforged/neoforge/21.1.265/win_args.txt nogui").unwrap();
+        fs::write(root.join("run.sh"), "new").unwrap();
+        fs::create_dir_all(root.join("world")).unwrap();
+        fs::write(root.join("world/level.dat"), "w2").unwrap();
+
+        let job = crate::jobs::Jobs::default().start("t");
+        undo(&root, &job).unwrap();
+        assert!(fs::read_to_string(root.join("run.bat")).unwrap().contains("21.1.259"));
+        assert_eq!(fs::read_to_string(root.join("user_jvm_args.txt")).unwrap(), "-Xmx8G");
+        assert!(!root.join("run.sh").exists());
+        // Nothing else is touched, and no backup was made.
+        assert_eq!(fs::read_to_string(root.join("world/level.dat")).unwrap(), "w2");
+        assert!(backup::list(&root).is_empty());
+        assert!(!root.join(KEPT_DIR).exists() && Record::load(&root).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_minecraft_change_without_a_backup_has_no_undo() {
+        let root = temp("noundo");
+        fs::write(root.join("run.bat"), "old").unwrap();
+        let r = Record { from: inst("1.20.1", "47.4.10"), to: inst("1.21.1", "21.1.265"), at: now(), ..Default::default() };
+        assert!(!r.can_undo());
+        r.save(&root).unwrap();
+        let job = crate::jobs::Jobs::default().start("t");
+        assert!(undo(&root, &job).is_err());
+        assert!(Record::load(&root).is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failed_change_puts_the_start_files_back_without_a_backup() {
+        let root = temp("fail");
+        fs::write(root.join("run.bat"), "java @libraries/net/neoforged/neoforge/21.1.259/win_args.txt nogui").unwrap();
+        fs::write(root.join("server.properties"), "level-name=world
+").unwrap();
+        // A build that doesn't exist: the installer download fails.
+        let c = Change {
+            minecraft: "1.21.1".into(),
+            loader: ServerLoader::NeoForge("0.0.0-nope".into()),
+            version: "0.0.0-nope".into(),
+            java: PathBuf::from("java"),
+            backup: false,
+        };
+        let job = crate::jobs::Jobs::default().start("t");
+        assert!(change(&root, &c, &job).is_err());
+        assert!(fs::read_to_string(root.join("run.bat")).unwrap().contains("21.1.259"));
+        assert!(!root.join("run.sh").exists());
+        assert!(backup::list(&root).is_empty());
+        assert!(Record::load(&root).is_none());
         let _ = fs::remove_dir_all(&root);
     }
 

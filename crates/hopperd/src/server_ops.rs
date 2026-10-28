@@ -234,6 +234,7 @@ async fn version(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
             let mut v = serde_json::to_value(&r).unwrap_or_default();
             v["ran_since"] = json!(ran);
             v["ok"] = json!(r.ok());
+            v["can_undo"] = json!(r.can_undo());
             v
         });
         Ok(json!({
@@ -368,6 +369,11 @@ struct ChangeBody {
     off_none: bool,
     #[serde(default)]
     off_unknown: bool,
+    /// Back the whole server up first (the "Back up the server first"
+    /// tick; off unless the person asks). Without it a Minecraft change
+    /// can't be undone.
+    #[serde(default)]
+    backup_first: bool,
 }
 
 async fn version_change(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<ChangeBody>) -> ApiResult<Json<Value>> {
@@ -383,7 +389,7 @@ async fn version_change(State(app): State<Arc<App>>, headers: HeaderMap, method:
     let same_mc = b.minecraft == have.minecraft;
     let job = crate::pack_api::spawn(&app, format!("Changing {name}'s version"), move |job| {
         let java = crate::manage_api::java_for(&b.minecraft, job)?;
-        let change = vc::Change { minecraft: b.minecraft.clone(), loader, version: b.loader_version.trim().to_string(), java };
+        let change = vc::Change { minecraft: b.minecraft.clone(), loader, version: b.loader_version.trim().to_string(), java, backup: b.backup_first };
         let mut r = vc::change(&root, &change, job)?;
         if !same_mc && !b.mods.is_empty() {
             let notes = vc::apply_mods(&root, &b.mods, b.update_mods, b.off_none, b.off_unknown, job);
@@ -402,8 +408,10 @@ async fn version_change(State(app): State<Arc<App>>, headers: HeaderMap, method:
 async fn version_undo(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     stopped(&e)?;
-    if vc::Record::load(&e.root).is_none() {
-        return Err(bad("There's no version change to undo."));
+    match vc::Record::load(&e.root) {
+        None => return Err(bad("There's no version change to undo.")),
+        Some(r) if !r.can_undo() => return Err(bad("No backup was made before this Minecraft change, so it can't be undone.")),
+        Some(_) => {}
     }
     let (root, sid, name, a) = (e.root.clone(), e.id.clone(), e.name.clone(), app.clone());
     let job = crate::pack_api::spawn(&app, format!("Undoing {name}'s version change"), move |job| {

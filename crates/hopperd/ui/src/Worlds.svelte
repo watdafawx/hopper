@@ -1,14 +1,15 @@
 <script>
   // A server's worlds, as desktop's Worlds tab shows an instance's: one card
   // per world (size, last played, seed), the one in level-name marked
-  // Active. New world, Make active, Reset (backup first), delete, upload,
+  // Active. New world, Make active, Reset and delete (a backup first only
+  // when ticked), upload,
   // download, and pre-generation with Chunky on the active world.
   import { Globe, FolderOpen, Download, Archive, RotateCcw, Trash2, Plus, Upload, ChevronRight, ChevronDown, Pause, Play, X, AlertTriangle, Package } from '@lucide/svelte';
   import { relative, fullDate, plural } from './lib/worlds.js';
   import { api, post, del } from './lib/api.js';
   import { bytes } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
-  import { confirmIt } from './lib/dialog.svelte.js';
+  import { confirmTick } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
   import { download, queueUploads, transfers } from './lib/transfers.svelte.js';
   import { onDestroy, untrack } from 'svelte';
@@ -83,12 +84,15 @@
   const zip = (w) => download(`/api/v1/fs/${enc(sid)}/zip?${w.folders.map((f) => `path=${enc(f)}`).join('&')}`);
 
   async function remove(w) {
-    const ok = await confirmIt(`Delete ${w.name}?`, {
-      body: w.created ? 'A backup is made first (Backups tab), then the world moves to the server\'s trash (Files › Trash) for 30 days.' : 'It hasn\'t been played yet, so nothing is lost.',
+    const r = await confirmTick(`Delete ${w.name}?`, {
+      body: w.created ? 'The world moves to the server\'s trash (Files › Trash) for 30 days.' : 'It hasn\'t been played yet, so nothing is lost.',
       ok: 'Delete world',
       danger: true,
+      check: w.created ? `Back it up first (${bytes(w.size)}, Backups tab)` : '',
     });
-    if (ok) run(`Deleting ${w.name}`, () => del(`${base}/worlds/${enc(w.name)}`), `${w.name} deleted.`);
+    if (!r) return;
+    const q = r.ticked && w.created ? '?backup_first=true' : '';
+    run(`Deleting ${w.name}`, () => del(`${base}/worlds/${enc(w.name)}${q}`), `${w.name} deleted.`);
   }
 
   // ---- dialogs ----
@@ -98,7 +102,7 @@
   }
   function openReset(w) {
     error = '';
-    dlg = { kind: 'reset', w, mode: w.seed ? 'same' : 'new', seed: '', keep: false };
+    dlg = { kind: 'reset', w, mode: w.seed ? 'same' : 'new', seed: '', keep: false, backup: false };
   }
   function openPregen() {
     error = '';
@@ -113,7 +117,7 @@
   function submitReset() {
     const d = dlg;
     const seed = d.mode === 'custom' ? { mode: 'custom', seed: d.seed.trim() } : { mode: d.mode };
-    run(`Resetting ${d.w.name}`, () => post(`${base}/worlds/${enc(d.w.name)}/reset`, { seed, keep_dims: d.keep }),
+    run(`Resetting ${d.w.name}`, () => post(`${base}/worlds/${enc(d.w.name)}/reset`, { seed, keep_dims: d.keep, backup_first: d.backup }),
       `${d.w.name} reset. A fresh one is made on the next start.`);
   }
   function submitPregen() {
@@ -224,7 +228,7 @@
           {#if w.created}<button class="btn sm" disabled={alive || !!busy} title={alive ? 'Stop the server first' : 'Start this world over'} onclick={() => openReset(w)}><RotateCcw size={13} />Reset…</button>{/if}
         {:else}
           <button class="btn sm" disabled={alive || !!busy} title={alive ? 'Stop the server first' : 'Load this world on the next start'} onclick={() => makeActive(w)}>Make active</button>
-          <button class="btn sm icon ghost" disabled={!!busy} title="Delete (backup first, then the trash)" onclick={() => remove(w)}><Trash2 size={14} /></button>
+          <button class="btn sm icon ghost" disabled={!!busy} title="Delete (to the server's trash)" onclick={() => remove(w)}><Trash2 size={14} /></button>
         {/if}
       </div>
 
@@ -322,9 +326,10 @@
           <label><input type="radio" bind:group={dlg.mode} value="custom" /><div class="row">This seed <div class="input sm"><input class="mono" bind:value={dlg.seed} onfocus={() => (dlg.mode = 'custom')} /></div></div></label>
         </div>
         <label class="cb small"><input type="checkbox" bind:checked={dlg.keep} />Keep the Nether and the End</label>
-        <div class="note small">A backup of the world is made first ({bytes(dlg.w.size)}, Backups tab). The old folder goes to the server's trash for 30 days.</div>
+        <label class="cb small"><input type="checkbox" bind:checked={dlg.backup} />Back up the world first ({bytes(dlg.w.size)}, Backups tab)</label>
+        <div class="note small">The old folder goes to the server's trash for 30 days.</div>
         {#if error}<div class="err">{error}</div>{/if}
-        <div class="row end"><span class="sp"></span><button class="btn" disabled={!!busy} onclick={() => (dlg = null)}>Cancel</button><button class="btn danger" disabled={!!busy || (dlg.mode === 'custom' && !dlg.seed.trim())} onclick={submitReset}><RotateCcw size={13} />Back up and reset</button></div>
+        <div class="row end"><span class="sp"></span><button class="btn" disabled={!!busy} onclick={() => (dlg = null)}>Cancel</button><button class="btn danger" disabled={!!busy || (dlg.mode === 'custom' && !dlg.seed.trim())} onclick={submitReset}><RotateCcw size={13} />{dlg.backup ? 'Back up and reset' : 'Reset'}</button></div>
       {:else}
         <h3><Globe size={15} />Pre-generate {data.level}<span class="sp"></span><button class="btn sm icon ghost" disabled={!!busy} onclick={() => (dlg = null)}><X size={14} /></button></h3>
         <div class="small muted">Generates the overworld around a point now, so players don't wait for chunks later.</div>

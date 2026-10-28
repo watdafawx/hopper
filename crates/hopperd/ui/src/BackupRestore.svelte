@@ -1,7 +1,7 @@
 <script>
   // Asks before a restore, as desktop's "Restore "…"?" dialog: when it's
-  // from, what goes back (what changed since, when known), and that a
-  // "Before restoring" backup is made first so it can be undone.
+  // from, what goes back (what changed since, when known), and a "Back up
+  // first" tick, off by default: backups are the person's to make.
   import { RotateCcw } from '@lucide/svelte';
   import { bytes } from './lib/format.js';
   import { fullDate, whenLabel, plural } from './lib/worlds.js';
@@ -11,6 +11,7 @@
   let { b, title, paths = [], changes = null, onOk, onCancel } = $props();
   const all = $derived(!paths.length);
   let okBtn = $state();
+  let backupFirst = $state(false);
   let box = $state();
 
   // Focus Restore; give focus back to what had it when closed.
@@ -28,7 +29,7 @@
       e.stopPropagation();
       onCancel();
     } else if (e.key === 'Tab' && box) {
-      const els = [...box.querySelectorAll('button:not(:disabled)')];
+      const els = [...box.querySelectorAll('button:not(:disabled), input:not(:disabled)')];
       if (!els.length) return;
       const [first, last] = [els[0], els[els.length - 1]];
       if (!box.contains(document.activeElement)) {
@@ -74,10 +75,11 @@
         <span>Files</span><span class="ell" title={paths.join('\n')}>{paths.slice(0, 3).join(', ')}{paths.length > 3 ? ` and ${paths.length - 3} more` : ''}</span>
       {/if}
     </div>
-    <div class="small muted">A "Before restoring" backup is made first, so this can be undone.</div>
+    <label class="row small"><input type="checkbox" bind:checked={backupFirst} />Back up first, so this can be undone</label>
+    {#if !backupFirst}<div class="small muted">Without a backup, a restore can't be undone.</div>{/if}
     <div class="row end">
       <button class="btn" onclick={onCancel}>Cancel</button>
-      <button class="btn pri" bind:this={okBtn} onclick={onOk}><RotateCcw size={13} />Restore</button>
+      <button class="btn pri" bind:this={okBtn} onclick={() => onOk(backupFirst)}><RotateCcw size={13} />Restore</button>
     </div>
   </div>
 </div>

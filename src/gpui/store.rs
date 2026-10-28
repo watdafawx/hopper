@@ -2083,19 +2083,14 @@ impl Store {
         let Some(mut inst) = self.instance(root).cloned() else {
             return;
         };
-        let n = updates.len();
         q.insert(root.to_path_buf(), UpdateQueue { active: Vec::new(), waiting: updates, progress: HashMap::new() });
         drop(q);
         let queue = self.update_queue.clone();
         let recent = self.recent_updates.clone();
         let wake = self.wake.clone();
         self.spawn_instance_job(&inst.root.clone(), format!("Updating mods in {}", inst.name), move |job| {
-            // A snapshot first, so Backups can put the whole set back.
-            if n > 1
-                && let Err(e) = hopper::snapshots::take_in(&inst.root, hopper::snapshots::Reason::BulkUpdate { count: n }, job)
-            {
-                log::warn!("snapshot: {e:#}");
-            }
+            // No snapshot first: backups are the player's to make. The
+            // old jars still go to .hopper-backups, so Undo works.
             let mut clear = ClearQueue(queue.clone(), Some(inst.root.clone()));
             let mut done: Vec<u64> = Vec::new();
             let mut pages: Vec<String> = Vec::new();

@@ -6,7 +6,7 @@
 use crate::App;
 use crate::api::{ApiError, ApiResult, bad, not_found, require};
 use crate::servers::Entry;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -160,6 +160,17 @@ struct ResetBody {
     seed: SeedChoice,
     #[serde(default)]
     keep_dims: bool,
+    /// Back the world up first (the "Back up first" tick; off unless the
+    /// person asks: backups are theirs to make).
+    #[serde(default)]
+    backup_first: bool,
+}
+
+/// `?backup_first=true` on a world delete.
+#[derive(Deserialize, Default)]
+struct RemoveQuery {
+    #[serde(default)]
+    backup_first: bool,
 }
 
 async fn reset(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, name)): Path<(String, String)>, Json(b): Json<ResetBody>) -> ApiResult<Json<Value>> {
@@ -168,9 +179,9 @@ async fn reset(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, 
     worlds::check_name(&name).map_err(bad)?;
     log::info!("{}: resetting world {name} ({:?}, keep dimensions: {})", e.name, b.seed, b.keep_dims);
     let job = crate::pack_api::spawn(&app, format!("Resetting {name} on {}", e.name), move |job| {
-        if e.root.join(&name).join("level.dat").is_file() {
+        if b.backup_first && e.root.join(&name).join("level.dat").is_file() {
             job.detail(format!("Backing up {name}"));
-            worlds::backup_world(&e.root, &name, Kind::Safety, &format!("Before resetting {name}"), None, job)?;
+            worlds::backup_world(&e.root, &name, Kind::Manual, &format!("Before resetting {name}"), None, job)?;
             crate::offsite::kick();
         }
         job.detail(format!("Moving {name} to the trash"));
@@ -180,7 +191,13 @@ async fn reset(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, 
     Ok(Json(json!({ "job": job })))
 }
 
-async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, name)): Path<(String, String)>) -> ApiResult<Json<Value>> {
+async fn remove(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path((id, name)): Path<(String, String)>,
+    Query(q): Query<RemoveQuery>,
+) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     worlds::check_name(&name).map_err(bad)?;
     if worlds::level_name(&e.root) == name {
@@ -188,9 +205,9 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     }
     log::info!("{}: deleting world {name}", e.name);
     let job = crate::pack_api::spawn(&app, format!("Deleting {name} on {}", e.name), move |job| {
-        if e.root.join(&name).join("level.dat").is_file() {
+        if q.backup_first && e.root.join(&name).join("level.dat").is_file() {
             job.detail(format!("Backing up {name}"));
-            worlds::backup_world(&e.root, &name, Kind::Safety, &format!("Before deleting {name}"), None, job)?;
+            worlds::backup_world(&e.root, &name, Kind::Manual, &format!("Before deleting {name}"), None, job)?;
             crate::offsite::kick();
         }
         worlds::delete(&e.root, &name, &trash_in(&e.root))?;

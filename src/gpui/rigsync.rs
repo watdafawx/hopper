@@ -988,7 +988,7 @@ impl SyncPanel {
         let older = if older { " (an older build than the server has now)" } else { "" };
         let body = if server.remote.is_some() {
             format!(
-                "Hopper Server backs up {place} first, then installs NeoForge {want} there{older}. Mods aren't touched. Undo is on the server's Version page in Hopper Server."
+                "Hopper Server installs NeoForge {want} in {place}{older}. Mods aren't touched, and no backup is made: Undo on the server's Version page in Hopper Server puts the old start files back."
             )
         } else {
             format!(
