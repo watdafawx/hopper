@@ -1,0 +1,9 @@
+[seeds]
+			echo_shard_seed = true
+			#Enable or disable the Heavy Core Seed (tier 5)
+			heavy_core_seed = true
+
+		[seeds.groups.energy]
+			#Enable or disable the FE Seed (tier 2 to 6, set by the energy it holds)
+			fe_seed = true
+

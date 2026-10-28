@@ -93,6 +93,15 @@ Hopper Server (`ServerCrash.svelte`) and on desktop's server banner
   read again on the server so only a change the crash names can be put
   back; the newer jar goes to `.hopper-backups`), Turn off (the Mods tab's
   toggle), Remove from server (to backups, with Undo).
+- **Configs that differ from the pack** (`crashdetect::config_differs`,
+  desktop only: it has both folders). The setting for the item the crash
+  names (configswitch) is compared with the paired instance's, then the
+  crash's mods' whole config files. TNP-LL8: `fe_seed` is false in the pack
+  (turned off for this crash) and true on the server. The server banner says
+  so and offers **Send config to server** (a sync copy; the server's file
+  goes to backups). Hopper Server can't see the pack, so its card offers the
+  setting itself, as the game card does: "Keep <mod> and turn off only the
+  item that broke" (`POST /servers/{id}/crash/switch-off`).
 - Wording says "server" where the game card says "game": "stopped the
   server from starting", "Then the server crashed in".
 

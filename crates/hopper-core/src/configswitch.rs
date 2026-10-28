@@ -162,6 +162,15 @@ pub fn is_on(root: &Path, s: &Switch) -> bool {
     })
 }
 
+/// The value of setting `key` (its last name part) in config `text`, if
+/// it's a true/false setting there.
+pub fn value_in(text: &str, key: &str) -> Option<bool> {
+    text.lines().find_map(|l| {
+        let m = BOOL_LINE.captures(l.trim_end_matches('\r'))?;
+        (m[1].rsplit('.').next() == Some(key)).then(|| &m[2] == "true")
+    })
+}
+
 /// `key = true|false`, `"key" = false # note`.
 static BOOL_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^\s*"?([A-Za-z0-9_.-]+)"?\s*=\s*(true|false)\s*(?:#.*)?$"#).expect("static regex"));

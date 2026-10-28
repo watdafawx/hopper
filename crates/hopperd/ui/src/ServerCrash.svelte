@@ -10,6 +10,7 @@
   import { removeMods, setOn } from './lib/modops.js';
   import { relative } from './lib/worlds.js';
   import { say } from './lib/toast.svelte.js';
+  import { confirmIt } from './lib/dialog.svelte.js';
 
   let { server, onPeek, onShare, openFile } = $props();
 
@@ -97,6 +98,29 @@
     busy = false;
   }
 
+  // Settings for the item the crash names that can turn just that off.
+  const switches = $derived(crash?.switches || []);
+  const switchedOff = $derived(crash?.switched_off || []);
+  const fileOfMod = (id) => suspects.find((s) => s.mod_id === id)?.file_name;
+
+  async function switchOff(sw) {
+    const ok = await confirmIt(`Turn off ${sw.label}?`, {
+      body: `Sets ${sw.key} to false in ${sw.file}, line ${sw.line}. The config as it was goes to Mods › Backups.`,
+      ok: 'Turn off',
+    });
+    if (!ok) return;
+    busy = true;
+    try {
+      await post(`${base}/crash/switch-off`, { file: sw.file, key: sw.key });
+      say(`Turned off ${sw.label}. The old config is in Mods › Backups. Start the server to try again.`);
+      await load();
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function putBack(ch) {
     busy = true;
     try {
@@ -135,6 +159,23 @@
   {/if}
 {/snippet}
 
+{#snippet switchRows()}
+  {#each switches as sw, i (sw.file + sw.key)}
+    <div class="sw">
+      <div class="line">
+        <span>{i === 0 && (toTurnOff.length || changed) ? 'Or keep' : 'Keep'}</span>{#if fileOfMod(sw.mod_id)}{@render mod(fileOfMod(sw.mod_id))}{:else}<b>{sw.mod_id}</b>{/if}<span>and turn off only the item that broke:</span><code>{sw.key} = true</code><span class="tiny muted">in {sw.file}, line {sw.line}</span>
+      </div>
+      <div class="row acts">
+        <button class="btn sm" disabled={busy || alive} title={alive ? 'Stop the server first: it may write its config back when it stops.' : 'Sets it to false after you confirm. The old config goes to Backups.'} onclick={() => switchOff(sw)}><PowerOff size={13} />Turn off {sw.label}…</button>
+        <button class="btn sm ghost" title="Opens the file in the editor" onclick={() => openFile(sw.file)}><FileText size={13} />Open config</button>
+      </div>
+    </div>
+  {/each}
+  {#each switchedOff as sw (sw.file + sw.key)}
+    <div class="line"><span class="done"><Check size={13} />{sw.label} is off</span><span class="tiny muted">{sw.key} = false in {sw.file}. Start the server to try again.</span></div>
+  {/each}
+{/snippet}
+
 {#if crash && settled}
   <div class="crash">
     <div class="row head">
@@ -146,7 +187,7 @@
 
     {#if st}
       <div class="line">{@render mod(st.file_name)}<span>stopped the server from starting</span>{@render tag('Certain')}</div>
-      {#if changed || toTurnOff.length || offAlready.length}
+      {#if changed || toTurnOff.length || offAlready.length || switches.length || switchedOff.length}
         <div class="fix">
           {#if changed}
             {@const isBack = back && back.name === changed.name}
@@ -161,9 +202,10 @@
                 <span class="tiny muted">{changed.to ? `${changed.to} goes to Backups.` : 'The newer one goes to Backups.'}</span>
               {/if}
             </div>
-          {:else}
+          {:else if toTurnOff.length || offAlready.length}
             <div class="row acts">{@render actions()}</div>
           {/if}
+          {@render switchRows()}
         </div>
       {/if}
       <b class="what">What happened</b>
@@ -216,6 +258,7 @@
       {/if}
       {#if note}<div class="note">{note}</div>{/if}
       {#if toTurnOff.length || offAlready.length}<div class="row acts">{@render actions()}</div>{/if}
+      {#if switches.length || switchedOff.length}<div class="switches">{@render switchRows()}</div>{/if}
     {/if}
 
     {#if report || crash.source}
@@ -254,6 +297,8 @@
   .why .tiny, .quote, .steps .tiny { white-space: normal; overflow-wrap: anywhere; }
   .need { color: var(--gold); font-family: var(--mono, monospace); }
   .note { font-size: 13px; }
+  .switches, .sw { display: flex; flex-direction: column; gap: 6px; }
+  code { font-family: var(--mono, Consolas, monospace); font-size: 12px; color: var(--gold); }
   .mod { display: inline-flex; align-items: center; gap: 7px; flex: none; color: var(--text); padding: 0; max-width: 100%; }
   button.mod:hover b { color: var(--acc); }
   .mod img, .ph { width: 18px; height: 18px; border-radius: 4px; background: var(--raise); flex: none; display: inline-block; }

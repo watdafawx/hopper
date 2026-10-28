@@ -144,6 +144,8 @@ pub struct SyncPanel {
     /// A change put back from the crash card, with its crash's time: the
     /// crash no longer names it, so the card keeps it to say it's back.
     crash_back: Option<(i64, hopper::crashdetect::Changed)>,
+    /// Configs of the crash's mods that differ from the pack's.
+    crash_configs: Vec<hopper::crashdetect::ConfigDiff>,
     /// Global datapacks and mod configs that differ from the pack, looked
     /// up after each comparison (they sit on the same slow share).
     drift: Option<hopper::configdiff::Drift>,
@@ -271,6 +273,7 @@ impl SyncPanel {
             pack_marker: None,
             crash: None,
             crash_back: None,
+            crash_configs: Vec::new(),
             drift: None,
             drift_open: false,
             drift_hidden: None,
@@ -536,11 +539,21 @@ impl SyncPanel {
         let anyway = self.store.read(cx).settings().sync_anyway.clone();
         self._task = Some(cx.spawn(async move |this, cx| {
             let root = server.root.clone();
-            let (diff, crash, server_nf, marker) = cx
+            let (diff, (crash, crash_configs), server_nf, marker) = cx
                 .background_spawn(async move {
+                    let crash = hopper::crashscan::last_crash(&server.root);
+                    // The crash's mods' configs, against the pack's: read on
+                    // the server (through Hopper Server when it has it).
+                    let configs = crash.as_ref().map_or_else(Vec::new, |c| {
+                        let panel = hopper::hopperd::locate(&server.root).and_then(Result::ok);
+                        hopper::crashdetect::config_differs(&inst.root, c, |rel| match &panel {
+                            Some((client, id, _)) => client.read_text(id, rel).ok(),
+                            None => std::fs::read_to_string(server.root.join(rel)).ok(),
+                        })
+                    });
                     (
                         rigsync::compare(&inst, &server, &anyway),
-                        hopper::crashscan::last_crash(&server.root),
+                        (crash, configs),
                         hopper::server_update::server_neoforge(&server.root),
                         hopper::server_pack_update::recorded_on(&server),
                     )
@@ -552,6 +565,7 @@ impl SyncPanel {
                 }
                 this.comparing = false;
                 this.crash = crash;
+                this.crash_configs = crash_configs;
                 cx.emit(SyncEvent::Crash);
                 if let Ok((d, _)) = &diff {
                     this.check_drift(d, cx);
@@ -1744,6 +1758,45 @@ impl SyncPanel {
             if !turn_off.is_empty() {
                 body.push(h_flex().pt_1().child(self.crash_turn_off(turn_off.clone(), turn_off_label.clone(), blocked, cx)).into_any_element());
             }
+        }
+        // A config of the crash's mods that the pack has otherwise: often the
+        // fix itself (a setting turned off in the pack for this crash, never
+        // sent to the server). Right under the title.
+        if !self.crash_configs.is_empty() {
+            let mut cfg_box = crash_view::fix_box(cx);
+            for (i, d) in self.crash_configs.iter().enumerate() {
+                let who = match c.suspects.iter().find(|s| s.mod_id == d.mod_id) {
+                    Some(s) => link(&s.file_name, &format!("cfg{i}"), cx),
+                    None => words(d.mod_id.clone()),
+                };
+                let what = match &d.setting {
+                    Some((sw, mine, theirs)) => format!("isn't the same as your pack's: {} is {mine} in the pack, {theirs} on the server.", sw.key),
+                    None => format!("isn't the same as your pack's ({}).", d.file),
+                };
+                let (src, dst) = (self.pair_header(cx).map(|(_, i)| i.root.join(&d.file)), self.server.as_ref().map(|r| r.join(&d.file)));
+                let file = d.file.clone();
+                cfg_box = cfg_box.child(
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(sentence(vec![words("The server's config for"), who, words(what)]).text_sm())
+                        .child(
+                            Button::new(ElementId::Name(format!("srv-crash-cfg:{i}").into()))
+                                .small()
+                                .outline()
+                                .icon(IconName::Upload)
+                                .label("Send config to server")
+                                .tooltip(format!("Copies {file} from the pack to the server. The server's copy goes to backups."))
+                                .disabled(blocked || src.is_none() || dst.is_none())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let (Some(src), Some(dst)) = (src.clone(), dst.clone()) {
+                                        this.run(Ops { up: vec![hopper::model::SyncOp::Copy { src, dst }], down: Vec::new() }, cx);
+                                    }
+                                })),
+                        ),
+                );
+            }
+            body.insert(1.min(body.len()), cfg_box.into_any_element());
         }
         let report = c.source.clone();
         let local_report = !remote && report.extension().is_some_and(|e| e == "txt") && report.is_file();

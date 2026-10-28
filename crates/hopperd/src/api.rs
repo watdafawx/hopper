@@ -133,6 +133,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/servers/{id}/mods", get(mods))
         .route("/api/v1/servers/{id}/crash", get(crash))
         .route("/api/v1/servers/{id}/crash/put-back", post(crash_put_back))
+        .route("/api/v1/servers/{id}/crash/switch-off", post(crash_switch_off))
         .route("/api/v1/servers/{id}/neoforge", get(neoforge))
         .route("/api/v1/servers/{id}", get(server))
         .route("/api/v1/servers/{id}/power", post(power))
@@ -590,6 +591,46 @@ async fn crash(
         .and_then(|c| c.source.strip_prefix(&e.root).ok())
         .map(|p| p.to_string_lossy().replace('\\', "/"));
     Ok(Json(json!({ "crash": c, "report": report })))
+}
+
+#[derive(serde::Deserialize)]
+struct SwitchBody {
+    file: String,
+    key: String,
+}
+
+/// Turns off the setting for the item the last crash names (`fe_seed =
+/// true` → false), keeping the mod. The config as it was goes to
+/// `.hopper-backups` first. Read again here, so only a setting this crash
+/// names can be changed this way.
+async fn crash_switch_off(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<SwitchBody>,
+) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    if e.server.state().is_alive() {
+        return Err(bad("Stop the server first: it may write its config back when it stops."));
+    }
+    let root = e.root.clone();
+    let what = format!("{} in {}", b.key, b.file);
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let c = hopper_core::crashdetect::server(&root).ok_or_else(|| anyhow::anyhow!("The server's last start didn't crash."))?;
+        let sw = c
+            .switches
+            .iter()
+            .find(|s| s.file == b.file && s.key == b.key)
+            .ok_or_else(|| anyhow::anyhow!("The crash doesn't name {} in {}.", b.key, b.file))?;
+        hopper_core::configswitch::turn_off(&root, sw)
+    })
+    .await
+    .map_err(bad)?
+    .map_err(|e| bad(format!("{e:#}")))?;
+    log::info!("{}: turned off {what} after a crash", e.name);
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(serde::Deserialize)]

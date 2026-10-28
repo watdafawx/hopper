@@ -799,6 +799,50 @@ pub fn server(root: &Path) -> Option<Crash> {
     Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true })
 }
 
+/// A config of a mod a server crash names that isn't the same as in the
+/// paired instance: one setting (the switch for the item the crash names:
+/// "fe_seed: instance false, server true"), or the whole file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConfigDiff {
+    pub mod_id: String,
+    /// The file, relative to both folders with `/` (`config/x-common.toml`).
+    pub file: String,
+    /// The setting that differs, with its value in the instance and on the
+    /// server; `None` when the files differ somewhere else.
+    pub setting: Option<(crate::configswitch::Switch, bool, bool)>,
+}
+
+/// The configs of the mods a server crash names (Certain and Likely) that
+/// differ from the paired instance's: first the settings for the item the
+/// crash names, then whole files. `server_text` reads a file of the server
+/// (relative path), there or through Hopper Server.
+pub fn config_differs(inst_root: &Path, c: &Crash, server_text: impl Fn(&str) -> Option<String>) -> Vec<ConfigDiff> {
+    let norm = |t: &str| t.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+    let mut out: Vec<ConfigDiff> = Vec::new();
+    let on = c.switches.iter().map(|s| (s, true));
+    let off = c.switched_off.iter().map(|s| (s, false));
+    for (s, server) in on.chain(off) {
+        let Some(mine) = fs::read_to_string(inst_root.join(&s.file)).ok().and_then(|t| crate::configswitch::value_in(&t, &s.key)) else {
+            continue;
+        };
+        if mine != server && !out.iter().any(|d| d.file == s.file) {
+            out.push(ConfigDiff { mod_id: s.mod_id.clone(), file: s.file.clone(), setting: Some((s.clone(), mine, server)) });
+        }
+    }
+    for s in c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.mod_id.is_empty() && !s.client_only) {
+        for rel in crate::modconfig::files_for(inst_root, std::slice::from_ref(&s.mod_id)).into_iter().take(8) {
+            if out.iter().any(|d| d.file == rel) || !crate::configdiff::safe_rel(&rel) {
+                continue;
+            }
+            let (Ok(mine), Some(theirs)) = (fs::read_to_string(inst_root.join(&rel)), server_text(&rel)) else { continue };
+            if norm(&mine) != norm(&theirs) {
+                out.push(ConfigDiff { mod_id: s.mod_id.clone(), file: rel, setting: None });
+            }
+        }
+    }
+    out
+}
+
 /// Client-only mods on a dedicated server, from what they leave in the
 /// crash report and the log's last lines before it (a client class loaded
 /// on the server, a client mixin that failed, a client class missing; see
@@ -1861,6 +1905,8 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
     const TNP_REPORT: &str = include_str!("crashdetect_fixtures/tnp-server-crash.txt");
     const TNP_LOG: &str = include_str!("crashdetect_fixtures/tnp-server-latest.log");
     const TNP_FML: &str = include_str!("crashdetect_fixtures/tnp-fml-crash.txt");
+    const TNP_SERVER_CFG: &str = include_str!("crashdetect_fixtures/tnp-server-mysticalagricultureplus-common.toml");
+    const TNP_INSTANCE_CFG: &str = include_str!("crashdetect_fixtures/tnp-instance-mysticalagricultureplus-common.toml");
 
     /// TNP Limitless 8's server, 2026-10-28, cut down: Mystical Agriculture
     /// Plus failed while the server started. While it shut down (after the
@@ -1874,6 +1920,9 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
             ("smallships-neoforge-1.21.1-2.0.2.jar", "smallships", "Small Ships"),
         ];
         let root = server_root("tnp", &mods, ("crash-2026-10-28_22.47.24-server.txt", TNP_REPORT), TNP_LOG);
+        let cfg = "config/mysticalagricultureplus-common.toml";
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join(cfg), TNP_SERVER_CFG).unwrap();
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
         fs::File::options().write(true).open(root.join("logs/latest.log")).unwrap().set_modified(later).unwrap();
         let c = server(&root).expect("the log names the report: this run's crash");
@@ -1888,6 +1937,24 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         assert!(c.headline.contains("fe_seeds does not exist"));
         assert!(!before_crash(TNP_LOG).contains("smallships") && TNP_LOG.contains("smallships"));
         assert!(!loading_lines(&root.join("logs/latest.log")).contains("smallships"));
+
+        // The player turned the FE Seed off in the pack for this crash; the
+        // server still has it on.
+        let keys: Vec<&str> = c.switches.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, ["fe_seed"]);
+        let inst = root.with_file_name(format!("{}-instance", root.file_name().unwrap().to_string_lossy()));
+        let _ = fs::remove_dir_all(&inst);
+        fs::create_dir_all(inst.join("config")).unwrap();
+        fs::write(inst.join(cfg), TNP_INSTANCE_CFG).unwrap();
+        let d = config_differs(&inst, &c, |rel| fs::read_to_string(root.join(rel)).ok());
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].file, cfg);
+        let (sw, mine, theirs) = d[0].setting.clone().expect("the setting, not just the file");
+        assert_eq!((sw.key.as_str(), mine, theirs), ("fe_seed", false, true));
+        // The same in both: nothing to say.
+        fs::write(inst.join(cfg), TNP_SERVER_CFG).unwrap();
+        assert!(config_differs(&inst, &c, |rel| fs::read_to_string(root.join(rel)).ok()).is_empty());
+        let _ = fs::remove_dir_all(&inst);
 
         // Started again since: a new log that doesn't name the report.
         fs::write(root.join("logs/latest.log"), "[29Oct2026 10:00:00.000] [main/INFO] [x/]: Starting\n").unwrap();
