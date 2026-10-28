@@ -1759,6 +1759,9 @@ impl SyncPanel {
                 body.push(h_flex().pt_1().child(self.crash_turn_off(turn_off.clone(), turn_off_label.clone(), blocked, cx)).into_any_element());
             }
         }
+        if let Some(n) = c.lingered_note() {
+            body.push(widgets::caption(n, cx).text_xs().into_any_element());
+        }
         // A config of the crash's mods that the pack has otherwise: often the
         // fix itself (a setting turned off in the pack for this crash, never
         // sent to the server). Right under the title.

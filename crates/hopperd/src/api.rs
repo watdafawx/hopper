@@ -590,7 +590,9 @@ async fn crash(
         .as_ref()
         .and_then(|c| c.source.strip_prefix(&e.root).ok())
         .map(|p| p.to_string_lossy().replace('\\', "/"));
-    Ok(Json(json!({ "crash": c, "report": report })))
+    // Java kept running after the crash until the watchdog ended it.
+    let lingered = c.as_ref().and_then(|c| c.lingered_note());
+    Ok(Json(json!({ "crash": c, "report": report, "lingered": lingered })))
 }
 
 #[derive(serde::Deserialize)]

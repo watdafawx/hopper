@@ -18,6 +18,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const MAX_LINES: usize = 2000;
 /// How long a graceful stop waits for the world to save before killing.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long Java may keep running once the server has stopped and saved its
+/// worlds. Mods' threads that never end (Distant Horizons' timers, say) can
+/// keep it alive for good; past this it is ended.
+pub const LINGER_AFTER_STOP: Duration = Duration::from_secs(60);
 
 /// Where a server is in its life.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +55,13 @@ pub struct Tracker {
     /// Lines pushed since this tracker was made, including ones dropped
     /// from `lines`, so a reader can ask for only the lines after its last.
     pub total: u64,
+    /// The server said "Stopping server" (asked to, or after a crash).
+    pub stopping: bool,
+    /// The server wrote a crash report this run.
+    pub crashed: bool,
+    /// When the stopping server said its worlds were saved: all that's left
+    /// is for Java to exit.
+    pub saved_at: Option<Instant>,
 }
 
 impl Tracker {
@@ -73,7 +84,17 @@ impl Tracker {
             Some(LogEvent::Version(v)) => self.version = v,
             Some(LogEvent::PortInUse) => self.port_in_use = true,
             Some(LogEvent::EulaNotAccepted) => self.eula_missing = true,
-            Some(LogEvent::Stopping) | None => {}
+            Some(LogEvent::Stopping) => self.stopping = true,
+            None => {}
+        }
+        if crate::crashdetect::CRASH_SAVED.iter().any(|m| line.contains(m)) {
+            self.crashed = true;
+        }
+        // 1.17+ says "All dimensions are saved" once; older versions "All
+        // chunks are saved" per world, the last one at the end. A `save-all
+        // flush` says it too, so only after "Stopping server".
+        if self.stopping && (line.contains("All dimensions are saved") || line.contains("All chunks are saved")) {
+            self.saved_at = Some(Instant::now());
         }
         if self.lines.len() >= MAX_LINES {
             self.lines.pop_front();
@@ -136,6 +157,8 @@ struct Shared {
     root: PathBuf,
     /// Bumped per start, so an old run's threads leave a new run alone.
     run: u64,
+    /// [`LINGER_AFTER_STOP`], shorter in tests.
+    linger: Option<Duration>,
 }
 
 impl Shared {
@@ -244,6 +267,11 @@ impl LocalServer {
         let mut g = self.lock();
         reap(&mut g);
         g.proc.as_ref().and(g.pid)
+    }
+
+    /// How long Java may run on after the server stopped (tests).
+    pub fn set_linger(&self, d: Duration) {
+        self.lock().linger = Some(d);
     }
 
     pub fn started_at(&self) -> Option<SystemTime> {
@@ -467,8 +495,13 @@ impl LocalServer {
                 }
                 let mut g = shared.lock().unwrap_or_else(|e| e.into_inner());
                 if g.run == run {
-                    log::warn!("server did not stop in {timeout:?}; killing it");
-                    g.note("[Hopper] The server didn't stop in time; ending it.");
+                    if g.tracker.saved_at.is_some() {
+                        log::warn!("{}: Java kept running after the server stopped; killing it", g.root.display());
+                        g.note(LINGER_NOTE);
+                    } else {
+                        log::warn!("server did not stop in {timeout:?}; killing it");
+                        g.note("[Hopper] The server didn't stop in time; ending it.");
+                    }
                     kill_locked(&mut g);
                 }
             })?;
@@ -582,8 +615,29 @@ fn reap(g: &mut Shared) {
 }
 
 fn kill_locked(g: &mut Shared) {
-    if let Some(p) = g.proc.as_mut() {
+    if g.proc.is_some() {
         g.stop_requested = true;
+    }
+    end_process(g);
+}
+
+/// What the console says when Java is ended for running on after the stop.
+const LINGER_NOTE: &str = "[Hopper] Java kept running after the server stopped; ended it.";
+
+/// Ends Java when it runs on after the server stopped and saved its worlds.
+/// A stop that followed a crash stays a crash (the crash card, a crash
+/// restart); any other stop counts as asked for, even one typed in the game.
+fn end_lingering(g: &mut Shared) {
+    log::warn!("{}: Java kept running after the server stopped; ending it", g.root.display());
+    g.note(LINGER_NOTE);
+    if !g.tracker.crashed {
+        g.stop_requested = true;
+    }
+    end_process(g);
+}
+
+fn end_process(g: &mut Shared) {
+    if let Some(p) = g.proc.as_mut() {
         #[cfg(windows)]
         p.kill();
         #[cfg(not(windows))]
@@ -628,6 +682,12 @@ fn tail(path: PathBuf, shared: Arc<Mutex<Shared>>, run: u64) {
                 }
                 pending.drain(..start);
                 reap(&mut g);
+                let linger = g.linger.unwrap_or(LINGER_AFTER_STOP);
+                if g.proc.is_some() && g.tracker.saved_at.is_some_and(|t| t.elapsed() >= linger) {
+                    end_lingering(&mut g);
+                    // Once more, to read the note it left in the console file.
+                    continue;
+                }
                 if g.proc.is_none() && !got {
                     if !pending.is_empty() {
                         g.tracker.push(String::from_utf8_lossy(&pending).trim_end_matches('\r').to_string());
@@ -822,6 +882,84 @@ mod tests {
         assert_eq!(s.state(), ServerState::Stopped);
         assert!(!dir.join(RUN_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stand-in server that prints `lines` and then never exits, like Java
+    /// held open by a mod's threads after the server stopped.
+    #[cfg(windows)]
+    fn hanging(tag: &str, lines: &[&str]) -> (LocalServer, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("hopper-host-linger-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = LocalServer::new(&dir);
+        s.set_linger(Duration::from_secs(2));
+        let print: String = lines.iter().map(|l| format!("[Console]::Out.WriteLine('{l}'); ")).collect();
+        let script = format!("{print}[Console]::Out.Flush(); Start-Sleep -Seconds 120");
+        s.spawn(&Launch { note: None, java: "powershell".into(), args: vec!["-NoProfile".into(), "-Command".into(), script] })
+            .unwrap();
+        (s, dir)
+    }
+
+    #[cfg(windows)]
+    fn wait_dead(s: &LocalServer, limit: Duration) -> bool {
+        let end = Instant::now() + limit;
+        while s.state().is_alive() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        !s.state().is_alive()
+    }
+
+    const DONE: &str = "[10:00:00] [Server thread/INFO]: Done (1.0s)! For help, type \"help\"";
+    const STOPPING: &str = "[10:01:00] [Server thread/INFO]: Stopping server";
+    const SAVED: &str = "[10:01:01] [Server thread/INFO]: ThreadedAnvilChunkStorage: All dimensions are saved";
+
+    /// Stopped and saved, but Java runs on: ended after the wait, as a stop.
+    #[cfg(windows)]
+    #[test]
+    fn java_left_running_after_the_stop_is_ended() {
+        let (s, dir) = hanging("stop", &[DONE, STOPPING, SAVED]);
+        assert!(wait_dead(&s, Duration::from_secs(20)), "{:?}", s.console());
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(s.state(), ServerState::Stopped);
+        assert!(s.console().iter().any(|l| l == LINGER_NOTE), "{:?}", s.console());
+        assert!(!dir.join(RUN_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After a crash the same, but it stays a crash (card, crash restart).
+    #[cfg(windows)]
+    #[test]
+    fn java_left_running_after_a_crash_is_ended_as_a_crash() {
+        let crash = "[10:00:59] [Server thread/ERROR]: This crash report has been saved to: crash-reports\\crash-x-server.txt";
+        let (s, dir) = hanging("crash", &[DONE, crash, STOPPING, SAVED]);
+        assert!(wait_dead(&s, Duration::from_secs(20)), "{:?}", s.console());
+        assert_eq!(s.state(), ServerState::Crashed(Some(1)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `save-all flush` says the worlds are saved too: a running server.
+    #[cfg(windows)]
+    #[test]
+    fn a_save_while_running_ends_nothing() {
+        let (s, dir) = hanging("save", &[DONE, SAVED]);
+        assert!(wait_for(&s, SAVED), "{:?}", s.console());
+        assert!(!wait_dead(&s, Duration::from_secs(4)));
+        assert_eq!(s.state(), ServerState::Running);
+        s.kill().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_tracker_sees_the_stop_save_and_crash() {
+        let mut t = Tracker::default();
+        t.push(DONE.into());
+        t.push(SAVED.into());
+        assert!(t.saved_at.is_none(), "a save-all while running");
+        t.push(STOPPING.into());
+        assert!(t.stopping && !t.crashed);
+        t.push("[x] [Server thread/INFO]: ThreadedAnvilChunkStorage (world): All chunks are saved".into());
+        assert!(t.saved_at.is_some(), "older versions' line");
+        t.push("[x] [Server thread/FATAL]: Preparing crash report with UUID 1234".into());
+        assert!(t.crashed);
     }
 
     fn wait_for(s: &LocalServer, line: &str) -> bool {

@@ -1,0 +1,109 @@
+---- Minecraft Crash Report ----
+
+// What is this thing
+Please make sure this issue is not caused by Sable before reporting it to other mod authors.
+If you cannot reproduce it without Sable, file a report on the issue tracker
+https://github.com/ryanhcode/sable/issues
+
+// Hey, that tickles! Hehehe!
+
+Time: 2026-10-28 23:11:23
+Description: Watching Server
+
+java.lang.Error: ServerHangWatchdog detected that a single server tick took 400001664.00 seconds (should be max 0.05)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.dedicated.ServerWatchdog.run(ServerWatchdog.java:52) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,re:classloading,pl:mixin:APP:c2me-base.mixins.json:report.MixinDedicatedServerWatchdog from mod c2me_base,pl:mixin:A}
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Server Watchdog
+Stacktrace:
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.dedicated.ServerWatchdog.run(ServerWatchdog.java:52) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,re:classloading,pl:mixin:APP:c2me-base.mixins.json:report.MixinDedicatedServerWatchdog from mod c2me_base,pl:mixin:A}
+-- Thread trace dump (obtained on a best-effort basis) --
+Details:
+Stacktrace:
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.dedicated.ServerWatchdog.run(ServerWatchdog.java:52) ~[server-1.21.1-20240808.144430-srg.jar%231100!/:?] {re:mixin,re:classloading,pl:mixin:APP:c2me-base.mixins.json:report.MixinDedicatedServerWatchdog from mod c2me_base,pl:mixin:A}
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+
+
+"Server console handler" daemon prio=8 Id=559 RUNNABLE (in native)
+	at java.base@21.0.11/java.io.FileInputStream.readBytes(Native Method)
+	at java.base@21.0.11/java.io.FileInputStream.read(FileInputStream.java:287)
+	at java.base@21.0.11/java.io.BufferedInputStream.read1(BufferedInputStream.java:345)
+	at java.base@21.0.11/java.io.BufferedInputStream.implRead(BufferedInputStream.java:420)
+	at java.base@21.0.11/java.io.BufferedInputStream.read(BufferedInputStream.java:399)
+	at java.base@21.0.11/sun.nio.cs.StreamDecoder.readBytes(StreamDecoder.java:350)
+	at java.base@21.0.11/sun.nio.cs.StreamDecoder.implRead(StreamDecoder.java:393)
+	at java.base@21.0.11/sun.nio.cs.StreamDecoder.lockedRead(StreamDecoder.java:217)
+	at java.base@21.0.11/sun.nio.cs.StreamDecoder.read(StreamDecoder.java:171)
+	at java.base@21.0.11/java.io.InputStreamReader.read(InputStreamReader.java:188)
+	at java.base@21.0.11/java.io.BufferedReader.fill(BufferedReader.java:160)
+	at java.base@21.0.11/java.io.BufferedReader.implReadLine(BufferedReader.java:370)
+	at java.base@21.0.11/java.io.BufferedReader.readLine(BufferedReader.java:347)
+	at java.base@21.0.11/java.io.BufferedReader.readLine(BufferedReader.java:436)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.dedicated.DedicatedServer$1.run(DedicatedServer.java:113)
+"DH-ChunkSaveIgnoreTimer" daemon prio=5 Id=609 WAITING on java.util.TaskQueue@72154d35
+	at java.base@21.0.11/java.lang.Object.wait0(Native Method)
+	-  waiting on java.util.TaskQueue@72154d35
+	at java.base@21.0.11/java.lang.Object.wait(Object.java:366)
+	at java.base@21.0.11/java.lang.Object.wait(Object.java:339)
+	at java.base@21.0.11/java.util.TimerThread.mainLoop(Timer.java:537)
+	at java.base@21.0.11/java.util.TimerThread.run(Timer.java:516)
+
+
+"DH-Chunk Update Queue [minecraft:overworld] Thread[0]" prio=5 Id=610 TIMED_WAITING
+	at java.base@21.0.11/java.lang.Thread.sleep0(Native Method)
+	at java.base@21.0.11/java.lang.Thread.sleep(Thread.java:509)
+	at TRANSFORMER/distanthorizons@3.3.3/com.seibel.distanthorizons.core.api.internal.chunkUpdating.ChunkUpdateQueueManager.runQueueingLoop(ChunkUpdateQueueManager.java:249)
+	at TRANSFORMER/distanthorizons@3.3.3/com.seibel.distanthorizons.core.api.internal.chunkUpdating.ChunkUpdateQueueManager$$Lambda/0x0000025a113e93f0.run(Unknown Source)
+	at java.base@21.0.11/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base@21.0.11/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base@21.0.11/java.lang.Thread.runWith(Thread.java:1596)
+	at java.base@21.0.11/java.lang.Thread.run(Thread.java:1583)
+
+	Number of locked synchronizers = 1
+	- java.util.concurrent.ThreadPoolExecutor$Worker@3004272b
+
+
+"DH-ChunkSaveIgnoreTimer" daemon prio=5 Id=611 WAITING on java.util.TaskQueue@6d9098bd
+	at java.base@21.0.11/java.lang.Object.wait0(Native Method)
+	-  waiting on java.util.TaskQueue@6d9098bd
+	at java.base@21.0.11/java.lang.Object.wait(Object.java:366)
+	at java.base@21.0.11/java.lang.Object.wait(Object.java:339)
+	at java.base@21.0.11/java.util.TimerThread.mainLoop(Timer.java:537)
+	at java.base@21.0.11/java.util.TimerThread.run(Timer.java:516)
+
+
+"DH-World Gen Progress Updater Thread[0]" daemon prio=5 Id=613 WAITING on java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject@76de9efe
+	at java.base@21.0.11/jdk.internal.misc.Unsafe.park(Native Method)
+	-  waiting on java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject@76de9efe
+	at java.base@21.0.11/java.util.concurrent.locks.LockSupport.park(LockSupport.java:371)
+	at java.base@21.0.11/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionNode.block(AbstractQueuedSynchronizer.java:519)
+	at java.base@21.0.11/java.util.concurrent.ForkJoinPool.unmanagedBlock(ForkJoinPool.java:3778)
+	at java.base@21.0.11/java.util.concurrent.ForkJoinPool.managedBlock(ForkJoinPool.java:3723)
+	at java.base@21.0.11/java.util.concurrent.locks.AbstractQueuedSynchronizer$ConditionObject.await(AbstractQueuedSynchronizer.java:1712)
+	at java.base@21.0.11/java.util.concurrent.LinkedBlockingQueue.take(LinkedBlockingQueue.java:435)
+	at java.base@21.0.11/java.util.concurrent.ThreadPoolExecutor.getTask(ThreadPoolExecutor.java:1070)
+	at java.base@21.0.11/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1130)
+	at java.base@21.0.11/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base@21.0.11/java.lang.Thread.runWith(Thread.java:1596)
+	at java.base@21.0.11/java.lang.Thread.run(Thread.java:1583)
+
+
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Minecraft Version ID: 1.21.1
+	BetterCompatibilityChecker: Modpack Name: LL8 | Modpack Version: - v1.78.0
+	AllTheLeaks: 
+		Events:
+		  Server Stopped: 1
+		Explicit GC Last Run: Disabled
+		Note: Values below are not accurate due to -XX:+DisableExplicitGC arguments you are using
+		Leaking objects:
+		  Level:
+		    ServerLevel: 50

@@ -21,6 +21,7 @@
   const settled = $derived(server.state === 'crashed' || server.state === 'stopped');
   let crash = $state(null);
   let report = $state(null);
+  let lingered = $state(null);
   let mods = $state([]);
   let checking = $state(false);
   let busy = $state(false);
@@ -39,6 +40,7 @@
       if (crash?.when !== r.crash?.when) back = null;
       crash = r.crash;
       report = r.report;
+      lingered = r.lingered || null;
       mods = m;
     } catch {
       if (n === seq) crash = null;
@@ -261,6 +263,7 @@
       {#if switches.length || switchedOff.length}<div class="switches">{@render switchRows()}</div>{/if}
     {/if}
 
+    {#if lingered}<div class="tiny muted">{lingered}</div>{/if}
     {#if report || crash.source}
       <div class="row acts share"><button class="btn sm" onclick={() => onShare(report || crash.source)}><Share2 size={13} />Share on mclo.gs</button></div>
     {/if}

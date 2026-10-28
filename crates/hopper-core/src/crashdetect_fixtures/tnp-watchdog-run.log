@@ -1,0 +1,7 @@
+[28Oct2026 23:04:16.596] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Done (52.246s)! For help, type "help"
+[28Oct2026 23:04:39.402] [Server thread/FATAL] [net.neoforged.neoforge.common.NeoForgeMod/]: Preparing crash report with UUID 734c6760-1489-4053-b22f-d40177be5b50
+[28Oct2026 23:04:41.210] [Server thread/ERROR] [net.minecraft.server.MinecraftServer/]: This crash report has been saved to: G:\Minecraft\packs\TNP-LL8\crash-reports\crash-2026-10-28_23.04.39-server.txt
+[28Oct2026 23:04:41.236] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: Stopping server
+[28Oct2026 23:04:44.562] [Server thread/INFO] [uk.co.extraspecialstudio.calml_the_leaks_ctl.CalmlTheLeaks/]: [CTL] Server stopped. CTL state cleared.
+[28Oct2026 23:11:23.010] [Server Watchdog/FATAL] [net.neoforged.neoforge.common.NeoForgeMod/]: Preparing crash report with UUID 2162dddc-07ad-4dcd-a5c9-f71e33f62ae6
+[28Oct2026 23:11:23.012] [Server Watchdog/INFO] [STDOUT/]: [net.minecraft.server.Bootstrap:realStdoutPrintln:135]: Crash report:
