@@ -942,7 +942,7 @@ impl BrowseView {
         let urls: Vec<String> = m
             .screenshots
             .iter()
-            .map(|s| s.thumbnail_url.clone())
+            .map(|s| s.thumb().to_string())
             .chain(m.icon().map(str::to_string))
             .collect();
         self.store
@@ -2428,7 +2428,7 @@ impl BrowseView {
             .iter()
             .enumerate()
             .filter_map(|(i, s)| {
-                let p = store.image(&s.thumbnail_url)?.to_path_buf();
+                let p = store.image(s.thumb())?.to_path_buf();
                 let (gallery, store_e) = (gallery.clone(), store_e.clone());
                 Some(
                     div()

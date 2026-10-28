@@ -66,11 +66,11 @@ pub fn resized(src: &Path, width: u32) -> anyhow::Result<PathBuf> {
     if out.is_file() {
         return Ok(out);
     }
-    let (w, _) = image::image_dimensions(src)?;
+    let (w, _) = image::ImageReader::open(src)?.with_guessed_format()?.into_dimensions()?;
     if w <= width {
         return Ok(src.to_path_buf());
     }
-    let img = image::open(src)?.thumbnail(width, u32::MAX);
+    let img = open(src)?.thumbnail(width, u32::MAX);
     let mut bytes = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)?;
     write_atomic(&out, &bytes)?;
@@ -128,7 +128,7 @@ pub fn thumbnail(src: &Path, max: u32) -> anyhow::Result<PathBuf> {
     if out.is_file() {
         return Ok(out);
     }
-    let img = image::open(src)?.thumbnail(max, max).to_rgb8();
+    let img = open(src)?.thumbnail(max, max).to_rgb8();
     let mut bytes = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 85).encode_image(&img)?;
     write_atomic(&out, &bytes)?;
@@ -155,7 +155,7 @@ pub fn blurred(src: &Path) -> anyhow::Result<PathBuf> {
     if out.is_file() {
         return Ok(out);
     }
-    let img = blur_image(&image::open(src)?);
+    let img = blur_image(&open(src)?);
     let mut bytes = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 88).encode_image(&img)?;
     write_atomic(&out, &bytes)?;
@@ -210,11 +210,17 @@ pub fn still(path: &Path) -> anyhow::Result<PathBuf> {
     if out.is_file() {
         return Ok(out);
     }
-    let img = image::open(path)?;
+    let img = open(path)?;
     let mut bytes = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)?;
     write_atomic(&out, &bytes)?;
     Ok(out)
+}
+
+/// Decodes the image at `path` by what its bytes are, not its name: some
+/// CDNs serve PNGs under a `.webp` name, which the WebP decoder rejects.
+fn open(path: &Path) -> anyhow::Result<image::DynamicImage> {
+    Ok(image::ImageReader::open(path)?.with_guessed_format()?.decode()?)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -270,6 +276,20 @@ mod tests {
         assert!(left[0] > 200 && left[2] < 60, "{left:?}");
         // The seam is a blend, not a hard edge.
         assert!(mid[0] > 40 && mid[2] > 40, "{mid:?}");
+    }
+
+    #[test]
+    fn a_png_named_webp_still_decodes() {
+        let dir = std::env::temp_dir().join(format!("hopper-misnamed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("real.png");
+        let frame = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 255, 0, 255]));
+        image::DynamicImage::ImageRgba8(frame).save(&png).unwrap();
+        let webp = dir.join("icon.webp");
+        std::fs::rename(&png, &webp).unwrap();
+        let still = still(&webp).unwrap();
+        assert_eq!(image::open(&still).unwrap().width(), 8);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -253,7 +253,7 @@ fn look_up(link: &PackLink) -> anyhow::Result<Value> {
     };
     Ok(json!({
         "pack": {
-            "name": m.name, "icon": m.logo.as_ref().map(|l| l.thumbnail_url.clone()).unwrap_or_default(),
+            "name": m.name, "icon": m.icon().unwrap_or_default(),
             "source": link.source, "project": link.project, "page": page,
             "current": version_json(&current, mr),
             // A server pack update needs CurseForge's server packs.

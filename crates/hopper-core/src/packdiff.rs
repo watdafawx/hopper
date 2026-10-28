@@ -1024,8 +1024,8 @@ fn cf_mod_changes(
     let logo = |id: u64| {
         projects
             .get(&id)
-            .and_then(|m| m.logo.as_ref())
-            .map(|l| l.thumbnail_url.clone())
+            .and_then(|m| m.icon())
+            .map(str::to_string)
             .unwrap_or_default()
     };
     for f in files {

@@ -586,7 +586,7 @@ async fn pack_search(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
             .iter()
             .map(|m| json!({
                 "id": m.id.to_string(), "name": m.name, "summary": m.summary, "downloads": m.download_count,
-                "icon": m.logo.as_ref().map(|l| l.thumbnail_url.clone()).unwrap_or_default(),
+                "icon": m.icon().unwrap_or_default(),
                 "author": m.authors.first().map(|a| a.name.clone()).unwrap_or_default(),
                 "source": if use_mr { "modrinth" } else { "curseforge" },
                 "server_files": if use_mr { None } else { Some(browse::curse_server_files(m).is_some()) },

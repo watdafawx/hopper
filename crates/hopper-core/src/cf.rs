@@ -173,12 +173,16 @@ pub struct Screenshot {
     pub url: String,
 }
 
+impl Screenshot {
+    /// The small copy, else the full image (the thumbnail can be empty).
+    pub fn thumb(&self) -> &str {
+        if self.thumbnail_url.is_empty() { &self.url } else { &self.thumbnail_url }
+    }
+}
+
 impl Mod {
     pub fn icon(&self) -> Option<&str> {
-        self.logo
-            .as_ref()
-            .map(|l| l.thumbnail_url.as_str())
-            .filter(|u| !u.is_empty())
+        self.logo.as_ref().and_then(Logo::icon)
     }
 
     pub fn author(&self) -> &str {
@@ -285,6 +289,14 @@ impl Mod {
 pub struct Logo {
     pub thumbnail_url: String,
     pub url: String,
+}
+
+impl Logo {
+    /// The small copy, else the full image. CurseForge leaves the
+    /// thumbnail empty for some animated logos (Applied Energistics 2).
+    pub fn icon(&self) -> Option<&str> {
+        [&self.thumbnail_url, &self.url].into_iter().map(String::as_str).find(|u| !u.is_empty())
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -1178,6 +1190,21 @@ pub fn fetch_range(url: &str, start: u64, end: u64) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_logo_thumbnail_falls_back_to_the_full_image() {
+        // Applied Energistics 2's animated logo, as the API returns it.
+        let m: Mod = serde_json::from_str(
+            r#"{"logo":{"thumbnailUrl":"","url":"https://media.forgecdn.net/avatars/1025/127/638548475358792693.webp"}}"#,
+        )
+        .unwrap();
+        assert_eq!(m.icon(), Some("https://media.forgecdn.net/avatars/1025/127/638548475358792693.webp"));
+        let m: Mod = serde_json::from_str(r#"{"logo":{"thumbnailUrl":"https://t/x.png","url":"https://u/x.png"}}"#).unwrap();
+        assert_eq!(m.icon(), Some("https://t/x.png"));
+        assert_eq!(Mod::default().icon(), None);
+        let s = Screenshot { url: "https://u/s.png".into(), ..Default::default() };
+        assert_eq!(s.thumb(), "https://u/s.png");
+    }
 
     #[test]
     fn side_from_environment_tags() {

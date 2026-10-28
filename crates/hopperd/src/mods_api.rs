@@ -570,7 +570,7 @@ async fn search(
             .iter()
             .map(|m| json!({
                 "id": id_str(m.id), "name": m.name, "summary": m.summary, "downloads": m.download_count,
-                "icon": m.logo.as_ref().map(|l| l.thumbnail_url.clone()).unwrap_or_default(),
+                "icon": m.icon().unwrap_or_default(),
                 "author": m.authors.first().map(|a| a.name.clone()).unwrap_or_default(),
                 "installed": have.contains(&m.id),
             }))

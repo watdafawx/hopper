@@ -1550,14 +1550,22 @@ impl Store {
                     // Animated icons show their first frame: GPUI redraws the
                     // whole window for every GIF frame on screen. A width
                     // in the key (`#w=156`) scales the copy down to it.
+                    // A still or scaled copy that fails falls back to the
+                    // downloaded file, so something shows rather than nothing.
                     let (base, width) = hopper::imgcache::split_width(&url);
                     let path = hopper::imgcache::fetch(base)
-                        .and_then(|p| hopper::imgcache::still(&p).or(Ok(p)))
-                        .and_then(|p| match width {
-                            Some(w) => hopper::imgcache::resized(&p, w),
-                            None => Ok(p),
+                        .map(|p| {
+                            let p = hopper::imgcache::still(&p)
+                                .inspect_err(|e| warn_once(&url, "still frame", e))
+                                .unwrap_or(p);
+                            match width {
+                                Some(w) => hopper::imgcache::resized(&p, w)
+                                    .inspect_err(|e| warn_once(&url, "resize", e))
+                                    .unwrap_or(p),
+                                None => p,
+                            }
                         })
-                        .inspect_err(|e| log::debug!("image {url}: {e:#}"))
+                        .inspect_err(|e| warn_once(&url, "download", e))
                         .ok();
                     if tx.send(Msg::Image { url, path }).is_err() {
                         return;
@@ -3376,3 +3384,13 @@ pub struct JobTicks;
 
 /// Notified when a translation finishes (see `Store::tr_tick`).
 pub struct TrTick;
+
+/// Logs an image that failed at warn, once per URL: the list asks for the
+/// same icon again on every scroll.
+fn warn_once(url: &str, step: &str, e: &anyhow::Error) {
+    static SEEN: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.get_or_insert_with(Default::default).insert(format!("{step}|{url}")) {
+        log::warn!("image {url}: {step} failed: {e:#}");
+    }
+}
