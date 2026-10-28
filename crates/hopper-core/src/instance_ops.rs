@@ -639,6 +639,15 @@ fn mcmeta_description(v: &serde_json::Value) -> String {
     strip_formatting(&text(&v["pack"]["description"]))
 }
 
+/// `path` as it is when switched on ("x.zip" for "x.zip.disabled"): what
+/// a pack is known by, so turning it off or on keeps what it was found to be.
+pub fn enabled_path(path: &Path) -> PathBuf {
+    match path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".disabled")) {
+        Some(on) => path.with_file_name(on),
+        None => path.to_path_buf(),
+    }
+}
+
 /// Packs in a folder with their names, descriptions and icons.
 pub fn pack_files(dir: &Path) -> Vec<PackFile> {
     use std::io::Read;
@@ -669,7 +678,7 @@ pub fn pack_files(dir: &Path) -> Vec<PackFile> {
                     let _ = e.read_to_string(&mut t);
                     description = mcmeta_description(&serde_json::from_str(&t).unwrap_or_default());
                 }
-                let key = sha1_smol::Sha1::from(format!("{}|{size}|{modified}", path.display()))
+                let key = sha1_smol::Sha1::from(format!("{}|{size}|{modified}", enabled_path(&path).display()))
                     .hexdigest();
                 let png = cache.join(format!("{key}.png"));
                 if png.exists() {
@@ -682,7 +691,7 @@ pub fn pack_files(dir: &Path) -> Vec<PackFile> {
                 }
             }
             let file = path.file_name().unwrap_or_default().to_string_lossy();
-            let name = strip_formatting(file.trim_end_matches(".zip"));
+            let name = strip_formatting(file.trim_end_matches(".disabled").trim_end_matches(".zip"));
             PackFile {
                 path,
                 name,
@@ -1004,6 +1013,8 @@ mod tests {
 /// What to search for a pack by: its file name without versions
 /// ("ExtraDataModels-1.21-4.3" → "ExtraDataModels").
 pub fn pack_search_name(file: &str) -> String {
+    // A pack switched off is the same pack.
+    let file = file.strip_suffix(".disabled").unwrap_or(file);
     let stem = file
         .strip_suffix(".zip")
         .or_else(|| file.strip_suffix(".jar"))
@@ -1184,6 +1195,7 @@ pub fn loose_pack_versions(
 
 fn pack_version(inst: &Instance, path: &Path, m: &PackMatch) -> PackVersion {
     let files = crate::source::files(m.project.id, &inst.game_version, crate::cf::Loader::Any).unwrap_or_default();
+    let path = enabled_path(path);
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let installed = m.file.clone().or_else(|| files.iter().find(|f| f.file_name == name).cloned());
     let best = files.iter().find(|f| f.release_type == 1).or(files.first());
@@ -1226,5 +1238,20 @@ mod pack_name_tests {
         assert_eq!(pack_search_name("tnp_data"), "tnp data");
         assert_eq!(pack_search_name("Better Trades [1.21.1-1.3.0].zip"), "Better Trades");
     }
+
+    /// A pack switched off (renamed to .disabled) is looked up and keyed
+    /// as the same pack, so it keeps its icon, author and link.
+    #[test]
+    fn disabled_is_the_same_pack() {
+        use super::enabled_path;
+        use std::path::Path;
+        assert_eq!(pack_search_name("Pretty X Smart Pipez.zip.disabled"), "Pretty X Smart Pipez");
+        assert_eq!(pack_search_name("Pretty X Smart Pipez.zip.disabled"), pack_search_name("Pretty X Smart Pipez.zip"));
+        let dir = Path::new("config/paxi/resourcepacks");
+        assert_eq!(enabled_path(&dir.join("a b.zip.disabled")), dir.join("a b.zip"));
+        assert_eq!(enabled_path(&dir.join("a b.zip")), dir.join("a b.zip"));
+        assert_eq!(enabled_path(&dir.join("tnp_resources")), dir.join("tnp_resources"));
+    }
 }
+
 

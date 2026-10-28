@@ -22,11 +22,13 @@ pub struct Found {
 
 type Key = (PathBuf, u64, i64);
 
-/// By (path, size, modified): `None` when neither site has it.
+/// By (path as switched on, size, modified): `None` when neither site has
+/// it. Turning a pack off renames it (size and date stay), so it keeps
+/// what it was found to be.
 static FOUND: Mutex<Option<HashMap<Key, Option<Found>>>> = Mutex::new(None);
 
 fn key(p: &PackFile) -> Key {
-    (p.path.clone(), p.size, p.modified)
+    (instance_ops::enabled_path(&p.path), p.size, p.modified)
 }
 
 /// What `p` was found to be: `None` before it's looked up, `Some(None)`
