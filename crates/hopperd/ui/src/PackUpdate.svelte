@@ -59,6 +59,9 @@
   let take = $state(new Set());
   let bulk = $state('pack');
   let keep = $state(new Set());
+  // Mods on the server's own versions go to the pack's too.
+  let resetVersions = $state(false);
+  let openVersions = $state(false);
   let section = $state(null);
   let filter = $state(0);
   let query = $state('');
@@ -133,7 +136,24 @@
   }
 
   // ---- the plan ----
-  const mods = $derived(plan?.mods || []);
+  const heldVersions = $derived(plan?.kept_versions || []);
+  const mods = $derived([...(plan?.mods || []), ...(resetVersions ? heldVersions : [])]);
+  /** "6.2.4" from "GeOre-1.21.1-6.2.4.jar" (the part after the shared name). */
+  function versionOf(from, to) {
+    const a = from.replace(/\.disabled$/i, '').replace(/\.jar$/i, '');
+    const b = to.replace(/\.jar$/i, '');
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    while (i > 0 && !/[-_ ]/.test(a[i - 1])) i--;
+    return [a.slice(i), b.slice(i)];
+  }
+  const versionsNote = $derived.by(() => {
+    const some = heldVersions.slice(0, 2).map((m) => { const [y, p] = versionOf(m.from, m.to); return `${m.name} ${y} (pack ${p})`; }).join(', ');
+    const more = heldVersions.length > 2 ? '…' : '';
+    return resetVersions
+      ? `They change to the pack's versions: ${some}${more}. The old jars go to .hopper-backups.`
+      : `They stay as they are: ${some}${more}.`;
+  });
   const files = $derived(plan?.files || []);
   const conflicts = $derived(files.filter((f) => f.action === 'Conflict').map((f) => f.rel));
   const quick = $derived(plan && !plan.base_known);
@@ -151,6 +171,8 @@
     const n = (p.files || []).filter((f) => f.action === 'Conflict').length;
     bulk = !p.base_known ? 'pack' : take.size === 0 ? 'mine' : take.size === n ? 'pack' : 'suggested';
     keep = new Set();
+    resetVersions = false;
+    openVersions = false;
   }
 
   const choices = $derived.by(() => {
@@ -320,7 +342,7 @@
     planErr = '';
     applying = { detail: 'Starting', progress: null };
     try {
-      const { job } = await post(`${base}/pack/apply`, { plan_id: plan.plan, take: [...take], keep: [...keep] });
+      const { job } = await post(`${base}/pack/apply`, { plan_id: plan.plan, take: [...take], keep: [...keep], reset_versions: resetVersions });
       result = await followJob(job, (st) => (applying = st));
       say(`${server.name} is on ${result.version}. Old files are in backups.`);
       onDone();
@@ -468,6 +490,23 @@
               <div class="tiny muted">{compare ? "The panel reads the old server pack's file list and compares it with the server's files." : 'The panel downloads the new server pack and compares it with the server.'} Nothing changes yet.</div>
             </div>
           {:else}
+            <!-- Your choice: mods on the server's own versions -->
+            {#if heldVersions.length}
+              <div class="choice col">
+                <div class="row"><span class="chip acc xs">Your choice</span><b class="small">{heldVersions.length} mod{heldVersions.length === 1 ? '' : 's'} run the server's versions, not the pack's</b></div>
+                <div class="seg"><button class:on={!resetVersions} onclick={() => (resetVersions = false)}>Keep the server's</button><button class:on={resetVersions} onclick={() => (resetVersions = true)}>Use the pack's</button></div>
+                <div class="tiny muted">{versionsNote}</div>
+                <button class="lh small" onclick={() => (openVersions = !openVersions)}>{#if openVersions}<ChevronDown size={13} />Hide the mods{:else}<Caret size={13} />Show the {heldVersions.length} mods{/if}</button>
+                {#if openVersions}
+                  <div class="list">
+                    {#each heldVersions.slice(0, LIST_CAP) as m (m.from)}
+                      <div class="mr row-hover">{@render modCell(m)}<span class="tiny muted ell grow">{m.from} → {m.to}</span><span class="chip xs">Server's</span></div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+
             <!-- Your choice -->
             {#if conflicts.length || plan.compared}
               <div class="choice col">
@@ -590,7 +629,6 @@
                   {/if}
                 </div>
               {/if}
-              {#if plan.kept?.yours}<div class="tiny muted indent">{plan.kept.yours} mods where the server runs another version and the pack didn't change it keep the server's.</div>{/if}
               {#if plan.kept?.left_off}<div class="tiny muted indent">{plan.kept.left_off} pack mods the server doesn't have stay off.</div>{/if}
               {#if edited.length}
                 {#snippet editedBody()}{edited.length} pack files the server changed: kept{/snippet}

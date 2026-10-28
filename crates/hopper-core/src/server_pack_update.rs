@@ -162,6 +162,21 @@ pub struct ServerPlan {
     pub mods_note: Option<String>,
     /// Server mods that stay as they are.
     pub kept: KeptMods,
+    /// Updates left out because the server runs the version the instance
+    /// has (you updated it past, or back from, the pack's): they move the
+    /// server to the pack's version only when you choose to reset to it
+    /// ([`ServerPlan::reset_versions`]).
+    #[serde(default)]
+    pub kept_versions: Vec<ModChange>,
+}
+
+impl ServerPlan {
+    /// Puts the mods [`Self::kept_versions`] holds back to the pack's
+    /// versions too.
+    pub fn reset_versions(&mut self) {
+        self.plan.mods.append(&mut self.kept_versions);
+        self.kept.yours = 0;
+    }
 }
 
 /// The pack versions a server could be updated to: the newer one first
@@ -327,11 +342,18 @@ pub fn plan(
 
     // Mods.
     let mut added = Vec::new();
+    let mut kept_versions = Vec::new();
     let (mods, kept, mods_note) = if new.mods_included {
-        let (mut m, k, a) = mod_changes(&server.mods_dir(), &new.jars, base.as_ref().map(|b| &b.jars));
+        let (m, mut k, a) = mod_changes(&server.mods_dir(), &new.jars, base.as_ref().map(|b| &b.jars));
         added = a;
+        let (mut m, held) = split_versions(m, |jar| {
+            let jar = jar.trim_end_matches(".disabled");
+            inst.addons.iter().any(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(jar))
+        });
+        k.yours = held.len();
+        kept_versions = held;
         // The instance knows these mods: their projects and icons.
-        for c in &mut m {
+        for c in m.iter_mut().chain(kept_versions.iter_mut()) {
             let jar = if c.to.is_empty() { &c.from } else { &c.to };
             let stem = serverpack::jar_stem(jar);
             if let Some(a) = inst
@@ -426,6 +448,18 @@ pub fn plan(
         base_assumed,
         mods_note,
         kept,
+        kept_versions,
+    })
+}
+
+/// Splits off the updates that would move a server mod off the version the
+/// instance runs (`client(jar)`: the instance has that file): the server
+/// keeps those unless you reset to the pack's versions. Additions,
+/// removals, and same-name refreshes stay in.
+fn split_versions(mods: Vec<ModChange>, client: impl Fn(&str) -> bool) -> (Vec<ModChange>, Vec<ModChange>) {
+    mods.into_iter().partition(|m| {
+        let renamed = !m.from.trim_end_matches(".disabled").eq_ignore_ascii_case(&m.to);
+        !(m.action == ModAction::Update && renamed && client(&m.from))
     })
 }
 
@@ -496,8 +530,8 @@ fn dest_name(m: &ModChange) -> String {
 pub struct KeptMods {
     /// Not the pack's: you added them.
     pub added: usize,
-    /// No longer set: the pack's version always wins. Kept so older
-    /// Hopper Servers and clients still read plans.
+    /// Pack mods where the server runs the instance's version, not the
+    /// pack's: kept unless you reset to the pack's versions.
     pub yours: usize,
     /// No longer set: every pack mod the server lacks is added.
     pub left_off: usize,
@@ -932,6 +966,26 @@ mod tests {
             assert!(dest_name(c).ends_with(".jar.disabled"), "{} arrives off", c.to);
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A server mod on the instance's version (GeOre 6.2.4 while the pack
+    /// ships 6.2.3) stays unless you reset; other updates and additions go
+    /// ahead either way.
+    #[test]
+    fn instance_versions_stay_unless_reset() {
+        let ch = |from: &str, to: &str, a| ModChange { from: from.into(), to: to.into(), action: a, ..Default::default() };
+        let mods = vec![
+            ch("GeOre-1.21.1-6.2.4.jar", "GeOre-1.21.1-6.2.3.jar", ModAction::Update),
+            ch("old-1.0.jar", "old-2.0.jar", ModAction::Update),
+            ch("same-1.0.jar", "same-1.0.jar", ModAction::Update),
+            ch("off-1.0.jar.disabled", "off-2.0.jar", ModAction::Update),
+            ch("", "new-1.0.jar", ModAction::Add),
+        ];
+        let client = ["geore-1.21.1-6.2.4.jar", "same-1.0.jar", "off-1.0.jar"];
+        let (go, held) = split_versions(mods, |j| client.contains(&j.trim_end_matches(".disabled").to_lowercase().as_str()));
+        let froms = |v: &[ModChange]| v.iter().map(|m| m.from.clone()).collect::<Vec<_>>();
+        assert_eq!(froms(&held), ["GeOre-1.21.1-6.2.4.jar", "off-1.0.jar.disabled"]);
+        assert_eq!(froms(&go), ["old-1.0.jar", "same-1.0.jar", ""]);
     }
 
     #[test]

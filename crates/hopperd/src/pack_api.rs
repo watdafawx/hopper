@@ -451,6 +451,8 @@ fn summary(plan_id: u64, p: &ServerPlan) -> Value {
         "kept": p.kept,
         "compared": p.plan.compared,
         "mods": p.plan.mods.iter().map(mod_json).collect::<Vec<_>>(),
+        // Mods on the server's own versions: kept unless the update resets them.
+        "kept_versions": p.kept_versions.iter().map(mod_json).collect::<Vec<_>>(),
         "your_mods": p.plan.your_mods.iter().map(mod_json).collect::<Vec<_>>(),
         "your_files": p.plan.your_files,
         "mod_made": p.plan.mod_made,
@@ -555,6 +557,9 @@ struct ApplyBody {
     /// files).
     #[serde(default)]
     keep: Vec<String>,
+    /// Web: mods on the server's own versions go to the pack's too.
+    #[serde(default)]
+    reset_versions: bool,
     #[serde(default)]
     cf_key: String,
     #[serde(default)]
@@ -580,6 +585,10 @@ async fn apply(
         (None, Some(job)) => take_plan(job, &id).ok_or_else(|| bad("That comparison is gone: compare again."))?,
         (None, None) => return Err(bad("Which update?")),
     };
+    // Desktop resets in the plan it sends; the web panel asks here.
+    if b.reset_versions {
+        plan.reset_versions();
+    }
     if !b.keep.is_empty() {
         let keep: HashSet<String> = b.keep.iter().map(|k| k.to_lowercase()).collect();
         plan.plan

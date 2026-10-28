@@ -31,6 +31,16 @@ use crate::widgets::{DIALOG_CHROME_FOOTER as DIALOG_CHROME, DIALOG_TOP};
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Group {
     Files(FileAction),
+    /// Server mode: the mods on your versions.
+    Versions,
+}
+
+/// "6.2.4" from "GeOre-1.21.1-6.2.4.jar": the jar name after the mod's.
+fn version_of(jar: &str) -> String {
+    let j = jar.trim_end_matches(".disabled");
+    let stem = hopper::serverpack::jar_stem(j).len();
+    let j = j.strip_suffix(".jar").unwrap_or(j);
+    j.get(stem..).unwrap_or(j).trim_start_matches(['-', '_', ' ']).to_string()
 }
 
 /// The summary lines that open a list (one at a time).
@@ -145,6 +155,8 @@ pub struct UpdatePreview {
     take: HashSet<String>,
     /// How the conflicting files were picked, all at once or per file.
     bulk: Bulk,
+    /// Server mode: mods on your versions go to the pack's too.
+    reset_versions: bool,
     /// Mods you turned off to turn on, and removed ones to add back (their
     /// keys); the rest stay off or out.
     turn_on: HashSet<String>,
@@ -228,6 +240,7 @@ impl UpdatePreview {
             plan: None,
             take: HashSet::new(),
             bulk: Bulk::Pack,
+            reset_versions: false,
             turn_on: HashSet::new(),
             paint: Default::default(),
             peek: None,
@@ -530,6 +543,7 @@ impl UpdatePreview {
         t.splan = None;
         t.via = None;
         t.status = None;
+        self.reset_versions = false;
 
         self.plan = None;
         self.diffs.clear();
@@ -700,6 +714,9 @@ impl UpdatePreview {
             return v.store.read(cx).job_state(id).is_none_or(|j| j.done);
         }
         let Some(mut p) = t.splan.clone() else { return false };
+        if v.reset_versions {
+            p.reset_versions();
+        }
         let shown = t.clone();
         // Dropped mods one of the server's own mods needs, kept.
         p.plan
@@ -957,7 +974,7 @@ impl UpdatePreview {
         let backups = if server {
             "The server's copies go to .hopper-backups."
         } else {
-            "Yours go to .hopper-backups, and a snapshot is saved first."
+            "Yours go to .hopper-backups."
         };
         let note = match self.bulk {
             Bulk::Pack if quick && mine > 0 => format!(
@@ -1083,6 +1100,93 @@ impl UpdatePreview {
         Some(card.into_any_element())
     }
 
+    /// Server mode: keep the mods on your versions, or put them back to the
+    /// pack's. The lists below count them in when reset.
+    fn pick_versions(&mut self, reset: bool, cx: &mut Context<Self>) {
+        let Some(sp) = self.server.as_ref().and_then(|t| t.splan.clone()) else { return };
+        self.reset_versions = reset;
+        let mut shown = sp.clone();
+        if reset {
+            shown.reset_versions();
+        }
+        self.plan = Some(Ok(shown.plan));
+        cx.notify();
+    }
+
+    /// Server mode: "Your choice" for the server mods that run your
+    /// versions, not the pack's (laid out like the files' choice card).
+    fn versions_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let held = self.server.as_ref()?.splan.as_ref()?.kept_versions.clone();
+        if held.is_empty() {
+            return None;
+        }
+        let n = held.len();
+        let open = self.open.contains(&Group::Versions);
+        let reset = self.reset_versions;
+        // Through the web panel's own instance there's no client: the
+        // versions are the server's.
+        let whose = if self.server.as_ref().is_some_and(|t| t.inst.root == t.server.root) { "this server's" } else { "your" };
+        let title = format!("{n} {} run {whose} versions, not the pack's", if n == 1 { "mod" } else { "mods" });
+        let some = held
+            .iter()
+            .take(2)
+            .map(|m| format!("{} {} (pack {})", m.name, version_of(&m.from), version_of(&m.to)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = if n > 2 { "…" } else { "" };
+        let note = if reset {
+            format!("They change to the pack's versions: {some}{more}. The old jars go to .hopper-backups.")
+        } else {
+            format!("They stay as they are: {some}{more}.")
+        };
+        let theme = cx.theme();
+        let (primary, muted, radius) = (theme.primary, theme.muted_foreground, theme.radius);
+        let rows = held
+            .iter()
+            .map(|m| (m.clone(), ("Yours", muted), format!("{} → {}", m.from, m.to)))
+            .collect();
+        let card = v_flex()
+            .gap_2()
+            .px_3()
+            .py_2p5()
+            .rounded(radius)
+            .border_1()
+            .border_color(primary.opacity(widgets::alpha::LINE))
+            .bg(primary.opacity(0.04))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(widgets::chip(primary).xsmall().child("Your choice"))
+                    .child(div().text_sm().font_semibold().child(title)),
+            )
+            .child(
+                h_flex().child(
+                    TabBar::new("versions-pick")
+                        .segmented()
+                        .small()
+                        .selected_index(usize::from(reset))
+                        .child(Tab::new().label(if whose == "your" { "Keep my versions" } else { "Keep the server's" }))
+                        .child(Tab::new().label("Use the pack's"))
+                        .on_click(cx.listener(|this, ix: &usize, _, cx| this.pick_versions(*ix == 1, cx))),
+                ),
+            )
+            .child(widgets::fine_print(note, cx))
+            .child(
+                h_flex()
+                    .id("review-versions")
+                    .gap_1()
+                    .text_sm()
+                    .text_color(muted)
+                    .clickable(cx)
+                    .hover(move |s| s.text_color(primary))
+                    .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small())
+                    .child(if open { "Hide the mods".to_string() } else { format!("Show the {n} mods") })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle(Group::Versions, cx))),
+            )
+            .when(open, |c| c.child(self.mod_rows("versions", rows, cx)));
+        Some(card.into_any_element())
+    }
+
     fn toggle(&mut self, g: Group, cx: &mut Context<Self>) {
         if !self.open.remove(&g) {
             self.open.insert(g);
@@ -1123,53 +1227,24 @@ impl UpdatePreview {
         {
             m.retain(|_, (r, _, _)| *r != root);
         }
-        // A snapshot first (off the UI thread), then the update.
-        let from = store
-            .read(cx)
-            .instance(&root)
-            .and_then(|i| i.pack.as_ref())
-            .map(|p| p.version.clone())
-            .unwrap_or_default();
-        let reason = hopper::snapshots::Reason::PackUpdate { from, to: file.display_name.clone() };
-        let job = store.read(cx).jobs().start(format!("Snapshot before updating {}", file.display_name));
-        let snap = job.id();
-        view.update(cx, |v, cx| {
-            v.update = Some((snap, false));
-            v.redraw_while(snap, cx);
+        // No automatic snapshot: backups are the user's to make. Replaced
+        // files still go to .hopper-backups.
+        let id = store.update(cx, |s, cx| {
+            let id = s.update_pack(&root, file, Some(overrides), backup);
+            cx.notify();
+            id
         });
-        let view = view.downgrade();
-        cx.spawn(async move |cx| {
-            let r2 = root.clone();
-            let r = cx
-                .background_spawn(async move {
-                    let r = hopper::snapshots::take_in(&r2, reason, &job);
-                    job.finish(&r);
-                    r
-                })
-                .await;
-            if let Err(e) = &r {
-                // The update still runs: its replaced files go to backups as before.
-                log::warn!("snapshot before pack update failed: {e:#}");
-            }
-            let id = store.update(cx, |s, cx| {
-                let id = s.update_pack(&root, file, Some(overrides), backup);
-                cx.notify();
-                id
-            });
-            // The dialog follows the update itself now (if still open).
-            view.update(cx, |v, cx| {
-                match id {
-                    Some(id) => {
-                        v.update = Some((id, true));
-                        v.redraw_while(id, cx);
-                    }
-                    None => v.update = None,
+        // The dialog follows the update (if still open).
+        view.update(cx, |v, cx| {
+            match id {
+                Some(id) => {
+                    v.update = Some((id, true));
+                    v.redraw_while(id, cx);
                 }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+                None => v.update = None,
+            }
+            cx.notify();
+        });
         false
     }
 
@@ -1748,10 +1823,8 @@ impl UpdatePreview {
             out = out.child(widgets::expand_area(cx).child(self.list_tools("stay-tabs", tabs, cx)).child(list));
         }
         if let Some(k) = self.server.as_ref().and_then(|t| t.splan.as_ref()).map(|p| p.kept) {
+            // Mods on your versions: the choice card at the top.
             let mut lines = Vec::new();
-            if k.yours > 0 {
-                lines.push(format!("{} mods where the server runs another version and the pack didn't change it keep the server's.", k.yours));
-            }
             if k.left_off > 0 {
                 lines.push(format!("{} pack mods the server doesn't have stay off.", k.left_off));
             }
@@ -2177,6 +2250,7 @@ impl Render for UpdatePreview {
                 let backup = self.backup_worlds;
                 let (warning, muted, border) = (theme.warning, theme.muted_foreground, theme.border);
                 let radius = theme.radius;
+                let versions = self.versions_card(cx);
                 let choice = self.choice_card(&plan, cx);
                 let mine = self.your_choices(&plan, cx);
                 let changes = self.changes(&plan, cx);
@@ -2211,6 +2285,7 @@ impl Render for UpdatePreview {
                                 ),
                         )
                     })
+                    .children(versions)
                     .children(choice)
                     .children(mine)
                     .child(changes)
@@ -2222,7 +2297,7 @@ impl Render for UpdatePreview {
                                 .text_xs()
                                 .text_color(muted)
                                 .child(Icon::new(IconName::Layers).xsmall().flex_none())
-                                .child("A snapshot of mods and configs is saved first. Restore it any time from Backups."),
+                                .child("Replaced mods and files go to .hopper-backups. No full backup is made: make one in Backups first if you want one."),
                         )
                     })
                     .when(server_mode, |c| {
@@ -2361,7 +2436,8 @@ fn show(
     let mc_change = to_mc
         .filter(|to| !inst.game_version.is_empty() && *to != inst.game_version)
         .map(|to| (inst.game_version.clone(), to));
-    let backup_worlds = mc_change.is_some();
+    // Opt-in only: no automatic backups.
+    let backup_worlds = false;
     let reinstall = inst.pack.as_ref().is_some_and(|p| hopper::packdiff::is_reinstall(p, &file));
     let view = cx.new(|cx| {
         let mut v = UpdatePreview::new(store, root, None, from, window, cx);
