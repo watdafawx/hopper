@@ -1,0 +1,127 @@
+[29Oct2026 13:26:26.782] [Render thread/INFO] [immersivepetroleum/]: Loading High-Pressure Refinery Recipes.
+[29Oct2026 13:26:26.790] [Render thread/ERROR] [com.craisinlord.integrated_api.IntegratedAPI/]: Integrated API Error: Couldn't parse spawner mob list idas:dread_citadel
+java.lang.Exception: Error: iceandfire:dread_lich is not a valid entity ID!
+	at TRANSFORMER/integrated_api@1.9.1/com.craisinlord.integrated_api.misc.mobspawners.MobSpawnerObj.setEntityType(MobSpawnerObj.java:37) ~[?:?]
+	at TRANSFORMER/integrated_api@1.9.1/com.craisinlord.integrated_api.misc.mobspawners.MobSpawnerManager.lambda$apply$0(MobSpawnerManager.java:41) ~[?:?]
+	at java.base/java.util.HashMap.forEach(HashMap.java:1429) ~[?:?]
+	at TRANSFORMER/integrated_api@1.9.1/com.craisinlord.integrated_api.misc.mobspawners.MobSpawnerManager.apply(MobSpawnerManager.java:36) ~[?:?]
+	at TRANSFORMER/integrated_api@1.9.1/com.craisinlord.integrated_api.misc.mobspawners.MobSpawnerManager.apply(MobSpawnerManager.java:23) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.packs.resources.SimplePreparableReloadListener.lambda$reload$1(SimplePreparableReloadListener.java:19) ~[?:?]
+	at java.base/java.util.concurrent.CompletableFuture$UniAccept.tryFire(CompletableFuture.java:718) ~[?:?]
+[29Oct2026 15:19:57.823] [Netty Client IO #20/WARN] [mixin/]: @ModifyConstant conflict. Skipping packetfixer.v1_20_5.neoforge.mixins.json:v1_20_5_neoforge.CompressionEncoderMixin from mod packetfixer->@ModifyConstant::packetfixer$newSize(I)I with priority 1000, already redirected by connectivity.mixins.json:CompressionEncoderMixin from mod connectivity->@ModifyConstant::modifyLimit(I)I with priority 1000
+[29Oct2026 15:20:02.179] [Render thread/INFO] [Framework/]: Loading synced config from server: refurbished_furniture:server
+[29Oct2026 15:20:02.184] [Render thread/INFO] [Framework/]: Loading synced config from server: cfm_wap:server
+[29Oct2026 15:20:02.387] [Render thread/INFO] [com.aquariverr.fluxod.FluxOverdrive/]: Flux Overdrive config loaded
+[29Oct2026 15:20:02.393] [Render thread/INFO] [Puzzles Lib/]: Dispatching reloading event for config illagerinvasion-server.toml
+[29Oct2026 15:20:02.401] [Render thread/INFO] [Puzzles Lib/]: Dispatching reloading event for config easyanvils-server.toml
+[29Oct2026 15:20:02.427] [Render thread/INFO] [sfm/]: SFM config reloaded, now on revision 1. Cleared program build cache.
+[29Oct2026 15:20:02.440] [Render thread/WARN] [net.neoforged.neoforge.common.ModConfigSpec/CORE]: Configuration LoadedConfig[config=SynchronizedConfig{DataHolder:{mobGriefing=SynchronizedConfig{DataHolder:{mobGriefing=SynchronizedConfig{DataHolder:{minecraft:allay=DEFAULT, minecraft:area_effect_cloud=DEFAULT, minecraft:armadillo=DEFAULT, minecraft:armor_stand=DEFAULT, minecraft:arrow=DEFAULT, minecraft:axolotl=DEFAULT, minecraft:bat=DEFAULT, minecraft:bee=DEFAULT, minecraft:blaze=DEFAULT, minecr…
+[29Oct2026 15:20:02.441] [Render thread/WARN] [net.neoforged.neoforge.common.ModConfigSpec/CORE]: Incorrect key mobGriefing.mobGriefing.neomagiccircles:magic_circle was corrected from null to its default, default. 
+[29Oct2026 15:20:02.450] [Render thread/ERROR] [net.neoforged.fml.javafmlmod.FMLModContainer/]: Exception caught during firing event: Cannot call getFullPath() on non-file config LoadedConfig[config=SynchronizedConfig{DataHolder:{schematicVersion=6, Ship=SynchronizedConfig{DataHolder:{General=SynchronizedConfig{DataHolder:{shipGeneralSailCooldown=30, shipGeneralCollisionDamage=7.5, shipGeneralCollisionKnockBack=true, shipGeneralDoItemDrop=true, Modifier=SynchronizedConfig{DataHolder:{shipGeneral…
+	Index: 0
+	Listeners:
+		0: net.neoforged.bus.EventListenerFactory$initRegisterConfigs/0x0000000089b30000@1601be78
+java.lang.IllegalStateException: Cannot call getFullPath() on non-file config LoadedConfig[config=SynchronizedConfig{DataHolder:{schematicVersion=6, Ship=SynchronizedConfig{DataHolder:{General=SynchronizedConfig{DataHolder:{shipGeneralSailCooldown=30, shipGeneralCollisionDamage=7.5, shipGeneralCollisionKnockBack=true, shipGeneralDoItemDrop=true, Modifier=SynchronizedConfig{DataHolder:{shipGeneralContainerModifier=10.0, shipGeneralCannonModifier=2.5, shipGeneralPaddlingModifier=35.0, shipGeneralB…
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ModConfig.getFullPath(ModConfig.java:69)
+	at TRANSFORMER/smallships@2.0.2/com.talhanation.smallships.neoforge.common.CommonModBus.initRegisterConfigs(CommonModBus.java:53)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:328)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:158)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ModConfig.setConfig(ModConfig.java:79)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ConfigTracker.acceptSyncedConfig(ConfigTracker.java:209)
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.network.ConfigSync.lambda$receiveSyncedConfig$2(ConfigSync.java:41)
+	at java.base/java.util.Optional.ifPresent(Optional.java:178)
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.network.ConfigSync.receiveSyncedConfig(ConfigSync.java:41)
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.network.handlers.ClientPayloadHandler.handle(ClientPayloadHandler.java:95)
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.network.handling.MainThreadPayloadHandler.lambda$handle$0(MainThreadPayloadHandler.java:16)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.lambda$submitAsync$0(BlockableEventLoop.java:60)
+	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1768)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.doRunTask(BlockableEventLoop.java:148)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.ReentrantBlockableEventLoop.doRunTask(ReentrantBlockableEventLoop.java:23)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.pollTask(BlockableEventLoop.java:122)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.runAllTasks(BlockableEventLoop.java:111)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.redirect$bbam000$smoothloading$budgetStartupTasks(Minecraft.java:60526)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1155)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.run(Minecraft.java:807)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+
+[29Oct2026 15:20:02.451] [Render thread/ERROR] [net.neoforged.fml.ModContainer/LOADING]: Caught exception during event net.neoforged.fml.event.config.ModConfigEvent$Reloading@656417c4 dispatch for modid smallships
+java.lang.IllegalStateException: Cannot call getFullPath() on non-file config LoadedConfig[config=SynchronizedConfig{DataHolder:{schematicVersion=6, Ship=SynchronizedConfig{DataHolder:{General=SynchronizedConfig{DataHolder:{shipGeneralSailCooldown=30, shipGeneralCollisionDamage=7.5, shipGeneralCollisionKnockBack=true, shipGeneralDoItemDrop=true, Modifier=SynchronizedConfig{DataHolder:{shipGeneralContainerModifier=10.0, shipGeneralCannonModifier=2.5, shipGeneralPaddlingModifier=35.0, shipGeneralB…
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ModConfig.getFullPath(ModConfig.java:69) ~[loader-4.0.45.jar%23107!/:4.0]
+	at TRANSFORMER/smallships@2.0.2/com.talhanation.smallships.neoforge.common.CommonModBus.initRegisterConfigs(CommonModBus.java:53) ~[?:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:328) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:158) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ModConfig.setConfig(ModConfig.java:79) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.config.ConfigTracker.acceptSyncedConfig(ConfigTracker.java:209) ~[loader-4.0.45.jar%23107!/:4.0]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.network.ConfigSync.lambda$receiveSyncedConfig$2(ConfigSync.java:41) ~[?:?]
+	at java.base/java.util.Optional.ifPresent(Optional.java:178) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.network.ConfigSync.receiveSyncedConfig(ConfigSync.java:41) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.network.handlers.ClientPayloadHandler.handle(ClientPayloadHandler.java:95) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.network.handling.MainThreadPayloadHandler.lambda$handle$0(MainThreadPayloadHandler.java:16) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.lambda$submitAsync$0(BlockableEventLoop.java:60) ~[?:?]
+	at java.base/java.util.concurrent.CompletableFuture$AsyncSupply.run(CompletableFuture.java:1768) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.doRunTask(BlockableEventLoop.java:148) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.ReentrantBlockableEventLoop.doRunTask(ReentrantBlockableEventLoop.java:23) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.pollTask(BlockableEventLoop.java:122) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.util.thread.BlockableEventLoop.runAllTasks(BlockableEventLoop.java:111) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.redirect$bbam000$smoothloading$budgetStartupTasks(Minecraft.java:60526) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1155) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.run(Minecraft.java:807) ~[?:?]
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?]
+[29Oct2026 15:20:02.455] [Render thread/ERROR] [net.minecraft.util.thread.BlockableEventLoop/FATAL]: Error executing task on Client
+java.util.concurrent.CompletionException: net.neoforged.fml.ModLoadingException: Loading errors encountered:
+	- Small Ships (smallships) encountered an error while dispatching the net.neoforged.fml.event.config.ModConfigEvent$Reloading event
+	  java.lang.IllegalStateException: Cannot call getFullPath() on non-file config LoadedConfig[config=SynchronizedConfig{DataHolder:{schematicVersion=6, Ship=SynchronizedConfig{DataHolder:{General=SynchronizedConfig{DataHolder:{shipGeneralSailCooldown=30, shipGeneralCollisionDamage=7.5, shipGeneralCollisionKnockBack=true, shipGeneralDoItemDrop=true, Modifier=SynchronizedConfig{DataHolder:{shipGeneralContainerModifier=10.0, shipGeneralCannonModifier=2.5, shipGeneralPaddlingModifier=35.0, shipGener…
+
+	at java.base/java.util.concurrent.CompletableFuture.encodeThrowable(CompletableFuture.java:315) ~[?:?]
+	at java.base/java.util.concurrent.CompletableFuture.completeThrowable(CompletableFuture.java:320) ~[?:?]
+[29Oct2026 15:20:45.859] [Render thread/INFO] [mixin/]: Instancing error handler class com.illusivesoulworks.polymorph.mixin.IntegratedMixinPlugin
+[29Oct2026 15:20:45.859] [Render thread/FATAL] [mixin/]: Mixin apply for mod micsable failed micsable.immersive_portals_sable.mixins.json:IpPointedBlockSubLevelMixin from mod micsable -> qouteall.imm_ptl.core.block_manipulation.BlockManipulationClient: org.spongepowered.asm.mixin.injection.throwables.InvalidInjectionException Invalid descriptor on micsable.immersive_portals_sable.mixins.json:IpPointedBlockSubLevelMixin from mod micsable->@Inject::mic$remoteSubLevelTarget(Lnet/minecraft/world/phy…
+[29Oct2026 15:20:45.860] [Render thread/ERROR] [net.minecraft.client.Minecraft/FATAL]: Unreported exception thrown!
+org.spongepowered.asm.mixin.transformer.throwables.MixinTransformerError: An unexpected critical error was encountered
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:381) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:253) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at TRANSFORMER/libjf_unsafe_v0@3.17.6+forge/io.gitlab.jfronny.libjf.unsafe.asm.AsmTransformer.transformClass(AsmTransformer.java:127) ~[?:?]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.service.modlauncher.MixinTransformationHandler.processClass(MixinTransformationHandler.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.launch.MixinLaunchPluginLegacy.processClass(MixinLaunchPluginLegacy.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.serviceapi.ILaunchPluginService.processClassWithFlags(ILaunchPluginService.java:156) ~[modlauncher-11.0.5.jar:11.0.5+main.901c6ea8]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchPluginHandler.offerClassNodeToPlugins(LaunchPluginHandler.java:94) ~[modlauncher-11.0.5.jar:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.ClassTransformer.transform(ClassTransformer.java:120) ~[modlauncher-11.0.5.jar:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.TransformingClassLoader.maybeTransformClassBytes(TransformingClassLoader.java:57) ~[modlauncher-11.0.5.jar:?]
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.readerToClass(ModuleClassLoader.java:190) ~[securejarhandler-3.0.8.jar:?]
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.lambda$findClass$20(ModuleClassLoader.java:298) ~[securejarhandler-3.0.8.jar:?]
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadFromModule(ModuleClassLoader.java:311) ~[securejarhandler-3.0.8.jar:?]
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.findClass(ModuleClassLoader.java:298) ~[securejarhandler-3.0.8.jar:?]
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadClass(ModuleClassLoader.java:214) ~[securejarhandler-3.0.8.jar:?]
+	at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:526) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.renderer.GameRenderer.handler$oed000$ip_aeronautics$onUpdateTargetedEntityFinish(GameRenderer.java:27307) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.renderer.GameRenderer.pick(GameRenderer.java:805) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.tick$mixinextras$wrapped$621(Minecraft.java:1801) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.mixinextras$bridge$tick$mixinextras$wrapped$621$622(Minecraft.java) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.wrapMethod$bbbo000$smoothloading$worldTransition(Minecraft.java:60997) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.tick(Minecraft.java) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1161) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.run(Minecraft.java:807) ~[?:?]
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?]
+Caused by: org.spongepowered.asm.mixin.throwables.MixinApplyError: Mixin [micsable.immersive_portals_sable.mixins.json:IpPointedBlockSubLevelMixin from mod micsable] from phase [DEFAULT] in config [micsable.immersive_portals_sable.mixins.json] FAILED during APPLY
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinError(MixinProcessor.java:686) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinApplyError(MixinProcessor.java:637) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:368) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	... 23 more
+Caused by: org.spongepowered.asm.mixin.injection.throwables.InvalidInjectionException: Invalid descriptor on micsable.immersive_portals_sable.mixins.json:IpPointedBlockSubLevelMixin from mod micsable->@Inject::mic$remoteSubLevelTarget(Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/resources/ResourceKey;DDLqouteall/imm_ptl/core/portal/Portal;Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V! Expected (Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/world/…
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.callback.CallbackInjector.inject(CallbackInjector.java:560) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.callback.CallbackInjector.inject(CallbackInjector.java:490) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.code.Injector.inject(Injector.java:284) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.struct.InjectionInfo.inject(InjectionInfo.java:508) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTargetContext.applyInjections(MixinTargetContext.java:1483) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.applyInjections(MixinApplicatorStandard.java:752) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.applyMixin(MixinApplicatorStandard.java:330) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.apply(MixinApplicatorStandard.java:246) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.apply(TargetClassContext.java:437) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.applyMixins(TargetClassContext.java:418) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:352) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar:0.16.4+mixin.0.8.7]
+	... 23 more
+[29Oct2026 15:20:52.905] [Thread-214/INFO] [EMI QuickIndex/]: Anvil examples: candidates=106391, selected=3952, items=3172, enchantments=245
+[29Oct2026 15:21:24.940] [Render thread/FATAL] [net.neoforged.neoforge.common.NeoForgeMod/]: Preparing crash report with UUID 3bf9144c-8c8a-4b96-bb7c-e58539a3052f
+[29Oct2026 15:21:24.943] [Render thread/INFO] [STDOUT/]: [net.minecraft.server.Bootstrap:realStdoutPrintln:135]: #@!@# Game crashed! Crash report saved to: #@!@# G:\Games\Minecraft\Curse\Instances\TNP Limitless 8\crash-reports\crash-2026-10-29_15.21.16-client.txt

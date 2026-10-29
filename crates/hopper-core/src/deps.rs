@@ -334,6 +334,37 @@ fn inspect(zip: &mut zip::ZipArchive<impl Read + std::io::Seek>, depth: u8) -> J
                 info.provides.extend(inner.provides.into_iter().chain(inner.nested));
             }
         }
+        // A jar with no mod of its own whose early loader adds a mod jar
+        // it carries elsewhere (Make it Compatible keeps it in
+        // META-INF/inner/): that jar is the mod, so crashes and names that
+        // say its id find this file.
+        if info.own.is_empty() && !info.meta.fabric {
+            let wrapped: Vec<String> = zip
+                .file_names()
+                .filter(|n| {
+                    n.starts_with("META-INF/")
+                        && n.ends_with(".jar")
+                        && !n.starts_with("META-INF/jarjar/")
+                        && !n.starts_with("META-INF/jars/")
+                })
+                .map(str::to_string)
+                .collect();
+            for n in wrapped {
+                let mut buf = Vec::new();
+                if zip.by_name(&n).and_then(|mut e| Ok(e.read_to_end(&mut buf)?)).is_err() {
+                    continue;
+                }
+                if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(buf)) {
+                    let inner = inspect(&mut z, depth + 1);
+                    if info.name.is_empty() {
+                        info.name = inner.name;
+                    }
+                    info.own.extend(inner.own);
+                    info.versions.extend(inner.versions);
+                    info.provides.extend(inner.provides.into_iter().chain(inner.nested));
+                }
+            }
+        }
     }
     info
 }
