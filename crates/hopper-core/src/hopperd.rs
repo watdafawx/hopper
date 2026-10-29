@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The panel's default port.
 pub const PORT: u16 = 8790;
@@ -148,8 +148,11 @@ pub fn same_panel(saved: &str, typed: &str) -> bool {
 }
 
 /// The first of [`candidates`] that `check` accepts, with what it gave.
-/// The first of several tries gets a short timeout so a wrong guess
-/// doesn't hold pairing up; when all fail, the error names every address.
+/// `check` gets how long to wait for the connection to open: short on the
+/// first of several tries, so a wrong guess doesn't hold pairing up. The
+/// answer itself gets longer ([`ANSWER_WAIT`]): a panel behind a proxy, on
+/// a slow link, can open fast and still take a few seconds to reply. When
+/// all fail, the error names every address.
 fn first_reachable<T>(url: &str, check: impl Fn(&str, Duration) -> anyhow::Result<T>) -> anyhow::Result<(String, T)> {
     let tries = candidates(url);
     if tries.len() == 1 {
@@ -191,7 +194,14 @@ fn trust_for(base: &str, ca: &str) -> Trust {
     if !ca.trim().is_empty() && private_host(base) { Trust::Pinned(ca.to_string()) } else { Trust::Web }
 }
 
+/// How long one pairing request may take, start to finish.
+const ANSWER_WAIT: Duration = Duration::from_secs(15);
+
 fn agent_with(timeout: Duration, trust: &Trust) -> ureq::Agent {
+    agent_timed(None, timeout, trust)
+}
+
+fn agent_timed(connect: Option<Duration>, timeout: Duration, trust: &Trust) -> ureq::Agent {
     use ureq::tls::{Certificate, RootCerts, TlsConfig};
     let tls = match trust {
         Trust::Pinned(pem) => match Certificate::from_pem(pem.as_bytes()) {
@@ -204,6 +214,7 @@ fn agent_with(timeout: Duration, trust: &Trust) -> ureq::Agent {
     };
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
+        .timeout_connect(connect)
         .http_status_as_error(false)
         .tls_config(tls)
         .build()
@@ -782,8 +793,10 @@ pub fn hello(url: &str) -> anyhow::Result<Hello> {
     hello_at(&base_url(url), Duration::from_secs(5))
 }
 
-fn hello_at(base: &str, timeout: Duration) -> anyhow::Result<Hello> {
-    let v = reply(agent_with(timeout, &Trust::Unverified).get(&format!("{base}/api/v1/hello")).call(), base)?;
+/// `connect`: how long to wait for the connection to open.
+fn hello_at(base: &str, connect: Duration) -> anyhow::Result<Hello> {
+    let agent = agent_timed(Some(connect), ANSWER_WAIT, &Trust::Unverified);
+    let v = reply(agent.get(&format!("{base}/api/v1/hello")).call(), base)?;
     if v["panel"].as_str() != Some("hopperd") {
         bail!("{base} isn't a Hopper Server.");
     }
@@ -802,32 +815,58 @@ pub struct Pairing {
     pub base: String,
     pub id: String,
     pub secret: String,
-    /// The 6-digit code, worked out here from the certificate this PC
-    /// pinned; the panel shows its own, and they only match for the real
-    /// panel.
+    /// The 6-digit code, worked out here from the panel's certificate; the
+    /// panel shows its own, and they only match for the real panel.
     pub code: String,
-    /// The panel's CA (PEM), to keep once paired.
+    /// The panel's CA (PEM), to keep once paired; empty when a LAN name's
+    /// certificate turned out to be a proxy's public one, so the saved
+    /// panel is checked with the web roots instead of a pin.
     pub ca: String,
     pub fingerprint: String,
+    /// One agent for the whole wait, so the polls reuse one connection
+    /// instead of opening a new one through the proxy every second.
+    agent: ureq::Agent,
+}
+
+/// Whether an error is the certificate being refused (rather than the
+/// panel being slow or away).
+fn cert_rejected(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let s = c.to_string().to_lowercase();
+        s.contains("certificate") || s.contains("unknownissuer") || s.contains("notvalidforname")
+    })
 }
 
 /// Asks the panel to pair this PC, named `device`. Everything after
-/// learning the CA goes over a connection pinned to it, so the token can
-/// only come from whoever holds that CA's key.
+/// learning the CA goes over a checked connection: pinned to that CA on a
+/// LAN address, the web roots on a public name. A LAN or Tailscale name
+/// whose certificate isn't the panel's own (a proxy in front of it, such as
+/// `tailscale serve`) is checked with the web roots instead; if those don't
+/// accept it either, pairing stops.
 pub fn pair_request(url: &str, device: &str) -> anyhow::Result<Pairing> {
     let (base, h) = find(url)?;
     let tls = h.tls.context("This Hopper Server is too old for encrypted pairing; update it.")?;
     let fingerprint = fingerprint_of(&tls.ca).context("The panel sent a broken certificate.")?;
-    let trust = trust_for(&base, &tls.ca);
-    let v = reply(
-        agent_with(Duration::from_secs(10), &trust)
-            .post(&format!("{base}/api/v1/pair/request"))
-            .send_json(json!({ "device": device })),
-        &base,
-    )
-    .context("The panel's certificate didn't check out")?;
+    let ask = |trust: &Trust| {
+        let agent = agent_with(ANSWER_WAIT, trust);
+        let v = reply(agent.post(&format!("{base}/api/v1/pair/request")).send_json(json!({ "device": device })), &base);
+        v.map(|v| (v, agent))
+    };
+    let first = trust_for(&base, &tls.ca);
+    let (v, agent, ca) = match ask(&first) {
+        Ok((v, a)) => (v, a, tls.ca),
+        Err(e) if matches!(first, Trust::Pinned(_)) && cert_rejected(&e) => match ask(&Trust::Web) {
+            Ok((v, a)) => (v, a, String::new()),
+            Err(_) => return Err(e.context(format!("{base} answered with a certificate that isn't the panel's"))),
+        },
+        Err(e) if cert_rejected(&e) => return Err(e.context(format!("{base}'s certificate didn't check out"))),
+        Err(e) => return Err(e.context("Couldn't send the pairing request")),
+    };
     let (id, secret) = (v["id"].as_str().unwrap_or("").to_string(), v["secret"].as_str().unwrap_or("").to_string());
-    Ok(Pairing { code: pair_code(&fingerprint, &id, &secret), base, id, secret, ca: tls.ca, fingerprint })
+    if id.is_empty() || secret.is_empty() {
+        bail!("{base} didn't take the pairing request.");
+    }
+    Ok(Pairing { code: pair_code(&fingerprint, &id, &secret), base, id, secret, ca, fingerprint, agent })
 }
 
 #[derive(Debug, PartialEq)]
@@ -842,9 +881,7 @@ pub enum PairState {
 /// Where a pairing request stands.
 pub fn pair_status(p: &Pairing) -> anyhow::Result<PairState> {
     let v = reply(
-        agent_with(Duration::from_secs(10), &trust_for(&p.base, &p.ca))
-            .post(&format!("{}/api/v1/pair/status", p.base))
-            .send_json(json!({ "id": p.id, "secret": p.secret })),
+        p.agent.post(&format!("{}/api/v1/pair/status", p.base)).send_json(json!({ "id": p.id, "secret": p.secret })),
         &p.base,
     )?;
     Ok(match v["status"].as_str() {
@@ -853,6 +890,54 @@ pub fn pair_status(p: &Pairing) -> anyhow::Result<PairState> {
         Some("denied") => PairState::Denied,
         _ => PairState::Expired,
     })
+}
+
+/// How long the owner has to allow a request (the panel forgets it then).
+pub const PAIR_WAIT: Duration = Duration::from_secs(300);
+/// How long the panel may stay out of reach while waiting before pairing
+/// gives up. One lost poll on a slow link or through a proxy is normal.
+const PAIR_OUT_OF_REACH: Duration = Duration::from_secs(60);
+
+/// Waits for the owner to answer `p`, asking every second or so. Polls that
+/// fail are tried again; pairing only stops when the panel has been out of
+/// reach for a minute. Returns `Approved`, `Denied` or `Expired`.
+pub fn wait_for_answer(p: &Pairing) -> anyhow::Result<PairState> {
+    wait_with(|| pair_status(p), std::thread::sleep, Instant::now, PAIR_WAIT)
+}
+
+/// [`wait_for_answer`] with the poll, sleep and clock passed in.
+fn wait_with(
+    mut poll: impl FnMut() -> anyhow::Result<PairState>,
+    mut sleep: impl FnMut(Duration),
+    now: impl Fn() -> Instant,
+    wait: Duration,
+) -> anyhow::Result<PairState> {
+    let start = now();
+    let mut reached = start;
+    let mut failed: Option<anyhow::Error> = None;
+    loop {
+        sleep(if failed.is_some() { Duration::from_secs(3) } else { Duration::from_secs(1) });
+        match poll() {
+            Ok(PairState::Waiting) if now().duration_since(start) < wait => {
+                reached = now();
+                failed = None;
+            }
+            Ok(PairState::Waiting) => return Ok(PairState::Expired),
+            // The panel forgot the request right after a lost answer: it
+            // may have been the approval (panels before 0.13.14 hand the
+            // token out only once).
+            Ok(PairState::Expired) if failed.is_some() => bail!(
+                "Lost the panel's answer: it may have allowed this PC already. Remove this PC from Access & devices in the panel, then pair again."
+            ),
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                if now().duration_since(reached) >= PAIR_OUT_OF_REACH || now().duration_since(start) >= wait {
+                    return Err(e.context("Lost the connection to the panel while waiting for it to allow this PC"));
+                }
+                failed = Some(e);
+            }
+        }
+    }
 }
 
 /// The 6-digit pairing code: from the panel's certificate fingerprint and
@@ -967,6 +1052,65 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.to_string(), "timeout: global");
         assert_eq!(*tried.borrow(), [("https://rig:8790".to_string(), Duration::from_secs(5))]);
+    }
+
+    /// Runs [`wait_with`] over scripted poll results on a fake clock; each
+    /// poll takes `poll_takes`. Returns the outcome and how many polls ran.
+    fn wait_script(script: Vec<anyhow::Result<PairState>>, poll_takes: Duration) -> (anyhow::Result<PairState>, usize) {
+        use std::cell::{Cell, RefCell};
+        let t0 = Instant::now();
+        let clock = Cell::new(t0);
+        let script = RefCell::new(script.into_iter());
+        let polls = Cell::new(0);
+        let out = wait_with(
+            || {
+                polls.set(polls.get() + 1);
+                clock.set(clock.get() + poll_takes);
+                // Past the script: the panel stays out of reach.
+                script.borrow_mut().next().unwrap_or_else(|| Err(anyhow::anyhow!("timeout: global")))
+            },
+            |d| clock.set(clock.get() + d),
+            || clock.get(),
+            PAIR_WAIT,
+        );
+        (out, polls.get())
+    }
+
+    #[test]
+    fn waiting_for_approval_survives_lost_polls() {
+        use PairState::*;
+        let lost = || Err(anyhow::anyhow!("can't reach Hopper Server at https://x:443: timeout: global"));
+        let slow = Duration::from_secs(15);
+        // A poll lost through the proxy, then the approval: paired.
+        let (out, polls) = wait_script(vec![Ok(Waiting), lost(), lost(), Ok(Approved("tok".into()))], slow);
+        assert_eq!(out.unwrap(), Approved("tok".into()));
+        assert_eq!(polls, 4);
+        // Denied and expired come straight back.
+        assert_eq!(wait_script(vec![Ok(Waiting), Ok(Denied)], slow).0.unwrap(), Denied);
+        assert_eq!(wait_script(vec![Ok(Expired)], slow).0.unwrap(), Expired);
+        // Out of reach for a minute: gives up, and says at which step.
+        let (out, polls) = wait_script(vec![Ok(Waiting)], slow);
+        let e = format!("{:#}", out.unwrap_err());
+        assert!(e.starts_with("Lost the connection to the panel while waiting") && e.contains("timeout: global"), "{e}");
+        assert!((3..=6).contains(&polls), "{polls}");
+        // An old panel that forgot the request after a lost reply: it may
+        // have been the approval, so say what to do instead of "expired".
+        let e = format!("{:#}", wait_script(vec![Ok(Waiting), lost(), Ok(Expired)], slow).0.unwrap_err());
+        assert!(e.contains("Remove this PC"), "{e}");
+        // Nobody answers for the whole wait: expired.
+        let fast = Duration::from_millis(50);
+        let (out, polls) = wait_script((0..1000).map(|_| Ok(Waiting)).collect(), fast);
+        assert_eq!(out.unwrap(), Expired);
+        assert!(polls > 200 && polls < 320, "{polls}");
+    }
+
+    #[test]
+    fn certificate_errors_told_apart() {
+        let cert = anyhow::anyhow!("invalid peer certificate: UnknownIssuer").context("can't reach Hopper Server at https://rig:8790");
+        assert!(cert_rejected(&cert));
+        assert!(cert_rejected(&anyhow::anyhow!("invalid peer certificate: NotValidForName")));
+        let slow = anyhow::anyhow!("timeout: global").context("can't reach Hopper Server at https://rig:8790");
+        assert!(!cert_rejected(&slow));
     }
 
     #[test]
