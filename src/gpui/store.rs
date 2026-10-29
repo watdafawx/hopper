@@ -175,6 +175,15 @@ enum Anim {
 /// Decoded clips kept at once; the oldest goes (and frees its GPU copies).
 const ANIMS_KEPT: usize = 12;
 
+/// Small clips (logos, see `logos.rs`) kept at once, counted apart: a page
+/// of results shows a dozen or two, and each is a few hundred KB.
+const SMALL_ANIMS_KEPT: usize = 40;
+
+/// Whether clip `key` is a small one (a logo), see [`SMALL_ANIMS_KEPT`].
+fn small_anim(key: &str) -> bool {
+    matches!(anim_parts(key).1, Some(w) if w <= crate::anim::LOGO.max_width)
+}
+
 /// Marks the key of a clip decoded big for the image viewer (see
 /// [`Store::want_anim_view`]), apart from the page's copy of the same image.
 const VIEW_SUFFIX: &str = "#view";
@@ -191,7 +200,8 @@ fn anim_parts(key: &str) -> (&str, Option<u32>, crate::anim::Limits) {
         Some(url) => (url, None, crate::anim::VIEWER),
         None => {
             let (url, width) = hopper::imgcache::split_width(key);
-            (url, width, crate::anim::PAGE)
+            let small = width.is_some_and(|w| w <= crate::anim::LOGO.max_width);
+            (url, width, if small { crate::anim::LOGO } else { crate::anim::PAGE })
         }
     }
 }
@@ -901,9 +911,13 @@ impl Store {
                     return;
                 };
                 self.anims.insert(key.clone(), Anim::Ready(clip));
+                // Logos and page GIFs make room for their own kind.
+                let small = small_anim(&key);
+                let kept = if small { SMALL_ANIMS_KEPT } else { ANIMS_KEPT };
                 self.anims_ready.push_back(key);
-                while self.anims_ready.len() > ANIMS_KEPT {
-                    let Some(old) = self.anims_ready.pop_front() else { break };
+                while self.anims_ready.iter().filter(|k| small_anim(k) == small).count() > kept {
+                    let Some(at) = self.anims_ready.iter().position(|k| small_anim(k) == small) else { break };
+                    let Some(old) = self.anims_ready.remove(at) else { break };
                     if let Some(Anim::Ready(c)) = self.anims.remove(&old) {
                         for f in c.frames() {
                             cx.drop_image(f, None);
@@ -1427,6 +1441,16 @@ impl Store {
             Some(Anim::Ready(c)) => Some(c),
             _ => None,
         }
+    }
+
+    /// Whether image key `key` was asked for with [`Self::want_anim`].
+    pub fn anim_known(&self, key: &str) -> bool {
+        self.anims.contains_key(key)
+    }
+
+    /// Whether clip `key` is still on its way (downloading or decoding).
+    pub fn anim_pending(&self, key: &str) -> bool {
+        matches!(self.anims.get(key), Some(Anim::Waiting | Anim::Decoding))
     }
 
     /// Frames streamed clips have moved past, whose GPU copies can go
@@ -3392,5 +3416,20 @@ fn warn_once(url: &str, step: &str, e: &anyhow::Error) {
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     if seen.get_or_insert_with(Default::default).insert(format!("{step}|{url}")) {
         log::warn!("image {url}: {step} failed: {e:#}");
+    }
+}
+
+#[cfg(test)]
+mod anim_key_tests {
+    use super::{anim_parts, small_anim, view_key};
+
+    #[test]
+    fn logos_are_small_clips_and_page_gifs_are_not() {
+        assert!(small_anim("https://x/a.gif#w=128"));
+        assert!(!small_anim("https://x/a.gif#w=400"));
+        assert!(!small_anim("https://x/a.gif"));
+        assert!(!small_anim(&view_key("https://x/a.gif")));
+        assert_eq!(anim_parts("https://x/a.gif#w=128").2.max_width, crate::anim::LOGO.max_width);
+        assert_eq!(anim_parts("https://x/a.gif#w=400").2.max_width, crate::anim::PAGE.max_width);
     }
 }

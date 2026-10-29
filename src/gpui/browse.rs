@@ -168,6 +168,10 @@ pub struct BrowseView {
     desc: Entity<widgets::DescView>,
     /// The filter and results columns (made on first draw, see [`Part`]).
     parts: Option<(Entity<Part>, Entity<Part>, Entity<Part>)>,
+    /// Where the results and the panel drew animated logos, and the layer
+    /// that plays them over the page (not in a peek; see `logos.rs`).
+    logos: crate::logos::Slots,
+    logo_layer: Option<Entity<crate::logos::LogoLayer>>,
     /// Open the first result when it arrives (`--detail`, for scripted runs).
     open_first: bool,
     /// Only the project panel, docked beside an instance's mod list.
@@ -193,7 +197,9 @@ pub struct BrowseView {
 
 impl BrowseView {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut view = Self::build(store, window, cx);
+        let mut view = Self::build(store.clone(), window, cx);
+        let slots = view.logos.clone();
+        view.logo_layer = Some(cx.new(|cx| crate::logos::LogoLayer::new(store, slots, window, cx)));
         view.open_first = std::env::args().any(|a| a == "--detail");
         view.load_versions(cx);
         view
@@ -272,6 +278,8 @@ impl BrowseView {
             detail_tab: 0,
             desc,
             parts: None,
+            logos: Default::default(),
+            logo_layer: None,
             _debounce: None,
             _search: None,
             _subscriptions: subs,
@@ -1984,7 +1992,7 @@ impl BrowseView {
             })
             .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
             .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
-            .child(widgets::thumb(icon.as_deref(), rems(3.5), cx))
+            .child(crate::logos::thumb(&self.logos, m.icon(), icon.as_deref(), rems(3.5), cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -2451,7 +2459,7 @@ impl BrowseView {
         let header = h_flex()
             .gap_4()
             .items_start()
-            .child(widgets::thumb(icon.as_deref(), rems(4.), cx))
+            .child(crate::logos::thumb(&self.logos, m.icon(), icon.as_deref(), rems(4.), cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -2677,7 +2685,7 @@ impl BrowseView {
                                     this.open_detail(open.clone(), cx)
                                 }),
                             )
-                            .child(widgets::thumb(icon.as_deref(), rems(1.75), cx))
+                            .child(crate::logos::thumb(&self.logos, d.icon(), icon.as_deref(), rems(1.75), cx))
                             .child(
                                 div()
                                     .flex_1()
@@ -2886,7 +2894,7 @@ impl BrowseView {
                         .when(current, |r| widgets::row_selected(r, cx))
                         .when(!current, |r| r.hover(|s| widgets::row_hover(s, cx)))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
-                        .child(widgets::thumb(icon.as_deref(), rems(2.75), cx))
+                        .child(crate::logos::thumb(&self.logos, m.icon(), icon.as_deref(), rems(2.75), cx))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -3023,7 +3031,7 @@ impl BrowseView {
                         .clickable(cx)
                         .hover(|s| s.bg(theme.list_hover))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
-                        .child(widgets::thumb(icon.as_deref(), rems(1.75), cx))
+                        .child(crate::logos::thumb(&self.logos, d.icon(), icon.as_deref(), rems(1.75), cx))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -3452,9 +3460,12 @@ impl Part {
 impl Render for Part {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let draw = self.draw;
+        let me = cx.entity_id();
         let part = self
             .browse
             .update(cx, |b, cx| {
+                // Its logos are marked again as it lays out.
+                b.logos.clear(me);
                 let target = b.target(cx);
                 draw(b, target.as_ref(), window, cx)
             })
@@ -3491,6 +3502,9 @@ impl Render for BrowseView {
                 )
             })
             .clone();
+        let has_detail = self.selected.is_some() || self.author.is_some();
+        // The layer plays the logos of the columns on screen.
+        self.logos.show([results.entity_id()].into_iter().chain(has_detail.then(|| panel.entity_id())));
         // The cache style carries the column's width (a cached view sizes by it).
         let filters_w = self.filters_panel.layout(self.store.read(cx).settings(), window).width;
         let filters = AnyView::from(filters).cached(StyleRefinement::default().w(rems(filters_w)).flex_none().h_full());
@@ -3499,11 +3513,12 @@ impl Render for BrowseView {
         // tasks button) doesn't rebuild the project and its description
         // every frame. Outside a peek it's open only with a project or an
         // author picked.
-        let detail = (self.selected.is_some() || self.author.is_some()).then(|| {
+        let detail = has_detail.then(|| {
             let w = self.panel_width(window, cx);
             AnyView::from(panel).cached(StyleRefinement::default().w(rems(w)).flex_none().h_full())
         });
         h_flex()
+            .relative()
             .size_full()
             .items_stretch()
             // The site's color fades in from the top across the whole page,
@@ -3520,6 +3535,7 @@ impl Render for BrowseView {
             .child(filters)
             .child(results)
             .children(detail)
+            .children(self.logo_layer.clone())
             .into_any_element()
     }
 }

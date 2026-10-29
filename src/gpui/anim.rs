@@ -42,6 +42,15 @@ pub const PAGE: Limits = Limits {
     stream_cache: 40 << 20,
 };
 
+/// Project logos in lists and headers (see `logos.rs`): small, and up to
+/// a few dozen at once, so each is kept whole when it fits.
+pub const LOGO: Limits = Limits {
+    max_width: crate::logos::WIDTH,
+    keep_budget: 16 << 20,
+    stream_width: 96,
+    stream_cache: 4 << 20,
+};
+
 /// The one GIF in the image viewer, shown big. It is freed when the viewer
 /// moves on or closes, so it can take more.
 pub const VIEWER: Limits = Limits {
