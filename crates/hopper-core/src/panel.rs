@@ -37,7 +37,32 @@ impl PanelAction {
             PanelAction::Backup => "Back up",
         }
     }
+
+    /// Whether a poll's `s` shows this action finished, so the app stops
+    /// showing it as under way. `seen_up`: a poll since the action was
+    /// sent showed the process running (starting counts); `waited`: time
+    /// since it was sent.
+    ///
+    /// A start is over once the server is up, or once its process ended:
+    /// a server that dies while loading mods goes starting → stopped (or
+    /// crashed) and never reaches running, and waiting for running would
+    /// keep it "starting" with Start greyed out for good. A panel can
+    /// still say stopped for a moment right after taking the request, so
+    /// a stopped server it never saw up only counts after a short grace.
+    pub fn settled(self, s: &PanelStats, seen_up: bool, waited: std::time::Duration) -> bool {
+        match self {
+            PanelAction::Start => {
+                s.crashed || (s.running && !s.starting) || (!s.running && (seen_up || waited >= START_GRACE))
+            }
+            PanelAction::Stop | PanelAction::Kill => !s.running,
+            PanelAction::Restart | PanelAction::Backup => true,
+        }
+    }
 }
+
+/// How long a panel may keep saying "stopped" after a start request
+/// before Hopper believes it (see [`PanelAction::settled`]).
+pub const START_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// A server as the panel knows it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -737,6 +762,39 @@ impl ServerPanel for Crafty {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn st(running: bool, starting: bool, crashed: bool) -> PanelStats {
+        PanelStats { running, starting, crashed, ..Default::default() }
+    }
+
+    #[test]
+    fn start_settles_when_the_process_ends() {
+        use std::time::Duration;
+        let now = Duration::ZERO;
+        let start = PanelAction::Start;
+        // Still loading: under way.
+        assert!(!start.settled(&st(true, true, false), true, now));
+        // Up: done.
+        assert!(start.settled(&st(true, false, false), true, now));
+        // Died while loading mods, exit code 0 (hopperd says stopped): done.
+        assert!(start.settled(&st(false, false, false), true, now));
+        // The same with a non-zero exit (crashed): done, even unseen.
+        assert!(start.settled(&st(false, false, true), false, now));
+        // Stopped before the panel ever showed it starting: a panel that
+        // hasn't caught up yet, until the grace runs out.
+        assert!(!start.settled(&st(false, false, false), false, Duration::from_secs(3)));
+        assert!(start.settled(&st(false, false, false), false, START_GRACE));
+    }
+
+    #[test]
+    fn other_actions_settle() {
+        use std::time::Duration;
+        let z = Duration::ZERO;
+        assert!(!PanelAction::Stop.settled(&st(true, false, false), true, z));
+        assert!(PanelAction::Stop.settled(&st(false, false, false), true, z));
+        assert!(PanelAction::Kill.settled(&st(false, false, true), true, z));
+        assert!(PanelAction::Restart.settled(&st(true, true, false), true, z));
+    }
 
     fn server(root: &str, port: u16) -> crate::server::ServerInfo {
         crate::server::ServerInfo {
