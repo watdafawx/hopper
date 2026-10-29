@@ -5,6 +5,7 @@
   import { api, post } from './lib/api.js';
   import { live } from './lib/live.svelte.js';
   import { say } from './lib/toast.svelte.js';
+  import { routerChip } from './lib/router.js';
 
   let r = $state(null);
   let cfg = $state(null);
@@ -15,6 +16,7 @@
 
   const dirty = $derived(cfg && JSON.stringify(cfg) !== saved);
   const withAddr = $derived(live.servers.filter((s) => s.addresses?.length));
+  const chip = $derived(r && routerChip(r));
 
   async function load() {
     try {
@@ -56,7 +58,7 @@
 
 <div class="card col">
   <h3><Globe size={14} />Server addresses<span class="sp"></span>
-    {#if r?.status.listening}<span class="chip running">On · port {r.status.listening}</span>{:else if cfg?.enabled}<span class="chip">Waiting</span>{:else if cfg}<span class="chip">Off</span>{/if}
+    {#if chip}<span class="chip {chip.cls}" title={chip.note}>{chip.label}{r.state === 'running' ? ` · port ${r.status.listening}` : ''}</span>{/if}
   </h3>
   {#if cfg}
     <p class="small subtle">Players join <span class="mono">survival.{cfg.domain || 'example.com'}</span> instead of an IP and port. One Minecraft port is shared by every server; each server's address is set in its Settings tab.</p>
@@ -74,7 +76,7 @@
     <div class="row"><span class="sp"></span>
       <button class="btn sm" disabled={checking || !withAddr.length && !cfg.domain} onclick={check}><SearchCheck size={13} />{checking ? 'Checking…' : 'Check DNS and port'}</button>
       <button class="btn sm pri" disabled={!dirty || saving} onclick={save}><Save size={13} />Save</button></div>
-    {#if !withAddr.length && cfg.enabled}<div class="tiny muted">The router starts once a server has an address.</div>{/if}
+    {#if !withAddr.length && cfg.enabled}<div class="tiny muted">The router starts once a server has a saved address.</div>{/if}
     {#if result}
       <div class="lbl">DNS records</div>
       {#if cfg.domain && result.public_ip}
