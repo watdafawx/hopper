@@ -207,7 +207,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "panel-kind", "Panel", "Crafty, MCSS or Pterodactyl, for the servers folder above: start, stop, console and backups.", "crafty mcss pterodactyl server panel"),
     e(C::Servers, "panel-url", "Address", "Where the panel answers, like https://myserver:8443.", "url https server panel"),
     e(C::Servers, "panel-find", "Find on the LAN", "Hopper Servers announce themselves on your network.", "hopper server hopperd discover lan"),
-    e(C::Servers, "panel-pair", "Add a Hopper Server", "Its address, then Pair: the panel shows the same code, allow it there under Access & devices.", "hopper server hopperd pair code add address"),
+    e(C::Servers, "panel-pair", "Add a Hopper Server", "Its address, then Pair: the panel shows the same code, allow it there under Access & devices. Behind a reverse proxy, a web address like https://hopper.example.com works too.", "hopper server hopperd pair code add address reverse proxy domain"),
     e(C::Servers, "panel-key", "API key", "Kept in Windows Credential Manager, not in settings.json.", "token server panel"),
     e(C::Servers, "panel-cert", "Self-signed certificate", "Accept a certificate the panel makes for itself.", "https ssl tls server panel"),
     e(C::Servers, "panel-test", "Connection", "Whether the panel answers with this address and key.", "test server panel"),
@@ -1614,7 +1614,7 @@ impl SettingsPage {
                 .gap_1()
                 .children(list.iter().enumerate().map(|(i, f)| {
                     let (url, name) = (f.url.clone(), f.name.clone());
-                    let known = s.hopper_panels.iter().any(|p| hopper::hopperd::base_url(&p.url) == hopper::hopperd::base_url(&f.url));
+                    let known = s.hopper_panels.iter().any(|p| hopper::hopperd::same_panel(&p.url, &f.url));
                     Button::new(("found-panel", i))
                         .small()
                         .outline()
@@ -1753,8 +1753,7 @@ impl SettingsPage {
         .unwrap_or_default();
         // An address already paired is paired again, not added twice.
         let repair = self.repair.clone().or_else(|| {
-            let base = hopper::hopperd::base_url(&url);
-            self.store.read(cx).settings().hopper_panels.iter().find(|p| hopper::hopperd::base_url(&p.url) == base).map(|p| p.id.clone())
+            self.store.read(cx).settings().hopper_panels.iter().find(|p| hopper::hopperd::same_panel(&p.url, &url)).map(|p| p.id.clone())
         });
         let mut announced = self.new_panel_name.clone().filter(|(u, _)| *u == url).map(|(_, n)| n);
         // Each new panel gets its own token name (only one paired before

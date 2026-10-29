@@ -122,6 +122,51 @@ pub fn base_url(url: &str) -> String {
     if has_port || host.is_empty() { url } else { format!("{url}:{PORT}") }
 }
 
+/// The addresses to try, in order, for what was typed. A web address with
+/// no port (`https://hopper.example.com`) is most likely a panel behind a
+/// reverse proxy on 443, so that comes first, then hopperd's own port.
+/// Everything else has one answer: [`base_url`]. An `http://` address with
+/// no port stays on hopperd's port, as before: the panel only speaks HTTPS,
+/// and a proxy's port 80 just redirects. Each address names its port, so
+/// what pairing saves never needs probing again.
+pub fn candidates(url: &str) -> Vec<String> {
+    let base = base_url(url);
+    let t = url.trim();
+    let Some(rest) = t.strip_prefix("https://") else { return vec![base] };
+    let host = rest.split('/').next().unwrap_or("");
+    let has_port = host.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    if host.is_empty() || has_port {
+        return vec![base];
+    }
+    vec![format!("https://{host}:443"), base]
+}
+
+/// Whether a saved panel address and a typed one are the same panel.
+pub fn same_panel(saved: &str, typed: &str) -> bool {
+    let saved = base_url(saved);
+    candidates(typed).iter().any(|c| *c == saved)
+}
+
+/// The first of [`candidates`] that `check` accepts, with what it gave.
+/// The first of several tries gets a short timeout so a wrong guess
+/// doesn't hold pairing up; when all fail, the error names every address.
+fn first_reachable<T>(url: &str, check: impl Fn(&str, Duration) -> anyhow::Result<T>) -> anyhow::Result<(String, T)> {
+    let tries = candidates(url);
+    if tries.len() == 1 {
+        let base = tries.into_iter().next().unwrap_or_default();
+        return check(&base, Duration::from_secs(5)).map(|v| (base, v));
+    }
+    let mut errors = Vec::new();
+    for (i, base) in tries.iter().enumerate() {
+        let wait = Duration::from_secs(if i + 1 < tries.len() { 3 } else { 5 });
+        match check(base, wait) {
+            Ok(v) => return Ok((base.clone(), v)),
+            Err(e) => errors.push(format!("{base}: {e:#}")),
+        }
+    }
+    bail!("No Hopper Server found at {}. Tried {}", tries.join(" or "), errors.join("; "))
+}
+
 /// Whether `base`'s host is a LAN, Tailscale or local name: the panel's
 /// own certificate covers those. A public domain has a Let's Encrypt one.
 fn private_host(base: &str) -> bool {
@@ -734,12 +779,21 @@ pub struct HelloTls {
 /// The panel's name, version and certificate authority. Unverified: only
 /// to learn the CA, which pairing then pins and the codes confirm.
 pub fn hello(url: &str) -> anyhow::Result<Hello> {
-    let base = base_url(url);
-    let v = reply(agent_with(Duration::from_secs(5), &Trust::Unverified).get(&format!("{base}/api/v1/hello")).call(), &base)?;
+    hello_at(&base_url(url), Duration::from_secs(5))
+}
+
+fn hello_at(base: &str, timeout: Duration) -> anyhow::Result<Hello> {
+    let v = reply(agent_with(timeout, &Trust::Unverified).get(&format!("{base}/api/v1/hello")).call(), base)?;
     if v["panel"].as_str() != Some("hopperd") {
         bail!("{base} isn't a Hopper Server.");
     }
     Ok(serde_json::from_value(v)?)
+}
+
+/// [`hello`] for a typed address, trying each of [`candidates`]: the
+/// address that answered (port included) and what it said.
+pub fn find(url: &str) -> anyhow::Result<(String, Hello)> {
+    first_reachable(url, hello_at)
 }
 
 /// A pairing request waiting for the owner.
@@ -761,8 +815,7 @@ pub struct Pairing {
 /// learning the CA goes over a connection pinned to it, so the token can
 /// only come from whoever holds that CA's key.
 pub fn pair_request(url: &str, device: &str) -> anyhow::Result<Pairing> {
-    let base = base_url(url);
-    let h = hello(&base)?;
+    let (base, h) = find(url)?;
     let tls = h.tls.context("This Hopper Server is too old for encrypted pairing; update it.")?;
     let fingerprint = fingerprint_of(&tls.ca).context("The panel sent a broken certificate.")?;
     let trust = trust_for(&base, &tls.ca);
@@ -841,6 +894,7 @@ mod tests {
         assert_eq!(base_url("192.168.50.3:9000/"), "https://192.168.50.3:9000");
         assert_eq!(base_url("https://panel.example.com"), "https://panel.example.com:8790");
         assert_eq!(base_url("http://rig:8790"), "https://rig:8790");
+        assert_eq!(base_url("https://panel.example.com:443"), "https://panel.example.com:443");
         for (b, private) in [
             ("https://rig:8790", true),
             ("https://192.168.50.3:8790", true),
@@ -854,6 +908,65 @@ mod tests {
         assert_ne!(pair_code("AA:BB", "1", "2"), pair_code("AA:BC", "1", "2"));
         assert_eq!(pair_code("AA", "1", "2").len(), 6);
         assert_eq!(enc("config/a b.toml"), "config%2Fa%20b.toml");
+    }
+
+    #[test]
+    fn address_candidates() {
+        // A web address with no port: the proxy's 443 first, then hopperd's.
+        for typed in ["https://hopper.example.com", "https://hopper.example.com/", " https://hopper.example.com/ "] {
+            assert_eq!(candidates(typed), ["https://hopper.example.com:443", "https://hopper.example.com:8790"], "{typed:?}");
+        }
+        // Everything else: one address, as before.
+        assert_eq!(candidates("rig"), ["https://rig:8790"]);
+        assert_eq!(candidates("rig:9000"), ["https://rig:9000"]);
+        assert_eq!(candidates("192.168.50.3"), ["https://192.168.50.3:8790"]);
+        assert_eq!(candidates("https://hopper.example.com:8443"), ["https://hopper.example.com:8443"]);
+        assert_eq!(candidates("http://hopper.example.com"), ["https://hopper.example.com:8790"]);
+        assert_eq!(candidates("http://rig:8791"), ["https://rig:8791"]);
+
+        assert!(same_panel("https://hopper.example.com:443", "https://hopper.example.com"));
+        assert!(same_panel("https://hopper.example.com:8790", "https://hopper.example.com/"));
+        assert!(same_panel("https://rig:8790", "rig"));
+        assert!(!same_panel("https://rig:8791", "rig"));
+    }
+
+    #[test]
+    fn probe_falls_back_to_panel_port() {
+        use std::cell::RefCell;
+        let tried = RefCell::new(Vec::new());
+        // 443 answers: no second try, and the saved address names the port.
+        let r = first_reachable("https://hopper.example.com", |b, t| {
+            tried.borrow_mut().push((b.to_string(), t));
+            Ok(1)
+        });
+        assert_eq!(r.unwrap(), ("https://hopper.example.com:443".to_string(), 1));
+        assert_eq!(tried.borrow().len(), 1);
+        assert!(tried.borrow()[0].1 < Duration::from_secs(5));
+
+        // 443 times out: 8790 is tried and kept.
+        tried.borrow_mut().clear();
+        let r = first_reachable("https://hopper.example.com", |b, t| {
+            tried.borrow_mut().push((b.to_string(), t));
+            if b.ends_with(":443") { bail!("timeout: global") } else { Ok(2) }
+        });
+        assert_eq!(r.unwrap(), ("https://hopper.example.com:8790".to_string(), 2));
+        assert_eq!(tried.borrow().len(), 2);
+
+        // Both fail: the error names both addresses.
+        let e = first_reachable("https://hopper.example.com", |b, _| -> anyhow::Result<()> { bail!("{b} isn't a Hopper Server.") })
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("https://hopper.example.com:443") && e.contains("https://hopper.example.com:8790"), "{e}");
+
+        // One address: one try, its error unchanged.
+        tried.borrow_mut().clear();
+        let e = first_reachable("rig", |b, t| -> anyhow::Result<()> {
+            tried.borrow_mut().push((b.to_string(), t));
+            bail!("timeout: global")
+        })
+        .unwrap_err();
+        assert_eq!(e.to_string(), "timeout: global");
+        assert_eq!(*tried.borrow(), [("https://rig:8790".to_string(), Duration::from_secs(5))]);
     }
 
     #[test]
