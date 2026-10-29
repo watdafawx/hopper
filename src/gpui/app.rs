@@ -33,6 +33,7 @@ gpui_kit::actions!(
         NextInstance,
         CommandPalette,
         OpenSettings,
+        OpenCfKey,
         GoBack,
         GoForward,
         ClosePanel
@@ -1262,6 +1263,7 @@ impl Render for AppView {
             .on_action(cx.listener(Self::zoom_reset))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(|this, _: &OpenCfKey, _, cx| this.open_settings_at("cf-key", cx)))
             .on_action(cx.listener(|this, _: &GoLibrary, _, cx| this.go(Page::Library, cx)))
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.step(true, cx)))
             .on_action(cx.listener(|this, _: &ClosePanel, _, cx| this.close_panel(cx)))

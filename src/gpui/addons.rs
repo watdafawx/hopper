@@ -2068,11 +2068,11 @@ impl AddonsView {
                 .child(Spinner::new().small())
                 .child(widgets::caption("Checking for updates", cx))
                 .into_any_element(),
-            Some(Updates::Failed(e)) => div()
-                .text_sm()
-                .text_color(cx.theme().danger)
-                .truncate()
-                .child(e.clone())
+            Some(Updates::Failed(e)) => h_flex()
+                .gap_2()
+                .min_w_0()
+                .child(div().min_w_0().text_sm().text_color(cx.theme().danger).truncate().child(e.clone()))
+                .children(widgets::cf_key_fix("updates-cf-key", e))
                 .into_any_element(),
             Some(Updates::Ready(_)) if updates.is_empty() => h_flex()
                 .gap_1p5()

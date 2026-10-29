@@ -826,6 +826,7 @@ impl SettingsPage {
     /// Asks CurseForge whether the typed key (or else the current one) works.
     fn test_cf_key(&mut self, cx: &mut Context<Self>) {
         let typed = self.cf_key.read(cx).value().trim().to_string();
+        let pasted = !typed.is_empty();
         let key = Some(typed)
             .filter(|k| !k.is_empty())
             .or_else(|| hopper::cf::api_key().map(String::from));
@@ -841,7 +842,9 @@ impl SettingsPage {
             let r = cx
                 .background_spawn(async move {
                     hopper::cf::test_key(&key)
-                        .map(|()| "CurseForge accepts this key.".to_string())
+                        .map(|()| {
+                            if pasted { "CurseForge accepts this key." } else { "CurseForge accepts the key in use." }.to_string()
+                        })
                         .map_err(|e| format!("{e:#}"))
                 })
                 .await;
@@ -1861,13 +1864,21 @@ impl SettingsPage {
         let theme = cx.theme().clone();
         let source = hopper::cf::api_key_source().map(|(_, s)| s);
         let (pill, desc) = match source {
+            Some(KeySource::Saved) => (
+                widgets::pill("Your key", theme.success, true),
+                if hopper::cf::env_key_ignored() {
+                    "Using your saved key. CF_API_KEY in .env holds a different key, which Hopper ignores while one is saved."
+                } else {
+                    "Using your saved key, kept in Windows Credential Manager. Paste another to replace it."
+                },
+            ),
             Some(KeySource::Env) => (
                 widgets::pill("From .env", theme.info, true),
-                "From CF_API_KEY in .env, which wins over a saved key.",
+                "Using CF_API_KEY from .env. A key you save here takes its place.",
             ),
-            Some(KeySource::Saved) => (
-                widgets::pill("Saved", theme.success, true),
-                "Saved in Windows Credential Manager. Paste another to replace it.",
+            Some(KeySource::Session) => (
+                widgets::pill("This run", theme.info, true),
+                "Using a key given for this run only.",
             ),
             Some(KeySource::BuiltIn) => (
                 widgets::pill("Built in", theme.muted_foreground, true),

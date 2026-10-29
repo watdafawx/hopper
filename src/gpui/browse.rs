@@ -496,7 +496,9 @@ impl BrowseView {
                     }
                 }
                 Err(e) => {
-                    this.error = Some(format!("Couldn't load that project. Check your connection and try again. ({e:#})"));
+                    this.error = Some(cf::explain(&e, |e| {
+                        format!("Couldn't load that project. Check your connection and try again. ({e:#})")
+                    }));
                     cx.notify();
                 }
             })
@@ -761,7 +763,9 @@ impl BrowseView {
                         this.want_server_files(cx);
                     }
                     Err(e) => {
-                        this.error = Some(format!("Couldn't load results. Check your connection and try again. ({e:#})"))
+                        this.error = Some(cf::explain(&e, |e| {
+                            format!("Couldn't load results. Check your connection and try again. ({e:#})")
+                        }))
                     }
                 }
                 cx.notify();
@@ -2293,7 +2297,8 @@ impl BrowseView {
                         r.child(
                             h_flex()
                                 .gap_2()
-                                .child(div().min_w_0().text_sm().text_color(theme.danger).child(e))
+                                .child(div().min_w_0().text_sm().text_color(theme.danger).child(e.clone()))
+                                .children(widgets::cf_key_fix("search-cf-key", &e))
                                 .when(retry, |r| {
                                     r.child(
                                         Button::new("search-retry")
@@ -3728,9 +3733,9 @@ impl BrowseView {
             v_flex()
                 .p_5()
                 .gap_3()
-                .child(div().text_sm().text_color(theme.danger).child(e))
+                .child(div().text_sm().text_color(theme.danger).child(e.clone()))
                 .child(
-                    h_flex().child(
+                    h_flex().gap_2().children(widgets::cf_key_fix("peek-cf-key", &e)).child(
                         Button::new("close-peek")
                             .small()
                             .outline()

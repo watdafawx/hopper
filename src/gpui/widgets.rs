@@ -170,6 +170,19 @@ pub fn split_alone(
         .on_click(on_click)
 }
 
+/// A button to the CurseForge key in Settings, when `error` is CurseForge
+/// rejecting the key; put it next to wherever a CurseForge error shows.
+pub fn cf_key_fix(id: impl Into<ElementId>, error: &str) -> Option<Button> {
+    hopper::cf::key_rejected_text(error).then(|| {
+        Button::new(id)
+            .xsmall()
+            .outline()
+            .icon(IconName::Settings)
+            .label("Open Settings")
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::app::OpenCfKey), cx))
+    })
+}
+
 /// A muted, small caption line.
 pub fn caption(text: impl Into<SharedString>, cx: &App) -> Div {
     div()

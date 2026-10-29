@@ -1,7 +1,8 @@
 //! CurseForge Core API client (https://docs.curseforge.com/rest-api/).
 //!
-//! The key comes from `CF_API_KEY` in `.env`. Every call blocks, so the UI
-//! runs them on worker threads.
+//! The key comes from Settings (Credential Manager), else `CF_API_KEY` in
+//! `.env`, else one built into the exe (see [`api_key_source`]). Every call
+//! blocks, so the UI runs them on worker threads.
 
 use anyhow::{Context, bail};
 use serde::de::DeserializeOwned;
@@ -476,59 +477,130 @@ pub struct Search {
 /// Where the CurseForge key came from, for Settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeySource {
-    Env,
+    /// Given for this run only ([`set_session_key`]; Hopper Server's own key).
+    Session,
     Saved,
+    Env,
     BuiltIn,
 }
 
 static KEY: std::sync::Mutex<Option<Option<(&'static str, KeySource)>>> =
     std::sync::Mutex::new(None);
+static SESSION: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
 
-/// The CurseForge API key: CF_API_KEY (.env), else the one saved in
-/// Windows Credential Manager from Settings, else one built into this exe.
+/// The CurseForge API key in use. See [`api_key_source`] for the order.
 pub fn api_key() -> Option<&'static str> {
     api_key_source().map(|(k, _)| k)
 }
 
+/// The key in use and where it came from: a key given for this run, else
+/// the one saved in Settings (Windows Credential Manager), else
+/// `CF_API_KEY` from `.env`, else one built into this exe. A saved key wins
+/// over `.env` so a key the player pastes in Settings always takes effect;
+/// `.env` still serves dev builds with nothing saved.
 pub fn api_key_source() -> Option<(&'static str, KeySource)> {
     let mut cache = KEY.lock().unwrap_or_else(|e| e.into_inner());
     *cache.get_or_insert_with(|| {
-        let clean = |k: String| Some(k.trim().to_string()).filter(|k| !k.is_empty());
-        let found = std::env::var("CF_API_KEY")
-            .ok()
-            .and_then(clean)
-            .map(|k| (k, KeySource::Env))
-            .or_else(|| {
-                crate::secrets::get(crate::secrets::CF_KEY)
-                    .and_then(clean)
-                    .map(|k| (k, KeySource::Saved))
-            })
-            .or_else(|| {
-                option_env!("HOPPER_CF_KEY")
-                    .map(String::from)
-                    .and_then(clean)
-                    .map(|k| (k, KeySource::BuiltIn))
-            });
+        let session = SESSION.lock().unwrap_or_else(|e| e.into_inner()).map(String::from);
+        let found = pick_key(
+            session,
+            crate::secrets::get(crate::secrets::CF_KEY),
+            std::env::var("CF_API_KEY").ok(),
+            option_env!("HOPPER_CF_KEY").map(String::from),
+        );
         // Leaked once per change of key, so callers can hold it freely.
         found.map(|(k, s)| (&*Box::leak(k.into_boxed_str()), s))
     })
 }
 
-/// Uses `key` for this run only (Hopper Server gets the desktop's key for a
-/// server pack update when it has none of its own).
-pub fn set_session_key(key: &str) {
-    let key = key.trim();
-    if key.is_empty() {
-        return;
-    }
-    *KEY.lock().unwrap_or_else(|e| e.into_inner()) = Some(Some((&*Box::leak(key.to_string().into_boxed_str()), KeySource::Env)));
+/// The first non-blank key, in order of precedence.
+fn pick_key(
+    session: Option<String>,
+    saved: Option<String>,
+    env: Option<String>,
+    built_in: Option<String>,
+) -> Option<(String, KeySource)> {
+    [
+        (session, KeySource::Session),
+        (saved, KeySource::Saved),
+        (env, KeySource::Env),
+        (built_in, KeySource::BuiltIn),
+    ]
+    .into_iter()
+    .find_map(|(k, s)| Some((k?.trim().to_string(), s)).filter(|(k, _)| !k.is_empty()))
 }
 
-/// Saves the key in Credential Manager (empty removes it).
+/// Whether `CF_API_KEY` in `.env` holds a different key from the saved one
+/// in use, so Settings can say the `.env` one is being ignored.
+pub fn env_key_ignored() -> bool {
+    match api_key_source() {
+        Some((k, KeySource::Saved)) => std::env::var("CF_API_KEY")
+            .ok()
+            .is_some_and(|e| !e.trim().is_empty() && e.trim() != k),
+        _ => false,
+    }
+}
+
+fn forget_key() {
+    *KEY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Uses `key` for this run only (Hopper Server gets the desktop's key for a
+/// server pack update when it has none of its own). Empty forgets it.
+pub fn set_session_key(key: &str) {
+    let key = key.trim();
+    *SESSION.lock().unwrap_or_else(|e| e.into_inner()) =
+        (!key.is_empty()).then(|| &*Box::leak(key.to_string().into_boxed_str()));
+    forget_key();
+}
+
+/// Saves the key in Credential Manager (empty removes it). Takes effect at
+/// once: the next call reads the key again.
 pub fn set_api_key(key: &str) -> anyhow::Result<()> {
     crate::secrets::set(crate::secrets::CF_KEY, key)?;
-    *KEY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    forget_key();
     Ok(())
+}
+
+/// What a player reads when CurseForge turns the key down (401 or 403).
+pub const KEY_REJECTED: &str = "CurseForge rejected the API key. Check it in Settings → CurseForge & Modrinth.";
+
+/// The error for a key CurseForge turned down, so callers can spot it
+/// ([`key_rejected`]) and offer a way to Settings.
+#[derive(Debug)]
+pub struct KeyRejected;
+
+impl std::fmt::Display for KeyRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(KEY_REJECTED)
+    }
+}
+
+impl std::error::Error for KeyRejected {}
+
+/// Whether `e` (or anything it wraps) is CurseForge rejecting the key.
+pub fn key_rejected(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<KeyRejected>())
+}
+
+/// Whether an error already turned into text is CurseForge rejecting the key.
+pub fn key_rejected_text(e: &str) -> bool {
+    e.contains(KEY_REJECTED)
+}
+
+/// `e` for a player: the plain key message when CurseForge rejected the
+/// key (whatever `other` would have said), else `other(e)`.
+pub fn explain(e: &anyhow::Error, other: impl FnOnce(&anyhow::Error) -> String) -> String {
+    if key_rejected(e) { KEY_REJECTED.to_string() } else { other(e) }
+}
+
+/// A failed API call: a turned-down key becomes [`KeyRejected`], anything
+/// else keeps the request in its message.
+fn call_error(e: ureq::Error, what: impl FnOnce() -> String) -> anyhow::Error {
+    match e {
+        ureq::Error::StatusCode(401 | 403) => KeyRejected.into(),
+        e => anyhow::Error::new(e).context(what()),
+    }
 }
 
 /// Asks CurseForge whether `key` works (one small request for Minecraft's
@@ -593,7 +665,7 @@ pub fn body_budget(len: u64) -> Duration {
 }
 
 fn key() -> anyhow::Result<&'static str> {
-    api_key().context("No CurseForge API key. Add one in Settings → More.")
+    api_key().context("No CurseForge API key. Add one in Settings → CurseForge & Modrinth.")
 }
 
 fn get<T: DeserializeOwned>(path: &str, query: &[(&str, String)]) -> anyhow::Result<T> {
@@ -603,7 +675,7 @@ fn get<T: DeserializeOwned>(path: &str, query: &[(&str, String)]) -> anyhow::Res
     for (k, v) in query {
         req = req.query(*k, v);
     }
-    let mut resp = req.call().with_context(|| format!("GET {path}"))?;
+    let mut resp = req.call().map_err(|e| call_error(e, || format!("GET {path}")))?;
     resp.body_mut()
         .with_config()
         .limit(64 * 1024 * 1024)
@@ -616,7 +688,7 @@ fn post<T: DeserializeOwned>(path: &str, body: &serde_json::Value) -> anyhow::Re
         .post(format!("{BASE}{path}"))
         .header("x-api-key", key()?)
         .send_json(body)
-        .with_context(|| format!("POST {path}"))?;
+        .map_err(|e| call_error(e, || format!("POST {path}")))?;
     resp.body_mut()
         .with_config()
         .limit(64 * 1024 * 1024)
@@ -1147,7 +1219,8 @@ fn file_label(p: &std::path::Path) -> String {
 pub fn http_status(e: &anyhow::Error) -> Option<u16> {
     e.chain().find_map(|c| match c.downcast_ref::<ureq::Error>() {
         Some(ureq::Error::StatusCode(s)) => Some(*s),
-        _ => None,
+        // A turned-down key loses its ureq error but is still a refusal.
+        _ => c.is::<KeyRejected>().then_some(403),
     })
 }
 
@@ -1190,6 +1263,45 @@ pub fn fetch_range(url: &str, start: u64, end: u64) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn some(k: &str) -> Option<String> {
+        Some(k.to_string())
+    }
+
+    #[test]
+    fn a_saved_key_wins_over_env_and_built_in() {
+        assert_eq!(
+            pick_key(None, some("saved"), some("env"), some("built")),
+            Some(("saved".into(), KeySource::Saved))
+        );
+    }
+
+    #[test]
+    fn env_then_built_in_fill_in_when_nothing_is_saved() {
+        assert_eq!(pick_key(None, None, some("env"), some("built")), Some(("env".into(), KeySource::Env)));
+        assert_eq!(pick_key(None, some("  "), some(" env "), None), Some(("env".into(), KeySource::Env)));
+        assert_eq!(pick_key(None, None, some(""), some("built")), Some(("built".into(), KeySource::BuiltIn)));
+        assert_eq!(pick_key(None, None, None, None), None);
+    }
+
+    #[test]
+    fn a_session_key_wins_over_everything() {
+        assert_eq!(
+            pick_key(some("panel"), some("saved"), some("env"), some("built")),
+            Some(("panel".into(), KeySource::Session))
+        );
+    }
+
+    #[test]
+    fn a_rejected_key_reads_plainly_and_is_spotted_through_context() {
+        let e = call_error(ureq::Error::StatusCode(403), || "POST /v1/mods".into()).context("checking updates");
+        assert!(key_rejected(&e));
+        assert!(key_rejected_text(&format!("{e:#}")));
+        assert_eq!(explain(&e, |e| format!("{e:#}")), KEY_REJECTED);
+        let other = call_error(ureq::Error::StatusCode(500), || "POST /v1/mods".into());
+        assert!(!key_rejected(&other));
+        assert!(format!("{other:#}").starts_with("POST /v1/mods"));
+    }
 
     #[test]
     fn an_empty_logo_thumbnail_falls_back_to_the_full_image() {

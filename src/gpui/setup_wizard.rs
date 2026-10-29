@@ -567,6 +567,7 @@ impl SetupWizard {
         let source = hopper::cf::api_key_source().map(|(_, s)| s);
         let status = match source {
             Some(KeySource::Env) => Some("Already set (from .env)"),
+            Some(KeySource::Session) => Some("Already set (for this run)"),
             Some(KeySource::Saved) => Some("Already set (saved)"),
             Some(KeySource::BuiltIn) => Some("Already set (built in)"),
             None => None,
