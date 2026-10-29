@@ -149,19 +149,18 @@ pub fn same_panel(saved: &str, typed: &str) -> bool {
 
 /// The first of [`candidates`] that `check` accepts, with what it gave.
 /// `check` gets how long to wait for the connection to open: short on the
-/// first of several tries, so a wrong guess doesn't hold pairing up. The
-/// answer itself gets longer ([`ANSWER_WAIT`]): a panel behind a proxy, on
-/// a slow link, can open fast and still take a few seconds to reply. When
+/// first of several tries ([`PROBE_WAIT`]), so a wrong guess doesn't hold
+/// pairing up; the last (or only) one gets the normal [`CONNECT_WAIT`]. When
 /// all fail, the error names every address.
 fn first_reachable<T>(url: &str, check: impl Fn(&str, Duration) -> anyhow::Result<T>) -> anyhow::Result<(String, T)> {
     let tries = candidates(url);
     if tries.len() == 1 {
         let base = tries.into_iter().next().unwrap_or_default();
-        return check(&base, Duration::from_secs(5)).map(|v| (base, v));
+        return check(&base, CONNECT_WAIT).map(|v| (base, v));
     }
     let mut errors = Vec::new();
     for (i, base) in tries.iter().enumerate() {
-        let wait = Duration::from_secs(if i + 1 < tries.len() { 3 } else { 5 });
+        let wait = if i + 1 < tries.len() { PROBE_WAIT } else { CONNECT_WAIT };
         match check(base, wait) {
             Ok(v) => return Ok((base.clone(), v)),
             Err(e) => errors.push(format!("{base}: {e:#}")),
@@ -194,14 +193,29 @@ fn trust_for(base: &str, ca: &str) -> Trust {
     if !ca.trim().is_empty() && private_host(base) { Trust::Pinned(ca.to_string()) } else { Trust::Web }
 }
 
-/// How long one pairing request may take, start to finish.
-const ANSWER_WAIT: Duration = Duration::from_secs(15);
+/// How long to wait for a connection to open (name lookup, then TCP and
+/// the TLS handshake), for the reply to start, and for a whole request. A
+/// panel on the other side of the world, behind a proxy, can take a few
+/// seconds just to open a connection; each step gets its own limit so an
+/// error can say which step it was.
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
+const REPLY_WAIT: Duration = Duration::from_secs(20);
+const CALL_WAIT: Duration = Duration::from_secs(30);
+/// How long the first of several guessed addresses may take to connect,
+/// so a wrong guess doesn't hold pairing up.
+const PROBE_WAIT: Duration = Duration::from_secs(5);
+/// Pauses before opening a connection again after one didn't open.
+const RETRY_PAUSES: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 
-fn agent_with(timeout: Duration, trust: &Trust) -> ureq::Agent {
-    agent_timed(None, timeout, trust)
+/// An agent for normal calls to `base`.
+fn agent_with(base: &str, trust: &Trust) -> ureq::Agent {
+    agent_timed(base, CONNECT_WAIT, Some(REPLY_WAIT), CALL_WAIT, trust)
 }
 
-fn agent_timed(connect: Option<Duration>, timeout: Duration, trust: &Trust) -> ureq::Agent {
+/// `connect`: how long the name lookup and opening the connection may each
+/// take. `reply`: how long to wait for the reply to start. `total`: the
+/// whole request.
+fn agent_timed(base: &str, connect: Duration, reply: Option<Duration>, total: Duration, trust: &Trust) -> ureq::Agent {
     use ureq::tls::{Certificate, RootCerts, TlsConfig};
     let tls = match trust {
         Trust::Pinned(pem) => match Certificate::from_pem(pem.as_bytes()) {
@@ -212,13 +226,180 @@ fn agent_timed(connect: Option<Duration>, timeout: Duration, trust: &Trust) -> u
         Trust::Web => TlsConfig::builder().root_certs(RootCerts::WebPki).build(),
         Trust::Unverified => TlsConfig::builder().disable_verification(true).build(),
     };
+    // A public address goes through the PC's proxy when it has one, as the
+    // browser does; a LAN or Tailscale panel is always reached directly.
+    let proxy = if private_host(base) { None } else { ureq::Proxy::try_from_env() };
     ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .timeout_connect(connect)
+        .timeout_global(Some(total))
+        .timeout_resolve(Some(connect))
+        .timeout_connect(Some(connect))
+        .timeout_recv_response(reply)
+        .user_agent(concat!("Hopper/", env!("CARGO_PKG_VERSION")))
+        .proxy(proxy)
         .http_status_as_error(false)
         .tls_config(tls)
         .build()
         .into()
+}
+
+/// Which step of a request failed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Step {
+    /// Looking up the address.
+    Lookup,
+    /// Opening the connection: TCP, then the TLS handshake.
+    Connect,
+    /// The certificate or the TLS handshake was refused.
+    Tls,
+    /// Sending the request.
+    Send,
+    /// Waiting for or reading the reply.
+    Reply,
+    /// Something else (the whole request ran out of time, a broken reply).
+    Other,
+}
+
+impl Step {
+    fn of(e: &ureq::Error) -> Step {
+        use std::io::ErrorKind as K;
+        use ureq::Timeout as T;
+        match e {
+            ureq::Error::HostNotFound | ureq::Error::Timeout(T::Resolve) => Step::Lookup,
+            // Windows' "No such host is known" and friends (WSAHOST_NOT_FOUND
+            // to WSANO_DATA); elsewhere getaddrinfo's own message.
+            ureq::Error::Io(io)
+                if matches!(io.raw_os_error(), Some(11001..=11004))
+                    || io.to_string().contains("failed to lookup address") =>
+            {
+                Step::Lookup
+            }
+            ureq::Error::Timeout(T::Connect) | ureq::Error::ConnectionFailed | ureq::Error::ConnectProxyFailed(_) => {
+                Step::Connect
+            }
+            ureq::Error::Io(io)
+                if matches!(
+                    io.kind(),
+                    K::ConnectionRefused | K::HostUnreachable | K::NetworkUnreachable | K::AddrNotAvailable
+                ) =>
+            {
+                Step::Connect
+            }
+            ureq::Error::Tls(_) | ureq::Error::Rustls(_) => Step::Tls,
+            ureq::Error::Timeout(T::SendRequest | T::SendBody) => Step::Send,
+            ureq::Error::Timeout(T::RecvResponse | T::RecvBody) | ureq::Error::BodyStalled => Step::Reply,
+            _ => Step::Other,
+        }
+    }
+
+    /// Whether nothing was sent yet, so trying again can't run a request
+    /// twice, and a second try may get through.
+    fn retry(self) -> bool {
+        matches!(self, Step::Lookup | Step::Connect)
+    }
+
+    fn says(self) -> &'static str {
+        match self {
+            Step::Lookup => "looking up the address failed",
+            Step::Connect => "the connection didn't open",
+            Step::Tls => "the secure connection was refused",
+            Step::Send => "sending the request stalled",
+            Step::Reply => "no reply came",
+            Step::Other => "the request failed",
+        }
+    }
+}
+
+/// Sends a request made by `f`, opening the connection again after a short
+/// pause when it couldn't be opened: a far-away panel on a lossy link
+/// sometimes loses a new connection that the next try gets through. Only
+/// failures before anything was sent are tried again, so a POST never runs
+/// twice. The error says which step failed and how long it took, and for a
+/// connection that didn't open, how long the lookup and TCP took on their
+/// own, so a report shows whether DNS, TCP or the TLS handshake stalled.
+fn send(
+    base: &str,
+    retry: bool,
+    f: impl FnMut() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+    send_with(base, retry, f, std::thread::sleep, probe)
+}
+
+/// [`send`] with the pause and the connection check passed in.
+fn send_with<R>(
+    base: &str,
+    retry: bool,
+    mut f: impl FnMut() -> Result<R, ureq::Error>,
+    mut sleep: impl FnMut(Duration),
+    check: impl Fn(&str) -> String,
+) -> anyhow::Result<R> {
+    let first = Instant::now();
+    let mut tries = 0;
+    loop {
+        let start = Instant::now();
+        let e = match f() {
+            Ok(r) => return Ok(r),
+            Err(e) => e,
+        };
+        let took = start.elapsed();
+        let step = Step::of(&e);
+        // A try that ran out of time is tried once more, not twice, so a
+        // panel that's switched off doesn't keep the answer waiting long.
+        let most = if took >= CONNECT_WAIT / 2 { 1 } else { RETRY_PAUSES.len() };
+        if retry && step.retry() && tries < most {
+            sleep(RETRY_PAUSES[tries]);
+            tries += 1;
+            continue;
+        }
+        let mut msg = format!("{} after {:.1} s ({e})", step.says(), took.as_secs_f32());
+        if tries > 0 {
+            msg.push_str(&format!(", tried {} times in {:.0} s", tries + 1, first.elapsed().as_secs_f32()));
+        }
+        if step == Step::Connect {
+            msg.push_str(&format!("; {}", check(base)));
+        }
+        return Err(anyhow::anyhow!(msg).context(format!("can't reach Hopper Server at {base}")));
+    }
+}
+
+/// Looks up `base`'s host and opens a plain TCP connection to it, timing
+/// each, to tell apart a slow lookup, a blocked port and a TLS handshake
+/// that stalls after TCP opened. Skipped behind a proxy (it would test
+/// another path than the one Hopper uses).
+fn probe(base: &str) -> String {
+    use std::net::ToSocketAddrs as _;
+    if !private_host(base) && ureq::Proxy::try_from_env().is_some() {
+        return "sent through the PC's proxy".into();
+    }
+    let after = base.split("://").nth(1).unwrap_or(base);
+    let authority = after.split('/').next().unwrap_or("").to_string();
+    let start = Instant::now();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let lookup = authority.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(lookup.to_socket_addrs().map(|a| a.collect::<Vec<_>>()));
+    });
+    let addrs = match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(a)) if !a.is_empty() => a,
+        Ok(Ok(_)) | Ok(Err(_)) => return format!("checked again: the address lookup found nothing ({:.1} s)", start.elapsed().as_secs_f32()),
+        Err(_) => return "checked again: the address lookup took over 5 s".into(),
+    };
+    let looked = start.elapsed();
+    let ips = addrs.iter().map(|a| a.ip().to_string()).collect::<Vec<_>>().join(", ");
+    let start = Instant::now();
+    for a in &addrs {
+        if std::net::TcpStream::connect_timeout(a, Duration::from_secs(5)).is_ok() {
+            return format!(
+                "checked again: lookup {:.1} s ({ips}), TCP {:.1} s, so the TLS handshake is what stalled",
+                looked.as_secs_f32(),
+                start.elapsed().as_secs_f32()
+            );
+        }
+    }
+    format!(
+        "checked again: lookup {:.1} s ({ips}), TCP didn't open in {:.1} s",
+        looked.as_secs_f32(),
+        start.elapsed().as_secs_f32()
+    )
 }
 
 /// "AB:CD:…" of a PEM certificate, worked out here (never taken from what
@@ -244,8 +425,8 @@ pub struct Client {
 }
 
 /// The reply's JSON, or its `error` as the error.
-fn reply(resp: Result<ureq::http::Response<ureq::Body>, ureq::Error>, base: &str) -> anyhow::Result<Value> {
-    let mut resp = resp.with_context(|| format!("can't reach Hopper Server at {base}"))?;
+fn reply(resp: anyhow::Result<ureq::http::Response<ureq::Body>>) -> anyhow::Result<Value> {
+    let mut resp = resp?;
     let status = resp.status().as_u16();
     let text = resp.body_mut().read_to_string().unwrap_or_default();
     let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -262,8 +443,10 @@ impl Client {
         let base = base_url(url);
         let trust = trust_for(&base, ca);
         Client {
-            agent: agent_with(Duration::from_secs(15), &trust),
-            slow: agent_with(Duration::from_secs(3600), &trust),
+            agent: agent_with(&base, &trust),
+            // No limit on the reply: the panel answers a chunk once it's
+            // written, and a download as long as it takes.
+            slow: agent_timed(&base, CONNECT_WAIT, None, Duration::from_secs(3600), &trust),
             base,
             panel: String::new(),
             token: token.to_string(),
@@ -318,19 +501,23 @@ impl Client {
     }
 
     pub fn get(&self, path: &str) -> anyhow::Result<Value> {
-        reply(self.agent.get(&self.url(path)).header("Authorization", &self.auth()).call(), &self.base)
+        reply(send(&self.base, true, || self.agent.get(&self.url(path)).header("Authorization", &self.auth()).call()))
     }
 
     pub fn post(&self, path: &str, body: Value) -> anyhow::Result<Value> {
-        reply(self.agent.post(&self.url(path)).header("Authorization", &self.auth()).send_json(body), &self.base)
+        reply(send(&self.base, true, || {
+            self.agent.post(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)
+        }))
     }
 
     pub fn put(&self, path: &str, body: Value) -> anyhow::Result<Value> {
-        reply(self.agent.put(&self.url(path)).header("Authorization", &self.auth()).send_json(body), &self.base)
+        reply(send(&self.base, true, || {
+            self.agent.put(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)
+        }))
     }
 
     pub fn delete(&self, path: &str) -> anyhow::Result<Value> {
-        reply(self.agent.delete(&self.url(path)).header("Authorization", &self.auth()).call(), &self.base)
+        reply(send(&self.base, true, || self.agent.delete(&self.url(path)).header("Authorization", &self.auth()).call()))
     }
 
     /// Unpairs this PC in the panel, so it leaves Access & devices and the
@@ -503,14 +690,13 @@ impl Client {
         loop {
             let n = read_full(&mut f, &mut buf)?;
             let url = self.url(&format!("/fs/{}/uploads/{up}?offset={offset}", enc(id)));
-            let v = reply(
+            let v = reply(send(&self.base, true, || {
                 self.slow
                     .put(&url)
                     .header("Authorization", &self.auth())
                     .content_type("application/octet-stream")
-                    .send(&buf[..n]),
-                &self.base,
-            )?;
+                    .send(&buf[..n])
+            }))?;
             offset = v["offset"].as_u64().unwrap_or(offset + n as u64);
             if v["done"].as_bool() == Some(true) || n == 0 {
                 return Ok(());
@@ -521,12 +707,7 @@ impl Client {
     /// Downloads `rel` from the server folder to `local`.
     pub fn download(&self, id: &str, rel: &str, local: &Path) -> anyhow::Result<()> {
         let url = self.url(&format!("/fs/{}/file?path={}", enc(id), enc(rel)));
-        let mut resp = self
-            .slow
-            .get(&url)
-            .header("Authorization", &self.auth())
-            .call()
-            .with_context(|| format!("can't reach Hopper Server at {}", self.base))?;
+        let mut resp = send(&self.base, true, || self.slow.get(&url).header("Authorization", &self.auth()).call())?;
         if !resp.status().is_success() {
             let text = resp.body_mut().read_to_string().unwrap_or_default();
             let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -790,13 +971,14 @@ pub struct HelloTls {
 /// The panel's name, version and certificate authority. Unverified: only
 /// to learn the CA, which pairing then pins and the codes confirm.
 pub fn hello(url: &str) -> anyhow::Result<Hello> {
-    hello_at(&base_url(url), Duration::from_secs(5))
+    hello_at(&base_url(url), CONNECT_WAIT)
 }
 
-/// `connect`: how long to wait for the connection to open.
+/// `connect`: how long to wait for the connection to open. A short wait is
+/// a guess at one of several addresses, so it isn't tried again.
 fn hello_at(base: &str, connect: Duration) -> anyhow::Result<Hello> {
-    let agent = agent_timed(Some(connect), ANSWER_WAIT, &Trust::Unverified);
-    let v = reply(agent.get(&format!("{base}/api/v1/hello")).call(), base)?;
+    let agent = agent_timed(base, connect, Some(REPLY_WAIT), CALL_WAIT, &Trust::Unverified);
+    let v = reply(send(base, connect >= CONNECT_WAIT, || agent.get(&format!("{base}/api/v1/hello")).call()))?;
     if v["panel"].as_str() != Some("hopperd") {
         bail!("{base} isn't a Hopper Server.");
     }
@@ -848,8 +1030,10 @@ pub fn pair_request(url: &str, device: &str) -> anyhow::Result<Pairing> {
     let tls = h.tls.context("This Hopper Server is too old for encrypted pairing; update it.")?;
     let fingerprint = fingerprint_of(&tls.ca).context("The panel sent a broken certificate.")?;
     let ask = |trust: &Trust| {
-        let agent = agent_with(ANSWER_WAIT, trust);
-        let v = reply(agent.post(&format!("{base}/api/v1/pair/request")).send_json(json!({ "device": device })), &base);
+        let agent = agent_with(&base, trust);
+        let v = reply(send(&base, true, || {
+            agent.post(&format!("{base}/api/v1/pair/request")).send_json(json!({ "device": device }))
+        }));
         v.map(|v| (v, agent))
     };
     let first = trust_for(&base, &tls.ca);
@@ -880,10 +1064,9 @@ pub enum PairState {
 
 /// Where a pairing request stands.
 pub fn pair_status(p: &Pairing) -> anyhow::Result<PairState> {
-    let v = reply(
-        p.agent.post(&format!("{}/api/v1/pair/status", p.base)).send_json(json!({ "id": p.id, "secret": p.secret })),
-        &p.base,
-    )?;
+    let v = reply(send(&p.base, true, || {
+        p.agent.post(&format!("{}/api/v1/pair/status", p.base)).send_json(json!({ "id": p.id, "secret": p.secret }))
+    }))?;
     Ok(match v["status"].as_str() {
         Some("waiting") => PairState::Waiting,
         Some("approved") => PairState::Approved(v["token"].as_str().unwrap_or("").into()),
@@ -1026,7 +1209,7 @@ mod tests {
         });
         assert_eq!(r.unwrap(), ("https://hopper.example.com:443".to_string(), 1));
         assert_eq!(tried.borrow().len(), 1);
-        assert!(tried.borrow()[0].1 < Duration::from_secs(5));
+        assert_eq!(tried.borrow()[0].1, PROBE_WAIT);
 
         // 443 times out: 8790 is tried and kept.
         tried.borrow_mut().clear();
@@ -1036,6 +1219,7 @@ mod tests {
         });
         assert_eq!(r.unwrap(), ("https://hopper.example.com:8790".to_string(), 2));
         assert_eq!(tried.borrow().len(), 2);
+        assert_eq!(tried.borrow()[1].1, CONNECT_WAIT);
 
         // Both fail: the error names both addresses.
         let e = first_reachable("https://hopper.example.com", |b, _| -> anyhow::Result<()> { bail!("{b} isn't a Hopper Server.") })
@@ -1051,7 +1235,7 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(e.to_string(), "timeout: global");
-        assert_eq!(*tried.borrow(), [("https://rig:8790".to_string(), Duration::from_secs(5))]);
+        assert_eq!(*tried.borrow(), [("https://rig:8790".to_string(), CONNECT_WAIT)]);
     }
 
     /// Runs [`wait_with`] over scripted poll results on a fake clock; each
@@ -1102,6 +1286,59 @@ mod tests {
         let (out, polls) = wait_script((0..1000).map(|_| Ok(Waiting)).collect(), fast);
         assert_eq!(out.unwrap(), Expired);
         assert!(polls > 200 && polls < 320, "{polls}");
+    }
+
+    /// Runs [`send_with`] over scripted results; returns the outcome, how
+    /// many tries ran and the pauses taken.
+    fn send_script(retry: bool, script: Vec<Result<u8, ureq::Error>>) -> (anyhow::Result<u8>, usize, Vec<Duration>) {
+        use std::cell::{Cell, RefCell};
+        let script = RefCell::new(script.into_iter());
+        let tries = Cell::new(0);
+        let mut pauses = Vec::new();
+        let out = send_with(
+            "https://hopper.example.com:443",
+            retry,
+            || {
+                tries.set(tries.get() + 1);
+                script.borrow_mut().next().unwrap_or(Err(ureq::Error::Timeout(ureq::Timeout::Connect)))
+            },
+            |d| pauses.push(d),
+            |_| "checked again: TCP 0.1 s".into(),
+        );
+        (out, tries.get(), pauses)
+    }
+
+    #[test]
+    fn connections_that_dont_open_are_tried_again() {
+        use ureq::{Error as E, Timeout as T};
+        // A lost connection, then it opens: one pause, no error.
+        let (out, tries, pauses) = send_script(true, vec![Err(E::Timeout(T::Connect)), Ok(7)]);
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!((tries, pauses), (2, vec![RETRY_PAUSES[0]]));
+        // Never opens: three tries, and the error says which step, how
+        // many tries and what the TCP check found.
+        let (out, tries, pauses) = send_script(true, vec![]);
+        let e = format!("{:#}", out.unwrap_err());
+        assert_eq!(tries, 3);
+        assert_eq!(pauses, RETRY_PAUSES.to_vec());
+        assert!(e.starts_with("can't reach Hopper Server at https://hopper.example.com:443: the connection didn't open after"), "{e}");
+        assert!(e.contains("timeout: connect") && e.contains("tried 3 times") && e.contains("TCP 0.1 s"), "{e}");
+        // A lookup that fails is tried again too.
+        let (out, tries, _) = send_script(true, vec![Err(E::HostNotFound), Ok(1)]);
+        assert_eq!((out.unwrap(), tries), (1, 2));
+        // Once the request may have been sent, it isn't sent again.
+        for e in [E::Timeout(T::RecvResponse), E::Timeout(T::Global), E::Timeout(T::SendBody)] {
+            let (out, tries, pauses) = send_script(true, vec![Err(e), Ok(1)]);
+            assert!(out.is_err());
+            assert_eq!((tries, pauses.len()), (1, 0));
+        }
+        let (out, _, _) = send_script(true, vec![Err(E::Timeout(T::RecvResponse))]);
+        let e = format!("{:#}", out.unwrap_err());
+        assert!(e.contains("no reply came after") && !e.contains("checked again"), "{e}");
+        // A guess at one of several addresses isn't tried again.
+        let (out, tries, _) = send_script(false, vec![Err(E::Timeout(T::Connect)), Ok(1)]);
+        assert!(out.is_err());
+        assert_eq!(tries, 1);
     }
 
     #[test]

@@ -24,7 +24,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 directories = "6"
 log = "0.4"
 env_logger = "0.11"
-ureq = { version = "3", features = ["json"] }
+# win-system-proxy: requests go through the Windows proxy, as the browser's do.
+ureq = { version = "3", features = ["json", "win-system-proxy"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 tiny_http = "0.12"
 base64 = "0.22"
