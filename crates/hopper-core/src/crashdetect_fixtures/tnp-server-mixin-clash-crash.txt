@@ -1,0 +1,75 @@
+---- Minecraft Crash Report ----
+
+
+// Don't be sad, have a hug! <3
+
+Time: 2026-10-29 16:06:57
+Description: Mod loading failures have occurred; consult the issue messages for more details
+
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: main
+Stacktrace:
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.code.Injector.findTargetNodes(Injector.java:312) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+-- Mod loading issue for: naturesaura --
+Details:
+	Caused by 0: org.spongepowered.asm.mixin.transformer.throwables.MixinTransformerError: An unexpected critical error was encountered
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:381) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:253) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at TRANSFORMER/libjf_unsafe_v0@3.17.6+forge/io.gitlab.jfronny.libjf.unsafe.asm.AsmTransformer.transformClass(AsmTransformer.java:127) ~[libjf-unsafe-v0-3.17.4+forge.jar%232463!/:?] {re:classloading}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.service.modlauncher.MixinTransformationHandler.processClass(MixinTransformationHandler.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.launch.MixinLaunchPluginLegacy.processClass(MixinLaunchPluginLegacy.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.serviceapi.ILaunchPluginService.processClassWithFlags(ILaunchPluginService.java:156) ~[modlauncher-11.0.5.jar%2364!/:11.0.5+main.901c6ea8] {}
+		at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchPluginHandler.offerClassNodeToPlugins(LaunchPluginHandler.java:94) ~[modlauncher-11.0.5.jar%2364!/:?] {}
+		at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.ClassTransformer.transform(ClassTransformer.java:120) ~[modlauncher-11.0.5.jar%2364!/:?] {}
+		at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.TransformingClassLoader.maybeTransformClassBytes(TransformingClassLoader.java:57) ~[modlauncher-11.0.5.jar%2364!/:?] {}
+		at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.readerToClass(ModuleClassLoader.java:190) ~[securejarhandler-3.0.8.jar:?] {}
+		at java.base/java.util.concurrent.ForkJoinPool.scan(ForkJoinPool.java:1841) ~[?:?] {re:computing_frames}
+		at java.base/java.util.concurrent.ForkJoinPool.runWorker(ForkJoinPool.java:1806) ~[?:?] {re:computing_frames}
+		at java.base/java.util.concurrent.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:188) ~[?:?] {re:mixin,re:mixin,re:mixin}
+
+	Caused by 1: org.spongepowered.asm.mixin.throwables.MixinApplyError: Mixin [securitycraft.mixins.json:camera.ChunkMapMixin from mod securitycraft] from phase [DEFAULT] in config [securitycraft.mixins.json] FAILED during APPLY
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinError(MixinProcessor.java:686) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinApplyError(MixinProcessor.java:637) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:368) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:253) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at TRANSFORMER/libjf_unsafe_v0@3.17.6+forge/io.gitlab.jfronny.libjf.unsafe.asm.AsmTransformer.transformClass(AsmTransformer.java:127) ~[libjf-unsafe-v0-3.17.4+forge.jar%232463!/:?] {re:classloading}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.service.modlauncher.MixinTransformationHandler.processClass(MixinTransformationHandler.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.launch.MixinLaunchPluginLegacy.processClass(MixinLaunchPluginLegacy.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.serviceapi.ILaunchPluginService.processClassWithFlags(ILaunchPluginService.java:156) ~[modlauncher-11.0.5.jar%2364!/:11.0.5+main.901c6ea8] {}
+		at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchPluginHandler.offerClassNodeToPlugins(LaunchPluginHandler.java:94) ~[modlauncher-11.0.5.jar%2364!/:?] {}
+		at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.ClassTransformer.transform(ClassTransformer.java:120) ~[modlauncher-11.0.5.jar%2364!/:?] {}
+		at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.TransformingClassLoader.maybeTransformClassBytes(TransformingClassLoader.java:57) ~[modlauncher-11.0.5.jar%2364!/:?] {}
+
+	Mod file: /server/mods/NaturesAura-41.10.jar
+	Failure message: NaturesAura (naturesaura) encountered an error while dispatching the net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent event
+		org.spongepowered.asm.mixin.transformer.throwables.MixinTransformerError: An unexpected critical error was encountered
+	Mod version: 41.10
+	Mod issues URL: <No issues URL found>
+	Exception message: org.spongepowered.asm.mixin.injection.throwables.InvalidInjectionException: @At("INVOKE") on net/minecraft/server/level/ChunkMap::securitycraft$sendChunksToCameras with priority 1100 cannot inject into net/minecraft/server/level/ChunkMap::onChunkReadyToSend(Lnet/minecraft/world/level/chunk/LevelChunk;)V merged by qouteall.imm_ptl.core.mixin.common.chunk_sync.MixinChunkMap_C with priority 1100 [INJECT_PREPARE Applicator Phase -> securitycraft.mixins.json:camera.ChunkMapMixin from mod securitycraft -> Prepare Injections -> handler$gcg000$securitycraft$sendChunksToCameras(Lnet/minecraft/world/level/chunk/LevelChunk;Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;Lnet/minecraft/server/level/ServerPlayer;)V -> Prepare ->  -> { target: onChunkReadyToSend(Lnet/minecraft/world/level/chunk/LevelChunk;)V }]
+Stacktrace:
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.code.Injector.findTargetNodes(Injector.java:312) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.code.Injector.find(Injector.java:248) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.struct.InjectionInfo.prepare(InjectionInfo.java:475) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at TRANSFORMER/mixinextras.neoforge@0.5.5/com.llamalad7.mixinextras.wrapper.InjectorWrapperImpl.prepare(InjectorWrapperImpl.java:56) ~[mixinextras-neoforge-0.5.5.jar%232716!/:?] {re:classloading,re:mixin,re:mixin,re:mixin}
+	at TRANSFORMER/mixinextras.neoforge@0.5.5/com.llamalad7.mixinextras.sugar.impl.SugarWrapperImpl.prepare(SugarWrapperImpl.java:70) ~[mixinextras-neoforge-0.5.5.jar%232716!/:?] {re:classloading}
+	at TRANSFORMER/mixinextras.neoforge@0.5.5/com.llamalad7.mixinextras.wrapper.WrapperInjectionInfo.prepare(WrapperInjectionInfo.java:64) ~[mixinextras-neoforge-0.5.5.jar%232716!/:?] {re:classloading}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTargetContext.prepareInjections(MixinTargetContext.java:1407) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.prepareInjections(MixinApplicatorStandard.java:731) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.applyMixin(MixinApplicatorStandard.java:315) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.apply(MixinApplicatorStandard.java:246) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.apply(TargetClassContext.java:437) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.applyMixins(TargetClassContext.java:418) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:352) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:253) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Minecraft Version ID: 1.21.1
+	Operating System: Windows 11 (amd64) version 10.0
