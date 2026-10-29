@@ -65,6 +65,10 @@ pub struct ServerControl {
     console_open: bool,
     /// An action on its way.
     busy: Option<PanelAction>,
+    /// When `busy` was sent, and whether a poll since showed the server
+    /// running (or starting), to tell when it's over.
+    busy_since: std::time::Instant,
+    busy_seen_up: bool,
     /// The server's backup setups and files, once asked for.
     backups: Option<Result<Vec<BackupSet>, String>>,
     /// Backups a backup mod in the server made, once looked for.
@@ -139,6 +143,8 @@ impl ServerControl {
             console: Vec::new(),
             console_open: false,
             busy: None,
+            busy_since: std::time::Instant::now(),
+            busy_seen_up: false,
             backups: None,
             mod_backups: None,
             command,
@@ -337,14 +343,11 @@ impl ServerControl {
         lines: Option<Vec<String>>,
         cx: &mut Context<Self>,
     ) {
-        // An action is done once the state moves past it.
+        // An action is done once the state moves past it; a start also
+        // when the process ended before it came up.
         if let (Some(a), Ok(s)) = (self.busy, &stats) {
-            let settled = match a {
-                PanelAction::Start => s.running && !s.starting,
-                PanelAction::Stop | PanelAction::Kill => !s.running,
-                PanelAction::Restart | PanelAction::Backup => true,
-            };
-            if settled {
+            self.busy_seen_up |= s.running;
+            if a.settled(s, self.busy_seen_up, self.busy_since.elapsed()) {
                 self.busy = None;
             }
         }
@@ -511,6 +514,8 @@ impl ServerControl {
             return;
         };
         self.busy = Some(action);
+        self.busy_since = std::time::Instant::now();
+        self.busy_seen_up = false;
         cx.notify();
         let name = self.server_name(cx);
         let pname = self.panel_name(cx);
