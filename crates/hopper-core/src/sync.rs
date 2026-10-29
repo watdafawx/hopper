@@ -121,10 +121,18 @@ fn backup(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     // Config folders repeat names (many `common.toml`s) within one run.
     let mut dest = backup_dir.join(&*name);
     let mut n = 1;
-    while dest.exists() {
+    while crate::backups::exists(&dest) {
         n += 1;
         dest = backup_dir.join(format!("{n}-{name}"));
     }
+    // Which CurseForge / Modrinth file a jar is, read before it leaves,
+    // so the copy can become a note of it later (backups::slim).
+    let root = backup_dir.parent().and_then(Path::parent).map(Path::to_path_buf);
+    let ids = |dest: &Path| {
+        if let Some(root) = &root {
+            crate::backups::note_ids(root, path, dest);
+        }
+    };
     if let Err(e) = fs::rename(path, &dest) {
         // In use (a running game): copying would only leave a second copy.
         if crate::locked::io_locked(&e) {
@@ -137,6 +145,7 @@ fn backup(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
             return Err(e.into());
         }
     }
+    ids(&dest);
     Ok(Some(dest))
 }
 

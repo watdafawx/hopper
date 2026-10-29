@@ -218,7 +218,7 @@ async fn backup_list(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
         .map(|s| {
             json!({
                 "when": s.when, "size": s.size(),
-                "files": s.files.iter().map(|f| json!({ "name": f.name, "size": f.size, "restore_to": f.restore_to })).collect::<Vec<_>>(),
+                "files": s.files.iter().map(|f| json!({ "name": f.name, "size": f.size, "restore_to": f.restore_to, "download": f.download })).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -287,6 +287,9 @@ async fn backup_restore(State(app): State<Arc<App>>, headers: HeaderMap, method:
         let mut inst = crate::mods_api::instance_of(&e)?;
         let mut out = Vec::new();
         for f in &files {
+            // Kept as a note of where to get it: download it again first
+            // (its mod ids are read from the jar).
+            backups::materialize(&f.path)?;
             if f.restore_to.starts_with("mods/") && f.name.to_lowercase().contains(".jar") {
                 let (ids, _) = hopper_core::deps::own_ids(&f.path);
                 if !ids.is_empty() {

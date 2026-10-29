@@ -118,7 +118,7 @@
           </div>
           {#if open.has(s.when)}
             {#each s.files as f (f.name)}
-              <div class="row file small"><span class="mono ell grow" title={f.restore_to}>{f.name}</span><span class="tiny muted">→ {f.restore_to.split('/')[0]}/ · {bytes(f.size)}</span>
+              <div class="row file small"><span class="mono ell grow" title={f.restore_to}>{f.name}</span><span class="tiny muted" title={f.download ? 'Only a note of which file it was is kept: restoring downloads it again from CurseForge or Modrinth.' : ''}>→ {f.restore_to.split('/')[0]}/ · {bytes(f.size)}{f.download ? ' · downloads again' : ''}</span>
                 {#if s.files.length > 1}<button class="btn sm ghost" disabled={busy} onclick={() => restore(s, f)}>Restore</button>{/if}</div>
             {/each}
           {/if}

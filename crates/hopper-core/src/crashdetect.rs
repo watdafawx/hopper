@@ -811,7 +811,7 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
     for s in suspects.iter_mut().filter(|s| s.changed.is_none()) {
         let kept = saved.suspects.iter().find(|o| o.file_name == s.file_name).and_then(|o| o.changed.clone());
         if let Some(ch) = kept
-            && !ch.backup.exists()
+            && !crate::backups::exists(&ch.backup)
             && ch.backup.file_name().is_some_and(|n| root.join("mods").join(n).exists())
         {
             s.changed = Some(ch);

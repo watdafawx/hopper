@@ -462,16 +462,21 @@ pub fn schedule(root: &Path) {
     let _ = std::thread::Builder::new().name("hopper-prune".into()).spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(5));
         PENDING.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x != &root);
+        // Older jar copies CurseForge / Modrinth can hand out again become
+        // notes first, then the rules apply.
+        crate::backups::slim(&root);
         run(&root, policy(), Mode::Auto, false, disposer());
     });
 }
 
 /// [`check`]s every folder in `roots` in the background, removing nothing
+/// but turning downloadable jar copies into notes ([`crate::backups::slim`])
 /// (each app at start).
 pub fn check_all_later(roots: Vec<PathBuf>) {
     let _ = std::thread::Builder::new().name("hopper-backups-check".into()).spawn(move || {
         for r in roots {
             if r.join(crate::sync::BACKUP_DIR).is_dir() {
+                crate::backups::slim(&r);
                 check(&r);
             }
         }

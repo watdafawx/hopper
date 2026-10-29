@@ -161,10 +161,11 @@ fn undo_one(c: &mut Change) -> anyhow::Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("no destination recorded"))?;
             // Its old copy may have been cleaned up (backup retention):
             // say so before touching anything.
-            if let Some(b) = &c.backup
-                && !b.exists()
-            {
-                anyhow::bail!("{}: its old copy was cleaned up from backups", c.label);
+            if let Some(b) = &c.backup {
+                if !crate::backups::exists(b) {
+                    anyhow::bail!("{}: its old copy was cleaned up from backups", c.label);
+                }
+                crate::backups::materialize(b)?;
             }
             // Keep the synced copy so redo works even if the source changed.
             let kept = crate::sync::backup_into(&c.backup_root, to)?;
@@ -185,9 +186,10 @@ fn undo_one(c: &mut Change) -> anyhow::Result<()> {
                 .from
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("original location unknown"))?;
-            if !b.exists() {
+            if !crate::backups::exists(b) {
                 anyhow::bail!("{}: its copy was cleaned up from backups", c.label);
             }
+            crate::backups::materialize(b)?;
             copy_over(b, from)?;
         }
     }

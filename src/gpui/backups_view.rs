@@ -880,7 +880,15 @@ impl BackupsView {
                                             .text_sm(),
                                         )
                                         .child(
-                                            widgets::caption(format!("back to {} · {}", f.restore_to, size(f.size)), cx)
+                                            widgets::caption(
+                                                format!(
+                                                    "back to {} · {}{}",
+                                                    f.restore_to,
+                                                    size(f.size),
+                                                    if f.download { " · downloads again" } else { "" }
+                                                ),
+                                                cx,
+                                            )
                                                 .text_xs()
                                                 .truncate(),
                                         ),

@@ -139,28 +139,7 @@ fn undos() -> std::sync::MutexGuard<'static, Vec<Undo>> {
 /// folders are named by the second; a name taken gets a "2-" prefix), as
 /// desktop's find_backup.
 fn find_backup(root: &FsPath, original: &FsPath, since: u64) -> Option<PathBuf> {
-    let name = original.file_name()?.to_string_lossy().into_owned();
-    let mut best: Option<((u64, u32), PathBuf)> = None;
-    for d in std::fs::read_dir(root.join(hopper_core::sync::BACKUP_DIR)).ok()?.flatten() {
-        let Some(stamp) = d.file_name().to_str().and_then(|s| s.parse::<u64>().ok()) else { continue };
-        if stamp < since {
-            continue;
-        }
-        for e in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            let rank = if n == name {
-                Some(1)
-            } else {
-                n.strip_suffix(&name).and_then(|p| p.strip_suffix('-')).and_then(|p| p.parse::<u32>().ok())
-            };
-            if let Some(r) = rank
-                && best.as_ref().is_none_or(|(k, _)| *k < (stamp, r))
-            {
-                best = Some(((stamp, r), e.path()));
-            }
-        }
-    }
-    best.map(|(_, p)| p)
+    hopper_core::backups::find(root, original, since)
 }
 
 /// Seconds now, less one (a backup folder made this tick may be named
@@ -229,9 +208,11 @@ async fn undo_remove(
         let mut back = 0;
         for it in &items {
             // Put back some other way already: leave the backup alone.
-            if it.original.exists() || !it.backup.exists() {
+            if it.original.exists() || !hopper_core::backups::exists(&it.backup) {
                 continue;
             }
+            // Kept as a note of where to get it: download it again first.
+            hopper_core::backups::materialize(&it.backup)?;
             match sets.iter().flat_map(|s| s.files.iter()).find(|f| f.path == it.backup) {
                 // Also tidies the emptied backup folder away.
                 Some(f) if root.join(&f.restore_to) == it.original => {
