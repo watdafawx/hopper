@@ -192,6 +192,19 @@ static LOADING_ERROR: LazyLock<Regex> =
 
 /// Mixin's own message.
 static MIXIN_FAILED: LazyLock<Regex> = LazyLock::new(|| re(r"Mixin apply for mod ([\w.-]+) failed"));
+/// The error a failed mixin throws, in the crash's cause chain:
+/// `MixinApplyError: Mixin [x.mixins.json:AMixin from mod x] from phase [DEFAULT] in config [x.mixins.json] FAILED during APPLY`
+static MIXIN_ERROR: LazyLock<Regex> =
+    LazyLock::new(|| re(r"Mixin \[[^\]]*? from mod ([\w.-]+)\] from phase \[\w+\] in config \[[^\]]+\] FAILED during \w+"));
+/// What a mod whose mixin threw gets.
+const MIXIN_ERROR_WHY: &str = "Its change to the code of the game or another mod (a mixin) didn't fit, so the game stopped. It was likely made for a different version of the mod it changes.";
+
+/// Config events the game sends after it has loaded: a server sending its
+/// config as you join (`Reloading`), or the game closing (`Unloading`). A
+/// mod that fails one of these didn't stop the game from loading.
+fn after_loading_event(line: &str) -> bool {
+    line.contains("ModConfigEvent$Reloading") || line.contains("ModConfigEvent$Unloading")
+}
 
 /// Mod ids that are the game or the loader, not a mod someone installed.
 const NOT_MODS: [&str; 7] = ["minecraft", "neoforge", "forge", "fml", "fml_loader", "fabricloader", "java"];
@@ -267,6 +280,9 @@ pub fn signals(text: &str) -> Vec<Raw> {
     let mut named = String::new();
     for (i, l) in lines.iter().enumerate() {
         let Some(m) = LOADING_ERROR.captures(l) else { continue };
+        if after_loading_event(l) {
+            continue;
+        }
         let id = m[1].to_string();
         let error = lines
             .get(i + 1)
@@ -284,6 +300,19 @@ pub fn signals(text: &str) -> Vec<Raw> {
             named = id.clone();
         }
         add(&mut out, Raw { mod_id: id, jar: String::new(), certainty: Certainty::Certain, why, class: String::new(), needs: Vec::new() });
+    }
+
+    // A mixin that threw while the game changed a class: that is the
+    // crash. The mods in the stack only loaded the class it changes.
+    let mut mixin_named = false;
+    for l in &lines {
+        let Some(m) = MIXIN_ERROR.captures(l) else { continue };
+        let id = m[1].to_string();
+        if named.is_empty() {
+            named = id.clone();
+            mixin_named = true;
+        }
+        add(&mut out, Raw { mod_id: id, jar: String::new(), certainty: Certainty::Certain, why: MIXIN_ERROR_WHY.into(), class: String::new(), needs: Vec::new() });
     }
 
     // The exception's own trace: the first stack, up to the first blank
@@ -310,6 +339,8 @@ pub fn signals(text: &str) -> Vec<Raw> {
                             Certainty::Possible,
                             if named.is_empty() {
                                 format!("Its change to the game's code (a mixin) called {first_name}, where the error happened.")
+                            } else if mixin_named {
+                                format!("Its change to the game's code (a mixin) was running when {named}'s change failed.")
                             } else {
                                 format!("Its change to the game's code (a mixin) was in the step where {named} failed.")
                             },
@@ -333,6 +364,8 @@ pub fn signals(text: &str) -> Vec<Raw> {
             } else {
                 let why = if named.is_empty() {
                     format!("Its code called {first_name}, where the error happened.")
+                } else if mixin_named {
+                    format!("Its code was running when {named}'s change failed.")
                 } else {
                     format!("Its code set off the step where {named} failed.")
                 };
@@ -419,7 +452,8 @@ fn fabric_signals(lines: &[&str], out: &mut Vec<Raw>) {
     if FRAME.is_match(lines[start]) {
         return; // NeoForge/Forge: handled with the jar names.
     }
-    let mut first = out.iter().all(|r| r.certainty != Certainty::Likely);
+    // A mod already named as the cause makes these frames only the way there.
+    let mut first = out.iter().all(|r| r.certainty == Certainty::Possible);
     for l in lines[start..].iter().take_while(|l| !l.trim().is_empty() && !l.starts_with("A detailed")) {
         if let Some(m) = MIXIN_METHOD.captures(l) {
             add(
@@ -1241,6 +1275,9 @@ fn loading_failures(text: &str) -> (bool, Vec<(Raw, String)>) {
     let mut out = Vec::new();
     for (i, l) in lines.iter().enumerate() {
         let Some(c) = LOAD_FAILED.captures(l) else { continue };
+        if after_loading_event(l) {
+            continue;
+        }
         let Some(id) = (1..=4).find_map(|g| c.get(g)).map(|g| g.as_str().to_string()) else { continue };
         if NOT_MODS.contains(&id.as_str()) {
             continue;
@@ -2209,6 +2246,59 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         let c = server(&root).unwrap();
         let s = &c.suspects[0];
         assert_eq!((s.file_name.as_str(), s.certainty, s.client_only), ("other-1.0.jar", Certainty::Certain, true));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    const TNP_MIXIN_REPORT: &str = include_str!("crashdetect_fixtures/tnp-client-mixin-crash.txt");
+    const TNP_MIXIN_LOG: &str = include_str!("crashdetect_fixtures/tnp-client-mixin-latest.log");
+
+    /// TNP Limitless 8's client, 2026-10-29, cut down: joining the server,
+    /// Small Ships failed to reload the config the server sent (a caught
+    /// error; the game went on). 40 s later Make it Compatible: Sable's
+    /// mixin into Immersive Portals: Aeronautics didn't fit and the game
+    /// crashed. The old scan read Small Ships' error as a loading failure
+    /// and the real one as its knock-on effect.
+    #[test]
+    fn a_mixin_that_does_not_fit_beats_a_config_reload_error() {
+        let (_, failed) = loading_failures(TNP_MIXIN_LOG);
+        assert!(failed.is_empty(), "a config reload after loading isn't a loading failure");
+        assert!(!signals(TNP_MIXIN_LOG).iter().any(|r| r.mod_id == "smallships"));
+
+        let root = std::env::temp_dir().join(format!("hopper-crash-mixin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dir = root.join("mods");
+        fake_jar(&dir.join("ip_aeronautics-2.7.0.jar"), "ip_aeronautics", "Immersive Portals: Aeronautics", "2.7.0");
+        fake_jar(&dir.join("smallships-neoforge-1.21.1-2.0.2.jar"), "smallships", "Small Ships", "2.0.2");
+        fake_jar(&dir.join("integrated_api-neoforge-1.21.1-1.9.1.jar"), "integrated_api", "Integrated API", "1.9.1");
+        // Make it Compatible's jar is an early loader that carries the mod
+        // in META-INF/inner/, with no mod metadata of its own.
+        let inner = dir.join("inner.tmp");
+        fake_jar(&inner, "micsable", "Make it Compatible: Sable", "1.3.0");
+        {
+            use std::io::Write;
+            let mut z = zip::ZipWriter::new(fs::File::create(dir.join("make-it-compatible-sable-1.3.0.jar")).unwrap());
+            z.start_file::<_, ()>("META-INF/MANIFEST.MF", Default::default()).unwrap();
+            z.write_all(b"Manifest-Version: 1.0\n").unwrap();
+            z.start_file::<_, ()>("META-INF/inner/make-it-compatible-sable-mod.jar", Default::default()).unwrap();
+            z.write_all(&fs::read(&inner).unwrap()).unwrap();
+            z.finish().unwrap();
+        }
+        fs::remove_file(&inner).unwrap();
+        assert_eq!(crate::deps::own_ids(&dir.join("make-it-compatible-sable-1.3.0.jar")).0, ["micsable"]);
+
+        let report = root.join("crash-reports/crash-2026-10-29_15.21.16-client.txt");
+        fs::write(&report, TNP_MIXIN_REPORT).unwrap();
+        fs::write(root.join("logs/latest.log"), TNP_MIXIN_LOG).unwrap();
+        let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let c = from_report(&root, &report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.file_name.as_str(), s.certainty)).collect();
+        assert_eq!(got, [("make-it-compatible-sable-1.3.0.jar", Certainty::Certain), ("ip_aeronautics-2.7.0.jar", Certainty::Possible)]);
+        assert_eq!(c.suspects[0].why, MIXIN_ERROR_WHY);
+        assert!(c.suspects[1].why.contains("micsable's change failed"), "{}", c.suspects[1].why);
+        assert!(c.stopped.is_none(), "the game had loaded: nothing stopped it from loading");
         let _ = fs::remove_dir_all(&root);
     }
 
