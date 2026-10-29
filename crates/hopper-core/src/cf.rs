@@ -516,6 +516,12 @@ pub fn api_key_source() -> Option<(&'static str, KeySource)> {
 // CF_KEY_ENC and CF_KEY_PAD, from build.rs (empty unless the build embeds a key).
 include!(concat!(env!("OUT_DIR"), "/cf_key.rs"));
 
+/// Whether this exe carries Hopper's own key (release builds do; dev
+/// builds don't), whatever key is in use right now.
+pub fn has_built_in_key() -> bool {
+    built_in_key().is_some()
+}
+
 /// The key built into this exe, unscrambled.
 fn built_in_key() -> Option<String> {
     let k: Vec<u8> = CF_KEY_ENC.iter().zip(CF_KEY_PAD).map(|(e, p)| e ^ p).collect();

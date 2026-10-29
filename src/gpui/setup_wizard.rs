@@ -48,6 +48,8 @@ pub struct SetupWizard {
     cf_key: Entity<InputState>,
     cf_testing: bool,
     cf_result: Option<Result<String, String>>,
+    /// "Use your own key instead" unfolded (builds with Hopper's own key).
+    cf_own_open: bool,
     instances_root: Entity<InputState>,
     /// Instances found in a folder: (folder, count), None while counting.
     counted: Option<(String, Option<usize>)>,
@@ -113,6 +115,7 @@ impl SetupWizard {
             cf_key,
             cf_testing: false,
             cf_result: None,
+            cf_own_open: false,
             instances_root,
             counted: None,
             servers: if s.servers_root.is_empty() { Servers::None } else { Servers::OtherPc },
@@ -615,11 +618,6 @@ impl SetupWizard {
         let how = v_flex()
             .text_sm()
             .gap_2()
-            .p_3()
-            .rounded(theme.radius_lg)
-            .bg(theme.foreground.opacity(0.035))
-            .border_1()
-            .border_color(theme.foreground.opacity(0.08))
             .child(step(
                 "1",
                 h_flex()
@@ -651,6 +649,101 @@ impl SetupWizard {
                     .disabled(self.cf_testing || (!typed && source.is_none()))
                     .on_click(cx.listener(|this, _, window, cx| this.test_key(window, cx))),
             );
+        // Some authors only allow downloads from the CurseForge website.
+        let site_only = h_flex()
+            .gap_2()
+            .items_start()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(Icon::new(IconName::Info).xsmall().flex_none().mt_0p5())
+            .child(div().flex_1().min_w_0().child(
+                "Some authors only allow downloads from the CurseForge website. Hopper opens those pages, picks the files up from your Downloads folder by itself, then cleans them up.",
+            ));
+        let result = |c: Div| {
+            c.when(self.cf_testing, |c| c.child(note("Asking CurseForge…", cx)))
+                .when_some(self.cf_result.clone(), |c, r| c.child(result_line(r, cx)))
+        };
+        if hopper::cf::has_built_in_key() {
+            // CurseForge works already. A key of the player's own is only a
+            // fallback in case Hopper's key is ever revoked, so its steps
+            // wait behind a fold.
+            let pill = match source {
+                Some(KeySource::Saved) => "Your key",
+                Some(KeySource::Env) => "From .env",
+                Some(KeySource::Session) => "This run",
+                _ => "Built in",
+            };
+            // A player already on their own key is only swapping it.
+            let fold = match source {
+                Some(KeySource::BuiltIn) | None => "Use your own key instead",
+                _ => "Paste a different key",
+            };
+            let open = self.cf_own_open;
+            let hover = theme.list_hover;
+            let own = v_flex()
+                .gap_3()
+                .px_3()
+                .pb_3()
+                .child(note(
+                    "Your own key keeps CurseForge working even if Hopper's key is ever revoked. It's free, takes a minute, stays on this PC (in Windows Credential Manager), and only your Hopper uses it.",
+                    cx,
+                ))
+                .child(how)
+                .child(field);
+            return v_flex()
+                .gap_4()
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .items_center()
+                        .text_sm()
+                        .child(widgets::pill(pill, theme.success, true))
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child("Search, install and update packs and mods from CurseForge."),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .rounded(theme.radius_lg)
+                        .bg(theme.foreground.opacity(0.035))
+                        .border_1()
+                        .border_color(theme.foreground.opacity(0.08))
+                        .child(
+                            h_flex()
+                                .id("setup-cf-own")
+                                .clickable(cx)
+                                .gap_2()
+                                .items_center()
+                                .p_3()
+                                .rounded(theme.radius_lg)
+                                .text_sm()
+                                .hover(move |s| s.bg(hover))
+                                .child(
+                                    Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                                        .small()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .child(fold)
+                                .child(div().text_color(theme.muted_foreground).child("(optional)"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cf_own_open = !this.cf_own_open;
+                                    cx.notify();
+                                })),
+                        )
+                        .when(open, |c| c.child(result(own))),
+                )
+                .child(site_only)
+                .into_any_element();
+        }
+        let how = how
+            .p_3()
+            .rounded(theme.radius_lg)
+            .bg(theme.foreground.opacity(0.035))
+            .border_1()
+            .border_color(theme.foreground.opacity(0.08));
         v_flex()
             .gap_4()
             .child(
@@ -660,7 +753,7 @@ impl SetupWizard {
                     .child("Optional. A free CurseForge key unlocks searching, installing and updating packs and mods from CurseForge; without one, Hopper uses Modrinth only.")
                     .child(
                         div().text_color(theme.muted_foreground).child(
-                            "Hopper doesn't ship a shared key, so you use your own: it's free, takes a minute, stays on this PC (in Windows Credential Manager), and only your Hopper uses it.",
+                            "This copy of Hopper has no CurseForge key built in, so you use your own: it's free, takes a minute, stays on this PC (in Windows Credential Manager), and only your Hopper uses it.",
                         ),
                     ),
             )
@@ -673,9 +766,7 @@ impl SetupWizard {
                         .child(note("Paste another to replace it, or go on.", cx)),
                 )
             })
-            .child(field)
-            .when(self.cf_testing, |c| c.child(note("Asking CurseForge…", cx)))
-            .when_some(self.cf_result.clone(), |c, r| c.child(result_line(r, cx)))
+            .child(result(v_flex().gap_4().child(field)))
             .child(
                 h_flex()
                     .flex_wrap()
@@ -691,17 +782,7 @@ impl SetupWizard {
                     )
                     .child(note("You can add a key any time in Settings.", cx)),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_start()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::Info).xsmall().flex_none().mt_0p5())
-                    .child(div().flex_1().min_w_0().child(
-                        "Some authors only allow downloads from the CurseForge website. Hopper opens those pages, picks the files up from your Downloads folder by itself, then cleans them up.",
-                    )),
-            )
+            .child(site_only)
             .into_any_element()
     }
 
@@ -924,7 +1005,8 @@ impl SetupWizard {
         let theme = cx.theme().clone();
         let s = self.store.read(cx).settings().clone();
         let installed = hopper::setup::running_installed() || hopper::setup::installed_exe().is_some();
-        let key = hopper::cf::api_key().is_some();
+        let key_source = hopper::cf::api_key_source().map(|(_, s)| s);
+        let key = key_source.is_some();
         let count = match &self.counted {
             Some((d, Some(n))) if *d == s.instances_root => Some(*n),
             _ => None,
@@ -1003,7 +1085,13 @@ impl SetupWizard {
                     .child(row(
                         IconName::Lock,
                         "CurseForge",
-                        if key { "API key set".into() } else { "No key: Modrinth only for now".into() },
+                        match key_source {
+                            Some(hopper::cf::KeySource::BuiltIn) => "Hopper's built-in key".into(),
+                            Some(hopper::cf::KeySource::Saved) => "Your own key".into(),
+                            Some(hopper::cf::KeySource::Env) => "Key from .env".into(),
+                            Some(hopper::cf::KeySource::Session) => "Key for this run".into(),
+                            None => "No key: Modrinth only for now".into(),
+                        },
                         key,
                         cx,
                     ))
@@ -1034,6 +1122,9 @@ impl SetupWizard {
         let (icon, title, sub) = match STEPS[self.step] {
             "Welcome" => (IconName::Sparkles, "Set up Hopper", "About a minute. All of it can change later in Settings."),
             "Files" => (IconName::FolderOpen, "Where Hopper keeps its files", "One folder for everything Hopper needs."),
+            "CurseForge" if hopper::cf::has_built_in_key() => {
+                (IconName::CircleCheck, "CurseForge is ready", "Nothing to do here. Go on when you're ready.")
+            }
             "CurseForge" => (IconName::Lock, "Your CurseForge key (optional)", "Skip it to use Modrinth only; add it later in Settings."),
             "Instances" => (IconName::LibraryBig, "Your instances", "Where Hopper finds what you play."),
             "Servers" => (IconName::Server, "Servers", "Optional. Skip it if you just play."),

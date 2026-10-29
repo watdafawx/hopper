@@ -129,7 +129,9 @@ Incremental and off-site backups: see 0.11.0 below.
   its folder): identify jars on CurseForge and Modrinth, add mods from
   either (with dependencies), turn them on and off, remove, and update the
   ones added on top of the pack. Pack mods update from the pack's server
-  files. CurseForge needs a key (`curseforge_key`, or the Mods tab).
+  files. CurseForge works with the key built into release builds; a key
+  of the panel's own (`curseforge_key`, or the Mods tab) is used instead
+  when set.
 - **File history and search:** the editor's History shows earlier
   versions side by side with the current file and can load one back. The
   file manager's filter box searches inside files on Enter (plain text or

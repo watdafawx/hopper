@@ -60,21 +60,25 @@ Hopper checks its latest release at start and updates itself from it.
 
 ## Setup
 
-- **CurseForge API key**: see [Why you need a CurseForge key](#why-you-need-a-curseforge-key). The setup wizard on first start walks you through it.
+- **CurseForge**: works out of the box with Hopper's built-in key. You can add your own key too: see [CurseForge key](#curseforge-key).
 - **Folders**: Settings → Library & folders points at your instances (CurseForge's `Instances` folder works) and Mojang's launcher; Settings → Servers at the folder your servers live in (see [Your servers](#your-servers)). Folders save as you leave the field, and the library refreshes.
 - **Other launchers**: Settings → Other launchers lists the ones found on this PC; switch each on to see its instances in your Library. "Add a launcher folder…" covers a portable MultiMC or a moved instances folder.
 - **Server panel** (optional): Settings → Servers takes the panel's address (e.g. `https://myserver:8443`) and an API key. For Crafty: your user → API Keys, with the Commands permission. Servers match by folder name, game port or name.
 - **Playing without the launcher** (optional): needs `MS_CLIENT_ID` in `.env`, an Azure app id approved for the Minecraft API.
 
-## Why you need a CurseForge key
+## CurseForge key
 
-CurseForge requires every app to use an API key for searching, installing and checking for updates (the files themselves come from CurseForge's download servers). Launchers like Prism ship one key for all their users; Hopper doesn't, so each person uses their own:
+CurseForge requires every app to use an API key for searching, installing and checking for updates (the files themselves come from CurseForge's download servers). Hopper's releases have Hopper's own key built in, so CurseForge works with nothing to set up.
+
+You can still use a key of your own, which keeps CurseForge working even if Hopper's key is ever revoked:
 
 1. Sign in at [console.curseforge.com](https://console.curseforge.com/) (free).
 2. Open **API keys** and copy yours.
-3. Paste it in Hopper's setup wizard, or Settings → CurseForge & Modrinth, and press Test.
+3. Paste it in Settings → CurseForge & Modrinth (or the setup wizard's "Use your own key instead"), and press Test.
 
-The key stays on your PC, in Windows Credential Manager, and only your copy of Hopper uses it. Without one, Modrinth still works: browse and install from there with no key at all.
+Your key stays on your PC, in Windows Credential Manager, and only your copy of Hopper uses it. Once saved, it's used instead of the built-in one; Settings shows which key is in use. Modrinth needs no key at all.
+
+Builds you make yourself have no built-in key: put `CF_API_KEY=...` in `.env`, paste your key in Settings, or build with `.\scripts\release.ps1 -EmbedKey` (see [Build](#build)).
 
 ### Files you download in your browser
 
@@ -167,4 +171,5 @@ git push origin v0.4.0
 
 The Release workflow builds `hopper.exe` and a zip and attaches them to the
 GitHub release; installed copies offer the update at their next start.
-Public builds never include a CurseForge key.
+The Release workflow builds Hopper's CurseForge key in (scrambled) from the
+`CF_API_KEY` repository secret; local builds only do with `-EmbedKey`.

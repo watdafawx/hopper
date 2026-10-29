@@ -1882,7 +1882,7 @@ impl SettingsPage {
             ),
             Some(KeySource::BuiltIn) => (
                 widgets::pill("Built in", theme.muted_foreground, true),
-                "Built into this copy of Hopper. Paste your own to use it instead.",
+                "Using Hopper's built-in key. Paste your own to use it instead; it keeps working if Hopper's key is ever revoked.",
             ),
             None => (
                 widgets::pill("Missing", theme.danger, true),
