@@ -67,6 +67,8 @@ pub enum Msg {
     /// What each update would stop loading: project → (mod, the range it
     /// needs).
     Breaks(PathBuf, HashMap<u64, Vec<(String, String)>>),
+    /// A mods folder's Revert offers (see [`Store::revert_offer`]).
+    Reverts(PathBuf, crate::revert_ui::Cached),
     Updates {
         root: PathBuf,
         result: Result<Vec<Update>, String>,
@@ -235,6 +237,10 @@ pub struct Store {
     /// Per instance, the mods each update would stop loading (see
     /// [`Store::update_breaks`]).
     breaks: HashMap<PathBuf, HashMap<u64, Vec<(String, String)>>>,
+    /// Per instance or server folder, the mods an older version would fix
+    /// (by jar), as of the mods folder's modified time; folders being read.
+    reverts: HashMap<PathBuf, crate::revert_ui::Cached>,
+    reverts_pending: HashSet<PathBuf>,
     /// When each instance's update check last started.
     updates_at: HashMap<PathBuf, Instant>,
     servers: Vec<ServerInfo>,
@@ -399,6 +405,8 @@ impl Store {
             cats_pending: Default::default(),
             updates: HashMap::new(),
             breaks: HashMap::new(),
+            reverts: HashMap::new(),
+            reverts_pending: HashSet::new(),
             updates_at: HashMap::new(),
             servers: Vec::new(),
             accounts: Default::default(),
@@ -1025,6 +1033,10 @@ impl Store {
             }
             Msg::Breaks(root, map) => {
                 self.breaks.insert(root, map);
+            }
+            Msg::Reverts(root, cached) => {
+                self.reverts_pending.remove(&root);
+                self.reverts.insert(root, cached);
             }
             Msg::Status { key, status } => {
                 self.pinging.remove(&key);
@@ -3383,6 +3395,28 @@ impl Store {
             },
             cx,
         );
+    }
+
+    /// "Revert X" for a jar in the mods folder under `root`, when an older
+    /// version of it fixes a newer mod or loader it needs ([`Self::want_reverts`]).
+    pub fn revert_offer(&self, root: &Path, file: &str) -> Option<crate::revert_ui::Offer> {
+        self.reverts.get(root).and_then(|(_, m)| m.get(file)).cloned()
+    }
+
+    /// Works out the Revert offers for `root`'s mods folder in the
+    /// background, unless they're up to date with its modified time.
+    /// `online`: also offer mods Hopper would fetch an older file of.
+    pub fn want_reverts(&mut self, root: &Path, loader: &str, game: &str, addons: &[hopper::instances::Addon], online: bool) {
+        let mtime = crate::revert_ui::mods_mtime(root);
+        if self.reverts_pending.contains(root) || self.reverts.get(root).is_some_and(|(t, _)| *t == mtime) {
+            return;
+        }
+        self.reverts_pending.insert(root.to_path_buf());
+        let (root, loader, game, addons) = (root.to_path_buf(), loader.to_string(), game.to_string(), addons.to_vec());
+        self.spawn(move || {
+            let map = crate::revert_ui::offers(&root, &loader, &game, &addons, online);
+            Msg::Reverts(root, (mtime, std::sync::Arc::new(map)))
+        });
     }
 
     /// Ends a running game.

@@ -1786,6 +1786,58 @@ impl SyncPanel {
                 body.push(h_flex().pt_1().child(self.crash_turn_off(turn_off.clone(), turn_off_label.clone(), blocked, cx)).into_any_element());
             }
         }
+        // A mod that needs a newer mod or loader: the older copy kept in this
+        // server's .hopper-backups that works. Only a folder Hopper can read
+        // (a remote Hopper Server's backups aren't).
+        if let Some(root) = self.server.clone().filter(|r| !hopper::hopperd::is_remote_root(r)) {
+            let pack = {
+                let store = self.store.read(cx);
+                store.server(&root).and_then(|sv| store.paired(sv)).map(|i| (i.loader.clone(), i.game_version.clone()))
+            };
+            if let Some((loader, game)) = pack {
+                self.store.update(cx, |s, _| s.want_reverts(&root, &loader, &game, &addons, false));
+            }
+            let offers: Vec<crate::revert_ui::Offer> = c
+                .suspects
+                .iter()
+                .filter(|s| s.certainty <= Certainty::Likely)
+                .filter_map(|s| self.store.read(cx).revert_offer(&root, s.file_name.trim_end_matches(".disabled")))
+                .filter(|o| o.backup.is_some())
+                .collect();
+            let buttons: Vec<AnyElement> = offers
+                .into_iter()
+                .enumerate()
+                .filter_map(|(k, o)| {
+                    let (label, tip) = o.label();
+                    let ch = o.backup?;
+                    Some(
+                        Button::new(ElementId::Name(format!("srv-crash-revert:{k}").into()))
+                            .small()
+                            .outline()
+                            .icon(IconName::Undo2)
+                            .label(label)
+                            .tooltip(tip)
+                            .disabled(blocked)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let ch = ch.clone();
+                                this.crash_fix(
+                                    move |root| {
+                                        hopper::crashdetect::put_back(root, &ch)?;
+                                        let old = if ch.from.is_empty() { "The older version".to_string() } else { ch.from.clone() };
+                                        let new = if ch.to.is_empty() { "the newer one".to_string() } else { ch.to.clone() };
+                                        Ok(format!("{old} is back; {new} is in backups. Start the server to try again."))
+                                    },
+                                    cx,
+                                );
+                            }))
+                            .into_any_element(),
+                    )
+                })
+                .collect();
+            if !buttons.is_empty() {
+                body.push(h_flex().gap_2().flex_wrap().pt_1().children(buttons).into_any_element());
+            }
+        }
         if let Some(n) = c.lingered_note() {
             body.push(widgets::caption(n, cx).text_xs().into_any_element());
         }
