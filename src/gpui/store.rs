@@ -2428,6 +2428,11 @@ impl Store {
         if let Some(mut inst) = self.instance(root).cloned() {
             self.spawn_instance_job(&inst.root.clone(), format!("Identifying jars in {}", inst.name), move |job| {
                 let n = install::identify_loose(&mut inst, job)?;
+                // A CurseForge pack's mods named on Modrinth earlier move to
+                // CurseForge where it has them (updates follow the pack's site).
+                if let Err(e) = install::prefer_curseforge(&mut inst, job) {
+                    job.note(format!("Checking Modrinth mods on CurseForge: {e:#}"));
+                }
                 job.detail(format!("Identified {n} jars"));
                 Ok(Msg::InstanceChanged(inst.root.clone()))
             });

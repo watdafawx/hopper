@@ -1104,33 +1104,31 @@ pub fn identify_jars(inst: &mut Instance, names: &[String], job: &Job) -> anyhow
     if loose.is_empty() {
         return Ok(0);
     }
-    let mut by_fp = HashMap::new();
-    for (i, name) in loose.iter().enumerate() {
-        job.progress(i, loose.len());
-        job.detail(format!("Fingerprinting {name}"));
-        let bytes = fs::read(inst.mods_dir().join(name))?;
-        by_fp.insert(cf::fingerprint(&bytes), name.clone());
-    }
-    let matches = cf::match_fingerprints(&by_fp.keys().copied().collect::<Vec<_>>())?;
-    let mods = cf::get_mods(&matches.iter().map(|m| m.id).collect::<Vec<_>>())?;
+    // CurseForge first, then Modrinth for what it doesn't know. One site
+    // failing (a rejected key, a timeout) still lets the other name jars.
     let mut n = 0;
-    for mt in matches {
-        let Some(name) = by_fp.get(&(mt.file.file_fingerprint as u32)) else {
-            continue;
-        };
-        let Some(m) = mods.iter().find(|m| m.id == mt.id) else {
-            continue;
-        };
-        let mut a = addon_from(m, &mt.file, false);
-        a.enabled = !name.ends_with(".disabled");
-        a.file_name = name.trim_end_matches(".disabled").to_string();
-        put_identified(inst, a);
-        n += 1;
+    let cf_failed = if cf::api_key().is_some() {
+        match identify_on_curseforge(inst, &loose, job) {
+            Ok(k) => {
+                n += k;
+                None
+            }
+            Err(e) => Some(format!("{e:#}")),
+        }
+    } else {
+        None
+    };
+    match identify_on_modrinth(inst, &loose, job) {
+        Ok(k) => n += k,
+        Err(e) => match &cf_failed {
+            // Neither site answered: say both, nothing was identified.
+            Some(c) => anyhow::bail!("CurseForge: {c}. Modrinth: {e:#}"),
+            None => job.note(format!("Modrinth lookup failed: {e:#}")),
+        },
     }
-    n += identify_on_modrinth(inst, &loose, job).unwrap_or_else(|e| {
-        job.note(format!("Modrinth lookup failed: {e:#}"));
-        0
-    });
+    if let Some(c) = cf_failed {
+        job.note(format!("CurseForge lookup failed, so these were looked up on Modrinth only: {c}"));
+    }
     let missing: Vec<&str> = loose
         .iter()
         .filter(|l| {
@@ -1157,11 +1155,28 @@ pub fn identify_jars(inst: &mut Instance, names: &[String], job: &Job) -> anyhow
 fn put_identified(inst: &mut Instance, mut a: Addon) {
     let dir = inst.mods_dir();
     let gone = |f: &str| !dir.join(f).exists() && !dir.join(format!("{f}.disabled")).exists();
-    match inst
-        .addons
-        .iter()
-        .position(|o| o.project_id == a.project_id && a.project_id != 0 && gone(&o.file_name))
-    {
+    // The same mod on the other site counts too: a jar identified on
+    // Modrinth before and on CurseForge now (or the other way round) is
+    // still that mod.
+    let same_mod = |o: &Addon| {
+        (o.project_id == a.project_id && a.project_id != 0)
+            || (!o.mr_project.is_empty() && o.mr_project == a.mr_project)
+            || (!o.name.is_empty() && o.name.eq_ignore_ascii_case(&a.name))
+    };
+    // A second gone entry of the same mod would show as a mod that isn't
+    // there: only one is kept, as this jar's.
+    let mut olds: Vec<usize> = (0..inst.addons.len())
+        .filter(|&i| {
+            let o = &inst.addons[i];
+            o.folder() == "mods" && same_mod(o) && gone(&o.file_name)
+        })
+        .collect();
+    let keep = olds.first().copied();
+    while olds.len() > 1 {
+        let i = olds.pop().unwrap_or_default();
+        inst.addons.remove(i);
+    }
+    match keep {
         Some(i) => {
             // The same mod, another file: it keeps what the user and the
             // pack said about it (when added, locks, where it runs).
@@ -1269,6 +1284,114 @@ pub fn changelogs(
         })
         .collect();
     Ok((entries, listed))
+}
+
+/// CurseForge's entries for the jars `names` (in the mods folder), by
+/// fingerprint: (jar name as on disk, entry). Jars it doesn't know are left
+/// out.
+fn curseforge_matches(inst: &Instance, names: &[String], job: &Job) -> anyhow::Result<Vec<(String, Addon)>> {
+    let mut by_fp = HashMap::new();
+    for (i, name) in names.iter().enumerate() {
+        job.progress(i, names.len());
+        job.detail(format!("Fingerprinting {name}"));
+        let bytes = fs::read(inst.mods_dir().join(name))?;
+        by_fp.insert(cf::fingerprint(&bytes), name.clone());
+    }
+    let matches = cf::match_fingerprints(&by_fp.keys().copied().collect::<Vec<_>>())?;
+    if matches.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mods = cf::get_mods(&matches.iter().map(|m| m.id).collect::<Vec<_>>())?;
+    let mut out = Vec::new();
+    for mt in matches {
+        let Some(name) = by_fp.get(&(mt.file.file_fingerprint as u32)) else {
+            continue;
+        };
+        let Some(m) = mods.iter().find(|m| m.id == mt.id) else {
+            continue;
+        };
+        let mut a = addon_from(m, &mt.file, false);
+        a.enabled = !name.ends_with(".disabled");
+        a.file_name = name.trim_end_matches(".disabled").to_string();
+        out.push((name.clone(), a));
+    }
+    Ok(out)
+}
+
+/// Identifies untracked jars on CurseForge by fingerprint.
+fn identify_on_curseforge(inst: &mut Instance, names: &[String], job: &Job) -> anyhow::Result<usize> {
+    let found = curseforge_matches(inst, names, job)?;
+    let n = found.len();
+    for (_, a) in found {
+        put_identified(inst, a);
+    }
+    Ok(n)
+}
+
+/// Whether the instance's (or server's) pack comes from CurseForge.
+pub fn is_curseforge_pack(inst: &Instance) -> bool {
+    inst.pack
+        .as_ref()
+        .is_some_and(|p| p.project_id != 0 && p.mr_project.is_empty() && !crate::modrinth::is_mr(p.project_id))
+}
+
+/// On a CurseForge pack, moves mods that were identified on Modrinth to
+/// their CurseForge entry when CurseForge knows the jar, so updates come
+/// from where the pack gets them. What the user said about each mod (when
+/// added, locks, on or off, where it runs, whether it's the pack's) stays.
+/// Jars CurseForge doesn't know keep their Modrinth entry. Returns how many
+/// moved. Does nothing without a CurseForge key or on other packs.
+pub fn prefer_curseforge(inst: &mut Instance, job: &Job) -> anyhow::Result<usize> {
+    if !is_curseforge_pack(inst) || cf::api_key().is_none() {
+        return Ok(0);
+    }
+    let dir = inst.mods_dir();
+    let names: Vec<String> = inst
+        .addons
+        .iter()
+        .filter(|a| a.folder() == "mods" && crate::modrinth::is_mr(a.project_id))
+        .filter_map(|a| {
+            let on = a.file_name.clone();
+            let off = format!("{on}.disabled");
+            if dir.join(&on).is_file() {
+                Some(on)
+            } else if dir.join(&off).is_file() {
+                Some(off)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if names.is_empty() {
+        return Ok(0);
+    }
+    job.detail(format!("Checking {} Modrinth mods on CurseForge", names.len()));
+    let found = curseforge_matches(inst, &names, job)?;
+    let mut n = 0;
+    for (_, mut a) in found {
+        let Some(o) = inst
+            .addons
+            .iter_mut()
+            .find(|o| o.folder() == "mods" && o.file_name.eq_ignore_ascii_case(&a.file_name))
+        else {
+            continue;
+        };
+        a.enabled = o.enabled;
+        a.from_pack = o.from_pack;
+        a.date_added = o.date_added.clone();
+        a.locked = o.locked;
+        a.locked_version = o.locked_version.clone();
+        a.cf_locked = o.cf_locked;
+        if a.env.is_empty() {
+            a.env = o.env.clone();
+        }
+        *o = a;
+        n += 1;
+    }
+    if n > 0 {
+        inst.save()?;
+    }
+    Ok(n)
 }
 
 /// Identifies still-untracked jars on Modrinth by sha1.
@@ -1697,5 +1820,64 @@ mod versions_tests {
             name: String::new(),
         };
         assert_eq!(u.versions(), ("yours".to_string(), "13/10/2026".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod identified_tests {
+    use crate::instances::{Addon, Instance, PackRef};
+
+    /// A jar identified on CurseForge takes over the entry the same mod had
+    /// from Modrinth (its old jar is gone), and the other gone copy goes.
+    #[test]
+    fn identified_jar_replaces_the_other_sites_gone_entries() {
+        let root = std::env::temp_dir().join(format!("hopper-put-identified-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::write(root.join("mods/amendments-1.21-2.2.4-neoforge.jar"), b"x").unwrap();
+        let old = |file: &str, date: &str| Addon {
+            project_id: 1 << 63,
+            file_name: file.into(),
+            name: "Amendments".into(),
+            mr_project: "6iTJugQR".into(),
+            date_added: date.into(),
+            locked: true,
+            from_pack: true,
+            enabled: true,
+            class_id: crate::cf::CLASS_MODS,
+            ..Default::default()
+        };
+        let mut inst = Instance {
+            root: root.clone(),
+            addons: vec![old("amendments-1.21-2.2.0-neoforge.jar", "2026-10-25"), old("amendments-1.21-2.2.2-neoforge.jar", "2026-10-26")],
+            ..Default::default()
+        };
+        let new = Addon {
+            project_id: 896746,
+            file_name: "amendments-1.21-2.2.4-neoforge.jar".into(),
+            name: "Amendments".into(),
+            enabled: true,
+            class_id: crate::cf::CLASS_MODS,
+            date_added: "2026-10-29".into(),
+            ..Default::default()
+        };
+        super::put_identified(&mut inst, new);
+        assert_eq!(inst.addons.len(), 1);
+        let a = &inst.addons[0];
+        assert_eq!((a.project_id, a.file_name.as_str()), (896746, "amendments-1.21-2.2.4-neoforge.jar"));
+        // What the user and the pack said stays.
+        assert_eq!(a.date_added, "2026-10-25");
+        assert!(a.locked && a.from_pack);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn curseforge_packs() {
+        let mut inst = Instance::default();
+        assert!(!super::is_curseforge_pack(&inst));
+        inst.pack = Some(PackRef { project_id: 1027782, ..Default::default() });
+        assert!(super::is_curseforge_pack(&inst));
+        inst.pack = Some(PackRef { project_id: crate::modrinth::num_id("abcdEFGH"), mr_project: "abcdEFGH".into(), ..Default::default() });
+        assert!(!super::is_curseforge_pack(&inst));
     }
 }

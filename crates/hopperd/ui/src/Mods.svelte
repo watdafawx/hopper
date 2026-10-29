@@ -235,7 +235,8 @@
     try {
       const { job } = await post(`${base}/mods/identify`);
       const r = await followJob(job, (st) => (identifying = st.detail || identifying));
-      if (!auto || r?.identified) say(r.unknown ? `Identified ${r.identified}; ${r.unknown} still unknown` : `Identified ${r.identified}`);
+      const moved = r?.moved_to_curseforge ? `; ${r.moved_to_curseforge} now from CurseForge, like the pack` : '';
+      if (!auto || r?.identified || r?.moved_to_curseforge) say((r.unknown ? `Identified ${r.identified}; ${r.unknown} still unknown` : `Identified ${r.identified}`) + moved);
       await load();
       checkUpdates(false);
     } catch (e) {
