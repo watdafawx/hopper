@@ -1247,7 +1247,7 @@ mod tests {
         assert_eq!(a.pair_status(&id, &secret), PairStatus::Approved { token: token.clone(), device_id: device_id.clone() });
         assert_eq!(a.pair_status(&id, "wrong"), PairStatus::Unknown);
         assert!(a.pending().is_empty());
-        assert!(a.answer(&id, true).is_err(), "answered once");
+        assert!(a.answer(&id, true, None).is_err(), "answered once");
         assert!(a.forget_device(&device_id));
         assert_eq!(a.check(&token), None);
         let (id2, s2, _) = a.pair_request("Phone", IP, "AA:BB").unwrap();
