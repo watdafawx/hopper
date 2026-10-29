@@ -60,6 +60,8 @@ pub struct ServerControl {
     /// Recent (CPU %, memory %) samples while running, oldest first, for
     /// the Overview's sparklines.
     history: std::collections::VecDeque<(f32, f32)>,
+    /// Recent TPS readings while running, for the TPS card's sparkline.
+    tps_history: std::collections::VecDeque<f32>,
     console: Vec<String>,
     /// Whether the console shows (it only polls then).
     console_open: bool,
@@ -140,6 +142,7 @@ impl ServerControl {
             stats: None,
             seen: None,
             history: Default::default(),
+            tps_history: Default::default(),
             console: Vec::new(),
             console_open: false,
             busy: None,
@@ -250,6 +253,7 @@ impl ServerControl {
         self.stats = None;
         self.seen = None;
         self.history.clear();
+        self.tps_history.clear();
         self.backups = None;
         self.console.clear();
         self.console_base = 0;
@@ -368,8 +372,17 @@ impl ServerControl {
                     self.history.pop_front();
                 }
                 self.history.push_back((s.cpu, s.mem_percent));
+                if let Some(t) = s.tps {
+                    if self.tps_history.len() >= HISTORY {
+                        self.tps_history.pop_front();
+                    }
+                    self.tps_history.push_back(t.tps);
+                }
             }
-            Ok(_) => self.history.clear(),
+            Ok(_) => {
+                self.history.clear();
+                self.tps_history.clear();
+            }
             Err(_) => {}
         }
         if stats.is_ok() {
@@ -908,6 +921,28 @@ impl ServerControl {
                         .child(value(mem_value.0, mem_value.1))
                         .child(trend(mem, 100.0, theme.primary)),
                 )
+                // Only panels that read TPS (Hopper Server) get the card.
+                .when(live && (s.tps.is_some() || s.no_tps.as_deref() == Some("rcon_off")), |r| {
+                    let c = card("card-tps", IconName::Gauge, "TPS");
+                    r.child(match s.tps {
+                        Some(t) => {
+                            let color = widgets::tps_color(&t, cx);
+                            c.child(
+                                h_flex()
+                                    .items_baseline()
+                                    .gap_1()
+                                    .child(div().text_2xl().font_weight(FontWeight::BOLD).text_color(color).child(t.text()))
+                                    .when_some(t.mspt_text(), |r, m| {
+                                        r.child(div().text_sm().text_color(theme.muted_foreground).child(format!("· {m}")))
+                                    }),
+                            )
+                            .child(trend(self.tps_history.iter().cloned().collect(), 20.0, color))
+                        }
+                        None => c
+                            .child(value(dash(), String::new()))
+                            .child(widgets::caption("Turn on RCON in Hopper Server to see it", cx).text_xs()),
+                    })
+                })
                 .child(
                     card("card-players", IconName::Users, "Players")
                         .child(value(
@@ -937,7 +972,7 @@ impl ServerControl {
                             String::new(),
                         ))
                         .when(live && !s.started.is_empty(), |c| {
-                            c.child(widgets::caption(format!("Up since {}", s.started), cx).text_xs())
+                            c.child(widgets::caption(s.up_text(), cx).text_xs())
                         }),
                 )
                 .into_any_element(),

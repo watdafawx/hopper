@@ -1076,6 +1076,12 @@ impl SyncPanel {
         }
     }
 
+    /// The server's latest TPS while it runs, when its panel reads it.
+    fn live_tps(&self, root: &Path, cx: &App) -> Option<hopper::panel::Tps> {
+        let stats = self.control.read(cx).stats_of(root).cloned().or_else(|| self.store.read(cx).panel_stats(root).cloned())?;
+        stats.tps.filter(|_| stats.running && !stats.starting)
+    }
+
     /// The server's state dot and word: the panel's state, else a ping,
     /// and red when its last start crashed.
     fn state(&self, cx: &App) -> (Hsla, &'static str) {
@@ -1114,6 +1120,8 @@ impl SyncPanel {
         // The server: its name and state, why its last start crashed, and
         // its controls.
         let reason = self.crash.as_ref().filter(|_| !online).map(crash_reason);
+        let ping = self.store.read(cx).status(&server.root).and_then(|s| s.ms());
+        let tps = self.live_tps(&server.root, cx);
         let server_card = card()
             .child(
                 h_flex()
@@ -1135,6 +1143,20 @@ impl SyncPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
                     ),
             )
+            // Its ping and TPS on their own line, so the name keeps its room.
+            .when(ping.is_some() || tps.is_some(), |c| {
+                c.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .pl_4()
+                        .when_some(ping, |r, ms| {
+                            r.child(crate::servers::ping_bars(&server.root, ms, cx))
+                                .child(widgets::caption(hopper::server::ping_text(ms), cx).text_xs())
+                        })
+                        .when_some(tps, |r, t| r.child(widgets::tps_chip("server-tps", &t, cx))),
+                )
+            })
             .when_some(reason, |c, r| c.child(div().text_xs().text_color(theme.danger).child(r)))
             .children(controls)
             .when(online, |c| {

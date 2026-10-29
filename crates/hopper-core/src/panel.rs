@@ -96,9 +96,64 @@ pub struct PanelStats {
     pub addresses: Vec<String>,
     /// Sleeps after this many minutes with nobody on (Hopper Server); 0: never.
     pub sleep_minutes: u32,
+    /// Ticks per second, from panels that read it (Hopper Server).
+    pub tps: Option<Tps>,
+    /// Why such a panel has no TPS for it: "rcon_off" or "unsupported".
+    pub no_tps: Option<String>,
+}
+
+/// A TPS reading, with the time a tick takes when the loader says.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tps {
+    pub tps: f32,
+    pub mspt: Option<f32>,
+}
+
+/// How healthy a TPS reading is: 20 is full speed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TpsLevel {
+    Good,
+    Slow,
+    Bad,
+}
+
+impl Tps {
+    /// Yellow below 18, red below 15 (Hopper Server's default alert).
+    pub fn level(&self) -> TpsLevel {
+        if self.tps >= 18.0 {
+            TpsLevel::Good
+        } else if self.tps >= 15.0 {
+            TpsLevel::Slow
+        } else {
+            TpsLevel::Bad
+        }
+    }
+
+    /// "19.9", one decimal like the panel.
+    pub fn text(&self) -> String {
+        format!("{:.1}", self.tps)
+    }
+
+    /// "12.4 ms a tick", when known.
+    pub fn mspt_text(&self) -> Option<String> {
+        self.mspt.map(|m| format!("{m:.1} ms a tick"))
+    }
 }
 
 impl PanelStats {
+    /// "Up 3h 30m" from a panel that gives the uptime, "Up since …" from one
+    /// that gives the start time; empty when it gives neither.
+    pub fn up_text(&self) -> String {
+        let s = self.started.trim();
+        if s.is_empty() {
+            String::new()
+        } else if let Some(rest) = s.strip_prefix("up ") {
+            format!("Up {rest}")
+        } else {
+            format!("Up since {s}")
+        }
+    }
+
     pub fn state(&self) -> &'static str {
         if self.crashed {
             "Crashed"
@@ -765,6 +820,27 @@ mod tests {
 
     fn st(running: bool, starting: bool, crashed: bool) -> PanelStats {
         PanelStats { running, starting, crashed, ..Default::default() }
+    }
+
+    #[test]
+    fn up_text_reads_both_kinds() {
+        let up = |s: &str| PanelStats { started: s.into(), ..Default::default() }.up_text();
+        assert_eq!(up("up 3h 30m"), "Up 3h 30m");
+        assert_eq!(up("2026-10-12 10:00:00"), "Up since 2026-10-12 10:00:00");
+        assert_eq!(up(""), "");
+    }
+
+    #[test]
+    fn tps_levels_and_text() {
+        let t = |tps: f32| Tps { tps, mspt: None };
+        assert_eq!(t(20.0).level(), TpsLevel::Good);
+        assert_eq!(t(18.0).level(), TpsLevel::Good);
+        assert_eq!(t(17.9).level(), TpsLevel::Slow);
+        assert_eq!(t(15.0).level(), TpsLevel::Slow);
+        assert_eq!(t(14.9).level(), TpsLevel::Bad);
+        assert_eq!(t(19.94).text(), "19.9");
+        assert_eq!(t(20.0).mspt_text(), None);
+        assert_eq!(Tps { tps: 20.0, mspt: Some(12.44) }.mspt_text().as_deref(), Some("12.4 ms a tick"));
     }
 
     #[test]

@@ -23,13 +23,29 @@ impl HopperServer {
     pub fn all_stats(&self) -> anyhow::Result<Vec<(String, PanelStats)>> {
         let list = self.client.get("/servers")?;
         let total = self.client.get("/host").ok().and_then(|h| h["mem_total"].as_u64()).unwrap_or(0);
+        let alerts = self.client.get("/alerts").ok();
         Ok(list
             .as_array()
             .into_iter()
             .flatten()
-            .map(|v| (v["id"].as_str().unwrap_or("").to_string(), stats_from(v, total)))
+            .map(|v| {
+                let id = v["id"].as_str().unwrap_or("").to_string();
+                let mut st = stats_from(v, total);
+                if let Some(a) = &alerts {
+                    add_tps(&mut st, a, &id);
+                }
+                (id, st)
+            })
             .collect())
     }
+}
+
+/// The TPS the panel last read for a server (its alerts list carries it),
+/// or why it has none. Panels older than alerts leave both empty.
+fn add_tps(st: &mut PanelStats, alerts: &Value, id: &str) {
+    let t = &alerts["tps"][id];
+    st.tps = t["tps"].as_f64().map(|tps| super::Tps { tps: tps as f32, mspt: t["mspt"].as_f64().map(|m| m as f32) });
+    st.no_tps = alerts["no_tps"][id].as_str().map(str::to_string);
 }
 
 fn enc(id: &str) -> String {
@@ -67,6 +83,8 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
         players,
         addresses: v["addresses"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect(),
         sleep_minutes: v["sleep_after_minutes"].as_u64().unwrap_or(0) as u32,
+        tps: None,
+        no_tps: None,
         version: v["version"].as_str().unwrap_or("").to_string(),
         world_size: String::new(),
         started: v["uptime_secs"]
@@ -99,7 +117,11 @@ impl ServerPanel for HopperServer {
     fn stats(&self, id: &str) -> anyhow::Result<PanelStats> {
         let v = self.client.get(&format!("/servers/{}", enc(id)))?;
         let total = self.client.get("/host").ok().and_then(|h| h["mem_total"].as_u64()).unwrap_or(0);
-        Ok(stats_from(&v, total))
+        let mut st = stats_from(&v, total);
+        if let Ok(a) = self.client.get("/alerts") {
+            add_tps(&mut st, &a, id);
+        }
+        Ok(st)
     }
 
     fn act(&self, id: &str, action: PanelAction) -> anyhow::Result<()> {
@@ -130,6 +152,24 @@ impl ServerPanel for HopperServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tps_from_alerts() {
+        let a = serde_json::json!({
+            "tps": { "a": { "tps": 19.9, "mspt": 12.4, "at": 1 }, "b": { "tps": 14.0 } },
+            "no_tps": { "c": "rcon_off" }
+        });
+        let mut st = PanelStats::default();
+        add_tps(&mut st, &a, "a");
+        let t = st.tps.unwrap();
+        assert!((t.tps - 19.9).abs() < 0.01 && (t.mspt.unwrap() - 12.4).abs() < 0.01);
+        add_tps(&mut st, &a, "b");
+        assert_eq!(st.tps.unwrap().mspt, None);
+        add_tps(&mut st, &a, "c");
+        assert_eq!((st.tps, st.no_tps.as_deref()), (None, Some("rcon_off")));
+        add_tps(&mut st, &serde_json::json!({}), "a");
+        assert_eq!((st.tps, st.no_tps), (None, None));
+    }
 
     #[test]
     fn stats_map() {

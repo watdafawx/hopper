@@ -22,7 +22,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::model::ModInfo;
 use hopper::panel::PanelStats;
-use hopper::server::{Manager, ServerInfo, Status};
+use hopper::server::{Manager, ServerInfo, Status, ping_text};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -69,10 +69,51 @@ fn status_text(status: Option<&Status>, panel: Option<&PanelStats>) -> String {
             players,
             max,
             version,
-        }) => format!("Online · {players}/{max} players · {version}"),
+            ms,
+        }) => format!("Online · {players}/{max} players · {version} · {}", ping_text(*ms)),
         Some(Status::Offline) => "Offline".into(),
         None => "Checking".into(),
     }
+}
+
+/// The server's last ping as the button that pings it again: signal bars
+/// and the round trip, a spinner while a ping is on its way, a red cross
+/// when it didn't answer.
+fn ping_button(store: &Entity<Store>, server: &ServerInfo, cx: &App) -> Button {
+    let s = store.read(cx);
+    let status = s.status(&server.root);
+    let (store, srv) = (store.clone(), server.clone());
+    let b = Button::new("ping")
+        .outline()
+        .small()
+        .tooltip("Ping it again, like the multiplayer screen")
+        .on_click(move |_, _, cx| store.update(cx, |s, cx| {
+            s.ping(&srv);
+            cx.notify();
+        }));
+    if s.pinging(&server.root) {
+        return b.icon(IconName::Activity).loading(true).label("Pinging…");
+    }
+    match status {
+        None => b.icon(IconName::Activity).label("Ping"),
+        Some(st) => b
+            .child(widgets::signal_bars(st.ms(), px(12.), cx))
+            .child(match st.ms() {
+                Some(ms) => ping_text(ms),
+                None => "Didn't answer".into(),
+            }),
+    }
+}
+
+
+/// Small signal bars for a server that answers, with its ping on hover
+/// (the server list's rows and the Library's Server tab).
+pub(crate) fn ping_bars(root: &std::path::Path, ms: u32, cx: &App) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(format!("ping-bars:{}", root.display()).into()))
+        .flex_none()
+        .child(widgets::signal_bars(Some(ms), px(10.), cx))
+        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(ping_text(ms)).build(w, cx))
 }
 
 /// "No servers yet", with the Host action when the page has one.
@@ -228,6 +269,11 @@ fn server_list(
                             .truncate()
                             .child(srv.name.clone()),
                     )
+                    // Its ping, while it answers (a stopped one is just its
+                    // grey dot).
+                    .when_some(s.status(&srv.root).and_then(|st| st.ms()), |r, ms| {
+                        r.child(ping_bars(&srv.root, ms, cx))
+                    })
                     // A stopped server is just its grey dot; pills are for
                     // running, starting and failing ones.
                     .when_some(s.panel_stats(&srv.root).filter(|p| p.running || p.starting || p.crashed), |r, p| {
@@ -237,7 +283,14 @@ fn server_list(
                         } else {
                             p.state().to_string()
                         };
-                        r.child(widgets::pill(text, status_color(s.status(&srv.root), Some(p), cx), live))
+                        r.when_some(p.tps.filter(|_| live), |r, t| {
+                            r.child(widgets::tps_chip(
+                                ElementId::Name(format!("tps:{}", srv.root.display()).into()),
+                                &t,
+                                cx,
+                            ))
+                        })
+                        .child(widgets::pill(text, status_color(s.status(&srv.root), Some(p), cx), live))
                     }),
             )
             .when_some(caption_for(s, srv), |r, c| r.child(widgets::caption(c, cx).text_xs().pl_4().truncate()))
@@ -1156,18 +1209,7 @@ impl ServersView {
                             .label(if remote { "Open in browser" } else { "Folder" })
                             .on_click(move |_, _, _| crate::store::open_path(&root)),
                     )
-                    .child(
-                        Button::new("ping")
-                            .outline()
-                            .small()
-                            .icon(IconName::Activity)
-                            .label("Ping")
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.store.read(cx).ping(&server)
-                                }),
-                            ),
-                    )
+                    .child(ping_button(&self.store, &server, cx))
             )
             .child({
                 let codes = tabs_for(remote);
