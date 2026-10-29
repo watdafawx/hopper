@@ -58,7 +58,7 @@ pub struct Event {
     /// Unix seconds.
     pub at: u64,
     pub who: String,
-    /// The actor's role: owner, coowner, admin, operator, viewer, device or
+    /// The actor's role: owner, manager, admin, operator, viewer, device or
     /// token (empty for anonymous requests and older lines).
     #[serde(default)]
     pub role: String,
@@ -150,8 +150,8 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
                 return None;
             }
             match role {
-                // Owner-only routes accept co-owners; the rest is open to them.
-                Role::CoOwner => None,
+                // Owner-only routes accept managers; the rest is open to them.
+                Role::Manager => None,
                 Role::Viewer => Some("Your account can only look."),
                 Role::Operator => {
                     let rest = path.strip_prefix("/api/v1/servers/").map(|r| r.splitn(2, '/').nth(1).unwrap_or(""));
@@ -265,7 +265,7 @@ mod tests {
         assert!(refusal(&a, &Method::PUT, "/api/v1/fs/tnp/text").is_none());
         assert!(refusal(&a, &post, "/api/v1/servers/create").is_some());
         assert!(refusal(&user(Role::Admin, &[]), &post, "/api/v1/servers/create").is_none());
-        let c = user(Role::CoOwner, &[]);
+        let c = user(Role::Manager, &[]);
         assert!(refusal(&c, &post, "/api/v1/servers/create").is_none());
         assert!(refusal(&c, &Method::PUT, "/api/v1/fs/other/text").is_none());
     }

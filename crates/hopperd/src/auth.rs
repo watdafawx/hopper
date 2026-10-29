@@ -105,8 +105,8 @@ pub struct Device {
     hash: String,
     pub created: u64,
     pub last_seen: u64,
-    /// The co-owner who let it in; the owner's when `None` (and for devices
-    /// paired before co-owners existed). A co-owner can't remove the owner's.
+    /// The manager who let it in; the owner's when `None` (and for devices
+    /// paired before managers existed). A manager can't remove the owner's.
     #[serde(default)]
     pub by: Option<String>,
 }
@@ -130,16 +130,16 @@ struct Stored {
     users: Vec<User>,
 }
 
-/// What a user may do. The owner can do everything. A co-owner has the
+/// What a user may do. The owner can do everything. A manager has the
 /// owner's access (all servers, users, devices, tokens, webhooks, panel
-/// settings) but can't touch the owner or other co-owners, so the owner can
+/// settings) but can't touch the owner or other managers, so the owner can
 /// never be locked out. Other roles are limited to their servers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
-    /// The owner's access, on every server. Only the owner makes co-owners.
-    #[serde(rename = "coowner")]
-    CoOwner,
+    /// The owner's access, on every server. Only the owner makes managers.
+    #[serde(rename = "manager")]
+    Manager,
     /// Everything on their servers: files, mods, settings, backups.
     Admin,
     /// Start, stop, console, players and making backups.
@@ -151,7 +151,7 @@ pub enum Role {
 impl Role {
     pub fn parse(s: &str) -> Option<Role> {
         match s {
-            "coowner" | "co-owner" => Some(Role::CoOwner),
+            "manager" => Some(Role::Manager),
             "admin" => Some(Role::Admin),
             "operator" => Some(Role::Operator),
             "viewer" => Some(Role::Viewer),
@@ -162,7 +162,7 @@ impl Role {
     /// The name the API and audit log use (the same as in config files).
     pub fn id(self) -> &'static str {
         match self {
-            Role::CoOwner => "coowner",
+            Role::Manager => "manager",
             Role::Admin => "admin",
             Role::Operator => "operator",
             Role::Viewer => "viewer",
@@ -194,10 +194,10 @@ impl User {
         self.totp.is_some()
     }
 
-    /// Who this user is on a request. A co-owner always has every server,
+    /// Who this user is on a request. A manager always has every server,
     /// whatever list was saved with them.
     fn who(&self) -> Who {
-        let servers = if self.role == Role::CoOwner { Vec::new() } else { self.servers.clone() };
+        let servers = if self.role == Role::Manager { Vec::new() } else { self.servers.clone() };
         Who::User { id: self.id.clone(), name: self.name.clone(), role: self.role, servers }
     }
 }
@@ -341,9 +341,9 @@ impl Who {
         }
     }
 
-    /// The owner or a co-owner: what owner-only routes (`require_owner`) allow.
+    /// The owner or a manager: what owner-only routes (`require_owner`) allow.
     pub fn owner_level(&self) -> bool {
-        matches!(self, Who::Owner | Who::User { role: Role::CoOwner, .. })
+        matches!(self, Who::Owner | Who::User { role: Role::Manager, .. })
     }
 
     /// The role shown in the audit log.
@@ -358,22 +358,22 @@ impl Who {
 
     /// Whether this one may add, change, remove or reset a user whose role
     /// is `before` (`None` when adding) and becomes `after` (`None` when
-    /// removing). Co-owners manage everyone but co-owners: only the true
+    /// removing). Managers manage everyone but managers: only the true
     /// owner makes, changes or removes those.
     pub fn may_manage_user(&self, before: Option<Role>, after: Option<Role>) -> bool {
         match self {
             Who::Owner => true,
-            Who::User { role: Role::CoOwner, .. } => before != Some(Role::CoOwner) && after != Some(Role::CoOwner),
+            Who::User { role: Role::Manager, .. } => before != Some(Role::Manager) && after != Some(Role::Manager),
             _ => false,
         }
     }
 
     /// Whether this one may remove a paired device that `by` let in (the
-    /// owner when `None`). A co-owner can't remove the owner's devices.
+    /// owner when `None`). A manager can't remove the owner's devices.
     pub fn may_forget_device(&self, by: Option<&str>) -> bool {
         match self {
             Who::Owner => true,
-            Who::User { role: Role::CoOwner, .. } => by.is_some(),
+            Who::User { role: Role::Manager, .. } => by.is_some(),
             _ => false,
         }
     }
@@ -726,7 +726,7 @@ impl Auth {
             name: name.to_string(),
             hash,
             role,
-            servers: if role == Role::CoOwner { Vec::new() } else { servers },
+            servers: if role == Role::Manager { Vec::new() } else { servers },
             created: now(),
             last_seen: 0,
             totp: None,
@@ -746,7 +746,7 @@ impl Auth {
         let Some(u) = s.users.iter_mut().find(|u| u.id == id) else { bail!("No user with that id.") };
         u.name = name.trim().to_string();
         u.role = role;
-        u.servers = if role == Role::CoOwner { Vec::new() } else { servers };
+        u.servers = if role == Role::Manager { Vec::new() } else { servers };
         if let Some(h) = hash {
             u.hash = h;
             s.sessions.retain(|x| x.user.as_deref() != Some(id));
@@ -888,7 +888,7 @@ impl Auth {
         p.iter().filter(|r| r.answer.is_none()).cloned().collect()
     }
 
-    /// The owner (`by` = `None`) or a co-owner allows or refuses a request.
+    /// The owner (`by` = `None`) or a manager allows or refuses a request.
     pub fn answer(&self, id: &str, allow: bool, by: Option<&str>) -> anyhow::Result<()> {
         let mut p = self.pairs.lock().unwrap();
         let Some(r) = p.iter_mut().find(|r| r.id == id && r.answer.is_none() && r.at.elapsed() < PAIR_TTL) else {
@@ -1128,59 +1128,58 @@ mod tests {
     }
 
     #[test]
-    fn co_owner_permissions() {
+    fn manager_permissions() {
         let user = |role| Who::User { id: "u".into(), name: "u".into(), role, servers: vec![] };
         let owner = Who::Owner;
-        let co = user(Role::CoOwner);
+        let co = user(Role::Manager);
         let others = [user(Role::Admin), user(Role::Operator), user(Role::Viewer), Who::Device { id: "d".into(), name: "d".into() }];
-        // Owner-only routes (`require_owner`): owner and co-owners.
+        // Owner-only routes (`require_owner`): owner and managers.
         assert!(owner.owner_level() && co.owner_level());
         assert!(others.iter().all(|w| !w.owner_level()));
-        // Managing everyone but co-owners: owner and co-owners.
+        // Managing everyone but managers: owner and managers.
         for (before, after) in [(None, Some(Role::Admin)), (Some(Role::Viewer), Some(Role::Operator)), (Some(Role::Admin), None)] {
             assert!(owner.may_manage_user(before, after));
             assert!(co.may_manage_user(before, after));
             assert!(others.iter().all(|w| !w.may_manage_user(before, after)));
         }
-        // Making, promoting to, demoting or removing a co-owner: the owner only.
-        for (before, after) in [(None, Some(Role::CoOwner)), (Some(Role::Admin), Some(Role::CoOwner)), (Some(Role::CoOwner), Some(Role::Admin)), (Some(Role::CoOwner), None), (Some(Role::CoOwner), Some(Role::CoOwner))] {
+        // Making, promoting to, demoting or removing a manager: the owner only.
+        for (before, after) in [(None, Some(Role::Manager)), (Some(Role::Admin), Some(Role::Manager)), (Some(Role::Manager), Some(Role::Admin)), (Some(Role::Manager), None), (Some(Role::Manager), Some(Role::Manager))] {
             assert!(owner.may_manage_user(before, after));
             assert!(!co.may_manage_user(before, after));
             assert!(others.iter().all(|w| !w.may_manage_user(before, after)));
         }
-        // The owner's devices: the owner only; a co-owner's: both.
+        // The owner's devices: the owner only; a manager's: both.
         assert!(owner.may_forget_device(None) && owner.may_forget_device(Some("u")));
         assert!(!co.may_forget_device(None) && co.may_forget_device(Some("u")));
         assert!(others.iter().all(|w| !w.may_forget_device(None) && !w.may_forget_device(Some("u"))));
         // The audit log's role names.
         assert_eq!(owner.role_name(), "owner");
-        assert_eq!(co.role_name(), "coowner");
+        assert_eq!(co.role_name(), "manager");
         assert_eq!(user(Role::Viewer).role_name(), "viewer");
     }
 
     #[test]
-    fn co_owner_saved_and_loaded() {
+    fn manager_saved_and_loaded() {
         let dir = temp();
         let a = Auth::load(&dir).unwrap();
         a.setup(&a.setup_code().unwrap(), "password1", IP).unwrap();
-        // Saved with a server list, a co-owner still gets every server.
-        let u = a.user_create("Sam", "sampass12", Role::CoOwner, vec!["tnp".into()]).unwrap();
+        // Saved with a server list, a manager still gets every server.
+        let u = a.user_create("Sam", "sampass12", Role::Manager, vec!["tnp".into()]).unwrap();
         assert!(u.servers.is_empty());
         let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
-        assert!(text.contains("\"coowner\""), "stable name in the file");
+        assert!(text.contains("\"manager\""), "stable name in the file");
         drop(a);
         let a = Auth::load(&dir).unwrap();
-        assert_eq!(a.users()[0].role, Role::CoOwner);
+        assert_eq!(a.users()[0].role, Role::Manager);
         let s = a.login_as("Sam", "sampass12", None, IP, true).unwrap();
         let who = a.check(&s).unwrap();
         assert!(who.owner_level() && who.sees("anything"));
-        // Old files without co-owners or device owners still load.
+        // Old files without managers or device owners still load.
         let old = r#"{"owner":null,"sessions":[],"devices":[{"id":"d1","name":"PC","hash":"h","created":1,"last_seen":1}],"tokens":[],"users":[{"id":"x","name":"Old","hash":"h","role":"admin","created":1}]}"#;
         let st: Stored = serde_json::from_str(old).unwrap();
         assert_eq!(st.users[0].role, Role::Admin);
         assert_eq!(st.devices[0].by, None);
-        assert_eq!(Role::parse("co-owner"), Some(Role::CoOwner));
-        assert_eq!(Role::parse("coowner"), Some(Role::CoOwner));
+        assert_eq!(Role::parse("manager"), Some(Role::Manager));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

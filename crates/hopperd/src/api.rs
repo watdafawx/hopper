@@ -80,7 +80,7 @@ pub(crate) fn require(app: &App, headers: &HeaderMap, method: &Method) -> ApiRes
     Ok(who)
 }
 
-/// The owner or a co-owner: panel-wide settings, users, devices and the
+/// The owner or a manager: panel-wide settings, users, devices and the
 /// rest. The few things only the true owner may do check `Who::may_*`.
 pub(crate) fn require_owner(app: &App, headers: &HeaderMap, method: &Method) -> ApiResult<()> {
     require_owner_who(app, headers, method).map(|_| ())
@@ -91,7 +91,7 @@ pub(crate) fn require_owner_who(app: &App, headers: &HeaderMap, method: &Method)
     if who.owner_level() {
         Ok(who)
     } else {
-        Err(ApiError(StatusCode::FORBIDDEN, "Only the owner or a co-owner can do that.".into()))
+        Err(ApiError(StatusCode::FORBIDDEN, "Only the owner or a manager can do that.".into()))
     }
 }
 
@@ -359,7 +359,7 @@ struct UserBody {
 }
 
 fn role_of(s: &str) -> ApiResult<crate::auth::Role> {
-    crate::auth::Role::parse(s).ok_or_else(|| bad("The role is coowner, admin, operator or viewer."))
+    crate::auth::Role::parse(s).ok_or_else(|| bad("The role is manager, admin, operator or viewer."))
 }
 
 /// A user's role now, and whether `who` may change that user to `after`.
@@ -368,7 +368,7 @@ fn check_manage(app: &App, who: &Who, id: &str, after: Option<crate::auth::Role>
     if who.may_manage_user(Some(before), after) {
         Ok(())
     } else {
-        Err(only_owner("Only the owner can change or remove co-owners."))
+        Err(only_owner("Only the owner can change or remove managers."))
     }
 }
 
@@ -376,7 +376,7 @@ async fn user_create(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     let who = require_owner_who(&app, &headers, &method)?;
     let role = role_of(&b.role)?;
     if !who.may_manage_user(None, Some(role)) {
-        return Err(only_owner("Only the owner can add co-owners."));
+        return Err(only_owner("Only the owner can add managers."));
     }
     let u = app.auth.user_create(&b.name, &b.password, role, b.servers).map_err(bad)?;
     Ok(Json(user_json(&u)))
@@ -467,8 +467,8 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> 
         Who::Owner => json!({ "role": "owner", "min_password": MIN_PASSWORD, "panel_folder": app.cfg.read().unwrap().home }),
         Who::Device { id, name } => json!({ "role": "device", "id": id, "name": name }),
         Who::Token { id, name, read_only, servers } => json!({ "role": "token", "id": id, "name": name, "read_only": read_only, "servers": servers }),
-        Who::User { id, name, role: crate::auth::Role::CoOwner, servers } => json!({
-            "role": "coowner", "user": true, "id": id, "name": name, "servers": servers,
+        Who::User { id, name, role: crate::auth::Role::Manager, servers } => json!({
+            "role": "manager", "user": true, "id": id, "name": name, "servers": servers,
             "min_password": MIN_PASSWORD, "panel_folder": app.cfg.read().unwrap().home,
         }),
         Who::User { id, name, role, servers } => json!({ "role": role, "user": true, "id": id, "name": name, "servers": servers, "min_password": MIN_PASSWORD }),

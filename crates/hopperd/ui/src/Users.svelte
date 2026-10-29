@@ -8,14 +8,14 @@
   import { session, roleLabel } from './lib/me.svelte.js';
 
   const ALL_ROLES = [
-    { id: 'coowner', label: 'Co-owner', about: 'Everything the owner can do, on every server, except managing the owner and other co-owners.' },
+    { id: 'manager', label: 'Manager', about: 'Everything the owner can do, on every server, except managing the owner and other managers.' },
     { id: 'admin', label: 'Admin', about: 'Everything on their servers: files, mods, settings, backups.' },
     { id: 'operator', label: 'Operator', about: 'Start and stop, console, players, make backups. Can look at files.' },
     { id: 'viewer', label: 'Viewer', about: 'Looks only: console, files, stats.' },
   ];
-  // Only the owner makes co-owners, or changes and removes them.
-  const ROLES = $derived(session.trueOwner ? ALL_ROLES : ALL_ROLES.filter((r) => r.id !== 'coowner'));
-  const canManage = (u) => session.trueOwner || u.role !== 'coowner';
+  // Only the owner makes managers, or changes and removes them.
+  const ROLES = $derived(session.trueOwner ? ALL_ROLES : ALL_ROLES.filter((r) => r.id !== 'manager'));
+  const canManage = (u) => session.trueOwner || u.role !== 'manager';
 
   let users = $state([]);
   let form = $state(null);
@@ -90,7 +90,7 @@
           </button>
         {/each}
       </div>
-      {#if live.servers.length > 1 && form.role !== 'coowner'}
+      {#if live.servers.length > 1 && form.role !== 'manager'}
         <div class="row wrap"><span class="tiny muted">Servers {form.servers.length ? '' : '(all)'}</span>
           {#each live.servers as s (s.id)}
             <button type="button" class="chip" class:acc={form.servers.includes(s.id)} onclick={() => (form.servers = flip(form.servers, s.id))}>{s.name}</button>
@@ -106,7 +106,7 @@
       <div class="u">
         <div class="grow">
           <div>{u.name} <span class="chip">{roleLabel(u.role)}</span>{#if u.two_factor}<span class="chip running">2FA</span>{/if}</div>
-          <div class="tiny muted ell">{u.servers.length && u.role !== 'coowner' ? names(u.servers) : 'All servers'} · last seen {when(u.last_seen)}</div>
+          <div class="tiny muted ell">{u.servers.length && u.role !== 'manager' ? names(u.servers) : 'All servers'} · last seen {when(u.last_seen)}</div>
         </div>
         {#if canManage(u)}
         {#if u.two_factor}<button class="btn sm icon ghost" title="Turn off their two-factor sign-in" onclick={() => reset2fa(u)}><ShieldOff size={13} /></button>{/if}
