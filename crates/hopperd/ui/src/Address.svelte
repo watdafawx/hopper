@@ -4,6 +4,8 @@
   import { Globe, Save, Plus, X, TriangleAlert, ArrowRightLeft, SearchCheck } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
+  import { session } from './lib/me.svelte.js';
+  import { routerChip } from './lib/router.js';
 
   let { server } = $props();
   // The live feed hands over a new `server` object every second; effects
@@ -28,6 +30,10 @@
   const dirty = $derived(JSON.stringify(body) !== saved);
   const clash = $derived(info && router?.config?.enabled && info.port === info.router_port);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
+  const chip = $derived(router && routerChip(router));
+  // Minecraft joins on 25565 unless the player types a port (or DNS has an
+  // SRV record), so a router on another port needs a word.
+  const offPort = $derived(info?.addresses.length && router?.config?.enabled && !clash && router.config.port !== router.join_port);
 
   async function load() {
     try {
@@ -73,6 +79,16 @@
     }
   }
 
+  async function useJoinPort() {
+    try {
+      router = await api('/router', { method: 'PUT', body: { ...router.config, port: router.join_port } });
+      say(router.status.error || `Players join on port ${router.join_port} now`, !!router.status.error);
+      load();
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
   async function check() {
     checking = true;
     try {
@@ -95,7 +111,7 @@
 
 <div class="card side col">
   <h3><Globe size={14} />Address<span class="sp"></span>
-    {#if info?.addresses.length}<button class="btn sm ghost" disabled={checking} onclick={check} title="Check DNS"><SearchCheck size={13} />{checking ? 'Checking…' : 'Check DNS'}</button>{/if}
+    {#if dirty}<span class="unsaved">Not saved</span>{/if}
     <button class="btn sm pri" disabled={!dirty || saving} onclick={save}><Save size={13} />Save</button>
   </h3>
   {#if info && router}
@@ -106,7 +122,7 @@
     {#each addrs as a, i (i)}
       <div class="row">
         {#if under(a)}
-          <div class="input name"><input class="mono" value={nameOf(a)} placeholder={server.id} oninput={(e) => setName(i, e.currentTarget.value.trim().toLowerCase())} /></div>
+          <div class="input name"><input class="mono" value={nameOf(a)} placeholder="name" oninput={(e) => setName(i, e.currentTarget.value.trim().toLowerCase())} /></div>
           <span class="mono tiny muted ell">{suffix}</span>
         {:else}
           <div class="input full"><input class="mono" bind:value={addrs[i]} placeholder="survival.example.com" /></div>
@@ -116,6 +132,16 @@
         {#if addrs.length > 1 || a}<button class="btn sm ghost icon" title="Remove" onclick={() => (addrs = addrs.length > 1 ? addrs.filter((_, j) => j !== i) : [''])}><X size={13} /></button>{/if}
       </div>
     {/each}
+    {#if dirty && body.addresses.length}
+      <div class="tiny gold">Save to start using <span class="mono">{body.addresses[0]}</span>.</div>
+    {:else if !info.addresses.length && !dirty}
+      <div class="tiny muted">No address yet. Type a name and Save; players then join at <span class="mono">{domain ? `name.${domain}` : 'that address'}</span>.</div>
+    {/if}
+    {#if offPort}
+      <div class="warn small"><TriangleAlert size={13} /><div><span>Players typing <span class="mono">{info.addresses[0]}</span> connect on port {router.join_port}, but the router is on {router.config.port}.</span>
+        {#if session.owner}<div><button class="btn sm" onclick={useJoinPort}>Use {router.join_port}</button></div>{/if}
+        <span class="tiny muted">Keeping {router.config.port}: players add <span class="mono">:{router.config.port}</span>, or add an SRV record pointing at it.{session.owner ? '' : ' The panel owner can change the port in Access & devices.'}</span></div></div>
+    {/if}
     <button class="btn sm ghost add" onclick={() => (addrs = [...addrs, ''])}><Plus size={13} />Add another address</button>
     <label class="row small"><input type="checkbox" bind:checked={sleepOn} />Sleep when empty for
       <span class="input mins"><input type="number" min="1" max="1440" bind:value={minutes} disabled={!sleepOn} /></span>min</label>
@@ -123,15 +149,14 @@
       {#if sleepOn}Joining starts it again; the server list shows "Sleeping" meanwhile.
       {:else}Off: it runs until someone stops it.{/if}
     </div>
-    {#if !router.config.enabled}
-      <div class="tiny muted">Server addresses are off. Turn them on in <a href="#/access">Access &amp; devices</a>.</div>
-    {:else if router.status.error}
-      <div class="err small">{router.status.error}</div>
-    {:else if router.status.listening}
-      <div class="tiny muted">Players join on port {router.status.listening}.{domain ? '' : ' Set a domain in Access & devices to type only names.'}</div>
-    {:else}
-      <div class="tiny muted">The router starts on port {router.config.port} once a server has an address.</div>
-    {/if}
+    {#if router.state === 'error'}<div class="err small">{router.status.error}</div>{/if}
+    <div class="status small">
+      <span class="muted">Router</span><span class="chip {chip.cls}">{chip.label}</span>
+      {#if router.state !== 'error'}<span class="tiny muted ell">{chip.note}{router.state === 'running' && !domain ? '. Set a domain in Access & devices to type only names.' : ''}</span>{/if}
+      <span class="sp"></span>
+      {#if info.addresses.length}<button class="btn sm ghost" disabled={checking} onclick={check} title="Check DNS"><SearchCheck size={13} />{checking ? 'Checking…' : 'Check DNS'}</button>{/if}
+    </div>
+    {#if router.state === 'off'}<div class="tiny muted">Turn server addresses on in <a href="#/access">Access &amp; devices</a>.</div>{/if}
   {/if}
 </div>
 
@@ -146,5 +171,9 @@
   .icon { padding: 3px 5px; }
   .warn { display: flex; gap: 8px; align-items: flex-start; color: var(--gold); background: var(--gold-dim); border: 1px solid #eab30855; border-radius: 8px; padding: 8px 10px; }
   .warn > div { display: flex; flex-direction: column; gap: 6px; color: var(--text); }
+  .unsaved { color: var(--gold); font-size: 11.5px; font-weight: 600; }
+  .gold { color: var(--gold); }
+  .status { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 8px; min-width: 0; }
+  .warn .tiny { color: var(--muted); }
   label.row input[type='checkbox'] { width: 15px; height: 15px; accent-color: var(--acc); }
 </style>

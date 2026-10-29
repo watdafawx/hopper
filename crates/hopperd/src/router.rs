@@ -368,11 +368,32 @@ pub fn routes() -> Routes<Arc<App>> {
         .route("/api/v1/servers/{id}/address/move-port", post(move_port))
 }
 
+/// The router at a glance, for the panel's status chip: "off" (turned off),
+/// "waiting" (on, but no server has a saved address, so nothing listens),
+/// "running", or "error" (it couldn't get its port).
+fn state(cfg: &RouterConfig, st: &Status, has_addresses: bool) -> &'static str {
+    if !cfg.enabled {
+        "off"
+    } else if st.listening.is_some() {
+        "running"
+    } else if st.error.is_some() {
+        "error"
+    } else if has_addresses {
+        // Saved a moment ago: the next round binds it.
+        "starting"
+    } else {
+        "waiting"
+    }
+}
+
 fn router_json(app: &App) -> Value {
     let cfg = app.cfg.read().unwrap().router.clone();
     let st = app.router.status.lock().unwrap().clone();
+    let has = !app.router.routes.read().unwrap().is_empty();
     let clash = app.servers.list().into_iter().find(|e| port_of(e) == cfg.port).map(|e| json!({ "id": e.id, "name": e.name }));
-    json!({ "config": cfg, "status": st, "clash": clash })
+    // Players' Minecraft uses 25565 unless they type a port or DNS has an
+    // SRV record, so a router on another port needs one of those.
+    json!({ "config": cfg, "status": st, "clash": clash, "state": state(&cfg, &st, has), "join_port": core::DEFAULT_PORT })
 }
 
 async fn get_router(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
@@ -446,6 +467,9 @@ async fn put_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     log::info!("{}: addresses {:?}, sleep {} min", e.name, s.addresses, s.sleep_after_minutes);
     app.router.changed();
     app.refresh.notify_one();
+    // The first address starts the router: let it bind, so the card's
+    // status is right when it reloads.
+    tokio::time::sleep(Duration::from_millis(300)).await;
     Ok(Json(json!({ "ok": true, "addresses": s.addresses })))
 }
 
@@ -542,5 +566,21 @@ mod tests {
         assert_eq!(c.router.port, 25565);
         let c: crate::config::Config = toml::from_str("[router]\ndomain = \"mc.example.com\"\n").unwrap();
         assert_eq!((c.router.domain.as_str(), c.router.port), ("mc.example.com", 25565));
+    }
+
+    #[test]
+    fn state_for_the_chip() {
+        use super::{RouterConfig, Status, state};
+        let on = RouterConfig::default();
+        let off = RouterConfig { enabled: false, ..RouterConfig::default() };
+        let idle = Status::default();
+        let up = Status { listening: Some(25565), error: None };
+        let busy = Status { listening: None, error: Some("Port 25565 is in use by another program.".into()) };
+        assert_eq!(state(&off, &up, true), "off");
+        // On with no saved address: nothing listens yet (the TNP-LL8 case).
+        assert_eq!(state(&on, &idle, false), "waiting");
+        assert_eq!(state(&on, &idle, true), "starting");
+        assert_eq!(state(&on, &up, true), "running");
+        assert_eq!(state(&on, &busy, true), "error");
     }
 }
