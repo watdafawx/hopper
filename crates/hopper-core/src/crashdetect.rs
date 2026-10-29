@@ -198,6 +198,12 @@ static MIXIN_ERROR: LazyLock<Regex> =
     LazyLock::new(|| re(r"Mixin \[[^\]]*? from mod ([\w.-]+)\] from phase \[\w+\] in config \[[^\]]+\] FAILED during \w+"));
 /// What a mod whose mixin threw gets.
 const MIXIN_ERROR_WHY: &str = "Its change to the code of the game or another mod (a mixin) didn't fit, so the game stopped. It was likely made for a different version of the mod it changes.";
+/// A mixin that couldn't fit because another mod's mixin had already
+/// rewritten the same method: `cannot inject into net/x/Y::m()V merged by
+/// com.other.mixin.YMixin with priority 1000`.
+static MERGED_BY: LazyLock<Regex> = LazyLock::new(|| re(r"cannot inject into \S+ merged by ([\w.$]+) with priority"));
+/// What a mod whose mixin clashed with another mod's gets.
+const MIXIN_CLASH_WHY: &str = "Its change to the game's code (a mixin) couldn't fit: another mod had already changed the same part. The two don't work together, so one of them has to go.";
 
 /// Config events the game sends after it has loaded: a server sending its
 /// config as you join (`Reloading`), or the game closing (`Unloading`). A
@@ -304,15 +310,27 @@ pub fn signals(text: &str) -> Vec<Raw> {
 
     // A mixin that threw while the game changed a class: that is the
     // crash. The mods in the stack only loaded the class it changes.
+    // The loader names the mod whose step loaded the class, so the mixin's
+    // mod is the one the rest of the stack is explained by.
     let mut mixin_named = false;
+    let merged_by = lines.iter().find_map(|l| MERGED_BY.captures(l)).map(|m| m[1].to_string());
     for l in &lines {
         let Some(m) = MIXIN_ERROR.captures(l) else { continue };
         let id = m[1].to_string();
-        if named.is_empty() {
+        if !mixin_named {
             named = id.clone();
             mixin_named = true;
         }
-        add(&mut out, Raw { mod_id: id, jar: String::new(), certainty: Certainty::Certain, why: MIXIN_ERROR_WHY.into(), class: String::new(), needs: Vec::new() });
+        let why = if merged_by.is_some() { MIXIN_CLASH_WHY } else { MIXIN_ERROR_WHY };
+        add(&mut out, Raw { mod_id: id, jar: String::new(), certainty: Certainty::Certain, why: why.into(), class: String::new(), needs: Vec::new() });
+    }
+    // The mod whose mixin got to the method first is the other half of the
+    // clash: often the one just added. Its jar is found by the class's package.
+    if let Some(class) = &merged_by
+        && let Some(culprit) = mixin_culprit(&lines)
+    {
+        let why = format!("Its change to the game's code (a mixin) changed the same part first, so {culprit}'s change couldn't fit. The two don't work together.");
+        out.push(Raw { mod_id: String::new(), jar: String::new(), certainty: Certainty::Likely, why, class: class.clone(), needs: Vec::new() });
     }
 
     // The exception's own trace: the first stack, up to the first blank
@@ -398,8 +416,59 @@ pub fn signals(text: &str) -> Vec<Raw> {
     if !after_stop(text) && lines.iter().take(60).any(|l| l.trim() == "Description: Watching Server") {
         stuck_tick(&lines, &mut out);
     }
+    blame_the_mixin(&mut out, text);
     out.sort_by_key(|r| r.certainty);
     out
+}
+
+/// The mod whose mixin failed to apply, if one did.
+fn mixin_culprit(lines: &[&str]) -> Option<String> {
+    lines
+        .iter()
+        .find_map(|l| MIXIN_ERROR.captures(l))
+        .or_else(|| lines.iter().find_map(|l| MIXIN_FAILED.captures(l)))
+        .map(|m| m[1].to_string())
+}
+
+/// The mods the loader names whose failure was only a mixin error
+/// (`MixinTransformerError`): the game was loading a class for their setup
+/// step when another mod's change to that class failed.
+fn mixin_victims(lines: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if let Some(m) = LOADING_ISSUE.captures(l.trim_start()) {
+            let Some(id) = m.get(1).or(m.get(2)) else { continue };
+            let block = lines[i + 1..].iter().take_while(|l| !l.trim_start().starts_with("-- "));
+            if block.take(400).any(|l| l.contains("MixinTransformerError")) {
+                out.push(id.as_str().to_string());
+            }
+        } else if let Some(m) = LOADING_ERROR.captures(l)
+            && lines.get(i + 1).is_some_and(|n| n.contains("MixinTransformerError"))
+        {
+            out.push(m[1].to_string());
+        }
+    }
+    out
+}
+
+/// A mixin that failed is the crash, even when the loader names another
+/// mod: that mod only asked for the class the mixin changes. It drops to
+/// possible so it isn't turned off for nothing.
+fn blame_the_mixin(raws: &mut [Raw], text: &str) {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(culprit) = mixin_culprit(&lines) else { return };
+    let victims = mixin_victims(&lines);
+    for r in raws.iter_mut() {
+        if r.certainty < Certainty::Possible
+            && !r.mod_id.eq_ignore_ascii_case(&culprit)
+            && victims.iter().any(|v| r.mod_id.eq_ignore_ascii_case(v))
+        {
+            r.certainty = Certainty::Possible;
+            r.why = format!(
+                "The loader names it, but it didn't fail itself: the game was loading a part it needs when {culprit}'s change to that part (a mixin) failed."
+            );
+        }
+    }
 }
 
 /// `- Mod 'Sodium Extra' (sodium-extra) 0.5.1 requires version 0.5.0 of mod 'Sodium' (sodium), …`
@@ -554,13 +623,17 @@ fn needs_in(why: &str) -> Vec<(String, String)> {
 #[derive(Default)]
 pub struct PackageIndex {
     owner: std::collections::HashMap<String, Option<String>>,
+    /// The same for jars turned off: a mod turned off after the crash is
+    /// still the one it names. Only asked when no jar that's on has the
+    /// package, so an old copy kept off can't hide the one in use.
+    off: std::collections::HashMap<String, Option<String>>,
 }
 
 impl PackageIndex {
     /// Reads the file list of each jar in `dir` named in `mods`.
     pub fn build(dir: &Path, mods: &[String]) -> Self {
         let mut idx = Self::default();
-        for m in mods.iter().filter(|m| m.ends_with(".jar")) {
+        for m in mods.iter().filter(|m| m.ends_with(".jar") || m.ends_with(".jar.disabled")) {
             let Ok(f) = fs::File::open(dir.join(m)) else { continue };
             let Ok(z) = zip::ZipArchive::new(f) else { continue };
             let pkgs: std::collections::HashSet<String> = z
@@ -568,8 +641,9 @@ impl PackageIndex {
                 .filter(|n| n.ends_with(".class") && !n.starts_with("META-INF/"))
                 .filter_map(|n| n.rsplit_once('/').map(|(p, _)| p.replace('/', ".")))
                 .collect();
+            let owner = if m.ends_with(".jar") { &mut idx.owner } else { &mut idx.off };
             for p in pkgs {
-                idx.owner
+                owner
                     .entry(p)
                     .and_modify(|o| {
                         if o.as_deref() != Some(m.as_str()) {
@@ -585,7 +659,10 @@ impl PackageIndex {
     /// The jar a class (`com.x.Y$Z`) is in.
     pub fn jar_of(&self, class: &str) -> Option<&str> {
         let pkg = class.rsplit_once('.')?.0;
-        self.owner.get(pkg)?.as_deref()
+        match self.owner.get(pkg) {
+            Some(o) => o.as_deref(),
+            None => self.off.get(pkg)?.as_deref(),
+        }
     }
 }
 
@@ -1057,15 +1134,21 @@ fn analyze(
     let mut raws = signals(text);
     // The report's own loader list names the mod that failed first: the
     // crash is that failure itself, not a knock-on effect of it.
-    let direct = loading_failures(loading)
-        .1
-        .first()
-        .is_some_and(|(f, _)| raws.iter().any(|r| r.certainty == Certainty::Certain && same(r, &f.mod_id, &f.jar)));
+    // A failed mixin in the report is the crash itself too.
+    let direct = mixin_culprit(&text.lines().collect::<Vec<_>>()).is_some()
+        || loading_failures(loading)
+            .1
+            .first()
+            .is_some_and(|(f, _)| raws.iter().any(|r| r.certainty == Certainty::Certain && same(r, &f.mod_id, &f.jar)));
     let loading = if direct { "" } else { loading };
     for r in signals(log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
         add(&mut raws, r);
     }
     knock_on(&mut raws, loading);
+    // The log's loader list names the mod again as certain: the report's
+    // failed mixin still explains it.
+    blame_the_mixin(&mut raws, text);
+    blame_the_mixin(&mut raws, log);
     // Frames that name no jar (Fabric): the jar that has the class's package.
     if raws.iter().any(|r| !r.class.is_empty()) {
         let idx = PackageIndex::build(&root.join("mods"), mods);
@@ -1802,6 +1885,14 @@ A detailed walkthrough of the error
         assert_eq!(idx.jar_of("com.cool.render.Thing"), Some("cool-1.0.jar"));
         assert_eq!(idx.jar_of("com.other.lib.Util$Inner"), Some("other-2.0.jar"));
         assert_eq!(idx.jar_of("shaded.lib.A"), None, "a package in two jars is no one's");
+        // A jar turned off counts only where no jar that's on has the package.
+        jar("cool-0.9.jar.disabled", &["com/cool/render/Thing.class"]);
+        jar("portals-1.0.jar.disabled", &["com/portals/mixin/ChunkMixin.class"]);
+        let mut with_off = mods.clone();
+        with_off.extend(["cool-0.9.jar.disabled".to_string(), "portals-1.0.jar.disabled".to_string()]);
+        let idx = PackageIndex::build(&dir, &with_off);
+        assert_eq!(idx.jar_of("com.cool.render.Thing"), Some("cool-1.0.jar"), "the old copy kept off doesn't hide it");
+        assert_eq!(idx.jar_of("com.portals.mixin.ChunkMixin"), Some("portals-1.0.jar.disabled"));
 
         // And through detect.
         fs::create_dir_all(dir.join("root/crash-reports")).unwrap();
@@ -2299,6 +2390,61 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         assert_eq!(c.suspects[0].why, MIXIN_ERROR_WHY);
         assert!(c.suspects[1].why.contains("micsable's change failed"), "{}", c.suspects[1].why);
         assert!(c.stopped.is_none(), "the game had loaded: nothing stopped it from loading");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    const TNP_CLASH_REPORT: &str = include_str!("crashdetect_fixtures/tnp-server-mixin-clash-crash.txt");
+    const TNP_CLASH_LOG: &str = include_str!("crashdetect_fixtures/tnp-server-mixin-clash-latest.log");
+
+    /// TNP Limitless 8's server, 2026-10-29, cut down: Immersive Portals
+    /// (just added to the server, off in the client) rewrote
+    /// `ChunkMap.onChunkReadyToSend`, so SecurityCraft's mixin into it
+    /// couldn't fit. The loader named Nature's Aura, whose setup step only
+    /// loaded `ChunkMap`; the old scan called it certain and never named
+    /// Immersive Portals.
+    #[test]
+    fn a_mixin_clash_names_both_mods_and_not_the_one_that_loaded_the_class() {
+        let root = server_root(
+            "mixinclash",
+            &[("NaturesAura-41.10.jar", "naturesaura", "Nature's Aura"), ("[1.21.1] SecurityCraft v1.10.2.1.jar", "securitycraft", "SecurityCraft")],
+            ("crash-2026-10-29_16.06.57-fml.txt", TNP_CLASH_REPORT),
+            TNP_CLASH_LOG,
+        );
+        {
+            // Immersive Portals: its mixin class is in the jar itself.
+            use std::io::Write;
+            let mut z = zip::ZipWriter::new(fs::File::create(root.join("mods/immersive_portals-6.0.7-all.jar")).unwrap());
+            z.start_file::<_, ()>("META-INF/neoforge.mods.toml", Default::default()).unwrap();
+            z.write_all(b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"immersive_portals_core\"\nversion=\"6.0.7\"\ndisplayName=\"Immersive Portals\"\n").unwrap();
+            z.start_file::<_, ()>("qouteall/imm_ptl/core/mixin/common/chunk_sync/MixinChunkMap_C.class", Default::default()).unwrap();
+            z.write_all(b"\xca\xfe\xba\xbe").unwrap();
+            z.finish().unwrap();
+        }
+        let raws = signals(TNP_CLASH_REPORT);
+        // (The mixin library's own frames follow, possible; no jar matches them.)
+        let got: Vec<(&str, &str, Certainty)> = raws.iter().take(3).map(|r| (r.mod_id.as_str(), r.class.as_str(), r.certainty)).collect();
+        assert_eq!(
+            got,
+            [
+                ("securitycraft", "", Certainty::Certain),
+                ("", "qouteall.imm_ptl.core.mixin.common.chunk_sync.MixinChunkMap_C", Certainty::Likely),
+                ("naturesaura", "", Certainty::Possible),
+            ]
+        );
+        let c = server(&root).unwrap();
+        let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.file_name.as_str(), s.certainty)).collect();
+        assert_eq!(
+            got,
+            [
+                ("[1.21.1] SecurityCraft v1.10.2.1.jar", Certainty::Certain),
+                ("immersive_portals-6.0.7-all.jar", Certainty::Likely),
+                ("NaturesAura-41.10.jar", Certainty::Possible),
+            ]
+        );
+        assert_eq!(c.suspects[0].why, MIXIN_CLASH_WHY);
+        assert!(c.suspects[1].why.contains("securitycraft's change couldn't fit"), "{}", c.suspects[1].why);
+        assert!(c.suspects[2].why.contains("securitycraft's change"), "{}", c.suspects[2].why);
+        assert!(c.stopped.is_none());
         let _ = fs::remove_dir_all(&root);
     }
 
