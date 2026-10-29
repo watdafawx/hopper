@@ -21,6 +21,7 @@
   import { live } from './lib/live.svelte.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
+  import { roleLabel } from './lib/me.svelte.js';
 
   let twofa = $state(null);
   let setup = $state(null);
@@ -203,7 +204,7 @@
       <tbody>
         {#each audit as e, i (i)}
           <tr class:bad={e.status >= 400}>
-            <td class="muted nw">{when(e.at)}</td><td>{e.who}</td>
+            <td class="muted nw">{when(e.at)}</td><td>{e.who}{#if e.role && e.role !== 'owner' && e.role !== 'device' && e.role !== 'token'} <span class="tiny muted">{roleLabel(e.role)}</span>{/if}</td>
             <td><span class="chip" class:acc={e.net === 'internet'} class:ts={e.net === 'tailscale'}>{netLabel[e.net]}</span></td>
             <td class="mono tiny">{e.method} {e.path}</td><td class="muted">{e.status}</td><td class="muted tiny">{e.ip}</td>
           </tr>

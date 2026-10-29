@@ -50,7 +50,7 @@ impl Limiter {
 
 /// Who a sign-in became, set on the response for the audit log.
 #[derive(Clone)]
-pub struct SignedIn(pub String);
+pub struct SignedIn(pub String, pub String);
 
 /// A line of the audit log.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,6 +58,10 @@ pub struct Event {
     /// Unix seconds.
     pub at: u64,
     pub who: String,
+    /// The actor's role: owner, coowner, admin, operator, viewer, device or
+    /// token (empty for anonymous requests and older lines).
+    #[serde(default)]
+    pub role: String,
     pub ip: String,
     pub net: Net,
     pub method: String,
@@ -146,6 +150,8 @@ pub(crate) fn refusal(who: &crate::auth::Who, method: &Method, path: &str) -> Op
                 return None;
             }
             match role {
+                // Owner-only routes accept co-owners; the rest is open to them.
+                Role::CoOwner => None,
                 Role::Viewer => Some("Your account can only look."),
                 Role::Operator => {
                     let rest = path.strip_prefix("/api/v1/servers/").map(|r| r.splitn(2, '/').nth(1).unwrap_or(""));
@@ -203,7 +209,7 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
     let who = if token.is_empty() { None } else { app.auth.check(&token) };
     if let Some(w) = &who {
         if let Some(msg) = refusal(w, &method, &path) {
-            app.audit.record(&Event { at: now(), who: w.name(), ip: ip.to_string(), net, method: method.to_string(), path, status: 403 });
+            app.audit.record(&Event { at: now(), who: w.name(), role: w.role_name().into(), ip: ip.to_string(), net, method: method.to_string(), path, status: 403 });
             return deny(StatusCode::FORBIDDEN, msg);
         }
     }
@@ -216,10 +222,10 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
     if api && changes && path != "/api/v1/pair/status" {
         let status = res.status().as_u16();
         // A sign-in names who it became; a failed one stays anonymous.
-        let who_name = who.as_ref().map(|w| w.name()).unwrap_or_else(|| {
-            res.extensions().get::<SignedIn>().map(|s| s.0.clone()).unwrap_or_else(|| "-".into())
+        let (who_name, role) = who.as_ref().map(|w| (w.name(), w.role_name().to_string())).unwrap_or_else(|| {
+            res.extensions().get::<SignedIn>().map(|s| (s.0.clone(), s.1.clone())).unwrap_or_else(|| ("-".into(), String::new()))
         });
-        app.audit.record(&Event { at: now(), who: who_name, ip: ip.to_string(), net, method: method.to_string(), path, status });
+        app.audit.record(&Event { at: now(), who: who_name, role, ip: ip.to_string(), net, method: method.to_string(), path, status });
     }
     res
 }
@@ -259,6 +265,9 @@ mod tests {
         assert!(refusal(&a, &Method::PUT, "/api/v1/fs/tnp/text").is_none());
         assert!(refusal(&a, &post, "/api/v1/servers/create").is_some());
         assert!(refusal(&user(Role::Admin, &[]), &post, "/api/v1/servers/create").is_none());
+        let c = user(Role::CoOwner, &[]);
+        assert!(refusal(&c, &post, "/api/v1/servers/create").is_none());
+        assert!(refusal(&c, &Method::PUT, "/api/v1/fs/other/text").is_none());
     }
 
     #[test]
@@ -279,7 +288,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let a = Audit::new(&dir);
         for i in 0..3 {
-            a.record(&Event { at: i, who: "owner".into(), ip: "1.2.3.4".into(), net: Net::Internet, method: "POST".into(), path: format!("/p{i}"), status: 200 });
+            a.record(&Event { at: i, who: "owner".into(), role: "owner".into(), ip: "1.2.3.4".into(), net: Net::Internet, method: "POST".into(), path: format!("/p{i}"), status: 200 });
         }
         let r = a.recent(2);
         assert_eq!(r.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["/p2", "/p1"]);

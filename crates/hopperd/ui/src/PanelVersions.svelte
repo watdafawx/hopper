@@ -189,7 +189,7 @@
             </div>
             <div class="note tiny col">
               {#if st?.why_not}<span>{st.why_not}</span>
-              {:else if !session.owner}<span>Only the panel's owner can change its version.</span>
+              {:else if !session.owner}<span>Only the owner or a co-owner can change the panel's version.</span>
               {:else}
                 <span>The panel restarts into it once running jobs finish. Minecraft servers keep running, and the panel finds them again.</span>
                 {#if !up}

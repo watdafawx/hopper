@@ -24,7 +24,7 @@
   import Tasks from './Tasks.svelte';
   import Palette from './Palette.svelte';
   import NewServer from './NewServer.svelte';
-  import { session } from './lib/me.svelte.js';
+  import { session, ownerLike, roleLabel } from './lib/me.svelte.js';
   import { dialog } from './lib/dialog.svelte.js';
   import { leave } from './lib/leave.js';
   import Dialog from './Dialog.svelte';
@@ -35,10 +35,11 @@
   import { upd } from './lib/panelupdate.svelte.js';
 
   let { hello, me, onSignOut } = $props();
-  const owner = $derived(me?.role === 'owner');
+  const owner = $derived(ownerLike(me));
   const canPower = $derived(me?.role !== 'viewer');
   $effect(() => {
     session.owner = owner;
+    session.trueOwner = me?.role === 'owner';
     session.home = me?.panel_folder || '';
   });
 
@@ -327,7 +328,7 @@
         </button>
         {#if menu}
           <div class="popover menu dd">
-            <div class="mh"><b>{me?.name || 'owner'}</b><span class="tiny muted">{me?.role}{owner ? '' : me?.servers?.length ? ` · ${me.servers.length} server${me.servers.length === 1 ? '' : 's'}` : ''}</span></div>
+            <div class="mh"><b>{me?.name || 'owner'}</b><span class="tiny muted">{roleLabel(me?.role)}{owner ? '' : me?.servers?.length ? ` · ${me.servers.length} server${me.servers.length === 1 ? '' : 's'}` : ''}</span></div>
             <a class="menu-item" href="#/settings" onclick={() => (menu = false)}><Gear size={14} />{owner ? 'Settings' : 'Account'}</a>
             <div class="menu-sep"></div>
             <button class="menu-item" onclick={signOut}><LogOut size={14} />Sign out</button>

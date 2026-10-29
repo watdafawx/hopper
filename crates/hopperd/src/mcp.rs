@@ -185,6 +185,7 @@ fn allowed(app: &App, who: &Who, method: Method, path: String) -> Result<(), Str
         app.audit.record(&crate::security::Event {
             at: crate::security::now(),
             who: who.name(),
+            role: who.role_name().into(),
             ip: "mcp".into(),
             net: crate::net::Net::Local,
             method: method.to_string(),

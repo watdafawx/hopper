@@ -10,9 +10,10 @@
   const kindOf = (url) => pathKind((url.split('://')[1] ?? url).split(/[:/]/)[0].replace(/^\[|\]$/g, ''));
   import { api, post, del } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
+  import { session, ownerLike, roleLabel } from './lib/me.svelte.js';
 
   let { hello, me, pending = $bindable([]) } = $props();
-  const owner = $derived(me?.role === 'owner');
+  const owner = $derived(ownerLike(me));
   let devices = $state([]);
 
   async function loadDevices() {
@@ -52,7 +53,7 @@
 <div class="pad">
   {#if !owner}
   <div class="grid">
-    <div class="card"><h3>{me?.name}</h3><p class="small subtle">Role: <b class="txt">{me?.role}</b> · {me?.servers?.length ? `${me.servers.length} server${me.servers.length === 1 ? '' : 's'}` : 'all servers'}. The owner manages what you can do.</p></div>
+    <div class="card"><h3>{me?.name}</h3><p class="small subtle">Role: <b class="txt">{roleLabel(me?.role)}</b> · {me?.servers?.length ? `${me.servers.length} server${me.servers.length === 1 ? '' : 's'}` : 'all servers'}. The owner manages what you can do.</p></div>
     <Security own />
   </div>
   {:else}
@@ -110,7 +111,8 @@
             <div class="tiny muted">Paired {when(d.created)} · last used {when(d.last_seen)}</div>
           </div>
           <span class="sp"></span>
-          <button class="btn sm ghost icon" title="Remove" onclick={() => forget(d)}><Trash2 size={13} /></button>
+          {#if session.trueOwner || d.by}<button class="btn sm ghost icon" title="Remove" onclick={() => forget(d)}><Trash2 size={13} /></button>
+          {:else}<span class="tiny muted" title="Only the owner can remove the owner's devices.">Owner's</span>{/if}
         </div>
       {:else}
         <div class="small muted">No devices yet.</div>
