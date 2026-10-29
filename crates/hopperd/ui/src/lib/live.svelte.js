@@ -1,5 +1,7 @@
 // The live feed from /api/v1/ws: servers and host stats (about once a
-// second) and the consoles the UI follows. Reconnects on its own.
+// second) and the consoles the UI follows. Reconnects on its own, and
+// after a reconnect checks whether the panel came back on a new version.
+import { hello, seen, check } from './boot.svelte.js';
 
 const MAX_LINES = 2000;
 
@@ -39,6 +41,8 @@ function record(servers, host) {
 
 let socket = null;
 let retry = 0;
+/** The feed was up once: an open after that is a reconnect. */
+let wasUp = false;
 const followed = new Set();
 
 function send(msg) {
@@ -52,6 +56,8 @@ export function connect() {
   socket.onopen = () => {
     live.connected = true;
     retry = 0;
+    if (wasUp) check();
+    wasUp = true;
     for (const id of followed) send({ op: 'console', server: id });
   };
   socket.onmessage = (ev) => {
@@ -94,13 +100,14 @@ export function unfollow(id) {
   send({ op: 'unconsole', server: id });
 }
 
-/** Measures the round trip every 10 s. */
+/** Measures the round trip every 10 s (and notices a new version). */
 export function startPing() {
   const once = async () => {
     const t = performance.now();
     try {
-      await fetch('/api/v1/hello', { cache: 'no-store' });
+      const h = await hello();
       live.ping = Math.round(performance.now() - t);
+      seen(h);
     } catch {
       live.ping = null;
     }

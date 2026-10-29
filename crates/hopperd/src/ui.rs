@@ -26,6 +26,27 @@ pub fn mime(path: &str) -> &'static str {
     }
 }
 
+/// Which web UI this exe carries: a hash of index.html, which names every
+/// built file by its content hash. The panel reloads when it changes.
+pub fn build_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        UI.get_file("index.html").map(|f| f.contents()).unwrap_or_default().hash(&mut h);
+        format!("{:016x}", h.finish())
+    })
+}
+
+/// Different every time the panel starts, so a page can tell it restarted.
+pub fn boot_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        format!("{}-{}", t.as_millis(), std::process::id())
+    })
+}
+
 pub async fn serve(uri: Uri, headers: axum::http::HeaderMap) -> Response {
     let path = uri.path().trim_start_matches('/');
     if path.starts_with("api/") {
@@ -33,6 +54,9 @@ pub async fn serve(uri: Uri, headers: axum::http::HeaderMap) -> Response {
     }
     let (file, path) = match UI.get_file(path) {
         Some(f) if !path.is_empty() => (f, path),
+        // A page from before an update asks for its old hashed files: a 404
+        // (not index.html as JavaScript) lets it notice and reload.
+        _ if path.starts_with("assets/") => return (StatusCode::NOT_FOUND, "Not found").into_response(),
         _ => match UI.get_file("index.html") {
             Some(f) => (f, "index.html"),
             None => return (StatusCode::NOT_FOUND, "UI not built").into_response(),
