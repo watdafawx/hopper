@@ -4,6 +4,9 @@
 use crate::widgets::Clickable as _;
 use crate::store::{Msg, Store, Updates};
 use crate::widgets;
+
+/// The result card's hover group: the changelog shows while it's hovered.
+const BROWSE_ROW: &str = "browse-row";
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -1960,6 +1963,25 @@ impl BrowseView {
                     .when(!extra.is_empty() && hold.is_none(), |b| b.tooltip(tip))
                     .on_click(cx.listener(move |this, _, w, cx| this.install(m1.clone(), None, w, cx))),
                 )
+                // The newest file's notes, only on the hovered row so the
+                // list stays quiet; the space is kept so Install doesn't move.
+                .when(target.is_some(), |r| {
+                    let m2 = m.clone();
+                    r.child(
+                        div().invisible().group_hover(BROWSE_ROW, |s| s.visible()).child(
+                            Button::new(id("changes"))
+                                .small()
+                                .ghost()
+                                .icon(IconName::ScrollText)
+                                .tooltip("What the newest version changed")
+                                .on_click(cx.listener(move |this, _, w, cx| {
+                                    // Not a click on the card: the page stays as it is.
+                                    cx.stop_propagation();
+                                    this.open_changelog(&m2, w, cx)
+                                })),
+                        ),
+                    )
+                })
                 .into_any_element()
         };
 
@@ -1967,6 +1989,7 @@ impl BrowseView {
         let hovered = m.clone();
         h_flex()
             .id(id("card"))
+            .group(BROWSE_ROW)
             .on_hover(cx.listener(move |this, over: &bool, _, cx| {
                 if *over {
                     this.want_plan(&hovered, cx);
@@ -2059,6 +2082,39 @@ impl BrowseView {
                 }
             })
             .into_any_element()
+    }
+
+    /// Opens the changelog of the file Install would pick for the target:
+    /// the hover's plan already has it, else it's looked up now.
+    fn open_changelog(&mut self, m: &cf::Mod, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(inst) = self.target(cx) else { return };
+        let ready = self.plan_key(m, &inst).and_then(|k| match self.plans.get(&k) {
+            Some(Load::Ready(p)) => p.steps.iter().find(|(pm, _)| pm.id == m.id).map(|(_, f)| f.clone()),
+            _ => None,
+        });
+        let (store, root) = (self.store.clone(), inst.root.clone());
+        if let Some(f) = ready {
+            return crate::versions::open_file(store, Some(root), f, window, cx);
+        }
+        let (id, class) = (m.id, Some(m.class_id.unwrap_or(self.class)));
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { hopper::install::best_file(id, class, &inst) })
+                .await;
+            this.update_in(cx, |_, window, cx| match r {
+                Ok(Some(f)) => crate::versions::open_file(store, Some(root), f, window, cx),
+                Ok(None) => window.push_notification(
+                    Notification::error("There's no file for this Minecraft version and loader."),
+                    cx,
+                ),
+                Err(e) => window.push_notification(
+                    Notification::error(format!("Couldn't look up the changelog: {e:#}")),
+                    cx,
+                ),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Saves `m` for later, or forgets it.
