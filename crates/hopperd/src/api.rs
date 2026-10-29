@@ -180,6 +180,10 @@ async fn hello(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Socke
         "name": cfg.name,
         "version": env!("CARGO_PKG_VERSION"),
         "api": API_VERSION,
+        // The web UI this exe serves and this run of the panel: an open page
+        // compares them to its own to know it should reload.
+        "build": crate::ui::build_id(),
+        "boot": crate::ui::boot_id(),
         "setup_needed": setup_needed,
         // A browser on this PC sets the owner password without the code.
         "local_setup": setup_needed && crate::auth::trusted_local(cfg.trust_local_setup, addr.ip(), &headers),

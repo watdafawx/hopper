@@ -8,8 +8,9 @@
   import {
     LayoutDashboard, Compass, ChevronLeft, ChevronRight, Search, RefreshCw, Settings as Gear, LogOut, Wifi, WifiOff, Globe,
     Waypoints, Plus, Play, Square, RotateCw, Server, Terminal, Folder, Puzzle, Earth, Users, Archive, CalendarClock, SlidersHorizontal,
-    CircleCheck, CircleAlert, FolderOpen,
+    CircleCheck, CircleAlert, FolderOpen, X as Close,
   } from '@lucide/svelte';
+  import { boot } from './lib/boot.svelte.js';
   import { api, post } from './lib/api.js';
   import { live, connect, disconnect, startPing } from './lib/live.svelte.js';
   import { pathKind } from './lib/format.js';
@@ -338,6 +339,16 @@
       </div>
     </div>
   </header>
+  {#if boot.updated != null}
+    <!-- The panel came back on a new version while something was open here:
+         the page waits for the user instead of reloading over it. -->
+    <div class="updated" role="status">
+      <RotateCw size={13} />
+      <span>Hopper Server updated{boot.updated ? ` to ${boot.updated}` : ''}. Reload to use the new version.</span>
+      <button class="btn pri sm" onclick={() => location.reload()}>Reload</button>
+      <button class="btn ghost icon" title="Later" aria-label="Later" onclick={() => (boot.updated = null)}><Close size={13} /></button>
+    </div>
+  {/if}
   <div class="body">
     {#if page !== 'settings'}
       <ServerList selected={serverId} {owner} {canPower} onNew={() => (making = true)} onRescan={rescan} />
@@ -374,6 +385,8 @@
 
 <style>
   .win { height: 100%; display: flex; flex-direction: column; }
+  .updated { flex: none; display: flex; align-items: center; gap: 10px; padding: 5px 8px 5px 14px; font-size: 12.5px; color: var(--blue); background: var(--blue-dim); border-bottom: 1px solid var(--side-line); }
+  .updated span { color: var(--text); }
   .tbar { height: var(--titlebar); flex: none; display: flex; align-items: center; gap: 14px; padding: 0 8px 0 14px; background: var(--side); border-bottom: 1px solid var(--side-line); }
   .brand { display: flex; align-items: center; gap: 8px; flex: none; }
   .logo { width: 20px; height: 20px; image-rendering: pixelated; flex: none; }

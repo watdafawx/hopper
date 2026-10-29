@@ -1,9 +1,10 @@
 // Hopper Server's own version and updates, shared by the version beside the
 // logo, its versions window and Settings › Updates (GET /panel/update).
-// Looks every minute, every second and a half while an update runs, and
-// reloads the page once the panel comes back on another version (the new
-// version brings its own web UI).
+// Looks every minute, every second and a half while an update runs; once
+// the panel answers again after an update restart, boot.svelte.js reloads
+// the page (the new version brings its own web UI).
 import { api } from './api.js';
+import { check, expectRestart } from './boot.svelte.js';
 
 export const upd = $state({ st: null, open: false });
 
@@ -23,22 +24,25 @@ export function isNewer(a, b) {
 export const BUSY = ['checking', 'downloading', 'waiting', 'restarting'];
 
 let timer = null;
-let seen = null;
 let users = 0;
+/** The last look failed while an update was restarting the panel. */
+let away = false;
 
 export async function loadUpdate() {
   clearTimeout(timer);
   let lost = false;
   try {
     upd.st = await api('/panel/update');
-    if (seen && upd.st.current !== seen) {
-      location.reload();
-      return;
+    if (upd.st.state === 'restarting') expectRestart();
+    if (away) {
+      away = false;
+      check();
     }
-    seen ??= upd.st.current;
   } catch {
     // Restarting into the new version: keep looking until it answers.
     lost = upd.st?.state === 'restarting' || upd.st?.state === 'waiting';
+    if (lost) expectRestart();
+    away = lost;
   }
   if (!users) return;
   const busy = lost || BUSY.includes(upd.st?.state);

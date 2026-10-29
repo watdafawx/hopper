@@ -7,7 +7,8 @@
   // auto-update skip the version it came from; a newer release still
   // installs.
   import { X, RefreshCw, ExternalLink, Download, Undo2, ChevronDown } from '@lucide/svelte';
-  import { api, post } from './lib/api.js';
+  import { onDestroy } from 'svelte';
+  import { api, post, ApiError } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { session } from './lib/me.svelte.js';
   import { confirmIt, dialog } from './lib/dialog.svelte.js';
@@ -19,6 +20,11 @@
 
   let list = $state(null);
   let error = $state('');
+  // The panel didn't answer at all (restarting into an update, or the
+  // network dropped): say so and look again until it's back.
+  let away = $state(false);
+  let retry = null;
+  onDestroy(() => clearTimeout(retry));
   let checking = $state(false);
   let picked = $state('');
   let shown = $state(PAGE);
@@ -33,6 +39,7 @@
 
   async function load(fresh = false) {
     error = '';
+    clearTimeout(retry);
     if (fresh) checking = true;
     try {
       const r = await api(`/panel/releases${fresh ? '?fresh=1' : ''}`);
@@ -41,9 +48,16 @@
       if (!picked || (picked === r.current && list[0] && isNewer(list[0].version, r.current))) {
         picked = list[0] && isNewer(list[0].version, r.current) ? list[0].version : r.current;
       }
+      away = false;
       loadUpdate();
     } catch (e) {
-      error = e.message;
+      if (e instanceof ApiError) {
+        error = e.message;
+        away = false;
+      } else {
+        away = true;
+        retry = setTimeout(() => load(fresh), 2000);
+      }
     }
     checking = false;
   }
@@ -126,7 +140,9 @@
       <a class="btn sm ghost" href={REPO_PAGE} target="_blank" rel="noreferrer noopener"><ExternalLink size={13} />Releases on GitHub</a>
     </div>
 
-    {#if error}
+    {#if away}
+      <div class="row small muted loading"><span class="spinner"></span>{st?.state === 'restarting' || st?.state === 'waiting' ? 'Hopper Server is restarting…' : "Can't reach Hopper Server. Trying again…"}</div>
+    {:else if error}
       <div class="col err">
         <span class="small red">Couldn't read the releases: {error}</span>
         <button class="btn sm" onclick={() => load()}><RefreshCw size={13} />Try again</button>
