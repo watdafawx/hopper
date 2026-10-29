@@ -1866,6 +1866,9 @@ impl BrowseView {
             let m1 = m.clone();
             let (store, log_root, pid) = (self.store.clone(), root.clone(), m.id);
             let log_file = listed.as_ref().map(|u| u.file.clone());
+            // Yours → offered, as the Mods tab's row says it.
+            let change = listed.as_ref().map(|u| u.versions());
+            let modrinth = m.modrinth.is_some();
             let lead = install_button(
                 widgets::split_lead(site_primary(Button::new(id("update")), m.modrinth.is_some(), cx).small().icon(IconName::Download)),
                 "Update",
@@ -1892,7 +1895,7 @@ impl BrowseView {
                     None => this.install(m1.clone(), None, w, cx),
                 }
             }));
-            widgets::split(
+            let split = widgets::split(
                 lead,
                 id("changes"),
                 site_tint(m.modrinth.is_some()),
@@ -1903,8 +1906,19 @@ impl BrowseView {
                     crate::versions::open(store.clone(), log_root.clone(), pid, false, log_file.clone(), window, cx)
                 },
                 cx,
-            )
-            .into_any_element()
+            );
+            h_flex()
+                .gap_2()
+                .when_some(change, |r, (old, new)| {
+                    r.child(
+                        // The site's colour, like the button beside it.
+                        widgets::chip(if modrinth { cx.theme().success } else { cx.theme().primary })
+                            .max_w(rems(14.))
+                            .child(format!("{old} → {new}")),
+                    )
+                })
+                .child(split)
+                .into_any_element()
         } else if let Some(src) = installed {
             let site = matches!(src, "Modrinth" | "CurseForge");
             let same = (src == "Modrinth") == m.modrinth.is_some();
