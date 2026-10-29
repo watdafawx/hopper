@@ -127,12 +127,7 @@ fn backup(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     }
     // Which CurseForge / Modrinth file a jar is, read before it leaves,
     // so the copy can become a note of it later (backups::slim).
-    let root = backup_dir.parent().and_then(Path::parent).map(Path::to_path_buf);
-    let ids = |dest: &Path| {
-        if let Some(root) = &root {
-            crate::backups::note_ids(root, path, dest);
-        }
-    };
+    let ids = backup_dir.parent().and_then(Path::parent).and_then(|root| crate::backups::ids_for(root, path));
     if let Err(e) = fs::rename(path, &dest) {
         // In use (a running game): copying would only leave a second copy.
         if crate::locked::io_locked(&e) {
@@ -145,7 +140,9 @@ fn backup(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
             return Err(e.into());
         }
     }
-    ids(&dest);
+    if let Some(c) = ids {
+        crate::backups::note_ids(&dest, c);
+    }
     Ok(Some(dest))
 }
 
