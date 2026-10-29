@@ -5,7 +5,9 @@
 //! TPS is read where it's cheap: over RCON every 30 seconds, with the
 //! loader's own command (`neoforge tps`, `forge tps`, Paper's `tps`, spark,
 //! or vanilla's `tick query`), never typed into the console. Servers with
-//! RCON off show no TPS; the panel offers to turn it on.
+//! RCON off show no TPS; the panel offers to turn it on. RCON is used only
+//! while a server is up: not before "Done", and the connection is closed the
+//! moment it starts stopping, so it can't hold the shutdown open.
 
 use crate::App;
 use crate::api::{ApiResult, bad, not_found, require, require_owner};
@@ -164,38 +166,116 @@ fn has_spark(root: &std::path::Path) -> bool {
     })
 }
 
+/// An open RCON connection to one server. `idle` is out while a command
+/// runs; `closer` stays so a stop can cut that command short.
+struct Link {
+    port: u16,
+    pass: String,
+    closer: rcon::Closer,
+    idle: Option<rcon::Rcon>,
+}
+
 /// RCON connections stay open between readings: each new one is a
 /// "Thread RCON Client started" line in the server's console.
-fn conns() -> &'static Mutex<HashMap<String, (u16, String, rcon::Rcon)>> {
-    static C: OnceLock<Mutex<HashMap<String, (u16, String, rcon::Rcon)>>> = OnceLock::new();
+fn links() -> &'static Mutex<HashMap<String, Link>> {
+    static C: OnceLock<Mutex<HashMap<String, Link>>> = OnceLock::new();
     C.get_or_init(Default::default)
 }
 
-fn ask_rcon(id: &str, port: u16, pass: &str, cmd: &str) -> anyhow::Result<String> {
-    let mut m = conns().lock().unwrap();
-    if let Some((p, pw, c)) = m.get_mut(id)
-        && *p == port
-        && pw == pass
-    {
-        match c.command(cmd) {
-            Ok(r) => return Ok(r),
-            Err(_) => {
-                m.remove(id);
-            }
-        }
+/// Closes a server's RCON connection, ending any command still waiting for
+/// its answer (that command then fails quietly, without a retry).
+fn cut(id: &str) {
+    if let Some(l) = links().lock().unwrap().remove(id) {
+        l.closer.close();
     }
-    let mut c = rcon::Rcon::connect(port, pass, Duration::from_secs(3))?;
-    let r = c.command(cmd)?;
-    m.insert(id.to_string(), (port, pass.to_string(), c));
-    Ok(r)
 }
 
-/// Reads TPS from every running server that has RCON.
+/// Runs one command over RCON, reusing the open connection. `allowed` is
+/// asked before connecting and before sending: a server that has started
+/// stopping gets nothing new, and a failed command isn't retried then.
+fn ask_rcon(id: &str, port: u16, pass: &str, cmd: &str, allowed: &dyn Fn() -> bool) -> anyhow::Result<String> {
+    let reused = {
+        let mut m = links().lock().unwrap();
+        match m.get_mut(id) {
+            Some(l) if l.port == port && l.pass == pass => l.idle.take(),
+            Some(_) => {
+                if let Some(l) = m.remove(id) {
+                    l.closer.close();
+                }
+                None
+            }
+            None => None,
+        }
+    };
+    if let Some(mut c) = reused {
+        if !allowed() {
+            cut(id);
+            anyhow::bail!("server is stopping");
+        }
+        match c.command(cmd) {
+            Ok(r) => {
+                put_back(id, c);
+                return Ok(r);
+            }
+            // A stale connection (the server restarted): one fresh try below.
+            Err(_) => cut(id),
+        }
+    }
+    if !allowed() {
+        anyhow::bail!("server is stopping");
+    }
+    let mut c = rcon::Rcon::connect(port, pass, Duration::from_secs(3))?;
+    let closer = c.closer()?;
+    links().lock().unwrap().insert(id.to_string(), Link { port, pass: pass.to_string(), closer, idle: None });
+    // The stop may have come while connecting; the guard can't see a
+    // connection before it's in the map.
+    if !allowed() {
+        cut(id);
+        anyhow::bail!("server is stopping");
+    }
+    match c.command(cmd) {
+        Ok(r) => {
+            put_back(id, c);
+            Ok(r)
+        }
+        Err(e) => {
+            cut(id);
+            Err(e)
+        }
+    }
+}
+
+/// Returns a connection to the map after a command, unless it was cut
+/// meanwhile (then it's dropped, which closes it).
+fn put_back(id: &str, c: rcon::Rcon) {
+    if let Some(l) = links().lock().unwrap().get_mut(id) {
+        l.idle = Some(c);
+    }
+}
+
+/// Cuts RCON to every server that is no longer up and running: asked to
+/// stop, restart or be killed (from anywhere), "Stopping server" in its
+/// console, or ended. Runs every half second so a stop never waits on it.
+fn guard(app: &App) {
+    let open: Vec<String> = links().lock().unwrap().keys().cloned().collect();
+    if open.is_empty() {
+        return;
+    }
+    let servers = app.servers.list();
+    for id in open {
+        let ok = servers.iter().find(|e| e.id == id).is_some_and(|e| e.server.rcon_allowed());
+        if !ok {
+            cut(&id);
+        }
+    }
+}
+
+/// Reads TPS from every server that is up (past "Done", not stopping) and
+/// has RCON.
 fn poll_tps(app: &App) {
     for e in app.servers.list() {
-        let alive = e.server.state().is_alive();
-        if !alive {
-            conns().lock().unwrap().remove(&e.id);
+        if !e.server.rcon_allowed() {
+            cut(&e.id);
             let mut st = state().lock().unwrap();
             st.tps.remove(&e.id);
             st.no_tps.remove(&e.id);
@@ -210,7 +290,8 @@ fn poll_tps(app: &App) {
             state().lock().unwrap().no_tps.insert(e.id.clone(), "rcon_off");
             continue;
         };
-        let r = ask_rcon(&e.id, port, &pass, cmd);
+        let server = e.server.clone();
+        let r = ask_rcon(&e.id, port, &pass, cmd, &|| server.rcon_allowed());
         let mut st = state().lock().unwrap();
         match r.ok().as_deref().and_then(rcon::parse_tps) {
             Some((tps, mspt)) => {
@@ -218,7 +299,7 @@ fn poll_tps(app: &App) {
                 st.tps.insert(e.id.clone(), Tps { tps, mspt, at: now() });
             }
             None => {
-                // Still starting, or RCON not up yet: keep the last reading
+                // RCON not up yet, or a slow answer: keep the last reading
                 // a little while.
                 if st.tps.get(&e.id).is_some_and(|t| now() - t.at > 120) {
                     st.tps.remove(&e.id);
@@ -293,6 +374,16 @@ fn check(app: &Arc<App>, disks: &mut sysinfo::Disks) {
 
 /// Watches for alerts for as long as the panel runs.
 pub fn start(app: Arc<App>) {
+    let a = app.clone();
+    std::thread::Builder::new()
+        .name("rcon-guard".into())
+        .spawn(move || {
+            loop {
+                guard(&a);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        })
+        .ok();
     std::thread::Builder::new()
         .name("alerts".into())
         .spawn(move || {
@@ -401,4 +492,102 @@ async fn enable_rcon(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     .map_err(|e| bad(format!("{e:#}")))?;
     log::info!("{}: RCON turned on (port {port}) so the panel can read TPS", e.name);
     Ok(Json(json!({ "port": port, "restart": e.server.state().is_alive() })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A fake RCON server: accepts any login, answers commands after
+    /// `delay`. Returns its port and how many connections it took.
+    fn fake(delay: Duration) -> (u16, Arc<AtomicUsize>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                c.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || serve(s, delay));
+            }
+        });
+        (port, count)
+    }
+
+    fn serve(mut s: TcpStream, delay: Duration) {
+        let mut first = true;
+        loop {
+            let mut len = [0u8; 4];
+            if s.read_exact(&mut len).is_err() {
+                return;
+            }
+            let mut b = vec![0u8; i32::from_le_bytes(len) as usize];
+            if s.read_exact(&mut b).is_err() {
+                return;
+            }
+            let id = i32::from_le_bytes(b[0..4].try_into().unwrap());
+            if !first {
+                std::thread::sleep(delay);
+            }
+            let (kind, body) = if first { (2, String::new()) } else { (0, "TPS from last 1m, 5m, 15m: 19.5, 20.0, 20.0".to_string()) };
+            first = false;
+            let mut p = (10 + body.len() as i32).to_le_bytes().to_vec();
+            p.extend_from_slice(&id.to_le_bytes());
+            p.extend_from_slice(&(kind as i32).to_le_bytes());
+            p.extend_from_slice(body.as_bytes());
+            p.extend_from_slice(&[0, 0]);
+            if s.write_all(&p).is_err() {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn reuses_one_connection_while_running() {
+        let (port, count) = fake(Duration::ZERO);
+        let yes = || true;
+        assert!(ask_rcon("t-reuse", port, "pw", "spark tps", &yes).unwrap().contains("19.5"));
+        assert!(ask_rcon("t-reuse", port, "pw", "spark tps", &yes).is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        cut("t-reuse");
+    }
+
+    #[test]
+    fn nothing_is_sent_to_a_stopping_server() {
+        let (port, count) = fake(Duration::ZERO);
+        let running = AtomicBool::new(true);
+        let allowed = || running.load(Ordering::SeqCst);
+        assert!(ask_rcon("t-stopping", port, "pw", "spark tps", &allowed).is_ok());
+        running.store(false, Ordering::SeqCst);
+        assert!(ask_rcon("t-stopping", port, "pw", "spark tps", &allowed).is_err());
+        assert!(!links().lock().unwrap().contains_key("t-stopping"), "the connection is closed");
+        assert!(ask_rcon("t-stopping", port, "pw", "spark tps", &allowed).is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 1, "no new connection");
+    }
+
+    /// The stop comes while a reading waits for its answer: the guard's cut
+    /// ends it at once, and it isn't retried.
+    #[test]
+    fn a_stop_cuts_a_waiting_command_without_retry() {
+        let (port, count) = fake(Duration::from_secs(10));
+        let running = Arc::new(AtomicBool::new(true));
+        let r = running.clone();
+        let t = Instant::now();
+        let h = std::thread::spawn(move || ask_rcon("t-inflight", port, "pw", "spark tps", &|| r.load(Ordering::SeqCst)));
+        let end = Instant::now() + Duration::from_secs(3);
+        while !links().lock().unwrap().contains_key("t-inflight") && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        running.store(false, Ordering::SeqCst);
+        cut("t-inflight");
+        assert!(h.join().unwrap().is_err());
+        assert!(t.elapsed() < Duration::from_secs(3), "waited for the read timeout");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(count.load(Ordering::SeqCst), 1, "no retry");
+        assert!(!links().lock().unwrap().contains_key("t-inflight"));
+    }
 }

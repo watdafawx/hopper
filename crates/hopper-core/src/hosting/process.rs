@@ -319,6 +319,16 @@ impl LocalServer {
         state_of(g.proc.is_some(), g.tracker.done, g.stop_requested, g.exit)
     }
 
+    /// Whether Hopper may use RCON on this server now (see
+    /// [`super::rcon::allowed`]): up, and nothing has started stopping it,
+    /// whether Hopper was asked to or the console said "Stopping server".
+    pub fn rcon_allowed(&self) -> bool {
+        let mut g = self.lock();
+        reap(&mut g);
+        let state = state_of(g.proc.is_some(), g.tracker.done, g.stop_requested, g.exit);
+        super::rcon::allowed(&state, g.tracker.stopping)
+    }
+
     /// The console so far, oldest first.
     pub fn console(&self) -> Vec<String> {
         self.lock().tracker.lines.iter().cloned().collect()
@@ -1051,6 +1061,40 @@ mod tests {
         assert!(wait_for(&s, SAVED), "{:?}", s.console());
         assert!(!wait_dead(&s, Duration::from_secs(4)));
         assert_eq!(s.state(), ServerState::Running);
+        s.kill().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RCON only between "Done" and the stop request (Stop, Restart and
+    /// schedules all send "stop"; Kill ends the process).
+    #[cfg(windows)]
+    #[test]
+    fn rcon_only_between_done_and_the_stop() {
+        let (s, dir) = hanging("rcon-starting", &[]);
+        assert_eq!(s.state(), ServerState::Starting);
+        assert!(!s.rcon_allowed(), "before Done");
+        s.kill().unwrap();
+        assert!(!s.rcon_allowed(), "killed");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (s, dir) = hanging("rcon-stop", &[DONE]);
+        assert!(wait_for(&s, DONE), "{:?}", s.console());
+        assert!(s.rcon_allowed());
+        s.stop().unwrap();
+        assert!(!s.rcon_allowed(), "right after the stop request");
+        s.kill().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `/stop` Hopper didn't send (in game, another tool): the console's
+    /// "Stopping server" cuts RCON though the state still says running.
+    #[cfg(windows)]
+    #[test]
+    fn rcon_ends_when_the_console_says_stopping() {
+        let (s, dir) = hanging("rcon-console", &[DONE, STOPPING]);
+        assert!(wait_for(&s, STOPPING), "{:?}", s.console());
+        assert_eq!(s.state(), ServerState::Running);
+        assert!(!s.rcon_allowed());
         s.kill().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -8,7 +8,11 @@ use anyhow::{Context as _, bail};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use super::process::ServerState;
 
 const LOGIN: i32 = 3;
 const COMMAND: i32 = 2;
@@ -16,7 +20,13 @@ const COMMAND: i32 = 2;
 pub struct Rcon {
     s: TcpStream,
     id: i32,
+    timeout: Duration,
+    closed: Arc<AtomicBool>,
 }
+
+/// How often a waiting read checks whether it was cut (see [`Closer`]):
+/// Windows doesn't wake a blocked read when the socket is shut down.
+const SLICE: Duration = Duration::from_millis(100);
 
 /// Where a server's RCON answers and its password, from server.properties;
 /// `None` when RCON is off or has no password.
@@ -33,13 +43,36 @@ pub fn settings(root: &Path) -> Option<(u16, String)> {
     Some((port, pass))
 }
 
+/// Whether Hopper may talk to a server over RCON: only once it's up
+/// ("Done") and before anything starts stopping it. A stopping server shuts
+/// its command handlers (spark's among them) down while it saves, and an
+/// open RCON connection can keep it from closing at all.
+pub fn allowed(state: &ServerState, stopping_seen: bool) -> bool {
+    *state == ServerState::Running && !stopping_seen
+}
+
+/// Closes an [`Rcon`] connection from another thread, even while a command
+/// waits for its answer (which then fails at once).
+pub struct Closer(TcpStream, Arc<AtomicBool>);
+
+impl Closer {
+    pub fn close(&self) {
+        self.1.store(true, Ordering::SeqCst);
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 impl Rcon {
+    pub fn closer(&self) -> std::io::Result<Closer> {
+        Ok(Closer(self.s.try_clone()?, self.closed.clone()))
+    }
+
     pub fn connect(port: u16, password: &str, timeout: Duration) -> anyhow::Result<Self> {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let s = TcpStream::connect_timeout(&addr, timeout).with_context(|| format!("RCON on port {port}"))?;
-        s.set_read_timeout(Some(timeout))?;
+        s.set_read_timeout(Some(SLICE.min(timeout)))?;
         s.set_write_timeout(Some(timeout))?;
-        let mut r = Rcon { s, id: 0 };
+        let mut r = Rcon { s, id: 0, timeout, closed: Default::default() };
         let id = r.send(LOGIN, password)?;
         // Some servers send an empty answer before the login result.
         loop {
@@ -54,6 +87,9 @@ impl Rcon {
     }
 
     fn send(&mut self, kind: i32, body: &str) -> anyhow::Result<i32> {
+        if self.closed.load(Ordering::SeqCst) {
+            bail!("RCON connection closed");
+        }
         self.id = self.id.wrapping_add(1).max(1);
         let mut p = Vec::with_capacity(14 + body.len());
         p.extend_from_slice(&(10 + body.len() as i32).to_le_bytes());
@@ -65,15 +101,37 @@ impl Rcon {
         Ok(self.id)
     }
 
+    /// Fills `buf`, in short slices so a [`Closer`] can end the wait.
+    fn read_full(&mut self, buf: &mut [u8], deadline: Instant) -> anyhow::Result<()> {
+        let mut got = 0;
+        while got < buf.len() {
+            if self.closed.load(Ordering::SeqCst) {
+                bail!("RCON connection closed");
+            }
+            match self.s.read(&mut buf[got..]) {
+                Ok(0) => bail!("RCON connection closed by the server"),
+                Ok(n) => got += n,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {
+                    if Instant::now() >= deadline {
+                        bail!("RCON didn't answer in {} s", self.timeout.as_secs());
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
     fn recv(&mut self) -> anyhow::Result<(i32, i32, String)> {
+        let deadline = Instant::now() + self.timeout;
         let mut len = [0u8; 4];
-        self.s.read_exact(&mut len)?;
+        self.read_full(&mut len, deadline)?;
         let len = i32::from_le_bytes(len);
         if !(10..=1 << 20).contains(&len) {
             bail!("bad RCON packet");
         }
         let mut buf = vec![0u8; len as usize];
-        self.s.read_exact(&mut buf)?;
+        self.read_full(&mut buf, deadline)?;
         let id = i32::from_le_bytes(buf[0..4].try_into().unwrap());
         let kind = i32::from_le_bytes(buf[4..8].try_into().unwrap());
         let body = String::from_utf8_lossy(&buf[8..buf.len() - 2]).into_owned();
@@ -191,6 +249,44 @@ mod tests {
         assert_eq!(tps_command(None, "1.21.1", false), Some("tick query"));
         assert_eq!(tps_command(Some("fabric"), "1.20.1", false), None);
         assert_eq!(tps_command(Some("fabric"), "1.20.1", true), Some("spark tps"));
+    }
+
+    #[test]
+    fn rcon_only_while_running() {
+        assert!(allowed(&ServerState::Running, false));
+        assert!(!allowed(&ServerState::Running, true), "said Stopping server");
+        assert!(!allowed(&ServerState::Starting, false), "before Done");
+        assert!(!allowed(&ServerState::Stopping, false));
+        assert!(!allowed(&ServerState::Stopped, false));
+        assert!(!allowed(&ServerState::Crashed(Some(1)), false));
+    }
+
+    #[test]
+    fn closer_ends_a_waiting_command() {
+        // Logs in, then never answers the command.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut b = [0u8; 64];
+            let _ = s.read(&mut b).unwrap();
+            let id = i32::from_le_bytes(b[4..8].try_into().unwrap());
+            let mut p = 10i32.to_le_bytes().to_vec();
+            p.extend_from_slice(&id.to_le_bytes());
+            p.extend_from_slice(&2i32.to_le_bytes());
+            p.extend_from_slice(&[0, 0]);
+            s.write_all(&p).unwrap();
+            std::thread::sleep(Duration::from_secs(10));
+        });
+        let mut r = Rcon::connect(port, "pw", Duration::from_secs(8)).unwrap();
+        let c = r.closer().unwrap();
+        let t = std::time::Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            c.close();
+        });
+        assert!(r.command("spark tps").is_err());
+        assert!(t.elapsed() < Duration::from_secs(3), "the command waited for its timeout");
     }
 
     #[test]
