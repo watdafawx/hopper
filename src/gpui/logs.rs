@@ -585,7 +585,13 @@ impl Render for LogsView {
         let body: AnyElement = if self.tab == LogTab::Help {
             // What Hopper read from the last crash, when it was one of
             // Hopper's games; else the newest crash report as it is.
-            let detected = self.store.update(cx, |s, _| s.crash(&root).cloned());
+            let detected = self.store.update(cx, |s, _| {
+                // "Revert X" for a mod an older version of it fixes.
+                if let Some(i) = s.instance(&root).cloned() {
+                    s.want_reverts(&i.root, &i.loader, &i.game_version, &i.addons, true);
+                }
+                s.crash(&root).cloned()
+            });
             let card_source = detected.as_ref().map(|c| c.source.clone());
             let card = detected.map(|c| self.crash_card(&root, &c, cx));
             let warned = self.warnings_card(&root, cx);
@@ -1032,14 +1038,43 @@ impl LogsView {
             .flatten();
         let turned = c.turned_off.len();
         let playing = store.running(root).is_some();
-        if can_turn_off == 0 && turned == 0 {
+        // A mod that needs a newer mod or loader: back to a version that works.
+        let reverts: Vec<crate::revert_ui::Offer> = c
+            .suspects
+            .iter()
+            .filter(|s| s.certainty <= Certainty::Likely)
+            .filter_map(|s| store.revert_offer(root, s.file_name.trim_end_matches(".disabled")))
+            .collect();
+        if can_turn_off == 0 && turned == 0 && reverts.is_empty() {
             return None;
         }
         let (r1, r2, r3) = (root.to_path_buf(), root.to_path_buf(), root.to_path_buf());
+        let revert_buttons: Vec<AnyElement> = reverts
+            .into_iter()
+            .enumerate()
+            .map(|(k, o)| {
+                let (label, tip) = o.label();
+                let root = root.to_path_buf();
+                Button::new(ElementId::Name(format!("crash-revert:{k}").into()))
+                    .small()
+                    .outline()
+                    .icon(IconName::Undo2)
+                    .label(label)
+                    .tooltip(tip)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let store = this.store.clone();
+                        crate::revert_ui::revert_instance(&store, &root, &o, window, cx);
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
         Some(
             h_flex()
                 .gap_2()
                 .pt_1()
+                .flex_wrap()
+                .children(revert_buttons)
                 .when(can_turn_off > 0, |r| {
                     r.child(
                         Button::new("crash-turn-off")

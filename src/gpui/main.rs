@@ -39,6 +39,7 @@ mod pack_update;
 mod palette;
 mod peers;
 mod perf_view;
+mod revert_ui;
 mod rigsync;
 mod server_control;
 mod server_settings;
