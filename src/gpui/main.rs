@@ -43,6 +43,7 @@ mod rigsync;
 mod server_control;
 mod server_settings;
 mod panel_tabs;
+mod part;
 mod servers;
 mod settings_page;
 mod setup_wizard;

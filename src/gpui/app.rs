@@ -1234,9 +1234,10 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Cached: a page re-renders only when it (or what it reads) changes,
         // not on every frame of a dialog or spinner animating above it.
-        // Browse caches its own columns instead: GPUI redraws everything
-        // inside a cached view that redraws, so its cached columns would
-        // never be reused when a GIF in its description moves on.
+        // Browse and the Library cache their own columns instead (`part.rs`):
+        // GPUI redraws everything inside a cached view that redraws, so
+        // their cached columns would never be reused when a GIF in a
+        // description or a logo moves on.
         let page: AnyView = match self.page {
             Page::Library => self.library.clone().into(),
             Page::Browse => self.browse.clone().into(),
@@ -1244,7 +1245,7 @@ impl Render for AppView {
             Page::Settings => self.settings.clone().into(),
         };
         let page = match self.page {
-            Page::Browse => page.into_any_element(),
+            Page::Browse | Page::Library => page.into_any_element(),
             _ => page.cached(StyleRefinement::default().size_full()).into_any_element(),
         };
         let title = self.title_bar(window, cx);

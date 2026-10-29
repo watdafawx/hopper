@@ -490,6 +490,9 @@ pub struct AddonsView {
     pub(crate) scroll: UniformListScrollHandle,
     /// A mod's project page, docked on the right.
     peek: Entity<crate::browse::BrowseView>,
+    /// Where the rows and the peek drew animated logos, which the page
+    /// around them plays (see `logos.rs`).
+    logos: crate::logos::Slots,
     /// A data pack folder shown instead of the instance's content
     /// (instance-relative), and its packs once read.
     pub(crate) folder: Option<String>,
@@ -578,6 +581,8 @@ impl AddonsView {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let logos = crate::logos::Slots::default();
+        peek.update(cx, |p, _| p.set_logos(logos.clone()));
         let subs = vec![
             cx.observe(&peek, |_, _, cx| cx.notify()),
             cx.observe(&store, |this, _, cx| {
@@ -625,6 +630,7 @@ impl AddonsView {
             table: Table::default(),
             scroll: UniformListScrollHandle::new(),
             peek,
+            logos,
             cols: Cols::default(),
             room: None,
             list_open: false,
@@ -654,6 +660,12 @@ impl AddonsView {
     /// The project panel, which the Library docks beside the page.
     pub fn peek(&self) -> &Entity<crate::browse::BrowseView> {
         &self.peek
+    }
+
+    /// The animated logos the rows and the peek drew, for the page's
+    /// `logos::LogoLayer`.
+    pub fn logos(&self) -> &crate::logos::Slots {
+        &self.logos
     }
 
     pub(crate) fn open_peek(&mut self, project: u64, cx: &mut Context<Self>) {
@@ -3218,6 +3230,7 @@ It stays disabled after updating: turn it on in the On column.")
                 let pid = a.project_id;
                 div()
                     .id(id("thumb"))
+                    // Dimmed logos stay still: the layer paints at full strength.
                     .when(dim, |d| d.opacity(0.45))
                     .when(pid != 0, |d| {
                         d.clickable(cx).on_click(cx.listener(move |this, _, _, cx| {
@@ -3225,7 +3238,7 @@ It stays disabled after updating: turn it on in the On column.")
                             this.open_peek(pid, cx);
                         }))
                     })
-                    .child(widgets::thumb(icon.as_deref(), rems(2.5), cx))
+                    .child(crate::logos::thumb(&self.logos, (!dim).then_some(a.icon.as_str()), icon.as_deref(), rems(2.5), cx))
             })
             .child(
                 self.name_cell()
@@ -4382,6 +4395,8 @@ impl Picks for AddonsView {
 
 impl Render for AddonsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The rows' logos are marked again as they lay out.
+        self.logos.clear(cx.entity_id());
         let peek_open = self.peek.read(cx).is_open();
         self.compact = peek_open;
         self.tight = peek_open && self.global_dir().is_some();

@@ -6,6 +6,7 @@ use crate::addons::{AddonsEvent, AddonsView, in_class};
 use crate::content::{ContentEvent, ScreenshotsView, WorldsView};
 use crate::inst_settings::InstanceSettings;
 use crate::logs::LogsView;
+use crate::part::Part;
 use crate::peers::PeersView;
 use crate::rigsync::SyncPanel;
 use crate::store::{self, Msg, Store};
@@ -248,6 +249,14 @@ pub struct LibraryView {
     query: String,
     /// The shown instance's snapshot count, read at most every few seconds.
     snap_count: std::cell::RefCell<Option<(PathBuf, std::time::Instant, usize)>>,
+    /// The instance list and the instance's page (made on first draw, see
+    /// `part.rs`): a redraw from the docked peek (a GIF in its
+    /// description) or from the logo layer reuses them, mod table and all.
+    parts: Option<(Entity<Part<Self>>, Entity<Part<Self>>)>,
+    /// The page drew the mod table last time it drew (see `show_logos`).
+    addons_drawn: std::cell::Cell<bool>,
+    /// Plays the animated logos of the mod table and the peek.
+    logo_layer: Entity<crate::logos::LogoLayer>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -380,6 +389,8 @@ impl LibraryView {
             InstTab::from_key(key).unwrap_or(if old_mods { InstTab::Mods } else { InstTab::Overview })
         };
         let pack_desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
+        let logos = addons.read(cx).logos().clone();
+        let logo_layer = cx.new(|cx| crate::logos::LogoLayer::new(store.clone(), logos, window, cx));
         // Back in the window: the header's server dot is read once.
         let mut subs = subs;
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
@@ -416,6 +427,9 @@ impl LibraryView {
             search,
             query: String::new(),
             snap_count: Default::default(),
+            parts: None,
+            addons_drawn: Default::default(),
+            logo_layer,
             _subscriptions: subs,
         };
         view.ensure_selection(cx);
@@ -878,10 +892,9 @@ impl LibraryView {
         cx.notify();
     }
 
-    /// The instance list, or a narrow rail of icons when collapsed. Drag
-    /// its edge to resize; below the minimum it collapses. Toggling slides
-    /// the width.
-    fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Whether the instance list is folded to the rail, its width in rem,
+    /// and the width it grows or shrinks from as it folds or opens.
+    fn sidebar_size(&self, cx: &App) -> (bool, f32, f32) {
         let settings = self.store.read(cx).settings();
         let saved = settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         let (collapsed, width) = match self.drag_width {
@@ -890,12 +903,24 @@ impl LibraryView {
             None if settings.sidebar_collapsed => (true, RAIL),
             None => (false, saved),
         };
-        let from = if collapsed { saved } else { RAIL };
-        let inner = if collapsed {
-            self.rail(cx).into_any_element()
-        } else {
-            self.full_sidebar(width, cx).into_any_element()
-        };
+        (collapsed, width, if collapsed { saved } else { RAIL })
+    }
+
+    /// The instance list or the rail, drawn in a part of its own.
+    fn sidebar_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        match self.sidebar_size(cx) {
+            (true, ..) => self.rail(cx).into_any_element(),
+            (false, width, _) => self.full_sidebar(width, cx).into_any_element(),
+        }
+    }
+
+    /// The instance list, or a narrow rail of icons when collapsed. Drag
+    /// its edge to resize; below the minimum it collapses. Toggling slides
+    /// the width. `list` ([`Self::sidebar_list`]) keeps its final width
+    /// meanwhile (clipped), so it's drawn once, not per frame.
+    fn sidebar(&self, list: Entity<Part<Self>>, cx: &mut Context<Self>) -> AnyElement {
+        let (collapsed, width, from) = self.sidebar_size(cx);
+        let inner = AnyView::from(list).cached(StyleRefinement::default().w(rems(width)).flex_none().h_full());
         let theme = cx.theme();
         let (handle_bg, active) = (theme.primary, self.drag_width.is_some());
         div()
@@ -2440,7 +2465,10 @@ impl LibraryView {
 
     fn tab_body(&self, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
         match self.tab.class() {
-            Some(_) => cached(self.addons.clone()),
+            Some(_) => {
+                self.addons_drawn.set(true);
+                cached(self.addons.clone())
+            }
             None if self.tab == InstTab::Overview => self.overview_body(inst, cx),
             None if self.tab == InstTab::Server => self.server_tab(cx),
             None if self.tab == InstTab::Worlds => cached(self.worlds.clone()),
@@ -2540,6 +2568,7 @@ impl LibraryView {
     }
 
     fn detail(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.addons_drawn.set(false);
         let Some(inst) = self
             .selected
             .as_ref()
@@ -2709,13 +2738,7 @@ impl Render for LibraryView {
             None if settings.sidebar_collapsed => RAIL,
             None => settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
         };
-        // A mod's project page, docked full height beside the instance.
-        let peek = Some(self.addons.read(cx).peek().clone())
-            .filter(|p| {
-                (self.tab.class().is_some() || matches!(self.tab, InstTab::Server | InstTab::Datapacks))
-                    && self.selected.is_some()
-                    && p.read(cx).is_open()
-            });
+        let peek = self.peek_shown(cx);
         let peek_w = peek.as_ref().map_or(0.0, |p| p.read(cx).panel_width(window, cx));
         self.detail_w = window.viewport_size().width / window.rem_size() - side - peek_w;
         // The table fits its columns to this; it is re-laid out whenever
@@ -2726,8 +2749,32 @@ impl Render for LibraryView {
             a.list_open = list_open;
         });
         self.server.update(cx, |p, _| p.room = Some(room));
+        let view = cx.entity();
+        let (list, page) = self
+            .parts
+            .get_or_insert_with(|| {
+                (
+                    Part::new(&view, |l, _, _, cx| l.sidebar_list(cx), cx),
+                    Part::new(
+                        &view,
+                        |l, _, _, cx| {
+                            let page = l.detail(cx);
+                            l.show_logos(cx);
+                            page
+                        },
+                        cx,
+                    ),
+                )
+            })
+            .clone();
+        let page = AnyView::from(page).cached(StyleRefinement::default().flex_1().min_w_0().h_full());
+        // Cached too: its redraws (a GIF in the description) are its own.
+        let peek = peek.map(|p| {
+            AnyView::from(p).cached(StyleRefinement::default().w(rems(peek_w)).flex_none().h_full())
+        });
         h_flex()
             .id("library")
+            .relative()
             .size_full()
             .on_drag_move(cx.listener(|this, e: &DragMoveEvent<SidebarResize>, window, cx| {
                 let x = e.event.position.x - e.bounds.left();
@@ -2745,9 +2792,31 @@ impl Render for LibraryView {
                 peek.update(cx, |p, cx| p.end_resize(cx));
             }))
             .items_stretch()
-            .child(self.sidebar(cx))
-            .child(div().flex_1().min_w_0().h_full().child(self.detail(cx)))
+            .child(self.sidebar(list, cx))
+            .child(page)
             .children(peek)
+            .child(self.logo_layer.clone())
+    }
+}
+
+impl LibraryView {
+    /// A mod's project page, docked full height beside the instance, when
+    /// one is open on a tab that shows it.
+    fn peek_shown(&self, cx: &App) -> Option<Entity<crate::browse::BrowseView>> {
+        Some(self.addons.read(cx).peek().clone()).filter(|p| {
+            (self.tab.class().is_some() || matches!(self.tab, InstTab::Server | InstTab::Datapacks))
+                && self.selected.is_some()
+                && p.read(cx).is_open()
+        })
+    }
+
+    /// Tells the logo layer which views' logos are on screen: the mod table
+    /// when the page drew it, and the peek when it's open. Called as the
+    /// page draws; a reused page keeps what it said.
+    fn show_logos(&self, cx: &App) {
+        let table = self.addons_drawn.get().then(|| self.addons.entity_id());
+        let peek = self.peek_shown(cx).map(|p| p.entity_id());
+        self.addons.read(cx).logos().show(table.into_iter().chain(peek));
     }
 }
 

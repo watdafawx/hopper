@@ -2,6 +2,7 @@
 //! install it into an instance (or a modpack as a new instance).
 
 use crate::widgets::Clickable as _;
+use crate::part::Part;
 use crate::store::{Msg, Store, Updates};
 use crate::widgets;
 
@@ -170,9 +171,11 @@ pub struct BrowseView {
     /// redraw it alone.
     desc: Entity<widgets::DescView>,
     /// The filter and results columns (made on first draw, see [`Part`]).
-    parts: Option<(Entity<Part>, Entity<Part>, Entity<Part>)>,
+    parts: Option<(Entity<Part<Self>>, Entity<Part<Self>>, Entity<Part<Self>>)>,
     /// Where the results and the panel drew animated logos, and the layer
-    /// that plays them over the page (not in a peek; see `logos.rs`).
+    /// that plays them over the page (see `logos.rs`). A peek has no layer
+    /// of its own: the page it's docked in may share its (see
+    /// [`Self::set_logos`]).
     logos: crate::logos::Slots,
     logo_layer: Option<Entity<crate::logos::LogoLayer>>,
     /// Open the first result when it arrives (`--detail`, for scripted runs).
@@ -206,6 +209,12 @@ impl BrowseView {
         view.open_first = std::env::args().any(|a| a == "--detail");
         view.load_versions(cx);
         view
+    }
+
+    /// Marks this peek's animated logos in `slots`, which the page it's
+    /// docked in plays (see `logos.rs`).
+    pub fn set_logos(&mut self, slots: crate::logos::Slots) {
+        self.logos = slots;
     }
 
     /// A Browse that shows only the project panel (see [`Self::peek_project`]).
@@ -3505,50 +3514,12 @@ fn placeholder(modrinth: bool) -> &'static str {
     }
 }
 
-/// A column of the Browse page (the filters, the results) as a view of
-/// its own, drawn from the Browse view's state and redrawn whenever that
-/// changes. A redraw that leaves Browse alone (a GIF in the description
-/// moving on) reuses it instead of building every card again, which was
-/// most of what such a redraw cost.
-struct Part {
-    browse: WeakEntity<BrowseView>,
-    draw: DrawPart,
-}
-
-type DrawPart = fn(&mut BrowseView, Option<&Instance>, &mut Window, &mut Context<BrowseView>) -> AnyElement;
-
-impl Part {
-    /// The part, redrawn whenever `browse` changes.
-    fn new(browse: &Entity<BrowseView>, draw: DrawPart, cx: &mut App) -> Entity<Self> {
-        cx.new(|cx| {
-            cx.observe(browse, |_, _, cx| cx.notify()).detach();
-            Part { browse: browse.downgrade(), draw }
-        })
-    }
-}
-
-impl Render for Part {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let draw = self.draw;
-        let me = cx.entity_id();
-        let part = self
-            .browse
-            .update(cx, |b, cx| {
-                // Its logos are marked again as it lays out.
-                b.logos.clear(me);
-                let target = b.target(cx);
-                draw(b, target.as_ref(), window, cx)
-            })
-            .unwrap_or_else(|_| div().into_any_element());
-        // A cached view is laid out on its own: this row gives the column
-        // the flex parent it sizes itself by.
-        h_flex().size_full().child(part)
-    }
-}
-
 impl Render for BrowseView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.peek {
+            // Its logos are marked again as it lays out (played by the
+            // page it's docked in, if that page has a logo layer).
+            self.logos.clear(cx.entity_id());
             let target = self.target(cx);
             return self.panel(target.as_ref(), window, cx).unwrap_or_else(|| div().into_any_element());
         }
@@ -3561,12 +3532,33 @@ impl Render for BrowseView {
         let (filters, results, panel) = self
             .parts
             .get_or_insert_with(|| {
+                // Each part's logos are marked again as it lays out.
                 (
-                    Part::new(&view, |b, t, w, cx| b.filters(t, w, cx).into_any_element(), cx),
-                    Part::new(&view, |b, t, _, cx| b.results(t, cx).into_any_element(), cx),
                     Part::new(
                         &view,
-                        |b, t, w, cx| b.panel(t, w, cx).unwrap_or_else(|| div().into_any_element()),
+                        |b, me, w, cx| {
+                            b.logos.clear(me);
+                            let t = b.target(cx);
+                            b.filters(t.as_ref(), w, cx).into_any_element()
+                        },
+                        cx,
+                    ),
+                    Part::new(
+                        &view,
+                        |b, me, _, cx| {
+                            b.logos.clear(me);
+                            let t = b.target(cx);
+                            b.results(t.as_ref(), cx).into_any_element()
+                        },
+                        cx,
+                    ),
+                    Part::new(
+                        &view,
+                        |b, me, w, cx| {
+                            b.logos.clear(me);
+                            let t = b.target(cx);
+                            b.panel(t.as_ref(), w, cx).unwrap_or_else(|| div().into_any_element())
+                        },
                         cx,
                     ),
                 )
