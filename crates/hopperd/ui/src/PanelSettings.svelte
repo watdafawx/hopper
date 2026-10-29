@@ -5,7 +5,7 @@
   // (src/gpui/settings_page.rs): a list of categories on the left, the
   // picked one's icon, title and line under it, then its cards.
   export const CATS = [
-    { id: 'panel-folder', label: 'Panel folder', icon: FolderCog, owner: true, blurb: 'Where the servers and the panel’s own data live, and servers deleted lately.', words: 'servers folder move data deleted restore' },
+    { id: 'panel-folder', label: 'Panel folder', icon: FolderCog, owner: true, blurb: 'Where the servers and the panel’s own data live, servers deleted lately, and how long backups stay.', words: 'servers folder move data deleted restore backups undo hopper-backups clean up retention disk space' },
     { id: 'access', label: 'Access & devices', icon: Shield, owner: true, blurb: 'Pair Hopper desktop, how clients reach this panel, and the devices allowed in.', words: 'pair pairing devices tls certificate sftp https addresses' },
     { id: 'addresses', label: 'Server addresses', icon: Globe, owner: true, blurb: 'Players join by name on one shared Minecraft port.', words: 'domain port router proxy join' },
     { id: 'content', label: 'CurseForge & Modrinth', icon: Compass, owner: true, blurb: 'The CurseForge API key.', words: 'curseforge api key modrinth' },
@@ -34,6 +34,7 @@
   import Webhooks from './Webhooks.svelte';
   import Alerts from './Alerts.svelte';
   import BackupTargets from './BackupTargets.svelte';
+  import BackupRetention from './BackupRetention.svelte';
 
   let { cat = '', hello, me, pending = $bindable([]) } = $props();
   const owner = $derived(ownerLike(me));
@@ -74,7 +75,7 @@
         <div><h1>{c.label}</h1><p>{c.blurb}</p></div>
       </header>
       <div class="body">
-        {#if c.id === 'panel-folder'}<ServersFolder />
+        {#if c.id === 'panel-folder'}<ServersFolder /><BackupRetention />
         {:else if c.id === 'access' || c.id === 'account'}<Access {hello} {me} bind:pending />
         {:else if c.id === 'addresses'}<Addresses />
         {:else if c.id === 'content'}<CfKey />

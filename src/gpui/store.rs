@@ -449,9 +449,10 @@ impl Store {
             _poll: Self::poll(rx, dirty, ticked, cx),
         };
         store.refresh();
-        // Trim what earlier actions left in each instance's backups.
+        // Note which instances have old backups to clean up (nothing goes
+        // by itself at start).
         hopper::retention::set_policy(store.settings.backup_retention);
-        hopper::retention::prune_all_later(store.instances.iter().map(|i| i.root.clone()).collect());
+        hopper::retention::check_all_later(store.instances.iter().map(|i| i.root.clone()).collect());
         store.reload_accounts();
         store._panel_poll = Some(Self::panel_poll(cx));
         store._download_watch = Some(Self::download_watch(cx));

@@ -2326,7 +2326,9 @@ impl LibraryView {
         let backups = {
             let n = self.snapshot_count(&inst.root);
             let (store, root) = (self.store.clone(), inst.root.clone());
-            let muted = theme.muted_foreground;
+            // Gold when old backups wait for Clean up (or it's over its limit).
+            let over = hopper::retention::needs_cleanup(&inst.root);
+            let muted = if over { theme.warning } else { theme.muted_foreground };
             div()
                 .id("inst-backups")
                 .relative()
@@ -2348,15 +2350,20 @@ impl LibraryView {
                             .rounded_full()
                             .bg(theme.secondary)
                             .border_1()
-                            .border_color(theme.border)
+                            .border_color(if over { theme.warning.opacity(0.4) } else { theme.border })
                             .text_size(rems(0.625))
                             .font_weight(FontWeight::BOLD)
                             .text_color(muted)
                             .child(n.to_string()),
                     )
                 })
-                .tooltip(|w, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new("Snapshots and backups: undo an update or a removal").build(w, cx)
+                .tooltip(move |w, cx| {
+                    let t = if over {
+                        "Snapshots and backups: old backups to clean up"
+                    } else {
+                        "Snapshots and backups: undo an update or a removal"
+                    };
+                    gpui_kit::component::tooltip::Tooltip::new(t).build(w, cx)
                 })
                 .on_click(move |_, window, cx| crate::backups_view::open(store.clone(), root.clone(), window, cx))
         };

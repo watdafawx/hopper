@@ -17,7 +17,10 @@
   let open = $state(new Set());
   let busy = $state(false);
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
-  const old = $derived((data?.sets || []).filter((s) => Date.now() / 1000 - s.when > 30 * 86400));
+  // The clean up rules' numbers, as desktop's Backups footer shows them.
+  const u = $derived(data?.usage);
+  const cap = $derived(u ? u.max_mb * 1024 * 1024 : 0);
+  const over = $derived(!!u && cap > 0 && u.limited > cap);
 
   async function load() {
     try {
@@ -57,6 +60,20 @@
     }
   }
 
+  // Runs the panel's clean up rules now (Settings › Panel folder).
+  async function clean() {
+    busy = true;
+    try {
+      const r = await post(`${base}/mod-backups/clean`, {});
+      say(r.removed ? `Moved ${r.removed} old backup${r.removed === 1 ? '' : 's'} to the server's trash (${bytes(r.freed)})` : 'Nothing to clean up');
+      await load();
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      busy = false;
+    }
+  }
+
   function flip(w) {
     const s = new Set(open);
     s.has(w) ? s.delete(w) : s.add(w);
@@ -75,9 +92,15 @@
 
 <div class="col bk">
   <div class="row small">
-    {#if data}<span class="muted">{data.sets.length} backup{data.sets.length === 1 ? '' : 's'} · {bytes(data.total_size)} in .hopper-backups</span>{/if}
+    {#if u}
+      <span class="muted">{data.sets.length} backup{data.sets.length === 1 ? '' : 's'} · Backups use {bytes(u.total)}{cap && !over ? ` of ${bytes(cap)}` : ''}</span>
+      {#if over}<span class="chip warn">Over the {bytes(cap)} limit</span>{/if}
+    {/if}
     <span class="sp"></span>
-    {#if old.length}<button class="btn sm" disabled={busy} onclick={() => remove(old, `Delete ${old.length} backup${old.length === 1 ? '' : 's'} older than 30 days?`)}><Trash2 size={13} />Delete older than 30 days</button>{/if}
+    {#if u}
+      <span class="tiny muted">Keeps the last {u.keep_actions} actions and {u.keep_days} days</span>
+      <button class="btn sm" disabled={busy || !u.removes} title="Moves old backups to the server's trash (Files › Trash), by the rules in Settings › Panel folder. The panel does this by itself after each new backup, but leaves older ones for you. World backups stay." onclick={clean}>{u.frees ? `Clean up · frees ${bytes(u.frees)}` : 'Clean up'}</button>
+    {/if}
   </div>
   {#if !data}
     <div class="skels">{#each [0, 1, 2, 3] as i (i)}<div class="skel"><i></i></div>{/each}</div>

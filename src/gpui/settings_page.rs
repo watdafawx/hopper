@@ -102,7 +102,7 @@ impl Category {
         match self {
             Category::General => "How the library behaves day to day.",
             Category::Accounts => "Who plays: your Microsoft accounts.",
-            Category::Folders => "Where Hopper finds your instances and Minecraft's launcher.",
+            Category::Folders => "Where Hopper finds your instances and Minecraft's launcher, and how long backups stay.",
             Category::Launchers => "Instances from other launchers, managed where they are, without copying.",
             Category::Java => "How games start, what happens while one runs, and memory and Java for instances that don't set their own.",
             Category::Servers => "Your server packs, servers hosted on this PC, and the panel that runs them.",
@@ -187,6 +187,9 @@ const ENTRIES: &[Entry] = &[
     e(C::Accounts, "account", "Microsoft accounts", "Switch which one starts your games, add another, or sign one out.", "sign in login microsoft profile skin"),
     e(C::Folders, "instances-root", "Instances folder", "Where your instances live. CurseForge's Instances folder works.", "path directory library"),
     e(C::Folders, "launcher-dir", "Launcher folder", "The folder with minecraft.exe. CurseForge keeps one in Curse\\Install.", "minecraft.exe mojang path directory"),
+    e(C::Folders, "keep-actions", "Keep the last", "Old files from updates, removals and syncs are kept so you can undo. The last this many actions always stay, however old. After each new backup, older ones go to the Recycle Bin; backups from before wait for Clean up in an instance's Backups.", "backups undo hopper-backups disk space clean up retention keep"),
+    e(C::Folders, "keep-days", "And anything newer than", "Actions from these last days stay, however many.", "backups undo hopper-backups disk space clean up retention days"),
+    e(C::Folders, "keep-gb", "Up to", "Per instance. Past this the oldest go first; 0 is no limit. Snapshots you take and world backups stay until you delete them.", "backups undo hopper-backups disk space clean up retention size limit gb"),
     e(C::Launchers, "launchers", "Other launchers", "Found on this PC, and folders you add. Each one's instances can be managed in Hopper.", "modrinth prism multimc atlauncher gdlauncher ftb import manage"),
     e(C::Java, "launch-with", "Launch with", "Hopper starts games itself with your Microsoft sign-in, like CurseForge. Mojang's launcher opens instead and you press Play there.", "launcher native mojang direct"),
     e(C::Java, "minimize", "Minimize while playing", "Hide Hopper while a game runs, and bring it back when it closes.", "minimize window hide"),
@@ -271,10 +274,13 @@ enum Text {
     PanelUrl,
     UpdateRepo,
     McpPort,
+    KeepActions,
+    KeepDays,
+    KeepGb,
 }
 
 impl Text {
-    const ALL: [Text; 8] = [
+    const ALL: [Text; 11] = [
         Text::Instances,
         Text::Launcher,
         Text::ServerPacks,
@@ -283,18 +289,26 @@ impl Text {
         Text::PanelUrl,
         Text::UpdateRepo,
         Text::McpPort,
+        Text::KeepActions,
+        Text::KeepDays,
+        Text::KeepGb,
     ];
 
-    fn saved(self, s: &hopper::settings::Settings) -> &str {
+    fn saved(self, s: &hopper::settings::Settings) -> String {
+        let r = &s.backup_retention;
         match self {
-            Text::Instances => &s.instances_root,
-            Text::Launcher => &s.launcher_dir,
-            Text::ServerPacks => &s.servers_root,
-            Text::Hosted => &s.hosted_root,
-            Text::Host => &s.server_host,
-            Text::PanelUrl => &s.panel_url,
-            Text::UpdateRepo => &s.update_repo,
-            Text::McpPort => &s.mcp_port,
+            Text::Instances => s.instances_root.clone(),
+            Text::Launcher => s.launcher_dir.clone(),
+            Text::ServerPacks => s.servers_root.clone(),
+            Text::Hosted => s.hosted_root.clone(),
+            Text::Host => s.server_host.clone(),
+            Text::PanelUrl => s.panel_url.clone(),
+            Text::UpdateRepo => s.update_repo.clone(),
+            Text::McpPort => s.mcp_port.clone(),
+            Text::KeepActions => r.keep_actions.to_string(),
+            Text::KeepDays => r.keep_days.to_string(),
+            // "1", "0.5", "2.5": GB with at most two decimals.
+            Text::KeepGb => format!("{:.2}", r.max_mb as f64 / 1024.).trim_end_matches('0').trim_end_matches('.').to_string(),
         }
     }
 
@@ -308,6 +322,13 @@ impl Text {
             Text::PanelUrl => s.panel_url = v,
             Text::UpdateRepo => s.update_repo = v,
             Text::McpPort => s.mcp_port = v,
+            Text::KeepActions => s.backup_retention.keep_actions = v.parse().unwrap_or(s.backup_retention.keep_actions),
+            Text::KeepDays => s.backup_retention.keep_days = v.parse().unwrap_or(s.backup_retention.keep_days),
+            Text::KeepGb => {
+                if let Ok(gb) = v.parse::<f64>() {
+                    s.backup_retention.max_mb = (gb * 1024.).round() as u64;
+                }
+            }
         }
     }
 
@@ -321,6 +342,11 @@ impl Text {
 
     /// Why `v` can't be saved, if it can't.
     fn problem(self, v: &str) -> Option<&'static str> {
+        match self {
+            Text::KeepActions | Text::KeepDays => return v.parse::<u32>().is_err().then_some("Use a whole number, 0 or more."),
+            Text::KeepGb => return v.parse::<f64>().map_or(true, |g| !(0. ..=100_000.).contains(&g)).then_some("Use a number of GB, 0 for no limit."),
+            _ => {}
+        }
         if v.is_empty() {
             return None;
         }
@@ -1163,6 +1189,20 @@ impl SettingsPage {
     }
 
     fn folders(&self, cx: &mut Context<Self>) -> Vec<Block> {
+        let num = |t: Text, unit: &'static str, cx: &mut Context<Self>| {
+            h_flex()
+                .gap_2()
+                .child(div().w(rems(5.)).child(Input::new(&self.texts[&t]).small()))
+                .child(div().w(rems(3.5)).text_sm().text_color(cx.theme().muted_foreground).child(unit))
+        };
+        let backups = Block::card(
+            Some("Backups"),
+            vec![
+                Row::new("keep-actions").control(num(Text::KeepActions, "actions", cx)).note(self.note(Text::KeepActions, cx)),
+                Row::new("keep-days").control(num(Text::KeepDays, "days", cx)).note(self.note(Text::KeepDays, cx)),
+                Row::new("keep-gb").control(num(Text::KeepGb, "GB", cx)).note(self.note(Text::KeepGb, cx)),
+            ],
+        );
         vec![Block::card(
             None,
             vec![
@@ -1173,7 +1213,7 @@ impl SettingsPage {
                     .control(self.folder(Text::Launcher, cx))
                     .note(self.note(Text::Launcher, cx)),
             ],
-        )]
+        ), backups]
     }
 
     fn launchers(&self, cx: &mut Context<Self>) -> Vec<Block> {

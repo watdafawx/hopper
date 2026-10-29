@@ -3,11 +3,20 @@
 //! files behind an Undo, and automatic snapshots. Shared by Hopper and
 //! Hopper Server, which keeps the same folder in each server.
 //!
-//! Kept: the last [`Retention::keep_actions`] actions, anything newer than
-//! [`Retention::keep_days`], and always the newest action. Past that, and
-//! whenever the folder is over [`Retention::max_mb`], the oldest go first.
-//! Snapshots the user took or named, world zips and worlds moved aside
-//! before a restore are never touched.
+//! Kept: the last [`Retention::keep_actions`] actions and everything newer
+//! than [`Retention::keep_days`] (either is enough), always the newest
+//! action and anything from the last few minutes. With a size limit set,
+//! the oldest of the rest go until the folder fits. Snapshots the user took
+//! or named, world zips and worlds moved aside before a restore are never
+//! touched, and nothing is deleted outright: what goes, goes to the Recycle
+//! Bin (Hopper Server: the server's trash).
+//!
+//! Two ways it runs:
+//! - Clean up (the user's button): everything past the rules goes.
+//! - Right after a new backup: what that backup (or time) pushed past the
+//!   rules. What was already past them when this version first pruned the
+//!   folder is a backlog left for Clean up, so it is never cleared without
+//!   the user asking.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -29,13 +38,17 @@ pub struct Retention {
 
 impl Default for Retention {
     fn default() -> Self {
-        Retention { keep_actions: 20, keep_days: 14, max_mb: 1024 }
+        Retention { keep_actions: 30, keep_days: 30, max_mb: 0 }
     }
 }
 
 /// Undo toasts and running jobs still point at fresh backups: nothing this
-/// young is pruned, whatever the size.
+/// young goes, whatever the rules.
 const GRACE_SECS: i64 = 10 * 60;
+
+/// In `.hopper-backups`: the backlog automatic pruning leaves alone (see
+/// the module docs).
+const MARKER: &str = ".retention.json";
 
 static POLICY: RwLock<Option<Retention>> = RwLock::new(None);
 
@@ -47,6 +60,38 @@ pub fn set_policy(r: Retention) {
 
 pub fn policy() -> Retention {
     POLICY.read().unwrap_or_else(|e| e.into_inner()).unwrap_or_default()
+}
+
+/// Where pruned backups go: given the folder being pruned and the paths
+/// leaving it. Never deletes for good.
+pub type Dispose = fn(root: &Path, paths: &[PathBuf]) -> anyhow::Result<()>;
+
+static DISPOSE: RwLock<Option<Dispose>> = RwLock::new(None);
+
+/// Replaces the Recycle Bin (Hopper Server uses each server's trash).
+pub fn set_disposer(f: Dispose) {
+    *DISPOSE.write().unwrap_or_else(|e| e.into_inner()) = Some(f);
+}
+
+fn disposer() -> Dispose {
+    DISPOSE.read().unwrap_or_else(|e| e.into_inner()).unwrap_or(recycle)
+}
+
+/// The Recycle Bin; a network drive has none, so there they move to
+/// `.hopper-trash` beside them, as deleted instances do.
+fn recycle(_root: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
+    let mut local = Vec::new();
+    for p in paths {
+        if crate::instance_ops::is_remote_drive(p) {
+            crate::instance_ops::move_to_hopper_trash(p)?;
+        } else {
+            local.push(p);
+        }
+    }
+    if !local.is_empty() {
+        trash::delete_all(local)?;
+    }
+    Ok(())
 }
 
 /// One thing that can go.
@@ -63,7 +108,7 @@ struct Entry {
     item: Item,
 }
 
-/// What a prune did.
+/// What a prune did (or, for a preview, would do).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pruned {
     pub folders: usize,
@@ -71,20 +116,35 @@ pub struct Pruned {
     pub freed: u64,
 }
 
+impl Pruned {
+    pub fn count(&self) -> usize {
+        self.folders + self.snapshots
+    }
+}
+
 /// Where a backups folder's space goes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Usage {
-    /// Per-action folders and automatic snapshots: what pruning manages.
+    /// Per-action folders and automatic snapshots: what pruning removes.
     pub managed: u64,
-    /// Snapshots the user took or named, world zips and anything else.
-    pub kept: u64,
+    /// Snapshots the user took or named: never removed, but they count
+    /// toward the size limit.
+    pub pinned: u64,
+    /// World zips, worlds moved aside and anything else: left alone and
+    /// not counted toward the limit.
+    pub other: u64,
     /// Number of per-action folders and automatic snapshots.
     pub actions: usize,
 }
 
 impl Usage {
     pub fn total(&self) -> u64 {
-        self.managed + self.kept
+        self.managed + self.pinned + self.other
+    }
+
+    /// What the size limit is measured against.
+    pub fn limited(&self) -> u64 {
+        self.managed + self.pinned
     }
 }
 
@@ -175,81 +235,142 @@ pub fn usage(root: &Path) -> Usage {
     let folders: u64 = entries.iter().map(|e| if let Item::Folder { bytes, .. } = e.item { bytes } else { 0 }).sum();
     let all = store.bytes(&live);
     let pinned = store.bytes(&HashSet::new());
-    Usage { managed: folders + all - pinned, kept: other + pinned, actions: entries.len() }
+    Usage { managed: folders + all - pinned, pinned, other, actions: entries.len() }
 }
 
-/// Which entries go under `r` at `now`, oldest first. Pure, for the tests.
-fn choose(entries: &[Entry], store: &Store, r: Retention, now: i64) -> Vec<usize> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mode {
+    /// The user's Clean up: everything past the rules.
+    Full,
+    /// Right after a new backup: past the rules, but not the backlog.
+    Auto,
+}
+
+struct Choice {
+    /// Indices to remove, oldest first.
+    gone: Vec<usize>,
+    /// Bytes the limited part holds after.
+    left: u64,
+    /// Past the rules but left for Clean up (automatic runs only).
+    backlog: usize,
+}
+
+/// Which entries go under `r` at `now`; entries from `backlog_to` or
+/// earlier are the backlog and stay. Pure, for the tests.
+fn choose(entries: &[Entry], store: &Store, r: Retention, now: i64, backlog_to: Option<i64>) -> Choice {
     let mut gone = vec![false; entries.len()];
+    let mut backlog = vec![false; entries.len()];
     let day_cut = now - i64::from(r.keep_days) * 86_400;
+    let young = |e: &Entry| e.when > now - GRACE_SECS;
     // entries are newest first; index 0 (the newest) always stays.
     for (i, e) in entries.iter().enumerate().skip(1) {
-        let young = e.when > now - GRACE_SECS;
-        if !young && i >= r.keep_actions as usize && e.when < day_cut {
-            gone[i] = true;
+        if young(e) || i < r.keep_actions as usize || e.when >= day_cut {
+            continue;
+        }
+        match backlog_to {
+            Some(t) if e.when <= t => backlog[i] = true,
+            _ => gone[i] = true,
         }
     }
+    // The backlog is the user's to clean up: it doesn't count toward the
+    // limit either, or newer backups would go to make room for it.
+    let total = |gone: &[bool]| -> u64 {
+        let keep = |i: usize| !gone[i] && !backlog[i];
+        let live: HashSet<String> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match &e.item {
+                Item::Snapshot { id } if keep(i) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let folders: u64 = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| match e.item {
+                Item::Folder { bytes, .. } if keep(i) => bytes,
+                _ => 0,
+            })
+            .sum();
+        folders + store.bytes(&live)
+    };
     if r.max_mb > 0 {
         let cap = r.max_mb.saturating_mul(1024 * 1024);
-        let total = |gone: &[bool]| -> u64 {
-            let live: HashSet<String> = entries
-                .iter()
-                .zip(gone)
-                .filter_map(|(e, g)| match &e.item {
-                    Item::Snapshot { id } if !g => Some(id.clone()),
-                    _ => None,
-                })
-                .collect();
-            let folders: u64 = entries
-                .iter()
-                .zip(gone)
-                .map(|(e, g)| match e.item {
-                    Item::Folder { bytes, .. } if !g => bytes,
-                    _ => 0,
-                })
-                .sum();
-            folders + store.bytes(&live)
-        };
         for i in (1..entries.len()).rev() {
             if total(&gone) <= cap {
                 break;
             }
-            if !gone[i] && entries[i].when <= now - GRACE_SECS {
+            if !gone[i] && !backlog[i] && !young(&entries[i]) {
                 gone[i] = true;
             }
         }
     }
     let mut out: Vec<usize> = (0..entries.len()).filter(|&i| gone[i]).collect();
     out.reverse();
-    out
+    Choice { left: total(&gone), gone: out, backlog: backlog.iter().filter(|b| **b).count() }
 }
 
-/// Prunes `root`'s backups under `r` now.
-pub fn prune_with(root: &Path, r: Retention) -> Pruned {
-    run(root, r, false)
+fn marker(root: &Path) -> PathBuf {
+    root.join(crate::sync::BACKUP_DIR).join(MARKER)
 }
 
-/// What [`prune_with`] would remove, touching nothing.
-pub fn preview(root: &Path, r: Retention) -> Pruned {
-    run(root, r, true)
+/// The backlog's newest time: `None` with no marker yet, `Some(None)` with
+/// no backlog.
+fn read_backlog(root: &Path) -> Option<Option<i64>> {
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(marker(root)).ok()?).ok()?;
+    Some(v["backlog_to"].as_i64())
 }
 
-fn run(root: &Path, r: Retention, dry: bool) -> Pruned {
+fn write_backlog(root: &Path, t: Option<i64>) {
+    let _ = fs::write(marker(root), serde_json::json!({ "backlog_to": t }).to_string());
+}
+
+/// Folders with backups Clean up would remove, or over their size limit.
+static NEEDS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn set_needs(root: &Path, needs: bool) {
+    let mut n = NEEDS.lock().unwrap_or_else(|e| e.into_inner());
+    n.retain(|p| p != root);
+    if needs {
+        n.push(root.to_path_buf());
+    }
+}
+
+/// `root` has old backups only Clean up removes, or is over its size
+/// limit (as of its last check or prune).
+pub fn needs_cleanup(root: &Path) -> bool {
+    NEEDS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p == root)
+}
+
+fn run(root: &Path, r: Retention, mode: Mode, dry: bool, dispose: Dispose) -> Pruned {
     let _g = lock_for(root);
     let (entries, store, _) = scan(root);
     let now = crate::time::now();
-    let pick = choose(&entries, &store, r, now);
+    let backlog_to = match mode {
+        Mode::Full => None,
+        Mode::Auto => read_backlog(root).unwrap_or_else(|| {
+            // First automatic run in this folder: what was already past the
+            // rules before the backup just made is the backlog.
+            let before = entries.get(1..).unwrap_or_default();
+            let c = choose(before, &store, r, now, None);
+            let t = c.gone.iter().map(|&i| before[i].when).max();
+            if !dry {
+                write_backlog(root, t);
+            }
+            t
+        }),
+    };
+    let c = choose(&entries, &store, r, now, backlog_to);
     let live_before: HashSet<String> = store.uses.keys().cloned().collect();
     let mut out = Pruned::default();
+    let mut dirs = Vec::new();
     let mut snaps = Vec::new();
-    for i in pick {
+    for &i in &c.gone {
         match &entries[i].item {
             Item::Folder { dir, bytes } => {
-                // A file still open (a running game) keeps its folder for next time.
-                if dry || fs::remove_dir_all(dir).is_ok() {
-                    out.folders += 1;
-                    out.freed += bytes;
-                }
+                dirs.push(dir.clone());
+                out.folders += 1;
+                out.freed += bytes;
             }
             Item::Snapshot { id } => snaps.push(id.clone()),
         }
@@ -258,16 +379,49 @@ fn run(root: &Path, r: Retention, dry: bool) -> Pruned {
         let live_after: HashSet<String> = live_before.iter().filter(|id| !snaps.contains(id)).cloned().collect();
         out.freed += store.bytes(&live_before) - store.bytes(&live_after);
         out.snapshots = snaps.len();
-        if !dry {
-            crate::snapshots::delete_many(root, &snaps);
-        }
     }
+    let over = r.max_mb > 0 && c.left > r.max_mb.saturating_mul(1024 * 1024);
+    if dry {
+        return out;
+    }
+    if !dirs.is_empty()
+        && let Err(e) = dispose(root, &dirs)
+    {
+        // A file still open (a running game) keeps them for next time.
+        log::warn!("cleaning up backups in {}: {e:#}", root.display());
+        out.folders = 0;
+        out.freed = 0;
+    }
+    if !snaps.is_empty()
+        && let Err(e) = crate::snapshots::take_out(root, &snaps).and_then(|p| p.map_or(Ok(()), |p| dispose(root, &[p])))
+    {
+        log::warn!("cleaning up snapshots in {}: {e:#}", root.display());
+        out.snapshots = 0;
+    }
+    if mode == Mode::Full {
+        write_backlog(root, None);
+    }
+    set_needs(root, c.backlog > 0 || over);
     out
 }
 
-/// Prunes `root`'s backups under the current policy.
-pub fn prune(root: &Path) -> Pruned {
-    prune_with(root, policy())
+/// Clean up: moves every backup in `root` past the current rules to the
+/// Recycle Bin (Hopper Server: the server's trash).
+pub fn clean_up(root: &Path) -> Pruned {
+    run(root, policy(), Mode::Full, false, disposer())
+}
+
+/// What [`clean_up`] would remove now, touching nothing.
+pub fn preview(root: &Path) -> Pruned {
+    run(root, policy(), Mode::Full, true, disposer())
+}
+
+/// Notes whether `root` has old backups for Clean up, touching nothing.
+pub fn check(root: &Path) {
+    let r = policy();
+    let p = run(root, r, Mode::Full, true, disposer());
+    let over = r.max_mb > 0 && usage(root).limited() > r.max_mb.saturating_mul(1024 * 1024);
+    set_needs(root, p.count() > 0 || over);
 }
 
 /// One prune per folder at a time.
@@ -290,9 +444,9 @@ fn lock_for(root: &Path) -> std::sync::MutexGuard<'static, ()> {
 /// Folders waiting for a prune.
 static PENDING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-/// Prunes `root` a few seconds from now, in the background. Called after
-/// every new backup; a run of them (one per file during a sync) coalesces
-/// into one prune.
+/// Prunes what just crossed the rules in `root`, a few seconds from now in
+/// the background. Called after every new backup; a run of them (one per
+/// file during a sync) coalesces into one prune.
 pub fn schedule(root: &Path) {
     if cfg!(test) {
         return;
@@ -308,17 +462,17 @@ pub fn schedule(root: &Path) {
     let _ = std::thread::Builder::new().name("hopper-prune".into()).spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(5));
         PENDING.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x != &root);
-        prune(&root);
+        run(&root, policy(), Mode::Auto, false, disposer());
     });
 }
 
-/// Prunes every folder in `roots`, one after another, in the background
+/// [`check`]s every folder in `roots` in the background, removing nothing
 /// (each app at start).
-pub fn prune_all_later(roots: Vec<PathBuf>) {
-    let _ = std::thread::Builder::new().name("hopper-prune-all".into()).spawn(move || {
+pub fn check_all_later(roots: Vec<PathBuf>) {
+    let _ = std::thread::Builder::new().name("hopper-backups-check".into()).spawn(move || {
         for r in roots {
             if r.join(crate::sync::BACKUP_DIR).is_dir() {
-                prune(&r);
+                check(&r);
             }
         }
     });
@@ -337,7 +491,32 @@ mod tests {
         root
     }
 
-    /// An action folder `days` old holding one file of `bytes`.
+    /// Tests' Recycle Bin: `<root>/disposed/`.
+    fn to_bin(root: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
+        let bin = root.join("disposed");
+        fs::create_dir_all(&bin)?;
+        for p in paths {
+            fs::rename(p, bin.join(p.file_name().unwrap()))?;
+        }
+        Ok(())
+    }
+
+    fn full(root: &Path, r: Retention) -> Pruned {
+        run(root, r, Mode::Full, false, to_bin)
+    }
+
+    fn auto(root: &Path, r: Retention) -> Pruned {
+        run(root, r, Mode::Auto, false, to_bin)
+    }
+
+    fn binned(root: &Path) -> Vec<String> {
+        let mut v: Vec<String> =
+            fs::read_dir(root.join("disposed")).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    /// An action folder holding one file of `bytes`.
     fn action(root: &Path, name: &str, bytes: usize) -> PathBuf {
         let d = root.join(crate::sync::BACKUP_DIR).join(name);
         fs::create_dir_all(&d).unwrap();
@@ -345,38 +524,23 @@ mod tests {
         d
     }
 
+    /// What's in `.hopper-backups`, but not the marker.
     fn names(root: &Path) -> Vec<String> {
         let mut v: Vec<String> = fs::read_dir(root.join(crate::sync::BACKUP_DIR))
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != MARKER)
             .collect();
         v.sort();
         v
     }
 
-    /// What the default rules would remove from `HOPPER_RETENTION_ROOT`,
-    /// touching nothing.
-    #[test]
-    #[ignore]
-    fn preview_real_folder() {
-        let Ok(root) = std::env::var("HOPPER_RETENTION_ROOT") else { return };
-        let root = PathBuf::from(root);
-        let u = usage(&root);
-        let p = preview(&root, Retention::default());
-        println!("{u:?}
-would remove {p:?}");
-    }
+    const NO_RULES: Retention = Retention { keep_actions: 0, keep_days: 0, max_mb: 0 };
 
     #[test]
-    fn preview_touches_nothing() {
-        let root = tmp("preview");
-        action(&root, "1000", 10);
-        action(&root, "2000", 10);
-        let p = preview(&root, Retention { keep_actions: 0, keep_days: 0, max_mb: 0 });
-        assert_eq!((p.folders, p.freed), (1, 10));
-        assert_eq!(names(&root), ["1000", "2000"]);
-        fs::remove_dir_all(&root).unwrap();
+    fn defaults_keep_30_actions_and_30_days_with_no_size_limit() {
+        assert_eq!(Retention::default(), Retention { keep_actions: 30, keep_days: 30, max_mb: 0 });
     }
 
     #[test]
@@ -386,11 +550,12 @@ would remove {p:?}");
         assert_eq!(stamp("undo-1793138546"), Some(1793138546));
         assert_eq!(stamp("worlds"), None);
         assert_eq!(stamp("before-restore"), None);
+        assert_eq!(stamp(".pruned-1793138546510"), None);
         assert_eq!(stamp("run.bat.21.1.1"), None);
     }
 
     #[test]
-    fn keeps_the_last_n_and_the_recent_and_drops_the_oldest_first() {
+    fn clean_up_keeps_the_last_n_and_the_recent_and_bins_the_rest() {
         let root = tmp("order");
         let now = crate::time::now();
         // 30 actions a day apart, the newest 23 hours old.
@@ -398,17 +563,19 @@ would remove {p:?}");
         for i in 1..=30 {
             action(&root, &at(i), 10);
         }
-        let r = Retention { keep_actions: 5, keep_days: 10, max_mb: 0 };
-        let p = prune_with(&root, r);
-        // Kept: the 10 younger than 10 days.
+        let p = full(&root, Retention { keep_actions: 5, keep_days: 10, max_mb: 0 });
+        // Kept: the 10 younger than 10 days (more than the last 5).
         assert_eq!(p.folders, 20);
         let left = names(&root);
         assert_eq!(left.len(), 10);
         assert!(left.contains(&at(1)) && left.contains(&at(10)));
         assert!(!left.contains(&at(11)));
+        // Nothing deleted: all 20 are in the bin.
+        assert_eq!(binned(&root).len(), 20);
+        assert!(binned(&root).contains(&at(30)));
 
-        // keep_actions wins when it's the larger: nothing more goes.
-        let p = prune_with(&root, Retention { keep_actions: 20, keep_days: 0, max_mb: 0 });
+        // keep_actions wins when it's the larger.
+        let p = full(&root, Retention { keep_actions: 20, keep_days: 0, max_mb: 0 });
         assert_eq!(p.folders, 0);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -424,38 +591,42 @@ would remove {p:?}");
         fs::write(b.join("run.bat.21.1.1"), "x").unwrap();
         action(&root, "1000", 10);
         action(&root, "2000", 10);
-        let p = prune_with(&root, Retention { keep_actions: 0, keep_days: 0, max_mb: 0 });
+        let p = full(&root, NO_RULES);
         assert_eq!(p.folders, 1);
         assert_eq!(names(&root), ["2000", "before-restore", "run.bat.21.1.1", "worlds"]);
         let u = usage(&root);
         assert_eq!(u.actions, 1);
         assert_eq!(u.managed, 10);
-        assert_eq!(u.kept, 4096 * 2 + 1);
+        let marker_len = fs::metadata(marker(&root)).unwrap().len();
+        assert_eq!((u.pinned, u.other), (0, 4096 * 2 + 1 + marker_len));
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn never_deletes_the_newest_even_over_the_cap() {
+    fn never_removes_the_newest_even_over_the_cap() {
         let root = tmp("newest");
+        let cap = Retention { keep_actions: 0, keep_days: 0, max_mb: 1 };
         action(&root, "1000", 3 * 1024 * 1024);
-        let p = prune_with(&root, Retention { keep_actions: 0, keep_days: 0, max_mb: 1 });
-        assert_eq!(p, Pruned::default());
+        assert_eq!(full(&root, cap), Pruned::default());
+        assert!(needs_cleanup(&root));
         action(&root, "2000", 3 * 1024 * 1024);
-        let p = prune_with(&root, Retention { keep_actions: 0, keep_days: 0, max_mb: 1 });
-        assert_eq!(p.folders, 1);
+        assert_eq!(full(&root, cap).folders, 1);
         assert_eq!(names(&root), ["2000"]);
+        assert!(needs_cleanup(&root));
+        full(&root, Retention { max_mb: 4, ..cap });
+        assert!(!needs_cleanup(&root));
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn the_size_cap_drops_oldest_until_under() {
+    fn the_size_cap_bins_oldest_until_under() {
         let root = tmp("cap");
         let now = crate::time::now();
         // Five 1 MB actions, all recent enough to keep by days and count.
         for i in 1..=5 {
             action(&root, &(now - i * 3600).to_string(), 1024 * 1024);
         }
-        let p = prune_with(&root, Retention { keep_actions: 20, keep_days: 14, max_mb: 3 });
+        let p = full(&root, Retention { keep_actions: 20, keep_days: 14, max_mb: 3 });
         assert_eq!(p.folders, 2);
         assert_eq!(p.freed, 2 * 1024 * 1024);
         let left = names(&root);
@@ -471,14 +642,70 @@ would remove {p:?}");
         action(&root, &now.to_string(), 2 * 1024 * 1024);
         action(&root, &(now - 60).to_string(), 2 * 1024 * 1024);
         action(&root, &(now - 3600).to_string(), 2 * 1024 * 1024);
-        let p = prune_with(&root, Retention { keep_actions: 0, keep_days: 0, max_mb: 1 });
+        let p = full(&root, Retention { keep_actions: 0, keep_days: 0, max_mb: 1 });
         assert_eq!(p.folders, 1);
         assert_eq!(names(&root).len(), 2);
         fs::remove_dir_all(&root).unwrap();
     }
 
-    /// A snapshot manifest written straight, `when` seconds, using `files`
-    /// (hash, size) blobs.
+    #[test]
+    fn preview_touches_nothing() {
+        let root = tmp("preview");
+        action(&root, "1000", 10);
+        action(&root, "2000", 10);
+        let p = run(&root, NO_RULES, Mode::Full, true, to_bin);
+        assert_eq!((p.folders, p.freed), (1, 10));
+        assert_eq!(names(&root), ["1000", "2000"]);
+        assert!(!marker(&root).exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn after_a_backup_only_what_it_pushed_out_goes_and_the_backlog_waits() {
+        let root = tmp("auto");
+        let now = crate::time::now();
+        let r = Retention { keep_actions: 3, keep_days: 7, max_mb: 0 };
+        // A backlog from before: 10 actions, 31 to 40 days old.
+        let old = |i: i64| (now - (30 + i) * DAY).to_string();
+        for i in 1..=10 {
+            action(&root, &old(i), 10);
+        }
+        // First automatic run, right after a new backup: what crossed the
+        // rules before stays.
+        action(&root, &(now - 20).to_string(), 10);
+        let p = auto(&root, r);
+        // Only the one this backup pushed past "the last 3" goes.
+        assert_eq!(p.folders, 1);
+        assert_eq!(binned(&root), [old(3)]);
+        assert!(needs_cleanup(&root));
+        // The next backup pushes out one more.
+        action(&root, &(now - 10).to_string(), 10);
+        assert_eq!(auto(&root, r).folders, 1);
+        assert_eq!(binned(&root), [old(3), old(2)]);
+        // Clean up takes the rest of the backlog.
+        let p = full(&root, r);
+        assert_eq!(p.folders, 7);
+        assert!(!needs_cleanup(&root));
+        assert_eq!(binned(&root).len(), 9);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn after_a_clean_up_actions_aging_out_go_with_the_next_backup() {
+        let root = tmp("aging");
+        let now = crate::time::now();
+        let r = Retention { keep_actions: 1, keep_days: 7, max_mb: 0 };
+        // Cleaned up 5 days ago; this action turned 7 days old since.
+        action(&root, &(now - 8 * DAY).to_string(), 10);
+        write_backlog(&root, None);
+        action(&root, &(now - 20).to_string(), 10);
+        assert_eq!(auto(&root, r).folders, 1);
+        assert_eq!(binned(&root), [(now - 8 * DAY).to_string()]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A snapshot manifest written straight, using `files` (hash, size)
+    /// blobs.
     fn snapshot(root: &Path, id: i64, reason: &str, name: &str, files: &[(&str, usize)]) {
         let base = root.join(crate::sync::BACKUP_DIR).join(crate::snapshots::DIR);
         let entries: Vec<_> = files
@@ -500,7 +727,7 @@ would remove {p:?}");
     }
 
     #[test]
-    fn prunes_automatic_snapshots_and_their_unused_blobs_only() {
+    fn bins_automatic_snapshots_and_their_unused_blobs_only() {
         let root = tmp("snaps");
         // Old automatic ones sharing "aa11", a manual one and a named one.
         snapshot(&root, 1_000_000, "bulk_update", "", &[("aa11", 100), ("bb22", 200)]);
@@ -510,12 +737,20 @@ would remove {p:?}");
         // The newest action, a folder.
         action(&root, "5000", 10);
         assert_eq!(usage(&root).managed, 100 + 200 + 300 + 10);
-        let p = prune_with(&root, Retention { keep_actions: 0, keep_days: 0, max_mb: 0 });
+        let p = full(&root, NO_RULES);
         assert_eq!(p.snapshots, 2);
         assert_eq!(p.freed, 600);
         let left: Vec<String> = crate::snapshots::list(&root).into_iter().map(|s| s.id).collect();
         assert_eq!(left, ["4000000", "3000000"]);
         assert_eq!(blob_count(&root), 2);
+        // Both manifests and their three blobs went to the bin, in one folder.
+        let bin = binned(&root);
+        assert_eq!(bin.len(), 1);
+        let pruned = root.join("disposed").join(&bin[0]);
+        assert!(pruned.join("1000000.json").is_file() && pruned.join("2000000.json").is_file());
+        for h in ["aa11", "bb22", "cc33"] {
+            assert!(pruned.join("blobs").join(&h[..2]).join(h).is_file(), "{h}");
+        }
         assert_eq!(names(&root), ["5000", "snapshots"]);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -525,7 +760,7 @@ would remove {p:?}");
         let root = tmp("shared");
         snapshot(&root, 1_000_000, "bulk_update", "", &[("aa11", 100), ("bb22", 200)]);
         snapshot(&root, 2_000_000, "bulk_update", "", &[("aa11", 100)]);
-        let p = prune_with(&root, Retention { keep_actions: 1, keep_days: 0, max_mb: 0 });
+        let p = full(&root, Retention { keep_actions: 1, keep_days: 0, max_mb: 0 });
         assert_eq!((p.snapshots, p.freed), (1, 200));
         assert_eq!(blob_count(&root), 1);
         assert_eq!(crate::snapshots::list(&root)[0].id, "2000000");
@@ -556,7 +791,7 @@ would remove {p:?}");
         snapshot(&root, 2_000_000, "bulk_update", "", &[("aa11", 100)]);
         action(&root, "3000", 10);
         snapshot(&root, 4_000_000, "pack_update", "", &[("bb22", 100)]);
-        let p = prune_with(&root, Retention { keep_actions: 2, keep_days: 0, max_mb: 0 });
+        let p = full(&root, Retention { keep_actions: 2, keep_days: 0, max_mb: 0 });
         assert_eq!((p.folders, p.snapshots), (1, 1));
         assert_eq!(names(&root), ["3000", "snapshots"]);
         assert_eq!(crate::snapshots::list(&root)[0].id, "4000000");
