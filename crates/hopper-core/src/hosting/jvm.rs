@@ -175,6 +175,14 @@ impl JvmArgs {
         self.xmx_mb = Some(mb);
     }
 
+    /// Sets -Xms and -Xmx apart, as a two-thumb slider does: -Xms never
+    /// above -Xmx (Java won't start), None or 0 leaves -Xms out.
+    pub fn set_memory_range(&mut self, xms: Option<u32>, xmx: u32) {
+        let (min, max) = crate::jvm_args::memory_pair(xms, xmx);
+        self.xms_mb = min;
+        self.xmx_mb = Some(max);
+    }
+
     /// Replaces every `-XX:` flag with `preset`'s, keeping the rest (system
     /// properties like `-Dfoo=bar`, agents).
     pub fn set_preset(&mut self, preset: JvmPreset, java_major: u32) {
@@ -240,7 +248,9 @@ pub fn tokenize(line: &str) -> Vec<String> {
     out
 }
 
-fn quote(arg: &str) -> String {
+/// An argument as an argument file or a command line writes it: quoted
+/// when it has spaces.
+pub fn quote(arg: &str) -> String {
     if arg.contains(char::is_whitespace) {
         format!("\"{arg}\"")
     } else {
@@ -285,6 +295,19 @@ mod tests {
         assert_eq!(a.flags, ["-Dlog4j2.formatMsgNoLookups=true"]);
         assert!(!JvmPreset::Zgc.flags(25).contains(&"-XX:+ZGenerational".to_string()));
         assert!(!JvmPreset::Zgc.supported(17));
+    }
+
+    #[test]
+    fn memory_range_keeps_xms_at_most_xmx() {
+        let mut a = JvmArgs::new(4096, JvmPreset::Plain, 21);
+        a.set_memory_range(Some(8192), 16384);
+        assert_eq!((a.xms_mb, a.xmx_mb), (Some(8192), Some(16384)));
+        assert_eq!(a.args()[..2], ["-Xms8G".to_string(), "-Xmx16G".to_string()]);
+        a.set_memory_range(Some(32768), 16384);
+        assert_eq!((a.xms_mb, a.xmx_mb), (Some(16384), Some(16384)));
+        a.set_memory_range(None, 6144);
+        assert_eq!((a.xms_mb, a.xmx_mb), (None, Some(6144)));
+        assert!(!a.to_text().contains("-Xms"));
     }
 
     #[test]

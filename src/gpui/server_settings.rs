@@ -1,5 +1,6 @@
 //! A server's Settings tab: server.properties as a form, and how its JVM
-//! starts (memory, GC flags and, for servers Hopper hosts, which Java).
+//! starts (memory, the Java arguments with their generator, and for servers
+//! Hopper hosts, which Java). Memory and arguments use the instance form.
 
 use crate::store::Store;
 use crate::widgets;
@@ -8,7 +9,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::Field;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
@@ -16,7 +16,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::hosting::properties::{COMMON, PropKind};
-use hopper::hosting::{JvmArgs, JvmPreset, Properties};
+use crate::java_form::JavaForm;
+use hopper::hosting::{JvmArgs, Properties};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -31,8 +32,10 @@ pub struct ServerSettings {
     values: HashMap<&'static str, String>,
     /// Text and number fields, by key.
     inputs: HashMap<&'static str, Entity<InputState>>,
-    memory: Entity<SliderState>,
-    preset: JvmPreset,
+    /// Memory (-Xms/-Xmx) and the Java arguments, as an instance has them.
+    java_form: Entity<JavaForm>,
+    /// The arguments line the form loaded with (memory first).
+    args_orig: String,
     /// A java.exe picked for a hosted server.
     java: Option<PathBuf>,
     /// The hosted server's schedule, as read, and as edited.
@@ -47,9 +50,14 @@ pub struct ServerSettings {
 
 impl ServerSettings {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let memory = cx.new(|_| SliderState::new().min(1.).max(32.).step(0.5));
+        let java_form = cx.new(|cx| {
+            let mut f = JavaForm::new(store.clone(), None, window, cx);
+            let max = hopper::jvm_args::memory_max_mb(hopper::hosting::local_panel::total_memory() / (1024 * 1024));
+            f.set_max_gb(max as f32 / 1024.0, window, cx);
+            f
+        });
         let mut inputs = HashMap::new();
-        let mut subs = vec![cx.subscribe(&memory, |_, _, _: &SliderEvent, cx| cx.notify())];
+        let mut subs = vec![cx.observe(&java_form, |_, _, cx| cx.notify())];
         for spec in COMMON {
             if matches!(spec.kind, PropKind::String | PropKind::Int { .. }) {
                 let input = cx.new(|cx| InputState::new(window, cx).placeholder(spec.default));
@@ -86,8 +94,8 @@ impl ServerSettings {
             jvm: JvmArgs::default(),
             values: HashMap::new(),
             inputs,
-            memory,
-            preset: JvmPreset::Aikar,
+            java_form,
+            args_orig: String::new(),
             java: None,
             error: None,
             _subscriptions: subs,
@@ -108,7 +116,6 @@ impl ServerSettings {
         self.error = None;
         self.props = Properties::load(&root.join("server.properties")).unwrap_or_default();
         self.jvm = JvmArgs::load(&root).unwrap_or_default();
-        self.preset = self.jvm.preset();
         self.java = None;
         self.values.clear();
         for spec in COMMON {
@@ -129,9 +136,14 @@ impl ServerSettings {
         self.restart_at.update(cx, |s, cx| s.set_value(r, window, cx));
         self.warn_at.update(cx, |s, cx| s.set_value(w, window, cx));
         self.max_crashes.update(cx, |s, cx| s.set_value(m, window, cx));
-        let gb = self.jvm.xmx_mb.unwrap_or(4096) as f32 / 1024.0;
-        self.memory
-            .update(cx, |s, cx| s.set_value(gb.clamp(1.0, 32.0), window, cx));
+        let xmx = self.jvm.xmx_mb.unwrap_or(4096);
+        let line = self.jvm.flags.iter().map(|f| hopper::hosting::jvm::quote(f)).collect::<Vec<_>>().join(" ");
+        self.args_orig = hopper::jvm_args::set_memory(&line, self.jvm.xms_mb, Some(xmx));
+        let (args, target) = (self.args_orig.clone(), self.target());
+        self.java_form.update(cx, |f, cx| {
+            f.set_target(Some(target), cx);
+            f.set(xmx, "", &args, None, window, cx);
+        });
         cx.notify();
     }
 
@@ -151,8 +163,10 @@ impl ServerSettings {
         }
     }
 
-    fn memory_mb(&self, cx: &App) -> u32 {
-        (self.memory.read(cx).value().start() * 1024.0).round() as u32
+    /// Memory MB and the arguments line (memory first) the form has now.
+    fn form_args(&self, cx: &App) -> (u32, String) {
+        let (mb, _, args) = self.java_form.read(cx).values();
+        (mb, args)
     }
 
     fn changed(&self, cx: &App) -> bool {
@@ -161,29 +175,23 @@ impl ServerSettings {
         });
         props
             || self.sched != self.schedule
-            || Some(self.memory_mb(cx)) != self.jvm.xmx_mb
-            || self.preset != self.jvm.preset()
+            || {
+                let (mb, args) = self.form_args(cx);
+                Some(mb) != self.jvm.xmx_mb.or(Some(4096)) || args != self.args_orig
+            }
             || self.java.is_some()
     }
 
-    /// The Java major this server runs, for flag presets.
-    fn java_major(&self, cx: &App) -> u32 {
-        let Some(root) = &self.root else { return 21 };
+    /// The Java the generator writes for: the one picked, else the one the
+    /// start script runs, else Java 21 (what Hopper gives a new server).
+    fn target(&self) -> hopper::jvm_args::Target {
         let java = self.java.clone().or_else(|| {
-            hopper::hosting::script::launch_command(root)
-                .ok()
-                .map(|l| PathBuf::from(l.java))
+            let root = self.root.as_ref()?;
+            hopper::hosting::script::launch_command(root).ok().map(|l| l.java)
         });
         java.and_then(|j| hopper::java::inspect(&j))
-            .map(|j| j.major)
-            .or_else(|| {
-                let store = self.store.read(cx);
-                store
-                    .server(root)
-                    .and_then(|s| store.paired(s))
-                    .map(|i| hopper::java::recommended_major(&i.game_version))
-            })
-            .unwrap_or(21)
+            .map(|j| hopper::jvm_args::Target::of(&j))
+            .unwrap_or(hopper::jvm_args::Target { major: Some(21), ..Default::default() })
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -208,11 +216,13 @@ impl ServerSettings {
                 }
             }
         }
+        // The form's line into the file: -Xms / -Xmx from the slider, the
+        // rest one per line (comments kept).
+        let (mb, args) = self.form_args(cx);
+        let typed = JvmArgs::parse(&hopper::jvm_args::without_memory(&args));
         let mut jvm = self.jvm.clone();
-        jvm.set_memory(self.memory_mb(cx));
-        if self.preset != jvm.preset() && self.preset != JvmPreset::Custom {
-            jvm.set_preset(self.preset, self.java_major(cx));
-        }
+        jvm.flags = typed.flags;
+        jvm.set_memory_range(hopper::jvm_args::memory(&args).0, mb);
         let java = self.java.clone();
         let hosted = self.store.read(cx).is_hosted(&root);
         if hosted && let Err(e) = self.sched.validate() {
@@ -317,60 +327,17 @@ impl Render for ServerSettings {
         let theme = cx.theme().clone();
         let hosted = self.store.read(cx).is_hosted(&root);
         let changed = self.changed(cx);
-        let major = self.java_major(cx);
 
         let props = crate::java_form::settings_form(rem)
             .children(COMMON.iter().map(|spec| self.field(spec, rem, cx)));
 
-        let presets: Vec<(String, bool)> = JvmPreset::ALL
-            .iter()
-            .map(|p| {
-                let label = if p.supported(major) {
-                    p.label().to_string()
-                } else {
-                    format!("{} (needs Java 21+)", p.label())
-                };
-                (label, *p == self.preset)
-            })
-            .collect();
-        let view = cx.entity();
-        let preset_picker = widgets::picker(
-            "jvm-preset",
-            if self.preset == JvmPreset::Custom {
-                "Custom flags".to_string()
-            } else {
-                self.preset.label().to_string()
-            },
-            presets,
-            rem,
-            Rc::new(move |ix, _, cx| {
-                if let Some(p) = JvmPreset::ALL.get(ix) {
-                    view.update(cx, |this, cx| {
-                        this.preset = *p;
-                        cx.notify();
-                    });
-                }
-            }),
+        let [memory, _, args] = self.java_form.update(cx, |f, cx| f.parts(rem, cx));
+        let mut jvm = crate::java_form::settings_form(rem).child(
+            Field::new()
+                .label("Memory")
+                .description("The left end sets -Xms, the right end -Xmx. Modded servers want 6 to 10 GB.")
+                .child(memory),
         );
-        let gb = self.memory.read(cx).value().start();
-        let mut jvm = crate::java_form::settings_form(rem)
-            .child(
-                Field::new()
-                    .label("Memory")
-                    .description("The server's -Xms and -Xmx. Modded servers want 6 to 10 GB.")
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(div().w_64().child(Slider::new(&self.memory)))
-                            .child(div().text_sm().child(format!("{gb:.1} GB"))),
-                    ),
-            )
-            .child(
-                Field::new()
-                    .label("GC flags")
-                    .description("Aikar's flags suit almost every server.")
-                    .child(div().w_64().child(preset_picker)),
-            );
         if hosted {
             // The Java run.bat starts, unless another was just picked.
             let current = self.java.clone().or_else(|| {
@@ -390,6 +357,8 @@ impl Render for ServerSettings {
                     Rc::new(move |java: PathBuf, _: &mut Window, cx: &mut App| {
                         view.update(cx, |this, cx| {
                             this.java = Some(java);
+                            let target = this.target();
+                            this.java_form.update(cx, |f, cx| f.set_target(Some(target), cx));
                             cx.notify();
                         })
                     })
@@ -397,6 +366,7 @@ impl Render for ServerSettings {
                 cx,
             ));
         }
+        jvm = jvm.child(Field::new().label("Java arguments").items_start().child(args));
 
         let schedule = hosted.then(|| {
             let next = hopper::hosting::schedule::describe_next_restart(

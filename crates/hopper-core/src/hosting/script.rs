@@ -127,9 +127,15 @@ pub const SCRIPTS: [&str; 2] = [RUN_BAT, "start.bat"];
 /// a new Java is installed), the installed Java that fits its Minecraft
 /// version is used instead.
 pub fn launch_command(root: &Path) -> anyhow::Result<Launch> {
-    let (mut l, text) = read_launch(root)?;
+    let (l, text) = read_launch(root)?;
+    Ok(swap_java(root, l, &text))
+}
+
+/// Plain `java` becomes the installed Java that fits the server's
+/// Minecraft; any java gets its console twin.
+fn swap_java(root: &Path, mut l: Launch, text: &str) -> Launch {
     if is_bare_java(&l.java)
-        && let Some(mc) = minecraft_version(root, &text)
+        && let Some(mc) = minecraft_version(root, text)
         && let Some(best) = crate::java::best(&crate::java::detect(Path::new("")), &mc, crate::java::Side::Server)
     {
         let exe = console_java(&best.install.exe);
@@ -141,19 +147,33 @@ pub fn launch_command(root: &Path) -> anyhow::Result<Launch> {
         l.java = exe;
     }
     l.java = console_java(&l.java);
-    Ok(l)
+    l
+}
+
+/// The command the server would start with if `jvm` were its
+/// `user_jvm_args.txt` (and a start script with its own -Xmx got the same
+/// one, as saving does): the panel's preview before saving.
+pub fn preview_launch(root: &Path, jvm: &JvmArgs) -> anyhow::Result<Launch> {
+    let (l, text) = launch_with(root, jvm, jvm.xmx_mb)?;
+    Ok(swap_java(root, l, &text))
 }
 
 /// The command the server's start script runs (run.bat, else start.bat,
 /// else a server jar with `user_jvm_args.txt`), as written: java not
 /// swapped. Also the script's text ("" without one).
 pub fn read_launch(root: &Path) -> anyhow::Result<(Launch, String)> {
-    let jvm = JvmArgs::load(root)?;
+    launch_with(root, &JvmArgs::load(root)?, None)
+}
+
+/// [`read_launch`] with these Java arguments, and the script's own -Xmx
+/// set to `script_xmx` when given.
+fn launch_with(root: &Path, jvm: &JvmArgs, script_xmx: Option<u32>) -> anyhow::Result<(Launch, String)> {
     for script in SCRIPTS {
-        if let Ok(text) = fs::read_to_string(root.join(script))
-            && let Some(l) = parse_launch(&text, &jvm)
-        {
-            return Ok((l, text));
+        if let Ok(text) = fs::read_to_string(root.join(script)) {
+            let text = script_xmx.and_then(|mb| script_with_memory(&text, mb)).unwrap_or(text);
+            if let Some(l) = parse_launch(&text, jvm) {
+                return Ok((l, text));
+            }
         }
     }
     let jar = ["server.jar", "fabric-server-launch.jar", "quilt-server-launch.jar"]
@@ -345,19 +365,26 @@ pub fn set_script_memory(root: &Path, mb: u32) -> anyhow::Result<bool> {
     for script in SCRIPTS {
         let path = root.join(script);
         let Ok(text) = fs::read_to_string(&path) else { continue };
-        let Some(line) = launch_line(&text) else { continue };
-        let re = regex::Regex::new(r"(?i)-Xmx\d+[kmgt]?").expect("regex");
-        if !re.is_match(line) {
-            return Ok(false);
+        if launch_line(&text).is_none() {
+            continue;
         }
-        let new_line = re.replace_all(line, format!("-Xmx{}", super::jvm::format_mb(mb)).as_str()).into_owned();
-        if new_line == line {
-            return Ok(false);
-        }
-        fs::write(&path, text.replacen(line, &new_line, 1)).with_context(|| format!("writing {}", path.display()))?;
+        let Some(new) = script_with_memory(&text, mb) else { return Ok(false) };
+        fs::write(&path, new).with_context(|| format!("writing {}", path.display()))?;
         return Ok(true);
     }
     Ok(false)
+}
+
+/// `text` with every `-Xmx` on its java line set to `mb`; None when the
+/// line has none (or already says that).
+fn script_with_memory(text: &str, mb: u32) -> Option<String> {
+    let line = launch_line(text)?;
+    let re = regex::Regex::new(r"(?i)-Xmx\d+[kmgt]?").expect("regex");
+    if !re.is_match(line) {
+        return None;
+    }
+    let new_line = re.replace_all(line, format!("-Xmx{}", super::jvm::format_mb(mb)).as_str()).into_owned();
+    (new_line != line).then(|| text.replacen(line, &new_line, 1))
 }
 
 /// Points the launch line at another java, keeping everything else.

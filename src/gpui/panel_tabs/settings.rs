@@ -1,9 +1,10 @@
 //! A Hopper Server server's Settings tab, like the panel's: a section list
 //! on the left (with "Find a setting"), one page of settings on the right.
-//! server.properties fields, memory and GC flags, and the address players
-//! join by wait in one save bar; start files are edited in place.
+//! server.properties fields, memory and the Java arguments, and the address
+//! players join by wait in one save bar; start files are edited in place.
 
 use super::{Load, Target};
+use crate::java_form::JavaForm;
 use crate::store::Store;
 use crate::widgets;
 use crate::widgets::Clickable as _;
@@ -13,7 +14,6 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
@@ -44,7 +44,6 @@ const PAGES: &[(&str, &str, IconName, &[(&str, &[&str])])] = &[
     ("world", "World", IconName::Map, &[("World", &["level-name", "level-seed"]), ("Performance", &["view-distance", "simulation-distance"])]),
     ("network", "Network & address", IconName::Globe, &[("Network", &["server-port"])]),
     ("java", "Memory & Java", IconName::MemoryStick, &[]),
-    ("files", "Start files", IconName::FileCode, &[]),
     ("all", "All properties", IconName::ListTree, &[]),
 ];
 
@@ -71,20 +70,15 @@ struct Spec {
     default: String,
 }
 
-#[derive(Clone)]
-struct Preset {
-    id: String,
-    label: String,
-    supported: bool,
-}
-
 /// `GET .../jvm`.
 #[derive(Clone)]
 struct Jvm {
     memory_mb: Option<u32>,
-    preset: String,
+    /// -Xms in user_jvm_args.txt (panels before 0.13.16 don't say).
+    xms_mb: Option<u32>,
+    /// The Java the panel's generator writes for (major, GraalVM, Oracle).
+    target: hopper::jvm_args::Target,
     flags: Vec<String>,
-    presets: Vec<Preset>,
     java: Option<String>,
     java_major: Option<u64>,
     host_mb: u64,
@@ -170,16 +164,13 @@ fn parse_specs(v: &Value) -> Vec<Spec> {
 fn parse_jvm(v: &Value) -> Jvm {
     Jvm {
         memory_mb: v["memory_mb"].as_u64().map(|m| m as u32),
-        preset: s(v, "preset"),
+        xms_mb: v["xms_mb"].as_u64().map(|m| m as u32),
+        target: hopper::jvm_args::Target {
+            major: v["target"]["major"].as_u64().or(v["java_major"].as_u64()).map(|m| m as u32),
+            graalvm: v["target"]["graalvm"].as_bool().unwrap_or(false),
+            oracle: v["target"]["oracle"].as_bool().unwrap_or(false),
+        },
         flags: v["flags"].as_array().map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect()).unwrap_or_default(),
-        presets: v["presets"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .map(|p| Preset { id: s(p, "id"), label: s(p, "label"), supported: p["supported"].as_bool().unwrap_or(true) })
-                    .collect()
-            })
-            .unwrap_or_default(),
         java: v["java"].as_str().map(String::from),
         java_major: v["java_major"].as_u64(),
         host_mb: v["host_memory_mb"].as_u64().unwrap_or(0),
@@ -249,10 +240,11 @@ pub struct SettingsTab {
     values: BTreeMap<String, String>,
     /// Text and number fields, by key.
     inputs: HashMap<String, Entity<InputState>>,
-    memory: Option<Entity<SliderState>>,
-    /// What the memory slider started at.
-    mem_start: u32,
-    preset: String,
+    /// Memory and the Java arguments, as an instance has them.
+    java_form: Option<Entity<JavaForm>>,
+    /// What the form started with: -Xmx and the arguments line (memory first).
+    xmx_orig: u32,
+    args_orig: String,
     addr_inputs: Vec<Entity<InputState>>,
     sleep_on: bool,
     sleep_min: Entity<InputState>,
@@ -285,9 +277,9 @@ impl SettingsTab {
             search,
             values: BTreeMap::new(),
             inputs: HashMap::new(),
-            memory: None,
-            mem_start: 0,
-            preset: String::new(),
+            java_form: None,
+            xmx_orig: 0,
+            args_orig: String::new(),
             addr_inputs: Vec::new(),
             sleep_on: false,
             sleep_min,
@@ -404,17 +396,23 @@ impl SettingsTab {
         }
         self.inputs = inputs;
 
-        self.memory = None;
-        if let Some(j) = &d.jvm {
-            let host = if j.host_mb > 0 { j.host_mb } else { 65536 };
-            let max_mb = host.saturating_sub(1024).min(65536).max(2048);
-            let max = (max_mb as f32 / 1024.0 * 2.0).floor() / 2.0;
-            let start = (j.memory_mb.unwrap_or(4096) as f32 / 1024.0).clamp(1.0, max);
-            self.mem_start = (start * 1024.0).round() as u32;
-            let slider = cx.new(|_| SliderState::new().min(1.).max(max).step(0.5).default_value(start));
-            subs.push(cx.subscribe(&slider, |_, _, _: &SliderEvent, cx| cx.notify()));
-            self.memory = Some(slider);
-            self.preset = j.preset.clone();
+        self.java_form = None;
+        if let Some(j) = d.jvm.clone() {
+            let max = hopper::jvm_args::memory_max_mb(j.host_mb);
+            let xmx = j.memory_mb.unwrap_or(4096).clamp(1024, max.max(j.memory_mb.unwrap_or(0)));
+            let line = j.flags.iter().map(|f| hopper::hosting::jvm::quote(f)).collect::<Vec<_>>().join(" ");
+            self.xmx_orig = xmx;
+            self.args_orig = hopper::jvm_args::set_memory(&line, j.xms_mb.map(|m| m.min(xmx)), Some(xmx));
+            let (store, args) = (self.store.clone(), self.args_orig.clone());
+            let form = cx.new(|cx| {
+                let mut f = JavaForm::new(store, None, window, cx);
+                f.set_max_gb(max.max(xmx) as f32 / 1024.0, window, cx);
+                f.set_target(Some(j.target), cx);
+                f.set(xmx, "", &args, None, window, cx);
+                f
+            });
+            subs.push(cx.observe(&form, |_, _, cx| cx.notify()));
+            self.java_form = Some(form);
         }
 
         let domain = d.router.as_ref().map(|r| r.domain.clone()).unwrap_or_default();
@@ -482,8 +480,12 @@ impl SettingsTab {
         self.sleep_min.read(cx).value().trim().parse::<u32>().unwrap_or(1).max(1)
     }
 
-    fn mem_mb(&self, cx: &App) -> Option<u32> {
-        self.memory.as_ref().map(|m| (m.read(cx).value().start() * 1024.0).round() as u32)
+    /// The form's -Xmx and arguments line (memory first).
+    fn form_args(&self, cx: &App) -> Option<(u32, String)> {
+        self.java_form.as_ref().map(|f| {
+            let (mb, _, args) = f.read(cx).values();
+            (mb, args)
+        })
     }
 
     fn changed_props(&self) -> Vec<String> {
@@ -495,12 +497,14 @@ impl SettingsTab {
             .collect()
     }
 
-    fn mem_changed(&self, cx: &App) -> bool {
-        self.mem_mb(cx).is_some_and(|m| m != self.mem_start)
-    }
-
-    fn preset_changed(&self) -> bool {
-        self.data.ready().and_then(|d| d.jvm.as_ref()).is_some_and(|j| j.preset != self.preset)
+    /// (memory changed, other arguments changed).
+    fn jvm_changed(&self, cx: &App) -> (bool, bool) {
+        use hopper::jvm_args::{memory, without_memory};
+        let Some((mb, args)) = self.form_args(cx) else { return (false, false) };
+        (
+            mb != self.xmx_orig || memory(&args).0 != memory(&self.args_orig).0,
+            without_memory(&args) != without_memory(&self.args_orig),
+        )
     }
 
     fn addr_changed(&self, cx: &App) -> (bool, bool) {
@@ -511,11 +515,12 @@ impl SettingsTab {
     /// Names of everything unsaved, for the save bar.
     fn changes(&self, cx: &App) -> Vec<String> {
         let mut out = self.changed_props();
-        if self.mem_changed(cx) {
+        let (mem, args) = self.jvm_changed(cx);
+        if mem {
             out.push("memory".into());
         }
-        if self.preset_changed() {
-            out.push("GC flags".into());
+        if args {
+            out.push("Java arguments".into());
         }
         let (addr, sleep) = self.addr_changed(cx);
         if addr {
@@ -540,13 +545,18 @@ impl SettingsTab {
             })
             .collect();
         let mut jvm = serde_json::Map::new();
-        if self.mem_changed(cx)
-            && let Some(m) = self.mem_mb(cx)
-        {
-            jvm.insert("memory_mb".into(), json!(m));
-        }
-        if self.preset_changed() && self.preset != "custom" {
-            jvm.insert("preset".into(), json!(self.preset));
+        let (mem, args_changed) = self.jvm_changed(cx);
+        if let Some((mb, args)) = self.form_args(cx) {
+            if mem {
+                // The panel sets -Xmx, then -Xms on its own (0: none).
+                jvm.insert("memory_mb".into(), json!(mb));
+                jvm.insert("xms_mb".into(), json!(hopper::jvm_args::memory(&args).0.unwrap_or(0)));
+            }
+            if args_changed {
+                let flags = hopper::hosting::JvmArgs::parse(&hopper::jvm_args::without_memory(&args)).flags;
+                let text = flags.iter().map(|f| hopper::hosting::jvm::quote(f)).collect::<Vec<_>>().join("\n");
+                jvm.insert("flags_text".into(), json!(text));
+            }
         }
         let (a, sl) = self.addr_changed(cx);
         let addr = (a || sl).then(|| json!({ "addresses": self.addresses(cx), "sleep_after_minutes": self.sleep_minutes(cx) }));
@@ -965,31 +975,32 @@ impl SettingsTab {
         .into_any_element()
     }
 
+    /// Memory & Java: memory and the Java arguments in the instance form
+    /// (two-thumb slider, generator), the Java, and the start files.
     fn java_page(&self, d: &Data, rem: Pixels, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let Some(j) = d.jvm.clone() else {
             return vec![widgets::caption("The panel didn't say how this server starts.", cx).into_any_element()];
         };
         let mut out = vec![Self::heading("Memory", cx).into_any_element()];
-        if let Some(m) = &self.memory {
-            let mb = self.mem_mb(cx).unwrap_or(0);
-            let host = if j.host_mb > 0 { format!(" This PC has {}.", gb(j.host_mb)) } else { String::new() };
-            out.push(
-                Self::row(
-                    Self::label("Memory"),
-                    Some(format!("The server's -Xms and -Xmx. Modded servers want 6 to 10 GB.{host}")),
-                    None,
-                    h_flex()
-                        .gap_3()
-                        .child(div().w_64().child(Slider::new(m)))
-                        .child(div().w(rems(4.)).text_sm().font_semibold().child(gb(mb as u64)))
-                        .into_any_element(),
-                    self.mem_changed(cx),
-                    cx,
-                )
-                .into_any_element(),
-            );
-        }
+        let parts = self.java_form.as_ref().map(|f| f.update(cx, |f, cx| f.parts(rem, cx)));
+        let (mem_dirty, args_dirty) = self.jvm_changed(cx);
+        let [memory, _, args] = match parts {
+            Some(p) => p,
+            None => return out,
+        };
+        let host = if j.host_mb > 0 { format!(" This PC has {}.", gb(j.host_mb)) } else { String::new() };
+        out.push(
+            Self::row(
+                Self::label("Memory"),
+                Some(format!("The left end sets -Xms, the right end -Xmx. Modded servers want 6 to 10 GB.{host}")),
+                None,
+                memory,
+                mem_dirty,
+                cx,
+            )
+            .into_any_element(),
+        );
         out.push(Self::heading("Java", cx).into_any_element());
         let java = j.java.clone().unwrap_or_else(|| "java on PATH".into());
         out.push(
@@ -1013,47 +1024,17 @@ impl SettingsTab {
             )
             .into_any_element(),
         );
-        let label = if self.preset == "custom" {
-            format!("Custom flags ({})", j.flags.len())
-        } else {
-            j.presets.iter().find(|p| p.id == self.preset).map_or_else(|| self.preset.clone(), |p| p.label.clone())
-        };
-        let items = j
-            .presets
-            .iter()
-            .map(|p| {
-                let l = if p.supported { p.label.clone() } else { format!("{} (needs a newer Java)", p.label) };
-                (l, p.id == self.preset, p.supported)
-            })
-            .collect();
-        let (view, ids) = (cx.entity(), j.presets.iter().map(|p| p.id.clone()).collect::<Vec<_>>());
+        out.push(Self::heading("Java arguments", cx).into_any_element());
         out.push(
-            Self::row(
-                Self::label("GC flags"),
-                Some("How Java frees memory. Aikar's flags suit almost every server.".into()),
-                None,
-                div()
-                    .w_64()
-                    .child(Self::dropdown(
-                        "settings-gc".into(),
-                        label,
-                        items,
-                        rem,
-                        Rc::new(move |ix, _, cx| {
-                            if let Some(id) = ids.get(ix).cloned() {
-                                view.update(cx, |this, cx| {
-                                    this.preset = id;
-                                    cx.notify();
-                                });
-                            }
-                        }),
-                    ))
-                    .into_any_element(),
-                self.preset_changed(),
-                cx,
-            )
-            .into_any_element(),
+            div()
+                .px_2()
+                .py_2()
+                .rounded(theme.radius)
+                .when(args_dirty, |c| c.bg(theme.primary.opacity(0.08)))
+                .child(args)
+                .into_any_element(),
         );
+        out.extend(self.files_page(d, cx));
         out
     }
 
@@ -1123,22 +1104,6 @@ impl SettingsTab {
                 out.push(col.into_any_element());
             }
         }
-        out.push(Self::heading(&format!("Java flags ({})", j.flags.len()), cx).into_any_element());
-        out.push(
-            div()
-                .mx_2()
-                .px_3()
-                .py_2p5()
-                .rounded(theme.radius)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.muted)
-                .text_xs()
-                .font_family(theme.mono_font_family.clone())
-                .text_color(theme.muted_foreground)
-                .child(if j.flags.is_empty() { "None".to_string() } else { j.flags.join("\n") })
-                .into_any_element(),
-        );
         out
     }
 
@@ -1386,7 +1351,6 @@ impl Render for SettingsTab {
             match id {
                 "network" => body.extend(self.address(&d, cx)),
                 "java" => body.extend(self.java_page(&d, rem, cx)),
-                "files" => body.extend(self.files_page(&d, cx)),
                 "all" => {
                     body.push(
                         div()

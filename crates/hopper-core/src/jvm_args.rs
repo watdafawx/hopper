@@ -584,6 +584,222 @@ pub fn conflicts(args: &str, target: Target) -> Vec<String> {
     out
 }
 
+// ---- The generator's rows, shared by Hopper desktop and Hopper Server ----
+//
+// Both apps show the same rows with the same choices and apply a pick the
+// same way, so the same clicks write the same flags in either.
+
+/// The collectors the generator offers, in the order it shows them.
+pub const GC_CHOICES: [(Gc, &str); 5] = [
+    (Gc::Default, "Default"),
+    (Gc::G1, "G1"),
+    (Gc::Aikar, "G1 (Aikar)"),
+    (Gc::Zgc, "ZGC"),
+    (Gc::Shenandoah, "Shenandoah"),
+];
+const CODE_CACHE_CHOICES: [&str; 4] = ["Default", "256M", "512M", "1G"];
+const LOCALE_CHOICES: [&str; 2] = ["System", "en-US"];
+const NIO_CHOICES: [(&str, Option<u64>); 3] = [("Off", None), ("256 KB", Some(262_144)), ("1 MB", Some(1_048_576))];
+
+impl Gc {
+    /// A sentence on what the collector is, for the generator's row.
+    pub fn note(self) -> &'static str {
+        match self {
+            Gc::Default => "No collector flag: Java picks G1 by itself.",
+            Gc::G1 => "G1 with Java's own settings: a safe all-rounder.",
+            Gc::Aikar => "G1 with Aikar's tuning for Minecraft: fewer, shorter pauses. The usual choice up to about 12 GB.",
+            Gc::Zgc => "ZGC: pauses under a millisecond even with big heaps, for a bit more memory and CPU. Java 21+ recommended.",
+            Gc::Shenandoah => "Shenandoah: short pauses like ZGC. Not in Oracle's builds.",
+        }
+    }
+}
+
+/// What a generator row's control is.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Control {
+    Switch { on: bool },
+    /// Segmented choices. A value written by hand that isn't one of them
+    /// shows as one more label (picking it changes nothing); `selected` is
+    /// None when nothing fits (two collectors, or one the generator lacks).
+    Choice { labels: Vec<String>, selected: Option<usize> },
+}
+
+/// One option of the generator.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Row {
+    /// What [`Options::set`] takes.
+    pub id: &'static str,
+    pub label: &'static str,
+    pub note: String,
+    /// A heading the row sits under ("GraalVM"), None for the main list.
+    pub section: Option<&'static str>,
+    #[serde(flatten)]
+    pub control: Control,
+}
+
+/// A pick on a row: a switch turned on or off, or a choice by index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    On(bool),
+    Index(usize),
+}
+
+/// The labels for `values` and which one `current` is ("Default"/the first
+/// when None); a value that isn't one of them is added as the last label.
+fn choice(values: &[&str], current: Option<&str>) -> (Vec<String>, usize) {
+    let mut labels: Vec<String> = values.iter().map(|s| s.to_string()).collect();
+    let ix = match current {
+        None => 0,
+        Some(c) => match values.iter().position(|v| v.eq_ignore_ascii_case(c)) {
+            Some(i) => i,
+            None => {
+                labels.push(c.to_string());
+                labels.len() - 1
+            }
+        },
+    };
+    (labels, ix)
+}
+
+impl Options {
+    /// The generator's rows for these options and this Java.
+    pub fn rows(&self, target: Target) -> Vec<Row> {
+        let explain = |flag: &str| explain(flag).unwrap_or_default();
+        let switch = |id, label, flag: &str, on: bool| Row {
+            id,
+            label,
+            note: explain(flag),
+            section: None,
+            control: Control::Switch { on },
+        };
+        let pick = |id, label, note: String, (labels, ix): (Vec<String>, usize)| Row {
+            id,
+            label,
+            note,
+            section: None,
+            control: Control::Choice { labels, selected: Some(ix) },
+        };
+        // A collector that isn't a choice, or two: none selected.
+        let other_gc = self.extra.iter().any(|t| t.starts_with("-XX:+Use") && t.ends_with("GC"));
+        let gc_ix = if self.gc == Gc::Default && other_gc {
+            None
+        } else {
+            GC_CHOICES.iter().position(|(g, _)| *g == self.gc)
+        };
+        let mut rows = vec![
+            Row {
+                id: "gc",
+                label: "Garbage collector",
+                note: self.gc.note().into(),
+                section: None,
+                control: Control::Choice { labels: GC_CHOICES.iter().map(|(_, l)| l.to_string()).collect(), selected: gc_ix },
+            },
+            switch("pre_touch", "Pre-touch memory", "-XX:+AlwaysPreTouch", self.pre_touch),
+            switch("disable_explicit_gc", "Ignore forced GCs", "-XX:+DisableExplicitGC", self.disable_explicit_gc),
+            switch("string_dedup", "String deduplication", "-XX:+UseStringDeduplication", self.string_dedup),
+        ];
+        if target.major.is_none_or(|m| m >= 24) || self.compact_headers {
+            rows.push(switch("compact_headers", "Compact object headers", "-XX:+UseCompactObjectHeaders", self.compact_headers));
+        }
+        rows.push(pick(
+            "code_cache",
+            "Code cache",
+            explain("-XX:ReservedCodeCacheSize=512M"),
+            choice(&CODE_CACHE_CHOICES, self.code_cache.as_deref()),
+        ));
+        let locale_now = self.locale.as_ref().map(|l| match &l.country {
+            Some(c) => format!("{}-{c}", l.language),
+            None => l.language.clone(),
+        });
+        rows.push(pick(
+            "locale",
+            "Locale",
+            "Reports English (US) to mods, which fixes crashes and misread numbers under some system languages.".into(),
+            choice(&LOCALE_CHOICES, locale_now.as_deref()),
+        ));
+        let nio_now = self.nio_cache.map(|n| {
+            NIO_CHOICES
+                .iter()
+                .find(|(_, v)| *v == Some(n))
+                .map(|(l, _)| l.to_string())
+                .unwrap_or_else(|| format!("{} KB", n / 1024))
+        });
+        rows.push(pick(
+            "nio_cache",
+            "Buffer cache cap",
+            explain("-Djdk.nio.maxCachedBufferSize=262144"),
+            choice(&NIO_CHOICES.map(|(l, _)| l), nio_now.as_deref()),
+        ));
+        if target.graalvm {
+            let graal = |r: Row| Row { section: Some("GraalVM"), ..r };
+            rows.push(graal(switch("jvmci", "Graal compiler", "-XX:+UseJVMCICompiler", self.jvmci)));
+            rows.push(graal(switch("eager_jvmci", "Start Graal early", "-XX:+EagerJVMCI", self.eager_jvmci)));
+            if target.oracle || self.enterprise {
+                rows.push(graal(Row {
+                    note: "Oracle GraalVM's stronger optimizations; usually a few percent faster.".into(),
+                    ..switch("enterprise", "Enterprise optimizations", "", self.enterprise)
+                }));
+            }
+        }
+        rows
+    }
+
+    /// Applies a pick on the row `id`. False when it changes nothing (an
+    /// unknown row, or the extra label of a value written by hand).
+    pub fn set(&mut self, id: &str, pick: Pick) -> bool {
+        match (id, pick) {
+            ("gc", Pick::Index(i)) if i < GC_CHOICES.len() => self.set_gc(GC_CHOICES[i].0),
+            ("pre_touch", Pick::On(v)) => self.pre_touch = v,
+            ("disable_explicit_gc", Pick::On(v)) => self.disable_explicit_gc = v,
+            ("string_dedup", Pick::On(v)) => self.string_dedup = v,
+            ("compact_headers", Pick::On(v)) => self.compact_headers = v,
+            ("jvmci", Pick::On(v)) => self.jvmci = v,
+            ("eager_jvmci", Pick::On(v)) => self.eager_jvmci = v,
+            ("enterprise", Pick::On(v)) => self.enterprise = v,
+            ("code_cache", Pick::Index(i)) if i < CODE_CACHE_CHOICES.len() => {
+                self.code_cache = (i > 0).then(|| CODE_CACHE_CHOICES[i].to_string())
+            }
+            ("locale", Pick::Index(i)) if i < LOCALE_CHOICES.len() => {
+                let region_key = self.locale.as_ref().is_some_and(|l| l.region_key);
+                self.locale = (i == 1).then(|| Locale { language: "en".into(), country: Some("US".into()), region_key });
+            }
+            ("nio_cache", Pick::Index(i)) if i < NIO_CHOICES.len() => self.nio_cache = NIO_CHOICES[i].1,
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// `args` after a pick on a generator row: the generator's flags rebuilt,
+/// flags it doesn't cover kept after them, and `-Xms`/`-Xmx` first as they
+/// were. What both apps run when a generator option changes.
+pub fn regenerate(args: &str, target: Target, id: &str, pick: Pick) -> String {
+    let mut o = Options::parse(args);
+    if !o.set(id, pick) {
+        return args.to_string();
+    }
+    let (xms, xmx) = memory(args);
+    set_memory(&o.build(target), xms, xmx)
+}
+
+/// The `-Xms` and `-Xmx` (MB) a two-thumb memory slider gives, so Java
+/// always starts: the maximum at least 1 MB, the minimum never above it
+/// (0 or None leaves it out).
+pub fn memory_pair(xms: Option<u32>, xmx: u32) -> (Option<u32>, u32) {
+    let xmx = xmx.max(1);
+    (xms.filter(|m| *m > 0).map(|m| m.min(xmx)), xmx)
+}
+
+/// The top of a server's memory slider (MB) on a PC with `host_mb`: its
+/// memory less 1 GB for the system, at most 64 GB, at least 2 GB, in half
+/// gigabytes. Hopper desktop and the panel use the same.
+pub fn memory_max_mb(host_mb: u64) -> u32 {
+    let host = if host_mb > 0 { host_mb } else { 65536 };
+    let mb = host.saturating_sub(1024).clamp(2048, 65536) as u32;
+    mb / 512 * 512
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,6 +976,94 @@ mod tests {
         }
         for f in split(LL8) {
             assert!(explain(&f).is_some(), "{f}");
+        }
+    }
+
+    /// What desktop's generator did before the rows moved here: parse, change
+    /// one option, rebuild, memory first. `regenerate` must match it.
+    fn old_desktop_edit(args: &str, target: Target, f: impl FnOnce(&mut Options)) -> String {
+        let mut o = Options::parse(args);
+        f(&mut o);
+        let (xms, xmx) = memory(args);
+        set_memory(&o.build(target), xms, xmx)
+    }
+
+    #[test]
+    fn regenerate_matches_desktop() {
+        let start = "-Xms4G -Xmx8G -XX:+UseG1GC -Dfml.readTimeout=180";
+        let cases: [(&str, Pick, Box<dyn Fn(&mut Options)>); 8] = [
+            ("gc", Pick::Index(2), Box::new(|o| o.set_gc(Gc::Aikar))),
+            ("gc", Pick::Index(3), Box::new(|o| o.set_gc(Gc::Zgc))),
+            ("pre_touch", Pick::On(true), Box::new(|o| o.pre_touch = true)),
+            ("code_cache", Pick::Index(2), Box::new(|o| o.code_cache = Some("512M".into()))),
+            ("locale", Pick::Index(1), Box::new(|o| {
+                let region_key = o.locale.as_ref().is_some_and(|l| l.region_key);
+                o.locale = Some(Locale { language: "en".into(), country: Some("US".into()), region_key })
+            })),
+            ("nio_cache", Pick::Index(1), Box::new(|o| o.nio_cache = Some(262_144))),
+            ("compact_headers", Pick::On(true), Box::new(|o| o.compact_headers = true)),
+            ("jvmci", Pick::On(true), Box::new(|o| o.jvmci = true)),
+        ];
+        for (id, pick, f) in cases {
+            for target in [TEMURIN21, GRAAL21, Target { major: Some(25), ..TEMURIN21 }] {
+                assert_eq!(regenerate(start, target, id, pick), old_desktop_edit(start, target, &*f), "{id}");
+                assert_eq!(regenerate(LL8, target, id, pick), old_desktop_edit(LL8, target, &*f), "{id} on LL8");
+            }
+        }
+        // Aikar from scratch is the preset's flags, memory kept first.
+        let aikar = regenerate("-Xms6G -Xmx6G", TEMURIN21, "gc", Pick::Index(2));
+        assert!(aikar.starts_with("-Xms6G -Xmx6G -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC"), "{aikar}");
+        assert_eq!(Options::parse(&aikar).gc, Gc::Aikar);
+        // A pick that changes nothing leaves the text as typed.
+        assert_eq!(regenerate("  -Xmx2G  -Dx=1 ", TEMURIN21, "nope", Pick::On(true)), "  -Xmx2G  -Dx=1 ");
+        assert_eq!(regenerate("-XX:ReservedCodeCacheSize=384M", TEMURIN21, "code_cache", Pick::Index(4)), "-XX:ReservedCodeCacheSize=384M");
+    }
+
+    #[test]
+    fn rows_follow_the_java() {
+        let ids = |t: Target, args: &str| Options::parse(args).rows(t).into_iter().map(|r| r.id).collect::<Vec<_>>();
+        let t21 = ids(TEMURIN21, "");
+        assert!(!t21.contains(&"compact_headers") && !t21.contains(&"jvmci"), "{t21:?}");
+        assert!(ids(Target { major: Some(25), ..TEMURIN21 }, "").contains(&"compact_headers"));
+        let g = ids(GRAAL21, "");
+        assert!(g.contains(&"jvmci") && g.contains(&"enterprise"));
+        assert!(!ids(Target { oracle: false, ..GRAAL21 }, "").contains(&"enterprise"));
+
+        let rows = Options::parse(LL8).rows(GRAAL21);
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap().control.clone();
+        assert_eq!(row("gc"), Control::Choice { labels: GC_CHOICES.iter().map(|(_, l)| l.to_string()).collect(), selected: Some(3) });
+        assert_eq!(row("pre_touch"), Control::Switch { on: true });
+        assert!(matches!(row("code_cache"), Control::Choice { selected: Some(2), .. }));
+        // A hand-written size shows as an extra choice.
+        let odd = Options::parse("-XX:ReservedCodeCacheSize=384M").rows(TEMURIN21);
+        let cc = odd.iter().find(|r| r.id == "code_cache").unwrap();
+        assert_eq!(cc.control, Control::Choice { labels: vec!["Default".into(), "256M".into(), "512M".into(), "1G".into(), "384M".into()], selected: Some(4) });
+        // Two collectors: none picked.
+        let two = Options::parse("-XX:+UseG1GC -XX:+UseZGC").rows(TEMURIN21);
+        assert!(matches!(two[0].control, Control::Choice { selected: None, .. }));
+        let par = Options::parse("-XX:+UseParallelGC").rows(TEMURIN21);
+        assert!(matches!(par[0].control, Control::Choice { selected: None, .. }));
+    }
+
+    #[test]
+    fn server_memory_range() {
+        assert_eq!(memory_max_mb(62_566), 61_440);
+        assert_eq!(memory_max_mb(0), 64_512);
+        assert_eq!(memory_max_mb(128 * 1024), 65_536);
+        assert_eq!(memory_max_mb(2048), 2048);
+    }
+
+    #[test]
+    fn memory_pair_keeps_xms_at_most_xmx() {
+        assert_eq!(memory_pair(Some(8192), 16384), (Some(8192), 16384));
+        assert_eq!(memory_pair(Some(20480), 16384), (Some(16384), 16384));
+        assert_eq!(memory_pair(Some(0), 4096), (None, 4096));
+        assert_eq!(memory_pair(None, 0), (None, 1));
+        for xms in [0u32, 512, 4096, 9999, 70000] {
+            for xmx in [0u32, 1024, 4096, 65536] {
+                let (a, b) = memory_pair(Some(xms), xmx);
+                assert!(a.is_none_or(|a| a <= b));
+            }
         }
     }
 
