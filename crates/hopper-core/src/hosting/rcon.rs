@@ -150,22 +150,28 @@ impl Rcon {
     }
 }
 
-/// The command that reports TPS, by loader ("neoforge", "paper", …) and
-/// Minecraft version; `None` when there's no cheap one.
+/// The command that reports TPS, by loader ("neoforge 21.1.259", "paper",
+/// …) and Minecraft version; `None` when there's no cheap one.
+///
+/// spark comes last: it answers on its own thread after the command
+/// returns, so over RCON its reply is empty or only its first line.
 pub fn tps_command(loader: Option<&str>, mc_version: &str, has_spark: bool) -> Option<&'static str> {
-    match loader.map(str::to_ascii_lowercase).as_deref() {
+    // Loaders come with their version ("forge 1.20.1-47.4.10",
+    // "neoforge-21.1.259"): the name is the leading letters.
+    let family = loader.map(|l| l.trim().chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>().to_ascii_lowercase());
+    match family.as_deref() {
         Some("neoforge") => return Some("neoforge tps"),
         Some("forge") => return Some("forge tps"),
         Some("paper" | "purpur" | "spigot" | "folia" | "bukkit") => return Some("tps"),
         _ => {}
     }
-    if has_spark {
-        return Some("spark tps");
-    }
     // Vanilla 1.20.3 added /tick query.
     let mut parts = mc_version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
     let (major, minor, patch) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-    ((major, minor, patch) >= (1, 20, 3)).then_some("tick query")
+    if (major, minor, patch) >= (1, 20, 3) {
+        return Some("tick query");
+    }
+    has_spark.then_some("spark tps")
 }
 
 /// Ticks per second and milliseconds per tick, read from a TPS command's
@@ -178,12 +184,19 @@ pub fn parse_tps(text: &str) -> Option<(f32, Option<f32>)> {
             .filter_map(|t| t.trim_matches('.').parse().ok())
             .collect()
     };
-    // Paper / spark: "TPS from last 1m, 5m, 15m: 20.0, 19.9, 19.8".
+    // Paper: "TPS from last 1m, 5m, 15m: 20.0, 19.9, 19.8"; spark puts the
+    // numbers on the next line. Only that line counts: a spark reply cut
+    // short over RCON can run into another command's answer ("There are 0
+    // of a max of 16 players"), which isn't a TPS of 0.
     if let Some(i) = clean.find("TPS from last") {
         let after = &clean[i..];
         let colon = after.find(':')?;
-        let tps = *nums(&after[colon + 1..]).first()?;
-        return Some((tps.min(20.0), None));
+        let line = after[colon + 1..].lines().find(|l| !l.trim().is_empty())?;
+        let n = nums(line);
+        if n.len() < 3 || !line.contains(',') {
+            return None;
+        }
+        return Some((n[0].min(20.0), None));
     }
     // Vanilla /tick query: "Average time per tick: 1.2ms (Target: 50.0ms)".
     if let Some(i) = clean.find("Average time per tick") {
@@ -242,6 +255,36 @@ mod tests {
         assert_eq!(parse_tps("Unknown command"), None);
     }
 
+    /// Real replies from TNP-LL8 (NeoForge 1.21.1, spark 1.10.124) over RCON.
+    #[test]
+    fn parses_real_replies() {
+        // `neoforge tps`, trimmed to a few of its 52 dimensions.
+        let neo = "Overworld: 20.000 TPS (0.884 ms/tick)
+Meteorite Cluster: 20.000 TPS (0.293 ms/tick)
+sgjourney:cavum_tenebrae: 20.000 TPS (0.223 ms/tick)
+The Nether: 20.000 TPS (0.186 ms/tick)
+AE2 Spatial Storage: 20.000 TPS (0.181 ms/tick)
+Overall: 20.000 TPS (10.574 ms/tick)
+";
+        assert_eq!(parse_tps(neo), Some((20.0, Some(10.574))));
+        // `spark tps`: empty, or only its first line, never the numbers.
+        assert_eq!(parse_tps(""), None);
+        assert_eq!(parse_tps("[⚡] TPS from last 5s, 10s, 1m, 5m, 15m:
+"), None);
+        // The rest of a spark reply showing up in the next command's answer.
+        assert_eq!(parse_tps("[⚡] TPS from last 5s, 10s, 1m, 5m, 15m:
+There are 0 of a max of 16 players online: 
+"), None);
+        // A whole spark reply (made up, in spark's layout), should one come through.
+        let spark = "[⚡] TPS from last 5s, 10s, 1m, 5m, 15m:
+[⚡]  8.1, 9.4, 12.0, 15.2, 18.9
+[⚡]
+[⚡] Tick durations (min/med/95%ile/max ms) from last 10s, 1m:
+[⚡]  12.1/80.3/250.0/900.4;  10.0/70.2/240.1/27000.0
+";
+        assert_eq!(parse_tps(spark), Some((8.1, None)));
+    }
+
     #[test]
     fn picks_a_command() {
         assert_eq!(tps_command(Some("NeoForge"), "1.21.1", false), Some("neoforge tps"));
@@ -249,6 +292,11 @@ mod tests {
         assert_eq!(tps_command(None, "1.21.1", false), Some("tick query"));
         assert_eq!(tps_command(Some("fabric"), "1.20.1", false), None);
         assert_eq!(tps_command(Some("fabric"), "1.20.1", true), Some("spark tps"));
+        // As Hopper reads them from a server's files.
+        assert_eq!(tps_command(Some("neoforge 21.1.259"), "1.21.1", true), Some("neoforge tps"));
+        assert_eq!(tps_command(Some("neoforge-21.1.259"), "1.21.1", true), Some("neoforge tps"));
+        assert_eq!(tps_command(Some("forge 1.20.1-47.4.10"), "1.20.1", true), Some("forge tps"));
+        assert_eq!(tps_command(Some("fabric 0.18.1"), "1.21.1", true), Some("tick query"), "vanilla's over spark");
     }
 
     #[test]

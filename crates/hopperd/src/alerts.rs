@@ -77,7 +77,8 @@ struct Tracker {
     /// When a condition started (it must last before it fires).
     over: HashMap<(String, &'static str), u64>,
     tps: HashMap<String, Tps>,
-    /// Why a server has no TPS: "rcon_off", "unsupported".
+    /// Why a server has no TPS: "rcon_off", "unsupported", or "slow" (it
+    /// didn't answer within [`ANSWER_WAIT`]: ticks are taking seconds).
     no_tps: HashMap<String, &'static str>,
 }
 
@@ -166,6 +167,12 @@ fn has_spark(root: &std::path::Path) -> bool {
     })
 }
 
+/// How long a TPS reading waits for its answer. RCON commands run on the
+/// server thread between ticks, so a lagging server answers late (TNP-LL8
+/// took 10-40 s with single ticks of up to 27 s); a stop still cuts the
+/// wait at once (see [`guard`]).
+const ANSWER_WAIT: Duration = Duration::from_secs(20);
+
 /// An open RCON connection to one server. `idle` is out while a command
 /// runs; `closer` stays so a stop can cut that command short.
 struct Link {
@@ -218,13 +225,20 @@ fn ask_rcon(id: &str, port: u16, pass: &str, cmd: &str, allowed: &dyn Fn() -> bo
                 return Ok(r);
             }
             // A stale connection (the server restarted): one fresh try below.
-            Err(_) => cut(id),
+            // Not after a timeout: a lagging server would only get a second
+            // command waiting behind the first.
+            Err(e) => {
+                cut(id);
+                if e.to_string().contains("didn't answer") {
+                    return Err(e);
+                }
+            }
         }
     }
     if !allowed() {
         anyhow::bail!("server is stopping");
     }
-    let mut c = rcon::Rcon::connect(port, pass, Duration::from_secs(3))?;
+    let mut c = rcon::Rcon::connect(port, pass, ANSWER_WAIT)?;
     let closer = c.closer()?;
     links().lock().unwrap().insert(id.to_string(), Link { port, pass: pass.to_string(), closer, idle: None });
     // The stop may have come while connecting; the guard can't see a
@@ -292,6 +306,7 @@ fn poll_tps(app: &App) {
         };
         let server = e.server.clone();
         let r = ask_rcon(&e.id, port, &pass, cmd, &|| server.rcon_allowed());
+        let timed_out = r.as_ref().is_err_and(|e| e.to_string().contains("didn't answer"));
         let mut st = state().lock().unwrap();
         match r.ok().as_deref().and_then(rcon::parse_tps) {
             Some((tps, mspt)) => {
@@ -303,6 +318,11 @@ fn poll_tps(app: &App) {
                 // a little while.
                 if st.tps.get(&e.id).is_some_and(|t| now() - t.at > 120) {
                     st.tps.remove(&e.id);
+                }
+                if timed_out && !st.tps.contains_key(&e.id) {
+                    st.no_tps.insert(e.id.clone(), "slow");
+                } else if !timed_out && st.no_tps.get(&e.id) == Some(&"slow") {
+                    st.no_tps.remove(&e.id);
                 }
             }
         }
@@ -384,17 +404,25 @@ pub fn start(app: Arc<App>) {
             }
         })
         .ok();
+    // Its own thread: a lagging server can take a while to answer.
+    let p = app.clone();
+    std::thread::Builder::new()
+        .name("tps".into())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_secs(15));
+            loop {
+                let t = Instant::now();
+                poll_tps(&p);
+                std::thread::sleep(Duration::from_secs(30).saturating_sub(t.elapsed()).max(Duration::from_secs(5)));
+            }
+        })
+        .ok();
     std::thread::Builder::new()
         .name("alerts".into())
         .spawn(move || {
             std::thread::sleep(Duration::from_secs(15));
             let mut disks = sysinfo::Disks::new_with_refreshed_list();
-            let mut last_tps = Instant::now() - Duration::from_secs(60);
             loop {
-                if last_tps.elapsed() >= Duration::from_secs(30) {
-                    poll_tps(&app);
-                    last_tps = Instant::now();
-                }
                 check(&app, &mut disks);
                 std::thread::sleep(Duration::from_secs(15));
             }
