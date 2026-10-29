@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Manager {
@@ -117,8 +117,60 @@ pub enum Status {
         players: u32,
         max: u32,
         version: String,
+        /// The round trip, as the multiplayer screen measures it.
+        ms: u32,
     },
     Offline,
+}
+
+impl Status {
+    /// The round trip in milliseconds, when it answered.
+    pub fn ms(&self) -> Option<u32> {
+        match self {
+            Status::Online { ms, .. } => Some(*ms),
+            Status::Offline => None,
+        }
+    }
+}
+
+/// Bars out of five for a ping, as Minecraft's server list draws them
+/// (0: didn't answer).
+pub fn signal_bars(ms: Option<u32>) -> u8 {
+    match ms {
+        None => 0,
+        Some(m) if m < 150 => 5,
+        Some(m) if m < 300 => 4,
+        Some(m) if m < 600 => 3,
+        Some(m) if m < 1000 => 2,
+        Some(_) => 1,
+    }
+}
+
+/// A ping as the server list writes it: "34 ms", or "<1 ms" on the same
+/// network where it rounds to nothing.
+pub fn ping_text(ms: u32) -> String {
+    if ms == 0 { "<1 ms".into() } else { format!("{ms} ms") }
+}
+
+/// Where to ping an address players join by: "host" or "host:port"
+/// (25565 when it gives none).
+pub fn join_target(address: &str) -> Option<(String, u16)> {
+    let a = address.trim();
+    let a = a.split_once("://").map_or(a, |(_, rest)| rest).trim_end_matches('/');
+    if a.is_empty() {
+        return None;
+    }
+    match a.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && !h.contains(':') => Some((h.to_string(), p.parse().ok()?)),
+        _ => Some((a.to_string(), 25565)),
+    }
+}
+
+/// A reply from Hopper Server's address router standing in for a server
+/// that isn't up ("Sleeping", "Offline"…): it marks those with protocol -1,
+/// which no real server sends.
+fn is_standin(v: &serde_json::Value) -> bool {
+    v["version"]["protocol"].as_i64() == Some(-1)
 }
 
 /// Server List Ping (the multiplayer screen's request).
@@ -149,6 +201,7 @@ fn ping_inner(host: &str, port: u16) -> anyhow::Result<Status> {
     packet.extend(body);
     // Status request: length 1, id 0.
     packet.extend([0x01, 0x00]);
+    let sent = Instant::now();
     s.write_all(&packet)?;
 
     let _len = read_varint(&mut s)?;
@@ -157,11 +210,33 @@ fn ping_inner(host: &str, port: u16) -> anyhow::Result<Status> {
     let mut json = vec![0; json_len];
     s.read_exact(&mut json)?;
     let v: serde_json::Value = serde_json::from_slice(&json)?;
+    if is_standin(&v) {
+        return Ok(Status::Offline);
+    }
+    // The status reply's time, unless the ping packet answers (the
+    // multiplayer screen's number: it leaves out building the status).
+    let status_ms = sent.elapsed().as_millis() as u32;
+    let ms = pong(&mut s).unwrap_or(status_ms);
     Ok(Status::Online {
         players: v["players"]["online"].as_u64().unwrap_or(0) as u32,
         max: v["players"]["max"].as_u64().unwrap_or(0) as u32,
         version: v["version"]["name"].as_str().unwrap_or("").to_string(),
+        ms,
     })
+}
+
+/// Sends the status ping (id 1 with a number to echo) and times the pong.
+fn pong(s: &mut TcpStream) -> anyhow::Result<u32> {
+    let mut packet = vec![0x09, 0x01];
+    packet.extend_from_slice(&42i64.to_be_bytes());
+    let sent = Instant::now();
+    s.write_all(&packet)?;
+    let _len = read_varint(s)?;
+    let id = read_varint(s)?;
+    anyhow::ensure!(id == 1, "not a pong");
+    let mut back = [0u8; 8];
+    s.read_exact(&mut back)?;
+    Ok(sent.elapsed().as_millis() as u32)
 }
 
 fn write_varint(buf: &mut Vec<u8>, value: i32) {
@@ -192,6 +267,92 @@ fn read_varint(r: &mut impl Read) -> anyhow::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A one-connection server that answers the status request with
+    /// `json`, then echoes the ping packet.
+    fn fake_server(json: &'static str) -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            // Handshake, then the status request.
+            for _ in 0..2 {
+                let len = read_varint(&mut c).unwrap() as usize;
+                let mut b = vec![0; len];
+                c.read_exact(&mut b).unwrap();
+            }
+            let mut body = vec![0x00];
+            write_varint(&mut body, json.len() as i32);
+            body.extend_from_slice(json.as_bytes());
+            let mut out = Vec::new();
+            write_varint(&mut out, body.len() as i32);
+            out.extend(body);
+            c.write_all(&out).unwrap();
+            // The ping: echo it back as the pong.
+            let len = read_varint(&mut c).unwrap() as usize;
+            let mut b = vec![0; len];
+            if c.read_exact(&mut b).is_ok() {
+                let mut out = Vec::new();
+                write_varint(&mut out, len as i32);
+                out.extend(b);
+                let _ = c.write_all(&out);
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn ping_reads_status_and_times_it() {
+        let port = fake_server(r#"{"version":{"name":"1.21.1","protocol":767},"players":{"max":16,"online":2}}"#);
+        match ping("127.0.0.1", port) {
+            Status::Online { players, max, version, ms } => {
+                assert_eq!((players, max, version.as_str()), (2, 16, "1.21.1"));
+                assert!(ms < 1000);
+            }
+            Status::Offline => panic!("should answer"),
+        }
+        // Hopper Server's router standing in for a stopped server.
+        let port = fake_server(r#"{"version":{"name":"Sleeping","protocol":-1},"players":{"max":16,"online":0}}"#);
+        assert!(matches!(ping("127.0.0.1", port), Status::Offline));
+    }
+
+    #[test]
+    fn ping_texts() {
+        assert_eq!(ping_text(0), "<1 ms");
+        assert_eq!(ping_text(34), "34 ms");
+    }
+
+    #[test]
+    fn join_targets() {
+        assert_eq!(join_target("tnp-ll8.kyuubi.dev"), Some(("tnp-ll8.kyuubi.dev".into(), 25565)));
+        assert_eq!(join_target(" play.example.com:25570 "), Some(("play.example.com".into(), 25570)));
+        assert_eq!(join_target("192.168.50.3:25565"), Some(("192.168.50.3".into(), 25565)));
+        assert_eq!(join_target("minecraft://mc.example.com/"), Some(("mc.example.com".into(), 25565)));
+        assert_eq!(join_target(""), None);
+        assert_eq!(join_target("host:notaport"), None);
+    }
+
+    #[test]
+    fn standin_replies_are_not_servers() {
+        assert!(is_standin(&serde_json::json!({ "version": { "name": "Sleeping", "protocol": -1 } })));
+        assert!(!is_standin(&serde_json::json!({ "version": { "name": "1.21.1", "protocol": 767 } })));
+        assert!(!is_standin(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn signal_bars_follow_the_server_list() {
+        assert_eq!(signal_bars(None), 0);
+        assert_eq!(signal_bars(Some(0)), 5);
+        assert_eq!(signal_bars(Some(149)), 5);
+        assert_eq!(signal_bars(Some(150)), 4);
+        assert_eq!(signal_bars(Some(299)), 4);
+        assert_eq!(signal_bars(Some(300)), 3);
+        assert_eq!(signal_bars(Some(599)), 3);
+        assert_eq!(signal_bars(Some(600)), 2);
+        assert_eq!(signal_bars(Some(999)), 2);
+        assert_eq!(signal_bars(Some(1000)), 1);
+        assert_eq!(signal_bars(Some(5000)), 1);
+    }
 
     #[test]
     fn place_names_remote_servers() {

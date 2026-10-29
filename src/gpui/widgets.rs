@@ -410,6 +410,65 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
         .child(text.into())
 }
 
+/// A ping's color: green with four or five bars, yellow with three, red
+/// below that or when the server didn't answer.
+pub fn ping_color(ms: Option<u32>, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match hopper::server::signal_bars(ms) {
+        4.. => theme.success,
+        3 => theme.warning,
+        _ => theme.danger,
+    }
+}
+
+/// Five rising bars for a ping, like Minecraft's server list, or a red
+/// cross when the server didn't answer. `h`: the tallest bar's height.
+pub fn signal_bars(ms: Option<u32>, h: Pixels, cx: &App) -> AnyElement {
+    let lit = hopper::server::signal_bars(ms);
+    let color = ping_color(ms, cx);
+    if lit == 0 {
+        return Icon::new(IconName::X).xsmall().text_color(color).into_any_element();
+    }
+    let off = cx.theme().foreground.opacity(0.15);
+    h_flex()
+        .flex_none()
+        .items_end()
+        .gap(px(1.5))
+        .h(h)
+        .children((1..=5u8).map(|i| {
+            div()
+                .w(px(3.))
+                .h(h * (i as f32 / 5.))
+                .rounded(px(1.))
+                .bg(if i <= lit { color } else { off })
+        }))
+        .into_any_element()
+}
+
+/// A TPS reading's color: green at full speed, yellow when slowing, red
+/// when it lags.
+pub fn tps_color(t: &hopper::panel::Tps, cx: &App) -> Hsla {
+    use hopper::panel::TpsLevel;
+    let theme = cx.theme();
+    match t.level() {
+        TpsLevel::Good => theme.success,
+        TpsLevel::Slow => theme.warning,
+        TpsLevel::Bad => theme.danger,
+    }
+}
+
+/// "TPS 19.9" as a tinted chip in the reading's color, with the time a
+/// tick takes on hover (server rows and the Library's Server tab).
+pub fn tps_chip(id: impl Into<ElementId>, t: &hopper::panel::Tps, cx: &App) -> Stateful<Div> {
+    let tip: SharedString = t
+        .mspt_text()
+        .map_or_else(|| "Ticks per second; 20 is full speed".to_string(), |m| format!("{m}; 20 TPS is full speed"))
+        .into();
+    pill(format!("TPS {}", t.text()), tps_color(t, cx), false)
+        .id(id)
+        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+}
+
 /// A small figure with a caption under it, on a faint tile.
 pub fn stat_tile(value: impl Into<SharedString>, label: &str, cx: &App) -> Div {
     let theme = cx.theme();

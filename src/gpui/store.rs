@@ -9,7 +9,7 @@ use hopper::instances::{self, Instance};
 use hopper::jobs::{Job, Jobs};
 use hopper::server::{ServerInfo, Status};
 use hopper::settings::Settings;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -137,6 +137,8 @@ impl EventEmitter<StoreEvent> for Store {}
 pub const UPDATES_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 /// How often a running Hopper looks for a newer release of itself
 /// (GitHub allows 60 unauthenticated API calls an hour).
+/// How often every server is pinged again.
+pub const PING_EVERY: Duration = Duration::from_secs(30);
 pub const SELF_UPDATE_EVERY: Duration = Duration::from_secs(30 * 60);
 
 pub enum Updates {
@@ -246,6 +248,8 @@ pub struct Store {
     javas: Option<Vec<hopper::java::JavaInstall>>,
     javas_asked: bool,
     statuses: HashMap<PathBuf, Status>,
+    /// Servers with a ping on its way.
+    pinging: HashSet<PathBuf>,
     /// Each server's state in the server panel, when one is set up.
     panel_stats: HashMap<PathBuf, hopper::panel::PanelStats>,
     /// The servers folder's servers, before merging.
@@ -280,6 +284,7 @@ pub struct Store {
     /// Watches Downloads for files to download by hand.
     _download_watch: Option<Task<()>>,
     _update_watch: Option<Task<()>>,
+    _ping_watch: Option<Task<()>>,
     _self_update_watch: Option<Task<()>>,
     /// Bumped whenever servers change on disk.
     server_rev: u64,
@@ -403,6 +408,7 @@ impl Store {
             javas: None,
             javas_asked: false,
             statuses: HashMap::new(),
+            pinging: HashSet::new(),
             panel_stats: HashMap::new(),
             folder_servers: Vec::new(),
             panel_servers: HashMap::new(),
@@ -428,6 +434,7 @@ impl Store {
             _panel_poll: None,
             _download_watch: None,
             _update_watch: None,
+            _ping_watch: None,
             _self_update_watch: None,
             server_rev: 0,
             peer_hub: None,
@@ -446,6 +453,7 @@ impl Store {
         store._panel_poll = Some(Self::panel_poll(cx));
         store._download_watch = Some(Self::download_watch(cx));
         store._update_watch = Some(Self::update_watch(cx));
+        store._ping_watch = Some(Self::ping_watch(cx));
         // Hosted servers were found by refresh(): start their scheduler.
         let scheduler = hopper::hosting::Scheduler::start(store.local.clone());
         scheduler.start_autostart(&store.local);
@@ -485,6 +493,24 @@ impl Store {
                     }
                     if !stale.is_empty() {
                         cx.notify();
+                    }
+                });
+                if ok.is_err() {
+                    return;
+                }
+            }
+        })
+    }
+
+    /// Pings every server again every [`PING_EVERY`], so the state dots and
+    /// ping bars stay current while Hopper stays open.
+    fn ping_watch(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PING_EVERY).await;
+                let ok = this.update(cx, |s, _| {
+                    for srv in s.servers.clone() {
+                        s.ping(&srv);
                     }
                 });
                 if ok.is_err() {
@@ -680,7 +706,21 @@ impl Store {
                     }
                     let next: HashMap<_, _> = found.into_iter().collect();
                     if next != s.panel_stats {
+                        // A join address showed up (or changed): ping that.
+                        let moved: Vec<ServerInfo> = s
+                            .servers
+                            .iter()
+                            .filter(|x| {
+                                x.remote.is_some()
+                                    && next.get(&x.root).map(|p| p.addresses.first())
+                                        != s.panel_stats.get(&x.root).map(|p| p.addresses.first())
+                            })
+                            .cloned()
+                            .collect();
                         s.panel_stats = next;
+                        for x in &moved {
+                            s.ping(x);
+                        }
                         cx.notify();
                     }
                 });
@@ -983,6 +1023,7 @@ impl Store {
                 self.breaks.insert(root, map);
             }
             Msg::Status { key, status } => {
+                self.pinging.remove(&key);
                 self.statuses.insert(key, status);
             }
             Msg::ServersChanged => {
@@ -3011,8 +3052,31 @@ impl Store {
         self.statuses.get(root)
     }
 
-    pub fn ping(&self, s: &ServerInfo) {
+    /// A ping to the server is on its way.
+    pub fn pinging(&self, root: &Path) -> bool {
+        self.pinging.contains(root)
+    }
+
+    /// Pings the server (unless a ping is already on its way); its result
+    /// lands in [`Self::status`].
+    pub fn ping(&mut self, s: &ServerInfo) {
+        if !self.pinging.insert(s.root.clone()) {
+            return;
+        }
         // Hosted servers answer on this PC.
+        // A server behind Hopper Server's router: the address players join
+        // by, so the number is the one they'd see (its own port is often
+        // closed to other PCs).
+        let join = s
+            .remote
+            .as_ref()
+            .and_then(|_| self.panel_stats(&s.root)?.addresses.first())
+            .and_then(|a| hopper::server::join_target(a));
+        if let Some((host, port)) = join {
+            let key = s.root.clone();
+            self.spawn(move || Msg::Status { key, status: hopper::server::ping(&host, port) });
+            return;
+        }
         let host = if self.is_hosted(&s.root) {
             "127.0.0.1".to_string()
         } else if let Some(r) = &s.remote {

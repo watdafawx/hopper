@@ -1683,7 +1683,13 @@ impl LibraryView {
             let players = store
                 .panel_stats(&s.root)
                 .filter(|p| p.running && !p.starting && p.max > 0)
-                .map(|p| format!(", {}/{} players", p.online, p.max));
+                .map(|p| {
+                    // TPS and ping too, where they're known.
+                    let tps = p.tps.map(|t| format!(", {} TPS", t.text())).unwrap_or_default();
+                    let ms = store.status(&s.root).and_then(|st| st.ms());
+                    let ping = ms.map(|m| format!(", {} ping", hopper::server::ping_text(m))).unwrap_or_default();
+                    format!(", {}/{} players{tps}{ping}", p.online, p.max)
+                });
             (s.root.clone(), s.name.clone(), players.unwrap_or_default())
         });
         let can_pair = paired.is_none() && !store.servers().is_empty();
