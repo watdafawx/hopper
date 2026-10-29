@@ -120,7 +120,8 @@ pub fn uptime(secs: u64) -> String {
     }
 }
 
-fn total_memory() -> u64 {
+/// This PC's memory in bytes.
+pub fn total_memory() -> u64 {
     let mut s = sysinfo::System::new();
     s.refresh_memory();
     s.total_memory()

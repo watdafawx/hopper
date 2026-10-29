@@ -14,7 +14,7 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Selectable a
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::java::{JavaInstall, PRESETS, recommended_major};
-use hopper::jvm_args::{self, Gc, Locale, Options, Target};
+use hopper::jvm_args::{self, Control, Options, Pick, Target};
 use hopper::settings::JavaPreset;
 use std::rc::Rc;
 
@@ -49,6 +49,9 @@ pub struct JavaForm {
     explained: Option<String>,
     /// The saved presets show as a list to rename, update or delete.
     managing: bool,
+    /// The Java the arguments are for when the form doesn't pick it (a
+    /// server's Settings, which shows its own Java row).
+    target: Option<Target>,
     naming: Option<Naming>,
     name: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
@@ -114,10 +117,30 @@ impl JavaForm {
             show_flags: false,
             explained: None,
             managing: false,
+            target: None,
             naming: None,
             name,
             _subscriptions: subs,
         }
+    }
+
+    /// A server's slider: 1 GB up to `max_gb`, in place of the instance one.
+    /// Call before [`Self::set`].
+    pub fn set_max_gb(&mut self, max_gb: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let min = self.min_gb;
+        self.memory = cx.new(|_| SliderState::new().min(min).max(max_gb.max(min + 1.)).step(0.5).default_value((min, min)));
+        self._subscriptions.push(cx.subscribe_in(&self.memory, window, |this, _, e: &SliderEvent, window, cx| {
+            if let SliderEvent::Change(v) = e {
+                this.memory_moved(v.start(), v.end(), window, cx);
+            }
+        }));
+    }
+
+    /// The Java the arguments are for, when the form's own Java row isn't
+    /// shown (a server's: its panel says which).
+    pub fn set_target(&mut self, target: Option<Target>, cx: &mut Context<Self>) {
+        self.target = target;
+        cx.notify();
     }
 
     /// Loads values to edit.
@@ -182,20 +205,13 @@ impl JavaForm {
         self.set_args(&args, window, cx);
     }
 
-    /// Rebuilds the arguments after the generator changes an option.
-    fn edit(
-        &mut self,
-        target: Target,
-        f: impl FnOnce(&mut Options),
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let mut o = Options::parse(&self.args_text);
-        f(&mut o);
-        // Memory flags stay first, as the slider writes them.
-        let (xms, xmx) = hopper::jvm_args::memory(&self.args_text);
-        let args = hopper::jvm_args::set_memory(&o.build(target), xms, xmx);
-        self.set_args(&args, window, cx);
+    /// Rebuilds the arguments after a pick on a generator row (the same
+    /// rebuild Hopper Server's panel runs).
+    fn edit(&mut self, target: Target, id: &str, pick: Pick, window: &mut Window, cx: &mut Context<Self>) {
+        let args = jvm_args::regenerate(&self.args_text, target, id, pick);
+        if args != self.args_text {
+            self.set_args(&args, window, cx);
+        }
     }
 
     fn presets(&self, cx: &App) -> Vec<JavaPreset> {
@@ -440,6 +456,7 @@ impl JavaForm {
         // The Java the arguments are for: the picked one, else the
         // launcher's own (never GraalVM).
         let target = match &picked {
+            _ if self.target.is_some() => self.target.unwrap_or_default(),
             Some(j) => Target::of(j),
             None if self.java_path.is_empty() => Target {
                 major: want,
@@ -751,212 +768,41 @@ impl JavaForm {
 
     /// The generator: options with a sentence each. Every change rewrites
     /// the arguments at once; flags it doesn't cover stay after its own.
+    /// The rows come from hopper-core, shared with Hopper Server's panel.
     fn generator_panel(&self, target: Target, cx: &mut Context<Self>) -> AnyElement {
         let o = Options::parse(&self.args_text);
-        let explain = |flag: &str| jvm_args::explain(flag).unwrap_or_default();
-
-        // A collector that isn't a choice, or two: none selected.
-        let other_gc = o.extra.iter().any(|t| t.starts_with("-XX:+Use") && t.ends_with("GC"));
-        let gc_ix = match o.gc {
-            Gc::Default if other_gc => None,
-            Gc::Default => Some(0),
-            Gc::G1 => Some(1),
-            Gc::Aikar => Some(2),
-            Gc::Zgc => Some(3),
-            Gc::Shenandoah => Some(4),
-        };
-        let gc_note = match o.gc {
-            Gc::Default => "No collector flag: Java picks G1 by itself.",
-            Gc::G1 => "G1 with Java's own settings: a safe all-rounder.",
-            Gc::Aikar => "G1 with Aikar's tuning for Minecraft: fewer, shorter pauses. The usual choice up to about 12 GB.",
-            Gc::Zgc => "ZGC: pauses under a millisecond even with big heaps, for a bit more memory and CPU. Java 21+ recommended.",
-            Gc::Shenandoah => "Shenandoah: short pauses like ZGC. Not in Oracle's builds.",
-        };
-        let gc = segmented(
-            "gen-gc",
-            ["Default", "G1", "G1 (Aikar)", "ZGC", "Shenandoah"].map(String::from).to_vec(),
-            gc_ix,
-            cx.listener(move |this, ix: &usize, w, cx| {
-                let gc = [Gc::Default, Gc::G1, Gc::Aikar, Gc::Zgc, Gc::Shenandoah][(*ix).min(4)];
-                this.edit(target, |o| o.set_gc(gc), w, cx)
-            }),
-        );
-
-        let switch = |id: &'static str, on: bool, set: fn(&mut Options, bool), cx: &mut Context<Self>| {
-            Switch::new(id).checked(on).on_click(cx.listener(move |this, v: &bool, w, cx| {
-                let v = *v;
-                this.edit(target, |o| set(o, v), w, cx)
-            }))
-        };
-
-        // A value Hopper didn't write shows as one more choice.
-        let choice = |values: &[&str], current: Option<&str>| -> (Vec<String>, usize) {
-            let mut labels: Vec<String> = values.iter().map(|s| s.to_string()).collect();
-            let ix = match current {
-                None => 0,
-                Some(c) => match values.iter().position(|v| v.eq_ignore_ascii_case(c)) {
-                    Some(i) => i,
-                    None => {
-                        labels.push(c.to_string());
-                        labels.len() - 1
-                    }
-                },
-            };
-            (labels, ix)
-        };
-
-        const CACHE: [&str; 4] = ["Default", "256M", "512M", "1G"];
-        let (cache_labels, cache_ix) = choice(&CACHE, o.code_cache.as_deref());
-        let cache = segmented(
-            "gen-cache",
-            cache_labels,
-            Some(cache_ix),
-            cx.listener(move |this, ix: &usize, w, cx| {
-                let ix = *ix;
-                if ix >= CACHE.len() {
-                    return;
+        let mut section = None;
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for row in o.rows(target) {
+            if row.section != section {
+                section = row.section;
+                if let Some(head) = section {
+                    rows.push(
+                        div()
+                            .pt_2()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(head.to_uppercase())
+                            .into_any_element(),
+                    );
                 }
-                this.edit(
-                    target,
-                    |o| o.code_cache = (ix > 0).then(|| CACHE[ix].to_string()),
-                    w,
-                    cx,
-                )
-            }),
-        );
-
-        let locale_now = o.locale.as_ref().map(|l| match &l.country {
-            Some(c) => format!("{}-{c}", l.language),
-            None => l.language.clone(),
-        });
-        let (locale_labels, locale_ix) = choice(&["System", "en-US"], locale_now.as_deref());
-        let locale = segmented(
-            "gen-locale",
-            locale_labels,
-            Some(locale_ix),
-            cx.listener(move |this, ix: &usize, w, cx| {
-                let ix = *ix;
-                if ix > 1 {
-                    return;
-                }
-                this.edit(
-                    target,
-                    |o| {
-                        let region_key = o.locale.as_ref().is_some_and(|l| l.region_key);
-                        o.locale = (ix == 1).then(|| Locale {
-                            language: "en".into(),
-                            country: Some("US".into()),
-                            region_key,
-                        });
-                    },
-                    w,
-                    cx,
-                )
-            }),
-        );
-
-        const NIO: [(&str, Option<u64>); 3] = [("Off", None), ("256 KB", Some(262_144)), ("1 MB", Some(1_048_576))];
-        let nio_now = o.nio_cache.map(|n| {
-            NIO.iter()
-                .find(|(_, v)| *v == Some(n))
-                .map(|(l, _)| l.to_string())
-                .unwrap_or_else(|| format!("{} KB", n / 1024))
-        });
-        let (nio_labels, nio_ix) = choice(&NIO.map(|(l, _)| l), nio_now.as_deref());
-        let nio = segmented(
-            "gen-nio",
-            nio_labels,
-            Some(nio_ix),
-            cx.listener(move |this, ix: &usize, w, cx| {
-                let ix = *ix;
-                if ix >= NIO.len() {
-                    return;
-                }
-                this.edit(target, |o| o.nio_cache = NIO[ix].1, w, cx)
-            }),
-        );
-
-        let compact_ok = target.major.is_none_or(|m| m >= 24);
-        let mut rows = vec![
-            gen_row("Garbage collector", gc_note.to_string(), gc.into_any_element(), cx),
-            gen_row(
-                "Pre-touch memory",
-                explain("-XX:+AlwaysPreTouch"),
-                switch("gen-pretouch", o.pre_touch, |o, v| o.pre_touch = v, cx).into_any_element(),
-                cx,
-            ),
-            gen_row(
-                "Ignore forced GCs",
-                explain("-XX:+DisableExplicitGC"),
-                switch("gen-explicit", o.disable_explicit_gc, |o, v| o.disable_explicit_gc = v, cx)
-                    .into_any_element(),
-                cx,
-            ),
-            gen_row(
-                "String deduplication",
-                explain("-XX:+UseStringDeduplication"),
-                switch("gen-dedup", o.string_dedup, |o, v| o.string_dedup = v, cx).into_any_element(),
-                cx,
-            ),
-        ];
-        if compact_ok || o.compact_headers {
-            rows.push(gen_row(
-                "Compact object headers",
-                explain("-XX:+UseCompactObjectHeaders"),
-                switch("gen-compact", o.compact_headers, |o, v| o.compact_headers = v, cx)
-                    .into_any_element(),
-                cx,
-            ));
-        }
-        rows.push(gen_row(
-            "Code cache",
-            explain("-XX:ReservedCodeCacheSize=512M"),
-            cache.into_any_element(),
-            cx,
-        ));
-        rows.push(gen_row(
-            "Locale",
-            "Reports English (US) to mods, which fixes crashes and misread numbers under some system languages.".into(),
-            locale.into_any_element(),
-            cx,
-        ));
-        rows.push(gen_row(
-            "Buffer cache cap",
-            explain("-Djdk.nio.maxCachedBufferSize=262144"),
-            nio.into_any_element(),
-            cx,
-        ));
-        if target.graalvm {
-            rows.push(
-                div()
-                    .pt_2()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().muted_foreground)
-                    .child("GRAALVM")
-                    .into_any_element(),
-            );
-            rows.push(gen_row(
-                "Graal compiler",
-                explain("-XX:+UseJVMCICompiler"),
-                switch("gen-jvmci", o.jvmci, |o, v| o.jvmci = v, cx).into_any_element(),
-                cx,
-            ));
-            rows.push(gen_row(
-                "Start Graal early",
-                explain("-XX:+EagerJVMCI"),
-                switch("gen-eager", o.eager_jvmci, |o, v| o.eager_jvmci = v, cx).into_any_element(),
-                cx,
-            ));
-            if target.oracle || o.enterprise {
-                rows.push(gen_row(
-                    "Enterprise optimizations",
-                    "Oracle GraalVM's stronger optimizations; usually a few percent faster.".into(),
-                    switch("gen-enterprise", o.enterprise, |o, v| o.enterprise = v, cx)
-                        .into_any_element(),
-                    cx,
-                ));
             }
+            let id = row.id;
+            let control = match row.control {
+                Control::Switch { on } => Switch::new(SharedString::from(format!("gen-{id}")))
+                    .checked(on)
+                    .on_click(cx.listener(move |this, v: &bool, w, cx| this.edit(target, id, Pick::On(*v), w, cx)))
+                    .into_any_element(),
+                Control::Choice { labels, selected } => segmented(
+                    SharedString::from(format!("gen-{id}")),
+                    labels,
+                    selected,
+                    cx.listener(move |this, ix: &usize, w, cx| this.edit(target, id, Pick::Index(*ix), w, cx)),
+                )
+                .into_any_element(),
+            };
+            rows.push(gen_row(row.label, row.note, control, cx));
         }
         let kept = o.extra.len();
         v_flex()
@@ -1027,7 +873,7 @@ fn gen_row(label: &str, note: String, control: AnyElement, cx: &App) -> AnyEleme
 }
 
 fn segmented(
-    id: &'static str,
+    id: impl Into<ElementId>,
     labels: Vec<String>,
     selected: Option<usize>,
     on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static,

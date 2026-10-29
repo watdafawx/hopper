@@ -10,7 +10,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use hopper_core::hosting::backup;
 use hopper_core::hosting::properties::{self, PropKind, Properties};
-use hopper_core::hosting::{JvmArgs, JvmPreset, Schedule};
+use hopper_core::hosting::{self, JvmArgs, JvmPreset, Schedule};
+use hopper_core::jvm_args::{self, Options, Pick, Target};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -21,6 +22,7 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new()
         .route("/api/v1/servers/{id}/properties", get(get_props).put(put_props))
         .route("/api/v1/servers/{id}/jvm", get(get_jvm).put(put_jvm))
+        .route("/api/v1/servers/{id}/jvm/preview", post(preview_jvm))
         .route("/api/v1/servers/{id}/players", get(players).post(player_action))
         .route("/api/v1/servers/{id}/schedule", get(get_schedule).put(put_schedule))
         .route("/api/v1/servers/create", post(create))
@@ -113,12 +115,45 @@ async fn put_props(
 /// The Java the server starts with (what the start script says, or the
 /// one Hopper puts in place of a plain `java`), and its major version.
 fn java_of(e: &Entry) -> (Option<String>, Option<u32>) {
+    let (java, install) = java_install(e);
+    (java, install.map(|j| j.major))
+}
+
+/// The Java the server starts with and what it is, when it can be run.
+fn java_install(e: &Entry) -> (Option<String>, Option<hopper_core::java::JavaInstall>) {
     let java = hopper_core::hosting::script::launch_command(&e.root)
         .ok()
         .map(|l| l.java.to_string_lossy().into_owned())
         .or_else(|| hopper_core::server::load(&e.root).java);
-    let major = java.as_deref().and_then(|j| hopper_core::java::inspect(std::path::Path::new(j))).map(|j| j.major);
-    (java, major)
+    let install = java.as_deref().and_then(|j| hopper_core::java::inspect(std::path::Path::new(j)));
+    (java, install)
+}
+
+/// The Java the generator writes flags for: the server's, else Java 21
+/// (what a server Hopper makes gets).
+fn target_of(install: Option<&hopper_core::java::JavaInstall>) -> Target {
+    install.map(Target::of).unwrap_or(Target { major: Some(21), ..Target::default() })
+}
+
+/// What the Memory & Java page shows for these arguments: the generator's
+/// rows, clashes, the flags it doesn't cover and the command line the
+/// server would start with. Desktop shows the same rows and warnings.
+fn jvm_view(e: &Entry, a: &JvmArgs, target: Target) -> Value {
+    let line = a.args().iter().map(|f| hosting::jvm::quote(f)).collect::<Vec<_>>().join(" ");
+    let o = Options::parse(&jvm_args::without_memory(&line));
+    let command = hosting::script::preview_launch(&e.root, a).ok().map(|l| {
+        std::iter::once(hosting::jvm::quote(&l.java.to_string_lossy()))
+            .chain(l.args.iter().map(|f| hosting::jvm::quote(f)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    let explain: BTreeMap<String, String> =
+        a.flags.iter().filter_map(|f| Some((f.clone(), jvm_args::explain(f)?))).collect();
+    json!({
+        "rows": o.rows(target), "conflicts": jvm_args::conflicts(&line, target), "extra": o.extra,
+        "command": command, "explain": explain,
+        "target": { "major": target.major, "graalvm": target.graalvm, "oracle": target.oracle },
+    })
 }
 
 /// The files that decide how the server starts and that exist: start
@@ -141,7 +176,9 @@ async fn get_jvm(
     let total = app.host.read().unwrap().mem_total;
     let v = blocking(move || {
         let a = JvmArgs::load(&e.root)?;
-        let (java, major) = java_of(&e);
+        let (java, install) = java_install(&e);
+        let major = install.as_ref().map(|j| j.major);
+        let view = jvm_view(&e, &a, target_of(install.as_ref()));
         let files = start_files(&e);
         let major_n = major.unwrap_or(21);
         let presets: Vec<Value> = [JvmPreset::Aikar, JvmPreset::Zgc, JvmPreset::Plain]
@@ -152,11 +189,16 @@ async fn get_jvm(
         // line, from user_jvm_args.txt or the start script (BCG's start.bat
         // says -Xmx8G and has no args file). None: the JVM's default.
         let memory = hopper_core::hosting::script::start_info(&e.root).max_memory_mb.or(a.xmx_mb);
-        Ok(json!({
+        let mut v = json!({
             "memory_mb": memory, "preset": format!("{:?}", a.preset()).to_lowercase(), "flags": a.flags,
             "presets": presets, "java": java, "java_major": major, "host_memory_mb": total / (1024 * 1024),
-            "files": files,
-        }))
+            "files": files, "xms_mb": a.xms_mb, "xmx_mb": a.xmx_mb,
+            "memory_max_mb": jvm_args::memory_max_mb(total / (1024 * 1024)),
+        });
+        if let (Value::Object(v), Value::Object(more)) = (&mut v, view) {
+            v.extend(more);
+        }
+        Ok(v)
     })
     .await?;
     Ok(Json(v))
@@ -169,6 +211,9 @@ struct JvmBody {
     /// The Java flags, one or more per line, replacing every flag in
     /// user_jvm_args.txt. An -Xmx / -Xms in it sets memory too.
     flags_text: Option<String>,
+    /// -Xms on its own (a two-thumb slider), applied last: 0 leaves it
+    /// out, above -Xmx it becomes -Xmx.
+    xms_mb: Option<u32>,
 }
 
 async fn put_jvm(
@@ -208,17 +253,76 @@ async fn put_jvm(
             if p.xms_mb.is_some() {
                 a.xms_mb = p.xms_mb;
             }
-            // Java won't start with a minimum heap above the maximum.
-            if let (Some(min), Some(max)) = (a.xms_mb, a.xmx_mb) {
-                if min > max {
-                    a.xms_mb = Some(max);
-                }
+        }
+        if let Some(xms) = b.xms_mb {
+            let xmx = a.xmx_mb.unwrap_or(xms.max(1024));
+            a.set_memory_range(Some(xms), xmx);
+        }
+        // Java won't start with a minimum heap above the maximum.
+        if let (Some(min), Some(max)) = (a.xms_mb, a.xmx_mb) {
+            if min > max {
+                a.xms_mb = Some(max);
             }
         }
         a.save(&e.root)
     })
     .await?;
     Ok(Json(json!({ "ok": true, "restart_needed": running })))
+}
+
+#[derive(Deserialize)]
+struct PreviewBody {
+    /// What the page has now (nothing is saved): memory and the flags box.
+    xms_mb: Option<u32>,
+    xmx_mb: Option<u32>,
+    #[serde(default)]
+    flags_text: String,
+    /// A generator pick to apply first: `{ "row": "gc", "index": 2 }` or
+    /// `{ "row": "pre_touch", "on": true }`.
+    pick: Option<PickBody>,
+}
+
+#[derive(Deserialize)]
+struct PickBody {
+    row: String,
+    on: Option<bool>,
+    index: Option<usize>,
+}
+
+/// The Memory & Java page as it would be with these values, without
+/// saving: the generator (shared with desktop) applies a pick, and the
+/// answer has the new flags, the rows, warnings and the command line.
+async fn preview_jvm(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<PreviewBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let v = blocking(move || {
+        let (_, install) = java_install(&e);
+        let target = target_of(install.as_ref());
+        let typed = JvmArgs::parse(&b.flags_text);
+        let mut a = JvmArgs { flags: typed.flags, ..JvmArgs::default() };
+        if let Some(xmx) = b.xmx_mb.or(typed.xmx_mb) {
+            a.set_memory_range(b.xms_mb.or(typed.xms_mb), xmx);
+        }
+        if let Some(p) = b.pick {
+            let pick = match (p.on, p.index) {
+                (Some(on), _) => Pick::On(on),
+                (None, Some(i)) => Pick::Index(i),
+                (None, None) => anyhow::bail!("A pick needs \"on\" or \"index\"."),
+            };
+            let line = a.flags.iter().map(|f| hosting::jvm::quote(f)).collect::<Vec<_>>().join(" ");
+            a.flags = JvmArgs::parse(&jvm_args::regenerate(&line, target, &p.row, pick)).flags;
+        }
+        let mut v = jvm_view(&e, &a, target);
+        v["flags"] = json!(a.flags);
+        Ok(v)
+    })
+    .await?;
+    Ok(Json(v))
 }
 
 // ---- players ------------------------------------------------------------------------

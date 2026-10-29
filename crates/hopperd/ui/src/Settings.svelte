@@ -7,15 +7,17 @@
   // Settings, one section per page like Hopper desktop's settings: a list
   // on the left switches the page, each page is one column (label left,
   // control right). Search finds a setting on any page. Changes to
-  // server.properties, memory, GC flags and the Java flags all wait in one
-  // save bar; Discard puts every one back.
-  import { SlidersHorizontal, MemoryStick, Save, Search, FileCode, Globe, Users, Map as MapIcon, ListTree, X, ImageUp, ArrowRightLeft } from '@lucide/svelte';
+  // server.properties, memory and the Java arguments all wait in one save
+  // bar; Discard puts every one back.
+  import { SlidersHorizontal, MemoryStick, Save, Search, Globe, Users, Map as MapIcon, ListTree, X, ImageUp, ArrowRightLeft } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { queueUploads, onUploaded } from './lib/transfers.svelte.js';
   import Address from './Address.svelte';
   import Avatar from './Avatar.svelte';
+  import JavaPage from './JavaPage.svelte';
+  import { flagsToText, withoutMemory } from './lib/jvm.js';
 
   // `start`: the page to open on (the header's "Minecraft 1.21.1" opens Version).
   let { server, start = '' } = $props();
@@ -27,14 +29,15 @@
   /** What the form started with (file values, else Minecraft's defaults). */
   let orig = $state({});
   let jvm = $state(null);
-  let mem = $state(4096);
-  /** What the memory slider started at (the server's -Xmx, else 4 GB). */
-  let memOrig = $state(4096);
-  /** The Java flags box, one flag per line, and what it loaded with. */
+  /** The memory slider's two ends in MB: -Xms (0: none) and -Xmx, and
+   * what they started at (the server's, else 4 GB and none). */
+  let xmx = $state(4096);
+  let xms = $state(0);
+  let xmxOrig = $state(4096);
+  let xmsOrig = $state(0);
+  /** The Java arguments box, one per line, and what it loaded with. */
   let flagsText = $state('');
   let flagsOrig = $state('');
-  const flagCount = $derived(flagsText.split('\n').filter((l) => l.trim() && !l.trim().startsWith('#')).length);
-  const hasArgsFile = $derived((jvm?.files || []).includes('user_jvm_args.txt'));
   let filter = $state('');
   let saving = $state(false);
   let page = $state(untrack(() => start || 'general'));
@@ -48,12 +51,11 @@
     ['world', 'World', MapIcon, [['World', ['level-name', 'level-seed']], ['Performance', ['view-distance', 'simulation-distance']]]],
     ['network', 'Network & address', Globe, [['Network', ['server-port']]]],
     ['java', 'Memory & Java', MemoryStick, []],
-    ['files', 'Start files', FileCode, []],
     ['all', 'All properties', ListTree, []],
   ];
   /** Words that find a page (things on it that aren't server.properties keys). */
-  const PAGE_WORDS = { java: 'java memory ram xmx xms gc garbage aikar', files: 'start files run.bat start.bat user_jvm_args flags jvm args arguments script', version:'version minecraft loader neoforge forge fabric quilt paper purpur upgrade downgrade update', general: 'clone copy template duplicate remove delete' };
-  const PAGE_HINT = { version: 'Change Minecraft or loader version', general: 'Clone, save as template, remove', java: 'Memory, Java and GC flags', files: 'Start scripts and Java flags' };
+  const PAGE_WORDS = { java: 'java memory ram xmx xms gc garbage aikar zgc generator start files run.bat start.bat user_jvm_args flags jvm args arguments script command', version:'version minecraft loader neoforge forge fabric quilt paper purpur upgrade downgrade update', general: 'clone copy template duplicate remove delete' };
+  const PAGE_HINT = { version: 'Change Minecraft or loader version', general: 'Clone, save as template, remove', java: 'Memory, Java arguments, generator and start files' };
   const UNITS = { 'view-distance': 'chunks', 'simulation-distance': 'chunks', 'spawn-protection': 'blocks', 'max-players': 'players' };
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -70,17 +72,15 @@
   // A cleared number box binds null: it's an empty value, not "null".
   const str = (v) => (v == null ? '' : String(v));
   const changed = $derived(Object.keys(values).filter((k) => str(values[k]) !== str(orig[k])));
-  // Memory and GC flags wait in the save bar with the properties, as in
-  // desktop's Settings tab.
-  let preset = $state('');
-  const memDirty = $derived(!!jvm && Number(mem) !== memOrig);
-  const presetDirty = $derived(!!jvm && preset !== (jvm.preset ?? ''));
+  // Memory and the Java arguments wait in the save bar with the
+  // properties, as in desktop's Settings tab.
+  const memDirty = $derived(!!jvm && (Number(xmx) !== xmxOrig || Number(xms) !== xmsOrig));
   const flagsDirty = $derived(!!jvm && flagsText !== flagsOrig);
-  const changes = $derived([...changed, ...(memDirty ? ['Memory'] : []), ...(presetDirty ? ['GC flags'] : []), ...(flagsDirty ? ['Java flags'] : [])]);
+  const changes = $derived([...changed, ...(memDirty ? ['Memory'] : []), ...(flagsDirty ? ['Java arguments'] : [])]);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
-  const presetLabel = $derived(preset === 'custom' ? `Custom flags (${jvm?.flags?.length || 0})` : jvm?.presets?.find((p) => p.id === preset)?.label || preset);
-  // An unknown page in the link (#/server/<id>/settings/<page>) opens General.
-  const cur = $derived(PAGES.find((p) => p[0] === page) || PAGES[0]);
+  // An unknown page in the link (#/server/<id>/settings/<page>) opens
+  // General; Start files is part of Memory & Java now.
+  const cur = $derived(PAGES.find((p) => p[0] === (page === 'files' ? 'java' : page)) || PAGES[0]);
   const pg = $derived(cur[0]);
 
   /** Reads server.properties into the form (Minecraft's defaults for
@@ -113,8 +113,8 @@
     }
   }
 
-  /** Saves everything in the save bar: server.properties, then memory, GC
-   * flags and Java flags in one go. A part that saved stops counting as a
+  /** Saves everything in the save bar: server.properties, then memory and
+   * the Java arguments in one go. A part that saved stops counting as a
    * change, so after a failure only what didn't save is left. */
   async function saveAll() {
     saving = true;
@@ -132,12 +132,12 @@
         restart = (await api(`${base}/properties`, { method: 'PUT', body: { values: out } })).restart_needed || restart;
         orig = { ...orig, ...out };
       }
-      if (memDirty || presetDirty || flagsDirty) {
-        // The server applies memory, then the preset, then the flags text.
+      if (memDirty || flagsDirty) {
+        // The server applies -Xmx, the flags text, then -Xms. The slider
+        // sets memory: -Xms / -Xmx typed in the box are left out.
         const body = {};
-        if (memDirty) body.memory_mb = Number(mem);
-        if (presetDirty) body.preset = preset;
-        if (flagsDirty) body.flags_text = flagsText;
+        if (memDirty) { body.memory_mb = Number(xmx); body.xms_mb = Number(xms); }
+        if (flagsDirty) body.flags_text = withoutMemory(flagsText);
         restart = (await api(`${base}/jvm`, { method: 'PUT', body })).restart_needed || restart;
         setJvm(await api(`${base}/jvm`));
       }
@@ -152,16 +152,17 @@
 
   function discard() {
     values = { ...orig };
-    mem = memOrig;
+    xmx = xmxOrig;
+    xms = xmsOrig;
     flagsText = flagsOrig;
-    if (jvm) preset = jvm.preset ?? '';
   }
 
   function setJvm(j) {
     jvm = j;
-    memOrig = mem = j.memory_mb || memOrig;
-    preset = j.preset ?? '';
-    flagsOrig = flagsText = (j.flags || []).join('\n');
+    xmxOrig = xmx = j.memory_mb || xmxOrig;
+    // -Xms from user_jvm_args.txt; one under 1 GB shows at the slider's start.
+    xmsOrig = xms = Math.min(j.xms_mb || 0, xmx);
+    flagsOrig = flagsText = flagsToText(j.flags);
   }
 
   async function pickIcon(ev) {
@@ -260,30 +261,7 @@
         <Address {server} />
       {:else if pg === 'java'}
         {#if jvm}
-          <h4>Memory</h4>
-          <div class="fl" class:dirty={memDirty}><div class="lab"><div>Memory</div><div class="tiny muted">The server's -Xms and -Xmx. Modded servers want 6 to 10 GB.{jvm.host_memory_mb ? ` This PC has ${gb(jvm.host_memory_mb)}.` : ''}</div></div>
-            <div class="ctl"><input class="range" type="range" min="1024" max={Math.max(2048, Math.min(jvm.host_memory_mb - 1024, 65536))} step="512" bind:value={mem} aria-label="Memory" /><b class="memv">{gb(Number(mem))}</b></div></div>
-          <h4>Java</h4>
-          <div class="fl"><div class="lab"><div>Java</div><div class="tiny muted">{jvm.java_major ? `Java ${jvm.java_major}` : 'Version unknown'}: the one the server starts with</div></div>
-            <div class="ctl"><span class="mono small ell" title={jvm.java || ''}>{jvm.java || 'java on PATH'}</span></div></div>
-          <div class="fl" class:dirty={presetDirty}><div class="lab"><div>GC flags</div><div class="tiny muted">How Java frees memory. Aikar's flags suit almost every server.</div></div>
-            <div class="ctl"><select class="sel gc" bind:value={preset} aria-label="GC flags">
-              {#if preset === 'custom'}<option value="custom">{presetLabel}</option>{/if}
-              {#each jvm.presets as p (p.id)}<option value={p.id} disabled={!p.supported}>{p.supported ? p.label : `${p.label} (needs a newer Java)`}</option>{/each}
-            </select></div></div>
-        {:else}
-          <div class="small muted">The panel didn't say how this server starts.</div>
-        {/if}
-      {:else if pg === 'files'}
-        {#if jvm}
-          <h4>Files that start the server</h4>
-          {#each jvm.files || [] as f (f)}
-            <div class="fl"><div class="lab"><div class="mono">{f}</div><div class="tiny muted">{f === 'user_jvm_args.txt' ? 'Java arguments: memory and flags' : 'The start script'}</div></div>
-              <div class="ctl"><a class="btn sm" href="#/server/{encodeURIComponent(server.id)}/edit/{encodeURIComponent(f)}"><FileCode size={13} />Edit</a></div></div>
-          {:else}<div class="small muted">No run.bat, start.bat or user_jvm_args.txt; the server starts from its jar.</div>{/each}
-          <h4>Java flags ({flagCount})</h4>
-          <div class="tiny muted hint">One per line, saved to user_jvm_args.txt.{hasArgsFile ? '' : ' This server has no user_jvm_args.txt yet; its start script may not read one.'}</div>
-          <textarea class="flags mono" class:dirty={flagsDirty} spellcheck="false" rows={Math.min(24, Math.max(6, flagCount + 1))} bind:value={flagsText} aria-label="Java flags"></textarea>
+          <JavaPage {server} {jvm} bind:xms bind:xmx bind:flagsText dirty={{ memory: memDirty, flags: flagsDirty }} />
         {:else}
           <div class="small muted">The panel didn't say how this server starts.</div>
         {/if}
@@ -324,15 +302,9 @@
   .w { width: 100px; padding: 5px 8px; }
   .wide { width: 300px; padding: 5px 9px; }
   .sel { background: var(--base); border: 1px solid var(--line2); border-radius: 6px; padding: 5px 8px; color: var(--text); width: 12rem; font: inherit; }
-  .sel.gc { width: 16rem; }
   .grow { flex: 1; min-width: 0; }
-  .range { width: 260px; accent-color: var(--acc); }
-  .memv { min-width: 56px; text-align: right; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 380px; display: block; }
   .savebar .ell { max-width: none; }
-  .flags { white-space: pre-wrap; word-break: break-all; font-size: 11.5px; background: var(--term); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; max-height: 520px; overflow: auto; color: var(--text); width: 100%; resize: vertical; line-height: 1.5; }
-  .flags:focus { outline: none; border-color: var(--acc); }
-  .flags.dirty { border-color: #f9731677; }
   .savebar { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 30; gap: 10px; padding: 8px 12px; box-shadow: 0 12px 40px #000c; border-color: #f9731677; width: min(620px, calc(100vw - 32px)); }
-  @media (max-width: 900px) { .layout { flex-direction: column; } .secs { width: 100%; position: static; } .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; } .wide, .range { width: 100%; } }
+  @media (max-width: 900px) { .layout { flex-direction: column; } .secs { width: 100%; position: static; } .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; } .wide { width: 100%; } }
 </style>
