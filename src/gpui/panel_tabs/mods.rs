@@ -1291,6 +1291,8 @@ impl ModsTab {
         let theme = cx.theme();
         let (info, warn, danger, success, primary) = (theme.info, theme.warning, theme.danger, theme.success, theme.primary);
         let mut out = Vec::new();
+        // Closed notices are remembered per server.
+        let place = self.target.as_ref().map(|t| format!("{}#{}", t.remote.panel, t.remote.id)).unwrap_or_default();
         if self.identifying {
             out.push(
                 widgets::notice_bar(info, IconName::ScanSearch, cx)
@@ -1337,8 +1339,7 @@ impl ModsTab {
         }
         if let Some(d) = self.data.ready() {
             if !d.curseforge {
-                out.push(
-                    widgets::notice_bar(info, IconName::KeyRound, cx)
+                let body = widgets::notice_bar(info, IconName::KeyRound, cx)
                         .child(
                             v_flex()
                                 .flex_1()
@@ -1369,15 +1370,16 @@ impl ModsTab {
                                                 .on_click(|_, _, cx| cx.open_url("https://console.curseforge.com/")),
                                         ),
                                 ),
-                        )
-                        .into_any_element(),
-                );
+                        );
+                let key = hopper::settings::notice_key(&place, "cf-key", "");
+                out.extend(widgets::closable_notice(body, key, widgets::Closed::Gone, "", info, &self.store, cx));
             }
             let client_on = d.mods.iter().filter(|m| m.side == "client" && m.enabled).count();
             if client_on > 0 {
                 let one = client_on == 1;
-                out.push(
-                    h_flex()
+                let title = format!("{client_on} client-only mod{} on", if one { "" } else { "s" });
+                let key = hopper::settings::notice_key(&place, "client-only", &title);
+                let body = h_flex()
                         .gap_2()
                         .text_sm()
                         .text_color(warn)
@@ -1398,9 +1400,8 @@ impl ModsTab {
                                     this.refilter();
                                     cx.notify();
                                 })),
-                        )
-                        .into_any_element(),
-                );
+                        );
+                out.extend(widgets::closable_notice(body, key, widgets::Closed::Chip, title, warn, &self.store, cx));
             }
         }
         if let Some(ups) = self.updates.as_ref().filter(|u| !u.is_empty() && !self.reviewing) {
@@ -1408,8 +1409,12 @@ impl ModsTab {
             let names = ups.iter().take(3).map(|u| u.name.as_str()).collect::<Vec<_>>().join(", ");
             let more = if n > 3 { format!(" +{}", n - 3) } else { String::new() };
             let label = if n == 1 { "Review 1 update".to_string() } else { format!("Review {n} updates") };
-            out.push(
-                widgets::notice_bar(primary, IconName::CircleArrowUp, cx)
+            let key = hopper::settings::notice_key(
+                &place,
+                "updates",
+                &ups.iter().map(|u| u.name.as_str()).collect::<Vec<_>>().join(";"),
+            );
+            let body = widgets::notice_bar(primary, IconName::CircleArrowUp, cx)
                     .child(div().flex_none().text_sm().font_semibold().child(if n == 1 {
                         "1 update".to_string()
                     } else {
@@ -1423,9 +1428,8 @@ impl ModsTab {
                             .label(label)
                             .disabled(self.busy.is_some())
                             .on_click(cx.listener(|this, _, _, cx| this.open_review(cx))),
-                    )
-                    .into_any_element(),
-            );
+                    );
+            out.extend(widgets::closable_notice(body, key, widgets::Closed::Gone, "", primary, &self.store, cx));
         }
         out
     }

@@ -1873,6 +1873,9 @@ impl AddonsView {
                 for (n, r) in store.update_breaks(&inst.root, u.project_id) {
                     issues.push(format!("stops {n} loading (it needs {r})"));
                 }
+                if let Some(n) = store.update_needs(&inst.root, u.project_id) {
+                    issues.push(format!("needs {n}"));
+                }
                 // A version the user locked out is left out.
                 if a.is_some_and(|a| !a.locked_version.is_empty() && a.locked_version == u.file.file_name) {
                     skip.insert(u.project_id);
@@ -2763,7 +2766,7 @@ impl AddonsView {
         }
         let store = self.store.read(cx);
         if let Some(r) = &self.root {
-            if !store.update_breaks(r, a.project_id).is_empty() {
+            if !store.update_breaks(r, a.project_id).is_empty() || store.update_needs(r, a.project_id).is_some() {
                 return None;
             }
             let hold = !store.queues_updates(r) && store.edit_hold_reason(r).is_some();
@@ -2948,9 +2951,14 @@ impl AddonsView {
             (Some(r), Some(_)) => store.update_breaks(r, a.project_id).to_vec(),
             _ => Vec::new(),
         };
-        // "breaks" / Lock chips share the tag line: categories fold into
-        // "+n" so it isn't clipped off.
-        let lock_line = update.is_some() && (vlocked || !breaks.is_empty());
+        // Reverted because its newer versions need a newer mod: what they need.
+        let needs: Option<String> = match (&self.root, update) {
+            (Some(r), Some(_)) => store.update_needs(r, a.project_id).map(str::to_string),
+            _ => None,
+        };
+        // "breaks" / "needs" / Lock chips share the tag line: categories
+        // fold into "+n" so it isn't clipped off.
+        let lock_line = update.is_some() && (vlocked || !breaks.is_empty() || needs.is_some());
         let tags = widgets::mod_tags(
             widgets::ModTags {
                 key: &file,
@@ -3027,7 +3035,7 @@ Details").into()),
             });
 
         let done = self.recent.contains_key(&a.project_id);
-        let breaking = !breaks.is_empty() && !vlocked;
+        let breaking = (!breaks.is_empty() || needs.is_some()) && !vlocked;
         // A drag across switches or Update buttons: what letting go does.
         let sweep = self.pick.sweeping();
         let swept = self.swept.contains(&file);
@@ -3103,6 +3111,8 @@ Details").into()),
                             } else if vlocked {
                                 let (old, new) = u.versions();
                                 format!("{new} is locked: you keep {old}.\nShift+click to update anyway, or click the lock tag to unlock.")
+                            } else if let Some(n) = needs.as_ref().filter(|_| breaking && breaks.is_empty()) {
+                                format!("{tip}\nIt needs {n}: Hopper went back to this version for that.")
                             } else if breaking {
                                 format!(
                                     "{tip}\nThis stops {} loading: {}",
@@ -3352,7 +3362,7 @@ Change version", a.file_name).into()
                                     this.versions(pid, upd.clone(), window, cx)
                                 }))
                         })
-                    }).children(self.lock_tags(a, update, &breaks, vlocked, cx))),
+                    }).children(self.lock_tags(a, update, &breaks, needs.as_deref(), vlocked, cx))),
             )
             .when(self.action_fits(), |r| r.child(action))
             .children(self.spacer())
@@ -3470,6 +3480,7 @@ Change version", a.file_name).into()
         a: &Addon,
         update: Option<&Update>,
         breaks: &[(String, String)],
+        needs: Option<&str>,
         vlocked: bool,
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
@@ -3499,48 +3510,69 @@ Change version", a.file_name).into()
             );
             return out;
         }
-        if breaks.is_empty() {
+        if breaks.is_empty() && needs.is_none() {
             return out;
         }
-        let inst = self.table.inst.clone();
-        // "breaks X": the first mod with its icon (its page on click), and
-        // how many more in the tooltip.
-        let (first, range) = (breaks[0].0.clone(), breaks[0].1.clone());
-        let found = inst.as_ref().and_then(|i| i.addons.iter().find(|x| x.name == first)).map(|x| (x.project_id, x.icon.clone()));
-        let icon = found.as_ref().and_then(|(_, i)| self.store.read(cx).image(i)).map(std::path::Path::to_path_buf);
-        let tip: SharedString = breaks
-            .iter()
-            .map(|(n, r)| format!("{n} needs {r}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .into();
-        let more = breaks.len() - 1;
-        let pid = found.map_or(0, |(p, _)| p);
-        let warn = theme.warning;
-        out.push(
-            h_flex()
-                .id(key("breaks"))
-                .flex_none()
-                .gap_1()
-                .px_1p5()
-                .rounded(theme.radius)
-                .text_xs()
-                .bg(warn.opacity(widgets::alpha::TINT))
-                .text_color(warn)
-                .child(Icon::new(IconName::TriangleAlert).xsmall())
-                .child("breaks")
-                .child(widgets::thumb(icon.as_deref(), rems(0.85), cx))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(first.clone()))
-                .when(more > 0, |r| r.child(format!("+{more}")))
-                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(format!("{tip}\n(needs {range} now)")).build(w, cx))
-                .when(pid != 0, |d| {
-                    d.clickable(cx).on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.open_peek(pid, cx)
-                    }))
-                })
-                .into_any_element(),
-        );
+        if let Some(n) = needs {
+            let tip = SharedString::from(format!("{new} needs {n}. Hopper went back to this version for that."));
+            let warn = theme.warning;
+            out.push(
+                h_flex()
+                    .id(key("needs"))
+                    .flex_none()
+                    .gap_1()
+                    .px_1p5()
+                    .rounded(theme.radius)
+                    .text_xs()
+                    .bg(warn.opacity(widgets::alpha::TINT))
+                    .text_color(warn)
+                    .child(Icon::new(IconName::TriangleAlert).xsmall())
+                    .child(format!("needs {n}"))
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                    .into_any_element(),
+            );
+        }
+        if !breaks.is_empty() {
+            let inst = self.table.inst.clone();
+            // "breaks X": the first mod with its icon (its page on click), and
+            // how many more in the tooltip.
+            let (first, range) = (breaks[0].0.clone(), breaks[0].1.clone());
+            let found = inst.as_ref().and_then(|i| i.addons.iter().find(|x| x.name == first)).map(|x| (x.project_id, x.icon.clone()));
+            let icon = found.as_ref().and_then(|(_, i)| self.store.read(cx).image(i)).map(std::path::Path::to_path_buf);
+            let tip: SharedString = breaks
+                .iter()
+                .map(|(n, r)| format!("{n} needs {r}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into();
+            let more = breaks.len() - 1;
+            let pid = found.map_or(0, |(p, _)| p);
+            let warn = theme.warning;
+            out.push(
+                h_flex()
+                    .id(key("breaks"))
+                    .flex_none()
+                    .gap_1()
+                    .px_1p5()
+                    .rounded(theme.radius)
+                    .text_xs()
+                    .bg(warn.opacity(widgets::alpha::TINT))
+                    .text_color(warn)
+                    .child(Icon::new(IconName::TriangleAlert).xsmall())
+                    .child("breaks")
+                    .child(widgets::thumb(icon.as_deref(), rems(0.85), cx))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(first.clone()))
+                    .when(more > 0, |r| r.child(format!("+{more}")))
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(format!("{tip}\n(needs {range} now)")).build(w, cx))
+                    .when(pid != 0, |d| {
+                        d.clickable(cx).on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.open_peek(pid, cx)
+                        }))
+                    })
+                    .into_any_element(),
+            );
+        }
         let lock_file = u.file.file_name.clone();
         out.push(
             div()
