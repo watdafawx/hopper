@@ -4502,7 +4502,7 @@ dependencies = [
 
 [[package]]
 name = "hopperd"
-version = "0.13.14"
+version = "0.13.15"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
