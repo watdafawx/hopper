@@ -67,6 +67,7 @@ pub fn execute_local(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let backup_dir = server_root.join(BACKUP_DIR).join(stamp.to_string());
+    crate::retention::schedule(server_root);
     ops.into_iter()
         .map(|op| {
             let r = match &op {
@@ -98,6 +99,9 @@ pub fn backup_into(root: &Path, path: &Path) -> anyhow::Result<Option<PathBuf>> 
         .map_or(0, |d| d.as_secs());
     let dir = root.join(BACKUP_DIR).join(stamp.to_string());
     let saved = backup(path, &dir)?;
+    if saved.is_some() {
+        crate::retention::schedule(root);
+    }
     // Where it came from, so it can go back there.
     if let Some(s) = &saved
         && let Ok(rel) = path.strip_prefix(root)

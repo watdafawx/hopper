@@ -407,6 +407,10 @@ pub(crate) fn undo_remove(store: &Entity<Store>, root: PathBuf, items: Vec<Remov
                 job.note(format!("{} is back already; left the backup alone", it.original.display()));
                 continue;
             }
+            if !it.backup.exists() {
+                job.note(format!("{}: its copy isn't in backups any more", it.original.display()));
+                continue;
+            }
             if std::fs::rename(&it.backup, &it.original).is_err() {
                 std::fs::copy(&it.backup, &it.original)?;
                 std::fs::remove_file(&it.backup)?;

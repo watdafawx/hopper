@@ -1205,6 +1205,7 @@ pub fn put_back(root: &Path, c: &Changed) -> anyhow::Result<PathBuf> {
     if now.is_file() {
         let dir = root.join(crate::sync::BACKUP_DIR).join(crate::time::now().to_string());
         fs::create_dir_all(&dir)?;
+        crate::retention::schedule(root);
         let aside = dir.join(&c.file_name);
         if fs::rename(&now, &aside).is_err() {
             fs::copy(&now, &aside)?;

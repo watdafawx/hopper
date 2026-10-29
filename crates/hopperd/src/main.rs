@@ -310,6 +310,9 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     });
     app.rescan();
     autoupdate::start(app.clone());
+    // Trim what earlier actions left in each server's .hopper-backups.
+    hopper_core::retention::set_policy(cfg.backup_retention);
+    hopper_core::retention::prune_all_later(app.servers.list().iter().map(|e| e.root.clone()).collect());
     // Read every server's mod jars once in the background; the Mods tab
     // then opens from the scan cache instead of opening hundreds of jars.
     {

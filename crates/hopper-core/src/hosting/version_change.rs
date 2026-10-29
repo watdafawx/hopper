@@ -488,6 +488,7 @@ fn target_of(l: &script::Launch) -> Option<LaunchTarget> {
 fn undo_files(root: &Path, backup: &str, job: &Job) -> anyhow::Result<usize> {
     let had: std::collections::HashSet<String> = backup::entries(root, backup)?.into_iter().map(|(n, _)| n).collect();
     let aside = root.join(".hopper-backups").join(format!("undo-{}", now()));
+    crate::retention::schedule(root);
     for folder in ["mods", "plugins"] {
         for e in fs::read_dir(root.join(folder)).into_iter().flatten().flatten() {
             let name = e.file_name().to_string_lossy().into_owned();

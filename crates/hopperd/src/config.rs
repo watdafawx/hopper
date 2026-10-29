@@ -58,6 +58,8 @@ pub struct Config {
     /// Set by rolling back: auto-update doesn't install this version or
     /// older ones again (a newer release still installs).
     pub skip_auto_up_to: Option<String>,
+    /// How long each server's `.hopper-backups` keeps the files behind Undo.
+    pub backup_retention: hopper_core::retention::Retention,
 }
 
 impl Default for Config {
@@ -83,6 +85,7 @@ impl Default for Config {
             trust_local_setup: true,
             auto_update: true,
             skip_auto_up_to: None,
+            backup_retention: Default::default(),
         }
     }
 }

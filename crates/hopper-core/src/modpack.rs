@@ -963,6 +963,7 @@ fn prepare_overrides(root: &Path, overrides: Option<&Overrides>) -> anyhow::Resu
         .join(crate::sync::BACKUP_DIR)
         .join(stamp.to_string())
         .join("pack-update");
+    crate::retention::schedule(root);
     for (rel, remove) in o
         .backup
         .iter()

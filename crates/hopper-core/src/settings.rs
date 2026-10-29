@@ -177,6 +177,8 @@ pub struct Settings {
     pub translate: bool,
     /// Languages (`translate::Lang::code`) translated without asking.
     pub translate_always: Vec<String>,
+    /// How long `.hopper-backups` keeps the files behind Undo.
+    pub backup_retention: crate::retention::Retention,
     /// Settings this build doesn't know (saved by a newer Hopper), kept as
     /// they are so going back a version and forward again loses none.
     #[serde(flatten)]
@@ -388,6 +390,7 @@ impl Default for Settings {
             server_hint_dismissed: Vec::new(),
             translate: false,
             translate_always: Vec::new(),
+            backup_retention: Default::default(),
             unknown: serde_json::Map::new(),
         }
     }

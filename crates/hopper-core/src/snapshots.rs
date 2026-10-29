@@ -348,6 +348,7 @@ pub fn take(root: &Path, reason: Reason) -> anyhow::Result<Snapshot> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let s = take_locked(root, reason, &|_, _| {})?;
     prune_locked(root);
+    crate::retention::schedule(root);
     Ok(s)
 }
 
@@ -365,6 +366,7 @@ pub fn take_in(root: &Path, reason: Reason, job: &crate::jobs::Job) -> anyhow::R
         job.detail(format!("Saving a snapshot to undo this: {i} of {n} files"));
     })?;
     prune_locked(root);
+    crate::retention::schedule(root);
     let mut by = BY_JOB.lock().unwrap_or_else(|e| e.into_inner());
     by.push((job.id(), root.to_path_buf(), s.id.clone()));
     let extra = by.len().saturating_sub(64);
@@ -549,6 +551,18 @@ pub fn delete(root: &Path, id: &str) -> anyhow::Result<()> {
     fs::remove_file(base(root).join(format!("{id}.json")))?;
     gc_locked(root);
     Ok(())
+}
+
+/// Deletes several snapshots, then the files none of the rest use.
+pub fn delete_many(root: &Path, ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for id in ids {
+        let _ = fs::remove_file(base(root).join(format!("{id}.json")));
+    }
+    gc_locked(root);
 }
 
 /// Names a snapshot; an empty name goes back to its reason. A named
@@ -767,6 +781,7 @@ pub fn restore(root: &Path, id: &str, snapshot_first: bool) -> anyhow::Result<Re
     }
     let safety = if snapshot_first { Some(take_locked(root, Reason::BeforeRestore { of: snap.label() }, &|_, _| {})?) } else { None };
     let aside_dir = root.join(crate::sync::BACKUP_DIR).join(format!("restore-{}", now_ms()));
+    crate::retention::schedule(root);
     let after = |e: anyhow::Error| match &safety {
         Some(s) => e.context(format!("Restore stopped partway. \"{}\" in Backups has the instance as it was", s.reason.label())),
         None => e.context(format!("Restore stopped partway. Files it took away are in {}", aside_dir.display())),
