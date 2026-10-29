@@ -97,6 +97,26 @@ pub(crate) fn pack_addon(p: &PackFile, class: u32, from_pack: bool) -> (Addon, O
     (a, update)
 }
 
+/// What a blocked mod asks for that an older version of it may not: a
+/// newer mod or loader.
+fn revert_need(b: &hopper::deps::Blocker) -> Option<hopper::revert::Need> {
+    match &b.kind {
+        hopper::deps::BlockerKind::WrongVersion { needs, have, .. } | hopper::deps::BlockerKind::Loader { id: needs, have, .. } => {
+            Some(hopper::revert::Need { id: needs.clone(), have: have.clone() })
+        }
+        _ => None,
+    }
+}
+
+/// The lowest version a range accepts ("[19.70.0.460,)" → "19.70.0.460").
+fn range_min(range: &str) -> Option<String> {
+    let r = range.trim();
+    let r = r.strip_prefix(['[', '(']).map(|r| r.split(',').next().unwrap_or(""))
+        .unwrap_or(r.trim_start_matches(['>', '=', '~', '^']));
+    let m = r.trim();
+    (!m.is_empty()).then(|| m.to_string())
+}
+
 /// Required mods that are missing, for the mods folder as of `mtime`.
 #[derive(Default)]
 pub struct MissingDeps {
@@ -119,6 +139,9 @@ pub struct MissingDeps {
     /// Wrong-version rows whose asked-for version nobody published (mod
     /// id and range → a version that does exist, as an example).
     pub ghosts: std::collections::HashMap<(String, String), String>,
+    /// For a mod that needs a newer mod or loader: the older copy in
+    /// `.hopper-backups` that works with what's installed (by jar).
+    pub reverts: std::collections::HashMap<String, hopper::crashdetect::Changed>,
 }
 
 impl AddonsView {
@@ -214,17 +237,28 @@ impl AddonsView {
             loaded_fine: if same { self.missing.loaded_fine } else { None },
             against: against.clone(),
             ghosts: if same { std::mem::take(&mut self.missing.ghosts) } else { Default::default() },
+            reverts: if same { std::mem::take(&mut self.missing.reverts) } else { Default::default() },
         };
         let root = inst.root.clone();
         let snapshot = inst.clone();
         cx.spawn(async move |this, cx| {
-            let (list, dups, blockers, loaded_fine) = cx
+            let (list, dups, blockers, loaded_fine, reverts) = cx
                 .background_spawn(async move {
+                    let blockers = hopper::deps::blockers(&dir, &snapshot.loader, &snapshot.game_version);
+                    // Older copies that would work, for "Revert".
+                    let reverts = blockers
+                        .iter()
+                        .filter_map(|b| {
+                            let need = revert_need(b)?;
+                            Some((b.file_name.clone(), hopper::revert::from_backups(&snapshot.root, &b.file_name, &need)?))
+                        })
+                        .collect();
                     (
                         hopper::deps::missing(&dir),
                         hopper::install::duplicates(&snapshot),
-                        hopper::deps::blockers(&dir, &snapshot.loader, &snapshot.game_version),
+                        blockers,
                         hopper::deps::loaded_fine(&snapshot.root),
+                        reverts,
                     )
                 })
                 .await;
@@ -234,6 +268,7 @@ impl AddonsView {
                     this.want_ghosts(&blockers, cx);
                     this.missing.blockers = blockers;
                     this.missing.loaded_fine = loaded_fine;
+                    this.missing.reverts = reverts;
                     // Wrong versions are warned about when an update causes
                     // them; packs often ship a few that run anyway.
                     let list: Vec<_> = list.into_iter().filter(|m| m.wrong_version.is_none()).collect();
@@ -1036,6 +1071,7 @@ impl AddonsView {
                             Some(m) => format!("Update {name} to {m}+"),
                             None => format!("Update {name}"),
                         };
+                        actions.extend(self.revert_action(i, inst, b, pid, &name, cx));
                         actions.push(
                             Button::new(SharedString::from(format!("blk-loader:{i}")))
                                 .xsmall()
@@ -1064,6 +1100,8 @@ impl AddonsView {
                     // No update fixes it: go back to a version of this mod
                     // that doesn't ask for it.
                     actions.push(off(format!("blk-off:{i}"), b.file_name.clone(), format!("Turn off {}", b.mod_name)));
+                    let name = other.as_ref().map_or_else(|| b.mod_name.clone(), |o| o.2.clone());
+                    actions.extend(self.revert_action(i, inst, b, pid, &name, cx));
                     let (store, root) = (self.store.clone(), inst.root.clone());
                     actions.push(
                         Button::new(SharedString::from(format!("blk-older:{i}")))
@@ -1082,6 +1120,7 @@ impl AddonsView {
                     actions.push(off(format!("blk-off:{i}"), b.file_name.clone(), format!("Turn off {}", b.mod_name)));
                     let id = needs.clone();
                     let name = other.as_ref().map_or_else(|| needs.clone(), |o| o.2.clone());
+                    actions.extend(self.revert_action(i, inst, b, pid, &name, cx));
                     actions.push(
                         Button::new(SharedString::from(format!("blk-dep:{i}")))
                             .xsmall()
@@ -1201,6 +1240,95 @@ impl AddonsView {
                         );
         let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
         Some(div().px_6().child(notice).into_any_element())
+    }
+
+    /// "Revert X to 1.6.3": back to the newest older version of a mod that
+    /// works with the `other` mod (or loader) installed, from the copy in
+    /// `.hopper-backups`, else the newest older file on CurseForge or
+    /// Modrinth that works. Its updates are then marked with what they
+    /// need, so Update doesn't lead straight back. `None` for a mod Hopper
+    /// can't place, or a problem an older version doesn't fix.
+    fn revert_action(
+        &self,
+        i: usize,
+        inst: &Instance,
+        b: &hopper::deps::Blocker,
+        pid: u64,
+        other: &str,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        use hopper::deps::BlockerKind;
+        let need = revert_need(b)?;
+        let (range, have) = match &b.kind {
+            BlockerKind::WrongVersion { versions, jar, .. } => (versions.clone(), jar.clone()),
+            BlockerKind::Loader { versions, .. } => (versions.clone(), inst.loader.clone()),
+            _ => return None,
+        };
+        let needs = match range_min(&range) {
+            Some(m) => format!("{other} {m}+"),
+            None => format!("a newer {other}"),
+        };
+        // A record that names another jar (an untracked swap) still has the
+        // mod's name: its project is what the mark goes on.
+        let pid = if pid != 0 {
+            pid
+        } else {
+            inst.addons.iter().find(|a| a.project_id != 0 && a.name.eq_ignore_ascii_case(&b.mod_name)).map_or(0, |a| a.project_id)
+        };
+        let backup = self.missing.reverts.get(&b.file_name).cloned();
+        if backup.is_none() && pid == 0 {
+            return None;
+        }
+        let (root, file, name) = (inst.root.clone(), b.file_name.clone(), b.mod_name.clone());
+        let (label, tip) = match &backup {
+            Some(ch) if !ch.from.is_empty() => (
+                format!("Revert {name} to {}", ch.from),
+                format!("Puts back {}, the copy Hopper kept, which works with your {other}. The newer one goes to Backups, so you can undo this there.", ch.from),
+            ),
+            Some(_) => (
+                format!("Revert {name}"),
+                format!("Puts back the copy Hopper kept, which works with your {other}. The newer one goes to Backups, so you can undo this there."),
+            ),
+            None => (
+                format!("Revert {name}"),
+                format!("Installs the newest older version of {name} that works with your {other}."),
+            ),
+        };
+        Some(
+            Button::new(SharedString::from(format!("blk-revert:{i}")))
+                .xsmall()
+                .outline()
+                .icon(IconName::Undo2)
+                .label(label)
+                .tooltip(tip)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let store = this.store.clone();
+                    let hold = |cx: &mut Context<Self>| {
+                        store.update(cx, |s, cx| s.hold_update(&root, pid, needs.clone(), have.clone(), cx));
+                    };
+                    match &backup {
+                        Some(ch) => {
+                            if crate::crash_help::put_back_changed(&store, &root, ch, window, cx) {
+                                hold(cx);
+                                this.resync(cx);
+                            }
+                        }
+                        None => {
+                            hold(cx);
+                            let s = store.read(cx);
+                            let Some(mut inst) = s.instance(&root).cloned() else { return };
+                            let (file, need, name) = (file.clone(), need.clone(), name.clone());
+                            s.spawn_instance_job(&root, format!("Reverting {name}"), move |job| {
+                                let got = hopper::revert::from_source(&mut inst, &file, &need, job)?;
+                                job.note(format!("Reverted {name} to {got}"));
+                                Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
+                            });
+                        }
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
+        )
     }
 
     /// The banner's row for the last crash: "X stopped the game from

@@ -175,6 +175,9 @@ pub struct Settings {
     /// (place: an instance's or server's folder). A notice that says
     /// something new has a new hash, so it shows again.
     pub dismissed_notices: Vec<String>,
+    /// Mods Hopper reverted because their newer versions need a newer mod
+    /// or loader: their updates are marked until that changes.
+    pub update_holds: Vec<UpdateHold>,
     /// Offer to translate changelogs and descriptions into English, on this
     /// PC. Off until the user turns it on: nothing is detected, shown or
     /// downloaded before.
@@ -391,6 +394,7 @@ impl Default for Settings {
             hide_servers_item: false,
             server_hint_dismissed: Vec::new(),
             dismissed_notices: Vec::new(),
+            update_holds: Vec::new(),
             translate: false,
             translate_always: Vec::new(),
             unknown: serde_json::Map::new(),
@@ -510,6 +514,22 @@ impl Settings {
         std::fs::rename(tmp, p)?;
         Ok(())
     }
+}
+
+/// A mod put back to an older version because its newer ones need a newer
+/// mod (or loader) than the instance has: its update offers are marked
+/// with what they need until the needed mod's jar (or the loader) changes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateHold {
+    /// The instance's folder.
+    pub instance: String,
+    pub project_id: u64,
+    /// What the newer versions need, for the mark: "TMRV Updated 19.70.0.460+".
+    pub needs: String,
+    /// The needed mod's jar when it was reverted; for the loader, the
+    /// instance's loader ("neoforge-21.1.259").
+    pub have: String,
 }
 
 /// The key a closed notice is remembered by: where it shows (an

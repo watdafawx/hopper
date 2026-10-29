@@ -59,6 +59,7 @@ pub mod msauth;
 pub mod peer;
 pub mod perf;
 pub mod richtext;
+pub mod revert;
 pub mod rigsync;
 pub mod scan;
 pub mod server;

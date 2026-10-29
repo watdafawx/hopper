@@ -406,6 +406,22 @@ pub fn own_version(path: &Path) -> String {
     jar(path).and_then(|j| j.versions.first().map(|v| v.1.clone())).unwrap_or_default()
 }
 
+/// Whether the jar at `path` asks for a newer `id` than `have`, the way
+/// [`blockers`] finds a wrong version or too old a loader.
+pub fn needs_newer(path: &Path, id: &str, have: &str) -> bool {
+    jar(path).is_some_and(|j| {
+        let lists = [&j.requires, &j.optional];
+        let forge = j.forge.as_ref().map(|f| [&f.0, &f.1]);
+        let fabric = j.fabric.as_ref().map(|f| &f.requires);
+        lists
+            .into_iter()
+            .chain(forge.into_iter().flatten())
+            .chain(fabric)
+            .flatten()
+            .any(|(i, r)| i == id && too_old(r, have))
+    })
+}
+
 /// Reads jars on a few threads.
 fn read_all(list: &[&PathBuf]) -> Vec<(PathBuf, Arc<JarInfo>)> {
     let chunk = list.len().div_ceil(8).max(1);

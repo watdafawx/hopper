@@ -3348,6 +3348,38 @@ impl Store {
         self.update_settings(|st| st.show_notice(key), cx);
     }
 
+    /// What `project`'s newer versions need, when Hopper reverted it for
+    /// that and the needed mod (or the loader) hasn't changed since.
+    pub fn update_needs(&self, root: &Path, project: u64) -> Option<&str> {
+        let key = root.to_string_lossy();
+        let h = self
+            .settings
+            .update_holds
+            .iter()
+            .find(|h| h.project_id == project && project != 0 && h.instance == key)?;
+        let inst = self.instance(root)?;
+        let still = inst.loader == h.have
+            || inst.mods_dir().join(&h.have).is_file()
+            || inst.addons.iter().any(|a| a.enabled && a.file_name.eq_ignore_ascii_case(&h.have));
+        still.then_some(h.needs.as_str())
+    }
+
+    /// Marks `project`'s updates with what they need (`have`: the needed
+    /// mod's jar, or the loader, as it is now).
+    pub fn hold_update(&mut self, root: &Path, project: u64, needs: String, have: String, cx: &mut Context<Self>) {
+        if project == 0 {
+            return;
+        }
+        let instance = root.to_string_lossy().into_owned();
+        self.update_settings(
+            |st| {
+                st.update_holds.retain(|h| !(h.instance == instance && h.project_id == project));
+                st.update_holds.push(hopper::settings::UpdateHold { instance, project_id: project, needs, have });
+            },
+            cx,
+        );
+    }
+
     /// Ends a running game.
     pub fn stop(&self, root: &Path) {
         if let Some(r) = self.running.get(root) {
