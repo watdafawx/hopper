@@ -5,12 +5,17 @@
   import { live } from './lib/live.svelte.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
+  import { session, roleLabel } from './lib/me.svelte.js';
 
-  const ROLES = [
+  const ALL_ROLES = [
+    { id: 'manager', label: 'Manager', about: 'Everything the owner can do, on every server, except managing the owner and other managers.' },
     { id: 'admin', label: 'Admin', about: 'Everything on their servers: files, mods, settings, backups.' },
     { id: 'operator', label: 'Operator', about: 'Start and stop, console, players, make backups. Can look at files.' },
     { id: 'viewer', label: 'Viewer', about: 'Looks only: console, files, stats.' },
   ];
+  // Only the owner makes managers, or changes and removes them.
+  const ROLES = $derived(session.trueOwner ? ALL_ROLES : ALL_ROLES.filter((r) => r.id !== 'manager'));
+  const canManage = (u) => session.trueOwner || u.role !== 'manager';
 
   let users = $state([]);
   let form = $state(null);
@@ -85,7 +90,7 @@
           </button>
         {/each}
       </div>
-      {#if live.servers.length > 1}
+      {#if live.servers.length > 1 && form.role !== 'manager'}
         <div class="row wrap"><span class="tiny muted">Servers {form.servers.length ? '' : '(all)'}</span>
           {#each live.servers as s (s.id)}
             <button type="button" class="chip" class:acc={form.servers.includes(s.id)} onclick={() => (form.servers = flip(form.servers, s.id))}>{s.name}</button>
@@ -100,12 +105,14 @@
     {#each users as u (u.id)}
       <div class="u">
         <div class="grow">
-          <div>{u.name} <span class="chip">{u.role}</span>{#if u.two_factor}<span class="chip running">2FA</span>{/if}</div>
-          <div class="tiny muted ell">{u.servers.length ? names(u.servers) : 'All servers'} · last seen {when(u.last_seen)}</div>
+          <div>{u.name} <span class="chip">{roleLabel(u.role)}</span>{#if u.two_factor}<span class="chip running">2FA</span>{/if}</div>
+          <div class="tiny muted ell">{u.servers.length && u.role !== 'manager' ? names(u.servers) : 'All servers'} · last seen {when(u.last_seen)}</div>
         </div>
+        {#if canManage(u)}
         {#if u.two_factor}<button class="btn sm icon ghost" title="Turn off their two-factor sign-in" onclick={() => reset2fa(u)}><ShieldOff size={13} /></button>{/if}
         <button class="btn sm icon ghost" title="Edit" onclick={() => edit(u)}><Pencil size={13} /></button>
         <button class="btn sm icon ghost" title="Remove" onclick={() => remove(u)}><Trash2 size={13} /></button>
+        {/if}
       </div>
     {:else}
       <p class="small subtle">Let others in with their own name and password, limited to what their role allows and to the servers you pick.</p>
@@ -117,7 +124,7 @@
   .col { display: flex; flex-direction: column; gap: 8px; }
   .grow { flex: 1; min-width: 0; }
   .wrap { flex-wrap: wrap; }
-  .roles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
   .role { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 8px; border: 1px solid var(--line2); border-radius: 8px; }
   .role.on { border-color: var(--acc); background: var(--acc-dim); }
   .u { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }

@@ -80,11 +80,23 @@ pub(crate) fn require(app: &App, headers: &HeaderMap, method: &Method) -> ApiRes
     Ok(who)
 }
 
+/// The owner or a manager: panel-wide settings, users, devices and the
+/// rest. The few things only the true owner may do check `Who::may_*`.
 pub(crate) fn require_owner(app: &App, headers: &HeaderMap, method: &Method) -> ApiResult<()> {
-    match require(app, headers, method)? {
-        Who::Owner => Ok(()),
-        _ => Err(ApiError(StatusCode::FORBIDDEN, "Only the owner can do that.".into())),
+    require_owner_who(app, headers, method).map(|_| ())
+}
+
+pub(crate) fn require_owner_who(app: &App, headers: &HeaderMap, method: &Method) -> ApiResult<Who> {
+    let who = require(app, headers, method)?;
+    if who.owner_level() {
+        Ok(who)
+    } else {
+        Err(ApiError(StatusCode::FORBIDDEN, "Only the owner or a manager can do that.".into()))
     }
+}
+
+fn only_owner(msg: &str) -> ApiError {
+    ApiError(StatusCode::FORBIDDEN, msg.into())
 }
 
 /// The session cookie; `Secure` over HTTPS, so it's never sent in the clear.
@@ -216,7 +228,7 @@ async fn setup(
     let _ = std::fs::remove_file(app.data_dir.join(crate::SETUP_FILE));
     log::info!("owner set up from {}{}", addr.ip(), if local && b.code.trim().is_empty() { " (this PC, no setup code)" } else { "" });
     let mut r = ([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response();
-    r.extensions_mut().insert(crate::security::SignedIn("owner".into()));
+    r.extensions_mut().insert(crate::security::SignedIn("owner".into(), "owner".into()));
     Ok(r)
 }
 
@@ -239,9 +251,9 @@ async fn login(
     let private = crate::net::Net::of(addr.ip()).private();
     match app.auth.login_as(&b.name, &b.password, b.code.as_deref(), addr.ip(), private) {
         Ok(token) => {
-            let who = app.auth.check(&token).map_or_else(|| "owner".into(), |w| w.name());
+            let (who, role) = app.auth.check(&token).map_or_else(|| ("owner".into(), "owner"), |w| (w.name(), w.role_name()));
             let mut r = ([(header::SET_COOKIE, session_cookie(&token, secure(&t)))], Json(json!({ "ok": true }))).into_response();
-            r.extensions_mut().insert(crate::security::SignedIn(who));
+            r.extensions_mut().insert(crate::security::SignedIn(who, role.into()));
             r
         }
         Err(e) => (
@@ -347,12 +359,26 @@ struct UserBody {
 }
 
 fn role_of(s: &str) -> ApiResult<crate::auth::Role> {
-    crate::auth::Role::parse(s).ok_or_else(|| bad("The role is admin, operator or viewer."))
+    crate::auth::Role::parse(s).ok_or_else(|| bad("The role is manager, admin, operator or viewer."))
+}
+
+/// A user's role now, and whether `who` may change that user to `after`.
+fn check_manage(app: &App, who: &Who, id: &str, after: Option<crate::auth::Role>) -> ApiResult<()> {
+    let before = app.auth.users().into_iter().find(|u| u.id == id).ok_or_else(|| not_found("user"))?.role;
+    if who.may_manage_user(Some(before), after) {
+        Ok(())
+    } else {
+        Err(only_owner("Only the owner can change or remove managers."))
+    }
 }
 
 async fn user_create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<UserBody>) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
-    let u = app.auth.user_create(&b.name, &b.password, role_of(&b.role)?, b.servers).map_err(bad)?;
+    let who = require_owner_who(&app, &headers, &method)?;
+    let role = role_of(&b.role)?;
+    if !who.may_manage_user(None, Some(role)) {
+        return Err(only_owner("Only the owner can add managers."));
+    }
+    let u = app.auth.user_create(&b.name, &b.password, role, b.servers).map_err(bad)?;
     Ok(Json(user_json(&u)))
 }
 
@@ -363,13 +389,16 @@ async fn user_update(
     Path(id): Path<String>,
     Json(b): Json<UserBody>,
 ) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
-    app.auth.user_update(&id, &b.name, role_of(&b.role)?, b.servers, Some(b.password.as_str())).map_err(bad)?;
+    let who = require_owner_who(&app, &headers, &method)?;
+    let role = role_of(&b.role)?;
+    check_manage(&app, &who, &id, Some(role))?;
+    app.auth.user_update(&id, &b.name, role, b.servers, Some(b.password.as_str())).map_err(bad)?;
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn user_delete(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
+    let who = require_owner_who(&app, &headers, &method)?;
+    check_manage(&app, &who, &id, None)?;
     if !app.auth.user_delete(&id) {
         return Err(not_found("user"));
     }
@@ -377,7 +406,9 @@ async fn user_delete(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
 }
 
 async fn user_reset_2fa(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
+    let who = require_owner_who(&app, &headers, &method)?;
+    let role = app.auth.users().into_iter().find(|u| u.id == id).map(|u| u.role);
+    check_manage(&app, &who, &id, role)?;
     if !app.auth.user_reset_2fa(&id) {
         return Err(not_found("user"));
     }
@@ -436,6 +467,10 @@ async fn me(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> 
         Who::Owner => json!({ "role": "owner", "min_password": MIN_PASSWORD, "panel_folder": app.cfg.read().unwrap().home }),
         Who::Device { id, name } => json!({ "role": "device", "id": id, "name": name }),
         Who::Token { id, name, read_only, servers } => json!({ "role": "token", "id": id, "name": name, "read_only": read_only, "servers": servers }),
+        Who::User { id, name, role: crate::auth::Role::Manager, servers } => json!({
+            "role": "manager", "user": true, "id": id, "name": name, "servers": servers,
+            "min_password": MIN_PASSWORD, "panel_folder": app.cfg.read().unwrap().home,
+        }),
         Who::User { id, name, role, servers } => json!({ "role": role, "user": true, "id": id, "name": name, "servers": servers, "min_password": MIN_PASSWORD }),
     }))
 }
@@ -486,8 +521,8 @@ async fn pair_answer(
     Path(id): Path<String>,
     Json(b): Json<AnswerBody>,
 ) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
-    app.auth.answer(&id, b.allow).map_err(bad)?;
+    let who = require_owner_who(&app, &headers, &method)?;
+    app.auth.answer(&id, b.allow, who.account().flatten()).map_err(bad)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -502,7 +537,11 @@ async fn forget_device(
     method: Method,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
+    let who = require_owner_who(&app, &headers, &method)?;
+    let by = app.auth.devices().into_iter().find(|d| d.id == id).ok_or_else(|| not_found("device"))?.by;
+    if !who.may_forget_device(by.as_deref()) {
+        return Err(only_owner("Only the owner can remove the owner's devices."));
+    }
     if !app.auth.forget_device(&id) {
         return Err(not_found("device"));
     }

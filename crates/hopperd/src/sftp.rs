@@ -113,6 +113,7 @@ impl russh::server::Handler for SshSession {
         self.app.audit.record(&crate::security::Event {
             at: crate::security::now(),
             who: res.as_ref().map_or_else(|_| "-".into(), |w| w.name()),
+            role: res.as_ref().map_or_else(|_| String::new(), |w| w.role_name().into()),
             ip: self.ip.to_string(),
             net: crate::net::Net::of(self.ip),
             method: "SFTP".into(),
@@ -261,6 +262,7 @@ impl Sftp {
         self.app.audit.record(&crate::security::Event {
             at: crate::security::now(),
             who: self.who.name(),
+            role: self.who.role_name().into(),
             ip: self.ip.to_string(),
             net: crate::net::Net::of(self.ip),
             method: "SFTP".into(),

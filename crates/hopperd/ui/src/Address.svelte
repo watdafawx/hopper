@@ -174,7 +174,7 @@
     {#if offPort}
       <div class="warn small"><TriangleAlert size={13} /><div><span>Players typing <span class="mono">{live[0]}</span> connect on port {router.join_port}, but the router is on {router.config.port}.</span>
         {#if session.owner}<div><button class="btn sm" onclick={useJoinPort}>Use {router.join_port}</button></div>{/if}
-        <span class="tiny muted">Keeping {router.config.port}: players add <span class="mono">:{router.config.port}</span>, or add an SRV record pointing at it.{session.owner ? '' : ' The panel owner can change the port in Access & devices.'}</span></div></div>
+        <span class="tiny muted">Keeping {router.config.port}: players add <span class="mono">:{router.config.port}</span>, or add an SRV record pointing at it.{session.owner ? '' : ' The owner or a manager can change the port in Access & devices.'}</span></div></div>
     {/if}
     <button class="btn sm ghost add" onclick={() => (addrs = [...addrs, ''])}><Plus size={13} />Add another address</button>
     <label class="row small"><input type="checkbox" bind:checked={sleepOn} />Sleep when empty for

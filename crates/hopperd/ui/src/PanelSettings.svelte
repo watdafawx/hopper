@@ -30,12 +30,13 @@
   import CfKey from './CfKey.svelte';
   import Security from './Security.svelte';
   import Users from './Users.svelte';
+  import { ownerLike } from './lib/me.svelte.js';
   import Webhooks from './Webhooks.svelte';
   import Alerts from './Alerts.svelte';
   import BackupTargets from './BackupTargets.svelte';
 
   let { cat = '', hello, me, pending = $bindable([]) } = $props();
-  const owner = $derived(me?.role === 'owner');
+  const owner = $derived(ownerLike(me));
   const cats = $derived(catsFor(owner));
   const c = $derived(cats.find((x) => x.id === cat) || cats[0]);
   let query = $state('');

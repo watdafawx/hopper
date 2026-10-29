@@ -105,6 +105,10 @@ pub struct Device {
     hash: String,
     pub created: u64,
     pub last_seen: u64,
+    /// The manager who let it in; the owner's when `None` (and for devices
+    /// paired before managers existed). A manager can't remove the owner's.
+    #[serde(default)]
+    pub by: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -126,11 +130,16 @@ struct Stored {
     users: Vec<User>,
 }
 
-/// What a user may do. The owner can do everything; only the owner manages
-/// users, devices, tokens, webhooks, two-factor and panel settings.
+/// What a user may do. The owner can do everything. A manager has the
+/// owner's access (all servers, users, devices, tokens, webhooks, panel
+/// settings) but can't touch the owner or other managers, so the owner can
+/// never be locked out. Other roles are limited to their servers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
+    /// The owner's access, on every server. Only the owner makes managers.
+    #[serde(rename = "manager")]
+    Manager,
     /// Everything on their servers: files, mods, settings, backups.
     Admin,
     /// Start, stop, console, players and making backups.
@@ -142,10 +151,21 @@ pub enum Role {
 impl Role {
     pub fn parse(s: &str) -> Option<Role> {
         match s {
+            "manager" => Some(Role::Manager),
             "admin" => Some(Role::Admin),
             "operator" => Some(Role::Operator),
             "viewer" => Some(Role::Viewer),
             _ => None,
+        }
+    }
+
+    /// The name the API and audit log use (the same as in config files).
+    pub fn id(self) -> &'static str {
+        match self {
+            Role::Manager => "manager",
+            Role::Admin => "admin",
+            Role::Operator => "operator",
+            Role::Viewer => "viewer",
         }
     }
 }
@@ -172,6 +192,13 @@ pub struct User {
 impl User {
     pub fn two_factor(&self) -> bool {
         self.totp.is_some()
+    }
+
+    /// Who this user is on a request. A manager always has every server,
+    /// whatever list was saved with them.
+    fn who(&self) -> Who {
+        let servers = if self.role == Role::Manager { Vec::new() } else { self.servers.clone() };
+        Who::User { id: self.id.clone(), name: self.name.clone(), role: self.role, servers }
     }
 }
 
@@ -311,6 +338,43 @@ impl Who {
         match self {
             Who::Token { servers, .. } | Who::User { servers, .. } => servers.is_empty() || servers.iter().any(|s| s == id),
             _ => true,
+        }
+    }
+
+    /// The owner or a manager: what owner-only routes (`require_owner`) allow.
+    pub fn owner_level(&self) -> bool {
+        matches!(self, Who::Owner | Who::User { role: Role::Manager, .. })
+    }
+
+    /// The role shown in the audit log.
+    pub fn role_name(&self) -> &'static str {
+        match self {
+            Who::Owner => "owner",
+            Who::Device { .. } => "device",
+            Who::Token { .. } => "token",
+            Who::User { role, .. } => role.id(),
+        }
+    }
+
+    /// Whether this one may add, change, remove or reset a user whose role
+    /// is `before` (`None` when adding) and becomes `after` (`None` when
+    /// removing). Managers manage everyone but managers: only the true
+    /// owner makes, changes or removes those.
+    pub fn may_manage_user(&self, before: Option<Role>, after: Option<Role>) -> bool {
+        match self {
+            Who::Owner => true,
+            Who::User { role: Role::Manager, .. } => before != Some(Role::Manager) && after != Some(Role::Manager),
+            _ => false,
+        }
+    }
+
+    /// Whether this one may remove a paired device that `by` let in (the
+    /// owner when `None`). A manager can't remove the owner's devices.
+    pub fn may_forget_device(&self, by: Option<&str>) -> bool {
+        match self {
+            Who::Owner => true,
+            Who::User { role: Role::Manager, .. } => by.is_some(),
+            _ => false,
         }
     }
 
@@ -502,7 +566,7 @@ impl Auth {
                     // A removed user's sessions end with them.
                     let u = s.users.iter_mut().find(|u| u.id == uid)?;
                     u.last_seen = t;
-                    Who::User { id: u.id.clone(), name: u.name.clone(), role: u.role, servers: u.servers.clone() }
+                    u.who()
                 }
             };
             if stale {
@@ -631,7 +695,7 @@ impl Auth {
             None => Who::Owner,
             Some(id) => {
                 let u = s.users.iter().find(|u| u.id == id).context("user gone")?;
-                Who::User { id: u.id.clone(), name: u.name.clone(), role: u.role, servers: u.servers.clone() }
+                u.who()
             }
         })
     }
@@ -662,7 +726,7 @@ impl Auth {
             name: name.to_string(),
             hash,
             role,
-            servers,
+            servers: if role == Role::Manager { Vec::new() } else { servers },
             created: now(),
             last_seen: 0,
             totp: None,
@@ -682,7 +746,7 @@ impl Auth {
         let Some(u) = s.users.iter_mut().find(|u| u.id == id) else { bail!("No user with that id.") };
         u.name = name.trim().to_string();
         u.role = role;
-        u.servers = servers;
+        u.servers = if role == Role::Manager { Vec::new() } else { servers };
         if let Some(h) = hash {
             u.hash = h;
             s.sessions.retain(|x| x.user.as_deref() != Some(id));
@@ -824,8 +888,8 @@ impl Auth {
         p.iter().filter(|r| r.answer.is_none()).cloned().collect()
     }
 
-    /// The owner allows or refuses a request.
-    pub fn answer(&self, id: &str, allow: bool) -> anyhow::Result<()> {
+    /// The owner (`by` = `None`) or a manager allows or refuses a request.
+    pub fn answer(&self, id: &str, allow: bool, by: Option<&str>) -> anyhow::Result<()> {
         let mut p = self.pairs.lock().unwrap();
         let Some(r) = p.iter_mut().find(|r| r.id == id && r.answer.is_none() && r.at.elapsed() < PAIR_TTL) else {
             bail!("That pairing request has expired.");
@@ -841,6 +905,7 @@ impl Auth {
             hash: hash_token(&token),
             created: now(),
             last_seen: now(),
+            by: by.map(str::to_string),
         };
         r.answer = Some(Ok(format!("{}:{token}", device.id)));
         drop(p);
@@ -1061,6 +1126,62 @@ mod tests {
     }
 
     #[test]
+    fn manager_permissions() {
+        let user = |role| Who::User { id: "u".into(), name: "u".into(), role, servers: vec![] };
+        let owner = Who::Owner;
+        let co = user(Role::Manager);
+        let others = [user(Role::Admin), user(Role::Operator), user(Role::Viewer), Who::Device { id: "d".into(), name: "d".into() }];
+        // Owner-only routes (`require_owner`): owner and managers.
+        assert!(owner.owner_level() && co.owner_level());
+        assert!(others.iter().all(|w| !w.owner_level()));
+        // Managing everyone but managers: owner and managers.
+        for (before, after) in [(None, Some(Role::Admin)), (Some(Role::Viewer), Some(Role::Operator)), (Some(Role::Admin), None)] {
+            assert!(owner.may_manage_user(before, after));
+            assert!(co.may_manage_user(before, after));
+            assert!(others.iter().all(|w| !w.may_manage_user(before, after)));
+        }
+        // Making, promoting to, demoting or removing a manager: the owner only.
+        for (before, after) in [(None, Some(Role::Manager)), (Some(Role::Admin), Some(Role::Manager)), (Some(Role::Manager), Some(Role::Admin)), (Some(Role::Manager), None), (Some(Role::Manager), Some(Role::Manager))] {
+            assert!(owner.may_manage_user(before, after));
+            assert!(!co.may_manage_user(before, after));
+            assert!(others.iter().all(|w| !w.may_manage_user(before, after)));
+        }
+        // The owner's devices: the owner only; a manager's: both.
+        assert!(owner.may_forget_device(None) && owner.may_forget_device(Some("u")));
+        assert!(!co.may_forget_device(None) && co.may_forget_device(Some("u")));
+        assert!(others.iter().all(|w| !w.may_forget_device(None) && !w.may_forget_device(Some("u"))));
+        // The audit log's role names.
+        assert_eq!(owner.role_name(), "owner");
+        assert_eq!(co.role_name(), "manager");
+        assert_eq!(user(Role::Viewer).role_name(), "viewer");
+    }
+
+    #[test]
+    fn manager_saved_and_loaded() {
+        let dir = temp();
+        let a = Auth::load(&dir).unwrap();
+        a.setup(&a.setup_code().unwrap(), "password1", IP).unwrap();
+        // Saved with a server list, a manager still gets every server.
+        let u = a.user_create("Sam", "sampass12", Role::Manager, vec!["tnp".into()]).unwrap();
+        assert!(u.servers.is_empty());
+        let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(text.contains("\"manager\""), "stable name in the file");
+        drop(a);
+        let a = Auth::load(&dir).unwrap();
+        assert_eq!(a.users()[0].role, Role::Manager);
+        let s = a.login_as("Sam", "sampass12", None, IP, true).unwrap();
+        let who = a.check(&s).unwrap();
+        assert!(who.owner_level() && who.sees("anything"));
+        // Old files without managers or device owners still load.
+        let old = r#"{"owner":null,"sessions":[],"devices":[{"id":"d1","name":"PC","hash":"h","created":1,"last_seen":1}],"tokens":[],"users":[{"id":"x","name":"Old","hash":"h","role":"admin","created":1}]}"#;
+        let st: Stored = serde_json::from_str(old).unwrap();
+        assert_eq!(st.users[0].role, Role::Admin);
+        assert_eq!(st.devices[0].by, None);
+        assert_eq!(Role::parse("manager"), Some(Role::Manager));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn users_sign_in_by_name() {
         let dir = temp();
         let a = Auth::load(&dir).unwrap();
@@ -1118,7 +1239,7 @@ mod tests {
         assert_eq!(a.pair_status(&id, &secret), PairStatus::Waiting);
         assert_eq!(a.pair_status(&id, "wrong"), PairStatus::Unknown);
         assert_eq!(a.pending().len(), 1);
-        a.answer(&id, true).unwrap();
+        a.answer(&id, true, None).unwrap();
         let PairStatus::Approved { token, device_id } = a.pair_status(&id, &secret) else { panic!() };
         assert_eq!(a.check(&token), Some(Who::Device { id: device_id.clone(), name: "Hopper on FOX".into() }));
         // Asking again (the first reply lost on the way) gets the same
@@ -1130,7 +1251,7 @@ mod tests {
         assert!(a.forget_device(&device_id));
         assert_eq!(a.check(&token), None);
         let (id2, s2, _) = a.pair_request("Phone", IP, "AA:BB").unwrap();
-        a.answer(&id2, false).unwrap();
+        a.answer(&id2, false, None).unwrap();
         assert_eq!(a.pair_status(&id2, &s2), PairStatus::Denied);
         assert_eq!(a.pair_status(&id2, &s2), PairStatus::Denied);
         assert!(a.pair_request("", IP, "AA:BB").is_err());
