@@ -482,9 +482,9 @@ fn common(app: &App, address: &str, port: Option<u16>, accept_eula: bool) -> Api
         a => Some(hopper_core::hosting::router::clean_address(a).map_err(bad)?),
     };
     if let Some(a) = &address
-        && let Some(other) = app.servers.list().into_iter().find(|e| crate::router::settings(e).addresses.contains(a))
+        && let Some(other) = crate::router::taken_by(&app, a, None)
     {
-        return Err(bad(format!("{} already has {a}.", other.name)));
+        return Err(bad(format!("{other} already has {a}.")));
     }
     let router_port = {
         let c = app.cfg.read().unwrap();

@@ -718,7 +718,7 @@ async fn server(
     require(&app, &headers, &method)?;
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let a = app.clone();
-    tokio::task::spawn_blocking(move || Json(a.servers.summary(&e))).await.map_err(bad)
+    tokio::task::spawn_blocking(move || Json(crate::router::fill_summary(a.servers.summary(&e), &mut crate::router::effective(&a)))).await.map_err(bad)
 }
 
 #[derive(Deserialize)]

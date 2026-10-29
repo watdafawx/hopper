@@ -83,8 +83,8 @@ fn address(app: &App, a: &str) -> ApiResult<Option<String>> {
         "" => return Ok(None),
         a => hopper_core::hosting::router::clean_address(a).map_err(bad)?,
     };
-    if let Some(other) = app.servers.list().into_iter().find(|e| crate::router::settings(e).addresses.contains(&a)) {
-        return Err(bad(format!("{} already has {a}.", other.name)));
+    if let Some(other) = crate::router::taken_by(app, &a, None) {
+        return Err(bad(format!("{other} already has {a}.")));
     }
     Ok(Some(a))
 }

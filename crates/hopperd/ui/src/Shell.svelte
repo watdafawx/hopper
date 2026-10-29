@@ -290,8 +290,7 @@
 <div class="win">
   <header class="tbar">
     <div class="brand">
-      <img class="logo" src="/logo.svg" alt="" />
-      <span class="bname">Hopper Server</span>
+      <a class="home" href="#/" title="Overview"><img class="logo" src="/logo.svg" alt="" /><span class="bname">Hopper Server</span></a>
       <VersionChip />
       <span class="chip tiny host" title="This panel's PC">{hello.name}</span>
     </div>
@@ -389,7 +388,7 @@
   .updated span { color: var(--text); }
   .tbar { height: var(--titlebar); flex: none; display: flex; align-items: center; gap: 14px; padding: 0 8px 0 14px; background: var(--side); border-bottom: 1px solid var(--side-line); }
   .brand { display: flex; align-items: center; gap: 8px; flex: none; }
-  .logo { width: 20px; height: 20px; image-rendering: pixelated; flex: none; }
+  .home { display: flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; border-radius: 6px; }  .logo { width: 20px; height: 20px; image-rendering: pixelated; flex: none; }
   .bname { font-weight: 600; font-size: 13px; white-space: nowrap; }
   .host { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
   .arrows { display: flex; gap: 2px; }

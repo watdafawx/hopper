@@ -13,6 +13,6 @@ export function routerChip(r) {
     case 'off':
       return { cls: '', label: 'Off', note: 'turned off in Access & devices' };
     default:
-      return { cls: '', label: 'Not running', note: 'starts once a server has a saved address' };
+      return { cls: '', label: 'Not running', note: 'starts once a server has an address' };
   }
 }

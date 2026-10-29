@@ -76,7 +76,20 @@
     <div class="row"><span class="sp"></span>
       <button class="btn sm" disabled={checking || !withAddr.length && !cfg.domain} onclick={check}><SearchCheck size={13} />{checking ? 'Checking…' : 'Check DNS and port'}</button>
       <button class="btn sm pri" disabled={!dirty || saving} onclick={save}><Save size={13} />Save</button></div>
-    {#if !withAddr.length && cfg.enabled}<div class="tiny muted">The router starts once a server has a saved address.</div>{/if}
+    {#if !withAddr.length && cfg.enabled}<div class="tiny muted">The router starts once a server has an address{cfg.domain ? '' : ': set a domain to give every server one'}.</div>{/if}
+    {#if live.servers.length}
+      <div class="lbl">Players join at</div>
+      <div class="list">
+        {#each live.servers as s (s.id)}
+          <a class="srow" href="#/server/{encodeURIComponent(s.id)}/settings" title="Change it in {s.name}'s Settings">
+            <span class="ell">{s.name}</span>
+            {#if s.addresses?.length}<span class="mono ell">{s.addresses[0]}{s.addresses.length > 1 ? ` +${s.addresses.length - 1}` : ''}</span>
+              <span class="chip" class:lan={s.address_default} class:acc={!s.address_default}>{s.address_default ? 'Default' : 'Custom'}</span>
+            {:else}<span class="muted">No address</span>{#if r.config.enabled && r.config.domain}<span class="chip" title="Turned off in its Settings">Off</span>{/if}{/if}
+          </a>
+        {/each}
+      </div>
+    {/if}
     {#if result}
       <div class="lbl">DNS records</div>
       {#if cfg.domain && result.public_ip}
@@ -107,5 +120,9 @@
   .dns b { font: 600 10.5px Inter, system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .okc { color: var(--green); }
+  .list { display: flex; flex-direction: column; }
+  .srow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: 10px; align-items: center; padding: 5px 8px; border-radius: 6px; color: inherit; text-decoration: none; font-size: 12.5px; }
+  .srow:hover { background: var(--hover); }
+  .srow .mono { font-size: 12px; }
   .badc { color: var(--gold); }
 </style>

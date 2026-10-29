@@ -14,6 +14,8 @@
   let info = $state(null);
   let router = $state(null);
   let addrs = $state([]);
+  // No address at all, not even the default name.<domain>.
+  let off = $state(false);
   let sleepOn = $state(false);
   let minutes = $state(15);
   let saved = $state('');
@@ -23,25 +25,33 @@
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const domain = $derived(router?.config?.domain || '');
+  const typed = $derived(addrs.map((a) => a.trim()).filter(Boolean));
+  // Just the default typed back counts as "use the default", so it keeps
+  // following renames.
+  const useDefault = $derived(!off && !!info?.default_address && typed.length === 1 && typed[0] === info.default_address);
   const body = $derived({
-    addresses: addrs.map((a) => a.trim()).filter(Boolean),
+    addresses: off || useDefault ? [] : typed,
     sleep_after_minutes: sleepOn ? Math.max(1, Number(minutes) || 1) : 0,
+    off,
   });
+  // What players join at, as saved (default included).
+  const live = $derived(info?.effective || []);
   const dirty = $derived(JSON.stringify(body) !== saved);
   const clash = $derived(info && router?.config?.enabled && info.port === info.router_port);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
   const chip = $derived(router && routerChip(router));
   // Minecraft joins on 25565 unless the player types a port (or DNS has an
   // SRV record), so a router on another port needs a word.
-  const offPort = $derived(info?.addresses.length && router?.config?.enabled && !clash && router.config.port !== router.join_port);
+  const offPort = $derived(live.length && router?.config?.enabled && !clash && router.config.port !== router.join_port);
 
   async function load() {
     try {
       [info, router] = await Promise.all([api(`${base}/address`), api('/router')]);
-      addrs = info.addresses.length ? [...info.addresses] : [''];
+      addrs = info.effective.length ? [...info.effective] : [''];
+      off = info.off;
       sleepOn = info.sleep_after_minutes > 0;
       minutes = info.sleep_after_minutes || 15;
-      saved = JSON.stringify({ addresses: info.addresses, sleep_after_minutes: info.sleep_after_minutes });
+      saved = JSON.stringify({ addresses: info.addresses, sleep_after_minutes: info.sleep_after_minutes, off: info.off });
       dns = null;
     } catch (e) {
       say(e.message, true);
@@ -54,13 +64,27 @@
   const nameOf = (a) => (a.endsWith(suffix) ? a.slice(0, -suffix.length) : a);
   function setName(i, v) {
     addrs[i] = v.includes('.') ? v : v ? v + suffix : '';
+    if (v) off = false;
+  }
+  function remove(i) {
+    if (addrs.length > 1) addrs = addrs.filter((_, j) => j !== i);
+    else {
+      addrs = [''];
+      // With a default to fall back on, clearing the only address turns
+      // the address off; otherwise it's simply empty.
+      off = !!info.default_address;
+    }
+  }
+  function resetDefault() {
+    addrs = [info.default_address];
+    off = false;
   }
 
   async function save() {
     saving = true;
     try {
       const r = await api(`${base}/address`, { method: 'PUT', body });
-      say(r.addresses.length ? `Players can join at ${r.addresses[0]}` : 'Address removed');
+      say(r.addresses.length ? `Players can join at ${r.addresses[0]}` : off ? 'Address turned off' : 'Address removed');
       await load();
     } catch (e) {
       say(e.message, true);
@@ -129,16 +153,26 @@
         {/if}
         <span class="sp"></span>
         {#if dnsOf(a)}<span class="chip" class:running={dnsOf(a).ok} class:crashed={!dnsOf(a).ok} title={dnsOf(a).ips.join(', ')}>{dnsOf(a).ok ? '✓ DNS' : dnsOf(a).note}</span>{/if}
-        {#if addrs.length > 1 || a}<button class="btn sm ghost icon" title="Remove" onclick={() => (addrs = addrs.length > 1 ? addrs.filter((_, j) => j !== i) : [''])}><X size={13} /></button>{/if}
+        {#if i === 0 && useDefault}<span class="chip lan" title="From the server's name">Default</span>
+        {:else if i === 0 && off}<span class="chip">Off</span>
+        {:else if i === 0 && info.default_address && a}<span class="chip acc">Custom</span>{/if}
+        {#if addrs.length > 1 || a}<button class="btn sm ghost icon" title={addrs.length === 1 && info.default_address ? 'Turn off' : 'Remove'} onclick={() => remove(i)}><X size={13} /></button>{/if}
       </div>
     {/each}
-    {#if dirty && body.addresses.length}
-      <div class="tiny gold">Save to start using <span class="mono">{body.addresses[0]}</span>.</div>
-    {:else if !info.addresses.length && !dirty}
+    {#if off}
+      <div class="tiny muted">No address: players can't join by name.{#if info.default_address}{' '}<button class="lnk" onclick={resetDefault}>Use default ({nameOf(info.default_address)})</button>{/if}</div>
+    {:else if useDefault}
+      <div class="tiny muted">From the server's name. Type another name and Save to change it.</div>
+      {#if info.default_taken}<div class="tiny muted">{info.default_taken.by} already has <span class="mono">{info.default_taken.address}</span>, so this one gets a number.</div>{/if}
+    {:else if dirty && typed.length}
+      <div class="tiny gold">Save to start using <span class="mono">{typed[0]}</span>.{#if info.default_address}{' '}<button class="lnk" onclick={resetDefault}>Use default ({nameOf(info.default_address)})</button>{/if}</div>
+    {:else if typed.length && info.default_address}
+      <div class="tiny"><button class="lnk" onclick={resetDefault}>Use default ({nameOf(info.default_address)})</button></div>
+    {:else if !live.length && !dirty}
       <div class="tiny muted">No address yet. Type a name and Save; players then join at <span class="mono">{domain ? `name.${domain}` : 'that address'}</span>.</div>
     {/if}
     {#if offPort}
-      <div class="warn small"><TriangleAlert size={13} /><div><span>Players typing <span class="mono">{info.addresses[0]}</span> connect on port {router.join_port}, but the router is on {router.config.port}.</span>
+      <div class="warn small"><TriangleAlert size={13} /><div><span>Players typing <span class="mono">{live[0]}</span> connect on port {router.join_port}, but the router is on {router.config.port}.</span>
         {#if session.owner}<div><button class="btn sm" onclick={useJoinPort}>Use {router.join_port}</button></div>{/if}
         <span class="tiny muted">Keeping {router.config.port}: players add <span class="mono">:{router.config.port}</span>, or add an SRV record pointing at it.{session.owner ? '' : ' The panel owner can change the port in Access & devices.'}</span></div></div>
     {/if}
@@ -154,7 +188,7 @@
       <span class="muted">Router</span><span class="chip {chip.cls}">{chip.label}</span>
       {#if router.state !== 'error'}<span class="tiny muted ell">{chip.note}{router.state === 'running' && !domain ? '. Set a domain in Access & devices to type only names.' : ''}</span>{/if}
       <span class="sp"></span>
-      {#if info.addresses.length}<button class="btn sm ghost" disabled={checking} onclick={check} title="Check DNS"><SearchCheck size={13} />{checking ? 'Checking…' : 'Check DNS'}</button>{/if}
+      {#if live.length}<button class="btn sm ghost" disabled={checking} onclick={check} title="Check DNS"><SearchCheck size={13} />{checking ? 'Checking…' : 'Check DNS'}</button>{/if}
     </div>
     {#if router.state === 'off'}<div class="tiny muted">Turn server addresses on in <a href="#/access">Access &amp; devices</a>.</div>{/if}
   {/if}
@@ -173,6 +207,7 @@
   .warn > div { display: flex; flex-direction: column; gap: 6px; color: var(--text); }
   .unsaved { color: var(--gold); font-size: 11.5px; font-weight: 600; }
   .gold { color: var(--gold); }
+  .lnk { background: none; border: none; padding: 0; font: inherit; color: var(--acc); cursor: pointer; }
   .status { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 8px; min-width: 0; }
   .warn .tiny { color: var(--muted); }
   label.row input[type='checkbox'] { width: 15px; height: 15px; accent-color: var(--acc); }

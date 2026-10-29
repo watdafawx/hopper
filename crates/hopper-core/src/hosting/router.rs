@@ -34,6 +34,9 @@ pub struct RouteSettings {
     pub sleep_after_minutes: u32,
     /// How long the last start took, for "about 2 min" when waking it.
     pub last_start_secs: Option<u32>,
+    /// No address at all, not even the default `name.<domain>`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
 }
 
 impl RouteSettings {
@@ -48,6 +51,81 @@ impl RouteSettings {
         let path = root.join(FILE);
         std::fs::write(&path, serde_json::to_string_pretty(self)?).with_context(|| format!("writing {}", path.display()))
     }
+}
+
+/// The name part of a server's default address: "All the Mons" →
+/// "all-the-mons". Spaces and underscores become hyphens, anything else
+/// that can't be in an address is dropped. None when nothing is left.
+pub fn address_slug(name: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in name.trim().chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            out.push(c);
+        } else if matches!(c, ' ' | '_' | '-') && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.truncate(63);
+    let out = out.trim_matches('-');
+    (!out.is_empty()).then(|| out.to_string())
+}
+
+/// A server for [`effective_addresses`]: its id, name and saved settings.
+pub struct Named<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub settings: &'a RouteSettings,
+}
+
+/// The addresses players can use for one server.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Effective {
+    pub addresses: Vec<String>,
+    /// They're the default `name.<domain>`, not saved ones.
+    pub default: bool,
+}
+
+/// Every server's addresses: its saved ones, else (with a domain, and not
+/// turned off) `slug.<domain>` from its name. A default another server
+/// already has gets `-2`, `-3`…; servers claim defaults in id order so the
+/// same one keeps the plain name across restarts. `domain` is empty when
+/// defaults don't apply (no domain, or routing off).
+pub fn effective_addresses(servers: &[Named], domain: &str) -> Vec<Effective> {
+    let mut taken: Vec<String> = servers.iter().flat_map(|s| s.settings.addresses.iter().cloned()).collect();
+    let mut out: Vec<Effective> = servers
+        .iter()
+        .map(|s| Effective { addresses: s.settings.addresses.clone(), default: false })
+        .collect();
+    if domain.is_empty() {
+        return out;
+    }
+    let mut order: Vec<usize> = (0..servers.len()).collect();
+    order.sort_by(|a, b| servers[*a].id.cmp(servers[*b].id));
+    for i in order {
+        let s = &servers[i];
+        if s.settings.off || !s.settings.addresses.is_empty() {
+            continue;
+        }
+        let Some(base) = address_slug(s.name) else { continue };
+        let mut n = 1;
+        let address = loop {
+            let label = if n == 1 {
+                base.clone()
+            } else {
+                let tail = format!("-{n}");
+                format!("{}{tail}", base[..base.len().min(63 - tail.len())].trim_end_matches('-'))
+            };
+            let a = format!("{label}.{domain}");
+            if !taken.contains(&a) {
+                break a;
+            }
+            n += 1;
+        };
+        taken.push(address.clone());
+        out[i] = Effective { addresses: vec![address], default: true };
+    }
+    out
 }
 
 /// `raw` as an address to store: lower case, no trailing dot; letters,
@@ -442,9 +520,70 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hopper-route-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(RouteSettings::load(&dir), RouteSettings::default());
-        let s = RouteSettings { addresses: vec!["a.example.com".into()], sleep_after_minutes: 15, last_start_secs: Some(40) };
+        let s = RouteSettings { addresses: vec!["a.example.com".into()], sleep_after_minutes: 15, last_start_secs: Some(40), off: false };
         s.save(&dir).unwrap();
         assert_eq!(RouteSettings::load(&dir), s);
+        // Older files have no `off`; a turned-off server keeps it.
+        let off = RouteSettings { off: true, ..Default::default() };
+        off.save(&dir).unwrap();
+        assert_eq!(RouteSettings::load(&dir), off);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn address_slugs() {
+        assert_eq!(address_slug("all the mons").as_deref(), Some("all-the-mons"));
+        assert_eq!(address_slug("TNP-LL8").as_deref(), Some("tnp-ll8"));
+        assert_eq!(address_slug("  Val's_Pack!! ").as_deref(), Some("vals-pack"));
+        assert_eq!(address_slug("-- a  -  b --").as_deref(), Some("a-b"));
+        assert_eq!(address_slug("Ünïcode"), Some("ncode".into()));
+        assert_eq!(address_slug("!!!"), None);
+        assert_eq!(address_slug(&"x".repeat(80)).unwrap().len(), 63);
+        // Cut at 63 never leaves a trailing hyphen.
+        let s = address_slug(&format!("{} b", "a".repeat(62))).unwrap();
+        assert_eq!(s, "a".repeat(62));
+    }
+
+    fn eff(list: &[(&str, &str, RouteSettings)], domain: &str) -> Vec<Effective> {
+        let named: Vec<Named> = list.iter().map(|(id, name, s)| Named { id, name, settings: s }).collect();
+        effective_addresses(&named, domain)
+    }
+
+    #[test]
+    fn default_addresses() {
+        let none = RouteSettings::default();
+        let saved = RouteSettings { addresses: vec!["tnp.kyuubi.dev".into()], ..Default::default() };
+        let off = RouteSettings { off: true, ..Default::default() };
+        let list = [("bcg", "BCG", none.clone()), ("tnp-ll8", "TNP-LL8", saved), ("val", "Val", off)];
+        let e = eff(&list, "kyuubi.dev");
+        assert_eq!(e[0], Effective { addresses: vec!["bcg.kyuubi.dev".into()], default: true });
+        // A saved address wins over the default.
+        assert_eq!(e[1], Effective { addresses: vec!["tnp.kyuubi.dev".into()], default: false });
+        // Turned off: nothing.
+        assert_eq!(e[2], Effective::default());
+        // No domain (or routing off): only saved addresses.
+        let e = eff(&list, "");
+        assert!(e[0].addresses.is_empty() && e[1].addresses.len() == 1);
+    }
+
+    #[test]
+    fn default_address_clashes() {
+        let none = RouteSettings::default();
+        // Listed in any order, the lower id keeps the plain name.
+        let list = [("all-the-mons-2", "All The Mons", none.clone()), ("all-the-mons", "all the mons", none.clone())];
+        let e = eff(&list, "mc.test");
+        assert_eq!(e[1].addresses, ["all-the-mons.mc.test"]);
+        assert_eq!(e[0].addresses, ["all-the-mons-2.mc.test"]);
+        // A saved address elsewhere pushes the default along.
+        let mine = RouteSettings { addresses: vec!["bcg.mc.test".into()], ..Default::default() };
+        let list = [("a", "Other", mine), ("bcg", "BCG", none.clone())];
+        assert_eq!(eff(&list, "mc.test")[1].addresses, ["bcg-2.mc.test"]);
+        // A long name still fits in one label with its number.
+        let long = "x".repeat(70);
+        let list = [("a", long.as_str(), none.clone()), ("b", long.as_str(), none)];
+        let e = eff(&list, "mc.test");
+        let label = e[1].addresses[0].split('.').next().unwrap().to_string();
+        assert!(label.len() <= 63 && label.ends_with("-2"));
+        assert!(clean_address(&e[1].addresses[0]).is_ok());
     }
 }
