@@ -3333,6 +3333,21 @@ impl Store {
         );
     }
 
+    /// Whether the player closed this notice (`hopper::settings::notice_key`).
+    pub fn notice_hidden(&self, key: &str) -> bool {
+        self.settings.notice_hidden(key)
+    }
+
+    /// Closes a notice for good, until what it says changes.
+    pub fn hide_notice(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.update_settings(|st| st.hide_notice(key), cx);
+    }
+
+    /// Opens a closed notice again.
+    pub fn show_notice(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.update_settings(|st| st.show_notice(key), cx);
+    }
+
     /// Ends a running game.
     pub fn stop(&self, root: &Path) {
         if let Some(r) = self.running.get(root) {

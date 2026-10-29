@@ -412,21 +412,22 @@ impl AddonsView {
             return None;
         }
         let theme = cx.theme();
+        let place = inst.root.to_string_lossy();
         if dups.is_empty() {
-            return Some(
-                div()
-                    .px_6()
-                    .child(
-                        callout(theme.info, cx).child(
-                            div().text_sm().child(format!(
-                                "{queued} old file{} the game still has open will be removed when it closes.",
-                                if queued == 1 { "" } else { "s" }
-                            )),
-                        ),
-                    )
-                    .into_any_element(),
+            let text = format!(
+                "{queued} old file{} the game still has open will be removed when it closes.",
+                if queued == 1 { "" } else { "s" }
             );
+            let key = hopper::settings::notice_key(&place, "queued", &text);
+            let body = callout(theme.info, cx).child(div().text_sm().child(text));
+            let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.info, &self.store, cx)?;
+            return Some(div().px_6().child(notice).into_any_element());
         }
+        let dup_key = hopper::settings::notice_key(
+            &place,
+            "dups",
+            &dups.iter().map(|d| d.files.join(",")).collect::<Vec<_>>().join(";"),
+        );
         let extra: Vec<String> = dups.iter().flat_map(|d| d.files[1..].to_vec()).collect();
         let rows = dups.iter().map(|d| {
             let older = d.files[1..].to_vec();
@@ -472,11 +473,9 @@ impl AddonsView {
                 .into_any_element()
         });
         let n = dups.len();
-        Some(
-            div()
-                .px_6()
-                .child(
-                    callout(theme.warning, cx)
+        let title = format!("{n} mod{} in twice: the game won't start with both", if n == 1 { " is" } else { "s are" });
+        let warning = theme.warning;
+        let body = callout(theme.warning, cx)
                         .child(
                             h_flex()
                                 .gap_3()
@@ -485,10 +484,7 @@ impl AddonsView {
                                         .flex_1()
                                         .font_semibold()
                                         .text_color(theme.warning)
-                                        .child(format!(
-                                            "{n} mod{} in twice: the game won't start with both",
-                                            if n == 1 { " is" } else { "s are" }
-                                        )),
+                                        .child(title.clone()),
                                 )
                                 .when(n > 1, |r| {
                                     r.child(
@@ -514,10 +510,9 @@ impl AddonsView {
                                 .when(n > 6, |d| d.h(rems(10.5)))
                                 .overflow_y_scrollbar()
                                 .child(v_flex().gap_2().children(rows)),
-                        ),
-                )
-                .into_any_element(),
-        )
+                        );
+        let notice = widgets::closable_notice(body, dup_key, widgets::Closed::Chip, title, warning, &self.store, cx)?;
+        Some(div().px_6().child(notice).into_any_element())
     }
 
     /// "N required mods are missing", with Enable or Find for each.
@@ -741,13 +736,25 @@ impl AddonsView {
             })
             .collect();
         let n_rows = rows.len();
-        Some(
-            div()
-                .id("missing-banner")
-                .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
-                .px_6()
-                .child(
-                    callout(if loaded_fine.is_some() { theme.info } else { theme.warning }, cx)
+        let color = if loaded_fine.is_some() { theme.info } else { theme.warning };
+        let title = match loaded_fine {
+            Some(_) => format!(
+                "{n} mod{} list{} a requirement that isn't installed",
+                if n == 1 { "" } else { "s" },
+                if n == 1 { "s" } else { "" }
+            ),
+            None => format!(
+                "{n} required mod{} missing: the game will stop at loading",
+                if n == 1 { " is" } else { "s are" }
+            ),
+        };
+        let key = hopper::settings::notice_key(
+            &inst.root.to_string_lossy(),
+            "missing",
+            &self.missing.list.iter().map(|m| format!("{}>{}", m.mod_name, m.needs)).collect::<Vec<_>>().join(";"),
+        );
+        let hover = cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h);
+        let body = callout(color, cx)
                         .child(
                             h_flex()
                                 .gap_3()
@@ -755,18 +762,8 @@ impl AddonsView {
                                     div()
                                         .flex_1()
                                         .font_semibold()
-                                        .text_color(if loaded_fine.is_some() { theme.info } else { theme.warning })
-                                        .child(match loaded_fine {
-                                            Some(_) => format!(
-                                                "{n} mod{} list{} a requirement that isn't installed",
-                                                if n == 1 { "" } else { "s" },
-                                                if n == 1 { "s" } else { "" }
-                                            ),
-                                            None => format!(
-                                                "{n} required mod{} missing: the game will stop at loading",
-                                                if n == 1 { " is" } else { "s are" }
-                                            ),
-                                        }),
+                                        .text_color(color)
+                                        .child(title.clone()),
                                 )
                                 .when(installable.len() > 1, |r| {
                                     r.child(
@@ -789,10 +786,9 @@ impl AddonsView {
                                 .when(n_rows > 6, |d| d.h(rems(10.5)))
                                 .overflow_y_scrollbar()
                                 .child(v_flex().gap_2().children(rows)),
-                        ),
-                )
-                .into_any_element(),
-        )
+                        );
+        let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
+        Some(div().id("missing-banner").on_hover(hover).px_6().child(notice).into_any_element())
     }
 
     /// Downloads mods jars ask for by id; one that can't be found is
@@ -1177,17 +1173,18 @@ impl AddonsView {
             .iter()
             .any(|b| matches!(&b.kind, BlockerKind::Loader { id, .. } if id != "minecraft"));
         let n_rows = rows.len();
-        Some(
-            div()
-                .px_6()
-                .child(
-                    callout(if loaded_fine.is_some() { theme.info } else { theme.danger }, cx)
-                        .child(div().font_semibold().text_color(if loaded_fine.is_some() { theme.info } else { theme.danger }).child(
-                            match loaded_fine {
-                                Some(_) => format!("{n} possible problem{} in the mods' own files", if n == 1 { "" } else { "s" }),
-                                None => format!("{n} problem{} will stop the game at loading", if n == 1 { "" } else { "s" }),
-                            },
-                        ))
+        let color = if loaded_fine.is_some() { theme.info } else { theme.danger };
+        let title = match loaded_fine {
+            Some(_) => format!("{n} possible problem{} in the mods' own files", if n == 1 { "" } else { "s" }),
+            None => format!("{n} problem{} will stop the game at loading", if n == 1 { "" } else { "s" }),
+        };
+        let key = hopper::settings::notice_key(
+            &inst.root.to_string_lossy(),
+            "blockers",
+            &format!("{:?}{:?}", stop.map(|(st, _)| &st.file_name), blockers),
+        );
+        let body = callout(color, cx)
+                        .child(div().font_semibold().text_color(color).child(title.clone()))
                         .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx)))
                         .when(loader_note, |c| {
                             c.child(widgets::caption(
@@ -1201,10 +1198,9 @@ impl AddonsView {
                                 .when(n_rows > 6, |d| d.h(rems(10.5)))
                                 .overflow_y_scrollbar()
                                 .child(v_flex().gap_2().children(rows)),
-                        ),
-                )
-                .into_any_element(),
-        )
+                        );
+        let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
+        Some(div().px_6().child(notice).into_any_element())
     }
 
     /// The banner's row for the last crash: "X stopped the game from
@@ -1350,15 +1346,14 @@ impl AddonsView {
         let theme = cx.theme();
         let want = if inst.loader.starts_with("forge") { "Oculus" } else { "Iris" };
         let root = inst.root.clone();
-        Some(
-            div()
-                .px_6()
-                .child(
-                    callout(theme.warning, cx).child(
+        let title = "Install Iris or Oculus to use shaders";
+        let key = hopper::settings::notice_key(&inst.root.to_string_lossy(), "shader-loader", title);
+        let warning = theme.warning;
+        let body = callout(theme.warning, cx).child(
                         h_flex()
                             .gap_3()
                             .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
-                            .child(div().flex_1().text_sm().child("Install Iris or Oculus to use shaders"))
+                            .child(div().flex_1().text_sm().child(title))
                             .child(
                                 Button::new("find-shader-loader")
                                     .small()
@@ -1369,10 +1364,9 @@ impl AddonsView {
                                         cx.emit(AddonsEvent::Find { root: root.clone(), text: want.to_lowercase() })
                                     })),
                             ),
-                    ),
-                )
-                .into_any_element(),
-        )
+                    );
+        let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, warning, &self.store, cx)?;
+        Some(div().px_6().child(notice).into_any_element())
     }
 
     /// Named sets of disabled mods to switch between.

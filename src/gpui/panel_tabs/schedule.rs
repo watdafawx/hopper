@@ -36,7 +36,6 @@ fn parse(v: &Value) -> Loaded {
 }
 
 pub struct ScheduleTab {
-    #[allow(dead_code)]
     store: Entity<Store>,
     target: Option<Target>,
     data: Load<Loaded>,
@@ -347,7 +346,12 @@ impl Render for ScheduleTab {
                     .gap_6()
                     .p_4()
                     .pb_6()
-                    .when_some(gave_up, |c, g| c.child(widgets::notice_bar(theme.warning, IconName::TriangleAlert, cx).child(div().text_sm().child(g))))
+                    .when_some(gave_up, |c, g| {
+                        let place = self.target.as_ref().map(|t| format!("{}#{}", t.remote.panel, t.remote.id)).unwrap_or_default();
+                        let key = hopper::settings::notice_key(&place, "restart-gave-up", &g);
+                        let body = widgets::notice_bar(theme.warning, IconName::TriangleAlert, cx).child(div().text_sm().child(g));
+                        c.children(widgets::closable_notice(body, key, widgets::Closed::Chip, "Automatic restarts stopped", theme.warning, &self.store, cx))
+                    })
                     .child(Self::section("Daily restart", restart))
                     .child(Self::section("Crashes", crashes))
                     .child(Self::section("Backups", backups))

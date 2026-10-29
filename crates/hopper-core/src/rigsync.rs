@@ -496,6 +496,44 @@ pub fn summary(results: &[SyncResult]) -> Result<String, Vec<String>> {
     ))
 }
 
+/// A Sync button's label for what it will do: `push` jars copied to the
+/// server (added or updated) and `remove` taken off it. Only removals:
+/// "Remove 2 from server"; only pushes: "Push 3 to server"; both:
+/// "Sync 5 (push 3, remove 2)". `None` when there is nothing to do.
+pub fn sync_label(push: usize, remove: usize) -> Option<String> {
+    match (push, remove) {
+        (0, 0) => None,
+        (p, 0) => Some(format!("Push {p} to server")),
+        (0, r) => Some(format!("Remove {r} from server")),
+        (p, r) => Some(format!("Sync {} (push {p}, remove {r})", p + r)),
+    }
+}
+
+/// What a Sync button does, naming only the actions it will take; `kept_in`
+/// is where replaced and removed jars go.
+pub fn sync_help(add: usize, update: usize, remove: usize, kept_in: &str) -> String {
+    let jars = |n: usize| if n == 1 { "jar" } else { "jars" };
+    let mut push = Vec::new();
+    if add > 0 {
+        push.push(format!("{add} new"));
+    }
+    if update > 0 {
+        push.push(format!("{update} updated"));
+    }
+    let n_push = add + update;
+    let push = push.join(" and ");
+    match (n_push, remove) {
+        (0, 0) => "Tick mods to choose what to sync.".to_string(),
+        (_, 0) if update > 0 => format!("Copies {push} {} to the server. Replaced jars are kept in {kept_in}.", jars(n_push)),
+        (_, 0) => format!("Copies {push} {} to the server.", jars(n_push)),
+        (0, r) => format!("Removes {r} {} the server no longer needs. They are kept in {kept_in}.", jars(r)),
+        (_, r) => format!(
+            "Copies {push} {} to the server and removes {r} it no longer needs. Replaced and removed jars are kept in {kept_in}.",
+            jars(n_push)
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,5 +659,25 @@ mod tests {
         assert_eq!(row_action(DiffStatus::OnlyServer), Some(RowAct::Pull));
         assert_eq!(row_action(DiffStatus::ServerStale), Some(RowAct::Remove));
         assert_eq!(row_action(DiffStatus::Same), None);
+    }
+
+    #[test]
+    fn sync_label_says_what_it_does() {
+        assert_eq!(sync_label(0, 0), None);
+        assert_eq!(sync_label(0, 2).as_deref(), Some("Remove 2 from server"));
+        assert_eq!(sync_label(3, 0).as_deref(), Some("Push 3 to server"));
+        assert_eq!(sync_label(3, 2).as_deref(), Some("Sync 5 (push 3, remove 2)"));
+    }
+
+    #[test]
+    fn sync_help_names_only_present_actions() {
+        let k = ".hopper-backups";
+        assert_eq!(sync_help(0, 0, 2, k), "Removes 2 jars the server no longer needs. They are kept in .hopper-backups.");
+        assert_eq!(sync_help(3, 0, 0, k), "Copies 3 new jars to the server.");
+        assert_eq!(sync_help(3, 1, 0, k), "Copies 3 new and 1 updated jars to the server. Replaced jars are kept in .hopper-backups.");
+        assert_eq!(
+            sync_help(1, 0, 1, k),
+            "Copies 1 new jar to the server and removes 1 it no longer needs. Replaced and removed jars are kept in .hopper-backups."
+        );
     }
 }

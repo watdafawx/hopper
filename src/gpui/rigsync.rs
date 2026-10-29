@@ -150,8 +150,6 @@ pub struct SyncPanel {
     /// up after each comparison (they sit on the same slow share).
     drift: Option<hopper::configdiff::Drift>,
     drift_open: bool,
-    /// The drift the user hid: shown again once it changes.
-    drift_hidden: Option<u64>,
     _drift_task: Option<Task<()>>,
     /// The NeoForge version the server's run.bat starts, read with each
     /// comparison (run.bat may sit on a network share: not per frame).
@@ -276,7 +274,6 @@ impl SyncPanel {
             crash_configs: Vec::new(),
             drift: None,
             drift_open: false,
-            drift_hidden: None,
             _drift_task: None,
             server_nf: None,
             nf_versions: None,
@@ -473,7 +470,6 @@ impl SyncPanel {
             self.result = None;
             self.diff = None;
             self.drift = None;
-            self.drift_hidden = None;
             self.server_nf = None;
             self.show = None;
         }
@@ -847,7 +843,7 @@ impl SyncPanel {
     }
 
     /// A sync that removes jars from the server says so first.
-    fn confirm_sync(&mut self, ops: Ops, n_sel: usize, n_remove: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_sync(&mut self, ops: Ops, n_push: usize, n_remove: usize, window: &mut Window, cx: &mut Context<Self>) {
         let view = cx.entity();
         let up = ops.up.clone();
         let down = ops.down.clone();
@@ -858,13 +854,22 @@ impl SyncPanel {
         };
         window.open_alert_dialog(cx, move |alert, _, _| {
             let (view, up, down) = (view.clone(), up.clone(), down.clone());
+            let mods = |n: usize| if n == 1 { "mod" } else { "mods" };
+            let (title, ok) = if n_push == 0 {
+                (format!("Remove {n_remove} {} from the server?", mods(n_remove)), "Remove from server")
+            } else {
+                let n = n_push + n_remove;
+                (format!("Sync {n} {} to the server?", mods(n)), "Sync to server")
+            };
             alert
-                .title(format!("Sync {n_sel} mod{} to the server?", if n_sel == 1 { "" } else { "s" }))
-                .description(format!(
-                    "{n_remove} will be removed from the server. {undo}"
-                ))
+                .title(title)
+                .description(if n_push == 0 {
+                    undo.to_string()
+                } else {
+                    format!("{n_push} will be copied to the server and {n_remove} removed from it. {undo}")
+                })
                 .confirm()
-                .ok_text("Sync to server")
+                .ok_text(ok)
                 .on_ok(move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.selected.clear();
@@ -1825,8 +1830,9 @@ impl SyncPanel {
         }
         let report = c.source.clone();
         let local_report = !remote && report.extension().is_some_and(|e| e == "txt") && report.is_file();
-        Some(
-            crate::crash_help::callout(theme.danger, cx)
+        let place = self.server.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let key = hopper::settings::notice_key(&place, "server-crash", &format!("{}|{}", c.source.to_string_lossy(), c.when));
+        let body = crate::crash_help::callout(theme.danger, cx)
                 .child(
                     h_flex()
                         .gap_2()
@@ -1846,9 +1852,8 @@ impl SyncPanel {
                             )
                         }),
                 )
-                .children(body)
-                .into_any_element(),
-        )
+                .children(body);
+        widgets::closable_notice(body, key, widgets::Closed::Chip, "The server crashed", theme.danger, &self.store, cx)
     }
 
     /// Opens the Configs section on the files a drift group lists.
@@ -1864,10 +1869,12 @@ impl SyncPanel {
     fn drift_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use hopper::configdiff::{DriftGroup, FileStatus};
         let d = self.drift.as_ref().filter(|d| !d.is_empty())?;
-        let sig = d.signature();
-        if self.drift_hidden == Some(sig) || self.section != Section::Mods {
+        if self.section != Section::Mods {
             return None;
         }
+        let place = self.server.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        // Hidden until something else changes.
+        let key = hopper::settings::notice_key(&place, "drift", &format!("{:016x}", d.signature()));
         let theme = cx.theme().clone();
         let counts = |g: &DriftGroup| {
             let mut v = Vec::new();
@@ -1926,8 +1933,7 @@ impl SyncPanel {
         // The first group's folder, unfiltered: the rest are a tab away.
         let first = groups.first().map(|(g, _)| g.folder.clone());
         // One line (a tint like the mock's), its groups below when opened.
-        Some(
-            v_flex()
+        let body = v_flex()
                 .gap_2()
                 .px_3()
                 .py_2()
@@ -1980,25 +1986,13 @@ impl SyncPanel {
                                         this.review_drift(&folder, "", window, cx)
                                     })),
                             )
-                        })
-                        .child(
-                            Button::new("drift-hide")
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::X)
-                                .tooltip("Hide until something else changes")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.drift_hidden = Some(sig);
-                                    cx.notify();
-                                })),
-                        ),
+                        }),
                 )
                 .children(rows)
                 .when(open && more > 0, |r| {
                     r.child(widgets::caption(format!("And {more} more in Configs."), cx))
-                })
-                .into_any_element(),
-        )
+                });
+        widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.warning, &self.store, cx)
     }
 
     fn group_color(g: Group, cx: &App) -> Hsla {
@@ -2068,13 +2062,23 @@ impl SyncPanel {
             }),
         );
         // What Sync changes: the whole comparison, whatever the filters.
-        let to_change = self.whole(cx).iter().filter(|g| Show::Needs.has(**g)).count();
+        let whole = self.whole(cx);
+        let to_change = whole.iter().filter(|g| Show::Needs.has(**g)).count();
+        let to_remove = whole.iter().filter(|g| **g == Group::ServerOnly).count();
+        // Installing the pack's NeoForge is part of it too: say "Sync" then.
+        let nf_differs = self.pair_header(cx).is_some_and(|(_, inst)| {
+            matches!((inst.loader.strip_prefix("neoforge-"), &self.server_nf), (Some(p), Some(sv)) if p != sv)
+        });
         let online = self.online(cx);
         let sync = Some(()).map(|_| {
             Button::new("update-server")
                 .small()
                 .icon(IconName::ServerCog)
-                .label(if to_change > 0 { format!("Sync {to_change} to server") } else { "Sync to server".to_string() })
+                .label(match rigsync::sync_label(to_change - to_remove, to_remove) {
+                    Some(l) if !nf_differs => l,
+                    _ if to_change > 0 => format!("Sync {to_change} to server"),
+                    _ => "Sync to server".to_string(),
+                })
                 // Picked rows have their own filled button below.
                 .map(|b| if to_change > 0 && n_sel == 0 { b.primary() } else { b.outline() })
                 .tooltip(if online {
@@ -2170,6 +2174,8 @@ impl SyncPanel {
         let blocked = self.running || (online && !self.allow_online);
         let n_sel = picked.len();
         let n_remove = count(Group::ServerOnly, None);
+        let (n_add, n_update) = (count(Group::Add, None) + count(Group::KeptOff, None), count(Group::Update, None));
+        let n_push = n_add + n_update;
         let parts = action_line(picked.iter());
         let todo = action_line(self.visible(cx).into_iter());
         let theme = cx.theme();
@@ -2228,9 +2234,9 @@ impl SyncPanel {
                     .small()
                     // Filled only with rows ticked: else the filter row's Sync is the one.
                     .map(|b| if n_sel > 0 { b.primary() } else { b.outline() })
-                    .icon(IconName::Upload)
-                    .label(if n_sel > 0 { format!("Sync to server ({n_sel})") } else { "Sync to server".to_string() })
-                    .tooltip(format!("Pushes added and updated jars to the server and removes the ones it no longer needs. Replaced and removed jars are kept in {}.", self.kept_in()))
+                    .icon(if n_push == 0 && n_remove > 0 { IconName::Trash } else { IconName::Upload })
+                    .label(rigsync::sync_label(n_push, n_remove).unwrap_or_else(|| "Sync to server".to_string()))
+                    .tooltip(rigsync::sync_help(n_add, n_update, n_remove, self.kept_in()))
                     .disabled(ops.is_empty() || blocked)
                     .on_click(cx.listener(move |this, _, w, cx| {
                         let ops = Ops {
@@ -2239,7 +2245,7 @@ impl SyncPanel {
                         };
                         // Removing asks first; adding and updating are backed up.
                         if n_remove > 0 {
-                            this.confirm_sync(ops, n_sel, n_remove, w, cx);
+                            this.confirm_sync(ops, n_push, n_remove, w, cx);
                         } else {
                             this.selected.clear();
                             this.run(ops, cx)

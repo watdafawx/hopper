@@ -398,15 +398,17 @@ impl AddonsView {
                                 }),
                         ),
                 )
-                .when(no_loader, |c| c.child(self.paxi_callout(&root, cx)))
+                .when(no_loader, |c| c.children(self.paxi_callout(&root, cx)))
                 .into_any_element(),
         )
     }
 
     /// "Paxi loads data packs into every world", with Find Paxi.
-    fn paxi_callout(&self, root: &Path, cx: &mut Context<Self>) -> AnyElement {
+    fn paxi_callout(&self, root: &Path, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let key = hopper::settings::notice_key(&root.to_string_lossy(), "paxi", "");
         let root = root.to_path_buf();
-        callout(cx.theme().info, cx)
+        let info = cx.theme().info;
+        let body = callout(info, cx)
             .child(
                 h_flex()
                     .gap_3()
@@ -423,8 +425,8 @@ impl AddonsView {
                                 cx.emit(AddonsEvent::Find { root: root.clone(), text: "paxi".into() })
                             })),
                     ),
-            )
-            .into_any_element()
+            );
+        widgets::closable_notice(body, key, widgets::Closed::Gone, "", info, &self.store, cx)
     }
 
     /// Data packs with no folder at all: no loader and no world yet.
@@ -433,7 +435,7 @@ impl AddonsView {
         v_flex()
             .size_full()
             .gap_3()
-            .child(div().px_6().child(self.paxi_callout(&root, cx)))
+            .children(self.paxi_callout(&root, cx).map(|n| div().px_6().child(n)))
             .child(
                 v_flex().flex_1().items_center().justify_center().child(widgets::empty_state(
                     IconName::Database,

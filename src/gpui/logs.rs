@@ -589,7 +589,7 @@ impl Render for LogsView {
             let card_source = detected.as_ref().map(|c| c.source.clone());
             let card = detected.map(|c| self.crash_card(&root, &c, cx));
             let warned = self.warnings_card(&root, cx);
-            let crash = self.crash.as_ref().filter(|_| card.is_none()).map(|c| {
+            let crash = self.crash.as_ref().filter(|_| card.is_none()).and_then(|c| {
                 let name = c.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 let report = c.path.clone();
                 // The lead: the error line under the description, and the
@@ -613,7 +613,7 @@ impl Render for LogsView {
                     .mtime
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| hopper::time::relative_secs(d.as_secs() as i64));
-                callout(theme.danger, cx)
+                let body = callout(theme.danger, cx)
                     .child(
                         h_flex()
                             .gap_2()
@@ -653,7 +653,9 @@ impl Render for LogsView {
                             .text_color(theme.muted_foreground)
                             .children(c.summary.clone()),
                     )
-                    .child(div().pt_1().child(share))
+                    .child(div().pt_1().child(share));
+                let key = hopper::settings::notice_key(&root.to_string_lossy(), "latest-crash", &c.path.to_string_lossy());
+                widgets::closable_notice(body, key, widgets::Closed::Chip, "Latest crash", theme.danger, &self.store, cx)
             });
             // No crash: say so, rather than leave the space blank.
             let calm = (card.is_none() && crash.is_none()).then(|| {
@@ -991,21 +993,21 @@ impl LogsView {
                     .into_any_element()
             })
             .collect();
-        Some(
-            callout(theme.warning, cx)
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
-                        .child(div().font_semibold().text_color(theme.warning).child(if playing {
-                            "While you play"
-                        } else {
-                            "While you last played"
-                        })),
-                )
-                .child(v_flex().children(rows))
-                .into_any_element(),
-        )
+        let title = if playing { "While you play" } else { "While you last played" };
+        let key = hopper::settings::notice_key(
+            &root.to_string_lossy(),
+            "mixin-warnings",
+            &list.iter().map(|s| format!("{}:{}", s.file_name, s.why)).collect::<Vec<_>>().join(";"),
+        );
+        let body = callout(theme.warning, cx)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
+                    .child(div().font_semibold().text_color(theme.warning).child(title)),
+            )
+            .child(v_flex().children(rows));
+        widgets::closable_notice(body, key, widgets::Closed::Chip, title, theme.warning, &self.store, cx)
     }
 
     /// Turn the likely mods off (then play), or back on.

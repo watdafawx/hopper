@@ -578,6 +578,86 @@ pub fn notice_bar(color: Hsla, icon: IconName, cx: &App) -> Div {
         .child(Icon::new(icon).small().flex_none().text_color(color))
 }
 
+/// What a closed notice leaves behind.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Closed {
+    /// Its title as a one-line chip with "Show": problems and warnings, so
+    /// the player never loses track of one.
+    Chip,
+    /// Nothing: tips and offers.
+    Gone,
+}
+
+/// A notice (a `callout`, a `notice_bar` or a hand-built box) with a ✕ in
+/// its top-right corner. `key` (`hopper::settings::notice_key`) remembers
+/// the closing per place and per what the notice says, so a changed notice
+/// shows again. `None` when it is closed and leaves nothing.
+pub fn closable_notice<E, V: 'static>(
+    body: E,
+    key: String,
+    closed: Closed,
+    title: impl Into<SharedString>,
+    color: Hsla,
+    store: &Entity<crate::store::Store>,
+    cx: &Context<V>,
+) -> Option<AnyElement>
+where
+    E: Styled + ParentElement + IntoElement,
+{
+    let id = SharedString::from(format!("notice-{key}"));
+    let store = store.clone();
+    // Not every view redraws when the store changes: tell this one.
+    let view = cx.entity_id();
+    if store.read(cx).notice_hidden(&key) {
+        return (closed == Closed::Chip).then(|| {
+            h_flex()
+                .child(
+                    clickable(
+                        h_flex()
+                            .id(id)
+                            .flex_none()
+                            .gap_1p5()
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(crate::theme::RADIUS))
+                            .bg(color.opacity(alpha::TINT))
+                            .text_xs()
+                            .text_color(color)
+                            .child(Icon::new(IconName::TriangleAlert).xsmall())
+                            .child(title.into())
+                            .child(div().opacity(0.6).child("·"))
+                            .child(div().font_semibold().child("Show")),
+                        cx,
+                    )
+                    .hover(|s| s.bg(color.opacity(alpha::TINT * 2.)))
+                    .on_click(move |_, _, cx| {
+                        store.update(cx, |s, cx| s.show_notice(&key, cx));
+                        cx.notify(view);
+                    })
+                )
+                .into_any_element()
+        });
+    }
+    Some(
+        body.relative()
+            .pr_10()
+            .child(
+                div().absolute().top_2().right_2().child(
+                    Button::new(id)
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::Close)
+                        .tooltip("Hide this notice")
+                        .on_click(move |_, _, cx| {
+                            store.update(cx, |s, cx| s.hide_notice(&key, cx));
+                            cx.notify(view);
+                        }),
+                ),
+            )
+            .into_any_element(),
+    )
+}
+
 /// One line of a summary ("242 mods: 17 added…"): a tinted icon, `body`,
 /// and "Show ›" / "Hide ⌄" at the end when it opens a list (`open` is
 /// `Some`). Add the click with `.on_click`.

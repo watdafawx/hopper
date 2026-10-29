@@ -1,6 +1,6 @@
 //! Server sync's Configs and History sections. Configs works like the Mods
 //! section beside it: files sorted into Needs action / Kept off / Not needed
-//! / Comments only / In sync, an action per row, and one "Sync N to server".
+//! / Comments only / In sync, an action per row, and one "Push N to server".
 //! A folder can also mirror or live-link (Folder rules). History lists and
 //! undoes every sync.
 
@@ -614,7 +614,7 @@ impl ConfigsPanel {
             Act::Push => (
                 many("Send 1 file to the server?", "Send {n} files to the server?"),
                 "The server's copies are backed up first; undo from History.",
-                "Sync to server",
+                "Push to server",
             ),
             Act::Pull => (
                 many("Copy 1 file from the server to the client?", "Copy {n} files from the server to the client?"),
@@ -1381,7 +1381,7 @@ impl ConfigsPanel {
                 Button::new("cfg-push")
                     .small()
                     .icon(IconName::ServerCog)
-                    .label(if np > 0 { format!("Sync {np} to server") } else { "Sync to server".to_string() })
+                    .label(hopper::rigsync::sync_label(np, 0).unwrap_or_else(|| "Push to server".to_string()))
                     .map(|b| if np > 0 { b.primary() } else { b.outline() })
                     .tooltip(if n_sel > 0 {
                         "Sends the ticked files to the server. The server's copies are backed up first."

@@ -171,6 +171,10 @@ pub struct Settings {
     /// Instances (their folders) whose "Running a server for this pack?"
     /// hint was dismissed.
     pub server_hint_dismissed: Vec<String>,
+    /// Notices the player closed, as `place|kind|hash of what it said`
+    /// (place: an instance's or server's folder). A notice that says
+    /// something new has a new hash, so it shows again.
+    pub dismissed_notices: Vec<String>,
     /// Offer to translate changelogs and descriptions into English, on this
     /// PC. Off until the user turns it on: nothing is detected, shown or
     /// downloaded before.
@@ -386,6 +390,7 @@ impl Default for Settings {
             server_tools: None,
             hide_servers_item: false,
             server_hint_dismissed: Vec::new(),
+            dismissed_notices: Vec::new(),
             translate: false,
             translate_always: Vec::new(),
             unknown: serde_json::Map::new(),
@@ -507,6 +512,45 @@ impl Settings {
     }
 }
 
+/// The key a closed notice is remembered by: where it shows (an
+/// instance's or server's folder), what kind it is, and a hash of what it
+/// says. FNV-1a, so the hash stays the same across Hopper versions.
+pub fn notice_key(place: &str, kind: &str, text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{place}|{kind}|{h:016x}")
+}
+
+/// How many closed notices are remembered; the oldest go first.
+const NOTICES_KEPT: usize = 300;
+
+impl Settings {
+    /// Whether the player closed this notice (see [`notice_key`]).
+    pub fn notice_hidden(&self, key: &str) -> bool {
+        self.dismissed_notices.iter().any(|k| k == key)
+    }
+
+    /// Remembers a closed notice. An older version of the same notice in
+    /// the same place said something else and can't come back the same,
+    /// so it is forgotten.
+    pub fn hide_notice(&mut self, key: &str) {
+        let prefix = key.rsplit_once('|').map_or(key, |(p, _)| p);
+        self.dismissed_notices
+            .retain(|k| k.rsplit_once('|').map_or(k.as_str(), |(p, _)| p) != prefix);
+        self.dismissed_notices.push(key.to_string());
+        let extra = self.dismissed_notices.len().saturating_sub(NOTICES_KEPT);
+        self.dismissed_notices.drain(..extra);
+    }
+
+    /// Shows a closed notice again.
+    pub fn show_notice(&mut self, key: &str) {
+        self.dismissed_notices.retain(|k| k != key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +589,39 @@ mod tests {
         assert_eq!(back.server_tools, Some(false));
         assert!(back.hide_servers_item);
         assert_eq!(back.server_hint_dismissed, s.server_hint_dismissed);
+    }
+
+    #[test]
+    fn dismissed_notices_load_and_round_trip() {
+        let old: Settings = serde_json::from_str(r#"{"servers_root":"S:\\servers"}"#).unwrap();
+        assert!(old.dismissed_notices.is_empty());
+        let mut s = old;
+        s.dismissed_notices.push("C:\\inst\\ATM|blockers|00ff".into());
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.dismissed_notices, s.dismissed_notices);
+    }
+
+    #[test]
+    fn notice_keys_hide_show_and_replace() {
+        let a = notice_key("C:/inst", "blockers", "ExtendedAE-Plus needs TMRV 19.70");
+        let b = notice_key("C:/inst", "blockers", "ExtendedAE-Plus needs TMRV 19.80");
+        assert_ne!(a, b);
+        assert_eq!(a, notice_key("C:/inst", "blockers", "ExtendedAE-Plus needs TMRV 19.70"));
+        let other = notice_key("C:/inst", "dups", "x");
+        let mut s = Settings::default();
+        s.hide_notice(&a);
+        s.hide_notice(&other);
+        assert!(s.notice_hidden(&a) && !s.notice_hidden(&b));
+        // The changed notice replaces the old one; the other kind stays.
+        s.hide_notice(&b);
+        assert!(!s.notice_hidden(&a) && s.notice_hidden(&b) && s.notice_hidden(&other));
+        s.show_notice(&b);
+        assert!(!s.notice_hidden(&b));
+        for i in 0..400 {
+            s.hide_notice(&notice_key(&format!("p{i}"), "k", "t"));
+        }
+        assert_eq!(s.dismissed_notices.len(), NOTICES_KEPT);
+        assert!(s.notice_hidden(&notice_key("p399", "k", "t")));
     }
 
     #[test]

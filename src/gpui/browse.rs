@@ -2241,7 +2241,7 @@ impl BrowseView {
         // from here doesn't come from where the pack's mods do.
         let off_site = target
             .filter(|_| !self.bookmarked && !is_pack)
-            .and_then(|t| t.pack.as_ref().map(|p| (t.name.clone(), hopper::modrinth::is_mr(p.project_id))))
+            .and_then(|t| t.pack.as_ref().map(|p| ((t.name.clone(), t.root.to_string_lossy().into_owned()), hopper::modrinth::is_mr(p.project_id))))
             .filter(|(_, pack_mr)| *pack_mr != self.modrinth);
         let some_need_target = match &saved {
             Some(list) => list.iter().any(|m| !hopper::browse::is_modpack(m, self.class)),
@@ -2311,14 +2311,14 @@ impl BrowseView {
                                 }),
                         )
                     })
-                    .when_some(off_site, |r, (name, pack_mr)| {
+                    .when_some(off_site, |r, ((name, place), pack_mr)| {
                         let (here, home) = if self.modrinth {
                             ("Modrinth", "CurseForge")
                         } else {
                             ("CurseForge", "Modrinth")
                         };
-                        r.child(
-                            h_flex()
+                        let key = hopper::settings::notice_key(&place, "off-site", here);
+                        let body = h_flex()
                                 .gap_2()
                                 .px_3()
                                 .py_2()
@@ -2340,8 +2340,16 @@ impl BrowseView {
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.set_source(pack_mr, window, cx)
                                         })),
-                                ),
-                        )
+                                );
+                        r.children(widgets::closable_notice(
+                            body,
+                            key,
+                            widgets::Closed::Chip,
+                            format!("{name} is a {home} pack"),
+                            theme.warning,
+                            &self.store,
+                            cx,
+                        ))
                     })
                     .when(!self.modrinth && cf::api_key().is_none(), |r| {
                         r.child(
@@ -3203,8 +3211,9 @@ impl BrowseView {
         let (pending, hold, progress) = self.install_state(m.id, pack, cx);
         let theme = cx.theme();
         let m2 = m.clone();
-        Some(
-            crate::crash_help::callout(theme.primary, cx)
+        let key = hopper::settings::notice_key("browse", "opened-link", &f.id.to_string());
+        let primary = theme.primary;
+        let body = crate::crash_help::callout(theme.primary, cx)
                 .child(div().font_semibold().child("Opened from curseforge.com"))
                 .child(div().text_sm().child(f.display_name.clone()))
                 .child(if have {
@@ -3237,9 +3246,8 @@ impl BrowseView {
                             r.child(widgets::caption("Pick an instance under Install into", cx))
                         })
                         .into_any_element()
-                })
-                .into_any_element(),
-        )
+                });
+        widgets::closable_notice(body, key, widgets::Closed::Gone, "", primary, &self.store, cx)
     }
 }
 

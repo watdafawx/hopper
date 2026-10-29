@@ -168,20 +168,21 @@ impl Render for CrashHelp {
                     .text_color(crate::widgets::site_color(false))
                     .on_click(|_, _, cx| cx.open_url(CURSEFORGE)),
             );
+        let body = callout(color, cx)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .text_color(color)
+                    .child(Icon::new(IconName::Stethoscope).small())
+                    .child(div().font_semibold().child(title)),
+            )
+            .child(div().text_sm().text_color(cx.theme().foreground).child(text))
+            .child(links);
+        let place = self.root.as_ref().map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+        let key = hopper::settings::notice_key(&place, "crash-assistant", title);
         v_flex()
             .gap_3()
-            .child(
-                callout(color, cx)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .text_color(color)
-                            .child(Icon::new(IconName::Stethoscope).small())
-                            .child(div().font_semibold().child(title)),
-                    )
-                    .child(div().text_sm().text_color(cx.theme().foreground).child(text))
-                    .child(links),
-            )
+            .children(crate::widgets::closable_notice(body, key, crate::widgets::Closed::Gone, "", color, &self.store, cx))
     }
 }
 
