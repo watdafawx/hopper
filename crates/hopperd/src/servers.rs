@@ -46,8 +46,12 @@ pub struct Summary {
     pub uptime_secs: Option<u64>,
     /// Stopping and saving its worlds (shown as "Saving worlds…").
     pub saving: bool,
-    /// Addresses players join it by (server addresses / the router).
+    /// Addresses players join it by (server addresses / the router):
+    /// saved ones, or the default `name.<domain>` (see
+    /// [`crate::router::effective`], which the callers fill in).
     pub addresses: Vec<String>,
+    /// `addresses` is the default, not saved.
+    pub address_default: bool,
     /// Sleeps after this many minutes with nobody on; 0: never.
     pub sleep_after_minutes: u32,
     /// `server-icon.png`'s modified time (Unix seconds), when it has one;
@@ -231,6 +235,7 @@ impl Servers {
                 .and_then(|s| s.elapsed().ok())
                 .map(|d| d.as_secs()),
             addresses: route.addresses,
+            address_default: false,
             sleep_after_minutes: route.sleep_after_minutes,
             icon: std::fs::metadata(e.root.join("server-icon.png"))
                 .and_then(|m| m.modified())

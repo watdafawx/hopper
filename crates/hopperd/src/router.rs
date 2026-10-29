@@ -80,14 +80,54 @@ pub fn settings(e: &Entry) -> RouteSettings {
     RouteSettings::load(&e.root)
 }
 
-fn refresh_routes(app: &App) {
-    let routes = app
-        .servers
-        .list()
+/// The domain default addresses go under: empty when routing is off.
+fn default_domain(app: &App) -> String {
+    let c = app.cfg.read().unwrap();
+    if c.router.enabled { c.router.domain.clone() } else { String::new() }
+}
+
+/// Every server's addresses, saved or default (see
+/// [`core::effective_addresses`]), by server id.
+pub fn effective(app: &App) -> HashMap<String, core::Effective> {
+    effective_with(app, None)
+}
+
+/// [`effective`], as if `instead` (server id, settings) were saved.
+fn effective_with(app: &App, instead: Option<(&str, &RouteSettings)>) -> HashMap<String, core::Effective> {
+    let list = app.servers.list();
+    let saved: Vec<RouteSettings> = list
         .iter()
-        .map(|e| (e.id.clone(), settings(e).addresses))
-        .filter(|(_, a)| !a.is_empty())
+        .map(|e| match instead {
+            Some((id, s)) if id == e.id => s.clone(),
+            _ => settings(e),
+        })
         .collect();
+    let named: Vec<core::Named> = list.iter().zip(&saved).map(|(e, s)| core::Named { id: &e.id, name: &e.name, settings: s }).collect();
+    let eff = core::effective_addresses(&named, &default_domain(app));
+    list.iter().map(|e| e.id.clone()).zip(eff).collect()
+}
+
+/// The server other than `skip` that players reach at `address`, by name.
+pub fn taken_by(app: &App, address: &str, skip: Option<&str>) -> Option<String> {
+    let eff = effective(app);
+    app.servers
+        .list()
+        .into_iter()
+        .find(|e| Some(e.id.as_str()) != skip && eff.get(&e.id).is_some_and(|x| x.addresses.iter().any(|a| a == address)))
+        .map(|e| e.name.clone())
+}
+
+/// A server's summary with its effective addresses (from [`effective`]).
+pub fn fill_summary(mut s: crate::servers::Summary, eff: &mut HashMap<String, core::Effective>) -> crate::servers::Summary {
+    if let Some(x) = eff.remove(&s.id) {
+        s.addresses = x.addresses;
+        s.address_default = x.default;
+    }
+    s
+}
+
+fn refresh_routes(app: &App) {
+    let routes = effective(app).into_iter().map(|(id, e)| (id, e.addresses)).filter(|(_, a)| !a.is_empty()).collect();
     *app.router.routes.write().unwrap() = routes;
 }
 
@@ -158,7 +198,7 @@ fn sleep_and_time(app: &Arc<App>) {
                 ServerState::Running => {
                     if let Some(at) = starting.remove(&e.id) {
                         let mut s = settings(&e);
-                        if !s.addresses.is_empty() {
+                        if !s.off && app.router.routes.read().unwrap().iter().any(|(id, _)| *id == e.id) {
                             s.last_start_secs = Some(now.duration_since(at).as_secs() as u32);
                             let _ = s.save(&e.root);
                         }
@@ -370,7 +410,8 @@ pub fn routes() -> Routes<Arc<App>> {
 
 /// The router at a glance, for the panel's status chip: "off" (turned off),
 /// "waiting" (on, but no server has a saved address, so nothing listens),
-/// "running", or "error" (it couldn't get its port).
+/// "running", or "error" (it couldn't get its port). Default addresses
+/// count as addresses.
 fn state(cfg: &RouterConfig, st: &Status, has_addresses: bool) -> &'static str {
     if !cfg.enabled {
         "off"
@@ -429,6 +470,9 @@ struct AddressBody {
     addresses: Vec<String>,
     #[serde(default)]
     sleep_after_minutes: u32,
+    /// No address at all, not even the default.
+    #[serde(default)]
+    off: bool,
 }
 
 async fn get_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -436,8 +480,17 @@ async fn get_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let s = settings(&e);
     let router_port = app.cfg.read().unwrap().router.port;
+    let eff = effective(&app).remove(&e.id).unwrap_or_default();
+    // What it gets with nothing saved, for "Use default".
+    let default = effective_with(&app, Some((&e.id, &RouteSettings::default()))).remove(&e.id).and_then(|x| x.addresses.into_iter().next());
+    // Who has the plain name, when the default got a number.
+    let domain = default_domain(&app);
+    let plain = core::address_slug(&e.name).map(|n| format!("{n}.{domain}"));
+    let taken = plain.filter(|p| default.as_ref() != Some(p)).and_then(|p| taken_by(&app, &p, Some(&e.id)).map(|who| json!({ "address": p, "by": who })));
     Ok(Json(json!({
-        "addresses": s.addresses, "sleep_after_minutes": s.sleep_after_minutes, "last_start_secs": s.last_start_secs,
+        "addresses": s.addresses, "off": s.off, "effective": eff.addresses, "is_default": eff.default,
+        "default_address": default, "default_taken": taken,
+        "sleep_after_minutes": s.sleep_after_minutes, "last_start_secs": s.last_start_secs,
         "port": port_of(&e), "router_port": router_port, "managed_by": e.managed_by,
     })))
 }
@@ -452,25 +505,27 @@ async fn put_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
             clean.push(a);
         }
     }
-    for other in app.servers.list().iter().filter(|o| o.id != e.id) {
-        if let Some(a) = settings(other).addresses.iter().find(|a| clean.contains(a)) {
-            return Err(bad(format!("{} already has {a}.", other.name)));
+    for a in &clean {
+        if let Some(name) = taken_by(&app, a, Some(&e.id)) {
+            return Err(bad(format!("{name} already has {a}.")));
         }
     }
     if b.sleep_after_minutes > 24 * 60 {
         return Err(bad("Sleep after at most a day (1440 minutes)."));
     }
     let mut s = settings(&e);
+    s.off = b.off && clean.is_empty();
     s.addresses = clean;
     s.sleep_after_minutes = b.sleep_after_minutes;
     s.save(&e.root).map_err(|e| bad(format!("{e:#}")))?;
-    log::info!("{}: addresses {:?}, sleep {} min", e.name, s.addresses, s.sleep_after_minutes);
+    log::info!("{}: addresses {:?}{}, sleep {} min", e.name, s.addresses, if s.off { " (off)" } else { "" }, s.sleep_after_minutes);
     app.router.changed();
     app.refresh.notify_one();
     // The first address starts the router: let it bind, so the card's
     // status is right when it reloads.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok(Json(json!({ "ok": true, "addresses": s.addresses })))
+    let eff = effective(&app).remove(&e.id).unwrap_or_default();
+    Ok(Json(json!({ "ok": true, "addresses": eff.addresses, "is_default": eff.default })))
 }
 
 /// Gives a server a port of its own, away from the router's.
@@ -499,12 +554,13 @@ async fn check(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) 
     let cfg = app.cfg.read().unwrap().router.clone();
     let public: Option<IpAddr> = tokio::task::spawn_blocking(public_ip).await.ok().flatten();
     let lan: Vec<IpAddr> = crate::discovery::lan_addresses();
+    let mut eff = effective(&app);
     let mut names: Vec<(String, String)> = app
         .servers
         .list()
         .iter()
         .filter(|e| who.sees(&e.id))
-        .flat_map(|e| settings(e).addresses.into_iter().map(move |a| (e.name.clone(), a)))
+        .flat_map(|e| eff.remove(&e.id).unwrap_or_default().addresses.into_iter().map(move |a| (e.name.clone(), a)))
         .collect();
     if !cfg.domain.is_empty() {
         names.insert(0, (String::new(), format!("*.{}", cfg.domain)));

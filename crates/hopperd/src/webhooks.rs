@@ -439,6 +439,7 @@ mod tests {
             uptime_secs: None,
             saving: false,
             addresses: Vec::new(),
+            address_default: false,
             sleep_after_minutes: 0,
             icon: None,
         }

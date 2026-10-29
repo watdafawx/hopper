@@ -126,8 +126,9 @@ impl App {
     }
 
     fn take_snapshot(&self) -> Snapshot {
+        let mut eff = router::effective(self);
         Snapshot {
-            servers: self.servers.list().iter().map(|e| self.servers.summary(e)).collect(),
+            servers: self.servers.list().iter().map(|e| router::fill_summary(self.servers.summary(e), &mut eff)).collect(),
             host: self.host.read().unwrap().clone(),
         }
     }
