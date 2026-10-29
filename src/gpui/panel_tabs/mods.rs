@@ -499,8 +499,13 @@ impl ModsTab {
                 match r {
                     Ok(v) => {
                         let (n, left) = (v["identified"].as_u64().unwrap_or(0), v["unknown"].as_u64().unwrap_or(0));
-                        if !auto || n > 0 {
-                            this.say(if left > 0 { format!("Identified {n}; {left} still unknown") } else { format!("Identified {n}") });
+                        let moved = v["moved_to_curseforge"].as_u64().unwrap_or(0);
+                        if !auto || n > 0 || moved > 0 {
+                            let mut text = if left > 0 { format!("Identified {n}; {left} still unknown") } else { format!("Identified {n}") };
+                            if moved > 0 {
+                                text.push_str(&format!("; {moved} now from CurseForge, like the pack"));
+                            }
+                            this.say(text);
                         }
                     }
                     Err(e) if !auto => this.fail(e),

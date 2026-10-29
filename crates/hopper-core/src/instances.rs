@@ -487,6 +487,68 @@ fn file_state(root: &Path, a: &Addon) -> Option<bool> {
     }
 }
 
+/// Drops the mod entries whose jar is gone, both as `x.jar` and as
+/// `x.jar.disabled` (an old jar swapped for a new one outside the entry: a
+/// sync, a server pack update, a file deleted by hand). Left in, each shows
+/// as a mod that isn't there and as a second copy of the one that is. A jar
+/// that comes back is identified again. Returns the dropped file names.
+///
+/// Does nothing when the mods folder can't be read or none of the entries'
+/// jars are in it: a drive that's offline or a moved folder isn't a reason
+/// to forget every mod.
+pub fn drop_gone_mods(inst: &mut Instance) -> Vec<String> {
+    let Ok(rd) = fs::read_dir(inst.mods_dir()) else {
+        return Vec::new();
+    };
+    let on_disk: std::collections::HashSet<String> = rd
+        .flatten()
+        .map(|e| {
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            n.strip_suffix(".disabled").map(str::to_string).unwrap_or(n)
+        })
+        .collect();
+    let is_mod = |a: &Addon| a.class_id == crate::cf::CLASS_MODS || a.class_id == 0;
+    let there = |a: &Addon| {
+        let f = a.file_name.to_lowercase();
+        on_disk.contains(f.strip_suffix(".disabled").unwrap_or(&f))
+    };
+    if !inst.addons.iter().any(|a| is_mod(a) && there(a)) {
+        return Vec::new();
+    }
+    // A jar nothing tracks yet with the same name apart from its version
+    // (mod-1.2.jar for a gone mod-1.1.jar) is likely the new copy: its old
+    // entry waits for identify, which hands it over (when added, locks,
+    // whether it's the pack's) instead of starting fresh.
+    let tracked: std::collections::HashSet<String> = inst
+        .addons
+        .iter()
+        .map(|a| a.file_name.to_lowercase().trim_end_matches(".disabled").to_string())
+        .collect();
+    let new_stems: std::collections::HashSet<String> = on_disk
+        .iter()
+        .filter(|n| n.ends_with(".jar") && !tracked.contains(*n))
+        .map(|n| name_stem(n))
+        .collect();
+    let mut gone = Vec::new();
+    inst.addons.retain(|a| {
+        let keep = !is_mod(a) || there(a) || new_stems.contains(&name_stem(&a.file_name));
+        if !keep {
+            gone.push(a.file_name.clone());
+        }
+        keep
+    });
+    gone
+}
+
+/// A jar's name without its versions: its letters only, lowercased, with
+/// ".jar" and ".disabled" off ("amendments-1.21-2.2.4-neoforge.jar" →
+/// "amendmentsneoforge").
+fn name_stem(file: &str) -> String {
+    let l = file.to_lowercase();
+    let l = l.trim_end_matches(".disabled").trim_end_matches(".jar");
+    l.chars().filter(|c| c.is_alphabetic()).collect()
+}
+
 fn same_file(a: &Addon, b: &Addon) -> bool {
     a.file_name.eq_ignore_ascii_case(&b.file_name)
 }
@@ -648,6 +710,10 @@ pub fn load(root: &Path) -> Option<Instance> {
         if !seen.insert(key) {
             inst.addons.remove(i);
         }
+    }
+    let gone = drop_gone_mods(&mut inst);
+    if !gone.is_empty() {
+        log::info!("{}: forgot {} mods whose jars are gone: {}", root.display(), gone.len(), gone.join(", "));
     }
     if inst.addons.len() != before {
         let _ = inst.save();
@@ -1429,4 +1495,86 @@ mod tests {
         assert_eq!(inst.format, FORMAT);
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// A server's mod list after jars were swapped outside its entries
+    /// (as on TNP-LL8: a mod sync and identify runs left old entries).
+    #[test]
+    fn forgets_mods_whose_jars_are_gone() {
+        let root = std::env::temp_dir().join(format!("hopper-ghosts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mods = root.join("mods");
+        fs::create_dir_all(&mods).unwrap();
+        for f in ["amendments-1.21-2.2.4-neoforge.jar", "jei.jar.disabled", "rftoolsbuilder-1.21-7.0.8.jar"] {
+            fs::write(mods.join(f), b"x").unwrap();
+        }
+        let mk = |file: &str, id: u64, f: fn(&mut Addon)| {
+            let mut a = Addon { file_name: file.into(), name: file.into(), project_id: id, enabled: true, class_id: crate::cf::CLASS_MODS, ..Default::default() };
+            f(&mut a);
+            a
+        };
+        let mut inst = Instance {
+            root: root.clone(),
+            addons: vec![
+                // Two old copies (from Modrinth, then CurseForge) of the one on disk.
+                mk("amendments-1.21-2.2.0-neoforge.jar", 1 << 63, |_| {}),
+                mk("amendments-1.21-2.2.2-neoforge.jar", 896746, |_| {}),
+                mk("amendments-1.21-2.2.4-neoforge.jar", 1 << 63, |_| {}),
+                // Off: its jar is "jei.jar.disabled".
+                mk("jei.jar", 3, |a| a.enabled = false),
+                // Gone, but an untracked jar of the same name is there: kept for identify.
+                mk("rftoolsbuilder-1.21-7.0.7.jar", 4, |a| a.locked = true),
+                // Gone for good.
+                mk("MultiBuilderTool-1.21.1-1.1.29.jar", 5, |_| {}),
+                // Not a mod: left alone.
+                mk("pack.zip", 6, |a| a.class_id = crate::cf::CLASS_RESOURCE_PACKS),
+            ],
+            ..Default::default()
+        };
+        let gone = super::drop_gone_mods(&mut inst);
+        assert_eq!(gone, vec!["amendments-1.21-2.2.0-neoforge.jar", "amendments-1.21-2.2.2-neoforge.jar", "MultiBuilderTool-1.21.1-1.1.29.jar"]);
+        let left: Vec<&str> = inst.addons.iter().map(|a| a.file_name.as_str()).collect();
+        assert_eq!(left, vec!["amendments-1.21-2.2.4-neoforge.jar", "jei.jar", "rftoolsbuilder-1.21-7.0.7.jar", "pack.zip"]);
+        assert!(super::drop_gone_mods(&mut inst).is_empty());
+
+        // Saved and loaded: load forgets them too.
+        inst.addons.push(mk("old-1.0.jar", 7, |_| {}));
+        inst.save().unwrap();
+        let loaded = super::load(&root).unwrap();
+        assert!(loaded.addon_by_file("old-1.0.jar").is_none());
+        assert!(loaded.addon_by_file("jei.jar").is_some());
+
+        // The mods folder unreadable (a drive offline): nothing is forgotten.
+        fs::remove_dir_all(&mods).unwrap();
+        let mut offline = loaded.clone();
+        assert!(super::drop_gone_mods(&mut offline).is_empty());
+        assert_eq!(offline.addons.len(), loaded.addons.len());
+        // There but holding none of the jars (a moved folder): the same.
+        fs::create_dir_all(&mods).unwrap();
+        fs::write(mods.join("other.jar"), b"x").unwrap();
+        assert!(super::drop_gone_mods(&mut offline).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn name_stems_ignore_versions() {
+        assert_eq!(super::name_stem("amendments-1.21-2.2.4-neoforge.jar"), "amendmentsneoforge");
+        assert_eq!(super::name_stem("rftoolsbuilder-1.21-7.0.7.jar.disabled"), super::name_stem("rftoolsbuilder-1.21-7.0.8.jar"));
+        assert_ne!(super::name_stem("rftoolsbuilder-1.21-7.0.7.jar"), super::name_stem("rftoolsbase-1.21-7.0.7.jar"));
+    }
+}
+
+/// Loads a copy of a real server's folder (its hopper.json and mods/, the
+/// jars may be empty files) and prints what load forgets. Point
+/// HOPPER_GHOST_SAMPLE at the copy; never at a real server.
+#[cfg(test)]
+#[test]
+#[ignore]
+fn ghost_sample() {
+    let Ok(dir) = std::env::var("HOPPER_GHOST_SAMPLE") else { return };
+    let root = Path::new(&dir);
+    let before: Instance = serde_json::from_slice(&fs::read(root.join(HOPPER_FILE)).unwrap()).unwrap();
+    let inst = load(root).unwrap();
+    let mods = |i: &Instance| i.addons.iter().filter(|a| a.folder() == "mods").count();
+    println!("mod entries: {} -> {}", mods(&before), mods(&inst));
+    println!("jars: {}", crate::install::loose_jars(&inst).len());
 }

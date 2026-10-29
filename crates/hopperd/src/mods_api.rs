@@ -316,8 +316,20 @@ async fn list(
         let (cats, cats_pending) = crate::mods_table::categories(&inst);
         let mut rows: Vec<Value> = Vec::new();
         let mut known = std::collections::HashSet::new();
+        // The jars in mods/ (on or off), by name without ".disabled".
+        let on_disk: std::collections::HashSet<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|f| f.file_name().to_string_lossy().to_lowercase().trim_end_matches(".disabled").to_string())
+            .collect();
         for a in &inst.addons {
             if a.folder() != "mods" {
+                continue;
+            }
+            // An entry whose jar is gone isn't a mod on the server (and
+            // would count as a second copy of the one that is).
+            if !on_disk.contains(a.file_name.to_lowercase().trim_end_matches(".disabled")) {
                 continue;
             }
             known.insert(a.file_name.to_lowercase());
@@ -415,37 +427,19 @@ async fn identify(
         let mut inst = instance(&e)?;
         let first = inst.addons.is_empty();
         let before = inst.addons.len();
-        if cf::api_key().is_some() {
-            if let Err(err) = install::identify_loose(&mut inst, job) {
-                log::warn!("CurseForge identify: {err:#}");
-            }
-            inst.save()?;
-        }
-        // Modrinth, by SHA-1, for what's left.
-        let loose = install::loose_jars(&inst);
-        if !loose.is_empty() {
-            job.detail("Asking Modrinth");
-            let mut by_hash = HashMap::new();
-            for name in &loose {
-                let bytes = std::fs::read(inst.mods_dir().join(name))?;
-                by_hash.insert(modrinth::sha1(&bytes), name.clone());
-            }
-            let hashes: Vec<String> = by_hash.keys().cloned().collect();
-            let versions = modrinth::versions_by_sha1(&hashes)?;
-            let ids: Vec<String> = versions.values().map(|v| v.project_id.clone()).collect();
-            let projects = modrinth::projects(&ids)?;
-            for (hash, v) in versions {
-                let (Some(name), Some(p)) = (by_hash.get(&hash), projects.iter().find(|p| p.id == v.project_id)) else { continue };
-                let m = modrinth::project_to_mod(p, "");
-                let mut f = modrinth::version_to_file(&v);
-                // A jar that's off is "x.jar.disabled" on disk; the entry
-                // names the jar ("x.jar") and says it's off.
-                f.file_name = name.trim_end_matches(".disabled").to_string();
-                let mut a = install::addon_from(&m, &f, false);
-                a.enabled = !name.ends_with(".disabled");
-                inst.addons.push(a);
-            }
-        }
+        // CurseForge by fingerprint, then Modrinth by SHA-1 for the rest
+        // (hopper-core's identify, as desktop does it: a jar swapped for a
+        // newer one takes over the old one's entry instead of adding one).
+        // It runs here on the server: say so, since desktop shows the same
+        // message and a timeout means the server's connection, not the PC's.
+        let found = install::identify_loose(&mut inst, job)
+            .map_err(|err| anyhow::anyhow!("The server couldn't look its jars up. {err:#}"))?;
+        // On a CurseForge pack, mods named on Modrinth earlier (say while
+        // the key didn't work) move to CurseForge where it has them.
+        let moved = install::prefer_curseforge(&mut inst, job).unwrap_or_else(|err| {
+            log::warn!("{}: checking Modrinth mods on CurseForge: {err:#}", e.name);
+            0
+        });
         if first && inst.pack.is_some() {
             for a in &mut inst.addons {
                 a.from_pack = true;
@@ -453,10 +447,10 @@ async fn identify(
         }
         inst.save()?;
         // Newly known mods need checking; nothing new keeps the last check.
-        if inst.addons.len() > before {
+        if found > 0 || moved > 0 || inst.addons.len() != before {
             forget_updates(&sid);
         }
-        Ok(json!({ "identified": inst.addons.len() - before, "unknown": install::loose_jars(&inst).len() }))
+        Ok(json!({ "identified": found, "moved_to_curseforge": moved, "unknown": install::loose_jars(&inst).len() }))
     });
     Ok(Json(json!({ "job": job })))
 }
