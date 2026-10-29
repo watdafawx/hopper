@@ -348,6 +348,7 @@ pub fn take(root: &Path, reason: Reason) -> anyhow::Result<Snapshot> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let s = take_locked(root, reason, &|_, _| {})?;
     prune_locked(root);
+    crate::retention::schedule(root);
     Ok(s)
 }
 
@@ -365,6 +366,7 @@ pub fn take_in(root: &Path, reason: Reason, job: &crate::jobs::Job) -> anyhow::R
         job.detail(format!("Saving a snapshot to undo this: {i} of {n} files"));
     })?;
     prune_locked(root);
+    crate::retention::schedule(root);
     let mut by = BY_JOB.lock().unwrap_or_else(|e| e.into_inner());
     by.push((job.id(), root.to_path_buf(), s.id.clone()));
     let extra = by.len().saturating_sub(64);
@@ -549,6 +551,49 @@ pub fn delete(root: &Path, id: &str) -> anyhow::Result<()> {
     fs::remove_file(base(root).join(format!("{id}.json")))?;
     gc_locked(root);
     Ok(())
+}
+
+/// Takes snapshots out of the store without deleting anything: their
+/// manifests and the files none of the rest use move into one new folder
+/// (`.hopper-backups/.pruned-<ms>/`), which is returned for the caller to
+/// send to the Recycle Bin. `None` when there was nothing to move.
+pub fn take_out(root: &Path, ids: &[String]) -> anyhow::Result<Option<PathBuf>> {
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let base = base(root);
+    let all = list(root);
+    let keep: HashSet<String> =
+        all.iter().filter(|s| !ids.contains(&s.id)).flat_map(|s| s.files.iter().map(|f| f.hash.clone())).collect();
+    let out = root.join(crate::sync::BACKUP_DIR).join(format!(".pruned-{}", now_ms()));
+    let mut moved = false;
+    let mut go = |from: PathBuf, rel: PathBuf| -> anyhow::Result<()> {
+        if !from.exists() {
+            return Ok(());
+        }
+        let to = out.join(rel);
+        fs::create_dir_all(to.parent().unwrap_or(&out))?;
+        fs::rename(&from, &to)?;
+        moved = true;
+        Ok(())
+    };
+    let mut seen = HashSet::new();
+    for s in all.iter().filter(|s| ids.contains(&s.id)) {
+        go(base.join(format!("{}.json", s.id)), PathBuf::from(format!("{}.json", s.id)))?;
+        for f in &s.files {
+            if !keep.contains(&f.hash) && seen.insert(f.hash.clone()) {
+                let b = blob(&base, &f.hash);
+                let rel = b.strip_prefix(&base).map(Path::to_path_buf).unwrap_or_default();
+                go(b, rel)?;
+            }
+        }
+    }
+    // Emptied blob folders.
+    for d in fs::read_dir(base.join("blobs")).into_iter().flatten().flatten() {
+        let _ = fs::remove_dir(d.path());
+    }
+    Ok(moved.then_some(out))
 }
 
 /// Names a snapshot; an empty name goes back to its reason. A named
@@ -767,6 +812,7 @@ pub fn restore(root: &Path, id: &str, snapshot_first: bool) -> anyhow::Result<Re
     }
     let safety = if snapshot_first { Some(take_locked(root, Reason::BeforeRestore { of: snap.label() }, &|_, _| {})?) } else { None };
     let aside_dir = root.join(crate::sync::BACKUP_DIR).join(format!("restore-{}", now_ms()));
+    crate::retention::schedule(root);
     let after = |e: anyhow::Error| match &safety {
         Some(s) => e.context(format!("Restore stopped partway. \"{}\" in Backups has the instance as it was", s.reason.label())),
         None => e.context(format!("Restore stopped partway. Files it took away are in {}", aside_dir.display())),

@@ -811,7 +811,7 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
     for s in suspects.iter_mut().filter(|s| s.changed.is_none()) {
         let kept = saved.suspects.iter().find(|o| o.file_name == s.file_name).and_then(|o| o.changed.clone());
         if let Some(ch) = kept
-            && !ch.backup.exists()
+            && !crate::backups::exists(&ch.backup)
             && ch.backup.file_name().is_some_and(|n| root.join("mods").join(n).exists())
         {
             s.changed = Some(ch);
@@ -1205,6 +1205,7 @@ pub fn put_back(root: &Path, c: &Changed) -> anyhow::Result<PathBuf> {
     if now.is_file() {
         let dir = root.join(crate::sync::BACKUP_DIR).join(crate::time::now().to_string());
         fs::create_dir_all(&dir)?;
+        crate::retention::schedule(root);
         let aside = dir.join(&c.file_name);
         if fs::rename(&now, &aside).is_err() {
             fs::copy(&now, &aside)?;

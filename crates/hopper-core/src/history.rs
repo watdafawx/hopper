@@ -159,6 +159,14 @@ fn undo_one(c: &mut Change) -> anyhow::Result<()> {
             let to =
                 c.to.as_ref()
                     .ok_or_else(|| anyhow::anyhow!("no destination recorded"))?;
+            // Its old copy may have been cleaned up (backup retention):
+            // say so before touching anything.
+            if let Some(b) = &c.backup {
+                if !crate::backups::exists(b) {
+                    anyhow::bail!("{}: its old copy was cleaned up from backups", c.label);
+                }
+                crate::backups::materialize(b)?;
+            }
             // Keep the synced copy so redo works even if the source changed.
             let kept = crate::sync::backup_into(&c.backup_root, to)?;
             if let Some(b) = &c.backup {
@@ -178,6 +186,10 @@ fn undo_one(c: &mut Change) -> anyhow::Result<()> {
                 .from
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("original location unknown"))?;
+            if !crate::backups::exists(b) {
+                anyhow::bail!("{}: its copy was cleaned up from backups", c.label);
+            }
+            crate::backups::materialize(b)?;
             copy_over(b, from)?;
         }
     }
@@ -339,6 +351,11 @@ mod tests {
         assert_eq!(fs::read_to_string(&f).unwrap(), "old");
         redo_one(&mut c).unwrap();
         assert!(!f.exists());
+        // Its copy pruned from backups: undo says so and changes nothing.
+        fs::remove_dir_all(root.join("server").join(crate::sync::BACKUP_DIR)).unwrap();
+        let e = undo_one(&mut c).unwrap_err().to_string();
+        assert!(e.contains("cleaned up"), "{e}");
+        assert!(!c.undone && !f.exists());
         let _ = fs::remove_dir_all(&root);
     }
 }

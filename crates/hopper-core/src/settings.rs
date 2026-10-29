@@ -184,6 +184,8 @@ pub struct Settings {
     pub translate: bool,
     /// Languages (`translate::Lang::code`) translated without asking.
     pub translate_always: Vec<String>,
+    /// How long `.hopper-backups` keeps the files behind Undo.
+    pub backup_retention: crate::retention::Retention,
     /// Settings this build doesn't know (saved by a newer Hopper), kept as
     /// they are so going back a version and forward again loses none.
     #[serde(flatten)]
@@ -300,6 +302,19 @@ fn curseforge_app_root(appdata: &Path) -> Option<PathBuf> {
     (!root.is_empty()).then(|| PathBuf::from(root))
 }
 
+/// With `HOPPER_DATA_DIR` set (a test or portable copy), nothing on the PC
+/// is looked for: instances and game files start empty inside that folder,
+/// so a copy never sees (or changes) the user's real instances, even when
+/// its settings are missing.
+fn forced_folders(root: &Path) -> DetectedFolders {
+    DetectedFolders {
+        instances_root: root.join("instances").to_string_lossy().into_owned(),
+        launcher_dir: root.join("minecraft").to_string_lossy().into_owned(),
+        servers_root: String::new(),
+        server_host: String::new(),
+    }
+}
+
 /// [`detect_folders`] for this user, looked up once per run.
 fn detected() -> &'static DetectedFolders {
     static D: OnceLock<DetectedFolders> = OnceLock::new();
@@ -309,17 +324,25 @@ fn detected() -> &'static DetectedFolders {
             .map(PathBuf::from)
             .unwrap_or_default();
         let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
-        let mut d = detect_folders(&home, appdata.as_deref());
-        // No CurseForge folders to share: a new user's instances and game
-        // files go in Hopper's own folder, next to its exe.
-        if !Path::new(&d.instances_root).is_dir()
-            && let Some(root) = crate::paths::dirs().and_then(|d| d.root())
-        {
-            d.instances_root = root.join("instances").to_string_lossy().into_owned();
-            d.launcher_dir = root.join("minecraft").to_string_lossy().into_owned();
-        }
-        d
+        detected_for(crate::paths::forced_root().as_deref(), &home, appdata.as_deref())
     })
+}
+
+/// [`detected`] for a given `HOPPER_DATA_DIR` (`forced`), home and %APPDATA%.
+fn detected_for(forced: Option<&Path>, home: &Path, appdata: Option<&Path>) -> DetectedFolders {
+    if let Some(root) = forced {
+        return forced_folders(root);
+    }
+    let mut d = detect_folders(home, appdata);
+    // No CurseForge folders to share: a new user's instances and game
+    // files go in Hopper's own folder, next to its exe.
+    if !Path::new(&d.instances_root).is_dir()
+        && let Some(root) = crate::paths::dirs().and_then(|d| d.root())
+    {
+        d.instances_root = root.join("instances").to_string_lossy().into_owned();
+        d.launcher_dir = root.join("minecraft").to_string_lossy().into_owned();
+    }
+    d
 }
 
 impl Default for Settings {
@@ -397,6 +420,7 @@ impl Default for Settings {
             update_holds: Vec::new(),
             translate: false,
             translate_always: Vec::new(),
+            backup_retention: Default::default(),
             unknown: serde_json::Map::new(),
         }
     }
@@ -654,6 +678,22 @@ mod tests {
         s.java_presets.push(JavaPreset { name: "LL8".into(), args: "-XX:+UseZGC".into() });
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.java_presets, s.java_presets);
+    }
+
+    #[test]
+    fn a_forced_data_dir_never_finds_the_real_folders() {
+        let t = temp("forced");
+        let home = t.join("home");
+        // A real-looking CurseForge folder in home.
+        std::fs::create_dir_all(home.join("curseforge/minecraft/Instances/Real Pack")).unwrap();
+        let normal = detected_for(None, &home, None);
+        assert!(normal.instances_root.starts_with(&*home.to_string_lossy()));
+        let forced = t.join("scratch");
+        let d = detected_for(Some(&forced), &home, None);
+        assert_eq!(d.instances_root, forced.join("instances").to_string_lossy());
+        assert_eq!(d.launcher_dir, forced.join("minecraft").to_string_lossy());
+        assert_eq!((d.servers_root.as_str(), d.server_host.as_str()), ("", ""));
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]

@@ -144,6 +144,7 @@ fn backup_copy(root: &Path, path: &Path) -> anyhow::Result<()> {
     }
     let dir = root.join(crate::sync::BACKUP_DIR).join(unix_secs().to_string());
     fs::create_dir_all(&dir)?;
+    crate::retention::schedule(root);
     let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let saved = dir.join(free_name(&dir, &name));
     copy_all(path, &saved)?;

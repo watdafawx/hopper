@@ -67,6 +67,7 @@ pub fn execute_local(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let backup_dir = server_root.join(BACKUP_DIR).join(stamp.to_string());
+    crate::retention::schedule(server_root);
     ops.into_iter()
         .map(|op| {
             let r = match &op {
@@ -98,6 +99,9 @@ pub fn backup_into(root: &Path, path: &Path) -> anyhow::Result<Option<PathBuf>> 
         .map_or(0, |d| d.as_secs());
     let dir = root.join(BACKUP_DIR).join(stamp.to_string());
     let saved = backup(path, &dir)?;
+    if saved.is_some() {
+        crate::retention::schedule(root);
+    }
     // Where it came from, so it can go back there.
     if let Some(s) = &saved
         && let Ok(rel) = path.strip_prefix(root)
@@ -117,10 +121,18 @@ fn backup(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     // Config folders repeat names (many `common.toml`s) within one run.
     let mut dest = backup_dir.join(&*name);
     let mut n = 1;
-    while dest.exists() {
+    while crate::backups::exists(&dest) {
         n += 1;
         dest = backup_dir.join(format!("{n}-{name}"));
     }
+    // Which CurseForge / Modrinth file a jar is, read before it leaves,
+    // so the copy can become a note of it later (backups::slim).
+    let root = backup_dir.parent().and_then(Path::parent).map(Path::to_path_buf);
+    let ids = |dest: &Path| {
+        if let Some(root) = &root {
+            crate::backups::note_ids(root, path, dest);
+        }
+    };
     if let Err(e) = fs::rename(path, &dest) {
         // In use (a running game): copying would only leave a second copy.
         if crate::locked::io_locked(&e) {
@@ -133,6 +145,7 @@ fn backup(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
             return Err(e.into());
         }
     }
+    ids(&dest);
     Ok(Some(dest))
 }
 

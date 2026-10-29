@@ -731,6 +731,7 @@ pub fn apply(
         .join(crate::sync::BACKUP_DIR)
         .join(stamp.to_string())
         .join("server-pack-update");
+    crate::retention::schedule(root);
     let stash = |rel: &str, keep: bool| -> anyhow::Result<()> {
         let src = root.join(rel);
         if !src.is_file() {

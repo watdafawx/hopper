@@ -67,7 +67,7 @@ a.btn { color: var(--text); }
 /* Tinted, no border, the theme's radius: the same rule as Hopper desktop's chips. */
 .chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 1px 8px; border-radius: var(--radius); border: 1px solid transparent; background: #ededef14; color: var(--subtle); white-space: nowrap; }
 .chip.running { color: var(--green); border-color: transparent; background: var(--green-dim); }
-.chip.starting, .chip.stopping { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
+.chip.starting, .chip.stopping, .chip.warn { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
 .chip.crashed { color: var(--red); border-color: transparent; background: var(--red-dim); }
 .chip.lan { color: var(--blue); border-color: transparent; background: var(--blue-dim); }
 .chip.ts { color: var(--violet); border-color: transparent; background: var(--violet-dim); }

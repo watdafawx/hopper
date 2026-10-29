@@ -237,32 +237,7 @@ fn marks_key(store: &Store, inst: &Instance) -> u64 {
 /// Where `remove_files` put `original`: the newest `.hopper-backups/<time>/`
 /// entry for its name (repeats are numbered `2-name`), from `since` on.
 pub(crate) fn find_backup(root: &Path, original: &Path, since: u64) -> Option<PathBuf> {
-    let name = original.file_name()?.to_string_lossy().into_owned();
-    let mut best: Option<((u64, u32), PathBuf)> = None;
-    for d in std::fs::read_dir(root.join(hopper::sync::BACKUP_DIR)).ok()?.flatten() {
-        let Some(stamp) = d.file_name().to_str().and_then(|s| s.parse::<u64>().ok()) else {
-            continue;
-        };
-        if stamp < since {
-            continue;
-        }
-        for e in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            let rank = if n == name {
-                Some(1)
-            } else {
-                n.strip_suffix(&name)
-                    .and_then(|p| p.strip_suffix('-'))
-                    .and_then(|p| p.parse::<u32>().ok())
-            };
-            if let Some(r) = rank
-                && best.as_ref().is_none_or(|(k, _)| *k < (stamp, r))
-            {
-                best = Some(((stamp, r), e.path()));
-            }
-        }
-    }
-    best.map(|(_, p)| p)
+    hopper::backups::find(root, original, since)
 }
 
 /// A removed file: where it was, where its backup is, and its entry.
@@ -405,6 +380,15 @@ pub(crate) fn undo_remove(store: &Entity<Store>, root: PathBuf, items: Vec<Remov
         for it in &items {
             if it.original.exists() {
                 job.note(format!("{} is back already; left the backup alone", it.original.display()));
+                continue;
+            }
+            if !hopper::backups::exists(&it.backup) {
+                job.note(format!("{}: its copy isn't in backups any more", it.original.display()));
+                continue;
+            }
+            // Kept as a note of where to get it: download it again first.
+            if let Err(e) = hopper::backups::materialize(&it.backup) {
+                job.note(format!("{e:#}"));
                 continue;
             }
             if std::fs::rename(&it.backup, &it.original).is_err() {
@@ -739,7 +723,7 @@ impl AddonsView {
                 let changed = c.suspects.iter().find(|s| s.file_name == st.file_name).and_then(|s| s.changed.clone());
                 // Put back already: the older copy left backups for the mods folder.
                 let back = changed.as_ref().is_some_and(|ch| {
-                    !ch.backup.exists() && ch.backup.file_name().is_some_and(|n| mods_dir.join(n).exists())
+                    !hopper::backups::exists(&ch.backup) && ch.backup.file_name().is_some_and(|n| mods_dir.join(n).exists())
                 });
                 (!back).then_some((st, changed))
             });
@@ -4293,8 +4277,13 @@ fn undo_update(store: &Entity<Store>, root: PathBuf, items: Vec<Replaced>, windo
     s.spawn_instance_job(&root, "Undoing update", move |job| {
         let mut back = 0;
         for it in &items {
-            if !it.backup.exists() {
+            if !hopper::backups::exists(&it.backup) {
                 job.note(format!("{}: its old file isn't in backups any more", it.old.name));
+                continue;
+            }
+            // Kept as a note of where to get it: download it again first.
+            if let Err(e) = hopper::backups::materialize(&it.backup) {
+                job.note(format!("{e:#}"));
                 continue;
             }
             if let Some(i) = inst.addons.iter().position(|a| a.project_id == it.old.project_id) {

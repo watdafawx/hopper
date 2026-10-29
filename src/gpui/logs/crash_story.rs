@@ -53,7 +53,7 @@ impl LogsView {
         let changed = root_suspect.and_then(|s| s.changed.clone());
         // Put back already: the older copy left backups for the mods folder.
         let back = changed.as_ref().is_some_and(|ch| {
-            !ch.backup.exists() && ch.backup.file_name().is_some_and(|n| mods.join(n).exists())
+            !hopper::backups::exists(&ch.backup) && ch.backup.file_name().is_some_and(|n| mods.join(n).exists())
         });
         let changed_file = changed.as_ref().map(|ch| {
             if back { ch.backup.file_name().unwrap_or_default().to_string_lossy().into_owned() } else { ch.file_name.clone() }

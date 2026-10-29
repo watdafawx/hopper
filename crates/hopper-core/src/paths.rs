@@ -119,9 +119,14 @@ fn is_dev_exe(exe: &Path) -> bool {
     exe.components().any(|c| c.as_os_str().eq_ignore_ascii_case("target"))
 }
 
+/// The folder `HOPPER_DATA_DIR` names, when set: everything stays in it.
+pub fn forced_root() -> Option<PathBuf> {
+    std::env::var_os("HOPPER_DATA_DIR").filter(|p| !p.is_empty()).map(PathBuf::from)
+}
+
 fn resolve() -> Option<Dirs> {
-    if let Some(p) = std::env::var_os("HOPPER_DATA_DIR").filter(|p| !p.is_empty()) {
-        return Some(Dirs::portable(PathBuf::from(p)));
+    if let Some(p) = forced_root() {
+        return Some(Dirs::portable(p));
     }
     let exe = std::env::current_exe().ok();
     choose(

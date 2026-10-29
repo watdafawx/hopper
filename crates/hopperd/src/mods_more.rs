@@ -4,7 +4,7 @@
 //! aside in `.hopper-backups` (by Hopper desktop or this panel).
 
 use crate::App;
-use crate::api::{ApiResult, bad, not_found, require};
+use crate::api::{ApiResult, bad, not_found, require, require_owner};
 use crate::servers::Entry;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method};
@@ -28,6 +28,8 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mod-backups", get(backup_list))
         .route("/api/v1/servers/{id}/mod-backups/restore", post(backup_restore))
         .route("/api/v1/servers/{id}/mod-backups/delete", post(backup_delete))
+        .route("/api/v1/servers/{id}/mod-backups/clean", post(backup_clean))
+        .route("/api/v1/settings/backup-retention", get(get_retention).put(put_retention))
 }
 
 fn entry(app: &App, headers: &HeaderMap, method: &Method, id: &str) -> ApiResult<Arc<Entry>> {
@@ -204,18 +206,63 @@ async fn config_reset(State(app): State<Arc<App>>, headers: HeaderMap, method: M
 
 async fn backup_list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    let sets = blocking(move || Ok(backups::list(&e.root))).await?;
+    let (sets, usage) = blocking(move || {
+        let r = hopper_core::retention::policy();
+        Ok((backups::list(&e.root), (hopper_core::retention::usage(&e.root), hopper_core::retention::preview(&e.root), r)))
+    })
+    .await?;
+    let (u, would, r) = usage;
     let total: u64 = sets.iter().map(|s| s.size()).sum();
     let rows: Vec<Value> = sets
         .iter()
         .map(|s| {
             json!({
                 "when": s.when, "size": s.size(),
-                "files": s.files.iter().map(|f| json!({ "name": f.name, "size": f.size, "restore_to": f.restore_to })).collect::<Vec<_>>(),
+                "files": s.files.iter().map(|f| json!({ "name": f.name, "size": f.size, "restore_to": f.restore_to, "download": f.download })).collect::<Vec<_>>(),
             })
         })
         .collect();
-    Ok(Json(json!({ "sets": rows, "total_size": total })))
+    Ok(Json(json!({
+        "sets": rows, "total_size": total,
+        // The whole folder (snapshots and world zips too) and the clean up rules.
+        "usage": { "total": u.total(), "limited": u.limited(), "frees": would.freed, "removes": would.count(),
+                   "keep_actions": r.keep_actions, "keep_days": r.keep_days, "max_mb": r.max_mb },
+    })))
+}
+
+/// Where old backups go when they're cleaned up: the server's trash (Files
+/// › Trash), which empties itself after its usual time.
+pub fn to_server_trash(root: &std::path::Path, paths: &[std::path::PathBuf]) -> anyhow::Result<()> {
+    for p in paths {
+        let rel = p.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
+        crate::files::trash(root, &rel)?;
+    }
+    Ok(())
+}
+
+/// How long every server's `.hopper-backups` keeps old files.
+async fn get_retention(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    Ok(Json(json!(app.cfg.read().unwrap().backup_retention)))
+}
+
+async fn put_retention(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(r): Json<hopper_core::retention::Retention>) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    {
+        let mut cfg = app.cfg.write().unwrap();
+        cfg.backup_retention = r;
+        cfg.save(&app.data_dir).map_err(|e| bad(format!("{e:#}")))?;
+    }
+    // Applied from the next backup on; older ones wait for Clean up.
+    hopper_core::retention::set_policy(r);
+    Ok(Json(json!(r)))
+}
+
+/// Removes old backups now, by the panel's clean up rules.
+async fn backup_clean(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let p = blocking(move || Ok(hopper_core::retention::clean_up(&e.root))).await?;
+    Ok(Json(json!({ "removed": p.folders + p.snapshots, "freed": p.freed })))
 }
 
 #[derive(Deserialize)]
@@ -240,6 +287,9 @@ async fn backup_restore(State(app): State<Arc<App>>, headers: HeaderMap, method:
         let mut inst = crate::mods_api::instance_of(&e)?;
         let mut out = Vec::new();
         for f in &files {
+            // Kept as a note of where to get it: download it again first
+            // (its mod ids are read from the jar).
+            backups::materialize(&f.path)?;
             if f.restore_to.starts_with("mods/") && f.name.to_lowercase().contains(".jar") {
                 let (ids, _) = hopper_core::deps::own_ids(&f.path);
                 if !ids.is_empty() {

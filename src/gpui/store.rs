@@ -449,6 +449,10 @@ impl Store {
             _poll: Self::poll(rx, dirty, ticked, cx),
         };
         store.refresh();
+        // Note which instances have old backups to clean up (nothing goes
+        // by itself at start).
+        hopper::retention::set_policy(store.settings.backup_retention);
+        hopper::retention::check_all_later(store.instances.iter().map(|i| i.root.clone()).collect());
         store.reload_accounts();
         store._panel_poll = Some(Self::panel_poll(cx));
         store._download_watch = Some(Self::download_watch(cx));
@@ -1193,6 +1197,7 @@ impl Store {
     /// Changes settings and writes them when they differ from the saved copy.
     pub fn update_settings(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         edit(&mut self.settings);
+        hopper::retention::set_policy(self.settings.backup_retention);
         let now = serde_json::to_string(&self.settings).unwrap_or_default();
         if now != self.saved_settings {
             if let Err(e) = self.settings.save() {

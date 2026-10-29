@@ -41,8 +41,9 @@ pub struct BackupsView {
     mode: Mode,
     /// `None` while loading.
     snaps: Option<Vec<Snapshot>>,
-    /// Disk the snapshots take.
-    used: u64,
+    /// What the backups folder holds, and what a clean up would free now;
+    /// `None` while reading.
+    usage: Option<(hopper::retention::Usage, hopper::retention::Pruned)>,
     /// Snapshots shown open, and those showing every change (by id).
     open_snaps: HashSet<String>,
     all: HashSet<String>,
@@ -72,6 +73,7 @@ impl BackupsView {
                 this.sets = sets;
                 this.projects = projects;
                 this.sets_loaded = true;
+                this.reload_usage(cx);
                 cx.notify();
             })
             .ok();
@@ -79,12 +81,89 @@ impl BackupsView {
         .detach();
     }
 
+    fn reload_usage(&mut self, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        cx.spawn(async move |this, cx| {
+            let u = cx
+                .background_spawn(async move {
+                    (hopper::retention::usage(&root), hopper::retention::preview(&root))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.usage = Some(u);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Runs the clean up rules (Settings › Library & folders) now.
+    fn clean_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        self.busy = Some("Cleaning up old backups…".into());
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let p = cx.background_spawn(async move { hopper::retention::clean_up(&root) }).await;
+            this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                let n = p.count();
+                let msg = if n == 0 {
+                    "Nothing to clean up".to_string()
+                } else {
+                    format!(
+                        "Moved {n} old backup{} to the Recycle Bin ({})",
+                        if n == 1 { "" } else { "s" },
+                        hopper::instance_ops::human_bytes(p.freed)
+                    )
+                };
+                window.push_notification(Notification::success(msg), cx);
+                this.reload(cx);
+                this.reload_snaps(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// "Backups use 4.9 GB · Over the 1 GB limit · Keeps … · Clean up".
+    fn usage_line(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let r = hopper::retention::policy();
+        let Some((u, would)) = &self.usage else {
+            return widgets::caption("Reading backups…", cx).text_xs().into_any_element();
+        };
+        let cap = r.max_mb * 1024 * 1024;
+        let over = cap > 0 && u.limited() > cap;
+        let gb = |b: u64| hopper::instance_ops::human_bytes(b);
+        let used = if cap > 0 && !over { format!("Backups use {} of {}", gb(u.total()), gb(cap)) } else { format!("Backups use {}", gb(u.total())) };
+        let rules = format!("Keeps the last {} actions and {} days", r.keep_actions, r.keep_days);
+        let label = if would.freed > 0 { format!("Clean up · frees {}", gb(would.freed)) } else { "Clean up".to_string() };
+        h_flex()
+            .gap_2()
+            .pt_2()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(div().text_sm().child(used))
+            .when(over, |r| r.child(widgets::chip(theme.warning).child(format!("Over the {} limit", gb(cap)))))
+            .child(div().flex_1())
+            .child(widgets::caption(rules, cx).text_xs())
+            .child(
+                Button::new("backups-clean")
+                    .small()
+                    .outline()
+                    .label(label)
+                    .tooltip("Moves old backups to the Recycle Bin, by the rules in Settings › Library & folders. Hopper does this by itself after each new backup, but leaves older ones for you. Snapshots you took and world backups stay.")
+                    .disabled(self.busy.is_some() || would.count() == 0)
+                    .on_click(cx.listener(|this, _, window, cx| this.clean_up(window, cx))),
+            )
+            .into_any_element()
+    }
+
     fn reload_snaps(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let (snaps, used) = cx
-                .background_spawn(async move { (hopper::snapshots::list(&root), hopper::snapshots::used_bytes(&root)) })
-                .await;
+            let snaps = cx.background_spawn(async move { hopper::snapshots::list(&root) }).await;
             this.update(cx, |this, cx| {
                 // Now has likely moved on: compare again.
                 this.changes.clear();
@@ -94,7 +173,7 @@ impl BackupsView {
                     _ => snaps.first().map(|s| s.id.clone()),
                 };
                 this.snaps = Some(snaps);
-                this.used = used;
+                this.reload_usage(cx);
                 if let Some(id) = first {
                     this.open_snaps.insert(id.clone());
                 }
@@ -801,7 +880,15 @@ impl BackupsView {
                                             .text_sm(),
                                         )
                                         .child(
-                                            widgets::caption(format!("back to {} · {}", f.restore_to, size(f.size)), cx)
+                                            widgets::caption(
+                                                format!(
+                                                    "back to {} · {}{}",
+                                                    f.restore_to,
+                                                    size(f.size),
+                                                    if f.download { " · downloads again" } else { "" }
+                                                ),
+                                                cx,
+                                            )
                                                 .text_xs()
                                                 .truncate(),
                                         ),
@@ -831,10 +918,7 @@ impl Render for BackupsView {
         let filled = if snaps_mode { n_snaps > 0 } else { !self.sets.is_empty() };
         let intro = match (&self.busy, snaps_mode) {
             (Some(b), _) => b.clone(),
-            (None, true) => format!(
-                "Mods, configs and hopper.json, saved before updates and config resets. Keeps the last {} automatic ones; yours stay until you delete them.",
-                hopper::snapshots::KEEP_AUTO
-            ),
+            (None, true) => "Mods, configs and hopper.json at one moment, to compare with now and put back. Yours stay until you delete them.".to_string(),
             (None, false) => {
                 "Files Hopper set aside: mods and packs you removed, and files replaced by updates and syncs. Newest first.".into()
             }
@@ -882,12 +966,7 @@ impl Render for BackupsView {
             )
             .child(widgets::caption(intro, cx))
             .child(div().id("backups-list").flex_1().min_h_0().overflow_y_scrollbar().child(body))
-            .when(snaps_mode && n_snaps > 0, |c| {
-                c.child(widgets::caption(
-                    format!("{} on disk for snapshots", hopper::instance_ops::human_bytes(self.used)),
-                    cx,
-                ).text_xs())
-            });
+            .child(self.usage_line(cx));
         h_flex().items_start().gap_4().child(main).children(peek)
     }
 }
@@ -910,7 +989,7 @@ pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window
             open: HashSet::new(),
             mode: Mode::Snapshots,
             snaps: None,
-            used: 0,
+            usage: None,
             open_snaps: HashSet::new(),
             all: HashSet::new(),
             changes: HashMap::new(),
