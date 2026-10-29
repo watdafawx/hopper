@@ -8,7 +8,11 @@ use anyhow::{Context as _, bail};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use super::process::ServerState;
 
 const LOGIN: i32 = 3;
 const COMMAND: i32 = 2;
@@ -16,7 +20,13 @@ const COMMAND: i32 = 2;
 pub struct Rcon {
     s: TcpStream,
     id: i32,
+    timeout: Duration,
+    closed: Arc<AtomicBool>,
 }
+
+/// How often a waiting read checks whether it was cut (see [`Closer`]):
+/// Windows doesn't wake a blocked read when the socket is shut down.
+const SLICE: Duration = Duration::from_millis(100);
 
 /// Where a server's RCON answers and its password, from server.properties;
 /// `None` when RCON is off or has no password.
@@ -33,13 +43,36 @@ pub fn settings(root: &Path) -> Option<(u16, String)> {
     Some((port, pass))
 }
 
+/// Whether Hopper may talk to a server over RCON: only once it's up
+/// ("Done") and before anything starts stopping it. A stopping server shuts
+/// its command handlers (spark's among them) down while it saves, and an
+/// open RCON connection can keep it from closing at all.
+pub fn allowed(state: &ServerState, stopping_seen: bool) -> bool {
+    *state == ServerState::Running && !stopping_seen
+}
+
+/// Closes an [`Rcon`] connection from another thread, even while a command
+/// waits for its answer (which then fails at once).
+pub struct Closer(TcpStream, Arc<AtomicBool>);
+
+impl Closer {
+    pub fn close(&self) {
+        self.1.store(true, Ordering::SeqCst);
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 impl Rcon {
+    pub fn closer(&self) -> std::io::Result<Closer> {
+        Ok(Closer(self.s.try_clone()?, self.closed.clone()))
+    }
+
     pub fn connect(port: u16, password: &str, timeout: Duration) -> anyhow::Result<Self> {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let s = TcpStream::connect_timeout(&addr, timeout).with_context(|| format!("RCON on port {port}"))?;
-        s.set_read_timeout(Some(timeout))?;
+        s.set_read_timeout(Some(SLICE.min(timeout)))?;
         s.set_write_timeout(Some(timeout))?;
-        let mut r = Rcon { s, id: 0 };
+        let mut r = Rcon { s, id: 0, timeout, closed: Default::default() };
         let id = r.send(LOGIN, password)?;
         // Some servers send an empty answer before the login result.
         loop {
@@ -54,6 +87,9 @@ impl Rcon {
     }
 
     fn send(&mut self, kind: i32, body: &str) -> anyhow::Result<i32> {
+        if self.closed.load(Ordering::SeqCst) {
+            bail!("RCON connection closed");
+        }
         self.id = self.id.wrapping_add(1).max(1);
         let mut p = Vec::with_capacity(14 + body.len());
         p.extend_from_slice(&(10 + body.len() as i32).to_le_bytes());
@@ -65,15 +101,37 @@ impl Rcon {
         Ok(self.id)
     }
 
+    /// Fills `buf`, in short slices so a [`Closer`] can end the wait.
+    fn read_full(&mut self, buf: &mut [u8], deadline: Instant) -> anyhow::Result<()> {
+        let mut got = 0;
+        while got < buf.len() {
+            if self.closed.load(Ordering::SeqCst) {
+                bail!("RCON connection closed");
+            }
+            match self.s.read(&mut buf[got..]) {
+                Ok(0) => bail!("RCON connection closed by the server"),
+                Ok(n) => got += n,
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {
+                    if Instant::now() >= deadline {
+                        bail!("RCON didn't answer in {} s", self.timeout.as_secs());
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(())
+    }
+
     fn recv(&mut self) -> anyhow::Result<(i32, i32, String)> {
+        let deadline = Instant::now() + self.timeout;
         let mut len = [0u8; 4];
-        self.s.read_exact(&mut len)?;
+        self.read_full(&mut len, deadline)?;
         let len = i32::from_le_bytes(len);
         if !(10..=1 << 20).contains(&len) {
             bail!("bad RCON packet");
         }
         let mut buf = vec![0u8; len as usize];
-        self.s.read_exact(&mut buf)?;
+        self.read_full(&mut buf, deadline)?;
         let id = i32::from_le_bytes(buf[0..4].try_into().unwrap());
         let kind = i32::from_le_bytes(buf[4..8].try_into().unwrap());
         let body = String::from_utf8_lossy(&buf[8..buf.len() - 2]).into_owned();
@@ -92,22 +150,28 @@ impl Rcon {
     }
 }
 
-/// The command that reports TPS, by loader ("neoforge", "paper", …) and
-/// Minecraft version; `None` when there's no cheap one.
+/// The command that reports TPS, by loader ("neoforge 21.1.259", "paper",
+/// …) and Minecraft version; `None` when there's no cheap one.
+///
+/// spark comes last: it answers on its own thread after the command
+/// returns, so over RCON its reply is empty or only its first line.
 pub fn tps_command(loader: Option<&str>, mc_version: &str, has_spark: bool) -> Option<&'static str> {
-    match loader.map(str::to_ascii_lowercase).as_deref() {
+    // Loaders come with their version ("forge 1.20.1-47.4.10",
+    // "neoforge-21.1.259"): the name is the leading letters.
+    let family = loader.map(|l| l.trim().chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>().to_ascii_lowercase());
+    match family.as_deref() {
         Some("neoforge") => return Some("neoforge tps"),
         Some("forge") => return Some("forge tps"),
         Some("paper" | "purpur" | "spigot" | "folia" | "bukkit") => return Some("tps"),
         _ => {}
     }
-    if has_spark {
-        return Some("spark tps");
-    }
     // Vanilla 1.20.3 added /tick query.
     let mut parts = mc_version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
     let (major, minor, patch) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-    ((major, minor, patch) >= (1, 20, 3)).then_some("tick query")
+    if (major, minor, patch) >= (1, 20, 3) {
+        return Some("tick query");
+    }
+    has_spark.then_some("spark tps")
 }
 
 /// Ticks per second and milliseconds per tick, read from a TPS command's
@@ -120,12 +184,19 @@ pub fn parse_tps(text: &str) -> Option<(f32, Option<f32>)> {
             .filter_map(|t| t.trim_matches('.').parse().ok())
             .collect()
     };
-    // Paper / spark: "TPS from last 1m, 5m, 15m: 20.0, 19.9, 19.8".
+    // Paper: "TPS from last 1m, 5m, 15m: 20.0, 19.9, 19.8"; spark puts the
+    // numbers on the next line. Only that line counts: a spark reply cut
+    // short over RCON can run into another command's answer ("There are 0
+    // of a max of 16 players"), which isn't a TPS of 0.
     if let Some(i) = clean.find("TPS from last") {
         let after = &clean[i..];
         let colon = after.find(':')?;
-        let tps = *nums(&after[colon + 1..]).first()?;
-        return Some((tps.min(20.0), None));
+        let line = after[colon + 1..].lines().find(|l| !l.trim().is_empty())?;
+        let n = nums(line);
+        if n.len() < 3 || !line.contains(',') {
+            return None;
+        }
+        return Some((n[0].min(20.0), None));
     }
     // Vanilla /tick query: "Average time per tick: 1.2ms (Target: 50.0ms)".
     if let Some(i) = clean.find("Average time per tick") {
@@ -184,6 +255,36 @@ mod tests {
         assert_eq!(parse_tps("Unknown command"), None);
     }
 
+    /// Real replies from TNP-LL8 (NeoForge 1.21.1, spark 1.10.124) over RCON.
+    #[test]
+    fn parses_real_replies() {
+        // `neoforge tps`, trimmed to a few of its 52 dimensions.
+        let neo = "Overworld: 20.000 TPS (0.884 ms/tick)
+Meteorite Cluster: 20.000 TPS (0.293 ms/tick)
+sgjourney:cavum_tenebrae: 20.000 TPS (0.223 ms/tick)
+The Nether: 20.000 TPS (0.186 ms/tick)
+AE2 Spatial Storage: 20.000 TPS (0.181 ms/tick)
+Overall: 20.000 TPS (10.574 ms/tick)
+";
+        assert_eq!(parse_tps(neo), Some((20.0, Some(10.574))));
+        // `spark tps`: empty, or only its first line, never the numbers.
+        assert_eq!(parse_tps(""), None);
+        assert_eq!(parse_tps("[⚡] TPS from last 5s, 10s, 1m, 5m, 15m:
+"), None);
+        // The rest of a spark reply showing up in the next command's answer.
+        assert_eq!(parse_tps("[⚡] TPS from last 5s, 10s, 1m, 5m, 15m:
+There are 0 of a max of 16 players online: 
+"), None);
+        // A whole spark reply (made up, in spark's layout), should one come through.
+        let spark = "[⚡] TPS from last 5s, 10s, 1m, 5m, 15m:
+[⚡]  8.1, 9.4, 12.0, 15.2, 18.9
+[⚡]
+[⚡] Tick durations (min/med/95%ile/max ms) from last 10s, 1m:
+[⚡]  12.1/80.3/250.0/900.4;  10.0/70.2/240.1/27000.0
+";
+        assert_eq!(parse_tps(spark), Some((8.1, None)));
+    }
+
     #[test]
     fn picks_a_command() {
         assert_eq!(tps_command(Some("NeoForge"), "1.21.1", false), Some("neoforge tps"));
@@ -191,6 +292,49 @@ mod tests {
         assert_eq!(tps_command(None, "1.21.1", false), Some("tick query"));
         assert_eq!(tps_command(Some("fabric"), "1.20.1", false), None);
         assert_eq!(tps_command(Some("fabric"), "1.20.1", true), Some("spark tps"));
+        // As Hopper reads them from a server's files.
+        assert_eq!(tps_command(Some("neoforge 21.1.259"), "1.21.1", true), Some("neoforge tps"));
+        assert_eq!(tps_command(Some("neoforge-21.1.259"), "1.21.1", true), Some("neoforge tps"));
+        assert_eq!(tps_command(Some("forge 1.20.1-47.4.10"), "1.20.1", true), Some("forge tps"));
+        assert_eq!(tps_command(Some("fabric 0.18.1"), "1.21.1", true), Some("tick query"), "vanilla's over spark");
+    }
+
+    #[test]
+    fn rcon_only_while_running() {
+        assert!(allowed(&ServerState::Running, false));
+        assert!(!allowed(&ServerState::Running, true), "said Stopping server");
+        assert!(!allowed(&ServerState::Starting, false), "before Done");
+        assert!(!allowed(&ServerState::Stopping, false));
+        assert!(!allowed(&ServerState::Stopped, false));
+        assert!(!allowed(&ServerState::Crashed(Some(1)), false));
+    }
+
+    #[test]
+    fn closer_ends_a_waiting_command() {
+        // Logs in, then never answers the command.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = l.accept().unwrap();
+            let mut b = [0u8; 64];
+            let _ = s.read(&mut b).unwrap();
+            let id = i32::from_le_bytes(b[4..8].try_into().unwrap());
+            let mut p = 10i32.to_le_bytes().to_vec();
+            p.extend_from_slice(&id.to_le_bytes());
+            p.extend_from_slice(&2i32.to_le_bytes());
+            p.extend_from_slice(&[0, 0]);
+            s.write_all(&p).unwrap();
+            std::thread::sleep(Duration::from_secs(10));
+        });
+        let mut r = Rcon::connect(port, "pw", Duration::from_secs(8)).unwrap();
+        let c = r.closer().unwrap();
+        let t = std::time::Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            c.close();
+        });
+        assert!(r.command("spark tps").is_err());
+        assert!(t.elapsed() < Duration::from_secs(3), "the command waited for its timeout");
     }
 
     #[test]
