@@ -30,9 +30,12 @@ jobs:
           $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
           if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} doesn't match Cargo.toml version $v" }
       - name: Build
-        # The Azure app id for Microsoft sign-in, when the repo has the secret.
+        # The Azure app id for Microsoft sign-in, and Hopper's CurseForge
+        # application key (built in scrambled), when the repo has the secrets.
         env:
           MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          HOPPER_EMBED_CF_KEY: "1"
         run: cargo build --release --bin hopper
       - name: Package
         shell: pwsh

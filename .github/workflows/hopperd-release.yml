@@ -62,6 +62,10 @@ jobs:
         working-directory: crates/hopperd/ui
         run: pnpm install --frozen-lockfile && pnpm build
       - name: Build
+        # Hopper's CurseForge application key, built in scrambled.
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          HOPPER_EMBED_CF_KEY: "1"
         run: cargo build --release -p hopperd
       - name: Package
         shell: bash

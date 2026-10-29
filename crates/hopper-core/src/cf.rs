@@ -506,11 +506,20 @@ pub fn api_key_source() -> Option<(&'static str, KeySource)> {
             session,
             crate::secrets::get(crate::secrets::CF_KEY),
             std::env::var("CF_API_KEY").ok(),
-            option_env!("HOPPER_CF_KEY").map(String::from),
+            built_in_key(),
         );
         // Leaked once per change of key, so callers can hold it freely.
         found.map(|(k, s)| (&*Box::leak(k.into_boxed_str()), s))
     })
+}
+
+// CF_KEY_ENC and CF_KEY_PAD, from build.rs (empty unless the build embeds a key).
+include!(concat!(env!("OUT_DIR"), "/cf_key.rs"));
+
+/// The key built into this exe, unscrambled.
+fn built_in_key() -> Option<String> {
+    let k: Vec<u8> = CF_KEY_ENC.iter().zip(CF_KEY_PAD).map(|(e, p)| e ^ p).collect();
+    String::from_utf8(k).ok().filter(|k| !k.is_empty())
 }
 
 /// The first non-blank key, in order of precedence.
@@ -1301,6 +1310,17 @@ mod tests {
         let other = call_error(ureq::Error::StatusCode(500), || "POST /v1/mods".into());
         assert!(!key_rejected(&other));
         assert!(format!("{other:#}").starts_with("POST /v1/mods"));
+    }
+
+    #[test]
+    fn a_built_in_key_unscrambles_to_the_one_it_was_built_with() {
+        // Only meaningful in a build with HOPPER_EMBED_CF_KEY=1.
+        if !CF_KEY_ENC.is_empty() {
+            assert_eq!(built_in_key(), std::env::var("CF_API_KEY").ok().map(|k| k.trim().to_string()));
+            assert_ne!(CF_KEY_ENC, built_in_key().unwrap().as_bytes());
+        } else {
+            assert_eq!(built_in_key(), None);
+        }
     }
 
     #[test]

@@ -40,6 +40,8 @@ fn embed_ms_client_id() {
 fn embed_cf_key() {
     println!("cargo:rerun-if-env-changed=HOPPER_EMBED_CF_KEY");
     println!("cargo:rerun-if-env-changed=CF_API_KEY");
+    // Always write the file (empty key by default) so cf.rs can include it.
+    write_cf_key(b"");
     if std::env::var("HOPPER_EMBED_CF_KEY").as_deref() != Ok("1") {
         return;
     }
@@ -50,10 +52,28 @@ fn embed_cf_key() {
             Some(v.trim().trim_matches('"').to_string())
         })
     };
-    match std::env::var("CF_API_KEY").ok().or_else(from_file) {
-        Some(k) if !k.is_empty() => println!("cargo:rustc-env=HOPPER_CF_KEY={k}"),
+    match std::env::var("CF_API_KEY").ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).or_else(from_file) {
+        Some(k) if !k.is_empty() => write_cf_key(k.as_bytes()),
         _ => println!("cargo:warning=HOPPER_EMBED_CF_KEY is set but no CF_API_KEY was found"),
     }
+}
+
+/// Writes the key to OUT_DIR/cf_key.rs XORed with a pad made fresh for
+/// each build, so the key isn't sitting in the exe as plain text. This only
+/// stops a casual search of the file; anyone determined can still get it.
+fn write_cf_key(key: &[u8]) {
+    use std::hash::{BuildHasher, Hasher};
+    let mut pad = Vec::with_capacity(key.len());
+    while pad.len() < key.len() {
+        // RandomState is seeded randomly per process.
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_usize(pad.len());
+        pad.extend_from_slice(&h.finish().to_le_bytes());
+    }
+    pad.truncate(key.len());
+    let enc: Vec<u8> = key.iter().zip(&pad).map(|(k, p)| k ^ p).collect();
+    let out = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("cf_key.rs");
+    std::fs::write(out, format!("const CF_KEY_ENC: &[u8] = &{enc:?};\nconst CF_KEY_PAD: &[u8] = &{pad:?};\n")).unwrap();
 }
 
 /// Builds the notes of the last releases into the exe for What's new,
