@@ -29,6 +29,7 @@ mod java_form;
 mod launchers_list;
 mod library;
 mod line_select;
+mod logos;
 mod logs;
 mod mcp;
 mod mcp_data;
