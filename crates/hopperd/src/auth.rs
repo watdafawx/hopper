@@ -851,24 +851,22 @@ impl Auth {
     }
 
     /// What the device that made request `id` gets when it asks again. The
-    /// token is handed out once.
+    /// answer stays until the request expires, so a device whose reply got
+    /// lost on the way (a slow link, a proxy) can ask again instead of being
+    /// left half paired; only the device holding the secret can ask.
     pub fn pair_status(&self, id: &str, secret: &str) -> PairStatus {
         let mut p = self.pairs.lock().unwrap();
         let Some(i) = p.iter().position(|r| r.id == id && r.secret == secret) else {
             return PairStatus::Unknown;
         };
+        if p[i].at.elapsed() >= PAIR_TTL {
+            p.remove(i);
+            return PairStatus::Unknown;
+        }
         match p[i].answer.clone() {
-            None if p[i].at.elapsed() >= PAIR_TTL => {
-                p.remove(i);
-                PairStatus::Unknown
-            }
             None => PairStatus::Waiting,
-            Some(Err(())) => {
-                p.remove(i);
-                PairStatus::Denied
-            }
+            Some(Err(())) => PairStatus::Denied,
             Some(Ok(v)) => {
-                p.remove(i);
                 let (device_id, token) = v.split_once(':').unwrap_or_default();
                 PairStatus::Approved { token: token.into(), device_id: device_id.into() }
             }
@@ -1123,13 +1121,17 @@ mod tests {
         a.answer(&id, true).unwrap();
         let PairStatus::Approved { token, device_id } = a.pair_status(&id, &secret) else { panic!() };
         assert_eq!(a.check(&token), Some(Who::Device { id: device_id.clone(), name: "Hopper on FOX".into() }));
-        // Handed out once.
-        assert_eq!(a.pair_status(&id, &secret), PairStatus::Unknown);
+        // Asking again (the first reply lost on the way) gets the same
+        // token; the wrong secret still gets nothing.
+        assert_eq!(a.pair_status(&id, &secret), PairStatus::Approved { token: token.clone(), device_id: device_id.clone() });
+        assert_eq!(a.pair_status(&id, "wrong"), PairStatus::Unknown);
         assert!(a.pending().is_empty());
+        assert!(a.answer(&id, true).is_err(), "answered once");
         assert!(a.forget_device(&device_id));
         assert_eq!(a.check(&token), None);
         let (id2, s2, _) = a.pair_request("Phone", IP, "AA:BB").unwrap();
         a.answer(&id2, false).unwrap();
+        assert_eq!(a.pair_status(&id2, &s2), PairStatus::Denied);
         assert_eq!(a.pair_status(&id2, &s2), PairStatus::Denied);
         assert!(a.pair_request("", IP, "AA:BB").is_err());
         let _ = std::fs::remove_dir_all(&dir);

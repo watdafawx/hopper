@@ -1791,13 +1791,12 @@ impl SettingsPage {
             {
                 return;
             }
-            let end = std::time::Instant::now() + std::time::Duration::from_secs(300);
-            let outcome = loop {
-                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                let r = req.clone();
-                let st = cx.background_spawn(async move { hopper::hopperd::pair_status(&r) }).await;
+            // Polls that get lost on the way are tried again; this only
+            // fails when the panel stays out of reach.
+            let r = req.clone();
+            let st = cx.background_spawn(async move { hopper::hopperd::wait_for_answer(&r) }).await;
+            let outcome = {
                 match st {
-                    Ok(hopper::hopperd::PairState::Waiting) if std::time::Instant::now() < end => continue,
                     Ok(hopper::hopperd::PairState::Approved(token)) => {
                         // The name the panel gives itself ("rig").
                         if announced.is_none() {
@@ -1807,14 +1806,14 @@ impl SettingsPage {
                                 .await
                                 .filter(|n| !n.trim().is_empty());
                         }
-                        break match hopper::panel::set_hopperd_token_for(&id2, &token) {
+                        match hopper::panel::set_hopperd_token_for(&id2, &token) {
                             Ok(()) => Ok("Paired over an encrypted connection. Hopper now syncs with this panel over the network.".to_string()),
                             Err(e) => Err(format!("Paired, but the token couldn't be saved: {e:#}")),
-                        };
+                        }
                     }
-                    Ok(hopper::hopperd::PairState::Denied) => break Err("The panel refused this PC.".into()),
-                    Ok(_) => break Err("The request expired. Pair again and allow it in the panel within 5 minutes.".into()),
-                    Err(e) => break Err(format!("{e:#}")),
+                    Ok(hopper::hopperd::PairState::Denied) => Err("The panel refused this PC.".into()),
+                    Ok(_) => Err("The request expired. Pair again and allow it in the panel within 5 minutes.".into()),
+                    Err(e) => Err(format!("{e:#}")),
                 }
             };
             this.update(cx, |this, cx| {
