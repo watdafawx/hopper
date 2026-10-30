@@ -50,7 +50,15 @@ export const stateText = (s) => (s.state === 'stopping' && s.saving ? 'Saving wo
 const PRIVATE = [/^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /\.local$/];
 const TAILSCALE = [/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /\.ts\.net$/];
 
-/** How the browser reached the panel: Local, LAN, Tailscale or Internet. */
+const VIA = { local: 'Local', lan: 'LAN', tailscale: 'Tailscale', internet: 'Internet' };
+
+/** How this browser reaches the panel. The panel's answer (`via` in /hello)
+ * wins: it sees the real client address, also behind a reverse proxy, where
+ * a public name can still point at the LAN. The address typed is the guess
+ * until it answers. */
+export const routeKind = (via) => VIA[via] ?? pathKind();
+
+/** What an address looks like: Local, LAN, Tailscale or Internet. */
 export function pathKind(host = location.hostname) {
   if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return 'Local';
   if (PRIVATE.some((r) => r.test(host))) return 'LAN';

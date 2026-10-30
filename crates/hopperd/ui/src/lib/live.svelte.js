@@ -11,6 +11,9 @@ export const live = $state({
   host: null,
   /** Round trip to the panel in ms, from the last /hello. */
   ping: null,
+  /** How the panel sees this browser's connection (local, lan, tailscale,
+   * internet), from the last /hello. */
+  via: null,
 });
 
 /** Console lines per server id, oldest first. */
@@ -107,6 +110,7 @@ export function startPing() {
     try {
       const h = await hello();
       live.ping = Math.round(performance.now() - t);
+      live.via = h.via ?? null;
       seen(h);
     } catch {
       live.ping = null;
