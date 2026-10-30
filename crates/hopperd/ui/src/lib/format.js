@@ -62,8 +62,34 @@ export const stateLabel = {
   crashed: 'Crashed',
 };
 
-/** A server's state in words; a stop that is saving its worlds says so. */
-export const stateText = (s) => (s.state === 'stopping' && s.saving ? 'Saving worlds…' : stateLabel[s.state]);
+/** A server's state in words; a stop that is saving its worlds says so,
+ * a start how far it has got. */
+export const stateText = (s) => {
+  if (s.state === 'stopping' && s.saving) return 'Saving worlds…';
+  if (s.state === 'starting' && s.boot) return `Starting ${s.boot.percent}%`;
+  return stateLabel[s.state];
+};
+
+/** "45s", "1m 20s", "3m": rounded like the server list says it. */
+export function shortTime(secs) {
+  const step = secs < 60 ? 5 : secs < 600 ? 10 : 60;
+  const s = Math.max(5, Math.round(secs / step) * step);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (!m) return `${r}s`;
+  return r ? `${m}m ${String(r).padStart(2, '0')}s` : `${m}m`;
+}
+
+/** A start's time left in words ("About 1m 20s left (usually 3m 40s)"). */
+export function bootLeft(b) {
+  if (!b) return '';
+  if (b.slow) return `Taking longer than usual (usually ${shortTime(b.usual_secs)})`;
+  if (b.left_secs != null) return `About ${shortTime(b.left_secs)} left (usually ${shortTime(b.usual_secs)})`;
+  return 'First start: no estimate yet';
+}
+
+/** A start's progress for a tooltip: what it is doing, then the time. */
+export const bootText = (s) => (s.state === 'starting' && s.boot ? `${s.boot.label} · ${bootLeft(s.boot)}` : '');
 
 const PRIVATE = [/^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /\.local$/];
 const TAILSCALE = [/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /\.ts\.net$/];

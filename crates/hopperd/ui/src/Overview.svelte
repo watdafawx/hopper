@@ -3,7 +3,7 @@
   import Avatar from './Avatar.svelte';
   import { Play, Square, RotateCw, Terminal, Plus, Server } from '@lucide/svelte';
   import { live, history } from './lib/live.svelte.js';
-  import { bytes, uptime, xmx, stateText, memTitle, loaderText } from './lib/format.js';
+  import { bytes, uptime, xmx, stateText, bootText, memTitle, loaderText } from './lib/format.js';
   import { power } from './lib/power.js';
   import { packUpdates } from './lib/packs.svelte.js';
   import Spark from './Spark.svelte';
@@ -89,7 +89,7 @@
           {:else if s.state === 'stopped'}
             <span class="stopped"><span class="dot"></span>Stopped</span>
           {:else}
-            <span class="pill {s.state}">{stateText(s)}{s.exit_code != null ? ` (${s.exit_code})` : ''}</span>
+            <span class="pill {s.state}" title={bootText(s) || undefined}>{stateText(s)}{s.exit_code != null ? ` (${s.exit_code})` : ''}</span>
           {/if}
         </div>
         <!-- One chip fits beside the footer's buttons; several get their own row. -->

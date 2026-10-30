@@ -46,6 +46,8 @@ pub struct Summary {
     pub uptime_secs: Option<u64>,
     /// Stopping and saving its worlds (shown as "Saving worlds…").
     pub saving: bool,
+    /// While starting: what it is doing, how far along, time left.
+    pub boot: Option<hopper_core::hosting::boot::BootStatus>,
     /// Addresses players join it by (server addresses / the router):
     /// saved ones, or the default `name.<domain>` (see
     /// [`crate::router::effective`], which the callers fill in).
@@ -209,6 +211,7 @@ impl Servers {
             port: props.port(),
             state: state_name(&state),
             saving: state == ServerState::Stopping && t.saving_at.is_some() && t.saved_at.is_none(),
+            boot: e.server.boot_status(),
             exit_code: match state {
                 ServerState::Crashed(c) => c,
                 _ => None,

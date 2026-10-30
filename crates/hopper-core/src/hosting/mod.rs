@@ -5,6 +5,7 @@
 //! and that keeps running when Hopper restarts.
 
 pub mod backup;
+pub mod boot;
 pub mod chunkstore;
 pub mod clone;
 pub mod create;
