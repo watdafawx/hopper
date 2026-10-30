@@ -76,6 +76,9 @@ pub struct Settings {
     /// Widths of the GPUI side panels in rem, by panel key. Negative means
     /// collapsed to a rail, remembering the open width.  Missing = default.
     pub panel_widths: HashMap<String, f32>,
+    /// Rows the Java arguments box shows, set by dragging its bottom edge.
+    /// 0 fits the box to the flags.
+    pub java_args_rows: f32,
     /// The instance picked last, to open on it again.
     pub last_instance: String,
     /// GPUI zoom in percent (Ctrl + / Ctrl - / Ctrl 0).
@@ -451,6 +454,7 @@ impl Default for Settings {
             accounts_sidebar_width: 17.0,
             browse_panel_width: 32.0,
             panel_widths: HashMap::new(),
+            java_args_rows: 0.,
             last_instance: String::new(),
             zoom: 100,
             // Mojang's launcher is only found as CurseForge's minecraft.exe,

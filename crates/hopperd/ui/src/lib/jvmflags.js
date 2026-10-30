@@ -37,6 +37,19 @@ export function parts(t) {
   return eq(t.length - t.replace(/^-+/, '').length);
 }
 
+/** The arguments one per line, comments on lines of their own (as hopper-core's `one_per_line`). */
+export function onePerLine(text) {
+  const out = [];
+  const comments = (gap) => gap.split('\n').map((l) => l.trim()).filter((l) => l.startsWith('#'));
+  let at = 0;
+  for (const tk of tokens(text)) {
+    out.push(...comments(text.slice(at, tk.start)), tk.text);
+    at = tk.end;
+  }
+  out.push(...comments(text.slice(at)));
+  return out.join('\n');
+}
+
 /** A flag's name for matching, as hopper-core's `key`. */
 export function key(t) {
   if (t.startsWith('-XX:')) return t.slice(4).replace(/^[+-]+/, '').split('=')[0];

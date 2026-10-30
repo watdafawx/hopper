@@ -95,11 +95,14 @@ impl JavaForm {
                     this.memory_moved(v.start(), v.end(), window, cx);
                 }
             }),
-            cx.subscribe(&args.state, |this, state, e: &InputEvent, cx| {
-                if matches!(e, InputEvent::Change) {
-                    this.args_text = state.read(cx).value().to_string();
+            cx.subscribe_in(&args.state, window, |this, _, e: &InputEvent, window, cx| match e {
+                InputEvent::Change => {
+                    // The box shows one flag per line; the saved value has them on one.
+                    this.args_text = this.args.saved(cx);
                     cx.notify();
                 }
+                InputEvent::Blur => this.args.tidy(window, cx),
+                _ => {}
             }),
         ];
         store.update(cx, |s, _| s.want_javas());
@@ -164,8 +167,9 @@ impl JavaForm {
             let xms = if self.xms_mb == 0 { self.min_gb } else { self.xms_mb as f32 / 1024. };
             s.set_value((xms.min(xmx), xmx), window, cx)
         });
-        let a = args.to_string();
-        self.args.state.update(cx, |s, cx| s.set_value(a, window, cx));
+        self.args.show(args, window, cx);
+        // Loading changes nothing: the value stays as saved until edited.
+        self.args_text = args.to_string();
         cx.notify();
     }
 
@@ -179,9 +183,8 @@ impl JavaForm {
     }
 
     fn set_args(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let t = text.to_string();
-        self.args.state.update(cx, |s, cx| s.set_value(t, window, cx));
-        self.args_text = text.to_string();
+        self.args.show(text, window, cx);
+        self.args_text = jvm_editor::compact(text);
         cx.notify();
     }
 
@@ -470,7 +473,7 @@ impl JavaForm {
         } else {
             jvm_editor::Memory::Free
         };
-        self.args.refresh(&self.args_text, args_editor::Context { target, memory: slider }, cx);
+        self.args.refresh(args_editor::Context { target, memory: slider }, cx);
         let mut warnings = jvm_args::conflicts(&self.args_text, target);
         // Launching uses the slider's -Xmx; one typed in the box is dropped.
         if let (_, Some(xmx)) = jvm_args::memory(&self.args_text)
@@ -698,10 +701,13 @@ impl JavaForm {
         let args = v_flex()
             .gap_2()
             .child({
-                // Fits the arguments up to 12 rows, then scrolls.
-                let h = self.args.height(3, 12, cx);
-                self.args.tab_accepts(div().id("java-args").w_full().max_w(rems(FIELD_W)))
-                    .child(Editor::new(&self.args.state).h(h))
+                // Fits the flags up to 12 rows, then scrolls; or the height
+                // dragged on its bottom edge.
+                let h = self.args.height(self.store.read(cx).settings().java_args_rows, cx);
+                let editor = Editor::new(&self.args.state).h_full();
+                self.args.tab_accepts(
+                    self.args.with_handle(editor, h, |this: &mut Self| &mut this.args, &self.store, cx).max_w(rems(FIELD_W)),
+                )
             })
             .child(
                 h_flex()

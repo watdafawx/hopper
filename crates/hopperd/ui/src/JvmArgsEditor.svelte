@@ -4,14 +4,51 @@
   // what the flag under the mouse does and what's wrong with it, and
   // suggestions while typing -XX:, -X or -D (up/down, Enter or Tab, Esc).
   // A see-through textarea sits over a coloured copy of the text, so typing,
-  // selection, undo and paste stay the browser's own.
-  import { tokens, parts, wordAt, complete } from './lib/jvmflags.js';
+  // selection, undo and paste stay the browser's own. One flag per line with
+  // its number beside it; a long flag scrolls sideways instead of breaking.
+  // Drag the bottom edge to set the height (kept in this browser).
+  import { tokens, parts, wordAt, complete, onePerLine } from './lib/jvmflags.js';
 
   let { value = $bindable(''), spans = [], spansText = '', catalog = [], dirty = false, rows = 6, label = 'Java arguments' } = $props();
 
   let ta = $state(null);
   let hl = $state(null);
+  let gut = $state(null);
   let wrap = $state(null);
+
+  // Height: dragged on the bottom edge (saved), else fitted by `rows`.
+  const HEIGHT_KEY = 'hopperd-jvm-args-height';
+  const LINE = 11.5 * 1.5, PAD = 20;
+  const MIN_H = PAD + 3 * LINE, MAX_H = PAD + 40 * LINE;
+  const clampH = (h) => Math.round(Math.min(MAX_H, Math.max(MIN_H, h)));
+  let height = $state((() => {
+    try { const v = Number(localStorage.getItem(HEIGHT_KEY)); return v > 0 ? clampH(v) : null; } catch { return null; }
+  })());
+  function saveHeight(h) {
+    height = h;
+    try { h ? localStorage.setItem(HEIGHT_KEY, String(h)) : localStorage.removeItem(HEIGHT_KEY); } catch { /* private window */ }
+  }
+  let drag = null;
+  function gripDown(e) {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    drag = { y: e.clientY, h: ta?.offsetHeight || MIN_H };
+  }
+  function gripMove(e) {
+    if (drag) height = clampH(drag.h + e.clientY - drag.y);
+  }
+  function gripUp() {
+    if (drag) { drag = null; saveHeight(height); }
+  }
+  function gripKey(e) {
+    const step = e.key === 'ArrowDown' ? LINE : e.key === 'ArrowUp' ? -LINE : 0;
+    if (!step) return;
+    e.preventDefault();
+    saveHeight(clampH((height ?? ta?.offsetHeight ?? MIN_H) + step));
+  }
+
+  const lineCount = $derived(value.split('\n').length);
+  const gutterCh = $derived(String(lineCount).length);
 
   // The panel's marks belong to the text it was sent; while typing runs
   // ahead, match each argument to its mark by text and how many times it
@@ -60,6 +97,7 @@
 
   function syncScroll() {
     if (hl && ta) { hl.scrollTop = ta.scrollTop; hl.scrollLeft = ta.scrollLeft; }
+    if (gut && ta) gut.scrollTop = ta.scrollTop;
   }
 
   function rectOf(i) {
@@ -138,13 +176,22 @@
   const hovered = $derived(hover && toks[hover.i]);
 </script>
 
-<div class="ed" class:dirty bind:this={wrap} role="group" aria-label={label} onmouseleave={() => (hover = null)}>
+<div class="ed" class:dirty bind:this={wrap} role="group" aria-label={label} style:--gut={`${gutterCh + 2}ch`} onmouseleave={() => (hover = null)}>
+  <pre class="gut mono" aria-hidden="true" bind:this={gut}>{#each { length: lineCount } as _, i (i)}{i + 1}{'\n'}{/each}</pre>
   <pre class="hl mono" aria-hidden="true" bind:this={hl}>{#each pieces as p, k (k)}{#if p.plain !== undefined}{p.plain}{:else}<span class="tok {p.tk.level}" bind:this={tokEls[p.i]}><span class="pre">{p.tk.text.slice(0, p.tk.pe)}</span><span class="name">{p.tk.text.slice(p.tk.pe, p.tk.ne)}</span>{#if p.tk.vs >= 0}<span class="pre">{p.tk.text.slice(p.tk.ne, p.tk.vs)}</span><span class="val">{p.tk.text.slice(p.tk.vs)}</span>{:else}<span class="val">{p.tk.text.slice(p.tk.ne)}</span>{/if}</span>{/if}{/each}</pre>
-  <textarea class="mono" spellcheck="false" {rows} bind:value bind:this={ta} aria-label={label}
+  <textarea class="mono" spellcheck="false" wrap="off" {rows} style:height={height ? `${height}px` : null} bind:value bind:this={ta} aria-label={label}
     role="combobox" aria-multiline="true" aria-autocomplete="list" aria-expanded={!!menu} aria-controls="jvm-suggest"
     aria-activedescendant={menu ? `jvm-sug-${menu.sel}` : undefined}
     onscroll={syncScroll} oninput={onInput} onkeydown={onKey} onmousemove={onMove}
-    onblur={() => setTimeout(() => (menu = null), 120)} onclick={() => (menu = null)}></textarea>
+    onblur={() => setTimeout(() => {
+      menu = null;
+      // Flags typed side by side (or pasted) go back on lines of their own.
+      const tidy = onePerLine(value);
+      if (tidy !== value && document.activeElement !== ta) value = tidy;
+    }, 120)} onclick={() => (menu = null)}></textarea>
+  <button class="grip" class:on={!!drag} type="button" aria-label="Resize the Java arguments box" title="Drag to resize, double-click to fit"
+    onpointerdown={gripDown} onpointermove={gripMove} onpointerup={gripUp} onpointercancel={gripUp}
+    ondblclick={() => saveHeight(null)} onkeydown={gripKey}><span></span></button>
 
   {#if hovered && !menu}
     <div class="popover tip" style:left={`${hover.x}px`} style:top={`${hover.y}px`} role="tooltip">
@@ -174,9 +221,17 @@
   .ed { position: relative; background: var(--term); border: 1px solid var(--line); border-radius: 8px; }
   .ed:focus-within { border-color: var(--acc); }
   .ed.dirty { border-color: #f9731677; }
-  .hl, textarea { margin: 0; font-size: 11.5px; line-height: 1.5; padding: 10px 12px; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; font-family: var(--mono); letter-spacing: 0; tab-size: 4; scrollbar-gutter: stable; box-sizing: border-box; }
+  /* One flag per line, never broken inside: long ones scroll sideways. */
+  .hl, textarea, .gut { margin: 0; font-size: 11.5px; line-height: 1.5; padding: 10px 12px 10px calc(var(--gut) + 10px); white-space: pre; overflow-wrap: normal; font-family: var(--mono); letter-spacing: 0; tab-size: 4; scrollbar-gutter: stable; box-sizing: border-box; }
   .hl { position: absolute; inset: 0; overflow: hidden; color: var(--text); pointer-events: none; }
-  textarea { position: relative; display: block; width: 100%; background: transparent; border: 0; color: transparent; caret-color: var(--text); resize: vertical; max-height: 520px; overflow: auto; outline: none; }
+  /* Text scrolled sideways stops at the line numbers (the box's colour is see-through). */
+  .hl, textarea { clip-path: inset(0 0 0 var(--gut)); }
+  .gut { position: absolute; top: 0; bottom: 0; left: 0; z-index: 1; width: var(--gut); padding: 10px 6px 10px 0; text-align: right; overflow: hidden; color: var(--muted); opacity: 0.7; background: var(--term); border-right: 1px solid var(--line); border-radius: 8px 0 0 8px; pointer-events: none; user-select: none; scrollbar-gutter: auto; }
+  textarea { position: relative; display: block; width: 100%; background: transparent; border: 0; color: transparent; caret-color: var(--text); resize: none; overflow: auto; outline: none; }
+  .grip { position: absolute; left: 0; right: 0; bottom: -5px; height: 10px; z-index: 2; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 4px; background: transparent; cursor: ns-resize; touch-action: none; }
+  .grip span { width: 36px; height: 3px; border-radius: 2px; background: var(--muted); opacity: 0.5; }
+  .grip:hover, .grip.on { background: color-mix(in srgb, var(--acc) 35%, transparent); }
+  .grip:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
   textarea::selection { background: #38bdf855; color: transparent; }
   .tok .pre { color: var(--muted); }
   .tok .name { color: var(--blue); }
