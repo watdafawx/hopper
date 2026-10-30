@@ -621,9 +621,7 @@ impl ScreenshotsView {
                             .icon(IconName::FolderOpen)
                             .tooltip("Show in folder")
                             .on_click(move |_, _, _| {
-                                let _ = std::process::Command::new("explorer")
-                                    .arg(format!("/select,{}", p3.display()))
-                                    .spawn();
+                                crate::store::reveal_path(&p3);
                             }),
                     )
                     .child(
