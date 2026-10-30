@@ -24,6 +24,7 @@ impl HopperServer {
         let list = self.client.get("/servers")?;
         let total = self.client.get("/host").ok().and_then(|h| h["mem_total"].as_u64()).unwrap_or(0);
         let alerts = self.client.get("/alerts").ok();
+        let via = self.client.get("/hello").ok().and_then(|h| h["via"].as_str().and_then(super::route_label));
         Ok(list
             .as_array()
             .into_iter()
@@ -31,6 +32,7 @@ impl HopperServer {
             .map(|v| {
                 let id = v["id"].as_str().unwrap_or("").to_string();
                 let mut st = stats_from(v, total);
+                st.via = via;
                 if let Some(a) = &alerts {
                     add_tps(&mut st, a, &id);
                 }
@@ -85,6 +87,7 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
         sleep_minutes: v["sleep_after_minutes"].as_u64().unwrap_or(0) as u32,
         tps: None,
         no_tps: None,
+        via: None,
         version: v["version"].as_str().unwrap_or("").to_string(),
         world_size: String::new(),
         started: v["uptime_secs"]

@@ -3617,10 +3617,33 @@ pub fn played(secs: u64) -> Option<String> {
 pub fn open_path(path: &Path) {
     // A server on a Hopper Server: open the spot in the panel's web UI.
     if let Some(url) = hopper::hopperd::web_url(path) {
-        let _ = std::process::Command::new("explorer").arg(url).spawn();
+        open_with_system(std::ffi::OsStr::new(&url));
         return;
     }
-    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    open_with_system(path.as_os_str());
+}
+
+/// Opens a folder, file or URL in the app the system picks for it.
+fn open_with_system(target: &std::ffi::OsStr) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(target).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(target).spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+}
+
+/// Opens the folder holding `path` with `path` selected ("Show in folder").
+pub fn reveal_path(path: &Path) {
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    // xdg-open can't select a file, so open the folder it's in.
+    #[cfg(not(any(windows, target_os = "macos")))]
+    if let Some(dir) = path.parent() {
+        open_with_system(dir.as_os_str());
+    }
 }
 
 /// An update job's work: the batch it's on and what was queued after.

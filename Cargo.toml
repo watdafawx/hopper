@@ -6,7 +6,7 @@ resolver = "3"
 # One version for every crate: release.ps1 and release.yml read the first
 # `version = "..."` line of this file.
 [workspace.package]
-version = "0.15.24"
+version = "0.15.25"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -84,6 +84,12 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Saved sign-ins and keys: without these keyring keeps them in memory only
+# off Windows (Secret Service on Linux, the Keychain on macOS). Here, not in
+# hopper-core, so Hopper Server's headless Linux build doesn't need D-Bus.
+[target.'cfg(not(windows))'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service", "apple-native"] }
 
 [build-dependencies]
 winresource = "0.1"

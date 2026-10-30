@@ -73,6 +73,11 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 
 /// The release's Windows download: an .exe named like Hopper, else a zip.
 fn pick(assets: &[GhAsset]) -> Option<(&GhAsset, bool)> {
+    // Releases carry only Windows builds so far; one installed over a Linux
+    // or macOS Hopper would leave it unable to start.
+    if !cfg!(windows) {
+        return None;
+    }
     let named = |a: &&GhAsset| a.name.to_lowercase().contains("hopper");
     let ext = |a: &GhAsset, e: &str| a.name.to_lowercase().ends_with(e);
     assets
@@ -331,6 +336,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "releases only offer Windows builds")]
     fn picks_the_exe_then_a_zip() {
         let a = [asset("hopper-setup.exe"), asset("hopper.zip"), asset("Hopper.exe")];
         assert_eq!(pick(&a).map(|(a, z)| (a.name.as_str(), z)), Some(("Hopper.exe", false)));
@@ -340,6 +346,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "releases only offer Windows builds")]
     fn skips_drafts_and_old_releases() {
         let r = |tag: &str, draft| GhRelease {
             tag_name: tag.into(),

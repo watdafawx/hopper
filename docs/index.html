@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hopper · Minecraft modpack and server manager</title>
-<meta name="description" content="A fast, native Minecraft modpack and server manager for Windows. Play CurseForge and Modrinth packs, update mods, run servers and keep them in step with your packs.">
+<title>Hopper · Minecraft modpack launcher and server panel</title>
+<meta name="description" content="Hopper is a fast, native Minecraft modpack launcher for Windows. Hopper Server is a self-hosted server panel you use from any browser, on Windows, Linux or Docker. Built in Rust.">
 <meta property="og:title" content="Hopper">
-<meta property="og:description" content="A fast, native Minecraft modpack and server manager for Windows.">
+<meta property="og:description" content="A fast, native Minecraft modpack launcher for Windows, plus Hopper Server: a self-hosted server panel for Windows, Linux and Docker.">
 <meta property="og:image" content="https://watdafawx.github.io/hopper/screenshots/overview.png">
 <meta property="og:type" content="website">
 <meta name="theme-color" content="#121214">
@@ -163,6 +163,25 @@ footer a:hover{color:var(--fg)}
 .hack pre{margin-top:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;font:13px/1.6 "JetBrains Mono",monospace;color:#d4d4d8}
 @media (max-width:900px){.hack,.limits{grid-template-columns:minmax(0,1fr)}}
 
+/* hopper server */
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+.chips span{background:#f9731618;color:#fdba74;border-radius:99px;padding:3px 12px;font-size:13px}
+.head.center .chips{justify-content:center}
+.dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.dl>.card{padding:26px}
+.dl h3{font-size:20px;margin-bottom:4px}
+.dl .plat{font-size:13.5px;color:var(--dim);margin-bottom:16px}
+.dl ol{margin:16px 0 0 18px;display:grid;gap:8px;font-size:14.5px;color:var(--mut)}
+.dl ol a,.dl p a{color:var(--acc)}
+.dl pre{margin-top:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;font:12.5px/1.6 "JetBrains Mono",monospace;color:#d4d4d8;white-space:pre}
+.ptabs{display:flex;gap:22px;border-bottom:1px solid var(--line);margin-top:18px}
+.ptabs button{background:none;border:0;color:var(--mut);font:600 14px Inter,system-ui,sans-serif;padding:8px 0;cursor:pointer;box-shadow:inset 0 -2px transparent}
+.ptabs button[aria-selected=true]{color:var(--fg);box-shadow:inset 0 -2px var(--acc)}
+.ptabs button:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.ppane{display:none;padding-top:6px}.ppane.on{display:block}
+html:not(.js) .ppane{display:block}
+@media (max-width:900px){.dl{grid-template-columns:minmax(0,1fr)}}
+
 /* lightbox */
 .lb{position:fixed;inset:0;z-index:50;background:rgba(5,5,7,.92);display:none;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}
 .lb.on{display:flex}
@@ -197,10 +216,10 @@ footer a:hover{color:var(--fg)}
     <a class="brand" href="#"><img src="hopper.png" alt="">Hopper</a>
     <div class="links">
       <a href="#features">Features</a>
-      <a href="#servers">Servers</a>
+      <a href="#server">Hopper Server</a>
       <a href="#panels">Panels</a>
       <a href="#screens">Screenshots</a>
-      <a href="#start">Get started</a>
+      <a href="#start">Download</a>
       <a href="#faq">FAQ</a>
       <a href="#hack">Contribute</a>
       <a href="https://github.com/watdafawx/hopper">GitHub</a>
@@ -215,23 +234,26 @@ footer a:hover{color:var(--fg)}
   <div class="wrap">
     <a class="pill" id="ver" href="https://github.com/watdafawx/hopper/releases/latest"><b>New</b><span>See what's in the latest release</span></a>
     <h1>Your modpacks and servers, in <em>one fast app</em>.</h1>
-    <p class="lede">Hopper is a native Minecraft launcher and server manager for Windows. Play CurseForge and Modrinth packs, keep hundreds of mods up to date, and keep your servers in step with them.</p>
+    <p class="lede">Hopper is a native Minecraft modpack launcher for Windows. Play CurseForge and Modrinth packs and keep hundreds of mods up to date. Hopper Server runs your Minecraft servers on Windows, Linux or Docker, with a web panel you open in any browser, and keeps them in step with your packs.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10 4.5v7H3zM11 4.3 21 3v8.5H11zM3 12.5h7v7L3 18.5zM11 12.5h10V21l-10-1.3z"/></svg>Download for Windows
+      </a>
+      <a class="btn ghost" href="#server">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>Hopper Server: Windows, Linux, Docker
       </a>
       <a class="btn ghost" href="https://github.com/watdafawx/hopper">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0C17.3 4.9 18.3 5.2 18.3 5.2c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5Z"/></svg>View on GitHub
       </a>
     </div>
-    <p class="fine">Free and open source (MIT) · Windows 10 and 11 · One exe, no admin rights · Updates itself</p>
-    <div class="shot rv"><img src="screenshots/overview.png" width="1782" height="1090" alt="Hopper showing an All the Mods 10 instance with its pack page, playtime and mod count"></div>
+    <p class="fine">Free and open source (MIT) · One exe, no admin rights · Both update themselves</p>
+    <div class="shot rv"><img src="screenshots/overview.png" width="1440" height="900" alt="Hopper showing an All the Mods 10 instance with its pack page, playtime, mod count and a pack update"></div>
 
     <div class="strip rv">
       <div><b>Native</b><span>Rust on GPUI. No Electron, no browser inside.</span></div>
       <div><b>In place</b><span>Reads CurseForge, Prism, Modrinth App and more without copying.</span></div>
       <div><b>1,000+ mods</b><span>Updates, side checks and profiles that stay fast.</span></div>
-      <div><b>19 themes</b><span>Dark and light, plus your own theme files.</span></div>
+      <div><b>Self-hosted</b><span>Hopper Server: your servers, your PC or VPS, any browser.</span></div>
     </div>
   </div>
 </header>
@@ -256,18 +278,21 @@ footer a:hover{color:var(--fg)}
   <div class="head center rv">
     <div class="eyebrow">Features</div>
     <h2>Everything a modded player needs</h2>
-    <p class="sub">Hopper covers playing packs, then goes further: performance tracking, a proper log viewer and real server tools.</p>
+    <p class="sub">Hopper covers playing packs, then goes further: pack updates that keep your changes, crash help that names the mod, and real server tools.</p>
   </div>
   <div class="grid">
-    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V4.5A1.5 1.5 0 0 1 5.5 3H9v18H5.5A1.5 1.5 0 0 1 4 19.5zM13 3h3l4 18h-3z"/></svg></div><h3>Library</h3><p>Every instance with its pack art, playtime, mods, worlds and screenshots. Update packs with a preview that keeps your config changes.</p></div>
-    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div><h3>Browse</h3><p>Search CurseForge and Modrinth for mods, modpacks, shaders, resource packs and worlds. Dependencies come along.</p></div>
-    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></div><h3>Performance</h3><p>Each run is recorded: FPS, 1% lows, frame times, CPU, RAM, GPU, GC pauses and load time. Compare Java presets side by side. Nothing is injected.</p></div>
-    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg></div><h3>Logs &amp; crashes</h3><p>The game's live log, debug.log and every crash report, with search and an errors-only filter. One click shares a log on mclo.gs.</p></div>
-    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></div><h3>Servers</h3><p>Start, stop and watch servers through Crafty, MCSS or Pterodactyl, or host one on this PC with Java picked for you.</p></div>
-    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13l-3-3M20 17H7l3 3"/></svg></div><h3>Server sync</h3><p>Compare a server with its pack and push or pull mods and configs. Client-only mods stay off. Backups and undo included.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V4.5A1.5 1.5 0 0 1 5.5 3H9v18H5.5A1.5 1.5 0 0 1 4 19.5zM13 3h3l4 18h-3z"/></svg></div><h3>Library</h3><p>Every instance with its pack art, playtime, mods, worlds and screenshots. Resource packs, shaders and data packs work like mods. Export as a CurseForge or Modrinth pack.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></div><h3>Browse</h3><p>Search CurseForge and Modrinth for mods, modpacks, shaders, resource packs, data packs and worlds. Dependencies come along, and installed mods show your version.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 21h16"/></svg></div><h3>Pack updates</h3><p>Read every changelog in between, then see what changes and what stays. Your own mods, configs and scripts are kept, and only the new version is downloaded.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg></div><h3>Config editor</h3><p>Mod configs as switches, pickers and fields, with each mod's own descriptions, ranges and defaults. Search every setting, or edit the text.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg></div><h3>Crash help</h3><p>Catches a crash in seconds, names the mod behind it (certain, likely or possible) and offers the fix: install what's missing, put the last working version back, or play without it.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg></div><h3>Performance</h3><p>Each run is recorded: FPS, 1% lows, CPU, RAM, GPU and GC pauses. Advice you can apply in one click, and a memory and Java flags generator. Nothing is injected.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></div><h3>Servers</h3><p>Pair with Hopper Server for console, files, mods, backups and ping. Crafty, MCSS and Pterodactyl work too, or host a pack's server on this PC.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13l-3-3M20 17H7l3 3"/></svg></div><h3>Server sync</h3><p>Compare a server with its pack, mod by mod and config by config, and push or pull. Client-only mods stay off. Works over the network with Hopper Server.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg></div><h3>Undo and revert</h3><p>Mods that load badly are flagged before you press Play. Put a mod back to the version that worked, lock it, take a snapshot, or undo any change.</p></div>
     <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div><h3>Other launchers</h3><p>Manage Modrinth App, Prism / MultiMC, ATLauncher, GDLauncher and FTB App instances where they already are.</p></div>
     <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg></div><h3>Accounts</h3><p>Several Microsoft accounts. Try skins on a 3D model that walks, runs, swims and dances, then change your skin, cape and name.</p></div>
-    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="m8.2 10.8 7.6-3.6M8.2 13.2l7.6 3.6"/></svg></div><h3>Peers</h3><p>Sync an instance with a friend's PC on your network, so everyone joins with the same mods.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="m8.2 10.8 7.6-3.6M8.2 13.2l7.6 3.6"/></svg></div><h3>Peers and AI assistants</h3><p>Sync an instance with a friend's PC on your network. Let an AI assistant read your mods, logs and crashes (off until you turn it on).</p></div>
   </div>
 </section>
 
@@ -277,87 +302,124 @@ footer a:hover{color:var(--fg)}
     <h2>Hundreds of updates, one click</h2>
     <p class="sub">See every mod with its file, author, side and the version it moves to, and read what changed before you update.</p>
     <ul>
-      <li>Updates shown old → new, with "Update all"</li>
-      <li>Every changelog since your version in one window, with "Update to this" or "Install this version"</li>
-      <li>"Added by me" shows the mods you added to the pack, and pack updates keep them</li>
-      <li>Profiles to switch sets of mods on and off</li>
-      <li>Files CurseForge only lets you get in a browser are picked up from Downloads automatically</li>
+      <li>Updates shown old → new, with a review that sorts small fixes from bigger jumps</li>
+      <li>Every changelog since your version in one window, with "Update to this" or "Roll back"</li>
+      <li>Warnings before you press Play: a mod in twice, a missing dependency, a loader that's too old</li>
+      <li>"Only yours" shows the mods you added, and pack updates keep them</li>
+      <li>Lock a mod to its version, switch it between CurseForge and Modrinth, or edit its config</li>
     </ul>
   </div>
-  <div class="frame rv"><img src="screenshots/changelogs.png" width="1782" height="1172" alt="Versions and changelogs for a mod three versions behind, over the mod list" loading="lazy"></div>
+  <div class="frame rv"><img src="screenshots/mods.png" width="1440" height="900" alt="Mods tab for All the Mods 10 with updates shown old to new and a warning about a mod that is in twice" loading="lazy"></div>
 </div>
 
-<div class="spot flip" id="servers">
+<div class="spot flip" id="packs">
   <div class="txt rv">
-    <div class="eyebrow">Servers</div>
-    <h2>Your servers, next to your packs</h2>
-    <p class="sub">Hopper works with servers wherever their files are: this PC, another PC at home, or a host running Pterodactyl.</p>
+    <div class="eyebrow">Pack updates</div>
+    <h2>Update the pack, keep your changes</h2>
+    <p class="sub">One window for every pack update: what's new first, then exactly what changes and what stays.</p>
     <ul>
-      <li>CPU, memory, players and world size, live</li>
-      <li>Console, backups, server.properties and JVM presets</li>
-      <li>Daily restarts with warnings, and crash recovery</li>
-      <li>Host a pack's server on this PC in a few clicks</li>
+      <li>The changelog of every version in between, with the pack author's advice up top</li>
+      <li>Mods added, updated and dropped, and the pack files that change</li>
+      <li>Your own mods, configs and KubeJS scripts stay. "Compare with my changes" merges your edits</li>
+      <li>Close the window and it keeps going. Replaced files go to the instance's backups folder</li>
     </ul>
   </div>
-  <div class="frame rv"><img src="screenshots/servers.png" width="1782" height="1172" alt="A running server managed through Crafty, with CPU, memory and players" loading="lazy"></div>
+  <div class="frame rv"><img src="screenshots/pack-update.png" width="1440" height="900" alt="Pack update window for All the Mods 10 showing what changes and what stays" loading="lazy"></div>
 </div>
 
-<div class="spot" id="sync">
+<div class="spot" id="logs">
+  <div class="txt rv">
+    <div class="eyebrow">Logs &amp; crashes</div>
+    <h2>A crash, explained</h2>
+    <p class="sub">Hopper reads the crash report and the game's logs, and tells you which mod is behind it and what to do.</p>
+    <ul>
+      <li>Mods graded certain, likely or possible, with the reason and what happened in order</li>
+      <li>Fixes in one click: install a missing mod, update the loader, put the last working version back, or play without it</li>
+      <li>The live log, debug.log and every crash report, with search and "errors and warnings only"</li>
+      <li>Share a log on mclo.gs with your name, IP addresses and tokens taken out</li>
+      <li><span>Optional: install <a href="https://modrinth.com/mod/crash-assistant">Crash Assistant</a>, KostromDan's mod that explains crashes in game</span></li>
+    </ul>
+  </div>
+  <div class="frame rv"><img src="screenshots/logs.png" width="1600" height="900" alt="Crash help naming the mod that stopped the game from loading, with a button to put the older version back" loading="lazy"></div>
+</div>
+
+<div class="spot flip" id="sync">
   <div class="txt rv">
     <div class="eyebrow">Server sync</div>
     <h2>Server and pack, always in step</h2>
     <p class="sub">Update the pack, then update the server to match. Hopper knows which mods belong on a server and which don't.</p>
     <ul>
       <li>Mod by mod: in sync, update, client only, server only</li>
-      <li>Configs compared too</li>
-      <li>Every change backed up, with history and undo</li>
+      <li>Configs compared too, setting by setting</li>
+      <li>Over the network with Hopper Server, or straight to a folder on this PC or a share</li>
     </ul>
   </div>
   <div class="frame rv"><img src="screenshots/sync.png" width="1782" height="1172" alt="Server sync comparing a server's mods with its pack" loading="lazy"></div>
 </div>
 
-<div class="spot flip" id="logs">
-  <div class="txt rv">
-    <div class="eyebrow">Logs &amp; crashes</div>
-    <h2>Every log, one tab away</h2>
-    <p class="sub">The game's live log, debug.log and every crash report in one place, quick to search even when they're huge.</p>
-    <ul>
-      <li>Search, and "errors and warnings only"</li>
-      <li>The latest crash's summary up top</li>
-      <li>Share a log on mclo.gs with your name taken out</li>
-      <li><span>Crash help: checks the pack for <a href="https://modrinth.com/mod/crash-assistant">Crash Assistant</a>, KostromDan's mod that explains crashes in game, and installs it in one click</span></li>
-    </ul>
+<section id="server">
+  <div class="head center rv">
+    <div class="eyebrow">Hopper Server</div>
+    <h2>Your own server panel, in any browser</h2>
+    <p class="sub">Hopper Server runs your Minecraft servers on a Windows PC, a Linux box or VPS, or in Docker. Open its panel from any browser, share it with friends, and pair it with Hopper so your servers follow your packs. You don't need Hopper to use it.</p>
+    <div class="chips"><span>Windows</span><span>Linux x64</span><span>Linux ARM64</span><span>Docker (amd64, arm64)</span></div>
   </div>
-  <div class="frame rv"><img src="screenshots/logs.png" width="1782" height="1172" alt="Logs and crashes tab with the latest crash and Crash Assistant installed" loading="lazy"></div>
-</div>
+  <div class="shot rv" style="margin-top:0"><img src="screenshots/panel-console.png" width="1440" height="900" alt="Hopper Server's web panel showing a running server's live console, memory and players" loading="lazy"></div>
+  <div class="grid" style="margin-top:40px">
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg></div><h3>Console and files</h3><p>A live console with history and filters. A file explorer with an editor that checks configs before saving, earlier versions of every file, search inside files, and SFTP.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13l-3-3M20 17H7l3 3"/></svg></div><h3>Mods in step with the pack</h3><p>The same Mods table as Hopper: updates with changelogs, locks, profiles. Browse CurseForge and Modrinth, and update a server from its pack with a review of every change.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg></div><h3>Backups that cost little</h3><p>A second backup of an unchanged server takes seconds and almost no space. Keep rules, restore all or a few files, and encrypted off-site copies to a share, SFTP, S3 or another Hopper Server.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></div><h3>Schedules and alerts</h3><p>Daily restarts with warnings in chat, restart after a crash, scheduled backups. Alerts for crashes, low TPS, a full drive or low memory, sent to Discord or any webhook.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg></div><h3>Crash help on the server</h3><p>The same crash card as Hopper: which mod, how sure, what happened, and the fix, from putting an older version back to taking a client-only mod off the server.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4"/><circle cx="12" cy="12" r="3"/></svg></div><h3>Memory and Java</h3><p>A memory slider, the right Java for each Minecraft version (found or downloaded), and a Java flags generator that explains each flag. See exactly how the server starts.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></div><h3>Addresses and sleep</h3><p>Players join survival.mc.example.com instead of an IP and port, every server on one port. Empty servers go to sleep and wake when someone joins.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c1-3.5 3.6-5.5 6.5-5.5s5.5 2 6.5 5.5M16 4.5a3.5 3.5 0 0 1 0 7M18.5 14.8c1.6.8 2.6 2.6 3 5.2"/></svg></div><h3>People and roles</h3><p>Add friends with their own sign-in: Manager, Admin, Operator or Viewer, limited to the servers you pick. Two-factor sign-in, an audit log and API tokens.</p></div>
+    <div class="card rv"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div><h3>Safe on the internet</h3><p>HTTPS from the first start, or a Let's Encrypt certificate for your domain. Works over your network, Tailscale or an open port; signing in from the internet needs two-factor.</p></div>
+  </div>
+  <div class="spot flip" style="padding-top:72px">
+    <div class="txt rv">
+      <div class="eyebrow">Hopper + Hopper Server</div>
+      <h2>Pair it with Hopper</h2>
+      <p class="sub">Hopper finds Hopper Server on your network, or takes its address. Check the 6-digit code, allow it in the panel, and the panel's servers show up in Hopper.</p>
+      <ul>
+        <li>Console, files, mods, players, backups and schedules from Hopper, no shared folder needed</li>
+        <li>Server sync and server pack updates over the network</li>
+        <li>Ping and TPS next to each server, and a dot on a pack's server button</li>
+        <li>Pair as many panels and PCs as you like</li>
+      </ul>
+    </div>
+    <div class="frame rv"><img src="screenshots/panel-mods.png" width="1440" height="900" alt="A server's Mods tab in Hopper Server's panel" loading="lazy"></div>
+  </div>
+</section>
 
 <section id="panels">
   <div class="head center rv">
     <div class="eyebrow">Server panels</div>
-    <h2>Works with the panel you already use</h2>
-    <p class="sub">Hopper talks to Crafty Controller 4, MCSS and Pterodactyl (or Pelican) through their own APIs with an API key you make in the panel. Your panel keeps running the servers. Hopper is the remote control.</p>
+    <h2>Hopper Server, or the panel you already use</h2>
+    <p class="sub">Hopper works best with Hopper Server, and also talks to Crafty Controller 4, MCSS and Pterodactyl (or Pelican) through their own APIs, with an API key you make in the panel. Or skip the panel and host a server on this PC.</p>
   </div>
   <div class="tbl rv"><table>
-    <thead><tr><th></th><th>Crafty Controller 4</th><th>MCSS</th><th>Pterodactyl / Pelican</th><th>Hosted by Hopper</th></tr></thead>
+    <thead><tr><th></th><th>Hopper Server</th><th>Crafty Controller 4</th><th>MCSS</th><th>Pterodactyl / Pelican</th><th>Hosted by Hopper</th></tr></thead>
     <tbody>
-            <tr><th>Start, stop, restart, kill</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
-      <tr><th>CPU and memory</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
-      <tr><th>Players online</th><td>Names and count</td><td>Count</td><td class="n">No</td><td>Names and count</td></tr>
-      <tr><th>World size</th><td class="y">Yes</td><td class="n">No</td><td class="n">No</td><td class="n">No</td></tr>
-      <tr><th>Read the console</th><td class="y">Yes</td><td class="y">Yes</td><td class="n">No (open it in the panel)</td><td class="y">Yes</td></tr>
-      <tr><th>Send console commands</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
-      <tr><th>Backups: list, run, restore</th><td class="y">Yes</td><td class="n">No (use MCSS)</td><td class="n">No (use the panel)</td><td>A backup mod's backups</td></tr>
-      <tr><th>Launch command follows NeoForge updates</th><td class="y">Yes</td><td class="n">No</td><td class="n">No</td><td>Yes (Hopper runs it)</td></tr>
-      <tr><th>Server sync (copy mods and configs)</th><td>If the folder is shared</td><td>If the folder is shared</td><td class="n">No (files live in its volumes)</td><td class="y">Yes</td></tr>
+      <tr><th>Start, stop, restart, kill</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><th>CPU and memory</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><th>Players online</th><td>Names and count</td><td>Names and count</td><td>Count</td><td class="n">No</td><td>Names and count</td></tr>
+      <tr><th>Ping and TPS</th><td class="y">Yes</td><td>Ping</td><td>Ping</td><td>Ping</td><td>Ping</td></tr>
+      <tr><th>Read the console</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="n">No (open it in the panel)</td><td class="y">Yes</td></tr>
+      <tr><th>Send console commands</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+      <tr><th>Files and mods</th><td class="y">Yes, over the network</td><td>If the folder is shared</td><td>If the folder is shared</td><td class="n">No (use the panel)</td><td class="y">Yes</td></tr>
+      <tr><th>Backups: list, run, restore</th><td class="y">Yes</td><td class="y">Yes</td><td class="n">No (use MCSS)</td><td class="n">No (use the panel)</td><td>A backup mod's backups</td></tr>
+      <tr><th>Server sync (copy mods and configs)</th><td class="y">Yes, over the network</td><td>If the folder is shared</td><td>If the folder is shared</td><td class="n">No (files live in its volumes)</td><td class="y">Yes</td></tr>
+      <tr><th>Keeps running with Hopper closed</th><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="n">No</td></tr>
     </tbody>
   </table></div>
   <ul class="limits rv">
-    <li><b>One panel at a time.</b> Settings → Servers takes one panel address and key.</li>
+    <li><b>Hopper Server</b> pairs with a 6-digit code you check in the panel. Pair as many as you like.</li>
     <li><b>Crafty</b> needs an API key with the Commands permission. Its self-signed certificate is accepted when you tick the box.</li>
     <li><b>MCSS</b> doesn't report ports, so servers pair by folder or name.</li>
     <li><b>Pterodactyl</b> needs a client key (<code>ptlc_…</code>). Its console is a websocket Hopper doesn't read yet.</li>
-    <li><b>Server sync needs the files as a folder</b>: this PC, or a share on another PC at home. No SFTP or FTP yet.</li>
-    <li><b>Hosted by Hopper</b> servers run while Hopper does. Quitting stops them, saving the world first.</li>
+    <li><b>Without Hopper Server, server sync needs the files as a folder</b>: this PC, or a share on another PC at home.</li>
+    <li><b>Hosted by Hopper</b> servers keep running when Hopper restarts or updates. Quitting Hopper stops them, saving the world first.</li>
   </ul>
 </section>
 
@@ -365,16 +427,16 @@ footer a:hover{color:var(--fg)}
   <div class="head center rv">
     <div class="eyebrow">Open source</div>
     <h2>Easy to hack on. Fork it, change it, send a PR.</h2>
-    <p class="sub">Hopper is plain Rust with no web stack, MIT licensed, and built to be changed. If it's missing something you need, it's likely a small change.</p>
+    <p class="sub">Hopper is plain Rust, MIT licensed, and built to be changed. If it's missing something you need, it's likely a small change.</p>
   </div>
   <div class="hack">
     <div class="card rv"><h3>Build it in one command</h3><p>Install Rust, clone, run. Dependencies are optimized even in dev builds, so the app runs at full speed while you work on it.</p>
 <pre>git clone https://github.com/watdafawx/hopper
 cd hopper
 cargo run --bin hopper</pre></div>
-    <div class="card rv"><h3>Small, separate pieces</h3><p>The library (<code>src/*.rs</code>: CurseForge, Modrinth, instances, servers, logs) is apart from the app (<code>src/gpui/</code>), with tests for the library. A new server panel is one file implementing the <code>ServerPanel</code> trait.</p></div>
+    <div class="card rv"><h3>Small, separate pieces</h3><p>A shared library (<code>crates/hopper-core</code>: CurseForge, Modrinth, instances, installs, servers, crash scanning) with tests, the desktop app (<code>src/gpui/</code>), and Hopper Server (<code>crates/hopperd</code>: a Rust backend and a Svelte web panel).</p></div>
     <div class="card rv"><h3>Themes are files</h3><p>Drop a theme JSON in the themes folder (Settings → Appearance opens it) and press refresh. No rebuild needed.</p></div>
-    <div class="card rv"><h3>Scriptable</h3><p><code>hopper --mcp</code> serves MCP on localhost, so scripts and AI agents can screenshot, click and navigate the app. Handy for testing your changes.</p></div>
+    <div class="card rv"><h3>Scriptable</h3><p><code>hopper --mcp</code> serves MCP on localhost, so scripts and AI agents can screenshot, click and navigate the app. Hopper Server has an MCP endpoint too. Working with an AI agent? Read <a href="https://github.com/watdafawx/hopper/blob/main/AGENTS.md" style="color:var(--acc)">AGENTS.md</a> first.</p></div>
   </div>
   <div class="note rv" style="text-align:center"><b>Forks and pull requests are welcome.</b> Fix a bug, add a panel or a launcher, or take it somewhere new. <a href="https://github.com/watdafawx/hopper/fork" style="color:var(--acc)">Fork on GitHub</a> · <a href="https://github.com/watdafawx/hopper/pulls" style="color:var(--acc)">Open a PR</a> · <a href="https://github.com/watdafawx/hopper/issues" style="color:var(--acc)">Report an issue</a></div>
 </section>
@@ -385,24 +447,72 @@ cargo run --bin hopper</pre></div>
     <h2>A closer look</h2>
   </div>
   <div class="gallery">
-    <figure class="rv"><img src="screenshots/added-by-me.png" alt="Mods tab filtered to the mods added by the player, with duplicate and missing-dependency warnings" loading="lazy"><figcaption><b>Added by me</b>: your own mods, plus warnings for duplicates and missing dependencies</figcaption></figure>
+    <figure class="rv"><img src="screenshots/config.png" alt="A mod's config shown as switches and fields with the mod's own descriptions" loading="lazy"><figcaption><b>Config editor</b>: switches and fields with each mod's own descriptions</figcaption></figure>
+    <figure class="rv"><img src="screenshots/panel-overview.png" alt="Hopper Server's overview with the PC's CPU, memory and disk and every server" loading="lazy"><figcaption><b>Hopper Server</b>: every server and the PC it runs on, at a glance</figcaption></figure>
+    <figure class="rv"><img src="screenshots/changelogs.png" alt="Versions and changelogs for a mod three versions behind, over the mod list" loading="lazy"><figcaption><b>Changelogs</b>: every version since yours, then update or roll back</figcaption></figure>
+    <figure class="rv"><img src="screenshots/panel-access.png" alt="People and roles in Hopper Server's Access and devices page" loading="lazy"><figcaption><b>People and roles</b>: give friends their own sign-in</figcaption></figure>
     <figure class="rv"><img src="screenshots/accounts.png" alt="Accounts dialog with an animated 3D skin preview" loading="lazy"><figcaption><b>3D skins</b>: walk, run, swim or dance before you apply</figcaption></figure>
-    <figure class="rv"><img src="screenshots/palette.png" alt="Ctrl+K command palette" loading="lazy"><figcaption><b>Ctrl+K</b> jumps to any instance, tab, server or mod</figcaption></figure>
     <figure class="rv"><img src="screenshots/browse.png" alt="Browsing CurseForge modpacks" loading="lazy"><figcaption><b>Browse</b> CurseForge and Modrinth</figcaption></figure>
+    <figure class="rv"><img src="screenshots/servers.png" alt="A running server managed through Crafty, with CPU, memory and players" loading="lazy"><figcaption><b>Servers</b>: a server run by Crafty, controlled from Hopper</figcaption></figure>
+    <figure class="rv"><img src="screenshots/palette.png" alt="Ctrl+K command palette" loading="lazy"><figcaption><b>Ctrl+K</b> jumps to any instance, tab, server or mod</figcaption></figure>
   </div>
 </section>
 
 <section id="start">
   <div class="head center rv">
-    <div class="eyebrow">Get started</div>
+    <div class="eyebrow">Download</div>
     <h2>Up and running in a minute</h2>
+    <p class="sub">Free, open source, and both update themselves from GitHub releases.</p>
   </div>
-  <div class="steps">
-    <div class="step rv"><h3>Download</h3><p>Get <a href="https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe">hopper.exe</a> and run it. Settings → Updates &amp; install → Install adds Start menu and desktop shortcuts, no admin needed.</p></div>
-    <div class="step rv"><h3>Point it at your packs</h3><p>The setup wizard finds CurseForge's Instances folder and other launchers on this PC. Nothing is copied or moved.</p></div>
-    <div class="step rv"><h3>Play</h3><p>CurseForge and Modrinth both work straight away. Hopper has its own CurseForge key built in.</p></div>
+  <div class="dl">
+    <div class="card rv">
+      <h3>Hopper</h3>
+      <div class="plat">The modpack launcher · Windows 10 and 11 (64-bit)</div>
+      <a class="btn primary" href="https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5 10 4.5v7H3zM11 4.3 21 3v8.5H11zM3 12.5h7v7L3 18.5zM11 12.5h10V21l-10-1.3z"/></svg>Download hopper.exe
+      </a>
+      <ol>
+        <li>Run <b>hopper.exe</b>. Settings → Updates &amp; install → Install adds Start menu and desktop shortcuts, no admin needed.</li>
+        <li>The setup finds CurseForge's Instances folder and other launchers on this PC. Nothing is copied or moved.</li>
+        <li>Play. CurseForge and Modrinth both work straight away: Hopper has its own CurseForge key built in.</li>
+      </ol>
+    </div>
+    <div class="card rv">
+      <h3>Hopper Server</h3>
+      <div class="plat">The server panel · Windows, Linux x64 / ARM64, Docker · <span id="hd-ver">latest release</span></div>
+      <div class="ptabs" role="tablist">
+        <button role="tab" aria-selected="true" data-p="win">Windows</button>
+        <button role="tab" aria-selected="false" data-p="linux">Linux</button>
+        <button role="tab" aria-selected="false" data-p="docker">Docker</button>
+      </div>
+      <div class="ppane on" data-p="win">
+        <ol>
+          <li>Download <a class="hd-dl" data-asset="windows-x64.zip" href="https://github.com/watdafawx/hopper/releases?q=hopperd&amp;expanded=true">hopperd for Windows</a> (zip) and unzip it.</li>
+          <li>Double-click <b>hopperd.exe</b> and pick how it runs: just run it, start with Windows, or install it as a service that runs without anyone signed in.</li>
+          <li>The panel opens in your browser. Set the owner password and pick the folder your servers go in.</li>
+        </ol>
+      </div>
+      <div class="ppane" data-p="linux">
+        <ol>
+          <li>Download hopperd for <a class="hd-dl" data-asset="linux-x64.tar.gz" href="https://github.com/watdafawx/hopper/releases?q=hopperd&amp;expanded=true">Linux x64</a> or <a class="hd-dl" data-asset="linux-arm64.tar.gz" href="https://github.com/watdafawx/hopper/releases?q=hopperd&amp;expanded=true">Linux ARM64</a> and unpack it.</li>
+          <li>Run it, or install it as a systemd service:</li>
+        </ol>
+<pre>tar xzf hopperd-*-linux-x64.tar.gz
+sudo ./hopperd service install</pre>
+        <ol start="3"><li>Open <code>http://&lt;this machine&gt;:8790</code> and enter the setup code from the log.</li></ol>
+      </div>
+      <div class="ppane" data-p="docker">
+        <p style="margin-top:14px;font-size:14.5px;color:var(--mut)">The image (amd64 and arm64) has Java 8, 17 and 21, so it runs servers for every Minecraft version. Servers and the panel's data live in one volume.</p>
+<pre>docker run -d --name hopperd --restart unless-stopped \
+  --stop-timeout 120 \
+  -p 8790:8790 -p 8022:8022 -p 25565:25565 \
+  -v hopperd:/hopper ghcr.io/watdafawx/hopperd:latest
+docker logs hopperd</pre>
+        <p style="margin-top:10px;font-size:14.5px;color:var(--mut)">Open <code>http://&lt;host&gt;:8790</code> and use the setup code from the log. More in the <a href="https://github.com/watdafawx/hopper/tree/main/crates/hopperd#docker">Docker guide</a>.</p>
+      </div>
+    </div>
   </div>
-  <div class="note rv"><b>Want your own CurseForge key?</b> Optional. Get one free from <a href="https://console.curseforge.com/">console.curseforge.com</a> and paste it in Settings → CurseForge &amp; Modrinth. It keeps CurseForge working even if Hopper's key is ever revoked, and stays on your PC in Windows Credential Manager.</div>
+  <div class="note rv"><b>Want your own CurseForge key?</b> Optional. Get one free from <a href="https://console.curseforge.com/">console.curseforge.com</a> and paste it in Settings → CurseForge &amp; Modrinth (Hopper Server: the Mods tab). Your key is used instead of the built-in one, and keeps CurseForge working even if Hopper's key is ever revoked. Hopper keeps it in Windows Credential Manager, and Settings shows which key is in use.</div>
 </section>
 
 <section id="faq">
@@ -411,24 +521,27 @@ cargo run --bin hopper</pre></div>
     <h2>Questions</h2>
   </div>
   <div class="faq">
-    <details class="rv"><summary>Is Hopper free?</summary><p>Yes. It's open source under the MIT license, with no ads and no accounts of its own.</p></details>
-    <details class="rv"><summary>Will it touch my existing CurseForge instances?</summary><p>Hopper reads CurseForge's folder in place and works on those instances directly, the same way CurseForge does. Updates and syncs make backups first, and pack updates show a preview before anything changes.</p></details>
-    <details class="rv"><summary>Does it work on macOS or Linux?</summary><p>Not yet. Hopper is Windows only for now (Windows 10 and 11).</p></details>
+    <details class="rv"><summary>Is Hopper free?</summary><p>Yes. Hopper and Hopper Server are open source under the MIT license, with no ads and no accounts of their own.</p></details>
+    <details class="rv"><summary>Will it touch my existing CurseForge instances?</summary><p>Hopper reads CurseForge's folder in place and works on those instances directly, the same way CurseForge does. Pack updates show what changes before anything happens, replaced files go to the instance's backups folder, and most changes can be undone. Full backups and snapshots are made when you ask for them.</p></details>
+    <details class="rv"><summary>Does it work on macOS or Linux?</summary><p>The Hopper app is Windows only for now (Windows 10 and 11). Hopper Server runs on Windows, Linux (x64 and ARM64, such as a Raspberry Pi or a VPS) and Docker, and its panel works in any browser on any device.</p></details>
+    <details class="rv"><summary>Do I need Hopper to use Hopper Server?</summary><p>No. Hopper Server is a full panel on its own: console, files, mods, players, backups, schedules and more, from a browser. Pairing it with Hopper adds server sync with your packs and lets you manage it from the app.</p></details>
+    <details class="rv"><summary>Can it manage a server at a host or on a VPS?</summary><p>Run Hopper Server on the VPS (Linux or Docker) and pair it with Hopper: you get files, mods, server sync and backups over the network. If your host runs Pterodactyl (or Pelican), add it as a panel for start, stop, stats and console commands.</p></details>
+    <details class="rv"><summary>Is it safe to open Hopper Server to the internet?</summary><p>It uses HTTPS from the first start, and can get a trusted certificate from Let's Encrypt for your domain. Signing in from the internet needs two-factor sign-in, with rate limits and an audit log of every sign-in and change. On your network or over Tailscale, no port needs opening at all.</p></details>
     <details class="rv"><summary>How does it measure FPS without a mod?</summary><p>It reads Windows' own present events for the game's window, plus Java's GC log. Nothing is injected into Minecraft. FPS needs admin or membership in the Performance Log Users group.</p></details>
-    <details class="rv"><summary>Can it manage a server at a host?</summary><p>If the host runs Pterodactyl (or Pelican), add it as the server panel for start, stop, restart, kill, stats and console commands. Copying files to a host isn't supported yet; use your host's file manager or SFTP with the server pack Hopper downloads.</p></details>
     <details class="rv"><summary>Was AI used to build Hopper?</summary><p>Yes, and proudly so. Hopper is a hobby project squeezed in around a full-time job, so a lot of the code (especially the boilerplate) is written by Anthropic's Claude. The testing is all by hand: every feature gets clicked through in the real app before it ships. Claude does the typing; the developer does the poking. From v0.8.0 on, commits Claude helped with say "Co-Authored-By: Claude", so the <a href="https://github.com/watdafawx/hopper/commits/main">commit history</a> shows exactly which ones (earlier history was folded into one fresh start).</p></details>
-    <details class="rv"><summary>How do updates work?</summary><p>Hopper checks its latest GitHub release when it starts and offers to update itself. Each release lists what changed in the What's new dialog.</p></details>
+    <details class="rv"><summary>How do updates work?</summary><p>Hopper and Hopper Server check GitHub for a new release while they run and show an "Update to" button with the changelog. Updates install when nothing is busy; games and servers keep running. Didn't like a version? The versions window lists every release and rolls back to any older one.</p></details>
   </div>
 </section>
 
 <div class="final rv">
   <img src="hopper.png" alt="">
   <h2>Ready to hop in?</h2>
-  <p class="sub" style="margin:12px auto 0">One exe, no installer needed.</p>
+  <p class="sub" style="margin:12px auto 0">Hopper is one exe, no installer needed. Hopper Server runs on Windows, Linux or Docker.</p>
   <div class="cta">
     <a class="btn primary" href="https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 21h16"/></svg>Download for Windows
     </a>
+    <a class="btn ghost" href="#start">Get Hopper Server</a>
     <a class="btn ghost" href="https://github.com/watdafawx/hopper/releases">All releases</a>
   </div>
 </div>
@@ -472,6 +585,32 @@ cargo run --bin hopper</pre></div>
   fetch('https://api.github.com/repos/watdafawx/hopper/releases/latest')
     .then(r => r.ok ? r.json() : null)
     .then(r => { if (r && r.tag_name) document.querySelector('#ver span').textContent = 'Hopper ' + r.tag_name.replace(/^v/, '') + ' is out: see what’s new'; })
+    .catch(() => {});
+
+  // Hopper Server platform tabs.
+  const tabs = document.querySelectorAll('.ptabs button');
+  tabs.forEach(b => b.addEventListener('click', () => {
+    tabs.forEach(t => t.setAttribute('aria-selected', t === b));
+    document.querySelectorAll('.ppane').forEach(p => p.classList.toggle('on', p.dataset.p === b.dataset.p));
+  }));
+  if (/Linux|X11|CrOS/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent)) {
+    const l = document.querySelector('.ptabs [data-p=linux]'); if (l) l.click();
+  }
+
+  // Hopper Server releases are never "Latest" (that stays on the desktop
+  // app), so find the newest hopperd-v* tag and link its files directly.
+  fetch('https://api.github.com/repos/watdafawx/hopper/releases?per_page=30')
+    .then(r => r.ok ? r.json() : null)
+    .then(rs => {
+      const r = rs && rs.find(x => /^hopperd-v/.test(x.tag_name) && !x.draft && !x.prerelease);
+      if (!r) return;
+      const v = r.tag_name.replace(/^hopperd-v/, '');
+      document.getElementById('hd-ver').textContent = 'version ' + v;
+      document.querySelectorAll('.hd-dl').forEach(a => {
+        const f = r.assets.find(x => x.name === 'hopperd-' + v + '-' + a.dataset.asset);
+        a.href = f ? f.browser_download_url : r.html_url;
+      });
+    })
     .catch(() => {});
 })();
 </script>

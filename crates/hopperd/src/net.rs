@@ -58,6 +58,36 @@ impl Net {
     pub fn private(self) -> bool {
         self != Net::Internet
     }
+
+    /// Where the person behind a request is, for showing them how they
+    /// reach the panel. A reverse proxy on this PC or the LAN (say Nginx
+    /// Proxy Manager in front of a public name that resolves to a LAN
+    /// address at home) makes every request look local, so its
+    /// X-Forwarded-For / X-Real-IP is believed, but only when the direct
+    /// peer is itself private: from the internet those headers are just
+    /// text anyone can send. Display only; security checks use the peer.
+    pub fn client(peer: IpAddr, headers: &axum::http::HeaderMap) -> Net {
+        let direct = Net::of(peer);
+        if !direct.private() {
+            return direct;
+        }
+        forwarded_for(headers).map_or(direct, Net::of)
+    }
+}
+
+/// The client address a proxy passed on: the last X-Forwarded-For entry
+/// (the one the nearest proxy appended itself; earlier ones come from the
+/// client and can be made up), else X-Real-IP.
+fn forwarded_for(headers: &axum::http::HeaderMap) -> Option<IpAddr> {
+    let parse = |s: &str| {
+        let s = s.trim().trim_matches('"');
+        s.parse::<IpAddr>().ok().or_else(|| s.parse::<SocketAddr>().ok().map(|a| a.ip()))
+    };
+    let xff = headers.get_all("x-forwarded-for").iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(',')).last();
+    match xff {
+        Some(last) => parse(last),
+        None => headers.get("x-real-ip").and_then(|v| v.to_str().ok()).and_then(parse),
+    }
 }
 
 /// Serves `router` on `listener` until `shutdown` resolves.
@@ -138,5 +168,36 @@ mod tests {
         assert_eq!(n("::ffff:192.168.1.2"), Net::Lan);
         assert_eq!(n("2a00:1450::1"), Net::Internet);
         assert!(!Net::Internet.private() && Net::Tailscale.private());
+    }
+
+    #[test]
+    fn client_behind_proxy() {
+        let h = |pairs: &[(&str, &str)]| {
+            let mut m = axum::http::HeaderMap::new();
+            for (k, v) in pairs {
+                m.append(axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), v.parse().unwrap());
+            }
+            m
+        };
+        let c = |peer: &str, pairs: &[(&str, &str)]| Net::client(peer.parse().unwrap(), &h(pairs));
+        // No proxy: the peer decides.
+        assert_eq!(c("192.168.50.2", &[]), Net::Lan);
+        assert_eq!(c("8.8.8.8", &[]), Net::Internet);
+        // A public name that resolves to the LAN at home: the proxy passes on a LAN client.
+        assert_eq!(c("192.168.50.3", &[("x-forwarded-for", "192.168.50.2"), ("x-real-ip", "192.168.50.2")]), Net::Lan);
+        assert_eq!(c("127.0.0.1", &[("x-real-ip", "192.168.50.2")]), Net::Lan);
+        // The same proxy with someone on the internet.
+        assert_eq!(c("172.17.0.2", &[("x-forwarded-for", "81.2.69.160"), ("x-real-ip", "81.2.69.160")]), Net::Internet);
+        assert_eq!(c("127.0.0.1", &[("x-forwarded-for", "2a00:1450::1")]), Net::Internet);
+        // Through Tailscale.
+        assert_eq!(c("127.0.0.1", &[("x-forwarded-for", "100.101.12.3")]), Net::Tailscale);
+        // Spoofing: an internet client can't claim to be local by sending the headers itself.
+        assert_eq!(c("81.2.69.160", &[("x-forwarded-for", "127.0.0.1"), ("x-real-ip", "192.168.1.5")]), Net::Internet);
+        // ...nor by putting a local address first for the proxy to append to.
+        assert_eq!(c("192.168.50.3", &[("x-forwarded-for", "192.168.1.5, 81.2.69.160"), ("x-real-ip", "81.2.69.160")]), Net::Internet);
+        assert_eq!(c("192.168.50.3", &[("x-forwarded-for", "192.168.1.5"), ("x-forwarded-for", "81.2.69.160")]), Net::Internet);
+        // Junk in the header: fall back to the peer.
+        assert_eq!(c("192.168.50.3", &[("x-forwarded-for", "unknown")]), Net::Lan);
+        assert_eq!(c("127.0.0.1", &[("x-forwarded-for", "\"[::1]:5000\"")]), Net::Local);
     }
 }

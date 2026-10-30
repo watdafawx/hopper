@@ -101,6 +101,21 @@ pub struct PanelStats {
     pub tps: Option<Tps>,
     /// Why such a panel has no TPS for it: "rcon_off" or "unsupported".
     pub no_tps: Option<String>,
+    /// How this PC reaches the panel, as Hopper Server sees it: "LAN",
+    /// "Tailscale", "Internet" or "Local". The panel decides from the real
+    /// client address, so a public name that points home still says LAN.
+    pub via: Option<&'static str>,
+}
+
+/// Hopper Server's `via` (from /hello) in words, as the web panel shows it.
+pub fn route_label(via: &str) -> Option<&'static str> {
+    match via {
+        "local" => Some("Local"),
+        "lan" => Some("LAN"),
+        "tailscale" => Some("Tailscale"),
+        "internet" => Some("Internet"),
+        _ => None,
+    }
 }
 
 /// A TPS reading, with the time a tick takes when the loader says.
@@ -979,6 +994,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "uses Windows paths and tools")]
     fn reads_servers_and_matches_folders() {
         let list = parse_servers(&json!([
             { "server_id": "a1-b2", "server_name": "TNP", "path": "G:\\Minecraft\\packs\\TNP-LL8\\", "server_port": 25565 },

@@ -1,10 +1,12 @@
 # Hopper
 
-A fast, native Minecraft modpack and server manager for Windows, in Rust on
-[GPUI](https://www.gpui.rs/). It's built for playing packs fast, and keeps
-your Minecraft servers in step with them.
+A fast, native Minecraft modpack launcher for Windows, in Rust on
+[GPUI](https://www.gpui.rs/), plus **Hopper Server**: a self-hosted server
+panel you use from any browser, on Windows, Linux (x64 and ARM64) or Docker.
+Hopper is built for playing packs fast, and keeps your Minecraft servers in
+step with them.
 
-**[Website](https://watdafawx.github.io/hopper/)** · **[Download hopper.exe](https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe)** · [All releases](https://github.com/watdafawx/hopper/releases)
+**[Website](https://watdafawx.github.io/hopper/)** · **[Download hopper.exe](https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe)** (Windows 10 and 11) · [Hopper Server downloads](https://github.com/watdafawx/hopper/releases?q=hopperd&expanded=true) (Windows, Linux, `ghcr.io/watdafawx/hopperd`) · [All releases](https://github.com/watdafawx/hopper/releases)
 
 ![Instance overview](docs/screenshots/overview.png)
 
@@ -25,7 +27,8 @@ In the open: most of Hopper's code is written with help from AI, Anthropic's Cla
 - **Servers**: each server's loader, Java and mods, plus a diagnosis. With a server panel (Crafty Controller 4, MCSS, Pterodactyl / Pelican) you can start, stop, restart or kill it, see CPU, memory and players, use its console and its backups, through the panel's API. See [Server panels](#server-panels) for what each one supports.
 - **Hosting**: run servers on your own PC: from a pack's official server pack or the instance's mods, with Java picked or downloaded for you, a server.properties editor, JVM presets, daily restarts with warnings and crash recovery. A backup mod's backups (SimpleBackups, FTB Backups, Advanced Backups…) are listed and restorable.
 - **Server sync**: compare a server with its pack and push or pull mods and configs, with backups and undo.
-- **Logs & crashes**: the game's live log, debug.log and crash reports, with search, an errors-only filter and mclo.gs sharing. Crash help checks the pack for [Crash Assistant](https://modrinth.com/mod/crash-assistant), KostromDan's mod that explains crashes in game, and installs it in one click.
+- **Logs & crashes**: the game's live log, debug.log and crash reports, with search, an errors-only filter and mclo.gs sharing. Crash help names the mod behind a crash (certain, likely or possible), says what happened and offers the fix: install a missing mod, update the loader, put the last working version back or play without it. It can also install [Crash Assistant](https://modrinth.com/mod/crash-assistant), KostromDan's mod that explains crashes in game.
+- **Hopper Server**: pair Hopper with [Hopper Server](crates/hopperd/README.md), a server panel for Windows, Linux and Docker with a web UI: console, files, mods, players, backups (with off-site copies), schedules, alerts, people with roles, server addresses and sleeping servers. Server sync and server pack updates then work over the network.
 - **Accounts**: several Microsoft accounts; try skins on an animated 3D model (walk, run, swim, dance and more), then change your skin (file, link or player name), cape and name.
 - **Ctrl+K**: jump to any instance, tab, server or mod, or run an action.
 - **Ctrl+,**: Settings, with a search over every setting (Ctrl+F there too).
@@ -49,7 +52,9 @@ In the open: most of Hopper's code is written with help from AI, Anthropic's Cla
 
 ## Install
 
-Download `hopper.exe` from the [latest release](https://github.com/watdafawx/hopper/releases/latest).
+Download `hopper.exe` from the [latest release](https://github.com/watdafawx/hopper/releases/latest). Hopper runs on Windows 10 and 11 (64-bit).
+
+Hopper Server has its own releases (tags `hopperd-v…`): a zip for Windows, tarballs for Linux x64 and ARM64, and the Docker image `ghcr.io/watdafawx/hopperd` (amd64 and arm64). See [crates/hopperd/README.md](crates/hopperd/README.md) for running it.
 
 Run `hopper.exe`, then use **Settings → Updates & install → Install**. That copies Hopper
 into your apps with Start menu and desktop shortcuts, with no admin rights

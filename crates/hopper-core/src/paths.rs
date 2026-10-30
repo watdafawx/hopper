@@ -474,6 +474,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "uses Windows paths and tools")]
     fn dev_exe() {
         assert!(is_dev_exe(Path::new(r"X:\Dev\hopper\target\perf\fast\hopper.exe")));
         assert!(!is_dev_exe(Path::new(r"D:\Games\Hopper\hopper.exe")));

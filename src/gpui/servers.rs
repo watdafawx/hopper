@@ -1221,14 +1221,37 @@ impl ServersView {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(
-                        Button::new("open-server")
+                    .child({
+                        // How this PC reaches the panel, as the panel sees it
+                        // (the web panel's status bar says the same).
+                        let via = pstats.as_ref().and_then(|p| p.via).filter(|_| remote);
+                        let tls = s.remote.as_ref().is_some_and(|r| r.base.starts_with("https:"));
+                        let b = Button::new("open-server")
                             .outline()
                             .small()
                             .icon(if remote { IconName::ExternalLink } else { IconName::FolderOpen })
-                            .label(if remote { "Open in browser" } else { "Folder" })
-                            .on_click(move |_, _, _| crate::store::open_path(&root)),
-                    )
+                            .label(match via {
+                                Some(v) => format!("Open in browser · {v}"),
+                                None if remote => "Open in browser".to_string(),
+                                None => "Folder".to_string(),
+                            })
+                            .on_click(move |_, _, _| crate::store::open_path(&root));
+                        match via {
+                            Some(v) => b
+                                .when(tls, |b| b.child(Icon::new(IconName::Lock).xsmall().text_color(cx.theme().muted_foreground)))
+                                .tooltip(format!(
+                                    "{} · {}",
+                                    match v {
+                                        "LAN" => "The panel is on your network",
+                                        "Tailscale" => "The panel is reached over Tailscale",
+                                        "Local" => "The panel is on this PC",
+                                        _ => "The panel is reached over the internet",
+                                    },
+                                    if tls { "encrypted" } else { "not encrypted (http)" }
+                                )),
+                            None => b,
+                        }
+                    })
                     .child(ping_button(&self.store, &server, cx))
             )
             .child({
