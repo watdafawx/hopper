@@ -479,7 +479,48 @@ fn capture(window: &Window) -> Result<(u32, u32, Vec<u8>), String> {
     }
 }
 
-#[cfg(not(windows))]
+/// The window's pixels on X11 (also XWayland), read with GetImage. A
+/// Wayland window can't be read from outside, so screenshots need X11 there.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn capture(window: &Window) -> Result<(u32, u32, Vec<u8>), String> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
+
+    let handle = HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?;
+    let id = match handle.as_raw() {
+        RawWindowHandle::Xcb(h) => h.window.get(),
+        RawWindowHandle::Xlib(h) => h.window as u32,
+        _ => {
+            return Err(
+                "screenshots need X11: start Hopper with WAYLAND_DISPLAY unset (it then uses XWayland)".into(),
+            );
+        }
+    };
+    let err = |e: &dyn std::fmt::Display| format!("could not capture the window: {e}");
+    let (conn, _) = x11rb::connect(None).map_err(|e| err(&e))?;
+    let g = conn.get_geometry(id).map_err(|e| err(&e))?.reply().map_err(|e| err(&e))?;
+    let (w, h) = (u32::from(g.width), u32::from(g.height));
+    if w == 0 || h == 0 {
+        return Err("the window is minimized".into());
+    }
+    let img = conn
+        .get_image(ImageFormat::Z_PIXMAP, id, 0, 0, g.width, g.height, !0)
+        .map_err(|e| err(&e))?
+        .reply()
+        .map_err(|e| err(&e))?;
+    // 24- and 32-bit visuals both come back as 4 bytes per pixel, BGRX.
+    let mut buf = img.data;
+    if buf.len() != (w * h * 4) as usize {
+        return Err(format!("unexpected image format (depth {})", img.depth));
+    }
+    for p in buf.chunks_exact_mut(4) {
+        p.swap(0, 2);
+        p[3] = 255;
+    }
+    Ok((w, h, buf))
+}
+
+#[cfg(target_os = "macos")]
 fn capture(_: &Window) -> Result<(u32, u32, Vec<u8>), String> {
-    Err("screenshots are only available on Windows".into())
+    Err("screenshots are not available on macOS yet".into())
 }
