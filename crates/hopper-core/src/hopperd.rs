@@ -1370,6 +1370,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "uses Windows paths and tools")]
     fn remote_roots() {
         let root = remote_root("TNP Limitless 8");
         assert!(is_remote_root(&root));
@@ -1383,6 +1384,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "uses Windows paths and tools")]
     fn server_info_from_panel_json() {
         let v = json!({
             "id": "tnp-limitless-8", "name": "TNP Limitless 8", "path": "G:\\Minecraft\\packs\\TNP Limitless 8",

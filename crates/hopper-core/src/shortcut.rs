@@ -50,6 +50,7 @@ pub fn link(path: &Path, target: &Path, args: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[cfg_attr(not(windows), ignore = "uses Windows paths and tools")]
     fn shortcut_with_awkward_name() {
         let dir = std::env::temp_dir().join(format!("hopper-lnk-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -886,6 +886,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "uses Windows paths and tools")]
     fn reads_servers_and_matches_folders() {
         let list = parse_servers(&json!([
             { "server_id": "a1-b2", "server_name": "TNP", "path": "G:\\Minecraft\\packs\\TNP-LL8\\", "server_port": 25565 },

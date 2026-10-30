@@ -659,12 +659,14 @@ mod tests {
     #[test]
     fn rules() {
         let none = HashMap::new();
-        let win = serde_json::json!([{ "action": "allow", "os": { "name": "windows" } }]);
-        let osx = serde_json::json!([{ "action": "allow", "os": { "name": "osx" } }]);
-        let not_osx = serde_json::json!([{ "action": "allow" }, { "action": "disallow", "os": { "name": "osx" } }]);
-        assert!(rules_allow(&win, &none));
-        assert!(!rules_allow(&osx, &none));
-        assert!(rules_allow(&not_osx, &none));
+        // Rules for the OS this runs on and for one it doesn't.
+        let other = if os::NAME == "osx" { "windows" } else { "osx" };
+        let this = serde_json::json!([{ "action": "allow", "os": { "name": os::NAME } }]);
+        let that = serde_json::json!([{ "action": "allow", "os": { "name": other } }]);
+        let not_that = serde_json::json!([{ "action": "allow" }, { "action": "disallow", "os": { "name": other } }]);
+        assert!(rules_allow(&this, &none));
+        assert!(!rules_allow(&that, &none));
+        assert!(rules_allow(&not_that, &none));
         let demo = serde_json::json!([{ "action": "allow", "features": { "is_demo_user": true } }]);
         assert!(!rules_allow(&demo, &none));
     }

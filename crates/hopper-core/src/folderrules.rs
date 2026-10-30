@@ -333,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "uses Windows paths and tools")]
     fn links_and_unlinks_a_local_folder() {
         let root = std::env::temp_dir().join(format!("hopper-link-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
