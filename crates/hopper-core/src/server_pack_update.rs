@@ -703,6 +703,7 @@ pub fn apply(
     if let Some(r) = &server.remote {
         return crate::hopperd::Client::for_remote(r)?.pack_apply(&r.id, p, take, job);
     }
+    crate::remotefs::local_only(&server.root, "Updating the server's pack")?;
     if matches!(server::ping(host, server.port()), Status::Online { .. }) {
         bail!("{} is running. Stop it first.", server.name);
     }

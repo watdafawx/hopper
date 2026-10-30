@@ -41,6 +41,8 @@ pub enum Msg {
     RigServers(Vec<ServerInfo>),
     /// A Hopper Server's servers (by panel id), or why it couldn't list them.
     PanelServers(String, Result<Vec<ServerInfo>, String>),
+    /// An SFTP / FTP site's servers (and its SSH key, to pin), or why not.
+    SiteServers(String, Result<(Vec<ServerInfo>, Option<String>), String>),
     /// An instance changed on disk; reload it.
     InstanceChanged(PathBuf),
     /// Jars were identified after an older copy went back: reload, then
@@ -260,6 +262,8 @@ pub struct Store {
     folder_servers: Vec<ServerInfo>,
     /// Each Hopper Server's servers (by panel id), or why it couldn't list them.
     panel_servers: HashMap<String, Result<Vec<ServerInfo>, String>>,
+    /// Each SFTP / FTP site's servers (by site id), or why it couldn't list them.
+    site_servers: HashMap<String, Result<Vec<ServerInfo>, String>>,
     /// Pack files that couldn't be downloaded automatically, per instance.
     pending: HashMap<PathBuf, Vec<hopper::modpack::Pending>>,
     /// Servers Hopper hosts on this PC, and the panel that runs them.
@@ -418,6 +422,7 @@ impl Store {
             panel_stats: HashMap::new(),
             folder_servers: Vec::new(),
             panel_servers: HashMap::new(),
+            site_servers: HashMap::new(),
             busy: Default::default(),
             launching: Default::default(),
             update_queue: Default::default(),
@@ -613,23 +618,18 @@ impl Store {
     fn panel_poll(cx: &mut Context<Self>) -> Task<()> {
         use hopper::panel::{PanelServer, ServerPanel};
         cx.spawn(async move |this, cx| {
-            // The panel's server list, re-read every minute or when the
-            // panel settings change.
-            let mut listed: Option<(String, std::time::Instant, Vec<PanelServer>)> = None;
+            // Each panel's server list, re-read every minute or when its
+            // settings change (by panel id: setup key, when, list).
+            let mut listed: HashMap<String, (String, std::time::Instant, Vec<PanelServer>)> = HashMap::new();
             loop {
                 let Ok(setup) = this.update(cx, |s, _| {
-                    let panel: Arc<dyn ServerPanel> =
-                        hopper::panel::from_settings(&s.settings)?.into();
-                    let key = format!(
-                        "{}|{}|{}|{}",
-                        s.settings.panel_kind,
-                        s.settings.panel_url,
-                        s.settings.panel_self_signed,
-                        hopper::panel::token().map_or(0, |t| t.len())
-                    );
+                    let panels: Vec<(String, String, Arc<dyn ServerPanel>)> = hopper::panel::panels(&s.settings)
+                        .iter()
+                        .filter_map(|p| Some((p.id.clone(), hopper::panel::setup_key(p), hopper::panel::open(p)?.into())))
+                        .collect();
                     // Servers on a Hopper Server are asked their own panel.
                     let servers: Vec<ServerInfo> = s.servers.iter().filter(|x| x.remote.is_none()).cloned().collect();
-                    Some((panel, key, servers))
+                    (!panels.is_empty()).then_some((panels, servers))
                 }) else {
                     return;
                 };
@@ -663,29 +663,50 @@ impl Store {
                     .await;
                 let found = match setup {
                     None => Vec::new(),
-                    Some((panel, key, servers)) => {
-                        let stale = listed.as_ref().is_none_or(|(k, at, _)| {
-                            *k != key || at.elapsed() > Duration::from_secs(60)
-                        });
-                        let known = if stale { None } else { listed.as_ref().map(|l| l.2.clone()) };
-                        let (list, stats) = cx
+                    Some((panels, servers)) => {
+                        let known: Vec<Option<Vec<PanelServer>>> = panels
+                            .iter()
+                            .map(|(id, key, _)| {
+                                listed
+                                    .get(id)
+                                    .filter(|(k, at, _)| k == key && at.elapsed() <= Duration::from_secs(60))
+                                    .map(|l| l.2.clone())
+                            })
+                            .collect();
+                        let jobs: Vec<_> = panels.iter().cloned().zip(known).collect();
+                        let (lists, stats) = cx
                             .background_spawn(async move {
-                                let list = match known {
-                                    Some(l) => l,
-                                    None => panel.servers().unwrap_or_default(),
-                                };
+                                let lists: Vec<(String, String, Option<Vec<PanelServer>>, Vec<PanelServer>)> = jobs
+                                    .iter()
+                                    .map(|((id, key, panel), known)| {
+                                        let fresh = known.is_none();
+                                        let list = match known {
+                                            Some(l) => l.clone(),
+                                            None => panel.servers().unwrap_or_default(),
+                                        };
+                                        (id.clone(), key.clone(), fresh.then(|| list.clone()), list)
+                                    })
+                                    .collect();
+                                // Each server on the first panel that has it.
                                 let stats: Vec<(PathBuf, hopper::panel::PanelStats)> = servers
                                     .iter()
                                     .filter_map(|srv| {
-                                        let id = &hopper::panel::match_server(&list, srv)?.id;
-                                        Some((srv.root.clone(), panel.stats(id).ok()?))
+                                        let (ix, hit) = lists
+                                            .iter()
+                                            .enumerate()
+                                            .find_map(|(ix, l)| Some((ix, hopper::panel::match_server(&l.3, srv)?)))?;
+                                        hopper::panel::remember(&srv.root, &lists[ix].0);
+                                        Some((srv.root.clone(), jobs[ix].0.2.stats(&hit.id).ok()?))
                                     })
                                     .collect();
-                                (list, stats)
+                                (lists, stats)
                             })
                             .await;
-                        if stale {
-                            listed = Some((key, std::time::Instant::now(), list));
+                        listed.retain(|id, _| panels.iter().any(|(p, _, _)| p == id));
+                        for (id, key, fresh, _) in lists {
+                            if let Some(list) = fresh {
+                                listed.insert(id, (key, std::time::Instant::now(), list));
+                            }
                         }
                         stats
                     }
@@ -1084,6 +1105,27 @@ impl Store {
                     log::warn!("Hopper Server {panel:?}: {e}");
                 }
                 self.panel_servers.insert(panel, list);
+                self.merge_servers(cx);
+            }
+            Msg::SiteServers(id, r) => {
+                let r = match r {
+                    Ok((list, key)) => {
+                        // The first connect pins the server's SSH key.
+                        if let Some(key) = key {
+                            self.update_settings_quietly(|st| {
+                                if let Some(site) = st.file_sites.iter_mut().find(|x| x.id == id && x.host_key.is_empty()) {
+                                    site.host_key = key;
+                                }
+                            });
+                        }
+                        Ok(list)
+                    }
+                    Err(e) => {
+                        log::warn!("server files {id:?}: {e}");
+                        Err(e)
+                    }
+                };
+                self.site_servers.insert(id, r);
                 self.merge_servers(cx);
             }
             Msg::SessionSaved(root) => cx.emit(StoreEvent::SessionSaved(root)),
@@ -2770,6 +2812,13 @@ impl Store {
                 }
             }
         }
+        // Servers over SFTP / FTP: listed off the UI thread too.
+        let ids: Vec<String> = self.settings.file_sites.iter().map(|p| p.id.clone()).collect();
+        self.site_servers.retain(|k, _| ids.contains(k));
+        for site in self.settings.file_sites.clone() {
+            let id = site.id.clone();
+            self.spawn(move || Msg::SiteServers(id, hopper::remotefs::discover(&site).map_err(|e| format!("{e:#}"))));
+        }
         if rig_root.as_os_str().is_empty() {
             self.folder_servers.clear();
             self.merge_servers_quiet();
@@ -2799,6 +2848,11 @@ impl Store {
         let mut out: Vec<ServerInfo> = Vec::new();
         for p in &self.settings.hopper_panels {
             if let Some(Ok(list)) = self.panel_servers.get(&p.id) {
+                out.extend(list.iter().cloned());
+            }
+        }
+        for site in &self.settings.file_sites {
+            if let Some(Ok(list)) = self.site_servers.get(&site.id) {
                 out.extend(list.iter().cloned());
             }
         }
@@ -2844,6 +2898,24 @@ impl Store {
     /// Whether a paired panel's list has come back (either way).
     pub fn panel_listed(&self, panel: &str) -> bool {
         self.panel_servers.contains_key(panel)
+    }
+
+    /// Why an SFTP / FTP site couldn't list its servers, if it couldn't.
+    pub fn site_error(&self, id: &str) -> Option<&str> {
+        match self.site_servers.get(id) {
+            Some(Err(e)) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// The site has answered (with servers or an error).
+    pub fn site_listed(&self, id: &str) -> bool {
+        self.site_servers.contains_key(id)
+    }
+
+    /// The SFTP / FTP site whose server is in `root`, if it's one.
+    pub fn site_of(&self, root: &Path) -> Option<String> {
+        hopper::remotefs::mirror_of(root).map(|m| m.site.id)
     }
 
     /// Where hosted servers live (HOPPER_HOSTED_ROOT wins, for tests).
@@ -3070,6 +3142,16 @@ impl Store {
     }
 
     /// The server's state in the server panel, when one is set up.
+    /// How many servers here were found on Crafty / MCSS / Pterodactyl
+    /// panel `id`.
+    pub fn panel_server_count(&self, id: &str) -> usize {
+        self.servers
+            .iter()
+            .filter(|x| x.remote.is_none() && self.panel_stats.contains_key(&x.root))
+            .filter(|x| hopper::panel::known_panel(&self.settings, &x.root).is_some_and(|p| p.id == id))
+            .count()
+    }
+
     pub fn panel_stats(&self, root: &Path) -> Option<&hopper::panel::PanelStats> {
         self.panel_stats.get(root)
     }
@@ -3292,7 +3374,8 @@ impl Store {
         let s = &self.settings;
         !self.servers.is_empty()
             || !s.servers_root.trim().is_empty()
-            || !s.panel_url.trim().is_empty()
+            || !s.panels.is_empty()
+            || !s.file_sites.is_empty()
             || !s.hopper_panels.is_empty()
             || !s.pairings.is_empty()
             || s.peer_sync

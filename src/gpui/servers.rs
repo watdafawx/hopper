@@ -365,6 +365,8 @@ enum GroupKind {
     Panel(String),
     /// The servers folder (and the Crafty / MCSS panel that runs it).
     Folder,
+    /// Servers over SFTP / FTP, by site id.
+    Site(String),
     /// Servers Hopper hosts on this PC.
     Local,
 }
@@ -383,7 +385,8 @@ impl Group {
         match &self.kind {
             GroupKind::Panel(id) => x.remote.as_ref().is_some_and(|r| &r.panel == id),
             GroupKind::Local => s.is_hosted(&x.root),
-            GroupKind::Folder => x.remote.is_none() && !s.is_hosted(&x.root),
+            GroupKind::Folder => x.remote.is_none() && !s.is_hosted(&x.root) && s.site_of(&x.root).is_none(),
+            GroupKind::Site(id) => s.site_of(&x.root).as_ref() == Some(id),
         }
     }
 }
@@ -407,8 +410,18 @@ fn groups(s: &Store) -> Vec<Group> {
         kind: GroupKind::Folder,
         key: "folder".into(),
         name: if folder.is_empty() { "Server folder".into() } else { folder.to_string() },
-        what: if st.panel_url.trim().is_empty() { String::new() } else { hopper::panel::short_name(&st.panel_kind).to_string() },
+        what: {
+            let mut kinds: Vec<&str> = hopper::panel::panels(st).iter().map(|p| hopper::panel::short_name(&p.kind)).collect();
+            kinds.dedup();
+            kinds.join(", ")
+        },
     });
+    out.extend(st.file_sites.iter().map(|f| Group {
+        kind: GroupKind::Site(f.id.clone()),
+        key: format!("site:{}", f.id),
+        name: f.label(),
+        what: f.proto.to_uppercase(),
+    }));
     out.push(Group { kind: GroupKind::Local, key: "local".into(), name: "This PC".into(), what: "hosted by Hopper".into() });
     out
 }
@@ -429,6 +442,11 @@ fn group_head(
         GroupKind::Panel(id) => match s.panel_error(id) {
             Some(e) => (Some(theme.danger), Some(e.to_string())),
             None if s.panel_listed(id) => (Some(theme.success), None),
+            None => (Some(theme.warning), None),
+        },
+        GroupKind::Site(id) => match s.site_error(id) {
+            Some(e) => (Some(theme.danger), Some(e.to_string())),
+            None if s.site_listed(id) => (Some(theme.success), None),
             None => (Some(theme.warning), None),
         },
         _ => (None, None),
@@ -480,7 +498,7 @@ fn group_head(
                 })
                 .into_any_element()
         }),
-        GroupKind::Folder => None,
+        GroupKind::Folder | GroupKind::Site(_) => None,
     };
     let web = match &g.kind {
         GroupKind::Panel(id) => s.settings().hopper_panels.iter().find(|p| &p.id == id).map(|p| p.url.clone()),
@@ -931,6 +949,8 @@ impl ServersView {
             let dir = root.join("mods");
             let r = cx
                 .background_spawn(async move {
+                    // Over SFTP / FTP: fetch what changed into Hopper's copy first.
+                    hopper::remotefs::refresh_path(&dir).map_err(|e| format!("{e:#}"))?;
                     hopper::scan::scan_folder(&dir).map_err(|e| format!("{e:#}"))
                 })
                 .await;

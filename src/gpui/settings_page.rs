@@ -24,7 +24,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+mod sites;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -205,8 +207,8 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "server-host", "Server host", "The server PC's name or address, for status pings.", "hostname ping address rig"),
     e(C::Servers, "auto-update", "Update paired servers", "After a pack update, update its paired server too (only while it is offline).", "rig auto update"),
     e(C::Servers, "hopper-panels", "Hopper Servers", "Panels this PC is paired with. Each one is a group in the Servers list, with everything its web page can do.", "hopper server hopperd panels paired remove"),
-    e(C::Servers, "panel-add", "Add a panel", "Crafty Controller 4, MCSS or Pterodactyl. Hopper starts, stops and updates servers through it.", "crafty mcss pterodactyl server panel add"),
-    e(C::Servers, "other-panel", "Your panel", "Hopper starts, stops and updates servers through it. One at a time: remove it to add a different one.", "crafty mcss pterodactyl server panel remove delete none"),
+    e(C::Servers, "panel-add", "Add a panel", "Crafty Controller 4, MCSS or Pterodactyl, as many as you use. Hopper starts, stops and updates servers through them.", "crafty mcss pterodactyl server panel add several multiple"),
+    e(C::Servers, "other-panel", "Your panels", "Hopper starts, stops and updates servers through them. Each server is found on the panel that runs it.", "crafty mcss pterodactyl server panel remove delete none"),
     e(C::Servers, "panel-kind", "Panel", "Crafty, MCSS or Pterodactyl, for the servers folder above: start, stop, console and backups.", "crafty mcss pterodactyl server panel"),
     e(C::Servers, "panel-url", "Address", "Where the panel answers, like https://myserver:8443.", "url https server panel"),
     e(C::Servers, "panel-find", "Find on the LAN", "Hopper Servers announce themselves on your network.", "hopper server hopperd discover lan"),
@@ -214,6 +216,17 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "panel-key", "API key", "Kept in Windows Credential Manager, not in settings.json.", "token server panel"),
     e(C::Servers, "panel-cert", "Self-signed certificate", "Accept a certificate the panel makes for itself.", "https ssl tls server panel"),
     e(C::Servers, "panel-test", "Connection", "Whether the panel answers with this address and key.", "test server panel"),
+    e(C::Servers, "files-sites", "Server files over the network", "Servers Hopper reaches over SFTP or FTP instead of a shared folder: rented hosts, Pterodactyl's SFTP, a PC with an SSH server. Sync copies mods and configs over it.", "sftp ftp ftps ssh files remote host sync"),
+    e(C::Servers, "files-add", "Add server files", "SFTP, or FTP with or without TLS. Hopper keeps a copy of each server's mods and configs to compare, and changes only what differs.", "sftp ftp ftps ssh add remote"),
+    e(C::Servers, "files-proto", "Connect with", "SFTP is the safe choice. Many hosts offer FTPS; plain FTP only on your own network.", "sftp ftp ftps protocol"),
+    e(C::Servers, "files-host", "Address and port", "The server's name or IP. Leave the port empty for the usual one (22 for SFTP, 21 for FTP; Pterodactyl uses 2022).", "host port address ip"),
+    e(C::Servers, "files-user", "User name", "Pterodactyl: your panel user name, a dot, and the server's short id (shown under SFTP details).", "user login name"),
+    e(C::Servers, "files-pass", "Password", "Kept in Windows Credential Manager, not in settings.json. With a key file, the key's passphrase (if any).", "password secret passphrase"),
+    e(C::Servers, "files-key", "Key file", "Sign in with an SSH private key instead of a password.", "ssh key private id_ed25519 id_rsa"),
+    e(C::Servers, "files-cert", "Self-signed certificate", "Accept a certificate the FTP server makes for itself.", "tls ssl certificate ftps"),
+    e(C::Servers, "files-plain", "Not encrypted", "Plain FTP has no encryption.", "ftp insecure plain"),
+    e(C::Servers, "files-folder", "Folder", "A server's folder, or a folder of server folders. Empty: the folder you land in.", "folder path directory root"),
+    e(C::Servers, "files-test", "Connection", "Whether the server answers with these details. SFTP remembers the server's key the first time and refuses a different one later.", "test connect host key fingerprint"),
     e(C::Content, "cf-key", "CurseForge API key", "Needed for CurseForge: browsing, installs and updates. Get one at console.curseforge.com.", "api key token console"),
     e(C::Content, "browse-source", "Browse searches", "Which site Browse opens on. Switch any time in Browse too.", "modrinth curseforge source search"),
     e(C::Appearance, "theme", "Theme", "Hopper's colors. Your own theme files go in the folder next to it.", "dark light color colour glass mica"),
@@ -302,7 +315,8 @@ impl Text {
             Text::ServerPacks => s.servers_root.clone(),
             Text::Hosted => s.hosted_root.clone(),
             Text::Host => s.server_host.clone(),
-            Text::PanelUrl => s.panel_url.clone(),
+            // The form's address is saved by Save and test, per panel.
+            Text::PanelUrl => String::new(),
             Text::UpdateRepo => s.update_repo.clone(),
             Text::McpPort => s.mcp_port.clone(),
             Text::KeepActions => r.keep_actions.to_string(),
@@ -319,7 +333,7 @@ impl Text {
             Text::ServerPacks => s.servers_root = v,
             Text::Hosted => s.hosted_root = v,
             Text::Host => s.server_host = v,
-            Text::PanelUrl => s.panel_url = v,
+            Text::PanelUrl => {}
             Text::UpdateRepo => s.update_repo = v,
             Text::McpPort => s.mcp_port = v,
             Text::KeepActions => s.backup_retention.keep_actions = v.parse().unwrap_or(s.backup_retention.keep_actions),
@@ -397,16 +411,30 @@ pub struct SettingsPage {
     notes: HashMap<Text, Note>,
     /// A new panel API key; empty keeps the saved one.
     panel_token: Entity<InputState>,
+    /// The edited panel's API key is saved.
     panel_key_saved: bool,
-    /// The last connection test: Ok(summary) or Err(why).
-    panel_test: Option<Result<String, String>>,
-    panel_testing: bool,
-    /// The add / edit form of the other panel is open.
+    /// Connection tests by panel id: Ok(summary) or Err(why).
+    panel_tests: HashMap<String, Result<String, String>>,
+    panel_testing: HashSet<String>,
+    /// The add / edit form is open.
     panel_form: bool,
-    /// The form adds a panel (Cancel forgets it) rather than editing one.
-    panel_form_new: bool,
-    /// Remove on the other panel was clicked once (asks again).
-    panel_removing: bool,
+    /// The panel the form edits; None while it adds one (Cancel forgets it).
+    panel_editing: Option<String>,
+    /// The form's panel kind and certificate switch.
+    panel_form_kind: String,
+    panel_form_ss: bool,
+    /// Remove was clicked once on this panel (asks again).
+    panel_removing: Option<String>,
+    /// Server files over SFTP / FTP: the form and its state, like the panels'.
+    site_form: sites::SiteForm,
+    site_form_open: bool,
+    site_editing: Option<String>,
+    site_proto: String,
+    site_ss: bool,
+    site_pass_saved: bool,
+    site_tests: HashMap<String, Result<String, String>>,
+    site_testing: HashSet<String>,
+    site_removing: Option<String>,
     /// Hopper Servers found on the LAN (None until looked for).
     found: Option<Vec<hopper::hopperd::Found>>,
     finding: bool,
@@ -488,14 +516,8 @@ impl SettingsPage {
                 },
             )
         });
-        let panel_key_saved = hopper::panel::token().is_some();
-        let panel_token = cx.new(|cx| {
-            InputState::new(window, cx).masked(true).placeholder(if panel_key_saved {
-                SAVED_KEY
-            } else {
-                "Paste the panel's API key"
-            })
-        });
+        let panel_key_saved = false;
+        let panel_token = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste the panel's API key"));
         let new_panel = cx.new(|cx| InputState::new(window, cx).placeholder("rig, 192.168.50.3 or https://panel.example.com"));
         let java = cx.new(|cx| JavaForm::new(store.clone(), None, window, cx));
         java.update(cx, |j, cx| {
@@ -508,6 +530,7 @@ impl SettingsPage {
                 cx,
             )
         });
+        let site_form = sites::SiteForm::new(window, cx);
         let mut subs = vec![
             // Java defaults apply as they change.
             cx.observe(&java, |this, java, cx| {
@@ -586,6 +609,13 @@ impl SettingsPage {
         }
         let launchers = cx.new(|_| crate::launchers_list::LaunchersList::new(store.clone()));
         subs.push(cx.observe(&launchers, |_, _, cx| cx.notify()));
+        for e in site_form.inputs() {
+            subs.push(cx.subscribe_in(e, window, |_, _, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    cx.notify()
+                }
+            }));
+        }
         Self {
             store,
             nav_panel: widgets::SidePanel::new(widgets::PanelSpec::new("settings.nav", 15., 12., 24.)),
@@ -600,11 +630,22 @@ impl SettingsPage {
             notes: HashMap::new(),
             panel_token,
             panel_key_saved,
-            panel_test: None,
+            panel_tests: HashMap::new(),
+            panel_testing: HashSet::new(),
             panel_form: false,
-            panel_form_new: false,
-            panel_removing: false,
-            panel_testing: false,
+            panel_editing: None,
+            panel_form_kind: "crafty".into(),
+            panel_form_ss: true,
+            panel_removing: None,
+            site_form,
+            site_form_open: false,
+            site_editing: None,
+            site_proto: "sftp".into(),
+            site_ss: false,
+            site_pass_saved: false,
+            site_tests: HashMap::new(),
+            site_testing: HashSet::new(),
+            site_removing: None,
             found: None,
             finding: false,
             pairing: Pairing::Idle,
@@ -640,9 +681,14 @@ impl SettingsPage {
     pub fn jump(&mut self, id: &'static str, cx: &mut Context<Self>) {
         self.show(entry(id).cat, cx);
         // The other panel's fields only show in its add / edit form.
-        if matches!(id, "panel-kind" | "panel-url" | "panel-key" | "panel-cert" | "panel-test") && !self.panel_form {
+        // With no panel yet, they open the add form; with panels, their
+        // rows (Edit) show where.
+        if matches!(id, "panel-kind" | "panel-url" | "panel-key" | "panel-cert" | "panel-test")
+            && !self.panel_form
+            && hopper::panel::panels(self.store.read(cx).settings()).is_empty()
+        {
             self.panel_form = true;
-            self.panel_form_new = !self.other_panel_added(self.store.read(cx).settings());
+            self.panel_editing = None;
         }
         self.reveal = Some(id);
         self.flashes += 1;
@@ -668,6 +714,15 @@ impl SettingsPage {
     /// Saves a text field when it changed and makes sense.
     fn commit(&mut self, t: Text, cx: &mut Context<Self>) {
         let typed = self.texts[&t].read(cx).value().trim().to_string();
+        // A panel's address is only checked here; Save and test keeps it.
+        if t == Text::PanelUrl {
+            match t.problem(&typed).filter(|_| !typed.is_empty()) {
+                Some(why) => self.notes.insert(t, Note::Problem(why, typed)),
+                None => self.notes.remove(&t),
+            };
+            cx.notify();
+            return;
+        }
         let saved = t.saved(self.store.read(cx).settings()).to_string();
         if typed == saved {
             if matches!(self.notes.get(&t), Some(Note::Problem(..))) {
@@ -769,14 +824,42 @@ impl SettingsPage {
             )
     }
 
-    /// Saves the panel's address and (when typed) its API key, then tests it.
+    /// Opens the add / edit form: for panel `id`, or a new one.
+    fn open_panel_form(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let p = id.as_ref().and_then(|id| self.store.read(cx).settings().panels.iter().find(|p| &p.id == id).cloned());
+        let p = p.unwrap_or_default();
+        self.panel_key_saved = id.as_ref().is_some_and(|id| hopper::panel::token_for(id).is_some());
+        self.panel_editing = id;
+        self.panel_form_kind = p.kind.clone();
+        self.panel_form_ss = p.self_signed;
+        self.panel_form = true;
+        self.panel_removing = None;
+        self.texts[&Text::PanelUrl].update(cx, |t, cx| t.set_value(p.url.clone(), window, cx));
+        let saved = self.panel_key_saved;
+        self.panel_token.update(cx, |t, cx| {
+            t.set_value(String::new(), window, cx);
+            t.set_placeholder(if saved { SAVED_KEY } else { "Paste the panel's API key" }, window, cx);
+        });
+        self.notes.remove(&Text::PanelUrl);
+        cx.notify();
+    }
+
+    /// Saves the form's panel (its address, kind, certificate switch and,
+    /// when typed, its API key), then tests it.
     fn save_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.commit(Text::PanelUrl, cx);
-        // Saved now, so leaving the form keeps it (Done, not Cancel).
-        self.panel_form_new = false;
+        let url = self.texts[&Text::PanelUrl].read(cx).value().trim().to_string();
+        if let Some(why) = Text::PanelUrl.problem(&url) {
+            self.notes.insert(Text::PanelUrl, Note::Problem(why, url));
+            cx.notify();
+            return;
+        }
         let key = self.panel_token.read(cx).value().trim().to_string();
+        if url.is_empty() || (key.is_empty() && !self.panel_key_saved) {
+            return;
+        }
+        let id = self.panel_editing.clone().unwrap_or_else(new_panel_id);
         if !key.is_empty() {
-            if let Err(e) = hopper::panel::set_token(&key) {
+            if let Err(e) = hopper::panel::set_token_for(&id, &key) {
                 window.push_notification(Notification::error(format!("{e:#}")), cx);
                 return;
             }
@@ -786,18 +869,37 @@ impl SettingsPage {
                 s.set_placeholder(SAVED_KEY, window, cx);
             });
         }
-        self.test_panel(cx);
+        let (kind, ss, id2) = (self.panel_form_kind.clone(), self.panel_form_ss, id.clone());
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                move |st| match st.panels.iter_mut().find(|p| p.id == id2) {
+                    Some(p) => {
+                        p.kind = kind;
+                        p.url = url;
+                        p.self_signed = ss;
+                    }
+                    None => st.panels.push(hopper::settings::OtherPanel { id: id2, kind, name: String::new(), url, self_signed: ss }),
+                },
+                cx,
+            );
+            s.rediscover_servers();
+        });
+        // Saved now, so leaving the form keeps it (Done, not Cancel).
+        self.panel_editing = Some(id.clone());
+        self.notes.insert(Text::PanelUrl, Note::Saved(Instant::now()));
+        self.test_panel(id, true, cx);
     }
 
-    fn test_panel(&mut self, cx: &mut Context<Self>) {
+    /// Asks panel `id` for its servers. `close`: shut the form when it works.
+    fn test_panel(&mut self, id: String, close: bool, cx: &mut Context<Self>) {
         let s = self.store.read(cx).settings().clone();
-        let Some(panel) = hopper::panel::from_settings(&s) else {
-            self.panel_test = Some(Err("Add the address and an API key first.".into()));
+        let Some(panel) = hopper::panel::panels(&s).iter().find(|p| p.id == id).and_then(hopper::panel::open) else {
+            self.panel_tests.insert(id, Err("Add the address and an API key first.".into()));
             cx.notify();
             return;
         };
-        self.panel_testing = true;
-        self.panel_test = None;
+        self.panel_testing.insert(id.clone());
+        self.panel_tests.remove(&id);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let r = cx
@@ -806,18 +908,18 @@ impl SettingsPage {
                         .servers()
                         .map(|list| {
                             let names: Vec<String> = list.iter().map(|s| s.name.clone()).collect();
-                            format!("Connected: {} servers ({})", list.len(), names.join(", "))
+                            format!("Connected: {} ({})", if list.len() == 1 { "1 server".to_string() } else { format!("{} servers", list.len()) }, names.join(", "))
                         })
                         .map_err(|e| format!("{e:#}"))
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.panel_testing = false;
-                if r.is_ok() {
+                this.panel_testing.remove(&id);
+                if r.is_ok() && close && this.panel_editing.as_deref() == Some(id.as_str()) {
                     this.panel_form = false;
-                    this.panel_form_new = false;
+                    this.panel_editing = None;
                 }
-                this.panel_test = Some(r);
+                this.panel_tests.insert(id, r);
                 cx.notify();
             })
             .ok();
@@ -1277,22 +1379,17 @@ impl SettingsPage {
     fn servers(&self, s: &hopper::settings::Settings, window: &mut Window, cx: &mut Context<Self>) -> Vec<Block> {
         let rem = window.rem_size();
         let theme = cx.theme().clone();
-        let kind = s.panel_kind.clone();
-        let kind_label = hopper::panel::KINDS
-            .iter()
-            .find(|(k, _)| *k == kind)
-            .map_or("Crafty Controller 4", |(_, n)| n)
-            .to_string();
+        let kind = self.panel_form_kind.clone();
+        let kind_label = kind_name(&kind);
         let kind_help = match kind.as_str() {
             "mcss" => "API key: MCSS Web Panel → API keys. Its web API must be on (port 25560 by default).",
-            "pterodactyl" => "API key: a client key (ptlc_…) from Account → API Credentials. The console stays in the panel.",
-            "hopperd" => "Hopper's own panel (hopperd) on the server PC. Find it on the LAN, then pair: no API key to copy. Sync goes over the network, no shared drive needed.",
+            "pterodactyl" => "API key: a client key (ptlc_…) from Account → API Credentials. Works with Pelican too.",
             _ => "API key: in Crafty, your user → API Keys, with the Commands permission.",
         };
-        let store = self.store.clone();
         // Hopper Servers have their own list above.
         let kinds: Vec<(&str, &str)> = hopper::panel::KINDS.iter().copied().filter(|(k, _)| *k != "hopperd").collect();
         let kinds2 = kinds.clone();
+        let view = cx.entity().downgrade();
         let picker = widgets::picker(
             "panel-kind",
             kind_label.clone(),
@@ -1301,17 +1398,19 @@ impl SettingsPage {
             Rc::new(move |ix, _, cx| {
                 if let Some((k, _)) = kinds2.get(ix) {
                     let k = k.to_string();
-                    store.update(cx, |s, cx| {
-                        s.update_settings(|st| st.panel_kind = k, cx);
-                        // A Hopper Server lists the servers; others use the folder.
-                        s.rediscover_servers();
-                    });
+                    view.update(cx, |this, cx| {
+                        this.panel_form_kind = k;
+                        cx.notify();
+                    })
+                    .ok();
                 }
             }),
         );
+        let form_id = self.panel_editing.clone().unwrap_or_default();
+        let form_testing = self.panel_editing.is_some() && self.panel_testing.contains(&form_id);
         let key_typed = !self.panel_token.read(cx).value().trim().is_empty();
-        let result: AnyElement = match &self.panel_test {
-            _ if self.panel_testing => widgets::caption("Connecting…", cx).into_any_element(),
+        let result: AnyElement = match self.panel_editing.as_ref().and_then(|id| self.panel_tests.get(id)) {
+            _ if form_testing => widgets::caption("Connecting…", cx).into_any_element(),
             Some(Ok(t)) => status_line(IconName::CircleCheck, t.clone(), theme.success),
             Some(Err(e)) => status_line(IconName::CircleX, e.clone(), theme.danger),
             None => widgets::caption("Not tested yet.", cx).text_xs().into_any_element(),
@@ -1356,106 +1455,117 @@ impl SettingsPage {
                 ],
             ),
             Block::card(Some("Hopper Servers"), self.hopperd_rows(s, cx)),
-            Block::card(Some("Other server panel"), if self.panel_form {
-                let mut rows = vec![
-                    Row::new("panel-kind")
-                        .desc(kind_help)
-                        .control(div().w(rems(15.)).child(picker)),
-                    Row::new("panel-url")
-                        .control(div().w(rems(20.)).child(Input::new(&self.texts[&Text::PanelUrl]).small()))
-                        .note(self.note(Text::PanelUrl, cx)),
-                ];
-                rows.extend(self.key_rows(s, cx));
-                rows.push(
-                    Row::new("panel-test").note(Some(result)).control(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("panel-cancel")
-                                    .ghost()
-                                    .small()
-                                    .label(if self.panel_form_new { "Cancel" } else { "Done" })
-                                    .on_click(cx.listener(|this, _, window, cx| this.close_panel_form(window, cx))),
-                            )
-                            .child(
-                                Button::new("panel-save")
-                                    .small()
-                                    .primary()
-                                    .label("Save and test")
-                                    .loading(self.panel_testing)
-                                    .disabled(self.panel_testing || !can_save)
-                                    .when(!can_save, |b| b.tooltip("Add the address and an API key first"))
-                                    .on_click(cx.listener(|this, _, window, cx| this.save_panel(window, cx))),
-                            ),
-                    ),
-                );
+            Block::card(Some("Other server panels"), {
+                let listed: Vec<AnyElement> = hopper::panel::panels(s)
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| !(self.panel_form && self.panel_editing.as_deref() == Some(p.id.as_str())))
+                    .map(|(i, p)| self.other_panel_row(i, p, cx))
+                    .collect();
+                let mut rows: Vec<Row> = Vec::new();
+                if !listed.is_empty() {
+                    rows.push(Row::new("other-panel").below(v_flex().gap_1().children(listed).into_any_element()));
+                }
+                if self.panel_form {
+                    rows.push(
+                        Row::new("panel-kind")
+                            .desc(kind_help)
+                            .control(div().w(rems(15.)).child(picker)),
+                    );
+                    rows.push(
+                        Row::new("panel-url")
+                            .control(div().w(rems(20.)).child(Input::new(&self.texts[&Text::PanelUrl]).small()))
+                            .note(self.note(Text::PanelUrl, cx)),
+                    );
+                    rows.extend(self.key_rows(cx));
+                    rows.push(
+                        Row::new("panel-test").note(Some(result)).control(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("panel-cancel")
+                                        .ghost()
+                                        .small()
+                                        .label(if self.panel_editing.is_none() { "Cancel" } else { "Done" })
+                                        .on_click(cx.listener(|this, _, window, cx| this.close_panel_form(window, cx))),
+                                )
+                                .child(
+                                    Button::new("panel-save")
+                                        .small()
+                                        .primary()
+                                        .label("Save and test")
+                                        .loading(form_testing)
+                                        .disabled(form_testing || !can_save)
+                                        .when(!can_save, |b| b.tooltip("Add the address and an API key first"))
+                                        .on_click(cx.listener(|this, _, window, cx| this.save_panel(window, cx))),
+                                ),
+                        ),
+                    );
+                } else {
+                    rows.push(Row::new("panel-add").control(
+                        Button::new("panel-add")
+                            .small()
+                            .outline()
+                            .icon(IconName::Plus)
+                            .label("Add a panel")
+                            .on_click(cx.listener(|this, _, window, cx| this.open_panel_form(None, window, cx))),
+                    ));
+                }
                 rows
-            } else if self.other_panel_added(s) {
-                vec![Row::new("other-panel").below(self.other_panel_row(s, kind_label, cx))]
-            } else {
-                vec![Row::new("panel-add").control(
-                    Button::new("panel-add")
-                        .small()
-                        .outline()
-                        .icon(IconName::Plus)
-                        .label("Add a panel")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.panel_form = true;
-                            this.panel_form_new = true;
-                            this.panel_test = None;
-                            cx.notify();
-                        })),
-                )]
             }),
+            Block::card(Some("Server files over SFTP or FTP"), self.site_rows(s, window, cx)),
         ]
     }
 
     /// The API key rows, for Crafty, MCSS and Pterodactyl.
-    fn key_rows(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Row> {
+    fn key_rows(&self, cx: &mut Context<Self>) -> Vec<Row> {
         let theme = cx.theme().clone();
         vec![
-                    Row::new("panel-key")
-                        .control(div().w(rems(17.)).child(Input::new(&self.panel_token).small().mask_toggle()))
-                        .note(Some(if self.panel_key_saved {
-                            widgets::pill("Saved", theme.success, false).into_any_element()
-                        } else {
-                            widgets::pill("Missing", theme.warning, false).into_any_element()
-                        })),
-                    Row::new("panel-cert").control(self.switch(
-                        "panel-self-signed",
-                        s.panel_self_signed,
-                        |st, v| st.panel_self_signed = v,
-                        cx,
-                    )),
+            Row::new("panel-key")
+                .control(div().w(rems(17.)).child(Input::new(&self.panel_token).small().mask_toggle()))
+                .note(Some(if self.panel_key_saved {
+                    widgets::pill("Saved", theme.success, false).into_any_element()
+                } else {
+                    widgets::pill("Missing", theme.warning, false).into_any_element()
+                })),
+            Row::new("panel-cert").control(
+                Switch::new("panel-self-signed")
+                    .checked(self.panel_form_ss)
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.panel_form_ss = *on;
+                        cx.notify();
+                    })),
+            ),
         ]
     }
 
-    /// A panel counts as added once it has an address or a saved key, so
-    /// a key left behind by an older build can still be removed.
-    fn other_panel_added(&self, s: &hopper::settings::Settings) -> bool {
-        !s.panel_url.trim().is_empty() || self.panel_key_saved
-    }
-
-    /// The added Crafty / MCSS / Pterodactyl panel: Test, Edit, Remove.
-    fn other_panel_row(&self, s: &hopper::settings::Settings, kind_label: String, cx: &mut Context<Self>) -> AnyElement {
+    /// One added Crafty / MCSS / Pterodactyl panel: Test, Edit, Remove.
+    fn other_panel_row(&self, i: usize, p: &hopper::settings::OtherPanel, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
-        let url = s.panel_url.trim().to_string();
-        let configured = !url.is_empty() && self.panel_key_saved;
-        let state = match &self.panel_test {
-            _ if self.panel_testing => widgets::pill("Connecting", theme.muted_foreground, false),
+        let url = p.url.trim().to_string();
+        let has_key = hopper::panel::token_for(&p.id).is_some();
+        let testing = self.panel_testing.contains(&p.id);
+        let test = self.panel_tests.get(&p.id);
+        let found = self.store.read(cx).panel_server_count(&p.id);
+        let state = match test {
+            _ if testing => widgets::pill("Connecting", theme.muted_foreground, false),
             Some(Ok(_)) => widgets::pill("Connected", theme.success, false),
             Some(Err(_)) => widgets::pill("Can't connect", theme.danger, false),
-            None if url.is_empty() => widgets::pill("No address", theme.warning, false),
-            None if !self.panel_key_saved => widgets::pill("No API key", theme.warning, false),
+            None if !has_key => widgets::pill("No API key", theme.warning, false),
             None => widgets::pill("Not tested", theme.muted_foreground, false),
         };
-        let detail: Option<AnyElement> = match &self.panel_test {
-            Some(Ok(t)) if !self.panel_testing => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
-            Some(Err(e)) if !self.panel_testing => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
+        let detail: Option<AnyElement> = match test {
+            Some(Ok(t)) if !testing => Some(status_line(IconName::CircleCheck, t.clone(), theme.success)),
+            Some(Err(e)) if !testing => Some(status_line(IconName::CircleX, e.clone(), theme.danger)),
             _ => None,
         };
-        let asking = self.panel_removing;
-        let open = url.clone();
+        let asking = self.panel_removing.as_deref() == Some(p.id.as_str());
+        let (open, id, id2, id3) = (url.clone(), p.id.clone(), p.id.clone(), p.id.clone());
+        let sub = match found {
+            0 => url.clone(),
+            1 => format!("{url} · 1 server here"),
+            n => format!("{url} · {n} servers here"),
+        };
         v_flex()
             .gap_1()
             .child(
@@ -1467,100 +1577,77 @@ impl SettingsPage {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_sm().font_medium().truncate().child(kind_label))
-                            .child(
-                                widgets::caption(if url.is_empty() { "Only an API key is saved".to_string() } else { url.clone() }, cx)
-                                    .text_xs()
-                                    .truncate(),
-                            ),
+                            .child(div().text_sm().font_medium().truncate().child(format!("{} · {}", p.label(), kind_name(&p.kind))))
+                            .child(widgets::caption(sub, cx).text_xs().truncate()),
                     )
                     .child(state)
-                    .when(!url.is_empty(), |r| {
-                        r.child(
-                            Button::new("other-panel-open")
-                                .ghost()
-                                .small()
-                                .icon(IconName::ExternalLink)
-                                .tooltip("Open its web page")
-                                .on_click(move |_, _, cx| cx.open_url(&open)),
-                        )
-                    })
                     .child(
-                        Button::new("other-panel-test")
+                        Button::new(("other-panel-open", i))
+                            .ghost()
+                            .small()
+                            .icon(IconName::ExternalLink)
+                            .tooltip("Open its web page")
+                            .on_click(move |_, _, cx| cx.open_url(&hopper::panel::base_url(&open))),
+                    )
+                    .child(
+                        Button::new(("other-panel-test", i))
                             .outline()
                             .small()
                             .label("Test")
-                            .loading(self.panel_testing)
-                            .disabled(self.panel_testing || !configured)
-                            .when(!configured, |b| b.tooltip("Add the address and an API key first (Edit)"))
-                            .on_click(cx.listener(|this, _, _, cx| this.test_panel(cx))),
+                            .loading(testing)
+                            .disabled(testing || !has_key)
+                            .when(!has_key, |b| b.tooltip("Add its API key first (Edit)"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.test_panel(id.clone(), false, cx))),
                     )
                     .child(
-                        Button::new("other-panel-edit")
+                        Button::new(("other-panel-edit", i))
                             .outline()
                             .small()
                             .label("Edit")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.panel_form = true;
-                                this.panel_form_new = false;
-                                this.panel_removing = false;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(move |this, _, window, cx| this.open_panel_form(Some(id2.clone()), window, cx))),
                     )
                     .child(
-                        Button::new("other-panel-remove")
+                        Button::new(("other-panel-remove", i))
                             .ghost()
                             .small()
                             .when(asking, |b| b.danger())
                             .label(if asking { "Remove?" } else { "Remove" })
                             .tooltip("Forget this panel and delete its API key here. Its servers keep running.")
-                            .on_click(cx.listener(|this, _, window, cx| this.remove_other_panel(window, cx))),
+                            .on_click(cx.listener(move |this, _, window, cx| this.remove_other_panel(id3.clone(), window, cx))),
                     ),
             )
             .children(detail)
             .into_any_element()
     }
 
-    /// Closes the add / edit form. Cancelling an add forgets the address
-    /// typed into it; a key is only saved by Save and test.
+    /// Closes the add / edit form. A key is only saved by Save and test.
     fn close_panel_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panel_form_new {
-            self.store.update(cx, |s, cx| s.update_settings(|st| st.panel_url.clear(), cx));
-            self.texts[&Text::PanelUrl].update(cx, |t, cx| t.set_value(String::new(), window, cx));
-            self.panel_token.update(cx, |t, cx| t.set_value(String::new(), window, cx));
-            self.notes.remove(&Text::PanelUrl);
-            self.panel_test = None;
-        }
+        self.texts[&Text::PanelUrl].update(cx, |t, cx| t.set_value(String::new(), window, cx));
+        self.panel_token.update(cx, |t, cx| t.set_value(String::new(), window, cx));
+        self.notes.remove(&Text::PanelUrl);
         self.panel_form = false;
-        self.panel_form_new = false;
+        self.panel_editing = None;
         cx.notify();
     }
 
-    /// Forgets the other panel (asks once more first): its address here and
-    /// its API key in Credential Manager. The panel itself is untouched.
-    fn remove_other_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.panel_removing {
-            self.panel_removing = true;
+    /// Forgets panel `id` (asks once more first): its entry here and its
+    /// API key in Credential Manager. The panel itself is untouched.
+    fn remove_other_panel(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel_removing.as_deref() != Some(id.as_str()) {
+            self.panel_removing = Some(id);
             cx.notify();
             return;
         }
-        self.panel_removing = false;
-        if let Err(e) = hopper::panel::set_token("") {
+        self.panel_removing = None;
+        if let Err(e) = hopper::panel::set_token_for(&id, "") {
             window.push_notification(Notification::error(format!("Couldn't delete the API key: {e:#}")), cx);
             return;
         }
-        self.panel_key_saved = hopper::panel::token().is_some();
-        self.panel_test = None;
+        self.panel_tests.remove(&id);
         self.store.update(cx, |s, cx| {
-            s.update_settings(|st| st.panel_url.clear(), cx);
+            s.update_settings(|st| st.panels.retain(|p| p.id != id), cx);
             s.rediscover_servers();
         });
-        self.texts[&Text::PanelUrl].update(cx, |t, cx| t.set_value(String::new(), window, cx));
-        self.panel_token.update(cx, |t, cx| {
-            t.set_value(String::new(), window, cx);
-            t.set_placeholder("Paste the panel's API key", window, cx);
-        });
-        self.notes.remove(&Text::PanelUrl);
         window.push_notification(Notification::info("Removed the panel and its API key from this PC."), cx);
         cx.notify();
     }
@@ -2504,17 +2591,13 @@ impl SettingsPage {
         match self.category {
             Category::Servers => {
                 let s = self.store.read(cx).settings();
-                Some(if s.panel_url.trim().is_empty() && s.hopper_panels.is_empty() {
-                    widgets::pill("No panel", theme.muted_foreground, false)
-                } else if s.panel_url.trim().is_empty() {
-                    let n = s.hopper_panels.len();
-                    widgets::pill(if n == 1 { "Hopper Server".to_string() } else { format!("{n} Hopper Servers") }, theme.primary, true)
-                } else {
-                    let name = hopper::panel::KINDS
-                        .iter()
-                        .find(|(k, _)| *k == s.panel_kind)
-                        .map_or("Panel", |(_, n)| n);
-                    widgets::pill(name.split(" (").next().unwrap_or(name).to_string(), theme.primary, true)
+                let others = hopper::panel::panels(s);
+                let n = others.len() + s.hopper_panels.len();
+                Some(match (n, others.first()) {
+                    (0, _) => widgets::pill("No panel", theme.muted_foreground, false),
+                    (1, Some(p)) => widgets::pill(kind_name(&p.kind), theme.primary, true),
+                    (1, None) => widgets::pill("Hopper Server", theme.primary, true),
+                    _ => widgets::pill(format!("{n} panels"), theme.primary, true),
                 })
             }
             _ => None,
@@ -2979,6 +3062,18 @@ fn theme_row(name: &str, cx: &App) -> AnyElement {
             r.child(div().text_xs().text_color(theme.muted_foreground).child("glass"))
         })
         .into_any_element()
+}
+
+/// "Crafty Controller 4" for "crafty", without MCSS's long name.
+fn kind_name(kind: &str) -> String {
+    let name = hopper::panel::KINDS.iter().find(|(k, _)| *k == kind).map_or("Crafty Controller 4", |(_, n)| n);
+    name.split(" (").next().unwrap_or(name).to_string()
+}
+
+/// A short random id for a new panel ("p3f9a1c").
+fn new_panel_id() -> String {
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    format!("p{:x}", (n ^ (n >> 29)) as u32)
 }
 
 #[cfg(test)]

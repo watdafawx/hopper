@@ -396,6 +396,7 @@ pub struct Change {
 /// Changes the stopped server in `root`. A failed install puts the files
 /// it rewrote back and returns the error.
 pub fn change(root: &Path, c: &Change, job: &Job) -> anyhow::Result<Record> {
+    crate::remotefs::local_only(root, "Changing the loader")?;
     let from = installed(root);
     let to_kind = kind_of(&c.loader);
     if !from.kind.is_empty() && from.kind != to_kind {

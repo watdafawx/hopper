@@ -32,6 +32,15 @@ sysinfo.workspace = true
 regex.workspace = true
 keyring.workspace = true
 similar.workspace = true
+# Pterodactyl's console (Wings' websocket), over the same rustls as ureq.
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+# Server files over SFTP (the same client crates as Hopper Server) and FTP(S).
+russh = { version = "0.64", default-features = false, features = ["ring"] }
+russh-sftp = "3"
+tokio = { version = "1", features = ["rt", "net", "time", "io-util"] }
+suppaftp = { version = "12", default-features = false, features = ["rustls-ring"] }
 # Finding Hopper Servers on the LAN.
 mdns-sd.workspace = true
 # Offline translation of changelogs and descriptions (desktop only).
@@ -63,3 +72,10 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+# An FTP(S) server in the tests, for the FTP client (ring, like the rest).
+libunftp = { version = "0.24", default-features = false, features = ["ring"] }
+unftp-sbe-fs = "0.4"
+rcgen = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros"] }

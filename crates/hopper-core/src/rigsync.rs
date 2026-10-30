@@ -67,7 +67,11 @@ pub fn compare(
 pub fn server_mods(server: &ServerInfo) -> anyhow::Result<Vec<crate::model::ModInfo>> {
     match &server.remote {
         Some(r) => crate::hopperd::Client::for_remote(r)?.mods(&r.id),
-        None => crate::scan::scan_folder(&server.mods_dir()),
+        None => {
+            // Over SFTP / FTP: fetch what changed into Hopper's copy first.
+            crate::remotefs::refresh_path(&server.root)?;
+            crate::scan::scan_folder(&server.mods_dir())
+        }
     }
 }
 

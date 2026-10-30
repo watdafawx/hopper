@@ -17,6 +17,12 @@ pub fn hopperd_key(id: &str) -> String {
     if id.is_empty() { HOPPERD_KEY.to_string() } else { format!("{HOPPERD_KEY}.{id}") }
 }
 
+/// The API key name of Crafty / MCSS / Pterodactyl panel `id` ("" is the
+/// one set up before several panels were possible).
+pub fn panel_key(id: &str) -> String {
+    if id.is_empty() { PANEL_KEY.to_string() } else { format!("{PANEL_KEY}.{id}") }
+}
+
 fn entry(name: &str) -> anyhow::Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, name).context("Credential Manager")
 }

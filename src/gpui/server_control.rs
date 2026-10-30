@@ -188,12 +188,9 @@ impl ServerControl {
             hopper::panel::hopperd_token_for(&r.panel)?;
             return Some(format!("hopperd|{}|{}", r.panel, r.base));
         }
-        let s = self.store.read(cx).settings();
-        let token = hopper::panel::token()?;
-        let url = std::env::var("HOPPER_PANEL_URL").unwrap_or_else(|_| s.panel_url.clone());
-        (!url.trim().is_empty()).then(|| {
-            format!("{}|{}|{}|{}", s.panel_kind, url.trim(), s.panel_self_signed, token.len())
-        })
+        let p = hopper::panel::known_panel(self.store.read(cx).settings(), self.root.as_ref()?)?;
+        hopper::panel::token_for(&p.id)?;
+        Some(hopper::panel::setup_key(&p))
     }
 
     fn the_panel(&mut self, cx: &App) -> Option<Arc<dyn ServerPanel>> {
@@ -204,7 +201,8 @@ impl ServerControl {
             } else if let Some(r) = self.remote(cx) {
                 Arc::new(hopper::panel::HopperServer::from_client(hopper::hopperd::Client::for_remote(&r).ok()?))
             } else {
-                hopper::panel::from_settings(self.store.read(cx).settings())?.into()
+                let p = hopper::panel::known_panel(self.store.read(cx).settings(), self.root.as_ref()?)?;
+                hopper::panel::open(&p)?.into()
             };
             self.panel = Some((key, p));
         }
@@ -219,7 +217,13 @@ impl ServerControl {
         if self.remote(cx).is_some() {
             return "Hopper Server";
         }
-        hopper::panel::short_name(&self.store.read(cx).settings().panel_kind)
+        let s = self.store.read(cx).settings();
+        let kind = self
+            .root
+            .as_ref()
+            .and_then(|r| hopper::panel::known_panel(s, r))
+            .map_or_else(|| s.panels.first().map_or(String::new(), |p| p.kind.clone()), |p| p.kind);
+        hopper::panel::short_name(&kind)
     }
 
     pub fn configured(&self, cx: &App) -> bool {

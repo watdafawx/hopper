@@ -99,26 +99,27 @@ Hopper works with servers wherever their files can be reached as a folder:
 
 ## Server panels
 
-Hopper drives servers through their panel's own API, with an API key you make in the panel. The panel keeps running the servers; Hopper is the remote control. Set it up in Settings → Servers.
+Hopper drives servers through their panel's own API, with an API key you make in the panel. The panel keeps running the servers; Hopper is the remote control. Set it up in Settings → Servers: add as many panels as you use, of any kind. Each server is found on the panel that runs it.
 
-| | Crafty Controller 4 | MCSS | Pterodactyl / Pelican | Hosted by Hopper |
-|---|---|---|---|---|
-| Start, stop, restart, kill | Yes | Yes | Yes | Yes |
-| CPU and memory | Yes | Yes | Yes | Yes |
-| Players online | Names and count | Count | No | Names and count |
-| World size | Yes | No | No | No |
-| Read the console | Yes | Yes | No (open it in the panel) | Yes |
-| Send console commands | Yes | Yes | Yes | Yes |
-| Backups: list, run, restore | Yes | No (use MCSS) | No (use the panel) | A backup mod's backups |
-| Launch command follows NeoForge updates | Yes | No | No | Yes (Hopper runs it) |
-| Server sync (copy mods and configs) | If the folder is shared | If the folder is shared | No (files live in its volumes) | Yes |
+| | Crafty Controller 4 | MCSS | Pterodactyl / Pelican | Hopper Server | Hosted by Hopper |
+|---|---|---|---|---|---|
+| Start, stop, restart, kill | Yes | Yes | Yes | Yes | Yes |
+| CPU and memory | Yes | Yes | Yes | Yes | Yes |
+| Players online | Names and count | Count | No | Names and count | Names and count |
+| World size | Yes | No | No | In its Worlds tab | No |
+| Read the console | Yes | Yes | Yes | Yes | Yes |
+| Send console commands | Yes | Yes | Yes | Yes | Yes |
+| Backups: list, run, restore | Yes | No (use MCSS) | No (use the panel) | Yes, plus off-site copies | A backup mod's backups |
+| Launch command follows NeoForge updates | Yes | No | No | Yes | Yes (Hopper runs it) |
+| Server sync (copy mods and configs) | Shared folder, SFTP or FTP | Shared folder, SFTP or FTP | SFTP | Yes, over its API | Yes |
+
+Server files over the network: Settings → Servers → Server files over SFTP or FTP. Point Hopper at a server's folder, or a folder of servers, on any SFTP, FTPS or FTP server: a rented host, Pterodactyl's SFTP, a PC with an SSH server. Hopper keeps a copy of each server's mods, configs and start scripts, fetches only files that changed, and uploads only what the sync changes. Files it replaces or removes on the server go to the server's own `.hopper-backups/<time>/` first. The password (or key passphrase) is kept in Windows Credential Manager, and an SFTP server's key is remembered the first time: a different key later stops the connection.
 
 Limits:
-- One panel at a time: Settings → Servers takes one address and key.
 - Crafty: the API key needs the Commands permission (your user → API Keys). Tick "self-signed" for Crafty's own certificate.
-- MCSS: doesn't report ports, so servers pair by folder or name. Key from Web Panel → API keys.
-- Pterodactyl: needs a client key (`ptlc_…`, Account → API Credentials). Its console is a websocket Hopper doesn't read yet; commands still work.
-- Server sync needs the server's files as a folder: this PC, or a share on another PC at home. No SFTP or FTP yet.
+- MCSS: doesn't report ports, so servers pair by folder or name. Key from Web Panel → API keys. Its API has no restore.
+- Pterodactyl: needs a client key (`ptlc_…`, Account → API Credentials). For sync, add its SFTP under server files: port 2022, user `<your panel user>.<server id>`, your panel password (API keys don't work for SFTP). One entry per server for now.
+- Server sync over SFTP or FTP: a server's loader can't be installed or updated over it (that runs on the server's PC); update the loader in the panel.
 - Servers hosted by Hopper keep running when Hopper restarts (an update) or closes unexpectedly, and Hopper reconnects to them. Quitting stops them, saving the world first.
 
 ## Build

@@ -122,6 +122,7 @@ pub fn install_neoforge_server(
     java: &Path,
     job: &Job,
 ) -> anyhow::Result<()> {
+    crate::remotefs::local_only(server_root, "Installing NeoForge")?;
     if args_file(server_root, version).exists() {
         return Ok(());
     }
@@ -243,6 +244,7 @@ pub fn set_server_neoforge(
     if let Some(r) = &server.remote {
         return set_remote_neoforge(r, want, job);
     }
+    crate::remotefs::local_only(&server.root, "Changing NeoForge")?;
     if matches!(server::ping(host, server.port()), Status::Online { .. }) {
         bail!("{} is running. Stop it first.", server.name);
     }
@@ -307,6 +309,7 @@ pub fn update_server(
     panel: Option<&dyn crate::panel::ServerPanel>,
     job: &Job,
 ) -> anyhow::Result<Report> {
+    crate::remotefs::local_only(&server.root, "Updating the server's pack")?;
     if server.remote.is_none() && matches!(server::ping(host, server.port()), Status::Online { .. }) {
         bail!("{} is running. Stop it in Crafty/MCSS first.", server.name);
     }
