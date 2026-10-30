@@ -277,6 +277,18 @@ pub fn state_of(alive: bool, done: bool, stop_requested: bool, exit: Option<Opti
 /// A server Hopper runs on this PC, by folder. The java process runs on
 /// its own: it outlives Hopper, and a restarted Hopper picks it up again
 /// (console, players, commands) from `.hopper-run.json`.
+type StartHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
+static BEFORE_START: std::sync::RwLock<Option<StartHook>> = std::sync::RwLock::new(None);
+
+/// Runs `f` with a server's folder just before every start, whatever asked
+/// for it (a button, a restart, the schedule, autostart, a player joining a
+/// sleeping server). The panel uses it to turn RCON on in time. One hook;
+/// setting it again replaces it.
+pub fn on_before_start(f: impl Fn(&Path) + Send + Sync + 'static) {
+    *BEFORE_START.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
+}
+
 pub struct LocalServer {
     root: PathBuf,
     shared: Arc<Mutex<Shared>>,
@@ -375,6 +387,12 @@ impl LocalServer {
     pub fn start(&self) -> anyhow::Result<()> {
         if self.state().is_alive() {
             bail!("{} is already running", self.name());
+        }
+        // Before anything reads server.properties, so what the hook writes
+        // (RCON, say) is in this run.
+        let hook = BEFORE_START.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(h) = hook {
+            h(&self.root);
         }
         if !super::eula_accepted(&self.root) {
             bail!("Accept the Minecraft EULA for this server first (eula.txt).");

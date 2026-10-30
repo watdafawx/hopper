@@ -456,6 +456,19 @@ fn check(app: &Arc<App>, disks: &mut sysinfo::Disks) {
 
 /// Watches for alerts for as long as the panel runs.
 pub fn start(app: Arc<App>) {
+    // RCON for all servers: set up the moment any server starts, so one
+    // started right after it was made doesn't wait for the 30 s look.
+    let h = app.clone();
+    hopper_core::hosting::process::on_before_start(move |root| {
+        if !settings(&h).auto_rcon || rcon::settings(root).is_some() {
+            return;
+        }
+        if let Some(e) = h.servers.list().into_iter().find(|e| e.root == root)
+            && let Err(err) = turn_on(&h, &e)
+        {
+            log::warn!("{}: couldn't turn RCON on: {err:#}", e.name);
+        }
+    });
     let a = app.clone();
     std::thread::Builder::new()
         .name("rcon-guard".into())

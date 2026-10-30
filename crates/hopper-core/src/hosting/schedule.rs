@@ -943,6 +943,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Every way a server is started runs the before-start hook first:
+    /// the panel's Start and Restart (button, MCP, a player waking a
+    /// sleeping server), autostart, and the schedule's own starts (which go
+    /// through the same `ScheduledServer::start`). Each start fails later
+    /// (no start files), after the hook.
+    #[test]
+    fn every_start_runs_the_before_start_hook() {
+        use crate::panel::{PanelAction, ServerPanel};
+        static SEEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+        let base = std::env::temp_dir().join(format!("hopper-prestart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("Hooked");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("server.properties"), "server-port=25599\n").unwrap();
+        super::super::write_eula(&dir, true).unwrap();
+        // Other tests start servers too: count only this folder.
+        super::super::process::on_before_start(|root| SEEN.lock().unwrap().push(root.to_path_buf()));
+        let seen = || SEEN.lock().unwrap().iter().filter(|p| p.ends_with("Hooked")).count();
+
+        let panel = LocalPanel::discover(&base);
+        let id = panel.servers().unwrap()[0].id.clone();
+        assert!(panel.act(&id, PanelAction::Start).is_err());
+        assert_eq!(seen(), 1, "Start");
+        assert!(panel.act(&id, PanelAction::Restart).is_err());
+        assert_eq!(seen(), 2, "Restart of a stopped server");
+
+        let s = LocalServer::new(&dir);
+        let on = Schedule { start_with_hopper: true, ..Schedule::default() };
+        let ev = autostart(&[(&s as &dyn ScheduledServer, on)]);
+        assert!(matches!(&ev[0], ScheduleEvent::Failed { .. }));
+        assert_eq!(seen(), 3, "autostart");
+        assert!(ScheduledServer::start(&s).is_err());
+        assert_eq!(seen(), 4, "scheduled restart / crash restart");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn scheduler_thread_stops_on_drop() {
         let panel = Arc::new(LocalPanel::new());
