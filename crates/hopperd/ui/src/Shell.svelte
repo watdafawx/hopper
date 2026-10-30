@@ -13,7 +13,7 @@
   import { boot } from './lib/boot.svelte.js';
   import { api, post } from './lib/api.js';
   import { live, connect, disconnect, startPing } from './lib/live.svelte.js';
-  import { pathKind } from './lib/format.js';
+  import { routeKind } from './lib/format.js';
   import { toast, say, hush } from './lib/toast.svelte.js';
   import { power } from './lib/power.js';
   import Overview from './Overview.svelte';
@@ -110,8 +110,8 @@
   const serverId = $derived(page === 'server' ? segs[0] : null);
   const tab = $derived(page === 'server' ? segs[1] || 'console' : null);
   const subpath = $derived(page === 'server' ? segs.slice(2).join('/') : '');
-  const kind = pathKind();
-  const PathIcon = { LAN: Wifi, Local: Wifi, Tailscale: Waypoints, Internet: Globe }[kind];
+  const kind = $derived(routeKind(live.via));
+  const PathIcon = $derived({ LAN: Wifi, Local: Wifi, Tailscale: Waypoints, Internet: Globe }[kind]);
   const NAV = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard, to: '/' },
     { id: 'browse', label: 'Browse', icon: Compass, to: '/browse' },

@@ -1,11 +1,12 @@
 <script>
   import { ArrowUp, Pause, Play, X, ChevronDown, ChevronUp, Check, RefreshCw } from '@lucide/svelte';
   import { transfers, pause, resume, cancel, clearDone, replace } from './lib/transfers.svelte.js';
-  import { bytes, pathKind } from './lib/format.js';
+  import { bytes, routeKind } from './lib/format.js';
+  import { live } from './lib/live.svelte.js';
 
   const active = $derived(transfers.list.filter((t) => t.state === 'running' || t.state === 'queued'));
   const total = $derived(active.reduce((n, t) => n + t.speed, 0));
-  const kind = pathKind();
+  const kind = $derived(routeKind(live.via));
 
   function eta(t) {
     if (!t.speed) return '';

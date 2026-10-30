@@ -197,6 +197,8 @@ async fn hello(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Socke
         "build": crate::ui::build_id(),
         "boot": crate::ui::boot_id(),
         "setup_needed": setup_needed,
+        // How this browser reaches the panel (local, lan, tailscale, internet).
+        "via": crate::net::Net::client(addr.ip(), &headers),
         // A browser on this PC sets the owner password without the code.
         "local_setup": setup_needed && crate::auth::trusted_local(cfg.trust_local_setup, addr.ip(), &headers),
         "addresses": *app.addresses.read().unwrap(),
