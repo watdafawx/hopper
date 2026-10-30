@@ -342,6 +342,15 @@ pub fn apply(name: &str, mode: u8, zoom: u16, cx: &mut App) {
     if let Some(c) = config {
         Theme::update(cx, |t| t.apply_config(&Rc::new(c)));
     }
+    // Code editors (Java arguments, config files) paint their line numbers
+    // over text scrolled sideways; the see-through input colour let that
+    // text show through, so the numbers get a solid fill.
+    Theme::update(cx, |t| {
+        use gpui_kit::component::theme::Colorize as _;
+        let mut gutter = t.input.mix_oklab(t.background, 0.3);
+        gutter.a = 1.;
+        std::sync::Arc::make_mut(&mut t.highlight_theme).style.editor_gutter_background = Some(gutter);
+    });
     for w in cx.windows() {
         let _ = w.update(cx, |_, window, _| set_backdrop(window, back, dark));
     }

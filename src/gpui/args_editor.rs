@@ -9,6 +9,7 @@ use gpui_kit::component::input::{
     CompletionProvider, EditorState, HoverProvider, IndentInline, Rope, RopeExt as _, TextDecoration,
     TextDecorationCollection, highlight_contains,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::jvm_args::Target;
 use hopper::jvm_editor::{self, Level, Memory};
@@ -26,13 +27,36 @@ pub struct Context {
     pub memory: Memory,
 }
 
-/// The editor plus what its hover card reads.
+/// The box's height in rows: never less than this.
+const MIN_ROWS: f32 = 3.;
+/// Fitted to the flags, it grows up to this many rows, then scrolls.
+const AUTO_ROWS: f32 = 12.;
+/// Dragged taller, it stops here.
+const MAX_ROWS: f32 = 40.;
+/// Padding above and below the rows, plus room for the sideways scrollbar.
+const PAD: f32 = 14.;
+
+/// Dragging the box's bottom edge.
+pub struct Resize;
+
+struct ResizeGhost;
+
+impl Render for ResizeGhost {
+    fn render(&mut self, _: &mut Window, _: &mut gpui_kit::Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// The editor plus what its hover card reads. It shows one flag per line;
+/// [`jvm_editor::compact`] turns that back into the one-line saved value.
 pub struct ArgsEditor {
     pub state: Entity<EditorState>,
     ctx: Rc<RefCell<Context>>,
     marks: RefCell<Option<TextDecorationCollection>>,
     /// (text, context) the marks were drawn for.
     drawn: RefCell<Option<(String, Context)>>,
+    /// Rows while the bottom edge is dragged.
+    drag: Option<f32>,
 }
 
 impl ArgsEditor {
@@ -40,13 +64,15 @@ impl ArgsEditor {
         let ctx = Rc::new(RefCell::new(Context { target: Target::default(), memory: Memory::Free }));
         let hover_ctx = ctx.clone();
         let state = cx.new(|cx| {
+            // One flag per line with its number; a long one scrolls sideways
+            // rather than wrapping in the middle of the flag.
             let mut s = EditorState::new(window, cx)
-                .line_number(false)
+                .line_number(true)
                 .folding(false)
                 .auto_close(false)
                 .smart_indent(false)
                 .searchable(false)
-                .soft_wrap(true)
+                .soft_wrap(false)
                 .placeholder(placeholder);
             let lsp = s.lsp_mut();
             lsp.completion_provider = Some(Rc::new(Flags));
@@ -55,14 +81,36 @@ impl ArgsEditor {
             lsp.set_completion_highlighter(Rc::new(highlight_contains));
             s
         });
-        Self { state, ctx, marks: RefCell::new(None), drawn: RefCell::new(None) }
+        Self { state, ctx, marks: RefCell::new(None), drawn: RefCell::new(None), drag: None }
     }
 
-    /// Tab picks the highlighted suggestion (Enter does already) instead of
-    /// indenting. Put on an element around the editor.
+    /// Shows `args` (a saved value) one flag per line.
+    pub fn show(&self, args: &str, window: &mut Window, cx: &mut App) {
+        let lines = jvm_editor::one_per_line(args);
+        self.state.update(cx, |s, cx| {
+            if s.value().as_ref() != lines {
+                s.set_value(lines, window, cx);
+            }
+        });
+    }
+
+    /// The text as it's saved: the flags on one line.
+    pub fn saved(&self, cx: &App) -> String {
+        jvm_editor::compact(self.state.read(cx).value().as_ref())
+    }
+
+    /// Puts flags typed side by side (or pasted) back on lines of their own.
+    /// Called when the box loses focus, so the caret never jumps while typing.
+    pub fn tidy(&self, window: &mut Window, cx: &mut App) {
+        let now = self.state.read(cx).value().to_string();
+        self.show(&now, window, cx);
+    }
+
+    /// Tab and Enter pick the highlighted suggestion, and only that: no
+    /// indent, and no new line after the flag. Put on an element around the
+    /// editor.
     pub fn tab_accepts<E: InteractiveElement>(&self, el: E) -> E {
-        let state = self.state.clone();
-        el.capture_action(move |_: &IndentInline, window, cx| {
+        fn accept(state: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
             state.update(cx, |s, cx| {
                 if s.completion_menu_state().open {
                     let enter = gpui_kit::component::input::Enter { secondary: false, shift: false };
@@ -71,20 +119,21 @@ impl ArgsEditor {
                     }
                 }
             });
-        })
+        }
+        let (tab, enter) = (self.state.clone(), self.state.clone());
+        el.capture_action(move |_: &IndentInline, window, cx| accept(&tab, window, cx))
+            .capture_action(move |_: &gpui_kit::component::input::Enter, window, cx| accept(&enter, window, cx))
     }
 
     /// Recolours the flags when the text or what they're checked against
     /// changed. Cheap to call on every render.
-    pub fn refresh(&self, text: &str, ctx: Context, cx: &mut App) {
+    pub fn refresh(&self, ctx: Context, cx: &mut App) {
+        let text = self.state.read(cx).value().to_string();
+        let text = text.as_str();
         if self.drawn.borrow().as_ref().is_some_and(|(t, c)| t == text && *c == ctx) {
             return;
         }
         *self.ctx.borrow_mut() = ctx;
-        // The editor may hold newer text than the caller's copy for a moment.
-        if self.state.read(cx).value().as_ref() != text {
-            return;
-        }
         *self.drawn.borrow_mut() = Some((text.to_string(), ctx));
         let theme = cx.theme();
         let (muted, name, value, warn, error) =
@@ -129,11 +178,90 @@ impl ArgsEditor {
         }
     }
 
-    /// Height for the text: at least `min` rows, at most `max`, then it scrolls.
-    pub fn height(&self, min: usize, max: usize, cx: &App) -> Pixels {
-        let s = self.state.read(cx);
-        let rows = s.display_map().wrap_row_count().clamp(min, max);
-        s.line_height().unwrap_or(px(20.)) * rows as f32 + px(14.)
+    fn line_height(&self, cx: &App) -> Pixels {
+        self.state.read(cx).line_height().unwrap_or(px(20.))
+    }
+
+    /// Height for the box: the dragged or saved rows (`saved_rows`, 0 for
+    /// none), else fitted to the flags up to [`AUTO_ROWS`], then it scrolls.
+    pub fn height(&self, saved_rows: f32, cx: &App) -> Pixels {
+        let rows = match self.drag.or((saved_rows > 0.).then_some(saved_rows)) {
+            Some(r) => r.clamp(MIN_ROWS, MAX_ROWS),
+            None => (self.state.read(cx).display_map().wrap_row_count() as f32).clamp(MIN_ROWS, AUTO_ROWS),
+        };
+        self.line_height(cx) * rows + px(PAD)
+    }
+
+    /// The editor `h` tall with a handle on its bottom edge: drag it to set
+    /// the height (saved in the settings), double-click it to fit the flags
+    /// again. `lens` finds this editor in the view that draws it.
+    pub fn with_handle<V: 'static>(
+        &self,
+        editor: impl IntoElement,
+        h: Pixels,
+        lens: fn(&mut V) -> &mut ArgsEditor,
+        store: &Entity<crate::store::Store>,
+        cx: &mut gpui_kit::Context<V>,
+    ) -> Stateful<Div> {
+        let (bar, active) = (cx.theme().primary, self.drag.is_some());
+        let grip = cx.theme().muted_foreground.opacity(0.45);
+        let drag_move = cx.listener(move |this: &mut V, e: &DragMoveEvent<Resize>, _, cx| {
+            let ed = lens(this);
+            let rows = (e.event.position.y - e.bounds.top() - px(PAD)) / ed.line_height(cx);
+            ed.drag = Some(rows.round().clamp(MIN_ROWS, MAX_ROWS));
+            cx.notify();
+        });
+        let save = |store: &Entity<crate::store::Store>, rows: f32, cx: &mut App| {
+            store.update(cx, |s, cx| s.update_settings(|st| st.java_args_rows = rows, cx));
+        };
+        let end = {
+            let store = store.clone();
+            move |this: &mut V, _: &MouseUpEvent, _: &mut Window, cx: &mut gpui_kit::Context<V>| {
+                if let Some(rows) = lens(this).drag.take() {
+                    save(&store, rows, cx);
+                    cx.notify();
+                }
+            }
+        };
+        let reset = {
+            let store = store.clone();
+            cx.listener(move |this: &mut V, e: &ClickEvent, _, cx| {
+                if e.click_count() == 2 {
+                    lens(this).drag = None;
+                    save(&store, 0., cx);
+                    cx.notify();
+                }
+            })
+        };
+        div()
+            .id("java-args")
+            .relative()
+            .w_full()
+            .h(h)
+            .on_drag_move(drag_move)
+            .capture_any_mouse_up(cx.listener(end.clone()))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(end))
+            .child(div().size_full().child(editor))
+            .child(
+                div()
+                    .id("java-args-resize")
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(-4.))
+                    .h(px(9.))
+                    .flex()
+                    .justify_center()
+                    .items_center()
+                    .cursor_row_resize()
+                    .rounded_sm()
+                    .when(active, |d| d.bg(bar.opacity(0.5)))
+                    .hover(move |s| s.bg(bar.opacity(0.35)))
+                    .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Drag to resize, double-click to fit").build(w, cx))
+                    .child(div().w(px(36.)).h(px(3.)).rounded_full().bg(grip))
+                    .on_click(reset)
+                    .on_drag(Resize, |_, _, _, cx| cx.new(|_| ResizeGhost)),
+            )
     }
 }
 

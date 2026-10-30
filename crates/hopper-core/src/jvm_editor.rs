@@ -86,6 +86,45 @@ pub fn tokens(text: &str) -> Vec<(Range<usize>, &str)> {
     out
 }
 
+/// The arguments and `#` comments in `text`, in order; `true` marks a
+/// comment (it runs to the end of its line).
+fn pieces(text: &str) -> Vec<(&str, bool)> {
+    fn comments(gap: &str) -> impl Iterator<Item = (&str, bool)> {
+        gap.lines().filter(|l| l.trim_start().starts_with('#')).map(|l| (l.trim(), true))
+    }
+    let mut out = Vec::new();
+    let mut at = 0;
+    for (r, t) in tokens(text) {
+        // Comments sit in the gaps between arguments.
+        out.extend(comments(&text[at..r.start]));
+        out.push((t, false));
+        at = r.end;
+    }
+    out.extend(comments(&text[at..]));
+    out
+}
+
+/// The arguments one per line, as the editor shows them. Comments keep a
+/// line of their own.
+pub fn one_per_line(text: &str) -> String {
+    pieces(text).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join("\n")
+}
+
+/// The arguments on one line, split by single spaces, as they're saved.
+/// A comment keeps a line of its own, so it hides nothing after it.
+pub fn compact(text: &str) -> String {
+    let mut out = String::new();
+    let mut after_comment = false;
+    for (t, comment) in pieces(text) {
+        if !out.is_empty() {
+            out.push(if after_comment || comment { '\n' } else { ' ' });
+        }
+        out.push_str(t);
+        after_comment = comment;
+    }
+    out
+}
+
 /// Where the name and value sit in one argument (offsets within `t`).
 fn parts(t: &str) -> (Range<usize>, Option<Range<usize>>) {
     let eq = |from: usize| -> (Range<usize>, Option<Range<usize>>) {
@@ -314,6 +353,29 @@ pub fn complete(word: &str) -> Vec<Suggestion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lines_round_trip() {
+        let saved = "-Xmx14G -XX:+UseG1GC -XX:MaxGCPauseMillis=50 -Dfoo=\"a b\" -XX:+UnlockExperimentalVMOptions";
+        let shown = one_per_line(saved);
+        assert_eq!(shown.lines().count(), 5);
+        assert_eq!(shown.lines().nth(3), Some("-Dfoo=\"a b\""));
+        assert_eq!(compact(&shown), saved);
+        // Typing: Enter, pasted newlines, tabs and extra spaces are just separators.
+        assert_eq!(compact("  -Xmx4G\n\n\t-XX:+UseG1GC   -Da=1\r\n"), "-Xmx4G -XX:+UseG1GC -Da=1");
+        assert_eq!(one_per_line("-Xmx4G  -XX:+UseG1GC\n"), "-Xmx4G\n-XX:+UseG1GC");
+        assert_eq!(compact(""), "");
+        assert_eq!(one_per_line("   "), "");
+        // Comments keep their own line, so nothing after them is commented out.
+        let file = "# memory\n-Xmx4G -Xms1G\n# gc\n-XX:+UseG1GC";
+        assert_eq!(one_per_line(file), "# memory\n-Xmx4G\n-Xms1G\n# gc\n-XX:+UseG1GC");
+        assert_eq!(compact(file), "# memory\n-Xmx4G -Xms1G\n# gc\n-XX:+UseG1GC");
+        assert_eq!(compact(&one_per_line(file)), compact(file));
+        // The same arguments either way.
+        let toks = |t: &str| tokens(t).into_iter().map(|(_, s)| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(toks(&one_per_line(file)), toks(file));
+        assert_eq!(toks(&compact(file)), toks(file));
+    }
 
     const T21: Target = Target { major: Some(21), graalvm: false, oracle: false };
 
