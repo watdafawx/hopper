@@ -6,6 +6,17 @@
 
 use std::path::{Path, PathBuf};
 
+/// The console Java and the windowless one in a `bin` folder. Off Windows
+/// there is only `java`.
+#[cfg(windows)]
+pub(crate) const JAVA_EXE: &str = "java.exe";
+#[cfg(windows)]
+const JAVAW_EXE: &str = "javaw.exe";
+#[cfg(not(windows))]
+pub(crate) const JAVA_EXE: &str = "java";
+#[cfg(not(windows))]
+const JAVAW_EXE: &str = "java";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct JavaInstall {
     /// `javaw.exe` (no console window).
@@ -38,7 +49,7 @@ impl JavaInstall {
 
     /// `java.exe` next to `exe` (console; what servers should run), or `exe`.
     pub fn console_exe(&self) -> PathBuf {
-        let java = self.exe.with_file_name("java.exe");
+        let java = self.exe.with_file_name(JAVA_EXE);
         if java.exists() {
             java
         } else {
@@ -319,7 +330,7 @@ pub fn parse_version_output(text: &str) -> Option<VersionInfo> {
 fn run_version(exe: &Path) -> Option<VersionInfo> {
     use std::io::Read;
     use std::process::{Command, Stdio};
-    let java = exe.with_file_name("java.exe");
+    let java = exe.with_file_name(JAVA_EXE);
     let java = if java.exists() {
         java
     } else {
@@ -360,7 +371,7 @@ fn run_version(exe: &Path) -> Option<VersionInfo> {
 
 /// Java homes under `dir`, up to `depth` levels down.
 fn homes_under(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-    if dir.join("bin").join("java.exe").exists() || dir.join("bin").join("javaw.exe").exists() {
+    if dir.join("bin").join(JAVA_EXE).exists() || dir.join("bin").join(JAVAW_EXE).exists() {
         out.push(dir.to_path_buf());
         return;
     }
@@ -443,10 +454,41 @@ fn search_roots(launcher_dir: &Path) -> Vec<(PathBuf, usize)> {
         roots.push((h.join(".jdks"), 2));
         roots.push((h.join("scoop").join("apps"), 2));
     }
+    #[cfg(not(windows))]
+    unix_roots(&mut roots, home.as_deref());
     if let Some(d) = hopper_runtimes_dir() {
         roots.push((d, 2));
     }
     roots
+}
+
+/// Where Java lives on Linux and macOS: the system JVM folders, SDKMAN and
+/// the launchers' own downloads in the user's data folder.
+#[cfg(not(windows))]
+fn unix_roots(roots: &mut Vec<(PathBuf, usize)>, home: Option<&Path>) {
+    // Distro packages (/usr/lib/jvm/java-21-openjdk-amd64) and tarballs in /opt.
+    roots.push((PathBuf::from("/usr/lib/jvm"), 1));
+    roots.push((PathBuf::from("/usr/lib64/jvm"), 1));
+    roots.push((PathBuf::from("/usr/java"), 1));
+    roots.push((PathBuf::from("/opt"), 2));
+    // macOS installers: <name>.jdk/Contents/Home.
+    roots.push((PathBuf::from("/Library/Java/JavaVirtualMachines"), 3));
+    if let Some(h) = home {
+        roots.push((h.join(".sdkman").join("candidates").join("java"), 1));
+        roots.push((h.join("Library").join("Java").join("JavaVirtualMachines"), 3));
+        roots.push((h.join(".minecraft").join("runtime"), 4));
+        // Prism as a Flatpak keeps its data in its sandbox.
+        roots.push((
+            h.join(".var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/java"),
+            3,
+        ));
+    }
+    if let Some(data) = directories::BaseDirs::new().map(|b| b.data_dir().to_path_buf()) {
+        roots.push((data.join("PrismLauncher").join("java"), 3));
+        roots.push((data.join("ModrinthApp").join("meta").join("java_versions"), 3));
+        roots.push((data.join("com.modrinth.theseus").join("meta").join("java_versions"), 3));
+        roots.push((data.join("gdlauncher_next").join("datastore").join("java"), 3));
+    }
 }
 
 /// A path's identity for de-duplication: canonical where possible, lower-cased.
@@ -476,7 +518,7 @@ pub fn detect(launcher_dir: &Path) -> Vec<JavaInstall> {
         .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
         .unwrap_or_default()
     {
-        let exe = dir.join("java.exe");
+        let exe = dir.join(JAVA_EXE);
         if !exe.exists() {
             continue;
         }

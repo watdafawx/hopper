@@ -38,7 +38,7 @@ pub fn installer_java(launcher_dir: &Path) -> PathBuf {
         .into_iter()
         .flatten()
         .flatten()
-        .map(|e| e.path().join("bin").join("java.exe"))
+        .map(|e| e.path().join("bin").join(crate::java::JAVA_EXE))
         .filter(|p| p.exists())
         .collect();
     jres.sort();

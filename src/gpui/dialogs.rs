@@ -933,9 +933,7 @@ impl ExportForm {
                                     .icon(IconName::FolderOpen)
                                     .label("Show in folder")
                                     .on_click(move |_, _, _| {
-                                        let _ = std::process::Command::new("explorer")
-                                            .arg(format!("/select,{}", o1.display()))
-                                            .spawn();
+                                        crate::store::reveal_path(&o1);
                                     }),
                             )
                             .child(

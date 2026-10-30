@@ -378,7 +378,9 @@ impl Default for Settings {
             panel_widths: HashMap::new(),
             last_instance: String::new(),
             zoom: 100,
-            launch_native: false,
+            // Mojang's launcher is only found as CurseForge's minecraft.exe,
+            // so elsewhere games start through Hopper.
+            launch_native: !cfg!(windows),
             launch_picked: false,
             signed_in_as: None,
             pairings: HashMap::new(),

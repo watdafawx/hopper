@@ -3850,16 +3850,14 @@ Change version", a.file_name).into()
     fn show_in_folder(&self, file: &str, cx: &App) {
         if let Some(dir) = self.global_dir().or_else(|| self.own_dir().filter(|_| self.is_loose(file))) {
             let path = Self::global_path(&dir, file);
-            let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+            crate::store::reveal_path(&path);
             return;
         }
         let Some(root) = &self.root else { return };
         if let Some(inst) = self.store.read(cx).instance(root)
             && let Some(a) = inst.addon_by_file(file)
         {
-            let _ = std::process::Command::new("explorer")
-                .arg(format!("/select,{}", inst.addon_path(a).display()))
-                .spawn();
+            crate::store::reveal_path(&inst.addon_path(a));
         }
     }
 }

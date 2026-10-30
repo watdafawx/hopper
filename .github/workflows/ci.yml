@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run on any branch by hand: gh workflow run ci.yml --ref <branch>
+  workflow_dispatch:
 
 jobs:
   test:
@@ -78,6 +80,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release --bin hopper --message-format short
+      # Shows how much of the shared library's logic holds up off Windows.
+      # Many tests use Windows paths, so failures here don't fail the job.
+      - name: Library tests (not required yet)
+        continue-on-error: true
+        run: cargo test --release -p hopper-core --lib --message-format short
       - name: Package (Linux tarball)
         if: runner.os == 'Linux'
         run: |
