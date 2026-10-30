@@ -407,7 +407,11 @@ fn groups(s: &Store) -> Vec<Group> {
         kind: GroupKind::Folder,
         key: "folder".into(),
         name: if folder.is_empty() { "Server folder".into() } else { folder.to_string() },
-        what: if st.panel_url.trim().is_empty() { String::new() } else { hopper::panel::short_name(&st.panel_kind).to_string() },
+        what: {
+            let mut kinds: Vec<&str> = hopper::panel::panels(st).iter().map(|p| hopper::panel::short_name(&p.kind)).collect();
+            kinds.dedup();
+            kinds.join(", ")
+        },
     });
     out.push(Group { kind: GroupKind::Local, key: "local".into(), name: "This PC".into(), what: "hosted by Hopper".into() });
     out

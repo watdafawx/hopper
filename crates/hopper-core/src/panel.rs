@@ -268,25 +268,104 @@ pub fn address_hint(kind: &str) -> &'static str {
     }
 }
 
-/// The panel set up in Settings (or by `HOPPER_PANEL_URL` and
-/// `HOPPER_PANEL_TOKEN` in .env, which win), if any.
-pub fn from_settings(s: &crate::settings::Settings) -> Option<Box<dyn ServerPanel>> {
-    let url = env("HOPPER_PANEL_URL").unwrap_or_else(|| s.panel_url.trim().to_string());
-    let token = if s.panel_kind == "hopperd" { hopperd_token()? } else { token()? };
+/// The Crafty / MCSS / Pterodactyl panels set up in Settings, in order,
+/// with an address. `HOPPER_PANEL_URL` (and `HOPPER_PANEL_TOKEN`) in .env
+/// replace the first one's, or make one, for tests.
+pub fn panels(s: &crate::settings::Settings) -> Vec<crate::settings::OtherPanel> {
+    let mut out = s.panels.clone();
+    if let Some(url) = env("HOPPER_PANEL_URL") {
+        match out.iter_mut().find(|p| p.id.is_empty()) {
+            Some(p) => p.url = url,
+            None => out.insert(
+                0,
+                crate::settings::OtherPanel {
+                    kind: env("HOPPER_PANEL_KIND").unwrap_or_else(|| s.panel_kind.clone()),
+                    url,
+                    self_signed: s.panel_self_signed,
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+    out.retain(|p| !p.url.trim().is_empty());
+    out
+}
+
+/// A client for panel `p`, when its API key is saved.
+pub fn open(p: &crate::settings::OtherPanel) -> Option<Box<dyn ServerPanel>> {
+    let token = token_for(&p.id)?;
+    let (url, ss) = (p.url.trim(), p.self_signed);
     if url.is_empty() {
         return None;
     }
-    let ss = s.panel_self_signed;
-    Some(match s.panel_kind.as_str() {
-        "mcss" => Box::new(Mcss::new(&url, &token, ss)),
-        "hopperd" => Box::new(HopperServer::new(&url, &token, &s.panel_ca)),
-        "pterodactyl" => Box::new(Pterodactyl::new(&url, &token, ss)),
-        _ => Box::new(Crafty::new(&url, &token, ss)),
+    Some(match p.kind.as_str() {
+        "mcss" => Box::new(Mcss::new(url, &token, ss)),
+        "pterodactyl" => Box::new(Pterodactyl::new(url, &token, ss)),
+        _ => Box::new(Crafty::new(url, &token, ss)),
     })
 }
 
+/// What a panel's client is made from, to tell when it must be made again
+/// (the key's length stands in for the key).
+pub fn setup_key(p: &crate::settings::OtherPanel) -> String {
+    format!("{}|{}|{}|{}|{}", p.id, p.kind, p.url.trim(), p.self_signed, token_for(&p.id).map_or(0, |t| t.len()))
+}
+
+/// The first panel set up in Settings, if any (for code with no server
+/// in mind).
+pub fn from_settings(s: &crate::settings::Settings) -> Option<Box<dyn ServerPanel>> {
+    panels(s).iter().find_map(open)
+}
+
+/// Which panel each server folder was found on (folder → panel id), as
+/// the app's poll last saw it.
+static PANEL_OF: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Notes that the server in `root` is on panel `id`.
+pub fn remember(root: &std::path::Path, id: &str) {
+    PANEL_OF.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), id.to_string());
+}
+
+/// The panel the server in `root` was last found on, or the only panel;
+/// None while that's unknown. No network: fine on the UI thread.
+pub fn known_panel(s: &crate::settings::Settings, root: &std::path::Path) -> Option<crate::settings::OtherPanel> {
+    let all = panels(s);
+    let known = PANEL_OF.lock().unwrap_or_else(|e| e.into_inner()).get(root).cloned();
+    match known.and_then(|id| all.iter().find(|p| p.id == id).cloned()) {
+        Some(p) => Some(p),
+        None if all.len() == 1 => all.into_iter().next(),
+        None => None,
+    }
+}
+
+/// The panel that runs the server in `server.root`: the one it was last
+/// found on; else the only panel; else the first whose list has it.
+pub fn panel_of(
+    s: &crate::settings::Settings,
+    server: &crate::server::ServerInfo,
+) -> Option<(crate::settings::OtherPanel, Box<dyn ServerPanel>)> {
+    let all = panels(s);
+    let known = PANEL_OF.lock().unwrap_or_else(|e| e.into_inner()).get(&server.root).cloned();
+    if let Some(p) = known.and_then(|id| all.iter().find(|p| p.id == id)) {
+        return Some((p.clone(), open(p)?));
+    }
+    if let [p] = &all[..] {
+        return Some((p.clone(), open(p)?));
+    }
+    for p in &all {
+        let Some(panel) = open(p) else { continue };
+        let Ok(list) = panel.servers() else { continue };
+        if match_server(&list, server).is_some() {
+            remember(&server.root, &p.id);
+            return Some((p.clone(), panel));
+        }
+    }
+    None
+}
+
 /// `url` with a scheme and no trailing slash.
-pub(crate) fn base_url(url: &str) -> String {
+pub fn base_url(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
     if url.contains("://") {
         url.to_string()
@@ -380,6 +459,19 @@ pub fn set_token(token: &str) -> anyhow::Result<()> {
     crate::secrets::set(crate::secrets::PANEL_KEY, token)
 }
 
+/// The API key of panel `id` ("" is the first; see [`token`]).
+pub fn token_for(id: &str) -> Option<String> {
+    if id.is_empty() {
+        return token();
+    }
+    crate::secrets::get(&crate::secrets::panel_key(id))
+}
+
+/// Saves panel `id`'s API key (empty removes it).
+pub fn set_token_for(id: &str, token: &str) -> anyhow::Result<()> {
+    crate::secrets::set(&crate::secrets::panel_key(id), token)
+}
+
 /// The token from pairing with a Hopper Server, kept apart from other
 /// panels' API keys (HOPPER_PANEL_TOKEN wins, for tests).
 pub fn hopperd_token() -> Option<String> {
@@ -404,11 +496,11 @@ pub fn set_hopperd_token_for(id: &str, token: &str) -> anyhow::Result<()> {
 }
 
 /// The panel that runs `server`: its Hopper Server when it's on one, else
-/// the panel set up in Settings.
+/// the panel it was found on ([`panel_of`]).
 pub fn for_server(s: &crate::settings::Settings, server: &crate::server::ServerInfo) -> Option<Box<dyn ServerPanel>> {
     match &server.remote {
         Some(r) => Some(Box::new(HopperServer::from_client(crate::hopperd::Client::for_remote(r).ok()?))),
-        None => from_settings(s),
+        None => panel_of(s, server).map(|(_, p)| p),
     }
 }
 

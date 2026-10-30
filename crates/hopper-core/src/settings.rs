@@ -104,6 +104,9 @@ pub struct Settings {
     pub panel_ca: String,
     /// Paired Hopper Server panels, each a group in the Servers list.
     pub hopper_panels: Vec<HopperPanel>,
+    /// Crafty, MCSS and Pterodactyl panels, any number of each. The single
+    /// panel of older builds (`panel_kind` / `panel_url`) moves here.
+    pub panels: Vec<OtherPanel>,
     /// Server list groups folded shut (panel ids, "local", "folder").
     pub collapsed_groups: HashSet<String>,
     /// Where the GPUI window was last, to open there again.
@@ -208,6 +211,45 @@ pub struct HopperPanel {
     pub url: String,
     /// Its certificate authority (PEM), pinned when pairing.
     pub ca: String,
+}
+
+/// A Crafty, MCSS or Pterodactyl panel Hopper drives with an API key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OtherPanel {
+    /// Stable id; "" for the panel set up before several were possible
+    /// (its API key keeps its old name in Credential Manager).
+    pub id: String,
+    /// "crafty", "mcss" or "pterodactyl" ([`crate::panel::KINDS`]).
+    pub kind: String,
+    /// What the list calls it ("rig").
+    pub name: String,
+    pub url: String,
+    /// Accept the panel's self-signed certificate (Crafty makes its own).
+    pub self_signed: bool,
+}
+
+impl Default for OtherPanel {
+    fn default() -> Self {
+        OtherPanel { id: String::new(), kind: "crafty".into(), name: String::new(), url: String::new(), self_signed: true }
+    }
+}
+
+impl OtherPanel {
+    /// Where its API key is kept in Credential Manager.
+    pub fn key_name(&self) -> String {
+        crate::secrets::panel_key(&self.id)
+    }
+
+    /// Its name, or the host it's on when it has none.
+    pub fn label(&self) -> String {
+        let n = self.name.trim();
+        if !n.is_empty() {
+            return n.to_string();
+        }
+        let host = crate::hopperd::host_name(&crate::panel::base_url(&self.url));
+        if host.is_empty() { crate::panel::short_name(&self.kind).to_string() } else { host }
+    }
 }
 
 impl HopperPanel {
@@ -389,6 +431,7 @@ impl Default for Settings {
             panel_self_signed: true,
             panel_ca: String::new(),
             hopper_panels: Vec::new(),
+            panels: Vec::new(),
             collapsed_groups: HashSet::new(),
             window: None,
             theme_name: String::new(),
@@ -508,6 +551,21 @@ impl Settings {
     /// [`Settings::hopper_panels`]; the Panel setting goes back to Crafty.
     pub fn migrate_panels(&mut self) {
         if self.panel_kind != "hopperd" {
+            // The one Crafty / MCSS / Pterodactyl panel of older builds
+            // becomes the first of the list (its key keeps its name).
+            if !self.panel_url.trim().is_empty() && !self.panels.iter().any(|p| p.id.is_empty()) {
+                self.panels.insert(
+                    0,
+                    OtherPanel {
+                        id: String::new(),
+                        kind: self.panel_kind.clone(),
+                        name: String::new(),
+                        url: self.panel_url.trim().to_string(),
+                        self_signed: self.panel_self_signed,
+                    },
+                );
+                self.panel_url.clear();
+            }
             return;
         }
         if !self.panel_url.trim().is_empty() && !self.hopper_panels.iter().any(|p| p.id.is_empty()) {
@@ -616,6 +674,40 @@ mod tests {
         s.panel_widths.insert("servers.list".into(), -20.0);
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.panel_widths, s.panel_widths);
+    }
+
+    #[test]
+    fn the_single_panel_becomes_the_first_of_the_list() {
+        let mut s: Settings = serde_json::from_str(
+            r#"{"panel_kind":"mcss","panel_url":" https://nas:25560 ","panel_self_signed":false}"#,
+        )
+        .unwrap();
+        s.migrate_panels();
+        assert_eq!(s.panels.len(), 1);
+        let p = &s.panels[0];
+        assert_eq!((p.id.as_str(), p.kind.as_str(), p.url.as_str(), p.self_signed), ("", "mcss", "https://nas:25560", false));
+        assert_eq!(p.key_name(), crate::secrets::PANEL_KEY);
+        assert!(s.panel_url.is_empty());
+        // Loading again doesn't add it twice.
+        s.migrate_panels();
+        assert_eq!(s.panels.len(), 1);
+        // No old panel: nothing to move; an older Hopper Server still moves.
+        let mut none = Settings::default();
+        none.migrate_panels();
+        assert!(none.panels.is_empty());
+        let mut hd: Settings = serde_json::from_str(r#"{"panel_kind":"hopperd","panel_url":"rig"}"#).unwrap();
+        hd.migrate_panels();
+        assert!(hd.panels.is_empty());
+        assert_eq!(hd.hopper_panels.len(), 1);
+    }
+
+    #[test]
+    fn other_panels_name_themselves() {
+        let p = OtherPanel { id: "p1".into(), kind: "pterodactyl".into(), url: "https://panel.example.com/".into(), ..Default::default() };
+        assert_eq!(p.label(), "panel.example.com");
+        assert_eq!(p.key_name(), "panel_api_key.p1");
+        let named = OtherPanel { name: " rig ".into(), ..p };
+        assert_eq!(named.label(), "rig");
     }
 
     #[test]
