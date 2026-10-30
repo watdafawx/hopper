@@ -9,7 +9,6 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -70,6 +69,16 @@ impl BackupsView {
                 .background_spawn(async move { (hopper::backups::list(&root), hopper::snapshots::projects_seen(&root)) })
                 .await;
             this.update(cx, |this, cx| {
+                // The newest opens when it's new to the list (the first
+                // read, or something just set aside); after that, what
+                // you fold or unfold stays that way.
+                let fresh = sets
+                    .first()
+                    .filter(|s| !this.sets_loaded || !this.sets.iter().any(|o| o.dir == s.dir))
+                    .map(|s| s.dir.clone());
+                if let Some(dir) = fresh {
+                    this.open.insert(dir);
+                }
                 this.sets = sets;
                 this.projects = projects;
                 this.sets_loaded = true;
@@ -168,9 +177,15 @@ impl BackupsView {
                 // Now has likely moved on: compare again.
                 this.changes.clear();
                 this.comparing.clear();
+                // The newest opens when it's new (the first read, or one
+                // just taken); otherwise what you folded stays folded.
+                let known = this.snaps.as_ref().map(|v| v.iter().map(|s| s.id.clone()).collect::<HashSet<_>>());
                 let first = match this.focus.take() {
                     Some(f) if snaps.iter().any(|s| s.id == f) => Some(f),
-                    _ => snaps.first().map(|s| s.id.clone()),
+                    _ => snaps
+                        .first()
+                        .filter(|s| known.as_ref().is_none_or(|k| !k.contains(&s.id)))
+                        .map(|s| s.id.clone()),
                 };
                 this.snaps = Some(snaps);
                 this.reload_usage(cx);
@@ -657,27 +672,30 @@ impl BackupsView {
                                     .child(if auto { "auto" } else { "manual" }),
                             )
                             .child(
-                                Button::new(("snap-restore", i))
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::Undo2)
-                                    .label("Restore")
-                                    .disabled(running || busy)
-                                    .when(running, |b| b.tooltip("Close the game first"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.ask_restore(id2.clone(), window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(("snap-delete", i))
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Trash)
-                                    .tooltip("Delete this snapshot")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.ask_delete_snapshot(id3.clone(), window, cx)
-                                    })),
+                                widgets::row_actions(("snap-actions", i))
+                                    .child(
+                                        Button::new(("snap-restore", i))
+                                            .small()
+                                            .outline()
+                                            .icon(IconName::Undo2)
+                                            .label("Restore")
+                                            .disabled(running || busy)
+                                            .when(running, |b| b.tooltip("Close the game first"))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.ask_restore(id2.clone(), window, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(("snap-delete", i))
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::Trash)
+                                            .tooltip("Delete this snapshot")
+                                            .disabled(busy)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.ask_delete_snapshot(id3.clone(), window, cx)
+                                            })),
+                                    )
                             ),
                     )
                     .when(open, |c| c.child(self.changes_view(i, &s.id, cx)))
@@ -796,7 +814,7 @@ impl BackupsView {
         v_flex()
             .gap_3()
             .children(self.sets.iter().enumerate().map(|(i, set)| {
-                let open = self.open.contains(&set.dir) || i == 0;
+                let open = self.open.contains(&set.dir);
                 let (d1, d2, d3) = (set.dir.clone(), set.dir.clone(), set.clone());
                 let all = set.files.clone();
                 let n = set.files.len();
@@ -828,28 +846,31 @@ impl BackupsView {
                             )
                             .child(div().flex_1())
                             .child(
-                                Button::new(("backup-restore-all", i))
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::Undo2)
-                                    .label(if n == 1 { "Restore" } else { "Restore all" })
-                                    .on_click(cx.listener(move |this, _, window, cx| this.restore(all.clone(), window, cx))),
-                            )
-                            .child(
-                                Button::new(("backup-folder", i))
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::FolderOpen)
-                                    .tooltip("Open this backup's folder")
-                                    .on_click(move |_, _, _| open_path(&d2)),
-                            )
-                            .child(
-                                Button::new(("backup-delete", i))
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Trash)
-                                    .tooltip("Delete this backup (to the Recycle Bin)")
-                                    .on_click(cx.listener(move |this, _, window, cx| this.ask_delete(d3.clone(), window, cx))),
+                                widgets::row_actions(("backup-actions", i))
+                                    .child(
+                                        Button::new(("backup-restore-all", i))
+                                            .small()
+                                            .outline()
+                                            .icon(IconName::Undo2)
+                                            .label(if n == 1 { "Restore" } else { "Restore all" })
+                                            .on_click(cx.listener(move |this, _, window, cx| this.restore(all.clone(), window, cx))),
+                                    )
+                                    .child(
+                                        Button::new(("backup-folder", i))
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::FolderOpen)
+                                            .tooltip("Open this backup's folder")
+                                            .on_click(move |_, _, _| open_path(&d2)),
+                                    )
+                                    .child(
+                                        Button::new(("backup-delete", i))
+                                            .small()
+                                            .ghost()
+                                            .icon(IconName::Trash)
+                                            .tooltip("Delete this backup (to the Recycle Bin)")
+                                            .on_click(cx.listener(move |this, _, window, cx| this.ask_delete(d3.clone(), window, cx))),
+                                    )
                             ),
                     )
                     .when(open, |c| {
@@ -935,22 +956,19 @@ impl Render for BackupsView {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(
-                        TabBar::new("backups-mode")
-                            .segmented()
-                            .small()
-                            .selected_index(if snaps_mode { 0 } else { 1 })
-                            .child(Tab::new().label(format!("Snapshots {n_snaps}")))
-                            .child(Tab::new().label(if self.sets_loaded {
-                                format!("Loose files {}", self.sets.len())
-                            } else {
-                                "Loose files".to_string()
-                            }))
-                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                this.mode = if *ix == 0 { Mode::Snapshots } else { Mode::Loose };
-                                cx.notify();
-                            })),
-                    )
+                    .child(widgets::underline_tabs(
+                        "backups-mode",
+                        vec![
+                            ("Snapshots".into(), self.snaps.as_ref().map(|_| n_snaps)),
+                            ("Loose files".into(), self.sets_loaded.then_some(self.sets.len())),
+                        ],
+                        if snaps_mode { 0 } else { 1 },
+                        cx.listener(|this, ix: &usize, _, cx| {
+                            this.mode = if *ix == 0 { Mode::Snapshots } else { Mode::Loose };
+                            cx.notify();
+                        }),
+                        cx,
+                    ))
                     .child(div().flex_1())
                     .when(snaps_mode, |r| {
                         r.child(

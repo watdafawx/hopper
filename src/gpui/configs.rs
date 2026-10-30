@@ -1032,16 +1032,16 @@ impl ConfigsPanel {
         };
         let (c_file, s_file) = (c_dir.join(&p.rel), s_dir.join(&p.rel));
         // Diff or Values, on the preview it switches.
-        let toggle = TabBar::new("cfg-view")
-            .segmented()
-            .small()
-            .selected_index(usize::from(!self.values))
-            .child(Tab::new().label("Values"))
-            .child(Tab::new().label("Diff"))
-            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+        let toggle = widgets::underline_tabs(
+            "cfg-view",
+            vec![("Values".into(), None), ("Diff".into(), None)],
+            usize::from(!self.values),
+            cx.listener(|this, ix: &usize, _, cx| {
                 this.values = *ix == 0;
                 cx.notify();
-            }));
+            }),
+            cx,
+        );
         let open_btns = h_flex()
             .gap_1()
             .child(
@@ -1232,26 +1232,19 @@ impl ConfigsPanel {
             .flex_wrap()
             .when(!folders.is_empty(), |r| {
                 let cur = self.folder.clone();
-                r.child(
-                    TabBar::new("cfg-folders")
-                        .segmented()
-                        .small()
-                        .selected_index(folder_ix)
-                        .children(folders.iter().map(|f| {
-                            // The open folder shows what it needs.
-                            let n = needs.filter(|_| *f == cur);
-                            Tab::new().label(match n {
-                                Some(n) => format!("{f}/  {n}"),
-                                None => format!("{f}/"),
-                            })
-                        }))
-                        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                            if let Some(f) = fl.get(*ix) {
-                                this.folder = f.clone();
-                                this.reset(cx);
-                            }
-                        })),
-                )
+                r.child(widgets::underline_tabs(
+                    "cfg-folders",
+                    // The open folder shows what it needs.
+                    folders.iter().map(|f| (format!("{f}/").into(), needs.filter(|_| *f == cur))).collect(),
+                    folder_ix,
+                    cx.listener(move |this, ix: &usize, _, cx| {
+                        if let Some(f) = fl.get(*ix) {
+                            this.folder = f.clone();
+                            this.reset(cx);
+                        }
+                    }),
+                    cx,
+                ))
             })
             .map(|r| {
                 if self.adding {
@@ -1328,16 +1321,17 @@ impl ConfigsPanel {
                 ),
             )
             .child(
-                TabBar::new("cfg-show")
-                    .segmented()
-                    .small()
-                    .selected_index(show_ix)
-                    .children(Show::ALL.iter().zip(counts).map(|(s, n)| Tab::new().label(format!("{} {n}", s.label()))))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                widgets::underline_tabs(
+                    "cfg-show",
+                    Show::ALL.iter().zip(counts).map(|(s, n)| (s.label().into(), Some(n))).collect(),
+                    show_ix,
+                    cx.listener(|this, ix: &usize, _, cx| {
                         this.show = Show::ALL.get(*ix).copied();
                         this.list.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) });
                         cx.notify();
-                    })),
+                    }),
+                    cx,
+                ),
             )
             .child(div().flex_1())
             .when(n_sel > 0, |r| {

@@ -1261,21 +1261,21 @@ impl UpdatePreview {
     }
 
     /// Filter tabs and the search box over an open list.
-    fn list_tools(&self, id: &'static str, tabs: Vec<String>, cx: &mut Context<Self>) -> Div {
+    fn list_tools(&self, id: &'static str, tabs: Vec<(SharedString, Option<usize>)>, cx: &mut Context<Self>) -> Div {
         h_flex()
             .gap_2()
             .when(tabs.len() > 1, |r| {
-                r.child(
-                    TabBar::new(id)
-                        .segmented()
-                        .xsmall()
-                        .selected_index(self.filter)
-                        .children(tabs.into_iter().map(|l| Tab::new().label(l)))
-                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                            this.filter = *ix;
-                            cx.notify();
-                        })),
-                )
+                let filter = self.filter;
+                r.child(widgets::underline_tabs(
+                    id,
+                    tabs,
+                    filter,
+                    cx.listener(|this, ix: &usize, _, cx| {
+                        this.filter = *ix;
+                        cx.notify();
+                    }),
+                    cx,
+                ))
             })
             .child(div().flex_1())
             .child(
@@ -1636,10 +1636,10 @@ impl UpdatePreview {
                 .collect();
             rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.0.name.to_lowercase().cmp(&b.1.0.name.to_lowercase())));
             let tabs = vec![
-                format!("All {total}"),
-                format!("Added {added}"),
-                format!("Updated {updated}"),
-                format!("Dropped {dropped}"),
+                ("All".into(), Some(total)),
+                ("Added".into(), Some(added)),
+                ("Updated".into(), Some(updated)),
+                ("Dropped".into(), Some(dropped)),
             ];
             let needed_cards: Vec<AnyElement> = plan.needed.iter().map(|n| self.needed_card(n, cx)).collect();
             out = out.child(
@@ -1708,7 +1708,7 @@ impl UpdatePreview {
                     (f.rel.clone(), Some(chip), f.action != FileAction::Add)
                 })
                 .collect();
-            let tabs = vec!["All".to_string(), format!("Replaced {replaced_n}"), format!("New {new_n}")];
+            let tabs = vec![("All".into(), None), ("Replaced".into(), Some(replaced_n)), ("New".into(), Some(new_n))];
             out = out.child(
                 widgets::expand_area(cx)
                     .child(self.list_tools("files-filter", tabs, cx))
@@ -1791,7 +1791,7 @@ impl UpdatePreview {
         );
         if open == Some(Section::Stays) {
             let by: HashMap<String, String> = plan.needed.iter().map(|n| (n.by.to_lowercase(), n.name.clone())).collect();
-            let tabs = vec![format!("Your mods {m}"), format!("Your files {f}")];
+            let tabs = vec![("Your mods".into(), Some(m)), ("Your files".into(), Some(f))];
             let list = if self.filter == 0 {
                 let mut rows: Vec<_> = plan
                     .your_mods

@@ -14,7 +14,6 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
     v_flex,
@@ -2157,17 +2156,16 @@ impl AddonsView {
             )
             .when(self.class == cf::CLASS_MODS, |r| r.child(self.profiles_button(inst, cx)))
             .child(
-                TabBar::new("show")
-                    .segmented()
-                    .small()
-                    .selected_index(show_ix)
-                    .child(Tab::new().label("All"))
-                    .child(Tab::new().label(format!("Updates {n_up}")))
-                    .child(Tab::new().label(format!("Off {n_off}")))
-                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                widgets::underline_tabs(
+                    "show",
+                    vec![("All".into(), None), ("Updates".into(), Some(n_up)), ("Off".into(), Some(n_off))],
+                    show_ix,
+                    cx.listener(|this, ix: &usize, _, cx| {
                         this.show = [Show::All, Show::Updates, Show::Disabled][*ix];
                         cx.notify();
-                    })),
+                    }),
+                    cx,
+                ),
             )
             .when(inst.pack.is_some() && self.global_dir().is_none(), |r| {
                 r.child(

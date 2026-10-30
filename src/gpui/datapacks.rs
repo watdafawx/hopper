@@ -16,7 +16,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::radio::Radio;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
     v_flex,
@@ -348,18 +347,17 @@ impl AddonsView {
                 .px_6()
                 .gap_2()
                 .when(!segs.is_empty(), |r| {
-                    r.child(
-                        TabBar::new("pack-places")
-                            .segmented()
-                            .small()
-                            .selected_index(ix)
-                            .children(segs.iter().map(|l| Tab::new().label(format!("{} {}", l.label, l.count))))
-                            .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                                if let Some(k) = keys.get(*ix) {
-                                    this.go_to(&k.clone(), cx)
-                                }
-                            })),
-                    )
+                    r.child(widgets::underline_tabs(
+                        "pack-places",
+                        segs.iter().map(|l| (l.label.clone().into(), Some(l.count))).collect(),
+                        ix,
+                        cx.listener(move |this, ix: &usize, _, cx| {
+                            if let Some(k) = keys.get(*ix) {
+                                this.go_to(&k.clone(), cx)
+                            }
+                        }),
+                        cx,
+                    ))
                 })
                 .children(picker)
                 .children(add)

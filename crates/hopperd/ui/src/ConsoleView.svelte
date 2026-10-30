@@ -270,9 +270,9 @@
 
 <section class="term">
   <div class="tb">
-    <div class="seg" role="tablist" aria-label="Console source">
-      <button role="tab" aria-selected={source === 'live'} class:on={source === 'live'} onclick={() => setSource('live')}>Live</button>
-      <button role="tab" aria-selected={source === 'file'} class:on={source === 'file'} onclick={() => setSource('file')}>Whole log file</button>
+    <div class="utabs" role="tablist" aria-label="Console source">
+      <button role="tab" aria-selected={source === 'live'} class:tab-sel={source === 'live'} onclick={() => setSource('live')}>Live</button>
+      <button role="tab" aria-selected={source === 'file'} class:tab-sel={source === 'file'} onclick={() => setSource('file')}>Whole log file</button>
     </div>
     <span class="tiny muted src">{source === 'file' ? "This run's latest.log from the start, read every few seconds." : "The panel's latest lines, live."}</span>
     <span class="sp"></span>
@@ -332,11 +332,6 @@
   .term { flex: 1; min-width: 0; min-height: 360px; background: var(--term); border: 1px solid var(--line); border-radius: var(--radius-lg); display: flex; flex-direction: column; overflow: hidden; position: relative; }
   .tb { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-bottom: 1px solid var(--line); background: var(--base); flex-wrap: wrap; }
   .src { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; flex: none; }
-  .seg button { padding: 3px 10px; font-size: 12px; color: var(--subtle); border-right: 1px solid var(--line2); }
-  .seg button:last-child { border-right: 0; }
-  .seg button:hover:not(.on) { background: var(--hover); }
-  .seg button.on { background: var(--raise); color: var(--text); font-weight: 600; }
   .find { padding: 3px 8px; width: 200px; }
   .find .x { color: var(--muted); display: grid; place-items: center; }
   .lines { flex: 1; overflow: auto; padding: 10px 12px; font: 12px/1.6 var(--mono); color: var(--text); cursor: text; outline: none; }

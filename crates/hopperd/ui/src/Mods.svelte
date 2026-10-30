@@ -571,9 +571,9 @@
       <div class="input find"><Search size={13} /><input placeholder="Search" bind:value={filter} />{#if filter}<button class="clr" title="Clear" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
       <a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a>
       <ModProfiles {base} {alive} onChanged={() => changed(false)} />
-      <div class="seg" role="tablist">
+      <div class="utabs" role="tablist">
         {#each CHIPS as [k, label] (k)}
-          {#if k === 'all' || k === 'updates' || k === 'off' || counts[k] || chip === k}<button class="fchip" role="tab" aria-selected={chip === k} class:on={chip === k} onclick={() => (chip = k)}>{label}{k === 'all' ? '' : ` ${counts[k]}`}</button>{/if}
+          {#if k === 'all' || k === 'updates' || k === 'off' || counts[k] || chip === k}<button role="tab" aria-selected={chip === k} class:tab-sel={chip === k} onclick={() => (chip = k)}>{label}{k === 'all' ? '' : ` ${counts[k]}`}</button>{/if}
         {/each}
       </div>
       {#if hasPack}<label class="cbl" title="Only what you added on top of the modpack"><input type="checkbox" bind:checked={onlyYours} />Only yours ({counts.yours})</label>{/if}
@@ -752,10 +752,6 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .tab:hover { color: var(--text); }
   .subtabs .chip { margin-bottom: 6px; }
   .toolbar { gap: 6px 10px; }
-  .seg { display: inline-flex; background: var(--base); border: 1px solid var(--line2); border-radius: 7px; padding: 2px; gap: 2px; }
-  .fchip { padding: 2px 10px; border-radius: 5px; color: var(--subtle); font-size: 12px; white-space: nowrap; }
-  .fchip:hover { background: #ffffff0a; }
-  .fchip.on { background: var(--raise); color: var(--text); font-weight: 500; }
   .cbl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--subtle); cursor: pointer; padding: 0 4px; }
   .cbl input, .c-ck input { width: 15px; height: 15px; accent-color: var(--acc); }
   .upd { gap: 4px; flex: none; }
