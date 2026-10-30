@@ -32,6 +32,10 @@ sysinfo.workspace = true
 regex.workspace = true
 keyring.workspace = true
 similar.workspace = true
+# Pterodactyl's console (Wings' websocket), over the same rustls as ureq.
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 # Finding Hopper Servers on the LAN.
 mdns-sd.workspace = true
 # Offline translation of changelogs and descriptions (desktop only).

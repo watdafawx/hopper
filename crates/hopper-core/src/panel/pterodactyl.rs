@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 pub struct Pterodactyl {
     base: String,
     key: String,
+    self_signed: bool,
     agent: ureq::Agent,
 }
 
@@ -16,11 +17,12 @@ impl Pterodactyl {
         Pterodactyl {
             base: base_url(url),
             key: key.to_string(),
+            self_signed,
             agent: agent(self_signed),
         }
     }
 
-    fn call(&self, method: &str, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
+    pub(super) fn call(&self, method: &str, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
         let url = format!("{}/api/client{path}", self.base);
         let auth = format!("Bearer {}", self.key);
         let accept = "Application/vnd.pterodactyl.v1+json";
@@ -135,9 +137,11 @@ impl ServerPanel for Pterodactyl {
             .map(|_| ())
     }
 
-    fn console(&self, _: &str) -> anyhow::Result<Vec<String>> {
-        // Pterodactyl streams the console over a websocket only.
-        bail!("Pterodactyl's console streams over a websocket; open it in the panel. Commands still work here.")
+    /// Pterodactyl streams the console over Wings' websocket only: a
+    /// background connection keeps its latest lines.
+    fn console(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        let access = super::pterodactyl_ws::Access { base: self.base.clone(), key: self.key.clone(), self_signed: self.self_signed };
+        super::pterodactyl_ws::lines(&access, id)
     }
 
     fn command(&self, id: &str, line: &str) -> anyhow::Result<()> {

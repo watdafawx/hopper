@@ -82,6 +82,7 @@ pub mod snapshots;
 pub mod source;
 pub mod sync;
 pub mod time;
+pub mod tls;
 #[cfg(feature = "translate")]
 pub mod translate;
 pub mod update_list;

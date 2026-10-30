@@ -4483,18 +4483,25 @@ dependencies = [
  "mdns-sd",
  "regex",
  "rusqlite",
+ "russh",
+ "russh-sftp",
+ "rustls",
  "serde",
  "serde_json",
  "sha1_smol",
  "sha2 0.10.9",
  "similar",
+ "suppaftp",
  "sysinfo 0.37.2",
  "tiny_http",
  "tokenizers",
+ "tokio",
  "toml 0.8.23",
  "toml_edit 0.22.27",
  "trash",
+ "tungstenite",
  "ureq",
+ "webpki-roots",
  "whatlang",
  "windows 0.62.2",
  "zip 2.4.2",
@@ -5283,6 +5290,29 @@ dependencies = [
  "euclid",
  "polycool",
  "smallvec",
+]
+
+[[package]]
+name = "lazy-regex"
+version = "3.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0a2cce8a22920a29fdcc8c9170aa5d29edd9fbcf8bea856e24c2cb1c2419f67"
+dependencies = [
+ "lazy-regex-proc_macros",
+ "once_cell",
+ "regex",
+]
+
+[[package]]
+name = "lazy-regex-proc_macros"
+version = "3.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f1e4b1f1d8c71edb4ff2b2150ec4606445fd2ddf67ddc097655daf59286baa6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "regex",
+ "syn 3.0.8",
 ]
 
 [[package]]
@@ -9084,6 +9114,19 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "suppaftp"
+version = "12.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b58fcf921745cca6f0127c9f822069947da8c6dbeff52e9004750bcc448171f"
+dependencies = [
+ "chrono",
+ "lazy-regex",
+ "log",
+ "rustls",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "svg_fmt"

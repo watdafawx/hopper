@@ -6,6 +6,7 @@
 mod hopperd;
 mod mcss;
 mod pterodactyl;
+mod pterodactyl_ws;
 
 pub use hopperd::HopperServer;
 pub use mcss::Mcss;
