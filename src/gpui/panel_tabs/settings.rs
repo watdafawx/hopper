@@ -21,6 +21,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::hopperd::Client;
+use hopper::hosting::jvm::ARGS_FILE;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -83,6 +84,17 @@ struct Jvm {
     java_major: Option<u64>,
     host_mb: u64,
     files: Vec<String>,
+    /// How the server starts (panels before 0.13.17 don't say).
+    start: Option<Start>,
+}
+
+/// `start` in `GET .../jvm`: the start script's own line, and whether it
+/// reads user_jvm_args.txt (then the flags live only there).
+#[derive(Clone)]
+struct Start {
+    script: Option<String>,
+    line: String,
+    reads_args_file: bool,
 }
 
 /// `GET .../address`.
@@ -175,6 +187,11 @@ fn parse_jvm(v: &Value) -> Jvm {
         java_major: v["java_major"].as_u64(),
         host_mb: v["host_memory_mb"].as_u64().unwrap_or(0),
         files: v["files"].as_array().map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect()).unwrap_or_default(),
+        start: v["start"]["line"].as_str().map(|line| Start {
+            script: v["start"]["script"].as_str().map(String::from),
+            line: line.to_string(),
+            reads_args_file: v["start"]["reads_args_file"].as_bool().unwrap_or(false),
+        }),
     }
 }
 
@@ -1043,8 +1060,54 @@ impl SettingsTab {
         let Some(j) = d.jvm.clone() else {
             return vec![widgets::caption("The panel didn't say how this server starts.", cx).into_any_element()];
         };
-        let mut out = vec![Self::heading("Files that start the server", cx).into_any_element()];
-        if j.files.is_empty() {
+        let mut out = vec![Self::heading("How the server starts", cx).into_any_element()];
+        let mut shown: Vec<&str> = Vec::new();
+        if let Some(st) = &j.start {
+            let (mem_dirty, args_dirty) = self.jvm_changed(cx);
+            let note = match (&st.script, st.reads_args_file) {
+                (None, _) => "No start script: Hopper starts the server jar and reads the flags from user_jvm_args.txt.".to_string(),
+                (Some(sc), true) => format!("{sc} starts Java and reads the flags from user_jvm_args.txt."),
+                (Some(sc), false) => format!(
+                    "{sc} has its flags in it and doesn't read user_jvm_args.txt. Saving changes only its -Xmx; edit {sc} for other flags."
+                ),
+            };
+            out.push(div().px_2().pb_1().child(widgets::caption(note, cx)).into_any_element());
+            // The script's line and the args file in boxes of their own, so
+            // the flags don't look written into both.
+            let mono_box = |lines: Vec<String>| {
+                v_flex()
+                    .mx_2()
+                    .mb_2()
+                    .px_3()
+                    .py_2()
+                    .rounded(theme.radius)
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .font_family(theme.mono_font_family.clone())
+                    .text_color(theme.muted_foreground)
+                    .children(lines.into_iter().map(|l| div().child(l)))
+                    .into_any_element()
+            };
+            let desc = if st.script.is_some() { "The start script" } else { "Hopper starts the server jar itself" };
+            let name = st.script.clone().unwrap_or_else(|| "No start script".into());
+            out.extend(self.file_row(0, &name, desc, mem_dirty && !st.reads_args_file, &j, cx));
+            out.push(mono_box(vec![st.line.clone()]));
+            if let Some(sc) = &st.script {
+                shown.push(sc.as_str());
+            }
+            if st.reads_args_file {
+                shown.push(ARGS_FILE);
+                let desc = "Java arguments, one per line: memory and flags, written by this page";
+                out.extend(self.file_row(1, ARGS_FILE, desc, mem_dirty || args_dirty, &j, cx));
+                // What saving writes: the form as it is now.
+                let args = self
+                    .form_args(cx)
+                    .map(|(_, a)| hopper::hosting::jvm::JvmArgs::parse(&a).args())
+                    .unwrap_or_else(|| j.flags.clone());
+                out.push(mono_box(if args.is_empty() { vec!["Empty: Java picks its own memory.".into()] } else { args }));
+            }
+        } else if j.files.is_empty() {
             out.push(
                 div()
                     .px_2()
@@ -1052,57 +1115,79 @@ impl SettingsTab {
                     .into_any_element(),
             );
         }
-        for (i, f) in j.files.iter().enumerate() {
-            let open = self.editor.as_ref().is_some_and(|e| &e.path == f);
-            let path = f.clone();
-            let control = if open {
-                div().into_any_element()
-            } else {
-                Button::new(("settings-edit-file", i))
-                    .outline()
-                    .small()
-                    .icon(IconName::FileCode)
-                    .label("Edit")
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_file(path.clone(), window, cx)))
-                    .into_any_element()
+        let others: Vec<String> = j.files.iter().filter(|f| !shown.contains(&f.as_str())).cloned().collect();
+        if j.start.is_some() && !others.is_empty() {
+            out.push(Self::heading("Other start files", cx).into_any_element());
+        }
+        for (i, f) in others.iter().enumerate() {
+            let desc = match (f.as_str() == ARGS_FILE, j.start.is_some()) {
+                (true, true) => "Java arguments; the start script above doesn't read it",
+                (true, false) => "Java arguments: memory and flags",
+                (false, true) => "A start script the server doesn't use",
+                (false, false) => "The start script",
             };
-            let label = div().text_sm().font_medium().font_family(theme.mono_font_family.clone()).child(f.clone()).into_any_element();
-            let desc = if f == "user_jvm_args.txt" { "Java arguments: memory and flags" } else { "The start script" };
-            out.push(Self::row(label, Some(desc.into()), None, control, false, cx).into_any_element());
-            if open && let Some(ed) = &self.editor {
-                let mut col = v_flex().gap_2().px_2().py_3();
-                match &ed.area {
-                    Some(a) => col = col.child(Textarea::new(a)),
-                    None if ed.error.is_none() => col = col.child(widgets::skeleton_rows(3, rems(1.5), cx)),
-                    None => {}
-                }
-                col = col
-                    .when_some(ed.error.clone(), |c, e| c.child(div().text_sm().text_color(theme.danger).child(e)))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("settings-file-save")
-                                    .primary()
-                                    .small()
-                                    .icon(IconName::Save)
-                                    .label(if ed.force { "Save anyway" } else { "Save" })
-                                    .disabled(ed.area.is_none() || ed.saving)
-                                    .on_click(cx.listener(|this, _, window, cx| this.save_file(window, cx))),
-                            )
-                            .child(
-                                Button::new("settings-file-cancel")
-                                    .ghost()
-                                    .small()
-                                    .label("Cancel")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.editor = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
-                out.push(col.into_any_element());
+            out.extend(self.file_row(i + 2, f, desc, false, &j, cx));
+        }
+        out
+    }
+
+    /// A start file's row: its name, what it is, "Not saved yet" while the
+    /// form differs from it, and Edit (the editor opens under it).
+    fn file_row(&self, i: usize, f: &str, desc: &str, unsaved: bool, j: &Jvm, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let mut out = Vec::new();
+        let open = self.editor.as_ref().is_some_and(|e| e.path == f);
+        let path = f.to_string();
+        let control = if open || !j.files.iter().any(|x| x == f) {
+            div().into_any_element()
+        } else {
+            Button::new(("settings-edit-file", i))
+                .outline()
+                .small()
+                .icon(IconName::FileCode)
+                .label("Edit")
+                .on_click(cx.listener(move |this, _, window, cx| this.open_file(path.clone(), window, cx)))
+                .into_any_element()
+        };
+        let label = h_flex()
+            .gap_2()
+            .child(div().text_sm().font_medium().font_family(theme.mono_font_family.clone()).child(f.to_string()))
+            .when(unsaved, |r| r.child(widgets::chip(theme.warning).child("Not saved yet")))
+            .into_any_element();
+        out.push(Self::row(label, Some(desc.into()), None, control, false, cx).into_any_element());
+        if open && let Some(ed) = &self.editor {
+            let mut col = v_flex().gap_2().px_2().py_3();
+            match &ed.area {
+                Some(a) => col = col.child(Textarea::new(a)),
+                None if ed.error.is_none() => col = col.child(widgets::skeleton_rows(3, rems(1.5), cx)),
+                None => {}
             }
+            col = col
+                .when_some(ed.error.clone(), |c, e| c.child(div().text_sm().text_color(theme.danger).child(e)))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("settings-file-save")
+                                .primary()
+                                .small()
+                                .icon(IconName::Save)
+                                .label(if ed.force { "Save anyway" } else { "Save" })
+                                .disabled(ed.area.is_none() || ed.saving)
+                                .on_click(cx.listener(|this, _, window, cx| this.save_file(window, cx))),
+                        )
+                        .child(
+                            Button::new("settings-file-cancel")
+                                .ghost()
+                                .small()
+                                .label("Cancel")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.editor = None;
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            out.push(col.into_any_element());
         }
         out
     }

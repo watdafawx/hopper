@@ -136,22 +136,19 @@ fn target_of(install: Option<&hopper_core::java::JavaInstall>) -> Target {
 }
 
 /// What the Memory & Java page shows for these arguments: the generator's
-/// rows, clashes, the flags it doesn't cover and the command line the
-/// server would start with. Desktop shows the same rows and warnings.
+/// rows, clashes, the flags it doesn't cover and how the server would
+/// start (script line and args file). Desktop shows the same rows and warnings.
 fn jvm_view(e: &Entry, a: &JvmArgs, target: Target) -> Value {
     let line = a.args().iter().map(|f| hosting::jvm::quote(f)).collect::<Vec<_>>().join(" ");
     let o = Options::parse(&jvm_args::without_memory(&line));
-    let command = hosting::script::preview_launch(&e.root, a).ok().map(|l| {
-        std::iter::once(hosting::jvm::quote(&l.java.to_string_lossy()))
-            .chain(l.args.iter().map(|f| hosting::jvm::quote(f)))
-            .collect::<Vec<_>>()
-            .join(" ")
-    });
+    // The script's own line and the args file apart, as the files hold
+    // them, so the flags don't look written into both.
+    let start = hosting::script::start_preview(&e.root, a).ok();
     let explain: BTreeMap<String, String> =
         a.flags.iter().filter_map(|f| Some((f.clone(), jvm_args::explain(f)?))).collect();
     json!({
         "rows": o.rows(target), "conflicts": jvm_args::conflicts(&line, target), "extra": o.extra,
-        "command": command, "explain": explain,
+        "start": start, "explain": explain,
         "target": { "major": target.major, "graalvm": target.graalvm, "oracle": target.oracle },
     })
 }
