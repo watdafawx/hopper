@@ -336,6 +336,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "releases only offer Windows builds")]
     fn picks_the_exe_then_a_zip() {
         let a = [asset("hopper-setup.exe"), asset("hopper.zip"), asset("Hopper.exe")];
         assert_eq!(pick(&a).map(|(a, z)| (a.name.as_str(), z)), Some(("Hopper.exe", false)));
@@ -345,6 +346,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(windows), ignore = "releases only offer Windows builds")]
     fn skips_drafts_and_old_releases() {
         let r = |tag: &str, draft| GhRelease {
             tag_name: tag.into(),
