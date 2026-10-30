@@ -51,6 +51,7 @@ mod parity_mods;
 mod parity_overview;
 mod parity_worlds;
 mod router;
+mod rules;
 mod servers;
 mod server_ops;
 mod servers_admin;
@@ -438,6 +439,7 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
     });
 
     webhooks::watch(app.clone());
+    rules::start(app.clone());
     router::start(app.clone());
     if cfg.sftp_port != 0 {
         tokio::spawn(sftp::serve(app.clone(), cfg.bind.clone(), cfg.sftp_port));

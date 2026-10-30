@@ -96,7 +96,7 @@ fn save(app: &App, hooks: Vec<Hook>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn agent() -> &'static ureq::Agent {
+pub(crate) fn agent() -> &'static ureq::Agent {
     static A: OnceLock<ureq::Agent> = OnceLock::new();
     A.get_or_init(|| {
         ureq::Agent::config_builder()
@@ -157,6 +157,7 @@ pub fn emit(app: &Arc<App>, events: Vec<Event>) {
     for e in &events {
         log::info!("event {}: {}", e.event, e.text);
     }
+    crate::rules::on_events(app, &events);
     let hooks: Vec<Hook> = load(app).into_iter().filter(|h| h.enabled).collect();
     if hooks.is_empty() {
         return;
@@ -282,6 +283,7 @@ pub fn routes() -> Router<Arc<App>> {
         .merge(crate::backups_api::routes())
         .merge(crate::alerts::routes())
         .merge(crate::logs_api::routes())
+        .merge(crate::rules::routes())
         .route("/api/v1/webhooks", get(list).post(create))
         .route("/api/v1/webhooks/{id}", put(update).delete(remove))
         .route("/api/v1/webhooks/{id}/test", post(test))
