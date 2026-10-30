@@ -522,6 +522,46 @@ pub fn tab_selected<E: Styled>(el: E, cx: &App) -> E {
     el.text_color(theme.foreground).shadow(vec![BoxShadow::new(px(0.), px(-2.), theme.primary).inset()])
 }
 
+/// Tabs that switch what a dialog or panel shows, in the instance page's
+/// look: muted labels, the open one full-strength and underlined
+/// (`tab_selected`), each with an optional count after it ("Mods 1132").
+/// Choosing a value (Classic or Slim, a file format) stays a segmented
+/// control; these are for views.
+pub fn underline_tabs(
+    id: &str,
+    tabs: Vec<(SharedString, Option<usize>)>,
+    selected: usize,
+    on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    let (fg, muted) = (theme.foreground, theme.muted_foreground);
+    let on_pick = Rc::new(on_pick);
+    h_flex().gap_1().children(tabs.into_iter().enumerate().map(|(i, (label, count))| {
+        let pick = on_pick.clone();
+        h_flex()
+            .id(ElementId::Name(format!("{id}:{i}").into()))
+            .flex_none()
+            .gap_1p5()
+            .px_2()
+            .py_1p5()
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .clickable(cx)
+            .map(|t| if i == selected { tab_selected(t, cx) } else { t.text_color(muted).hover(move |s| s.text_color(fg)) })
+            .child(label)
+            .when_some(count, |t, n| t.child(div().text_xs().text_color(muted).child(n.to_string())))
+            .on_click(move |_, window, cx| pick(&i, window, cx))
+    }))
+}
+
+/// Buttons inside a clickable header that opens and closes its section
+/// (Restore, Delete, Open folder): their clicks stop here, so pressing
+/// one doesn't also fold or unfold the section.
+pub fn row_actions(id: impl Into<ElementId>) -> Stateful<Div> {
+    h_flex().id(id).flex_none().gap_2().on_click(|_, _, cx| cx.stop_propagation())
+}
+
 /// The focus ring: 2px in the theme's `ring` color, just inside the edge
 /// (an outer shadow would show through see-through elements as a fill).
 /// For a custom `.focus_visible(..)` style; `clickable` already adds it.

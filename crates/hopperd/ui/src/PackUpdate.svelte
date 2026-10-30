@@ -374,7 +374,7 @@
 
 {#snippet tools(tabs)}
   <div class="tools">
-    {#if tabs.length > 1}<div class="seg xs">{#each tabs as t, i (i)}<button class:on={filter === i} onclick={() => (filter = i)}>{t}</button>{/each}</div>{/if}
+    {#if tabs.length > 1}<div class="utabs" role="tablist">{#each tabs as t, i (i)}<button role="tab" aria-selected={filter === i} class:tab-sel={filter === i} onclick={() => (filter = i)}>{t}</button>{/each}</div>{/if}
     <span class="sp"></span>
     <div class="input find"><input placeholder="Search" bind:value={query} /></div>
   </div>
