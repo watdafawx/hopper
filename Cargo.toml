@@ -91,6 +91,10 @@ windows = { workspace = true, features = [
 [target.'cfg(not(windows))'.dependencies]
 keyring = { workspace = true, features = ["sync-secret-service", "apple-native"] }
 
+# MCP screenshots on Linux (X11 / XWayland); GPUI already uses this crate.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+
 [build-dependencies]
 winresource = "0.1"
 

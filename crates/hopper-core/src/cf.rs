@@ -876,13 +876,48 @@ pub fn modloader(name: &str) -> anyhow::Result<serde_json::Value> {
     Ok(get::<Data<serde_json::Value>>(&format!("/v1/minecraft/modloader/{name}"), &[])?.data)
 }
 
-/// Release Minecraft versions, newest first.
+/// Release Minecraft versions, newest first: CurseForge's list, or
+/// Mojang's when there is no CurseForge key (public builds have none) or
+/// CurseForge doesn't answer, so New instance still has versions to offer.
 pub fn minecraft_versions() -> anyhow::Result<Vec<String>> {
-    let v = get::<Data<Vec<GameVersion>>>("/v1/minecraft/version", &[])?.data;
-    Ok(v.into_iter()
-        .map(|v| v.version_string)
-        .filter(|s| s.chars().all(|c| c.is_ascii_digit() || c == '.'))
-        .collect())
+    let cf = if api_key().is_some() {
+        get::<Data<Vec<GameVersion>>>("/v1/minecraft/version", &[]).map(|d| {
+            d.data
+                .into_iter()
+                .map(|v| v.version_string)
+                .filter(|s| s.chars().all(|c| c.is_ascii_digit() || c == '.'))
+                .collect::<Vec<_>>()
+        })
+    } else {
+        Err(anyhow::anyhow!("no CurseForge key"))
+    };
+    match cf {
+        Ok(v) if !v.is_empty() => Ok(v),
+        Err(e) => mojang_release_versions().map_err(|m| e.context(m)),
+        Ok(_) => mojang_release_versions(),
+    }
+}
+
+/// Release versions from Mojang's version manifest, newest first.
+fn mojang_release_versions() -> anyhow::Result<Vec<String>> {
+    let m: serde_json::Value = agent()
+        .get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+        .call()?
+        .body_mut()
+        .with_config()
+        .limit(16 << 20)
+        .read_json()?;
+    Ok(parse_mojang_releases(&m))
+}
+
+fn parse_mojang_releases(m: &serde_json::Value) -> Vec<String> {
+    m["versions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["type"] == "release")
+        .filter_map(|v| v["id"].as_str().map(str::to_string))
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1278,6 +1313,18 @@ pub fn fetch_range(url: &str, start: u64, end: u64) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mojang_releases_only_newest_first() {
+        let m = serde_json::json!({ "versions": [
+            { "id": "25w44a", "type": "snapshot" },
+            { "id": "1.21.10", "type": "release" },
+            { "id": "1.21.10-rc1", "type": "snapshot" },
+            { "id": "1.21.9", "type": "release" },
+            { "id": "b1.7.3", "type": "old_beta" }
+        ]});
+        assert_eq!(parse_mojang_releases(&m), ["1.21.10", "1.21.9"]);
+    }
 
     fn some(k: &str) -> Option<String> {
         Some(k.to_string())
