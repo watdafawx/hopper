@@ -3,6 +3,7 @@
 //! file Hopper tails into a ring buffer; commands go through stdin. Hopper
 //! can restart (a self-update) and pick the server up again.
 
+use super::boot::{BOOT_FILE, Boot, BootHistory, BootRecord, BootStatus};
 use super::logparse::{LogEvent, parse_line};
 use super::script::{Launch, launch_command};
 use anyhow::{Context as _, bail};
@@ -82,12 +83,15 @@ pub struct Tracker {
     pub saving_at: Option<Instant>,
     /// When the console last said anything.
     pub heard_at: Option<Instant>,
+    /// How far the start has got.
+    pub boot: Boot,
 }
 
 impl Tracker {
     pub fn push(&mut self, line: String) {
         let now = Instant::now();
         self.heard_at = Some(now);
+        self.boot.push(&line, now);
         match parse_line(&line) {
             Some(LogEvent::Done) => self.done = true,
             Some(LogEvent::Joined(n)) => {
@@ -235,6 +239,10 @@ struct Shared {
     linger: Option<Duration>,
     /// [`StopWait::default`], shorter in tests.
     stop_wait: Option<StopWait>,
+    /// The last start, to time this one by.
+    boot_last: Option<BootRecord>,
+    /// This start's times are in `.hopper-boot.json`.
+    boot_saved: bool,
 }
 
 impl Shared {
@@ -245,6 +253,22 @@ impl Shared {
                 let _ = writeln!(f, "{line}");
             }
             None => self.tracker.push(line.to_string()),
+        }
+    }
+
+    /// Notes how long the start took, once it is done, for the next one.
+    fn save_boot(&mut self) {
+        if self.boot_saved {
+            return;
+        }
+        let Some(r) = self.tracker.boot.record() else {
+            return;
+        };
+        self.boot_saved = true;
+        let mut h = BootHistory::load(&self.root);
+        h.add(r);
+        if let Err(e) = h.save(&self.root) {
+            log::warn!("saving {BOOT_FILE}: {e}");
         }
     }
 
@@ -355,6 +379,19 @@ impl LocalServer {
     /// Players online, from joins and leaves (and `list` replies).
     pub fn players(&self) -> Vec<String> {
         self.lock().tracker.players.iter().cloned().collect()
+    }
+
+    /// How far the start has got, while the server is starting.
+    pub fn boot_status(&self) -> Option<BootStatus> {
+        let mut g = self.lock();
+        reap(&mut g);
+        let starting = state_of(g.proc.is_some(), g.tracker.done, g.stop_requested, g.exit) == ServerState::Starting;
+        starting.then(|| g.tracker.boot.status(Instant::now(), g.boot_last.as_ref()))
+    }
+
+    /// How long the last start took, in seconds.
+    pub fn usual_start_secs(&self) -> Option<u32> {
+        BootHistory::load(&self.root).last().map(|r| r.secs.round() as u32)
     }
 
     pub fn tracker(&self) -> Tracker {
@@ -481,7 +518,9 @@ impl LocalServer {
         let run = {
             let mut g = self.lock();
             g.run += 1;
-            g.tracker = Tracker::default();
+            g.tracker = Tracker { boot: Boot::starting(Instant::now()), ..Default::default() };
+            g.boot_last = BootHistory::load(&self.root).last().cloned();
+            g.boot_saved = false;
             g.stdin = Some(stdin_w);
             g.log = Some(log);
             g.pid = Some(pid);
@@ -527,7 +566,13 @@ impl LocalServer {
         let run = {
             let mut g = self.lock();
             g.run += 1;
-            g.tracker = Tracker::default();
+            // The console is read again from the top, all at once: the start
+            // began when the process did, but its steps' times are lost.
+            let ago = SystemTime::now().duration_since(UNIX_EPOCH + Duration::from_secs(info.started)).unwrap_or_default();
+            let began = Instant::now().checked_sub(ago).unwrap_or_else(Instant::now);
+            g.tracker = Tracker { boot: Boot::read_again(began), ..Default::default() };
+            g.boot_last = BootHistory::load(&self.root).last().cloned();
+            g.boot_saved = false;
             g.stdin = stdin;
             g.log = log;
             g.pid = Some(info.pid);
@@ -816,6 +861,7 @@ fn tail(path: PathBuf, shared: Arc<Mutex<Shared>>, run: u64) {
                     start += i + 1;
                 }
                 pending.drain(..start);
+                g.save_boot();
                 reap(&mut g);
                 let linger = g.linger.unwrap_or(LINGER_AFTER_STOP);
                 if g.proc.is_some() && g.tracker.saved_at.is_some_and(|t| t.elapsed() >= linger) {

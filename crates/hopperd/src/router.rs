@@ -332,6 +332,10 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
     let mut buf = buf.to_vec();
     let s = e.map(|e| settings(e)).unwrap_or_default();
     let name = e.map(|e| e.name.clone()).unwrap_or_default();
+    // How long a start takes: the last one the panel watched, else the
+    // router's own note of it.
+    let usual = e.and_then(|e| e.server.usual_start_secs()).or(s.last_start_secs);
+    let boot = e.and_then(|e| e.server.boot_status());
     if hs.is_login() {
         let player = read_until(sock, &mut buf, used, core::read_login_name).await.map(|(n, _)| n).unwrap_or_default();
         if kind == Standin::Sleeping
@@ -339,7 +343,7 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
         {
             match e.server.state() {
                 ServerState::Stopped => {}
-                _ => return kick(sock, &core::standin_kick(Standin::Starting, &name, None)).await,
+                _ => return kick(sock, &core::standin_kick(Standin::Starting, &name, None, e.server.boot_status().as_ref())).await,
             }
             match app.servers.act(e, PanelAction::Start) {
                 Ok(()) => {
@@ -357,7 +361,7 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                 }
             }
         }
-        return kick(sock, &core::standin_kick(kind, &name, s.last_start_secs)).await;
+        return kick(sock, &core::standin_kick(kind, &name, usual, boot.as_ref())).await;
     }
     // Server list: status request, then ping.
     let (_, after) = read_until(sock, &mut buf, used, |b| packet(b, 16)).await?;
@@ -369,7 +373,7 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
         None => (String::new(), 0),
     };
     let icon = e.and_then(|e| core::favicon(&e.root));
-    sock.write_all(&core::status_packet(&core::standin_status(kind, &motd, s.last_start_secs, max, icon.as_deref()))).await?;
+    sock.write_all(&core::status_packet(&core::standin_status(kind, &motd, usual, max, icon.as_deref(), boot.as_ref()))).await?;
     if let Ok(((1, payload), _)) = read_until(sock, &mut buf, after, |b| packet(b, 64)).await {
         sock.write_all(&core::pong_packet(&payload)).await?;
     }

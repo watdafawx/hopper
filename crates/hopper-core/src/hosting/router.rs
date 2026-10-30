@@ -11,6 +11,7 @@
 
 use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
+use super::boot::{BootStatus, StepState, short_time};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -368,9 +369,57 @@ pub fn wake_estimate(last_start_secs: Option<u32>) -> String {
     }
 }
 
+/// Bars in the server list's progress bar. "|" is 2 px wide in Minecraft's
+/// font and crisp; block characters fall back to the blurry unicode font.
+const BAR: usize = 40;
+const NO_ID: &str = "00000000-0000-0000-0000-000000000000";
+
+/// A start's line in the server list: bar, percent, what it is doing.
+fn boot_line(b: &BootStatus) -> Vec<Value> {
+    let color = if b.slow { "gold" } else { "aqua" };
+    let filled = (b.percent as usize * BAR + 50) / 100;
+    vec![
+        json!({ "text": "|".repeat(filled), "color": color }),
+        json!({ "text": "|".repeat(BAR - filled), "color": "dark_gray" }),
+        json!({ "text": format!(" {}%", b.percent), "color": color }),
+        json!({ "text": format!(" {}", b.label), "color": "gray" }),
+    ]
+}
+
+/// The right-hand label of a starting server (the client shows it in red
+/// unless it carries its own colour code).
+fn boot_label(b: &BootStatus) -> String {
+    match b.left_secs {
+        _ if b.slow => "§6Taking longer".into(),
+        Some(l) => format!("§b~{} left", short_time(l)),
+        None => format!("§bStarting {}%", b.percent),
+    }
+}
+
+/// The lines shown on hovering the label: the steps and the times.
+fn boot_hover(b: &BootStatus) -> Vec<String> {
+    let mut out: Vec<String> = b
+        .steps
+        .iter()
+        .map(|s| match s.state {
+            StepState::Done => format!("§a✔ {}", s.label),
+            StepState::Now => format!("{}▶ {}", if b.slow { "§6" } else { "§b" }, s.label),
+            StepState::Next => format!("§8· {}", s.label),
+        })
+        .collect();
+    let so_far = format!("{} so far", short_time(b.elapsed_secs));
+    out.push(match (b.slow, b.left_secs, b.usual_secs) {
+        (true, _, Some(u)) => format!("§6{so_far} · taking longer than usual ({})", short_time(u)),
+        (_, Some(l), Some(u)) => format!("§7{so_far} · about {} left (usually {})", short_time(l), short_time(u)),
+        _ => format!("§7{so_far} · first start: no estimate yet"),
+    });
+    out
+}
+
 /// The server list entry for a server that isn't up. Protocol -1 makes the
-/// client show `version` (in red) where the ping bars go.
-pub fn standin_status(kind: Standin, motd: &str, last_start_secs: Option<u32>, max_players: u32, favicon: Option<&str>) -> Value {
+/// client show `version` (in red) where the ping bars go. A starting server
+/// shows how far it has got (`boot`); players see it again on Refresh.
+pub fn standin_status(kind: Standin, motd: &str, last_start_secs: Option<u32>, max_players: u32, favicon: Option<&str>, boot: Option<&BootStatus>) -> Value {
     let (label, color, rest) = match kind {
         Standin::Sleeping => ("Sleeping", "yellow", format!("join to wake it ({})", wake_estimate(last_start_secs))),
         Standin::Stopped => ("Offline", "gray", "the server is stopped".into()),
@@ -380,13 +429,23 @@ pub fn standin_status(kind: Standin, motd: &str, last_start_secs: Option<u32>, m
         Standin::Crashed => ("Crashed", "red", "the owner has been told".into()),
         Standin::Unknown => ("No server at this address", "red", "check the address with whoever runs the server".into()),
     };
-    let mut extra = vec![json!({ "text": format!("● {label}"), "color": color }), json!({ "text": format!(" · {rest}"), "color": "gray" })];
+    let boot = boot.filter(|_| kind == Standin::Starting);
+    let mut extra = match boot {
+        Some(b) => boot_line(b),
+        None => vec![json!({ "text": format!("● {label}"), "color": color }), json!({ "text": format!(" · {rest}"), "color": "gray" })],
+    };
     if !motd.trim().is_empty() && kind != Standin::Unknown {
         extra.insert(0, json!({ "text": format!("{}\n", first_line(motd)), "color": "white" }));
     }
+    let version = match boot {
+        Some(b) => boot_label(b),
+        None if kind == Standin::Starting => "Starting".into(),
+        None => label.to_string(),
+    };
+    let sample: Vec<Value> = boot.map(boot_hover).unwrap_or_default().into_iter().map(|name| json!({ "name": name, "id": NO_ID })).collect();
     let mut v = json!({
-        "version": { "name": if kind == Standin::Starting { "Starting" } else { label }, "protocol": -1 },
-        "players": { "max": max_players, "online": 0 },
+        "version": { "name": version, "protocol": -1 },
+        "players": { "max": max_players, "online": 0, "sample": sample },
         "description": { "text": "", "extra": extra },
     });
     if let Some(f) = favicon {
@@ -396,8 +455,17 @@ pub fn standin_status(kind: Standin, motd: &str, last_start_secs: Option<u32>, m
 }
 
 /// What a player joining a server that isn't up is told.
-pub fn standin_kick(kind: Standin, name: &str, last_start_secs: Option<u32>) -> Value {
+pub fn standin_kick(kind: Standin, name: &str, last_start_secs: Option<u32>, boot: Option<&BootStatus>) -> Value {
     let (head, color, rest) = match kind {
+        Standin::Starting if let Some(b) = boot => (
+            format!("{name} is starting: {}%, {}.", b.percent, b.label.to_lowercase()),
+            if b.slow { "gold" } else { "aqua" },
+            match b.left_secs {
+                _ if b.slow => "It's taking longer than usual. Join again in a moment.".into(),
+                Some(l) => format!("About {} left. Join again then.", short_time(l)),
+                None => "Join again in a moment.".into(),
+            },
+        ),
         Standin::Sleeping => (format!("Waking up {name}…"), "yellow", format!("It usually takes {}. Join again then.", wake_estimate(last_start_secs))),
         Standin::Starting => (format!("{name} is starting."), "aqua", "Join again in a moment.".into()),
         Standin::Stopping => (format!("{name} is stopping."), "gold", "Try again in a minute.".into()),
@@ -504,15 +572,49 @@ mod tests {
 
     #[test]
     fn standins_say_what_is_going_on() {
-        let s = standin_status(Standin::Sleeping, "§aMy §lSMP\\nline two", Some(130), 20, None);
+        let s = standin_status(Standin::Sleeping, "§aMy §lSMP\\nline two", Some(130), 20, None, None);
         assert_eq!(s["version"]["protocol"], -1);
         let text = s["description"]["extra"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect::<String>();
         assert_eq!(text, "My SMP\n● Sleeping · join to wake it (about 2 min)");
-        let k = standin_kick(Standin::Sleeping, "ATM10", None).to_string();
+        let k = standin_kick(Standin::Sleeping, "ATM10", None, None).to_string();
         assert!(k.contains("Waking up ATM10") && k.contains("a minute or two"), "{k}");
         assert_eq!(wake_estimate(Some(20)), "under a minute");
-        let u = standin_status(Standin::Unknown, "ignored", None, 0, None).to_string();
+        let u = standin_status(Standin::Unknown, "ignored", None, 0, None, None).to_string();
         assert!(u.contains("No server at this address") && !u.contains("ignored"));
+    }
+
+    #[test]
+    fn starting_servers_show_their_progress() {
+        use crate::hosting::boot::{Boot, BootRecord};
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut b = Boot::starting(t0);
+        b.push("[00:00:01] [main/INFO] [Launcher/MODLAUNCHER]: ModLauncher running: args []", t0 + Duration::from_secs(1));
+        b.push("[00:00:20] [main/INFO] [x/]: Launching target 'forgeserver' with arguments [nogui]", t0 + Duration::from_secs(20));
+        let last = BootRecord { secs: 100.0, marks: vec![Some(0.0), Some(1.0), Some(5.0), Some(20.0), Some(60.0), Some(90.0), Some(95.0)], mods: None };
+        let st = b.status(t0 + Duration::from_secs(40), Some(&last));
+        assert_eq!((st.percent, st.left_secs), (40, Some(60)));
+        let s = standin_status(Standin::Starting, "My Pack", None, 20, None, Some(&st));
+        let text = s["description"]["extra"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect::<String>();
+        assert_eq!(text, format!("My Pack\n{}{} 40% Loading mods", "|".repeat(16), "|".repeat(24)));
+        assert_eq!(s["version"]["name"], "§b~1m left");
+        let hover: Vec<_> = s["players"]["sample"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(hover.first().map(String::as_str), Some("§a✔ Starting Java"));
+        assert!(hover.contains(&"§b▶ Loading mods".to_string()), "{hover:?}");
+        assert!(hover.contains(&"§8· Loading data".to_string()), "{hover:?}");
+        assert_eq!(hover.last().unwrap(), "§740s so far · about 1m left (usually 1m 40s)");
+        let k = standin_kick(Standin::Starting, "ATM10", None, Some(&st)).to_string();
+        assert!(k.contains("ATM10 is starting: 40%, loading mods.") && k.contains("About 1m left"), "{k}");
+        // No progress (up, but not answering yet): as before.
+        let s = standin_status(Standin::Starting, "", None, 20, None, None);
+        assert_eq!(s["version"]["name"], "Starting");
+        // Past the last start's time.
+        let slow = b.status(t0 + Duration::from_secs(400), Some(&last));
+        let s = standin_status(Standin::Starting, "", None, 20, None, Some(&slow));
+        assert_eq!(s["version"]["name"], "§6Taking longer");
+        // Other kinds ignore a stray progress.
+        let s = standin_status(Standin::Sleeping, "", None, 20, None, Some(&st));
+        assert_eq!(s["version"]["name"], "Sleeping");
     }
 
     #[test]

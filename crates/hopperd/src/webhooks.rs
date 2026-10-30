@@ -440,6 +440,7 @@ mod tests {
             max_players: 0,
             uptime_secs: None,
             saving: false,
+            boot: None,
             addresses: Vec::new(),
             address_default: false,
             sleep_after_minutes: 0,
