@@ -422,6 +422,12 @@ pub struct Client {
     agent: ureq::Agent,
     /// For file transfers, which take as long as they take.
     slow: ureq::Agent,
+    /// With a pinned CA: the same two agents checking with the web roots,
+    /// for when the panel answers with a Let's Encrypt certificate (its
+    /// automatic certificate, served to the internet by IP or name).
+    web: Option<std::sync::OnceLock<(ureq::Agent, ureq::Agent)>>,
+    /// The last answer came with the web roots, so start with them.
+    on_web: std::sync::atomic::AtomicBool,
 }
 
 /// The reply's JSON, or its `error` as the error.
@@ -447,6 +453,8 @@ impl Client {
             // No limit on the reply: the panel answers a chunk once it's
             // written, and a download as long as it takes.
             slow: agent_timed(&base, CONNECT_WAIT, None, Duration::from_secs(3600), &trust),
+            web: matches!(trust, Trust::Pinned(_)).then(std::sync::OnceLock::new),
+            on_web: Default::default(),
             base,
             panel: String::new(),
             token: token.to_string(),
@@ -500,24 +508,58 @@ impl Client {
         format!("Bearer {}", self.token)
     }
 
+    /// [`send`] with this panel's agent (`slow` for file transfers). A
+    /// pinned panel may answer with its Let's Encrypt certificate instead
+    /// of its own (from the internet, by its public IP or name), or the
+    /// other way round when that's switched off: a certificate the one
+    /// check refuses is tried with the other, which is kept for next time.
+    fn send_via(
+        &self,
+        slow: bool,
+        f: impl Fn(&ureq::Agent) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let pick = |web: bool| -> &ureq::Agent {
+            match (&self.web, web) {
+                (Some(w), true) => {
+                    let (a, s) = w.get_or_init(|| {
+                        (
+                            agent_with(&self.base, &Trust::Web),
+                            agent_timed(&self.base, CONNECT_WAIT, None, Duration::from_secs(3600), &Trust::Web),
+                        )
+                    });
+                    if slow { s } else { a }
+                }
+                _ => if slow { &self.slow } else { &self.agent },
+            }
+        };
+        let web = self.on_web.load(Relaxed);
+        match send(&self.base, true, || f(pick(web))) {
+            Err(e) if self.web.is_some() && cert_rejected(&e) => match send(&self.base, true, || f(pick(!web))) {
+                Ok(r) => {
+                    self.on_web.store(!web, Relaxed);
+                    Ok(r)
+                }
+                Err(_) => Err(e),
+            },
+            r => r,
+        }
+    }
+
     pub fn get(&self, path: &str) -> anyhow::Result<Value> {
-        reply(send(&self.base, true, || self.agent.get(&self.url(path)).header("Authorization", &self.auth()).call()))
+        reply(self.send_via(false, |a| a.get(&self.url(path)).header("Authorization", &self.auth()).call()))
     }
 
     pub fn post(&self, path: &str, body: Value) -> anyhow::Result<Value> {
-        reply(send(&self.base, true, || {
-            self.agent.post(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)
-        }))
+        reply(self.send_via(false, |a| a.post(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)))
     }
 
     pub fn put(&self, path: &str, body: Value) -> anyhow::Result<Value> {
-        reply(send(&self.base, true, || {
-            self.agent.put(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)
-        }))
+        reply(self.send_via(false, |a| a.put(&self.url(path)).header("Authorization", &self.auth()).send_json(&body)))
     }
 
     pub fn delete(&self, path: &str) -> anyhow::Result<Value> {
-        reply(send(&self.base, true, || self.agent.delete(&self.url(path)).header("Authorization", &self.auth()).call()))
+        reply(self.send_via(false, |a| a.delete(&self.url(path)).header("Authorization", &self.auth()).call()))
     }
 
     /// Unpairs this PC in the panel, so it leaves Access & devices and the
@@ -690,8 +732,8 @@ impl Client {
         loop {
             let n = read_full(&mut f, &mut buf)?;
             let url = self.url(&format!("/fs/{}/uploads/{up}?offset={offset}", enc(id)));
-            let v = reply(send(&self.base, true, || {
-                self.slow
+            let v = reply(self.send_via(true, |slow| {
+                slow
                     .put(&url)
                     .header("Authorization", &self.auth())
                     .content_type("application/octet-stream")
@@ -707,7 +749,7 @@ impl Client {
     /// Downloads `rel` from the server folder to `local`.
     pub fn download(&self, id: &str, rel: &str, local: &Path) -> anyhow::Result<()> {
         let url = self.url(&format!("/fs/{}/file?path={}", enc(id), enc(rel)));
-        let mut resp = send(&self.base, true, || self.slow.get(&url).header("Authorization", &self.auth()).call())?;
+        let mut resp = self.send_via(true, |slow| slow.get(&url).header("Authorization", &self.auth()).call())?;
         if !resp.status().is_success() {
             let text = resp.body_mut().read_to_string().unwrap_or_default();
             let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -966,6 +1008,10 @@ pub struct HelloTls {
     pub fingerprint: String,
     pub ca: String,
     pub domain: Option<String>,
+    /// The panel's address with a Let's Encrypt certificate (`https://…`,
+    /// port 443), while it has one.
+    #[serde(default)]
+    pub trusted: Option<String>,
 }
 
 /// The panel's name, version and certificate authority. Unverified: only
@@ -988,7 +1034,39 @@ fn hello_at(base: &str, connect: Duration) -> anyhow::Result<Hello> {
 /// [`hello`] for a typed address, trying each of [`candidates`]: the
 /// address that answered (port included) and what it said.
 pub fn find(url: &str) -> anyhow::Result<(String, Hello)> {
-    first_reachable(url, hello_at)
+    let (base, h) = first_reachable(url, hello_at)?;
+    // Reached by a public IP while the panel has a trusted name for it: use
+    // that name when it answers, so what's saved works like any website.
+    if let Some(t) = h.tls.as_ref().and_then(|t| t.trusted.as_deref()).filter(|t| prefer_trusted(&base, t)) {
+        let t = trusted_base(t);
+        if let Ok(h2) = hello_at(&t, PROBE_WAIT)
+            && h2.tls.as_ref().map(|x| &x.fingerprint) == h.tls.as_ref().map(|x| &x.fingerprint)
+        {
+            return Ok((t, h2));
+        }
+    }
+    Ok((base, h))
+}
+
+/// Whether to move from `base` to the panel's trusted address: only from a
+/// public IP (a LAN, Tailscale or named address stays as typed).
+fn prefer_trusted(base: &str, trusted: &str) -> bool {
+    let host = base.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, p)| if p.chars().all(|c| c.is_ascii_digit()) { h } else { host });
+    let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() else { return false };
+    let public = match ip {
+        std::net::IpAddr::V4(v) => !(v.is_private() || v.is_loopback() || v.is_link_local() || matches!(v.octets(), [100, 64..=127, ..])),
+        std::net::IpAddr::V6(v) => (v.segments()[0] & 0xe000) == 0x2000,
+    };
+    public && trusted_base(trusted) != base_url(base)
+}
+
+/// The trusted address names no port: it's 443, where Let's Encrypt checked it.
+fn trusted_base(trusted: &str) -> String {
+    let t = trusted.trim().trim_end_matches('/');
+    let host = t.split("://").nth(1).unwrap_or(t);
+    let has_port = host.rsplit_once(':').is_some_and(|(h, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) && (!h.contains(':') || h.ends_with(']')));
+    base_url(&if has_port { t.to_string() } else { format!("{t}:443") })
 }
 
 /// A pairing request waiting for the owner.
@@ -1361,6 +1439,18 @@ mod tests {
         assert_eq!(web_url(&root.join("mods")).unwrap(), "http://rig:8790/#/server/web-test/files/mods");
         assert_eq!(web_url(&root).unwrap(), "http://rig:8790/#/server/web-test/files");
         assert!(web_url(Path::new(r"C:\x")).is_none());
+    }
+
+    #[test]
+    fn a_public_ip_moves_to_the_trusted_address() {
+        assert!(prefer_trusted("https://81.2.69.160:8790", "https://81-2-69-160.sslip.io"));
+        assert!(prefer_trusted("https://81.2.69.160:8790", "https://81.2.69.160"));
+        assert!(!prefer_trusted("https://192.168.50.3:8790", "https://81-2-69-160.sslip.io"));
+        assert!(!prefer_trusted("https://100.101.102.103:8790", "https://81-2-69-160.sslip.io"));
+        assert!(!prefer_trusted("https://hopper.example.com", "https://81-2-69-160.sslip.io"));
+        assert!(!prefer_trusted("https://81.2.69.160:443", "https://81.2.69.160"));
+        assert_eq!(trusted_base("https://81-2-69-160.sslip.io"), "https://81-2-69-160.sslip.io:443");
+        assert_eq!(trusted_base("https://[2a01:4f8::1]"), "https://[2a01:4f8::1]:443");
     }
 
     #[test]

@@ -90,14 +90,21 @@ fn forwarded_for(headers: &axum::http::HeaderMap) -> Option<IpAddr> {
     }
 }
 
+/// TLS settings by where the client is: an IP certificate from Let's
+/// Encrypt only goes to clients on the internet (see [`crate::tls::Resolver`]).
+pub struct Tls {
+    pub lan: Arc<rustls::ServerConfig>,
+    pub internet: Arc<rustls::ServerConfig>,
+}
+
 /// Serves `router` on `listener` until `shutdown` resolves.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     router: axum::Router,
-    tls: Arc<rustls::ServerConfig>,
+    tls: Tls,
     shutdown: impl std::future::Future<Output = ()>,
 ) {
-    let acceptor = tokio_rustls::TlsAcceptor::from(tls);
+    let (lan, internet) = (tokio_rustls::TlsAcceptor::from(tls.lan), tokio_rustls::TlsAcceptor::from(tls.internet));
     tokio::pin!(shutdown);
     loop {
         let (stream, addr) = tokio::select! {
@@ -112,7 +119,8 @@ pub async fn serve(
             _ = &mut shutdown => return,
         };
         let _ = stream.set_nodelay(true);
-        let (acceptor, router) = (acceptor.clone(), router.clone());
+        let acceptor = if Net::of(addr.ip()).private() { lan.clone() } else { internet.clone() };
+        let router = router.clone();
         tokio::spawn(async move {
             let mut first = [0u8; 1];
             let is_tls = match tokio::time::timeout(Duration::from_secs(15), stream.peek(&mut first)).await {
@@ -122,7 +130,7 @@ pub async fn serve(
             if is_tls {
                 match tokio::time::timeout(Duration::from_secs(15), acceptor.accept(stream)).await {
                     // Let's Encrypt's check only needs the handshake.
-                    Ok(Ok(s)) if s.get_ref().1.alpn_protocol() == Some(rustls_acme::acme::ACME_TLS_ALPN_NAME) => {}
+                    Ok(Ok(s)) if s.get_ref().1.alpn_protocol() == Some(crate::acme::ALPN) => {}
                     Ok(Ok(s)) => serve_conn(TokioIo::new(s), router, addr, true).await,
                     Ok(Err(e)) => log::debug!("TLS from {addr}: {e}"),
                     Err(_) => {}

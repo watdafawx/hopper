@@ -3,9 +3,9 @@
 //! at every start, naming this machine's current addresses. Hopper desktop
 //! pins the CA when it pairs, so a new IP or hostname never breaks it.
 //!
-//! With a domain set (and port 443 reaching the panel), Let's Encrypt
-//! certificates come from ACME (TLS-ALPN-01) and are served to clients
-//! asking for that name; everyone else gets the panel's own certificate.
+//! With automatic certificates on (see [`crate::acme`]), a Let's Encrypt
+//! certificate for the domain, public IP or sslip.io name is served to
+//! clients it covers; everyone else gets the panel's own certificate.
 
 use anyhow::Context as _;
 use rcgen::{
@@ -111,13 +111,17 @@ pub fn issue(ca: &Ca, names: &[String], ips: &[IpAddr]) -> anyhow::Result<Certif
     Ok(CertifiedKey::new(chain, signing))
 }
 
-/// Picks the certificate for a connection: Let's Encrypt's for the public
-/// domain, the panel's own for everything else.
+/// Picks the certificate for a connection: Let's Encrypt's where it covers
+/// the connection, the panel's own for everything else.
 #[derive(Debug)]
 pub struct Resolver {
     /// Swapped when this machine's addresses change (see [`OwnCert`]).
     pub own: OwnCert,
-    pub acme: Option<(String, Arc<rustls_acme::ResolvesServerCertAcme>)>,
+    pub acme: Arc<crate::acme::Acme>,
+    /// The client is on the internet (not this PC, the LAN or Tailscale).
+    /// An IP certificate goes only to them: LAN clients connect by a LAN
+    /// address it doesn't name.
+    pub internet: bool,
 }
 
 /// The panel's own certificate, re-issued when the machine's addresses
@@ -126,11 +130,11 @@ pub type OwnCert = Arc<std::sync::RwLock<Arc<CertifiedKey>>>;
 
 impl ResolvesServerCert for Resolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        if let Some((domain, acme)) = &self.acme
-            && (hello.server_name().is_some_and(|n| n.eq_ignore_ascii_case(domain))
-                || hello.alpn().is_some_and(|mut a| a.any(|p| p == rustls_acme::acme::ACME_TLS_ALPN_NAME)))
-        {
-            return acme.resolve(hello);
+        if hello.alpn().is_some_and(|mut a| a.any(|p| p == crate::acme::ALPN)) {
+            return self.acme.alpn_cert(hello.server_name());
+        }
+        if let Some(c) = self.acme.cert_for(hello.server_name(), self.internet) {
+            return Some(c);
         }
         Some(self.own.read().unwrap_or_else(|e| e.into_inner()).clone())
     }
@@ -145,7 +149,7 @@ pub fn server_config(resolver: Resolver) -> Arc<rustls::ServerConfig> {
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(resolver));
     let mut alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    alpn.push(rustls_acme::acme::ACME_TLS_ALPN_NAME.to_vec());
+    alpn.push(crate::acme::ALPN.to_vec());
     c.alpn_protocols = alpn;
     Arc::new(c)
 }

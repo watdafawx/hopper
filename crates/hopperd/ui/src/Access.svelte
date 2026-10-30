@@ -4,6 +4,7 @@
   // Settings › Access & devices (owner), or Settings › Account. The other
   // panel settings have their own categories (PanelSettings.svelte).
   import Security from './Security.svelte';
+  import Certificate from './Certificate.svelte';
   import { confirmIt } from './lib/dialog.svelte.js';
   import { pathKind } from './lib/format.js';
 
@@ -98,9 +99,10 @@
         <div class="fp sftp"><FolderTree size={13} /><div><div class="tiny muted">SFTP (FileZilla, WinSCP) on port <b class="txt">{hello.sftp.port}</b>: your name and password from the LAN or Tailscale, or an API token as the password from anywhere. Host key</div>
           <div class="mono tiny">{hello.sftp.fingerprint}</div></div></div>
       {/if}
-      <p class="tiny muted note">Plain HTTP works from this PC, the LAN and Tailscale; from the internet only HTTPS, and signing in needs two-factor. Browsers warn about the panel's own certificate; set a domain (<span class="mono">acme_domain</span> in hopperd.toml, port 443 forwarded) for a Let's Encrypt one. Announced on the LAN as <span class="mono">_hopperd._tcp</span>.</p>
+      <p class="tiny muted note">Plain HTTP works from this PC, the LAN and Tailscale; from the internet only HTTPS, and signing in needs two-factor. Browsers warn about the panel's own certificate; turn on a trusted one below. Announced on the LAN as <span class="mono">_hopperd._tcp</span>.</p>
     </div>
 
+    <Certificate port={hello.port} />
 
     <div class="card wide">
       <h3><MonitorSmartphone size={14} />Paired devices</h3>
