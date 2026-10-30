@@ -6,14 +6,13 @@
   // list), or Settings with its own category list.
   import { onMount, onDestroy } from 'svelte';
   import {
-    LayoutDashboard, Compass, ChevronLeft, ChevronRight, Search, RefreshCw, Settings as Gear, LogOut, Wifi, WifiOff, Globe,
-    Waypoints, Plus, Play, Square, RotateCw, Server, Terminal, Folder, Puzzle, Earth, Users, Archive, CalendarClock, SlidersHorizontal,
+    LayoutDashboard, Compass, ChevronLeft, ChevronRight, Search, RefreshCw, Settings as Gear, LogOut,
+    Plus, Play, Square, RotateCw, Server, Terminal, Folder, Puzzle, Earth, Users, Archive, CalendarClock, SlidersHorizontal,
     CircleCheck, CircleAlert, FolderOpen, X as Close,
   } from '@lucide/svelte';
   import { boot } from './lib/boot.svelte.js';
   import { api, post } from './lib/api.js';
   import { live, connect, disconnect, startPing } from './lib/live.svelte.js';
-  import { routeKind } from './lib/format.js';
   import { toast, say, hush } from './lib/toast.svelte.js';
   import { power } from './lib/power.js';
   import Overview from './Overview.svelte';
@@ -29,6 +28,7 @@
   import { leave } from './lib/leave.js';
   import Dialog from './Dialog.svelte';
   import Transfers from './Transfers.svelte';
+  import StatusBar from './StatusBar.svelte';
   import { refreshPackUpdates } from './lib/packs.svelte.js';
   import VersionChip from './VersionChip.svelte';
   import PanelVersions from './PanelVersions.svelte';
@@ -110,8 +110,6 @@
   const serverId = $derived(page === 'server' ? segs[0] : null);
   const tab = $derived(page === 'server' ? segs[1] || 'console' : null);
   const subpath = $derived(page === 'server' ? segs.slice(2).join('/') : '');
-  const kind = $derived(routeKind(live.via));
-  const PathIcon = $derived({ LAN: Wifi, Local: Wifi, Tailscale: Waypoints, Internet: Globe }[kind]);
   const NAV = [
     { id: 'overview', label: 'Overview', icon: LayoutDashboard, to: '/' },
     { id: 'browse', label: 'Browse', icon: Compass, to: '/browse' },
@@ -310,10 +308,6 @@
       {#if pending.length && settingsCat !== 'access'}
         <button class="chip acc pair" onclick={() => go('/settings/access')}>{pending[0].device} wants to pair</button>
       {/if}
-      <span class="conn" class:off={!live.connected} title="How this browser reaches the panel{live.ping != null && live.connected ? ` · ${live.ping} ms` : ''}">
-        {#if live.connected}<PathIcon size={13} />{:else}<WifiOff size={13} />{/if}
-        <span class="ct">{#if location.protocol === 'https:'}🔒 {/if}{live.connected ? kind : 'Reconnecting…'}</span>
-      </span>
       {#if owner}<Tasks />{/if}
       <div class="track">
         <button class="btn ghost sm" title="Search or run a command (Ctrl+K)" onclick={openPalette}><Search size={14} /><span class="kl">Ctrl K</span></button>
@@ -365,6 +359,7 @@
       {/if}
     </main>
   </div>
+  <StatusBar />
 </div>
 
 {#if making}<NewServer close={() => (making = false)} />{/if}
@@ -401,8 +396,6 @@
   .track .btn { position: relative; }
   .kl { color: var(--muted); font-size: 11.5px; }
   .pdot { position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--acc); }
-  .conn { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
-  .conn.off { color: var(--gold); }
   .account { position: relative; }
   .who { display: flex; align-items: center; gap: 8px; padding: 2px 4px 2px 8px; border-radius: var(--radius); }
   .who .nm { font-size: 11.5px; font-weight: 600; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -414,7 +407,7 @@
   .content { flex: 1; min-width: 0; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
   @media (max-width: 760px) {
     .tbar { gap: 8px; padding: 0 8px; overflow-x: auto; }
-    .bname, .host, .arrows, .conn, .pair, .kl, .who .nm, .tab span { display: none; }
+    .bname, .host, .arrows, .pair, .kl, .who .nm, .tab span { display: none; }
     .tbar { scrollbar-width: none; }
     .tab { padding: 0 9px; }
     .body { flex-direction: column; }
