@@ -73,6 +73,11 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 
 /// The release's Windows download: an .exe named like Hopper, else a zip.
 fn pick(assets: &[GhAsset]) -> Option<(&GhAsset, bool)> {
+    // Releases carry only Windows builds so far; one installed over a Linux
+    // or macOS Hopper would leave it unable to start.
+    if !cfg!(windows) {
+        return None;
+    }
     let named = |a: &&GhAsset| a.name.to_lowercase().contains("hopper");
     let ext = |a: &GhAsset, e: &str| a.name.to_lowercase().ends_with(e);
     assets
