@@ -129,9 +129,21 @@ pub fn loader_string(name: &str, version: &str) -> String {
 
 /// Where a launcher keeps its instances on this PC, when it's installed.
 pub fn default_dir(kind: Kind) -> Option<PathBuf> {
-    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    #[cfg(windows)]
+    let (appdata, local, home) = (
+        std::env::var_os("APPDATA").map(PathBuf::from),
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
+    );
+    // Off Windows the launchers use the user's data folder
+    // (~/.local/share, or Application Support on macOS) where Windows
+    // has %APPDATA%.
+    #[cfg(not(windows))]
+    let (appdata, local, home) = {
+        let base = directories::BaseDirs::new();
+        let data = base.as_ref().map(|b| b.data_dir().to_path_buf());
+        (data.clone(), data, base.map(|b| b.home_dir().to_path_buf()))
+    };
     let candidates: Vec<PathBuf> = match kind {
         Kind::Modrinth => appdata
             .iter()
