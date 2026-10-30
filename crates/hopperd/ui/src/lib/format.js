@@ -83,3 +83,9 @@ export function pathKind(host = location.hostname) {
   if (TAILSCALE.some((r) => r.test(host))) return 'Tailscale';
   return 'Internet';
 }
+
+/** How healthy a TPS reading is: 20 is full speed, under 15 players
+ * notice, under 10 it's badly lagging. */
+export function tpsLevel(tps) {
+  return tps >= 15 ? 'good' : tps >= 10 ? 'warn' : 'bad';
+}

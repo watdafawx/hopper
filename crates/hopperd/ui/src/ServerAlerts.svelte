@@ -7,6 +7,7 @@
   import ShareLog from './ShareLog.svelte';
   import { alerts, alertsFor, watchAlerts, dismissAlert, refreshAlerts } from './lib/alerts.svelte.js';
   import { post } from './lib/api.js';
+  import { tpsLevel } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
 
   let { server, part = 'chip' } = $props();
@@ -16,6 +17,14 @@
   const low = $derived(alerts.active.some((a) => a.server_id === id && a.kind === 'tps'));
   const shown = $derived(alertsFor(id).filter((a) => !a.dismissed));
   const why = $derived(alerts.no_tps[id]);
+  // A low-TPS alert colours it red even while a reading drifts back up.
+  const level = $derived(low ? 'bad' : tps ? tpsLevel(tps.tps) : '');
+  const WHY = {
+    rcon_off: 'TPS needs RCON: turn it on in the server’s Live card, or for every server in Settings › Alerts.',
+    restart: 'RCON is set up and starts with the server’s next restart. TPS shows then.',
+    unsupported: 'No cheap way to read TPS on this loader (add spark to get it).',
+    slow: 'The server didn’t answer within 20 seconds: it’s lagging hard (each tick is taking seconds).',
+  };
   let turning = $state(false);
   let sharing = $state(false);
 
@@ -39,7 +48,9 @@
 
 {#if part === 'chip'}
   {#if running && tps}
-    <span class="chip" class:warn={tps.tps < 18} class:bad={low} title={tps.mspt != null ? `${tps.mspt.toFixed(1)} ms a tick` : 'Ticks per second'}>TPS {tps.tps.toFixed(1)}</span>
+    <span class="chip tps {level}" title={tps.mspt != null ? `${tps.mspt.toFixed(1)} ms a tick` : 'Ticks per second'}>TPS {tps.tps.toFixed(1)}</span>
+  {:else if running}
+    <span class="chip tps" title={WHY[why] || 'Reading TPS…'}>TPS —</span>
   {/if}
 {:else if part === 'banner'}
   {#each shown as a (a.kind + a.server_id + a.since)}
@@ -55,7 +66,8 @@
 {:else if part === 'live'}
   {#if running}
     <div class="t gap">TPS
-      {#if tps}<b class:w={tps.tps < 18} class:r={low}>{tps.tps.toFixed(1)}{tps.mspt != null ? ` · ${tps.mspt.toFixed(1)} ms` : ''}</b>
+      {#if tps}<b class:w={level === 'warn'} class:r={level === 'bad'}>{tps.tps.toFixed(1)}{tps.mspt != null ? ` · ${tps.mspt.toFixed(1)} ms` : ''}</b>
+      {:else if why === 'restart'}<b class="muted" title={WHY.restart}>RCON on next restart</b>
       {:else if why === 'rcon_off'}<button class="lnk" disabled={turning} onclick={rcon} title="Gives it a random RCON password; takes effect at the next restart">Turn on RCON to see it</button>
       {:else if why === 'unsupported'}<b class="muted" title="No cheap way to read TPS on this loader (add spark to get it)">n/a</b>
       {:else if why === 'slow'}<b class="muted" title="The server didn't answer within 20 seconds: it's lagging hard (each tick is taking seconds)">No answer</b>
@@ -65,6 +77,8 @@
 {/if}
 
 <style>
+  .chip.tps { flex: none; font-variant-numeric: tabular-nums; }
+  .chip.good { color: var(--green); background: var(--green-dim); }
   .chip.warn { color: var(--gold); background: var(--gold-dim); }
   .chip.bad { color: var(--red); background: var(--red-dim); }
   .ban { display: flex; align-items: center; gap: 10px; margin: 0 18px 10px; padding: 7px 12px; border-radius: 8px; background: var(--gold-dim); border: 1px solid #eab30840; color: var(--text); font-size: 12.5px; }

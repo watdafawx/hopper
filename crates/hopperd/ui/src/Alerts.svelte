@@ -42,6 +42,8 @@
     <div class="f"><div class="l">TPS below<small>For {s.tps_minutes} min. Servers with RCON only (the Console offers to turn it on).</small></div>
       <div class="input w"><input type="number" min="1" max="20" step="0.5" value={s.tps_below} oninput={(e) => set('tps_below', e.target.value)} /></div>
       <label class="switch"><input type="checkbox" checked={s.tps_on} onchange={(e) => set('tps_on', e.target.checked)} /><span></span></label></div>
+    <div class="f"><div class="l">Turn on RCON for all servers automatically<small>So TPS shows for every server, new ones too. Each gets its own port and a random password; RCON you set up yourself is kept. It starts with each server's next restart. The panel opens no firewall ports for it.</small></div>
+      <label class="switch"><input type="checkbox" checked={s.auto_rcon} onchange={(e) => set('auto_rcon', e.target.checked)} /><span></span></label></div>
     <div class="f"><div class="l">Drive free below<small>GB, on each server's drive and the panel's</small></div>
       <div class="input w"><input type="number" min="1" value={s.disk_gb} oninput={(e) => set('disk_gb', e.target.value)} /></div>
       <label class="switch"><input type="checkbox" checked={s.disk_on} onchange={(e) => set('disk_on', e.target.checked)} /><span></span></label></div>

@@ -9,7 +9,7 @@
   // control right). Search finds a setting on any page. Changes to
   // server.properties, memory and the Java arguments all wait in one save
   // bar; Discard puts every one back.
-  import { SlidersHorizontal, MemoryStick, Save, Search, Globe, Users, Map as MapIcon, ListTree, X, ImageUp, ArrowRightLeft } from '@lucide/svelte';
+  import { SlidersHorizontal, MemoryStick, Save, Search, Globe, Users, Map as MapIcon, ListTree, X, ImageUp, ArrowRightLeft, Eye, EyeOff } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
@@ -56,6 +56,8 @@
   /** Words that find a page (things on it that aren't server.properties keys). */
   const PAGE_WORDS = { java: 'java memory ram xmx xms gc garbage aikar zgc generator start files run.bat start.bat user_jvm_args flags jvm args arguments script command', version:'version minecraft loader neoforge forge fabric quilt paper purpur upgrade downgrade update', general: 'clone copy template duplicate remove delete' };
   const PAGE_HINT = { version: 'Change Minecraft or loader version', general: 'Clone, save as template, remove', java: 'Memory, Java arguments, generator and start files' };
+  const SECRET = ['rcon.password', 'management-server-secret'];
+  let shown = $state({});
   const UNITS = { 'view-distance': 'chunks', 'simulation-distance': 'chunks', 'spawn-protection': 'blocks', 'max-players': 'players' };
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -191,6 +193,15 @@
   });
 </script>
 
+<!-- Passwords stay hidden until asked for (the panel may have made them). -->
+{#snippet text(k)}
+  {#if SECRET.includes(k)}
+    <div class="input wide"><input type={shown[k] ? 'text' : 'password'} autocomplete="off" bind:value={values[k]} /><button class="btn sm ghost icon" title={shown[k] ? 'Hide' : 'Show'} onclick={() => (shown[k] = !shown[k])}>{#if shown[k]}<EyeOff size={13} />{:else}<Eye size={13} />{/if}</button></div>
+  {:else}
+    <div class="input wide"><input bind:value={values[k]} /></div>
+  {/if}
+{/snippet}
+
 {#snippet field(k)}
   {@const s = spec(k)}
   {#if s}
@@ -204,14 +215,14 @@
         {:else if s.kind === 'int'}
           <div class="row"><div class="input w"><input type="number" min={s.min} max={s.max} bind:value={values[k]} /></div>{#if UNITS[k]}<span class="tiny muted">{UNITS[k]}</span>{/if}</div>
         {:else}
-          <div class="input wide"><input bind:value={values[k]} /></div>
+          {@render text(k)}
         {/if}
       </div>
     </div>
   {:else}
     <div class="fl" class:dirty={dirty(k)}>
       <div class="lab mono small">{k}</div>
-      <div class="ctl"><div class="input wide"><input bind:value={values[k]} /></div></div>
+      <div class="ctl">{@render text(k)}</div>
     </div>
   {/if}
 {/snippet}

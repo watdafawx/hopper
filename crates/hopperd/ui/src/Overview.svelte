@@ -84,6 +84,7 @@
             </div>
           </a>
           {#if s.state === 'running'}
+            <ServerAlerts server={s} part="chip" />
             <span class="pill running" title="Players online"><span class="glow"></span>{s.players.length} / {s.max_players}</span>
           {:else if s.state === 'stopped'}
             <span class="stopped"><span class="dot"></span>Stopped</span>
