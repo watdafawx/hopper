@@ -390,7 +390,7 @@ pub fn memory(args: &str) -> (Option<u32>, Option<u32>) {
     (xms, xmx)
 }
 
-fn is_memory(t: &str) -> bool {
+pub(crate) fn is_memory(t: &str) -> bool {
     t.starts_with("-Xms") || t.starts_with("-Xmx")
 }
 
@@ -416,64 +416,75 @@ pub fn set_memory(args: &str, xms: Option<u32>, xmx: Option<u32>) -> String {
     v.join(" ")
 }
 
-/// One plain sentence per flag, by name (`-XX:` names without +/- or value,
-/// `-D` property names with any `jdk.graal.`/`graal.` prefix dropped).
+/// One plain sentence per flag, keyed by a template: the flag as the editor
+/// inserts it (on for a switch, a typical value for the rest). Looked up by
+/// name (`key`), so `-XX:-Name`, other values and the old `graal.` prefix
+/// find the same sentence.
 const FLAGS: &[(&str, &str)] = &[
-    ("UseG1GC", "G1 garbage collector: Java's default and a safe all-rounder for most packs."),
-    ("UseZGC", "ZGC garbage collector: very short pauses even with big heaps, for a bit more memory and CPU."),
-    ("ZGenerational", "Makes ZGC generational on Java 21 and 22, which is much faster; Java 23+ does this on its own."),
-    ("UseShenandoahGC", "Shenandoah garbage collector: short pauses like ZGC; Oracle's Java builds don't include it."),
-    ("ShenandoahGCMode", "Picks how Shenandoah works (satb, iu or generational)."),
-    ("UseParallelGC", "Parallel collector: high throughput but long pauses, which show as lag spikes in games."),
-    ("UseSerialGC", "Single-threaded collector for tiny heaps; too slow for Minecraft."),
-    ("UseConcMarkSweepGC", "The old CMS collector; removed in Java 14, so newer Java won't start with it."),
-    ("UseEpsilonGC", "A collector that never frees memory, for testing only."),
-    ("UnlockExperimentalVMOptions", "Allows experimental flags; must come before them or Java won't start."),
-    ("UnlockDiagnosticVMOptions", "Allows diagnostic flags; must come before them or Java won't start."),
-    ("AlwaysPreTouch", "Claims all of the memory up front, so startup is slower but there are fewer hitches later."),
-    ("DisableExplicitGC", "Ignores mods that ask for a full garbage collection, which would freeze the game for a moment."),
-    ("ParallelRefProcEnabled", "Cleans up references on several threads, shortening G1 pauses."),
-    ("MaxGCPauseMillis", "The pause time G1 aims for, in milliseconds."),
-    ("G1NewSizePercent", "Smallest share of the heap G1 keeps for new objects; Aikar raises it because Minecraft makes lots of short-lived objects."),
-    ("G1MaxNewSizePercent", "Largest share of the heap G1 gives to new objects."),
-    ("G1HeapRegionSize", "Size of G1's heap regions; bigger regions suit big heaps."),
-    ("G1ReservePercent", "Memory G1 keeps free so it doesn't run out in a burst."),
-    ("G1HeapWastePercent", "How much garbage G1 leaves behind rather than spend time collecting."),
-    ("G1MixedGCCountTarget", "How many collections G1 spreads old-memory cleanup over."),
-    ("InitiatingHeapOccupancyPercent", "How full the heap gets before G1 starts cleaning old memory."),
-    ("G1MixedGCLiveThresholdPercent", "Regions fuller than this are skipped by G1's old-memory cleanup."),
-    ("G1RSetUpdatingPauseTimePercent", "Share of a pause G1 spends on bookkeeping."),
-    ("SurvivorRatio", "Size of the survivor spaces next to new memory; Aikar makes them small."),
-    ("MaxTenuringThreshold", "How many collections an object survives before it moves to old memory."),
-    ("PerfDisableSharedMem", "Stops Java writing stats to a file, which can stall it on slow disks."),
-    ("UseStringDeduplication", "Stores identical text only once, saving some memory for a little CPU."),
-    ("UseCompactObjectHeaders", "Smaller object headers, saving memory and often speed; Java 24+ (24 needs the experimental unlock)."),
-    ("ReservedCodeCacheSize", "Room for compiled code; big modpacks can fill the default 240 MB, then Java stops compiling and slows down."),
-    ("UseJVMCICompiler", "Uses the Graal compiler for hot code; GraalVM only, where it's usually on already."),
-    ("EnableJVMCI", "Turns on the interface Graal compiles through; GraalVM only."),
-    ("EagerJVMCI", "Starts the Graal compiler at launch instead of on first use, so early gameplay is smoother; GraalVM only."),
-    ("CompilerConfiguration", "Picks the Graal compiler's optimizations; \"enterprise\" needs Oracle GraalVM, the Community build won't start with it."),
-    ("TuneInlinerExploration", "Lets Graal try more inlining, for faster code at the cost of compile time; GraalVM only."),
-    ("UsePriorityInlining", "Graal inlines the most useful calls first; GraalVM only."),
-    ("Vectorization", "Graal uses SIMD instructions for loops where it can; GraalVM only."),
-    ("OptDuplication", "Graal duplicates code paths to optimize each one; GraalVM only."),
-    ("user.language", "The language Java reports to mods; set to en when a mod breaks with your system language (Turkish is the classic one)."),
-    ("user.country", "The country Java reports; with user.language it fixes number and date formats some mods misread."),
-    ("user.region", "Older name for user.country: the country Java reports to mods."),
-    ("jdk.nio.maxCachedBufferSize", "Caps the memory each thread keeps for file and network buffers, stopping slow memory growth outside the heap."),
-    ("file.encoding", "The text encoding Java uses for files; UTF-8 is the default from Java 18 on."),
-    ("java.net.preferIPv4Stack", "Uses IPv4 only, which fixes connection trouble on some networks."),
-    ("log4j2.formatMsgNoLookups", "Turns off the Log4Shell lookup hole in old Minecraft versions."),
-    ("MaxDirectMemorySize", "Caps memory outside the heap that mods use for buffers."),
-    ("UseLargePages", "Uses large memory pages; on Windows it needs the Lock Pages in Memory right, or Java warns and ignores it."),
-    ("UseTransparentHugePages", "Large memory pages on Linux; does nothing on Windows."),
-    ("UseNUMA", "Spreads memory across CPU nodes on multi-socket or Threadripper machines."),
-    ("Xmx", "Most memory Java may use; the right end of the memory slider sets it."),
-    ("Xms", "Memory Java claims at start; the left end of the memory slider sets it (256 MB when it's at the start)."),
-    ("Xss", "Stack size per thread; raise it only if a crash says StackOverflowError."),
+    ("-XX:+UseG1GC", "G1 garbage collector: Java's default and a safe all-rounder for most packs."),
+    ("-XX:+UseZGC", "ZGC garbage collector: very short pauses even with big heaps, for a bit more memory and CPU."),
+    ("-XX:+ZGenerational", "Makes ZGC generational on Java 21 and 22, which is much faster; Java 23+ does this on its own."),
+    ("-XX:+UseShenandoahGC", "Shenandoah garbage collector: short pauses like ZGC; Oracle's Java builds don't include it."),
+    ("-XX:ShenandoahGCMode=generational", "Picks how Shenandoah works (satb, iu or generational)."),
+    ("-XX:+UseParallelGC", "Parallel collector: high throughput but long pauses, which show as lag spikes in games."),
+    ("-XX:+UseSerialGC", "Single-threaded collector for tiny heaps; too slow for Minecraft."),
+    ("-XX:+UseConcMarkSweepGC", "The old CMS collector; removed in Java 14, so newer Java won't start with it."),
+    ("-XX:+UseEpsilonGC", "A collector that never frees memory, for testing only."),
+    ("-XX:+UnlockExperimentalVMOptions", "Allows experimental flags; must come before them or Java won't start."),
+    ("-XX:+UnlockDiagnosticVMOptions", "Allows diagnostic flags; must come before them or Java won't start."),
+    ("-XX:+AlwaysPreTouch", "Claims all of the memory up front, so startup is slower but there are fewer hitches later."),
+    ("-XX:+DisableExplicitGC", "Ignores mods that ask for a full garbage collection, which would freeze the game for a moment."),
+    ("-XX:+ParallelRefProcEnabled", "Cleans up references on several threads, shortening G1 pauses."),
+    ("-XX:MaxGCPauseMillis=200", "The pause time G1 aims for, in milliseconds."),
+    ("-XX:G1NewSizePercent=30", "Smallest share of the heap G1 keeps for new objects; Aikar raises it because Minecraft makes lots of short-lived objects."),
+    ("-XX:G1MaxNewSizePercent=40", "Largest share of the heap G1 gives to new objects."),
+    ("-XX:G1HeapRegionSize=8M", "Size of G1's heap regions; bigger regions suit big heaps."),
+    ("-XX:G1ReservePercent=20", "Memory G1 keeps free so it doesn't run out in a burst."),
+    ("-XX:G1HeapWastePercent=5", "How much garbage G1 leaves behind rather than spend time collecting."),
+    ("-XX:G1MixedGCCountTarget=4", "How many collections G1 spreads old-memory cleanup over."),
+    ("-XX:InitiatingHeapOccupancyPercent=15", "How full the heap gets before G1 starts cleaning old memory."),
+    ("-XX:G1MixedGCLiveThresholdPercent=90", "Regions fuller than this are skipped by G1's old-memory cleanup."),
+    ("-XX:G1RSetUpdatingPauseTimePercent=5", "Share of a pause G1 spends on bookkeeping."),
+    ("-XX:SurvivorRatio=32", "Size of the survivor spaces next to new memory; Aikar makes them small."),
+    ("-XX:MaxTenuringThreshold=1", "How many collections an object survives before it moves to old memory."),
+    ("-XX:+PerfDisableSharedMem", "Stops Java writing stats to a file, which can stall it on slow disks."),
+    ("-XX:+UseStringDeduplication", "Stores identical text only once, saving some memory for a little CPU."),
+    ("-XX:+UseCompactObjectHeaders", "Smaller object headers, saving memory and often speed; Java 24+ (24 needs the experimental unlock)."),
+    ("-XX:ReservedCodeCacheSize=512M", "Room for compiled code; big modpacks can fill the default 240 MB, then Java stops compiling and slows down."),
+    ("-XX:+UseJVMCICompiler", "Uses the Graal compiler for hot code; GraalVM only, where it's usually on already."),
+    ("-XX:+EnableJVMCI", "Turns on the interface Graal compiles through; GraalVM only."),
+    ("-XX:+EagerJVMCI", "Starts the Graal compiler at launch instead of on first use, so early gameplay is smoother; GraalVM only."),
+    ("-Djdk.graal.CompilerConfiguration=enterprise", "Picks the Graal compiler's optimizations; \"enterprise\" needs Oracle GraalVM, the Community build won't start with it."),
+    ("-Djdk.graal.TuneInlinerExploration=1", "Lets Graal try more inlining, for faster code at the cost of compile time; GraalVM only."),
+    ("-Djdk.graal.UsePriorityInlining=true", "Graal inlines the most useful calls first; GraalVM only."),
+    ("-Djdk.graal.Vectorization=true", "Graal uses SIMD instructions for loops where it can; GraalVM only."),
+    ("-Djdk.graal.OptDuplication=true", "Graal duplicates code paths to optimize each one; GraalVM only."),
+    ("-Duser.language=en", "The language Java reports to mods; set to en when a mod breaks with your system language (Turkish is the classic one)."),
+    ("-Duser.country=US", "The country Java reports; with user.language it fixes number and date formats some mods misread."),
+    ("-Duser.region=US", "Older name for user.country: the country Java reports to mods."),
+    ("-Djdk.nio.maxCachedBufferSize=262144", "Caps the memory each thread keeps for file and network buffers, stopping slow memory growth outside the heap."),
+    ("-Dfile.encoding=UTF-8", "The text encoding Java uses for files; UTF-8 is the default from Java 18 on."),
+    ("-Djava.net.preferIPv4Stack=true", "Uses IPv4 only, which fixes connection trouble on some networks."),
+    ("-Dlog4j2.formatMsgNoLookups=true", "Turns off the Log4Shell lookup hole in old Minecraft versions."),
+    ("-XX:MaxDirectMemorySize=4G", "Caps memory outside the heap that mods use for buffers."),
+    ("-XX:+UseLargePages", "Uses large memory pages; on Windows it needs the Lock Pages in Memory right, or Java warns and ignores it."),
+    ("-XX:+UseTransparentHugePages", "Large memory pages on Linux; does nothing on Windows."),
+    ("-XX:+UseNUMA", "Spreads memory across CPU nodes on multi-socket or Threadripper machines."),
+    ("-Xmx8G", "Most memory Java may use; the right end of the memory slider sets it."),
+    ("-Xms4G", "Memory Java claims at start; the left end of the memory slider sets it (256 MB when it's at the start)."),
+    ("-Xss4M", "Stack size per thread; raise it only if a crash says StackOverflowError."),
+    ("-XX:MaxMetaspaceSize=2G", "Caps the memory used for loaded classes; big modpacks load a lot of them, so set it high or leave it out."),
+    ("-XX:SoftRefLRUPolicyMSPerMB=50", "How long Java keeps cached objects that are only softly held; lower frees memory sooner."),
+    ("-XX:ParallelGCThreads=4", "Threads the collector uses while the game is paused; Java picks from your CPU count."),
+    ("-XX:ConcGCThreads=2", "Threads the collector uses while the game keeps running; Java picks from your CPU count."),
+    ("-XX:+OmitStackTraceInFastThrow", "Drops the details from errors Java throws often; turn it off (-XX:-) to get full error logs while debugging."),
+    ("-XX:+HeapDumpOnOutOfMemoryError", "Writes the whole memory to a file when Java runs out, for finding the cause; the file is as big as -Xmx."),
+    ("-XX:+ExitOnOutOfMemoryError", "Quits at once when Java runs out of memory, instead of limping on."),
+    ("-XX:+UseCompressedOops", "Smaller object pointers; on by default below 32 GB of memory."),
+    ("-XX:+UseFastUnorderedTimeStamps", "Cheaper timing for logs and stats; experimental, needs the unlock."),
 ];
 
-fn key(token: &str) -> &str {
+pub(crate) fn key(token: &str) -> &str {
     if let Some(x) = token.strip_prefix("-XX:") {
         let x = x.trim_start_matches(['+', '-']);
         return x.split('=').next().unwrap_or(x);
@@ -496,7 +507,7 @@ fn key(token: &str) -> &str {
 /// What `token` does, or None for a flag Hopper doesn't know.
 pub fn explain(token: &str) -> Option<String> {
     let k = key(token);
-    let (_, text) = FLAGS.iter().find(|(name, _)| *name == k)?;
+    let (_, text) = FLAGS.iter().find(|(t, _)| key(t) == k)?;
     Some(if token.starts_with("-XX:-") {
         format!("Turned off here. {text}")
     } else {
@@ -506,82 +517,112 @@ pub fn explain(token: &str) -> Option<String> {
 
 /// Flags in `args` that clash with each other or with the Java.
 pub fn conflicts(args: &str, target: Target) -> Vec<String> {
-    let tokens = split(args);
-    let has = |f: &str| tokens.iter().any(|t| t == f);
-    let mut out = Vec::new();
+    clashes(&split(args), target).into_iter().map(|(m, _)| m).collect()
+}
 
-    let gcs: Vec<&str> = GC_FLAGS
-        .iter()
-        .filter(|(f, _)| has(f))
-        .map(|(_, n)| *n)
-        .collect();
+/// Each clash with the tokens (by index) it's about, so the editor can mark
+/// them. Indices may be empty for a clash no single flag owns.
+pub(crate) fn clashes(tokens: &[String], target: Target) -> Vec<(String, Vec<usize>)> {
+    let at = |f: &str| -> Vec<usize> { (0..tokens.len()).filter(|&i| tokens[i] == f).collect() };
+    let has = |f: &str| tokens.iter().any(|t| t == f);
+    let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+
+    let gcs: Vec<(&str, &str)> = GC_FLAGS.iter().filter(|(f, _)| has(f)).copied().collect();
     if gcs.len() > 1 {
-        out.push(format!(
-            "Two garbage collectors are on ({}). Java won't start; keep one.",
-            gcs.join(" and ")
+        let names: Vec<&str> = gcs.iter().map(|(_, n)| *n).collect();
+        out.push((
+            format!("Two garbage collectors are on ({}). Java won't start; keep one.", names.join(" and ")),
+            gcs.iter().flat_map(|(f, _)| at(f)).collect(),
         ));
     }
-    let gc = gcs.first().copied();
+    let gc = gcs.first().map(|(_, n)| *n);
     let major = target.major;
     if has(ZGEN) {
         match major {
-            Some(m) if m < 21 => out.push(format!(
-                "-XX:+ZGenerational needs Java 21 or newer; this is Java {m}, which won't start with it."
+            Some(m) if m < 21 => out.push((
+                format!("-XX:+ZGenerational needs Java 21 or newer; this is Java {m}, which won't start with it."),
+                at(ZGEN),
             )),
-            Some(m) if m >= 24 => out.push(format!(
-                "Java {m} ignores -XX:+ZGenerational: ZGC is always generational now."
+            Some(m) if m >= 24 => out.push((
+                format!("Java {m} ignores -XX:+ZGenerational: ZGC is always generational now."),
+                at(ZGEN),
             )),
             _ => {}
         }
         if gc.is_some() && gc != Some("ZGC") {
-            out.push("-XX:+ZGenerational only applies to ZGC.".into());
+            out.push(("-XX:+ZGenerational only applies to ZGC.".into(), at(ZGEN)));
         }
     }
     if has("-XX:+UseZGC") && major.is_some_and(|m| m < 15) {
-        out.push("ZGC needs Java 15 or newer.".into());
+        out.push(("ZGC needs Java 15 or newer.".into(), at("-XX:+UseZGC")));
     }
     if has("-XX:+UseShenandoahGC") && target.oracle {
-        out.push("Oracle's Java builds don't include Shenandoah; this Java won't start with it.".into());
+        out.push((
+            "Oracle's Java builds don't include Shenandoah; this Java won't start with it.".into(),
+            at("-XX:+UseShenandoahGC"),
+        ));
     }
     if has("-XX:+UseCompactObjectHeaders") && major.is_some_and(|m| m < 24) {
-        out.push("-XX:+UseCompactObjectHeaders needs Java 24 or newer.".into());
+        out.push((
+            "-XX:+UseCompactObjectHeaders needs Java 24 or newer.".into(),
+            at("-XX:+UseCompactObjectHeaders"),
+        ));
     }
-    let g1_tuning = tokens.iter().any(|t| key(t).starts_with("G1"));
-    if g1_tuning && gc.is_some_and(|g| g != "G1") {
-        out.push(format!("G1 flags (-XX:G1…) do nothing with {}.", gc.unwrap_or_default()));
+    let g1: Vec<usize> = (0..tokens.len()).filter(|&i| key(&tokens[i]).starts_with("G1")).collect();
+    if !g1.is_empty() && gc.is_some_and(|g| g != "G1") {
+        out.push((format!("G1 flags (-XX:G1…) do nothing with {}.", gc.unwrap_or_default()), g1));
     }
 
     // Experimental flags without the unlock before them.
     let unlock_at = tokens.iter().position(|t| t == UNLOCK);
-    let needs_unlock = ["G1NewSizePercent", "G1MaxNewSizePercent"];
+    let needs_unlock = ["G1NewSizePercent", "G1MaxNewSizePercent", "UseFastUnorderedTimeStamps"];
     if let Some(i) = tokens.iter().position(|t| needs_unlock.contains(&key(t)))
         && unlock_at.is_none_or(|u| u > i)
     {
-        out.push(format!(
-            "{} needs -XX:+UnlockExperimentalVMOptions before it, or Java won't start.",
-            tokens[i]
+        out.push((
+            format!("{} needs -XX:+UnlockExperimentalVMOptions before it, or Java won't start.", tokens[i]),
+            (0..tokens.len())
+                .filter(|&j| needs_unlock.contains(&key(&tokens[j])) && unlock_at.is_none_or(|u| u > j))
+                .collect(),
         ));
     }
 
-    let graal = tokens.iter().any(|t| {
-        t.contains("JVMCI") || t.starts_with("-Dgraal.") || t.starts_with("-Djdk.graal.")
-    });
-    if graal && !target.graalvm {
-        out.push(
+    let graal_at: Vec<usize> = (0..tokens.len())
+        .filter(|&i| {
+            let t = &tokens[i];
+            t.contains("JVMCI") || t.starts_with("-Dgraal.") || t.starts_with("-Djdk.graal.")
+        })
+        .collect();
+    if !graal_at.is_empty() && !target.graalvm {
+        out.push((
             "These arguments are for GraalVM. Pick a GraalVM Java, or the game may not start.".into(),
-        );
-    } else if graal && !target.oracle && tokens.iter().any(|t| t.ends_with("CompilerConfiguration=enterprise")) {
-        out.push(
-            "CompilerConfiguration=enterprise needs Oracle GraalVM; the Community build won't start with it.".into(),
-        );
+            graal_at,
+        ));
+    } else if !graal_at.is_empty() && !target.oracle {
+        let ent: Vec<usize> = (0..tokens.len())
+            .filter(|&i| tokens[i].ends_with("CompilerConfiguration=enterprise"))
+            .collect();
+        if !ent.is_empty() {
+            out.push((
+                "CompilerConfiguration=enterprise needs Oracle GraalVM; the Community build won't start with it.".into(),
+                ent,
+            ));
+        }
     }
 
-    if let (Some(xms), Some(xmx)) = memory(args)
+    if let (Some(xms), Some(xmx)) = memory(&tokens.join(" "))
         && xms > xmx
     {
-        out.push("-Xms is bigger than -Xmx; Java won't start.".into());
+        let mem: Vec<usize> = (0..tokens.len()).filter(|&i| is_memory(&tokens[i])).collect();
+        out.push(("-Xms is bigger than -Xmx; Java won't start.".into(), mem));
     }
     out
+}
+
+/// Every flag Hopper knows, as (template, sentence): the template is the
+/// flag as the editor inserts it.
+pub fn catalog() -> &'static [(&'static str, &'static str)] {
+    FLAGS
 }
 
 // ---- The generator's rows, shared by Hopper desktop and Hopper Server ----

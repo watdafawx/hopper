@@ -6,6 +6,7 @@
   // Nothing saves from here: changes wait in Settings' save bar.
   import { FileCode, TriangleAlert, ChevronDown, ChevronRight, Info } from '@lucide/svelte';
   import MemoryRange from './MemoryRange.svelte';
+  import JvmArgsEditor from './JvmArgsEditor.svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { flagsToText } from './lib/jvm.js';
@@ -16,6 +17,8 @@
   let view = $state(null);
   let showFlags = $state(false);
   let explained = $state(null);
+  /** The text the last preview's editor marks (`view.spans`) are for. */
+  let spansText = $state('');
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const host = $derived(jvm?.host_memory_mb || 65536);
@@ -34,10 +37,12 @@
   let seq = 0;
   async function preview(pick) {
     const n = ++seq;
+    const sent = flagsText;
     try {
       const v = await api(`${base}/jvm/preview`, { method: 'POST', body: { xms_mb: xms, xmx_mb: xmx, flags_text: flagsText, ...(pick ? { pick } : {}) } });
       if (n !== seq) return;
       view = v;
+      spansText = sent;
       if (pick) flagsText = flagsToText(v.flags);
     } catch (e) {
       if (pick) say(e.message, true);
@@ -112,8 +117,8 @@
 </div>
 
 <h4>Java arguments ({lines.length}){#if extra.length}<span class="chip warn">Custom: {extra.length} flag{extra.length === 1 ? '' : 's'} the generator doesn't cover</span>{/if}</h4>
-<div class="tiny muted hint">One per line, saved to user_jvm_args.txt. Edit them by hand or with the generator.{hasArgsFile ? '' : ' This server has no user_jvm_args.txt yet; its start script may not read one.'}</div>
-<textarea class="flags mono" class:dirty={dirty.flags} spellcheck="false" rows={Math.min(24, Math.max(6, lines.length + 1))} bind:value={flagsText} aria-label="Java arguments"></textarea>
+<div class="tiny muted hint">One per line, saved to user_jvm_args.txt. Edit them by hand or with the generator; type -XX:, -X or -D for suggestions and hover a flag to see what it does.{hasArgsFile ? '' : ' This server has no user_jvm_args.txt yet; its start script may not read one.'}</div>
+<JvmArgsEditor bind:value={flagsText} spans={view?.spans || []} {spansText} catalog={jvm?.catalog || []} dirty={dirty.flags} rows={Math.min(24, Math.max(6, lines.length + 1))} />
 <div class="row tools">
   {#if tokens.length}<button class="btn sm ghost" onclick={() => { showFlags = !showFlags; explained = null; }}>{#if showFlags}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}Explain each</button>{/if}
   <span class="tiny muted">The memory slider sets -Xms and -Xmx.</span>
@@ -175,9 +180,6 @@
   .seg button.on { background: var(--acc-dim); color: var(--text); }
   .chip { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 99px; font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 500; }
   .chip.warn { background: #eab30822; color: #eab308; }
-  .flags { white-space: pre-wrap; word-break: break-all; font-size: 11.5px; background: var(--term); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; max-height: 520px; overflow: auto; color: var(--text); width: 100%; resize: vertical; line-height: 1.5; }
-  .flags:focus { outline: none; border-color: var(--acc); }
-  .flags.dirty { border-color: #f9731677; }
   .tools { gap: 10px; margin-top: 6px; }
   .toks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
   .tok { font-size: 11px; padding: 2px 7px; border-radius: 5px; color: var(--muted); }

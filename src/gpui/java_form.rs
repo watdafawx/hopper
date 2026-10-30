@@ -6,7 +6,8 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::{Field, Form};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Editor, Input, InputEvent, InputState};
+use crate::args_editor::{self, ArgsEditor};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -15,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::java::{JavaInstall, PRESETS, recommended_major};
 use hopper::jvm_args::{self, Control, Options, Pick, Target};
+use hopper::jvm_editor;
 use hopper::settings::JavaPreset;
 use std::rc::Rc;
 
@@ -35,7 +37,7 @@ pub struct JavaForm {
     /// Slider minimum in GB: 0 is "Default" for an instance.
     min_gb: f32,
     java_path: String,
-    args: Entity<TextareaState>,
+    args: ArgsEditor,
     args_text: String,
     /// Minecraft version, for the recommended Java (None for the defaults).
     game_version: Option<String>,
@@ -72,16 +74,15 @@ impl JavaForm {
                 .step(0.5)
                 .default_value((min, min))
         });
-        let args = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                // Fits the arguments up to 12 rows, then scrolls.
-                .auto_grow(3, 12)
-                .placeholder(if fallback_memory.is_some() {
-                    "Blank uses the default arguments from Settings"
-                } else {
-                    "Extra Java arguments"
-                })
-        });
+        let args = ArgsEditor::new(
+            if fallback_memory.is_some() {
+                "Blank uses the default arguments from Settings"
+            } else {
+                "Extra Java arguments"
+            },
+            window,
+            cx,
+        );
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Preset name"));
         let subs = vec![
             cx.subscribe_in(&name, window, |this, _, e: &InputEvent, window, cx| {
@@ -94,7 +95,7 @@ impl JavaForm {
                     this.memory_moved(v.start(), v.end(), window, cx);
                 }
             }),
-            cx.subscribe(&args, |this, state, e: &InputEvent, cx| {
+            cx.subscribe(&args.state, |this, state, e: &InputEvent, cx| {
                 if matches!(e, InputEvent::Change) {
                     this.args_text = state.read(cx).value().to_string();
                     cx.notify();
@@ -164,7 +165,7 @@ impl JavaForm {
             s.set_value((xms.min(xmx), xmx), window, cx)
         });
         let a = args.to_string();
-        self.args.update(cx, |s, cx| s.set_value(a, window, cx));
+        self.args.state.update(cx, |s, cx| s.set_value(a, window, cx));
         cx.notify();
     }
 
@@ -179,7 +180,7 @@ impl JavaForm {
 
     fn set_args(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let t = text.to_string();
-        self.args.update(cx, |s, cx| s.set_value(t, window, cx));
+        self.args.state.update(cx, |s, cx| s.set_value(t, window, cx));
         self.args_text = text.to_string();
         cx.notify();
     }
@@ -464,6 +465,12 @@ impl JavaForm {
             },
             None => Target::default(),
         };
+        let slider = if self.memory_mb > 0 {
+            jvm_editor::Memory::Slider { xmx_mb: self.memory_mb }
+        } else {
+            jvm_editor::Memory::Free
+        };
+        self.args.refresh(&self.args_text, args_editor::Context { target, memory: slider }, cx);
         let mut warnings = jvm_args::conflicts(&self.args_text, target);
         // Launching uses the slider's -Xmx; one typed in the box is dropped.
         if let (_, Some(xmx)) = jvm_args::memory(&self.args_text)
@@ -690,7 +697,12 @@ impl JavaForm {
 
         let args = v_flex()
             .gap_2()
-            .child(div().w_full().max_w(rems(FIELD_W)).child(Textarea::new(&self.args)))
+            .child({
+                // Fits the arguments up to 12 rows, then scrolls.
+                let h = self.args.height(3, 12, cx);
+                self.args.tab_accepts(div().id("java-args").w_full().max_w(rems(FIELD_W)))
+                    .child(Editor::new(&self.args.state).h(h))
+            })
             .child(
                 h_flex()
                     .w_full().max_w(rems(FIELD_W))
