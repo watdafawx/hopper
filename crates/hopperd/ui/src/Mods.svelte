@@ -275,7 +275,8 @@
       const ok = ids.filter((i) => mods.some((m) => m.project_id === i && (names.has(m.name) || names.has(m.update?.name))));
       done = new Set([...done, ...ok]);
       reviewing = null;
-      updates = null;
+      // The rest stay listed while the check runs.
+      if (updates) updates = updates.filter((u) => !ids.includes(u.project_id));
       checkUpdates(false);
       loadBackupCount();
     }
@@ -284,7 +285,6 @@
   async function changed(big) {
     await load();
     if (big) {
-      updates = null;
       checkUpdates(false);
       loadBackupCount();
     }
@@ -565,7 +565,7 @@
   </nav>
 
   {#if sub === 'backups'}
-    <ModBackups {server} onChanged={() => { load(); loadBackupCount(); updates = null; checkUpdates(false); }} />
+    <ModBackups {server} onChanged={() => { load(); loadBackupCount(); checkUpdates(false); }} />
   {:else}
     <div class="row wrap toolbar">
       <div class="input find"><Search size={13} /><input placeholder="Search" bind:value={filter} />{#if filter}<button class="clr" title="Clear" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
@@ -582,10 +582,11 @@
       {#if alive}<span class="tiny muted">The server is running: changes apply on its next start</span>{/if}
       {#if counts.unknown}<button class="btn sm ghost" disabled={!!identifying} onclick={() => identify(false)} title="Look jars up on CurseForge and Modrinth"><ScanSearch size={13} />Identify {counts.unknown}</button>{/if}
       <span class="row upd">
-        {#if checking}<span class="small muted row"><span class="spinner blue"></span>Checking for updates</span>
-        {:else if pendingUpdates.length}<button class="btn sm pri" disabled={!!busy} onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Review {pendingUpdates.length} update{pendingUpdates.length === 1 ? '' : 's'}</button>
-        {:else if updates}<span class="small okt row"><CircleCheck size={14} />Up to date</span>{/if}
-        <button class="btn sm ghost icon" disabled={checking} title="Check for updates again" onclick={() => checkUpdates(true)}><RefreshCw size={13} /></button>
+        <!-- The last check's results stay up while a new one runs; with results on screen the refresh button spins instead, so nothing moves. -->
+        {#if checking && !pendingUpdates.length}<span class="small muted row"><span class="spinner blue"></span>Checking for updates</span>{/if}
+        {#if pendingUpdates.length}<button class="btn sm pri" disabled={!!busy} onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Review {pendingUpdates.length} update{pendingUpdates.length === 1 ? '' : 's'}</button>
+        {:else if updates && !checking}<span class="small okt row"><CircleCheck size={14} />Up to date</span>{/if}
+        <button class="btn sm ghost icon" disabled={checking} title={checking ? 'Checking for updates' : 'Check for updates again'} onclick={() => checkUpdates(true)}>{#if checking && pendingUpdates.length}<span class="spinner blue"></span>{:else}<RefreshCw size={13} />{/if}</button>
       </span>
     </div>
     {#if identifying}<div class="banner small"><span class="spinner blue"></span>{identifying}… names, icons and updates fill in when it's done.</div>{/if}

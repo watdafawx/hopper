@@ -7,7 +7,7 @@
 //! back through the request's sender when it's ready.
 
 use crate::app::AppView;
-use crate::store::{Msg, Store, Updates};
+use crate::store::{Msg, Store};
 use gpui_kit::*;
 use hopper::cf::{self, Loader};
 use hopper::instances::Instance;
@@ -96,10 +96,7 @@ fn site_of(id: u64) -> &'static str {
 }
 
 fn updates_of(store: &Store, root: &Path) -> Vec<hopper::install::Update> {
-    match store.updates(root) {
-        Some(Updates::Ready(v)) => v.clone(),
-        _ => Vec::new(),
-    }
+    store.updates(root).and_then(|u| u.ready()).cloned().unwrap_or_default()
 }
 
 fn list_instances(store: &Store) -> Reply {

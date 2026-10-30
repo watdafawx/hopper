@@ -61,6 +61,8 @@ struct Up {
     from: String,
     to: String,
     file_id: String,
+    /// The jar the offer is for ("" from an older panel).
+    from_file: String,
 }
 
 impl Up {
@@ -71,6 +73,7 @@ impl Up {
             from: st(v, "from"),
             to: st(v, "to"),
             file_id: st(v, "file_id"),
+            from_file: st(v, "from_file"),
         })
     }
 }
@@ -457,7 +460,10 @@ impl ModsTab {
         let key = format!("{}/{}", t.remote.panel, t.id());
         get(cx, &t, t.sp("/mods/list"), self.fresh(move |this: &mut Self, r: Result<Value, String>, cx| {
             match r {
-                Ok(v) => this.data = Load::Ready(ModList::parse(&v)),
+                Ok(v) => {
+                    this.data = Load::Ready(ModList::parse(&v));
+                    this.keep_current_updates();
+                }
                 // Keep what's shown when a refresh fails.
                 Err(e) if this.data.ready().is_some() => this.fail(e),
                 Err(e) => this.data = Load::Failed(e),
@@ -477,6 +483,15 @@ impl ModsTab {
                 }
             }
         }));
+    }
+
+    /// Drops offers whose jar is gone or changed (updated, removed, put
+    /// back); the rest stay listed until the next check answers.
+    fn keep_current_updates(&mut self) {
+        let (Some(ups), Load::Ready(d)) = (self.updates.as_mut(), &self.data) else { return };
+        let key = |f: &str| f.trim_end_matches(".disabled").to_lowercase();
+        let files: HashSet<String> = d.mods.iter().map(|m| key(&m.file)).collect();
+        ups.retain(|u| u.from_file.is_empty() || files.contains(&key(&u.from_file)));
     }
 
     fn load_backups(&mut self, cx: &mut Context<Self>) {
@@ -668,8 +683,9 @@ impl ModsTab {
         self.busy = Some("Updating".into());
         self.note = None;
         let title = if ids.len() == 1 { "Updating a server mod".to_string() } else { format!("Updating {} server mods", ids.len()) };
+        let applied = ids.clone();
         job(cx, &self.store, &t, title, t.sp("/mods/update"), json!({ "project_ids": ids }), self.fresh(
-            |this: &mut Self, r: Result<Value, String>, cx| {
+            move |this: &mut Self, r: Result<Value, String>, cx| {
                 this.busy = None;
                 match r {
                     Ok(v) => {
@@ -679,7 +695,10 @@ impl ModsTab {
                             if n == 1 { "it" } else { "them" }
                         ));
                         this.reviewing = false;
-                        this.updates = None;
+                        // The rest stay listed while the check runs.
+                        if let Some(u) = this.updates.as_mut() {
+                            u.retain(|u| !applied.contains(&u.project_id));
+                        }
                         this.check_updates(false, cx);
                         this.load_backups(cx);
                     }
@@ -824,7 +843,6 @@ impl ModsTab {
                         if let Some(p) = this.peek.as_mut().filter(|_| !new.is_empty()) {
                             p.file = new;
                         }
-                        this.updates = None;
                         this.check_updates(false, cx);
                         this.load_backups(cx);
                         if this.peek.is_some() {
@@ -928,7 +946,6 @@ impl ModsTab {
                             if bl(&v, "restart_needed") {
                                 this.say("Removed. Restart the server to apply.");
                             }
-                            this.updates = None;
                             this.check_updates(false, cx);
                             this.load_backups(cx);
                         }
@@ -967,7 +984,6 @@ impl ModsTab {
                                 back.join(", "),
                                 if bl(&v, "restart_needed") { " Restart the server to load it." } else { "" }
                             ));
-                            this.updates = None;
                             this.check_updates(false, cx);
                         }
                         Err(e) => this.fail(e),

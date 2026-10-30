@@ -1282,10 +1282,7 @@ impl LibraryView {
         let picked = self.selected.as_deref() == Some(root);
         let playing = store.running(root).is_some();
         let pack_update = store.pack_update(inst).is_some();
-        let mod_updates = match store.updates(root) {
-            Some(crate::store::Updates::Ready(u)) => u.len(),
-            _ => 0,
-        };
+        let mod_updates = store.updates(root).and_then(|u| u.ready()).map_or(0, Vec::len);
         let icon = inst
             .icon
             .as_deref()
@@ -1882,7 +1879,7 @@ impl LibraryView {
                     .into_any_element(),
             );
         }
-        if let Some(store::Updates::Ready(u)) = store.updates(&inst.root)
+        if let Some(u) = store.updates(&inst.root).and_then(|u| u.ready())
             && !u.is_empty()
         {
             let n = u.len();

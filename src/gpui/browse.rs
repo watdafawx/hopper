@@ -3,7 +3,7 @@
 
 use crate::widgets::Clickable as _;
 use crate::part::Part;
-use crate::store::{Msg, Store, Updates};
+use crate::store::{Msg, Store};
 use crate::widgets;
 
 /// The result card's hover group: the changelog shows while it's hovered.
@@ -1794,10 +1794,10 @@ impl BrowseView {
         // list has it, or (fresher) the search hit's own file index does.
         let update = target.filter(|_| installed.is_some()).and_then(|t| {
             let a = t.addons.iter().find(|a| a.project_id == m.id && !a.locked)?;
-            let listed = match store.updates(&t.root) {
-                Some(Updates::Ready(v)) => v.iter().find(|u| u.project_id == m.id).cloned(),
-                _ => None,
-            };
+            let listed = store
+                .updates(&t.root)
+                .and_then(|u| u.ready())
+                .and_then(|v| v.iter().find(|u| u.project_id == m.id).cloned());
             let newer = listed.is_some()
                 || (m.modrinth.is_none()
                     && hopper::install::newer_file_id(t, a, m, hopper::install::loader_of(t).api_id())

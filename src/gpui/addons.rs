@@ -2,7 +2,7 @@
 //! of what an instance has installed, with updates, toggles and removal.
 
 use crate::drag_pick::{self, DragPick, PickDrag, PickState, Picks, Sweep};
-use crate::store::{Store, Updates};
+use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
@@ -202,11 +202,9 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
     }
     match store.updates(root) {
         None => 0u8.hash(&mut h),
-        Some(Updates::Checking) => 1u8.hash(&mut h),
-        Some(Updates::Failed(e)) => (2u8, e).hash(&mut h),
-        Some(Updates::Ready(u)) => {
-            3u8.hash(&mut h);
-            for x in u {
+        Some(u) => {
+            (1u8, u.checking, &u.error).hash(&mut h);
+            for x in u.ready().into_iter().flatten() {
                 (x.project_id, x.file.id).hash(&mut h);
             }
         }
@@ -940,8 +938,8 @@ impl AddonsView {
     }
 
     fn pending_updates(&self, inst: &Instance, cx: &App) -> HashMap<u64, Update> {
-        match self.store.read(cx).updates(&inst.root) {
-            Some(Updates::Ready(u)) => u
+        match self.store.read(cx).updates(&inst.root).and_then(|u| u.ready()) {
+            Some(u) => u
                 .iter()
                 .filter(|u| {
                     inst.addons
@@ -950,7 +948,7 @@ impl AddonsView {
                 })
                 .map(|u| (u.project_id, u.clone()))
                 .collect(),
-            _ => HashMap::new(),
+            None => HashMap::new(),
         }
     }
 
@@ -2049,26 +2047,46 @@ impl AddonsView {
             Show::Updates => 1,
             Show::Disabled => 2,
         };
-        let status: AnyElement = match self.store.read(cx).updates(&inst.root) {
-            Some(Updates::Checking) => h_flex()
-                .gap_2()
-                .child(Spinner::new().small())
-                .child(widgets::caption("Checking for updates", cx))
-                .into_any_element(),
-            Some(Updates::Failed(e)) => h_flex()
-                .gap_2()
-                .min_w_0()
-                .child(div().min_w_0().text_sm().text_color(cx.theme().danger).truncate().child(e.clone()))
-                .children(widgets::cf_key_fix("updates-cf-key", e))
-                .into_any_element(),
-            Some(Updates::Ready(_)) if updates.is_empty() => h_flex()
+        // The last check's results stay up while a new check runs or after
+        // one fails; the spinner or the error sits beside them.
+        let (checking, error, listed) = self
+            .store
+            .read(cx)
+            .updates(&inst.root)
+            .map_or((false, None, false), |u| (u.checking, u.error.clone(), u.list.is_some()));
+        // With results on screen the refresh icon spins instead, so nothing
+        // moves; the caption shows only where the list says nothing yet.
+        let note: Option<AnyElement> = if checking && (!listed || updates.is_empty()) {
+            Some(
+                h_flex()
+                    .gap_2()
+                    .child(Spinner::new().small())
+                    .child(widgets::caption("Checking for updates", cx))
+                    .into_any_element(),
+            )
+        } else if checking {
+            None
+        } else {
+            error.as_ref().map(|e| {
+                h_flex()
+                    .gap_2()
+                    .min_w_0()
+                    .child(div().min_w_0().text_sm().text_color(cx.theme().danger).truncate().child(e.clone()))
+                    .children(widgets::cf_key_fix("updates-cf-key", e))
+                    .into_any_element()
+            })
+        };
+        let quiet = checking || error.is_some();
+        let result: AnyElement = match listed {
+            true if updates.is_empty() && quiet => div().into_any_element(),
+            true if updates.is_empty() => h_flex()
                 .gap_1p5()
                 .text_sm()
                 .text_color(cx.theme().success)
                 .child(Icon::new(IconName::CircleCheck).small())
                 .child("Up to date")
                 .into_any_element(),
-            Some(Updates::Ready(_)) => {
+            true => {
                 let store = self.store.read(cx);
                 // What isn't already updating or queued.
                 let all: Vec<Update> = updates
@@ -2095,7 +2113,7 @@ impl AddonsView {
                     .on_click(cx.listener(move |this, _, window, cx| this.review_updates(all.clone(), window, cx)))
                     .into_any_element()
             }
-            None => div().into_any_element(),
+            false => div().into_any_element(),
         };
         let root = inst.root.clone();
         h_flex()
@@ -2200,14 +2218,16 @@ impl AddonsView {
                         .text_xs(),
                 )
             })
-            // The update status and its refresh wrap as one.
+            // The update status and its refresh wrap as one. The note goes
+            // before the Review button so the button doesn't move.
             .child(
-                h_flex().flex_none().gap_1().child(status).child(
+                h_flex().flex_none().gap_2().children(note).child(result).child(
                     Button::new("recheck")
                         .ghost()
                         .small()
                         .icon(IconName::RefreshCw)
-                        .tooltip("Check for updates again")
+                        .loading(checking)
+                        .tooltip(if checking { "Checking for updates" } else { "Check for updates again" })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.store.update(cx, |s, cx| {
                                 s.check_updates(&root, true);
