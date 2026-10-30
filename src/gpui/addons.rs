@@ -1524,6 +1524,7 @@ impl AddonsView {
                 .map(|i| i.addons.iter().map(|a| (a.file_name.clone(), a.project_id)).collect())
                 .unwrap_or_default(),
         );
+        let single = (files.len() == 1).then(|| pids.get(&files[0]).copied().unwrap_or(0));
         // Focus inside the dialog's body, so Shift going down or up reaches
         // its listener (they're called along the focused element's path).
         let body_focus = cx.focus_handle();
@@ -1626,8 +1627,18 @@ impl AddonsView {
                             })
                     }))
             });
+            // One mod: its icon beside the name, opening the peek.
+            let title = match &single {
+                Some(pid) => h_flex()
+                    .gap_1p5()
+                    .child("Remove")
+                    .child(peek_link("remove-title", what.clone(), *pid, &peek, cx))
+                    .child("?")
+                    .into_any_element(),
+                None => format!("Remove {what}?").into_any_element(),
+            };
             dialog
-                .title(format!("Remove {what}?"))
+                .title(title)
                 .w(rems(30.).to_pixels(window.rem_size()))
                 .margin_top(rems(crate::widgets::DIALOG_TOP).to_pixels(window.rem_size()))
                 .overlay(!peeking)
