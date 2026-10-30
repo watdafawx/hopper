@@ -53,6 +53,31 @@
     return () => clearTimeout(timer);
   });
 
+  // How the server starts: the script's line with @user_jvm_args.txt as a
+  // link to the args file, which is shown apart (the flags live only there).
+  const start = $derived(view?.start || jvm?.start || null);
+  const files = $derived(jvm?.files || []);
+  const editHref = (f) => `#/server/${encodeURIComponent(server.id)}/edit/${encodeURIComponent(f)}`;
+  const lineParts = $derived(
+    (start?.line || '').split(/(@user_jvm_args\.txt|!ARGS!|%ARGS%)/i).filter(Boolean)
+      .map((text) => ({ text, file: start?.reads_args_file && /^(@user_jvm_args\.txt|!ARGS!|%ARGS%)$/i.test(text) })),
+  );
+  const startNote = $derived(
+    !start ? '' :
+    !start.script ? 'No start script: Hopper starts the server jar and reads the flags from user_jvm_args.txt.' :
+    start.reads_args_file ? `${start.script} starts Java and reads the flags from user_jvm_args.txt.` :
+    `${start.script} has its flags in it and doesn't read user_jvm_args.txt. Saving changes only its -Xmx; edit ${start.script} for other flags.`,
+  );
+  const shown = $derived(new Set([start?.script, start?.reads_args_file ? 'user_jvm_args.txt' : null]));
+  const otherFiles = $derived(files.filter((f) => !shown.has(f)));
+  let argsHead = $state(null);
+  let flash = $state(false);
+  function showArgsFile() {
+    argsHead?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    flash = true;
+    setTimeout(() => (flash = false), 1200);
+  }
+
   const pickRow = (row, value) => preview(row.kind === 'switch' ? { row: row.id, on: value } : { row: row.id, index: value });
 </script>
 
@@ -100,15 +125,37 @@
 {#if typedMemory}<div class="warnl"><TriangleAlert size={14} />-Xms or -Xmx here isn't used: the memory slider's are. Move the slider instead.</div>{/if}
 {#each view?.conflicts || [] as w (w)}<div class="warnl"><TriangleAlert size={14} />{w}</div>{/each}
 
-<h4>Command line</h4>
-<div class="tiny muted hint">What the server starts with after saving: the start script with these arguments in it.</div>
-<div class="cmd mono">{view?.command || 'No start script or server jar, so the panel can’t tell yet.'}</div>
-
-<h4>Files that start the server</h4>
-{#each jvm.files || [] as f (f)}
-  <div class="fl"><div class="lab"><div class="mono">{f}</div><div class="tiny muted">{f === 'user_jvm_args.txt' ? 'Java arguments: memory and flags, written by this page' : 'The start script'}</div></div>
-    <div class="ctl"><a class="btn sm" href="#/server/{encodeURIComponent(server.id)}/edit/{encodeURIComponent(f)}"><FileCode size={13} />Edit</a></div></div>
-{:else}<div class="small muted">No run.bat, start.bat or user_jvm_args.txt; the server starts from its jar.</div>{/each}
+<h4>How the server starts</h4>
+{#if start}
+  <div class="tiny muted hint">{startNote}</div>
+  <div class="start">
+    <div class="fhead">
+      <span class="mono">{start.script || 'No start script'}</span>
+      <span class="tiny muted">{start.script ? 'The start script' : 'Hopper starts the server jar itself'}</span>
+      {#if start.line_changed && dirty.memory}<span class="chip new">Not saved yet</span>{/if}
+      {#if start.script && files.includes(start.script)}<a class="btn sm ghost" href={editHref(start.script)}><FileCode size={13} />Edit</a>{/if}
+    </div>
+    <div class="cmd mono">{#each lineParts as part, i (i)}{#if part.file}<button class="argref" title="Reads the Java arguments below" onclick={showArgsFile}>{part.text}</button>{:else}{part.text}{/if}{/each}</div>
+    {#if start.reads_args_file}
+      <div class="fhead" class:flash bind:this={argsHead}>
+        <span class="mono">user_jvm_args.txt</span>
+        <span class="tiny muted">Java arguments, one per line: memory and flags, written by this page</span>
+        {#if start.args_changed && (dirty.memory || dirty.flags)}<span class="chip new">Not saved yet</span>{/if}
+        {#if files.includes('user_jvm_args.txt')}<a class="btn sm ghost" href={editHref('user_jvm_args.txt')}><FileCode size={13} />Edit</a>{/if}
+      </div>
+      <div class="cmd mono args">{#each start.args as a, i (i)}<div>{a}</div>{:else}<div class="muted">Empty: Java picks its own memory.</div>{/each}</div>
+    {/if}
+  </div>
+{:else}
+  <div class="cmd mono">No start script or server jar, so the panel can’t tell yet.</div>
+{/if}
+{#if otherFiles.length}
+  <h4>Other start files</h4>
+  {#each otherFiles as f (f)}
+    <div class="fl"><div class="lab"><div class="mono">{f}</div><div class="tiny muted">{f === 'user_jvm_args.txt' ? "Java arguments; the start script above doesn't read it" : 'A start script the server doesn’t use'}</div></div>
+      <div class="ctl"><a class="btn sm" href={editHref(f)}><FileCode size={13} />Edit</a></div></div>
+  {/each}
+{/if}
 
 <style>
   .hint { margin-bottom: 6px; }
@@ -141,5 +188,16 @@
   .warnl { display: flex; gap: 6px; align-items: flex-start; color: #eab308; font-size: 13px; margin-top: 6px; }
   .warnl :global(svg) { flex: none; margin-top: 2px; }
   .cmd { font-size: 11.5px; background: var(--term); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; color: var(--subtle); word-break: break-all; line-height: 1.5; }
+  .start { border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px 12px; }
+  .start .cmd { margin-top: 4px; }
+  .fhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0 0; border-radius: 6px; transition: background .3s; }
+  .fhead > .mono { font-weight: 500; color: var(--text); }
+  .fhead .btn { margin-left: auto; }
+  .fhead.flash { background: var(--acc-dim); }
+  .start .fhead + .cmd + .fhead { margin-top: 10px; }
+  .args { word-break: break-all; }
+  .chip.new { background: #f9731622; color: #f97316; margin-left: 0; }
+  .argref { font: inherit; color: var(--acc); background: var(--acc-dim); border-radius: 4px; padding: 0 4px; cursor: pointer; }
+  .argref:hover { text-decoration: underline; }
   @media (max-width: 900px) { .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; flex-wrap: wrap; } }
 </style>

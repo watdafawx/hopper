@@ -150,19 +150,67 @@ fn swap_java(root: &Path, mut l: Launch, text: &str) -> Launch {
     l
 }
 
-/// The command the server would start with if `jvm` were its
-/// `user_jvm_args.txt` (and a start script with its own -Xmx got the same
-/// one, as saving does): the panel's preview before saving.
-pub fn preview_launch(root: &Path, jvm: &JvmArgs) -> anyhow::Result<Launch> {
-    let (l, text) = launch_with(root, jvm, jvm.xmx_mb)?;
-    Ok(swap_java(root, l, &text))
-}
-
 /// The command the server's start script runs (run.bat, else start.bat,
 /// else a server jar with `user_jvm_args.txt`), as written: java not
 /// swapped. Also the script's text ("" without one).
 pub fn read_launch(root: &Path) -> anyhow::Result<(Launch, String)> {
     launch_with(root, &JvmArgs::load(root)?, None)
+}
+
+/// How the server starts, the way the files say it: the start script's own
+/// line and, apart from it, what `user_jvm_args.txt` holds. The panel shows
+/// this instead of one expanded command line, which made the flags look
+/// written into both files.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StartPreview {
+    /// The start script (run.bat, start.bat); None when Hopper starts the
+    /// server jar itself.
+    pub script: Option<String>,
+    /// The script's launch line as it will be saved (`%*` and all). Without
+    /// a script: the command Hopper runs, with `@user_jvm_args.txt` in it.
+    pub line: String,
+    /// The line reads `user_jvm_args.txt` (`@user_jvm_args.txt`, or the
+    /// Java 8 loop into `!ARGS!`), so the flags live only there.
+    pub reads_args_file: bool,
+    /// `user_jvm_args.txt` as it will be saved, one argument per entry.
+    pub args: Vec<String>,
+    /// The arguments differ from the file on disk.
+    pub args_changed: bool,
+    /// The script line differs from the one on disk (its -Xmx).
+    pub line_changed: bool,
+}
+
+/// [`StartPreview`] for `root` if `jvm` were saved.
+pub fn start_preview(root: &Path, jvm: &JvmArgs) -> anyhow::Result<StartPreview> {
+    let saved = JvmArgs::load(root).unwrap_or_default();
+    let args = jvm.args();
+    let args_changed = args != saved.args();
+    for script in SCRIPTS {
+        let Ok(disk) = fs::read_to_string(root.join(script)) else { continue };
+        let text = jvm.xmx_mb.and_then(|mb| script_with_memory(&disk, mb)).unwrap_or_else(|| disk.clone());
+        let Some(line) = launch_line(&text) else { continue };
+        let reads_args_file = line.contains("!ARGS!")
+            || line.contains("%ARGS%")
+            || tokenize(line).iter().any(|t| t.eq_ignore_ascii_case(&format!("@{ARGS_FILE}")));
+        return Ok(StartPreview {
+            script: Some(script.to_string()),
+            line_changed: launch_line(&disk) != Some(line),
+            line: line.to_string(),
+            reads_args_file,
+            args,
+            args_changed,
+        });
+    }
+    let (l, _) = launch_with(root, jvm, None)?;
+    let jar = launch_jar(&l).unwrap_or("server.jar");
+    Ok(StartPreview {
+        script: None,
+        line: format!("java @{ARGS_FILE} -jar {} nogui", quote(jar)),
+        reads_args_file: true,
+        args,
+        args_changed,
+        line_changed: false,
+    })
 }
 
 /// [`read_launch`] with these Java arguments, and the script's own -Xmx
@@ -448,6 +496,58 @@ fn jar_script_and_java8() {
         let l = parse_launch(&old, &jvm()).unwrap();
         assert_eq!(l.java, PathBuf::from(r"C:\jre8\bin\java.exe"));
         assert_eq!(l.args, ["-Xms4G", "-Xmx4G", "-jar", "forge-1.12.2-14.23.5.2860.jar", "nogui"]);
+    }
+
+    #[test]
+    fn start_preview_keeps_the_args_file_apart() {
+        let root = std::env::temp_dir().join(format!("hopper-start-preview-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let line = r#""G:\jdk\bin\java.exe" @user_jvm_args.txt @libraries/net/neoforged/neoforge/21.1.259/win_args.txt nogui%*"#;
+        fs::write(root.join("run.bat"), format!("@echo off\r\n{line}\r\npause\r\n")).unwrap();
+        jvm().save(&root).unwrap();
+
+        // NeoForge's run.bat: its line as it is, the flags only in the args file.
+        let p = start_preview(&root, &jvm()).unwrap();
+        assert_eq!(p.script.as_deref(), Some("run.bat"));
+        assert_eq!(p.line, line);
+        assert!(p.reads_args_file && !p.args_changed && !p.line_changed);
+        assert_eq!(p.args, ["-Xms4G", "-Xmx4G"]);
+        let mut more = jvm();
+        more.set_memory(8192);
+        let p = start_preview(&root, &more).unwrap();
+        assert!(p.args_changed && !p.line_changed, "{p:?}");
+        assert_eq!(p.line, line);
+
+        // A start.bat with its flags inline: shown as it will be saved (the
+        // new -Xmx), and it doesn't read the args file.
+        fs::remove_file(root.join("run.bat")).unwrap();
+        fs::write(root.join("start.bat"), "java -Dfabric.log.level=DEBUG -Xmx8G -jar fabric-server-launch.jar nogui\r\npause\r\n").unwrap();
+        let p = start_preview(&root, &jvm()).unwrap();
+        assert_eq!(p.script.as_deref(), Some("start.bat"));
+        assert_eq!(p.line, "java -Dfabric.log.level=DEBUG -Xmx4G -jar fabric-server-launch.jar nogui");
+        assert!(!p.reads_args_file && p.line_changed);
+
+        // No script: Hopper starts the jar with the args file.
+        fs::remove_file(root.join("start.bat")).unwrap();
+        fs::write(root.join("server.jar"), "").unwrap();
+        let p = start_preview(&root, &jvm()).unwrap();
+        assert_eq!(p.script, None);
+        assert_eq!(p.line, "java @user_jvm_args.txt -jar server.jar nogui");
+        assert!(p.reads_args_file);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn start_preview_reads_the_java8_loop() {
+        let root = std::env::temp_dir().join(format!("hopper-start-preview8-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let bat = run_bat(Path::new(r"C:\jre8\bin\java.exe"), &LaunchTarget::Jar("forge.jar".into()), 8);
+        fs::write(root.join("run.bat"), bat).unwrap();
+        let p = start_preview(&root, &jvm()).unwrap();
+        assert!(p.reads_args_file && p.line.contains("!ARGS!"), "{p:?}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
