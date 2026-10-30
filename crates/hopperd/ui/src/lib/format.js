@@ -28,6 +28,24 @@ export function xmx(v) {
   return Number(m[1]) * mult;
 }
 
+/** Hover text for a server's RAM. The number is the whole Java process, and
+ * -Xmx only caps Java's heap, so a server above its setting is normal. */
+export function memTitle(used, cap) {
+  if (!cap) return `The server uses ${bytes(used)}.`;
+  const set = `The server uses ${bytes(used)}. Its memory setting lets Java use up to ${bytes(cap)}.`;
+  return used > cap ? `${set} Java also uses some memory outside that limit, so going over it is normal.` : set;
+}
+
+const LOADER_NAMES = { neoforge: 'NeoForge', forge: 'Forge', fabric: 'Fabric', quilt: 'Quilt', paper: 'Paper', purpur: 'Purpur', vanilla: 'Vanilla' };
+
+/** "neoforge 21.1.259" as "NeoForge 21.1.259", or just "NeoForge" with nameOnly. */
+export function loaderText(l, nameOnly = false) {
+  if (!l) return '';
+  const [id, ...rest] = l.split(' ');
+  const name = LOADER_NAMES[id.toLowerCase()] || id;
+  return nameOnly ? name : [name, ...rest].join(' ');
+}
+
 const COLORS = ['#84cc16', '#60a5fa', '#f472b6', '#f59e0b', '#a78bfa', '#14b8a6', '#ef4444', '#a3a3ad'];
 
 export function color(name) {
@@ -64,4 +82,10 @@ export function pathKind(host = location.hostname) {
   if (PRIVATE.some((r) => r.test(host))) return 'LAN';
   if (TAILSCALE.some((r) => r.test(host))) return 'Tailscale';
   return 'Internet';
+}
+
+/** How healthy a TPS reading is: 20 is full speed, under 15 players
+ * notice, under 10 it's badly lagging. */
+export function tpsLevel(tps) {
+  return tps >= 15 ? 'good' : tps >= 10 ? 'warn' : 'bad';
 }

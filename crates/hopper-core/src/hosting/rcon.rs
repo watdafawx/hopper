@@ -238,6 +238,90 @@ fn strip_colors(s: &str) -> String {
     out
 }
 
+/// Where RCON ports are picked from: Minecraft's default and up.
+const RCON_PORTS: std::ops::Range<u16> = 25575..26575;
+
+/// What [`enable`] did to a server's RCON settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setup {
+    /// It was on with a password already; nothing changed.
+    Already { port: u16 },
+    /// The owner's password was kept; RCON was switched on (and given a free
+    /// port if its own clashed with another server).
+    Adopted { port: u16 },
+    /// Turned on with a new port and password.
+    Enabled { port: u16 },
+}
+
+impl Setup {
+    pub fn port(self) -> u16 {
+        match self {
+            Setup::Already { port } | Setup::Adopted { port } | Setup::Enabled { port } => port,
+        }
+    }
+
+    /// Whether server.properties changed (and needs saving).
+    pub fn changed(self) -> bool {
+        !matches!(self, Setup::Already { .. })
+    }
+}
+
+/// Turns RCON on in `p` so the panel can read TPS. An RCON setup the owner
+/// made is kept: a password stays, and so does its port unless another
+/// server uses it. `taken` holds the ports other servers use (game and
+/// RCON); `free` says whether a port can be bound on this PC right now;
+/// `password` makes a new one when there is none.
+pub fn enable(p: &mut super::Properties, taken: &[u16], free: impl Fn(u16) -> bool, password: impl FnOnce() -> String) -> anyhow::Result<Setup> {
+    let pass = p.get("rcon.password").map(str::trim).unwrap_or("").to_string();
+    let own = p.get("rcon.port").and_then(|v| v.trim().parse::<u16>().ok());
+    if p.get("enable-rcon") == Some("true") && !pass.is_empty() {
+        return Ok(Setup::Already { port: own.unwrap_or(RCON_PORTS.start) });
+    }
+    let game = p.port();
+    let clash = |n: u16| n == game || taken.contains(&n);
+    let port = match own {
+        Some(n) if !pass.is_empty() && !clash(n) => n,
+        _ => RCON_PORTS.clone().find(|n| !clash(*n) && free(*n)).ok_or_else(|| anyhow::anyhow!("No free port for RCON."))?,
+    };
+    let kept = !pass.is_empty();
+    p.set("enable-rcon", "true");
+    p.set("rcon.port", port.to_string());
+    if !kept {
+        p.set("rcon.password", password());
+    }
+    // Commands the panel runs shouldn't show up in ops' chat.
+    p.set_default("broadcast-rcon-to-ops", "false");
+    Ok(if kept { Setup::Adopted { port } } else { Setup::Enabled { port } })
+}
+
+/// The ports a set of servers use, for the game and for RCON (on or off:
+/// an owner may switch theirs back on).
+pub fn ports_in_use(roots: &[std::path::PathBuf]) -> Vec<u16> {
+    let mut out = Vec::new();
+    for r in roots {
+        if let Ok(p) = super::Properties::load(&r.join("server.properties")) {
+            out.push(p.port());
+            if let Some(n) = p.get("rcon.port").and_then(|v| v.trim().parse().ok()) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+/// [`enable`] on the server in `root`, saving its server.properties when it
+/// changed. `others` are the other servers' folders.
+pub fn enable_in(root: &Path, others: &[std::path::PathBuf], password: impl FnOnce() -> String) -> anyhow::Result<Setup> {
+    let path = root.join("server.properties");
+    let mut p = super::Properties::load(&path)?;
+    let taken = ports_in_use(others);
+    let s = enable(&mut p, &taken, |n| std::net::TcpListener::bind(("127.0.0.1", n)).is_ok(), password)?;
+    if s.changed() {
+        p.save(&path)?;
+    }
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +450,78 @@ There are 0 of a max of 16 players online:
         });
         let mut r = Rcon::connect(port, "pw", Duration::from_secs(2)).unwrap();
         assert_eq!(r.command("tps").unwrap(), "ran tps");
+    }
+
+    use super::super::Properties;
+
+    const PW: fn() -> String = || "newpass".to_string();
+
+    #[test]
+    fn enable_picks_a_port_clear_of_other_servers() {
+        let mut p = Properties::parse("server-port=25575\n");
+        // Its own game port, another server's RCON and a busy port are skipped.
+        let s = enable(&mut p, &[25576], |n| n != 25577, PW).unwrap();
+        assert_eq!(s, Setup::Enabled { port: 25578 });
+        assert_eq!(p.get("enable-rcon"), Some("true"));
+        assert_eq!(p.get("rcon.port"), Some("25578"));
+        assert_eq!(p.get("rcon.password"), Some("newpass"));
+        assert_eq!(p.get("broadcast-rcon-to-ops"), Some("false"));
+    }
+
+    #[test]
+    fn enable_keeps_comments_and_order() {
+        let text = "#Minecraft server properties\n#Thu Oct 30\nmotd=Hi \\u00A7aall\nenable-rcon=false\n\nrcon.port=25575\nserver-port=25565\nbroadcast-rcon-to-ops=true\n";
+        let mut p = Properties::parse(text);
+        enable(&mut p, &[], |_| true, PW).unwrap();
+        let out = p.to_text();
+        let lines: Vec<&str> = out.lines().collect();
+        // Untouched lines come back exactly as written, escapes and all.
+        assert_eq!(&lines[..4], &["#Minecraft server properties", "#Thu Oct 30", "motd=Hi \\u00A7aall", "enable-rcon=true"]);
+        assert_eq!(lines[4], "");
+        assert_eq!(lines[5], "rcon.port=25575");
+        assert_eq!(lines[6], "server-port=25565");
+        // The owner's choice stays.
+        assert_eq!(lines[7], "broadcast-rcon-to-ops=true");
+        assert_eq!(lines[8], "rcon.password=newpass");
+        assert_eq!(lines.len(), 9);
+    }
+
+    #[test]
+    fn enable_adopts_an_existing_setup() {
+        // On with a password: left exactly as it is, even on a shared port.
+        let text = "enable-rcon=true\nrcon.port=25600\nrcon.password=mine\n";
+        let mut p = Properties::parse(text);
+        assert_eq!(enable(&mut p, &[25600], |_| true, PW).unwrap(), Setup::Already { port: 25600 });
+        assert_eq!(p.to_text(), Properties::parse(text).to_text());
+        // Off but set up: switched on with the same port and password.
+        let mut p = Properties::parse("enable-rcon=false\nrcon.port=25600\nrcon.password=mine\n");
+        assert_eq!(enable(&mut p, &[], |_| true, PW).unwrap(), Setup::Adopted { port: 25600 });
+        assert_eq!(p.get("rcon.password"), Some("mine"));
+        // Its port clashes with another server: the password stays, the port moves.
+        let mut p = Properties::parse("enable-rcon=false\nrcon.port=25600\nrcon.password=mine\n");
+        assert_eq!(enable(&mut p, &[25575, 25600], |_| true, PW).unwrap(), Setup::Adopted { port: 25576 });
+        // On but no password: Minecraft won't start RCON, so it gets one.
+        let mut p = Properties::parse("enable-rcon=true\nrcon.port=25590\nrcon.password=\n");
+        assert_eq!(enable(&mut p, &[], |_| true, PW).unwrap(), Setup::Enabled { port: 25575 });
+        assert_eq!(p.get("rcon.password"), Some("newpass"));
+    }
+
+    #[test]
+    fn enable_in_saves_and_reads_other_servers() {
+        let d = std::env::temp_dir().join(format!("hopper-rcon-enable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (a, b) = (d.join("a"), d.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("server.properties"), "server-port=25566\nenable-rcon=true\nrcon.port=25575\nrcon.password=x\n").unwrap();
+        std::fs::write(b.join("server.properties"), "# b\nserver-port=25567\n").unwrap();
+        let s = enable_in(&b, &[a.clone()], PW).unwrap();
+        assert_ne!(s.port(), 25575);
+        let text = std::fs::read_to_string(b.join("server.properties")).unwrap();
+        assert!(text.starts_with("# b\nserver-port=25567\nenable-rcon=true\n"), "{text}");
+        assert_eq!(settings(&b), Some((s.port(), "newpass".to_string())));
+        // A second run changes nothing.
+        assert_eq!(enable_in(&b, &[a], PW).unwrap(), Setup::Already { port: s.port() });
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

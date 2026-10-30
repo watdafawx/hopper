@@ -39,11 +39,14 @@ pub struct Settings {
     /// Percent of the PC's memory in use.
     pub ram_pct: u32,
     pub ram_minutes: u32,
+    /// Turn RCON on for every server (new ones too) so TPS shows
+    /// everywhere. Off unless the owner switches it on.
+    pub auto_rcon: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { crash: true, tps_on: true, tps_below: 15.0, tps_minutes: 2, disk_on: true, disk_gb: 20, ram_on: true, ram_pct: 90, ram_minutes: 5 }
+        Settings { crash: true, tps_on: true, tps_below: 15.0, tps_minutes: 2, disk_on: true, disk_gb: 20, ram_on: true, ram_pct: 90, ram_minutes: 5, auto_rcon: false }
     }
 }
 
@@ -80,6 +83,9 @@ struct Tracker {
     /// Why a server has no TPS: "rcon_off", "unsupported", or "slow" (it
     /// didn't answer within [`ANSWER_WAIT`]: ticks are taking seconds).
     no_tps: HashMap<String, &'static str>,
+    /// Servers whose RCON was turned on while they ran, with when that run
+    /// started: RCON comes up at their next start.
+    rcon_waits: HashMap<String, Option<std::time::SystemTime>>,
 }
 
 fn state() -> &'static Mutex<Tracker> {
@@ -284,10 +290,66 @@ fn guard(app: &App) {
     }
 }
 
+/// A random RCON password: 36 hex digits.
+fn new_password() -> String {
+    let mut raw = [0u8; 18];
+    getrandom::fill(&mut raw).expect("the OS random source");
+    hopper_core::hosting::chunkstore::hex(&raw)
+}
+
+/// Turns RCON on for one server (keeping a setup the owner made). When the
+/// server is running, it comes up at its next start; until then the panel
+/// says so instead of showing no TPS.
+fn turn_on(app: &App, e: &crate::servers::Entry) -> anyhow::Result<rcon::Setup> {
+    let others: Vec<std::path::PathBuf> = app.servers.list().iter().filter(|x| x.id != e.id).map(|x| x.root.clone()).collect();
+    let s = rcon::enable_in(&e.root, &others, new_password)?;
+    if s.changed() {
+        if e.server.state().is_alive() {
+            state().lock().unwrap().rcon_waits.insert(e.id.clone(), e.server.started_at());
+        }
+        let how = if matches!(s, rcon::Setup::Adopted { .. }) { "switched on with its own password" } else { "turned on" };
+        log::info!("{}: RCON {how} (port {}) so the panel can read TPS", e.name, s.port());
+    }
+    Ok(s)
+}
+
+/// With "RCON for all servers" on, turns it on for every server that has
+/// none yet: ones made, copied, downloaded or imported since the last look.
+fn auto_rcon(app: &App) {
+    if !settings(app).auto_rcon {
+        return;
+    }
+    for e in app.servers.list() {
+        if rcon::settings(&e.root).is_none()
+            && let Err(err) = turn_on(app, &e)
+        {
+            log::warn!("{}: couldn't turn RCON on: {err:#}", e.name);
+        }
+    }
+}
+
 /// Reads TPS from every server that is up (past "Done", not stopping) and
 /// has RCON.
 fn poll_tps(app: &App) {
     for e in app.servers.list() {
+        // RCON switched on while it ran: nothing listens until it restarts.
+        {
+            let mut st = state().lock().unwrap();
+            match st.rcon_waits.get(&e.id) {
+                Some(at) if *at == e.server.started_at() && e.server.state().is_alive() => {
+                    st.tps.remove(&e.id);
+                    st.no_tps.insert(e.id.clone(), "restart");
+                    continue;
+                }
+                Some(_) => {
+                    st.rcon_waits.remove(&e.id);
+                    if st.no_tps.get(&e.id) == Some(&"restart") {
+                        st.no_tps.remove(&e.id);
+                    }
+                }
+                None => {}
+            }
+        }
         if !e.server.rcon_allowed() {
             cut(&e.id);
             let mut st = state().lock().unwrap();
@@ -394,6 +456,19 @@ fn check(app: &Arc<App>, disks: &mut sysinfo::Disks) {
 
 /// Watches for alerts for as long as the panel runs.
 pub fn start(app: Arc<App>) {
+    // RCON for all servers: set up the moment any server starts, so one
+    // started right after it was made doesn't wait for the 30 s look.
+    let h = app.clone();
+    hopper_core::hosting::process::on_before_start(move |root| {
+        if !settings(&h).auto_rcon || rcon::settings(root).is_some() {
+            return;
+        }
+        if let Some(e) = h.servers.list().into_iter().find(|e| e.root == root)
+            && let Err(err) = turn_on(&h, &e)
+        {
+            log::warn!("{}: couldn't turn RCON on: {err:#}", e.name);
+        }
+    });
     let a = app.clone();
     std::thread::Builder::new()
         .name("rcon-guard".into())
@@ -412,6 +487,7 @@ pub fn start(app: Arc<App>) {
             std::thread::sleep(Duration::from_secs(15));
             loop {
                 let t = Instant::now();
+                auto_rcon(&p);
                 poll_tps(&p);
                 std::thread::sleep(Duration::from_secs(30).saturating_sub(t.elapsed()).max(Duration::from_secs(5)));
             }
@@ -464,6 +540,10 @@ async fn save(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, J
     let path = app.data_dir.join(FILE);
     std::fs::write(&path, serde_json::to_vec_pretty(&s).map_err(bad)?).map_err(bad)?;
     log::info!("alert settings changed");
+    if s.auto_rcon {
+        let a = app.clone();
+        tokio::task::spawn_blocking(move || auto_rcon(&a));
+    }
     Ok(Json(json!({ "settings": s })))
 }
 
@@ -482,44 +562,16 @@ async fn dismiss(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Turns RCON on with a random password and a free port, so the panel can
-/// read TPS. It takes effect when the server next starts.
+/// Turns RCON on with a random password and a free port (or switches on
+/// the owner's own setup), so the panel can read TPS. It takes effect when
+/// the server next starts.
 async fn enable_rcon(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
-    let others: Vec<std::path::PathBuf> = app.servers.list().iter().filter(|x| x.id != e.id).map(|x| x.root.clone()).collect();
-    let root = e.root.clone();
-    let port = tokio::task::spawn_blocking(move || -> anyhow::Result<u16> {
-        use hopper_core::hosting::Properties;
-        let path = root.join("server.properties");
-        let mut p = Properties::load(&path)?;
-        // Ports other servers use, for the game or for RCON.
-        let mut taken: Vec<u16> = vec![p.port()];
-        for o in &others {
-            if let Ok(op) = Properties::load(&o.join("server.properties")) {
-                taken.push(op.port());
-                if let Some(r) = op.get("rcon.port").and_then(|v| v.parse().ok()) {
-                    taken.push(r);
-                }
-            }
-        }
-        let port = (25575..26575)
-            .find(|n| !taken.contains(n) && std::net::TcpListener::bind(("127.0.0.1", *n)).is_ok())
-            .ok_or_else(|| anyhow::anyhow!("No free port for RCON."))?;
-        let mut raw = [0u8; 18];
-        getrandom::fill(&mut raw).map_err(|e| anyhow::anyhow!("{e}"))?;
-        p.set("enable-rcon", "true");
-        p.set("rcon.port", port.to_string());
-        p.set("rcon.password", hopper_core::hosting::chunkstore::hex(&raw));
-        p.set_default("broadcast-rcon-to-ops", "false");
-        p.save(&path)?;
-        Ok(port)
-    })
-    .await
-    .map_err(bad)?
-    .map_err(|e| bad(format!("{e:#}")))?;
-    log::info!("{}: RCON turned on (port {port}) so the panel can read TPS", e.name);
-    Ok(Json(json!({ "port": port, "restart": e.server.state().is_alive() })))
+    let a = app.clone();
+    let alive = e.server.state().is_alive();
+    let s = tokio::task::spawn_blocking(move || turn_on(&a, &e)).await.map_err(bad)?.map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({ "port": s.port(), "restart": alive && s.changed() })))
 }
 
 #[cfg(test)]

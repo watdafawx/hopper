@@ -5,6 +5,7 @@
   // folders, server or client pack zips) to add; the old folder's servers
   // stay listed where they are. Deleted servers wait here 30 days.
   import { FolderOpen, FolderCheck, FileArchive, RotateCcw, Trash2, FolderCog, MoveRight } from '@lucide/svelte';
+  import { loaderText } from './lib/format.js';
   import { restartPanel } from './lib/restart.js';
   import { api, post, del } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -145,7 +146,7 @@
           <label class="it" class:dim={s.already}>
             <input type="checkbox" checked={s.already || !skip.has(s.path)} disabled={s.already} onchange={() => (skip = flip(skip, s.path))} />
             <FolderCheck size={14} class="ok" /><b class="ell">{s.name}</b>
-            {#if s.loader}<span class="chip">{s.loader}</span>{/if}
+            {#if s.loader}<span class="chip">{loaderText(s.loader)}</span>{/if}
             {#if s.managed_by}<span class="chip">Also in {s.managed_by}</span>{/if}
             <span class="sp"></span><span class="tiny muted">{s.already ? 'already here' : 'runs where it is'}</span>
           </label>
