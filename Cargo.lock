@@ -4444,7 +4444,7 @@ dependencies = [
 
 [[package]]
 name = "hopper"
-version = "0.15.23"
+version = "0.15.24"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4468,7 +4468,7 @@ dependencies = [
 
 [[package]]
 name = "hopper-core"
-version = "0.15.23"
+version = "0.15.24"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
