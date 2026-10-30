@@ -27,7 +27,13 @@ impl Ftp {
                 anyhow::anyhow!("{host} didn't start TLS ({e}). If it only speaks plain FTP, pick FTP (not secure).")
             })?;
         }
-        s.login(user, pass).map_err(|e| anyhow::anyhow!("The FTP server refused the user name or password ({e})."))?;
+        s.login(user, pass).map_err(|e| {
+            if e.to_string().to_lowercase().contains("encryption") {
+                anyhow::anyhow!("This server only allows FTP with TLS: pick FTPS.")
+            } else {
+                anyhow::anyhow!("The FTP server refused the user name or password ({e}).")
+            }
+        })?;
         s.transfer_type(FileType::Binary)?;
         let mlsd = s.feat().map(|f| f.contains_key("MLST")).unwrap_or(false);
         Ok(Ftp { s, mlsd })
@@ -194,3 +200,4 @@ mod tests {
         round_trip(Ftp::connect("127.0.0.1", 32122, "u", "p", Some(true)).unwrap(), "tls");
     }
 }
+

@@ -517,6 +517,7 @@ mod tests {
             ..Default::default()
         };
         set_secret(&site.id, p[4]).unwrap();
+        let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let run = || -> anyhow::Result<()> {
             let (found, key) = test(&site)?;
             println!("servers: {found:?}, key: {key:?}");
@@ -550,9 +551,10 @@ mod tests {
             assert!(!names.iter().any(|n| n.starts_with("hopper-test")), "{names:?}");
             let backups = r.list(&join(&folder, crate::sync::BACKUP_DIR))?;
             println!("backups: {:?}", backups.iter().map(|e| &e.name).collect::<Vec<_>>());
+            // Only this run's backups (a re-run on the same server has older ones).
             let kept: usize = backups
                 .iter()
-                .filter(|b| b.dir)
+                .filter(|b| b.dir && b.name.parse::<u64>().is_ok_and(|t| t >= started))
                 .map(|b| r.list(&join(&folder, &format!("{}/{}", crate::sync::BACKUP_DIR, b.name))).map_or(0, |l| l.iter().filter(|e| e.name.contains("hopper-test")).count()))
                 .sum();
             assert_eq!(kept, 2, "both test jars kept in the server's backups");
