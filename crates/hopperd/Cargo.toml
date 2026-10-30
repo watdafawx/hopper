@@ -36,7 +36,7 @@ ring = "0.17"
 include_dir = "0.7"
 mdns-sd.workspace = true
 if-addrs = "0.13"
-# TLS: our own certificates (and Let's Encrypt's when a domain is set).
+# TLS: our own certificates, and Let's Encrypt's (an IP, an sslip.io name or a domain).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 time = "0.3"
@@ -44,7 +44,9 @@ ureq.workspace = true
 russh = { version = "0.64", default-features = false, features = ["ring"] }
 russh-sftp = "3"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "crypto"] }
-rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tls12", "tokio", "webpki-roots"] }
+# ACME with profiles and IP identifiers (Let's Encrypt's short-lived IP certificates).
+instant-acme = { version = "0.8", default-features = false, features = ["hyper-rustls", "ring"] }
+x509-parser = "0.18"
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
 tower = { version = "0.5", features = ["util"] }

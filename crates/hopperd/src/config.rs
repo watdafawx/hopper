@@ -35,9 +35,13 @@ pub struct Config {
     /// Other names or addresses the panel is reached by (a public IP, a
     /// DDNS name), put in its certificate.
     pub public_names: Vec<String>,
-    /// A domain to get a Let's Encrypt certificate for. Needs port 443 on
-    /// that name to reach this panel.
+    /// A domain to get a Let's Encrypt certificate for, when it points at
+    /// this server. Needs port 443 on that name to reach this panel.
     pub acme_domain: Option<String>,
+    /// Get a trusted Let's Encrypt certificate by itself: for the domain,
+    /// else the public IP, else its sslip.io name. Unset: on when a domain
+    /// is set (as before this setting).
+    pub auto_cert: Option<bool>,
     /// Contact for Let's Encrypt.
     pub acme_email: String,
     /// Use Let's Encrypt's staging server (for testing).
@@ -77,6 +81,7 @@ impl Default for Config {
             require_tls: false,
             public_names: Vec::new(),
             acme_domain: None,
+            auto_cert: None,
             acme_email: String::new(),
             acme_staging: false,
             curseforge_key: String::new(),
@@ -93,6 +98,11 @@ impl Default for Config {
 pub const FILE: &str = "hopperd.toml";
 
 impl Config {
+    /// Whether to get a Let's Encrypt certificate (see [`Config::auto_cert`]).
+    pub fn auto_cert_on(&self) -> bool {
+        self.auto_cert.unwrap_or_else(|| self.acme_domain.as_deref().is_some_and(|d| !d.trim().is_empty()))
+    }
+
     /// The config in `dir`, made with defaults (and saved) if missing.
     pub fn load_or_create(dir: &Path) -> anyhow::Result<Config> {
         let path = dir.join(FILE);

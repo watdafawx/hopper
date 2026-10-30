@@ -177,8 +177,10 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::parity_worlds::routes())
         .merge(crate::parity_console::routes())
         .merge(crate::parity_browse::routes())
+        .merge(crate::acme::routes())
         .fallback(crate::ui::serve)
         .layer(axum::middleware::from_fn_with_state(app.clone(), crate::security::guard))
+        .merge(crate::acme::challenge_route())
         .with_state(app)
 }
 
@@ -202,7 +204,8 @@ async fn hello(State(app): State<Arc<App>>, ConnectInfo(addr): ConnectInfo<Socke
         "addresses": *app.addresses.read().unwrap(),
         "port": cfg.port,
         "capabilities": CAPABILITIES,
-        "tls": { "fingerprint": app.tls.fingerprint, "ca": app.tls.ca_pem, "domain": cfg.acme_domain },
+        // `trusted`: the address with a Let's Encrypt certificate, when there is one.
+        "tls": { "fingerprint": app.tls.fingerprint, "ca": app.tls.ca_pem, "domain": cfg.acme_domain, "trusted": app.acme.trusted_url() },
         "sftp": (cfg.sftp_port != 0).then(|| json!({ "port": cfg.sftp_port, "fingerprint": app.sftp_fingerprint })),
     }))
 }

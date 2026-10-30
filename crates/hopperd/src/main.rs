@@ -16,6 +16,7 @@
 //! start with Windows, or install as a service) and runs a tray icon: see
 //! `launcher`.
 
+mod acme;
 mod alerts;
 mod api;
 mod auth;
@@ -56,6 +57,7 @@ mod servers_admin;
 mod service;
 mod sftp;
 mod tls;
+
 #[cfg(windows)]
 mod tray;
 mod ui;
@@ -111,6 +113,8 @@ pub struct App {
     pub limiter: security::Limiter,
     pub audit: security::Audit,
     pub tls: TlsInfo,
+    /// Let's Encrypt certificates (see [`acme`]).
+    pub acme: Arc<acme::Acme>,
     /// The SFTP host key's "SHA256:…".
     pub sftp_fingerprint: Option<String>,
     /// Server addresses (the Minecraft port shared by every server).
@@ -306,6 +310,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         limiter: Default::default(),
         audit: security::Audit::new(&data_dir),
         tls: tls_info,
+        acme: acme::Acme::new(&data_dir),
         sftp_fingerprint: sftp::fingerprint(&data_dir),
     });
     app.rescan();
@@ -443,27 +448,10 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
         .await
         .with_context(|| format!("listening on {addr} (is another hopperd running?)"))?;
     control::announce(cfg.port);
-    // Let's Encrypt, when a domain is set.
-    let acme = cfg.acme_domain.clone().filter(|d| !d.trim().is_empty()).map(|domain| {
-        use futures_util::StreamExt as _;
-        let mut state = rustls_acme::AcmeConfig::new([domain.clone()])
-            .contact(cfg.acme_email.trim().is_empty().then(Vec::<String>::new).unwrap_or_else(|| vec![format!("mailto:{}", cfg.acme_email.trim())]))
-            .cache(rustls_acme::caches::DirCache::new(app.data_dir.join("acme")))
-            .directory_lets_encrypt(!cfg.acme_staging)
-            .state();
-        let resolver = state.resolver();
-        tokio::spawn(async move {
-            while let Some(r) = state.next().await {
-                match r {
-                    Ok(ok) => log::info!("Let's Encrypt: {ok:?}"),
-                    Err(e) => log::warn!("Let's Encrypt: {e:?}"),
-                }
-            }
-        });
-        log::info!("getting a Let's Encrypt certificate for {domain} (port 443 on it must reach this panel)");
-        (domain, resolver)
-    });
-    let tls = tls::server_config(tls::Resolver { own: own_cert, acme });
+    // Let's Encrypt, when automatic certificates are on.
+    acme::start(app.clone());
+    let resolver = |internet| tls::Resolver { own: own_cert.clone(), acme: app.acme.clone(), internet };
+    let tls = net::Tls { lan: tls::server_config(resolver(false)), internet: tls::server_config(resolver(true)) };
 
     let first = app.addresses.read().unwrap().first().cloned();
     log::info!("hopperd {} on {}", env!("CARGO_PKG_VERSION"), first.unwrap_or_else(|| format!("https://{addr}")));
