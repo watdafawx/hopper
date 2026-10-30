@@ -12,6 +12,7 @@ use hopper_core::hosting::backup;
 use hopper_core::hosting::properties::{self, PropKind, Properties};
 use hopper_core::hosting::{self, JvmArgs, JvmPreset, Schedule};
 use hopper_core::jvm_args::{self, Options, Pick, Target};
+use hopper_core::jvm_editor;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -153,6 +154,22 @@ fn jvm_view(e: &Entry, a: &JvmArgs, target: Target) -> Value {
     })
 }
 
+/// The Java arguments editor's marks for `text` (the box's lines): each
+/// argument's parts, level, sentence and problems, from the same code as
+/// desktop's editor. Offsets are in UTF-16 units, as the browser counts.
+fn editor_spans(text: &str, target: Target) -> Value {
+    let u16_at = |b: usize| text[..b].encode_utf16().count();
+    let r = |r: &std::ops::Range<usize>| json!([u16_at(r.start), u16_at(r.end)]);
+    let spans: Vec<Value> = jvm_editor::analyze(text, target, jvm_editor::Memory::Dropped)
+        .iter()
+        .map(|s| json!({
+            "range": r(&s.range), "name": r(&s.name), "value": s.value.as_ref().map(r),
+            "level": s.level, "explain": s.explain, "problems": s.problems,
+        }))
+        .collect();
+    json!(spans)
+}
+
 /// The files that decide how the server starts and that exist: start
 /// scripts and the JVM arguments file.
 fn start_files(e: &Entry) -> Vec<&'static str> {
@@ -191,6 +208,7 @@ async fn get_jvm(
             "presets": presets, "java": java, "java_major": major, "host_memory_mb": total / (1024 * 1024),
             "files": files, "xms_mb": a.xms_mb, "xmx_mb": a.xmx_mb,
             "memory_max_mb": jvm_args::memory_max_mb(total / (1024 * 1024)),
+            "catalog": jvm_args::catalog().iter().map(|(t, d)| json!({ "insert": t, "detail": d })).collect::<Vec<_>>(),
         });
         if let (Value::Object(v), Value::Object(more)) = (&mut v, view) {
             v.extend(more);
@@ -316,6 +334,8 @@ async fn preview_jvm(
         }
         let mut v = jvm_view(&e, &a, target);
         v["flags"] = json!(a.flags);
+        // The editor's marks for the text as typed (before a pick rewrites it).
+        v["spans"] = editor_spans(&b.flags_text, target);
         Ok(v)
     })
     .await?;

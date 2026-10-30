@@ -35,6 +35,7 @@ pub mod java;
 pub mod javadl;
 pub mod jobs;
 pub mod jvm_args;
+pub mod jvm_editor;
 pub mod launch;
 pub mod launchers;
 pub mod locked;

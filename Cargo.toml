@@ -66,6 +66,8 @@ trash.workspace = true
 sha1_smol.workspace = true
 # The app: GPUI, gpui-component and Lucide icons in one crate.
 gpui-kit = "0.8"
+# The code editor's completion and hover types (same version gpui-kit uses).
+lsp-types = "0.97"
 
 # The window handle for screenshots and backdrops (the versions GPUI uses).
 raw-window-handle = "0.6"
