@@ -78,10 +78,12 @@
         {#if s.not_after}<div class="f"><span class="l">Expires</span><span class="small" title={date(s.not_after)}>in {span(s.not_after - now())}{#if s.renew_at} · renews {s.renew_at > now() ? `in ${span(s.renew_at - now())}` : 'now'}{/if}</span></div>{/if}
         {#if s.working}<div class="f"><span class="l">Now</span><span class="small">Getting a certificate{s.public_ip ? ` for ${s.public_ip}` : ''}…</span></div>
         {:else if !s.covers && s.next_try}<div class="f"><span class="l">Next try</span><span class="small">{date(s.next_try)}</span></div>{/if}
+        {#if s.ip_change}<div class="f"><span class="l">IP changed</span><span class="small warn">{s.ip_change}</span></div>{/if}
         {#if s.note}<div class="f"><span class="l">Note</span><span class="small">{s.note}</span></div>{/if}
         {#if s.last_error}<div class="f"><span class="l">Last try</span><span class="small err">{s.last_error}</span></div>{/if}
       </div>
       <p class="tiny muted">Port 443 on {s.public_ip ?? 'your public IP'} must reach this panel: forward it to port {port} on your router (port 80 too helps if 443 is blocked). The LAN and paired Hopper desktops keep working either way.</p>
+      {#if !s.domain}<p class="tiny muted">Home connection whose IP changes? Then this address changes too. A domain stays the same: a free dynamic DNS name such as <a href="https://www.duckdns.org" target="_blank" rel="noopener">DuckDNS</a>, set as <span class="mono">acme_domain</span> in hopperd.toml.</p>{/if}
     {:else}
       <p class="small subtle">Browsers on the internet warn about the panel's own certificate. Turn this on to get a free one from Let's Encrypt, renewed by itself: for your domain (<span class="mono">acme_domain</span> in hopperd.toml), else your public IP, else its sslip.io name. Port 443 must reach this panel. Not needed behind a reverse proxy that has its own certificate.</p>
     {/if}
@@ -99,4 +101,5 @@
   .f:last-child { border: 0; }
   .l { width: 92px; flex: none; color: var(--muted); font-size: 12.5px; }
   .err { color: var(--red); }
+  .warn { color: var(--gold); }
 </style>

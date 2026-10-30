@@ -186,6 +186,8 @@ pub struct Status {
     pub next_try: Option<i64>,
     /// A note that isn't an error (the domain doesn't point here, say).
     pub note: Option<String>,
+    /// The public IP changed: from what to what, and the new address.
+    pub ip_change: Option<String>,
 }
 
 /// Saved next to the certificate.
@@ -201,6 +203,82 @@ struct Saved {
     /// Let's Encrypt refused this IP: use its sslip.io name.
     #[serde(default)]
     sslip_for: Option<IpAddr>,
+    /// The public IP as last confirmed (a change is noticed across restarts).
+    #[serde(default)]
+    ip: IpWatch,
+    /// The last IP change, in words for the panel.
+    #[serde(default)]
+    ip_change: Option<String>,
+    /// Certificates got lately: (name, unix time). See [`next_allowed`].
+    #[serde(default)]
+    issued: Vec<(String, i64)>,
+}
+
+/// Follows the public IP. A home connection's IP changes now and then; a
+/// new one counts once two checks in a row (~15 minutes apart) see it, so
+/// one odd answer from a lookup service or a short flap doesn't start a new
+/// certificate. A failed lookup keeps the IP as it was.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct IpWatch {
+    pub current: Option<IpAddr>,
+    #[serde(default)]
+    pending: Option<IpAddr>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum IpSeen {
+    /// The lookup failed.
+    Unknown,
+    First(IpAddr),
+    Same,
+    /// A different IP, seen once: waiting for the next check to confirm it.
+    Waiting(IpAddr),
+    Changed { from: IpAddr, to: IpAddr },
+}
+
+impl IpWatch {
+    pub fn observe(&mut self, seen: Option<IpAddr>) -> IpSeen {
+        let Some(ip) = seen else { return IpSeen::Unknown };
+        match self.current {
+            None => {
+                self.current = Some(ip);
+                self.pending = None;
+                IpSeen::First(ip)
+            }
+            Some(c) if c == ip => {
+                self.pending = None;
+                IpSeen::Same
+            }
+            Some(from) if self.pending == Some(ip) => {
+                self.current = Some(ip);
+                self.pending = None;
+                IpSeen::Changed { from, to: ip }
+            }
+            Some(_) => {
+                self.pending = Some(ip);
+                IpSeen::Waiting(ip)
+            }
+        }
+    }
+}
+
+/// How often to look up the public IP while the certificate is fine.
+pub const IP_CHECK: Duration = Duration::from_secs(15 * 60);
+
+/// Let's Encrypt allows 5 certificates for the same name a week, and an IP
+/// that keeps changing could run up new orders. Stay under both: at most 4
+/// per name a week and 6 in all a day. `None`: allowed now; else when.
+pub fn next_allowed(issued: &[(String, i64)], name: &str, now: i64) -> Option<i64> {
+    const WEEK: i64 = 7 * 86_400;
+    const DAY: i64 = 86_400;
+    let at = |mut times: Vec<i64>, max: usize, window: i64| {
+        // Allowed again once the oldest that still counts drops out.
+        times.sort();
+        (times.len() >= max).then(|| times[times.len() - max] + window)
+    };
+    let per_name = at(issued.iter().filter(|(n, t)| n == name && now - t < WEEK).map(|x| x.1).collect(), 4, WEEK);
+    let all = at(issued.iter().filter(|(_, t)| now - t < DAY).map(|x| x.1).collect(), 6, DAY);
+    per_name.max(all).filter(|w| *w > now)
 }
 
 pub struct Acme {
@@ -303,12 +381,31 @@ impl Acme {
         (i.not_after > now()).then_some(i)
     }
 
+    /// Saves the certificate as the one served, and under its name, so an
+    /// IP that changes back reuses it instead of asking for another.
     fn store(&self, target: &Target, staging: bool, chain: &str, key: &str) -> anyhow::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
-        std::fs::write(self.dir.join("cert.pem"), chain)?;
-        std::fs::write(self.dir.join("key.pem"), key)?;
-        std::fs::write(self.dir.join("meta.json"), serde_json::to_string_pretty(&Meta { target: target.clone(), staging })?)?;
+        for d in [self.dir.clone(), self.by_name(target, staging)] {
+            std::fs::create_dir_all(&d)?;
+            std::fs::write(d.join("cert.pem"), chain)?;
+            std::fs::write(d.join("key.pem"), key)?;
+            std::fs::write(d.join("meta.json"), serde_json::to_string_pretty(&Meta { target: target.clone(), staging })?)?;
+        }
         Ok(())
+    }
+
+    fn by_name(&self, target: &Target, staging: bool) -> PathBuf {
+        let safe: String =
+            target.label().chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
+        self.dir.join(if staging { "by-name-staging" } else { "by-name" }).join(safe)
+    }
+
+    /// A saved certificate for `target` that isn't due for renewal yet.
+    fn load_for(&self, target: &Target, staging: bool) -> Option<Issued> {
+        let d = self.by_name(target, staging);
+        let chain = std::fs::read_to_string(d.join("cert.pem")).ok()?;
+        let key = std::fs::read_to_string(d.join("key.pem")).ok()?;
+        let i = parse(target.clone(), &chain, &key).ok()?;
+        (renew_at(i.not_before, i.not_after) > now()).then_some(i)
     }
 
     async fn account(&self, staging: bool, email: &str) -> anyhow::Result<Account> {
@@ -535,9 +632,19 @@ async fn public_ip(public_names: &[String]) -> Option<IpAddr> {
 
 /// What to get a certificate for, given the settings and the public IP.
 /// Also a note for the panel when the domain is skipped.
-async fn choose(domain: Option<&str>, ip: Option<IpAddr>, sslip_for: Option<IpAddr>) -> (Option<Target>, Option<String>) {
+async fn choose(
+    domain: Option<&str>,
+    ip: Option<IpAddr>,
+    sslip_for: Option<IpAddr>,
+    serving: Option<&Target>,
+) -> (Option<Target>, Option<String>) {
     let mut note = None;
     if let Some(d) = domain.map(str::trim).filter(|d| !d.is_empty()) {
+        // Already serving the domain: keep it. After an IP change a dynamic
+        // DNS name takes a while to follow; don't flip to the IP meanwhile.
+        if serving == Some(&Target::Name(d.to_string())) {
+            return (serving.cloned(), None);
+        }
         let resolved: Vec<IpAddr> = tokio::net::lookup_host((d, 443)).await.map(|a| a.map(|s| s.ip()).collect()).unwrap_or_default();
         match ip {
             // Can't tell where it points without knowing our IP: try it.
@@ -589,29 +696,62 @@ pub fn start(app: Arc<crate::App>) {
                 log::info!("serving the saved certificate for {} until {}", i.target.label(), i.not_after);
                 *acme.cert.write().unwrap() = Some(Arc::new(i));
             }
-            let ip = public_ip(&cfg.public_names).await;
-            let saved = acme.saved();
-            let (target, note) = choose(cfg.acme_domain.as_deref(), ip, saved.sslip_for).await;
+            let mut saved = acme.saved();
+            let ip_seen = saved.ip.observe(public_ip(&cfg.public_names).await);
+            let ip = saved.ip.current;
+            let current = acme.cert.read().unwrap().clone();
+            let (target, note) =
+                choose(cfg.acme_domain.as_deref(), ip, saved.sslip_for, current.as_ref().map(|c| &c.target)).await;
+            match ip_seen {
+                IpSeen::Changed { from, to } => {
+                    log::info!("public IP changed from {from} to {to}");
+                    let share = target.as_ref().map_or(String::new(), |t| format!(" The address to share is now {}.", t.url()));
+                    saved.ip_change = Some(format!("Your public IP changed from {from} to {to}.{share}"));
+                    acme.save_state(&saved);
+                }
+                IpSeen::First(_) | IpSeen::Waiting(_) => acme.save_state(&saved),
+                IpSeen::Same | IpSeen::Unknown => {}
+            }
             acme.set_status(|s| {
                 s.public_ip = ip.map(|i| i.to_string());
                 s.sslip = matches!((&target, ip), (Some(Target::Name(n)), Some(ip)) if *n == sslip_name(ip));
                 s.note = note;
+                s.ip_change = saved.ip_change.clone();
             });
             let Some(target) = target else {
                 acme.set_status(|s| s.last_error = Some("Couldn't find this server's public IP. Add it under public names in hopperd.toml.".into()));
-                wait(&acme, Duration::from_secs(3600)).await;
+                wait(&acme, IP_CHECK).await;
                 continue;
             };
-            let current = acme.cert.read().unwrap().clone();
             let due = match &current {
                 Some(c) if c.target == target => renew_at(c.not_before, c.not_after) - now(),
                 _ => 0,
             };
             if due > 0 {
-                // Check again at least every 6 hours (the IP may change).
+                // Look at the public IP again every 15 minutes meanwhile.
                 failures = 0;
-                acme.set_status(|s| s.next_try = Some(now() + due.min(6 * 3600)));
-                wait(&acme, Duration::from_secs(due.min(6 * 3600) as u64)).await;
+                let pause = due.min(IP_CHECK.as_secs() as i64);
+                acme.set_status(|s| s.next_try = Some(now() + pause));
+                wait(&acme, Duration::from_secs(pause as u64)).await;
+                continue;
+            }
+            // A name that still has a good certificate (the IP changed
+            // back): reuse it. Until a new one is ready the old one is served.
+            if let Some(i) = acme.load_for(&target, staging) {
+                log::info!("reusing the saved certificate for {}", i.target.label());
+                *acme.cert.write().unwrap() = Some(Arc::new(i));
+                continue;
+            }
+            if let Some(at) = next_allowed(&saved.issued, &target.label(), now()) {
+                log::warn!("not asking Let's Encrypt for {} again until {at}: many certificates lately", target.label());
+                acme.set_status(|s| {
+                    s.last_error = Some(format!(
+                        "Many certificates for {} lately (does the IP keep changing?). Waiting, to stay under Let's Encrypt's limits.",
+                        target.label()
+                    ));
+                    s.next_try = Some(at);
+                });
+                wait(&acme, Duration::from_secs((at - now()).clamp(60, 86_400) as u64)).await;
                 continue;
             }
             acme.set_status(|s| {
@@ -632,6 +772,10 @@ pub fn start(app: Arc<crate::App>) {
             match got {
                 Ok(i) => {
                     log::info!("got a certificate for {} from {}, valid until {}", i.target.label(), i.issuer, i.not_after);
+                    let mut saved = acme.saved();
+                    saved.issued.retain(|(_, t)| now() - t < 7 * 86_400);
+                    saved.issued.push((i.target.label(), now()));
+                    acme.save_state(&saved);
                     *acme.cert.write().unwrap() = Some(Arc::new(i));
                     acme.set_status(|s| s.last_error = None);
                     failures = 0;
@@ -639,7 +783,9 @@ pub fn start(app: Arc<crate::App>) {
                 Err(e) if matches!(target, Target::Ip(_)) && refuses_ip(&e) => {
                     let Target::Ip(ip) = target else { unreachable!() };
                     log::warn!("Let's Encrypt won't issue for {ip} ({e:#}); using {}", sslip_name(ip));
-                    acme.save_state(&Saved { sslip_for: Some(ip) });
+                    let mut saved = acme.saved();
+                    saved.sslip_for = Some(ip);
+                    acme.save_state(&saved);
                     acme.set_status(|s| s.last_error = Some(format!("Let's Encrypt won't issue a certificate for the IP address, so {} is used. ({e:#})", sslip_name(ip))));
                 }
                 Err(e) => {
@@ -776,17 +922,95 @@ mod tests {
     #[tokio::test]
     async fn picks_the_name() {
         let ip: IpAddr = "81.2.69.160".parse().unwrap();
-        assert_eq!(choose(None, Some(ip), None).await.0, Some(Target::Ip(ip)));
-        assert_eq!(choose(None, Some(ip), Some(ip)).await.0, Some(Target::Name("81-2-69-160.sslip.io".into())));
+        assert_eq!(choose(None, Some(ip), None, None).await.0, Some(Target::Ip(ip)));
+        assert_eq!(choose(None, Some(ip), Some(ip), None).await.0, Some(Target::Name("81-2-69-160.sslip.io".into())));
         // Refused for an older IP: the new one is tried as an IP again.
-        assert_eq!(choose(None, Some(ip), Some("81.2.69.161".parse().unwrap())).await.0, Some(Target::Ip(ip)));
-        assert_eq!(choose(None, None, None).await.0, None);
+        assert_eq!(choose(None, Some(ip), Some("81.2.69.161".parse().unwrap()), None).await.0, Some(Target::Ip(ip)));
+        assert_eq!(choose(None, None, None, None).await.0, None);
         // A domain that doesn't resolve: the IP, with a note.
-        let (t, note) = choose(Some("nothing-here.invalid"), Some(ip), None).await;
+        let (t, note) = choose(Some("nothing-here.invalid"), Some(ip), None, None).await;
         assert_eq!(t, Some(Target::Ip(ip)));
         assert!(note.unwrap().contains("doesn't resolve"));
         // Without our IP, the domain is tried.
-        assert_eq!(choose(Some("hopper.example.com"), None, None).await.0, Some(Target::Name("hopper.example.com".into())));
+        assert_eq!(choose(Some("hopper.example.com"), None, None, None).await.0, Some(Target::Name("hopper.example.com".into())));
+        // Serving the domain while the IP just changed (dynamic DNS not caught up): stay.
+        let d = Target::Name("nothing-here.invalid".into());
+        assert_eq!(choose(Some("nothing-here.invalid"), Some(ip), None, Some(&d)).await.0, Some(d));
+    }
+
+    #[test]
+    fn notices_an_ip_change_on_the_second_sighting() {
+        let (a, b): (IpAddr, IpAddr) = ("81.2.69.160".parse().unwrap(), "81.2.69.161".parse().unwrap());
+        let mut w = IpWatch::default();
+        assert_eq!(w.observe(None), IpSeen::Unknown);
+        assert_eq!(w.observe(Some(a)), IpSeen::First(a));
+        assert_eq!(w.observe(Some(a)), IpSeen::Same);
+        // A failed lookup keeps the IP.
+        assert_eq!(w.observe(None), IpSeen::Unknown);
+        assert_eq!(w.current, Some(a));
+        // One odd answer, then back: no change.
+        assert_eq!(w.observe(Some(b)), IpSeen::Waiting(b));
+        assert_eq!(w.observe(Some(a)), IpSeen::Same);
+        assert_eq!(w.current, Some(a));
+        // Seen twice in a row: changed.
+        assert_eq!(w.observe(Some(b)), IpSeen::Waiting(b));
+        assert_eq!(w.observe(Some(b)), IpSeen::Changed { from: a, to: b });
+        assert_eq!(w.current, Some(b));
+        assert_eq!(w.observe(Some(b)), IpSeen::Same);
+        // Kept across restarts.
+        let back: IpWatch = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn a_flapping_ip_stays_under_lets_encrypts_limits() {
+        let day = 86_400;
+        let now = 100 * day;
+        assert_eq!(next_allowed(&[], "a", now), None);
+        // 3 for one name this week: a 4th is fine; after 4 the next waits
+        // until the oldest is a week old.
+        let three: Vec<(String, i64)> = (1..=3).map(|d| ("a".to_string(), now - d * day)).collect();
+        assert_eq!(next_allowed(&three, "a", now), None);
+        let mut four = three.clone();
+        four.push(("a".into(), now - 4 * day));
+        assert_eq!(next_allowed(&four, "a", now), Some(now + 3 * day));
+        // Another name isn't held up by these.
+        assert_eq!(next_allowed(&four, "b", now), None);
+        // Older than a week doesn't count.
+        let old: Vec<(String, i64)> = (8..=12).map(|d| ("a".to_string(), now - d * day)).collect();
+        assert_eq!(next_allowed(&old, "a", now), None);
+        // Flapping between addresses: 6 today, whatever the names, waits a day.
+        let today: Vec<(String, i64)> = (1..=6).map(|h| (format!("ip{h}"), now - h * 3600)).collect();
+        assert_eq!(next_allowed(&today, "new", now), Some(now - 6 * 3600 + day));
+    }
+
+    #[test]
+    fn reuses_a_saved_certificate_when_the_ip_changes_back() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("hopperd-acme-reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = Acme::new(&dir);
+        let t = |s: &str| Target::Ip(s.parse().unwrap());
+        let cert = |life: i64| {
+            let mut p = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+            p.not_before = time::OffsetDateTime::now_utc() - std::time::Duration::from_secs(3600);
+            p.not_after = p.not_before + std::time::Duration::from_secs(life as u64);
+            let key = rcgen::KeyPair::generate().unwrap();
+            (p.self_signed(&key).unwrap().pem(), key.serialize_pem())
+        };
+        let (c, k) = cert(160 * 3600);
+        a.store(&t("81.2.69.160"), false, &c, &k).unwrap();
+        let (c2, k2) = cert(160 * 3600);
+        a.store(&t("81.2.69.161"), false, &c2, &k2).unwrap();
+        // Both kept by name; the last one is the one served at start.
+        assert!(a.load_for(&t("81.2.69.160"), false).is_some());
+        assert!(a.load_for(&t("81.2.69.160"), true).is_none(), "staging is separate");
+        assert_eq!(a.load(false).unwrap().target, t("81.2.69.161"));
+        // One past half its life is due: not reused.
+        let (c3, k3) = cert(2 * 3600);
+        a.store(&t("81.2.69.162"), false, &c3, &k3).unwrap();
+        assert!(a.load_for(&t("81.2.69.162"), false).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
