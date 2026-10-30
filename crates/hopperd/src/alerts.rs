@@ -430,6 +430,11 @@ pub fn start(app: Arc<App>) {
         .ok();
 }
 
+/// The server's last TPS reading, while it's fresh (for automations).
+pub fn tps_now(id: &str) -> Option<f32> {
+    state().lock().unwrap().tps.get(id).map(|t| t.tps)
+}
+
 // ---- API -------------------------------------------------------------------
 
 pub fn routes() -> Router<Arc<App>> {
