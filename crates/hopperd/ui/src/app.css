@@ -62,6 +62,9 @@ a.btn { color: var(--text); }
 .btn.ghost { background: none; border-color: transparent; color: var(--subtle); }
 .btn.ghost:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .btn.ghost.on { background: var(--hover); color: var(--text); }
+/* Destructive icon buttons stay red without an outline. */
+.btn.ghost.bad { color: var(--red); }
+.btn.ghost.bad:hover:not(:disabled) { background: var(--red-dim); color: var(--red); }
 .btn.sm { padding: 3px 8px; font-size: 12px; }
 .btn.icon { padding: 5px 6px; }
 /* Tinted, no border, the theme's radius: the same rule as Hopper desktop's chips. */

@@ -7,7 +7,7 @@
   import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown } from '@lucide/svelte';
   import { live, history, follow, unfollow } from './lib/live.svelte.js';
   import { api, post } from './lib/api.js';
-  import { bytes, uptime, xmx, stateText } from './lib/format.js';
+  import { bytes, uptime, xmx, stateText, memTitle, loaderText } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
   import { ask } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
@@ -163,7 +163,7 @@
         {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />
         {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => openUpdate()}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
       </div>
-      <div class="small muted ell">{#if packCheck?.pack}<button class="vlink" title="{packCheck.pack.name}: versions and changelogs" onclick={openVersions}>{packCheck.pack.current.name}</button>{' · '}{/if}{#if s.version}<button class="vlink" title="Change Minecraft version (Settings › Version)" onclick={() => nav('settings', 'version')}>Minecraft {s.version}</button>{:else}Minecraft{/if}{#if s.loader}{' · '}{#if hasLoader}<button class="vlink" title="Loader versions and changelog" onclick={() => (loaderOpen = true)}>{s.loader}</button>{:else}{s.loader}{/if}{/if} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gl={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gl">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
+      <div class="small muted ell">{#if packCheck?.pack}<button class="vlink" title="{packCheck.pack.name}: versions and changelogs" onclick={openVersions}>{packCheck.pack.current.name}</button>{' · '}{/if}{#if s.version}<button class="vlink" title="Change Minecraft version (Settings › Version)" onclick={() => nav('settings', 'version')}>Minecraft {s.version}</button>{:else}Minecraft{/if}{#if s.loader}{' · '}{#if hasLoader}<button class="vlink" title="Loader versions and changelog" onclick={() => (loaderOpen = true)}>{loaderText(s.loader)}</button>{:else}{loaderText(s.loader)}{/if}{/if} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gl={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gl">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
     </div>
     <div class="row acts">
       {#if !alive}
@@ -227,7 +227,7 @@
         <!-- As desktop's Live cards: a dash and the state while it isn't running. -->
         <div class="t">CPU<b>{alive ? `${Math.round(s.cpu)} %` : '—'}</b></div>
         {#if alive}<Spark values={history[`${id}.cpu`]} color="var(--acc)" />{/if}
-        <div class="t gap">RAM<b>{alive ? `${bytes(s.mem_bytes)}${cap ? ` / ${bytes(cap)}` : ''}` : cap ? `— / ${bytes(cap)}` : '—'}</b></div>
+        <div class="t gap" title={alive ? memTitle(s.mem_bytes, cap) : undefined}>RAM<b>{alive ? `${bytes(s.mem_bytes)}${cap ? ` / ${bytes(cap)}` : ''}` : cap ? `— / ${bytes(cap)}` : '—'}</b></div>
         {#if alive}<Spark values={history[`${id}.mem`]} color="var(--blue)" />{:else}<div class="tiny muted gap">{stateText(s)}</div>{/if}
         <ServerAlerts server={s} part="live" />
       </div>
@@ -244,7 +244,7 @@
         <div class="kv">
           <span>Port</span><span class="mono">{s.port}</span>
           <span>Memory</span><span>{s.max_memory ? `-Xmx${s.max_memory}` : 'not set'}</span>
-          <span>Loader</span><span>{s.loader || '—'}</span>
+          <span>Loader</span><span>{loaderText(s.loader) || '—'}</span>
           <span>Version</span><span>{s.version || '—'}</span>
         </div>
       </div>

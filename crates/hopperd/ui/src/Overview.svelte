@@ -3,7 +3,7 @@
   import Avatar from './Avatar.svelte';
   import { Play, Square, RotateCw, Terminal, Plus, Server } from '@lucide/svelte';
   import { live, history } from './lib/live.svelte.js';
-  import { bytes, uptime, xmx, stateText } from './lib/format.js';
+  import { bytes, uptime, xmx, stateText, memTitle, loaderText } from './lib/format.js';
   import { power } from './lib/power.js';
   import { packUpdates } from './lib/packs.svelte.js';
   import Spark from './Spark.svelte';
@@ -25,6 +25,12 @@
   const loading = $derived(!live.connected && !live.servers.length);
   const href = (s) => `#/server/${encodeURIComponent(s.id)}`;
 </script>
+
+{#snippet chips(s, up)}
+  {#if up}<a class="chip acc" href={href(s)} title="Pack update: {up.from} → {up.to}">Pack update · {up.to}</a>{/if}
+  {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder">Also in {s.managed_by}</span>{/if}
+  {#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}
+{/snippet}
 
 <div class="pad">
   <div class="row hd"><h2>Overview</h2><span class="sp"></span>
@@ -63,52 +69,54 @@
     {#each servers as s (s.id)}
       {@const cap = xmx(s.max_memory)}
       {@const up = packUpdates.byId[s.id]}
+      {@const on = alive(s)}
+      {@const mem = on ? s.mem_bytes : 0}
+      <!-- The bar spans the larger of use and setting, so going over shows as a hatched tail past a tick at the setting. -->
+      {@const span = Math.max(mem, cap)}
+      {@const nchips = Number(!!up) + Number(!!s.managed_by) + Number(outside(s.path))}
       <div class="scard">
         <div class="row">
           <a class="icl" href={href(s)}><Avatar server={s} cls="ic" /></a>
           <a class="nmw" href={href(s)}>
             <div class="nm">{s.name}</div>
-            <div class="tiny muted cap">
-              {s.loader || 'Minecraft'}{s.version ? ` ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{:else}:{s.port}{/if}{alive(s) ? ` · up ${uptime(s.uptime_secs)}` : ''}{#if s.sleep_after_minutes && s.state === 'stopped'} · Sleeping{/if}
+            <div class="tiny muted cap" title={[loaderText(s.loader), s.version].filter(Boolean).join(' · ')}>
+              {loaderText(s.loader, true) || 'Minecraft'}{s.version ? ` ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{:else}:{s.port}{/if}{on ? ` · up ${uptime(s.uptime_secs)}` : ''}{#if s.sleep_after_minutes && s.state === 'stopped'} · Sleeping{/if}
             </div>
           </a>
           {#if s.state === 'running'}
-            <span class="pill running" title="Players online"><span class="glow"></span>{s.players.length}/{s.max_players}</span>
+            <span class="pill running" title="Players online"><span class="glow"></span>{s.players.length} / {s.max_players}</span>
           {:else if s.state === 'stopped'}
             <span class="stopped"><span class="dot"></span>Stopped</span>
           {:else}
             <span class="pill {s.state}">{stateText(s)}{s.exit_code != null ? ` (${s.exit_code})` : ''}</span>
           {/if}
         </div>
-        {#if up || s.managed_by || outside(s.path)}
-          <div class="row chips">
-            {#if up}<a class="chip acc" href={href(s)} title="Pack update: {up.from} → {up.to}">Pack update · {up.to}</a>{/if}
-            {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder">Also in {s.managed_by}</span>{/if}
-            {#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}
-          </div>
-        {/if}
+        <!-- One chip fits beside the footer's buttons; several get their own row. -->
+        {#if nchips > 1}<div class="row chips">{@render chips(s, up)}</div>{/if}
+        <!-- Players show once, in the header pill; the two meters get half the card each. -->
         <div class="meters">
           <div>
-            <div class="t">CPU<b>{Math.round(s.cpu)} %</b></div>
-            <div class="bar"><i style:width="{Math.min(100, s.cpu)}%"></i></div>
+            <div class="t">CPU<b>{on ? `${Math.round(s.cpu)} %` : '—'}</b></div>
+            <div class="bar"><i style:width="{on ? Math.min(100, s.cpu) : 0}%"></i></div>
           </div>
-          <div>
-            <div class="t">RAM<b>{bytes(s.mem_bytes)}{cap ? ` / ${bytes(cap)}` : ''}</b></div>
-            <div class="bar b"><i style:width="{cap ? Math.min(100, (s.mem_bytes / cap) * 100) : 0}%"></i></div>
-          </div>
-          <div>
-            <div class="t">Players<b>{s.players.length} / {s.max_players}</b></div>
-            <div class="bar g"><i style:width="{(s.players.length / Math.max(1, s.max_players)) * 100}%"></i></div>
+          <div title={on ? memTitle(mem, cap) : undefined}>
+            <div class="t">RAM<b>{on ? bytes(mem) : '—'}{#if cap}<span class="u">{` / ${bytes(cap)}`}</span>{/if}</b></div>
+            <div class="bar b mem">
+              {#if span}<i style:width="{(Math.min(mem, cap || mem) / span) * 100}%"></i>{/if}
+              {#if cap && mem > cap}<s style:left="{(cap / span) * 100}%"></s><u style:left="{(cap / span) * 100}%"></u>{/if}
+            </div>
           </div>
         </div>
-        <div class="row">
-          <span class="small subtle ell">{s.players.join(', ') || (alive(s) ? 'Nobody online' : '')}</span>
-          <span class="sp"></span>
-          {#if !alive(s)}
+        <div class="row foot">
+          <span class="left">
+            {#if nchips === 1}{@render chips(s, up)}{/if}
+            <span class="small subtle ell" title={s.players.join(', ')}>{s.players.join(', ') || (on ? 'Nobody online' : '')}</span>
+          </span>
+          {#if !on}
             <button class="btn sm go" onclick={() => power(s, 'start')}><Play size={13} />Start</button>
           {:else}
-            <button class="btn sm icon" title="Restart" onclick={() => power(s, 'restart')}><RotateCw size={13} /></button>
-            <button class="btn sm icon bad" title="Stop" onclick={() => power(s, 'stop')}><Square size={13} /></button>
+            <button class="btn sm icon ghost" title="Restart" onclick={() => power(s, 'restart')}><RotateCw size={14} /></button>
+            <button class="btn sm icon ghost bad" title="Stop" onclick={() => power(s, 'stop')}><Square size={14} /></button>
           {/if}
           <a class="btn sm" href={href(s)}><Terminal size={13} />Console</a>
         </div>
@@ -148,9 +156,22 @@
   .cap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chips { flex-wrap: wrap; gap: 6px; margin-top: -4px; }
   .stopped { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); flex: none; }
-  .meters { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  .t { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
-  .t b { color: var(--text); font-weight: 500; }
+  .meters { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .t { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: var(--muted); margin-bottom: 5px; white-space: nowrap; }
+  .t b { margin-left: auto; color: var(--text); font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .t .u { color: var(--muted); font-weight: 400; }
+  /* Memory past the setting: a tick at the setting and a hatched tail. */
+  .mem { position: relative; overflow: visible; }
+  .mem s, .mem u { position: absolute; top: 0; bottom: 0; }
+  .mem s { right: 0; border-radius: 0 9px 9px 0; background: repeating-linear-gradient(135deg, #38bdf8aa 0 3px, #38bdf833 3px 6px); }
+  .mem u { top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text); opacity: .7; }
+  .foot { gap: 4px; }
+  .foot .left { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  /* Names take what the chips leave, down to a few letters, before wrapping. */
+  .foot .left .ell { flex: 1 1 0; min-width: 40px; }
+  .foot .btn { height: 26px; }
+  .foot .btn.icon { width: 26px; justify-content: center; padding: 0; }
+  .foot .btn + .btn { margin-left: 2px; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .empty { grid-column: 1 / -1; padding: 0; }
   @media (max-width: 760px) { .pad { padding: 16px; } .servers { grid-template-columns: 1fr; } }

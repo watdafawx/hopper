@@ -11,7 +11,7 @@
   import { say } from './lib/toast.svelte.js';
   import { live } from './lib/live.svelte.js';
   import { packUpdates } from './lib/packs.svelte.js';
-  import { stateText } from './lib/format.js';
+  import { stateText, loaderText } from './lib/format.js';
   import Avatar from './Avatar.svelte';
 
   let { selected = null, owner = false, canPower = true, onNew, onRescan } = $props();
@@ -51,7 +51,7 @@
 
   function caption(s) {
     const parts = [];
-    const lv = [s.loader, s.version].filter(Boolean).join(' ');
+    const lv = [loaderText(s.loader, true), s.version].filter(Boolean).join(' ');
     if (lv) parts.push(lv);
     if (s.addresses?.length) parts.push(s.addresses[0]);
     if (s.managed_by) parts.push(`also in ${s.managed_by}`);

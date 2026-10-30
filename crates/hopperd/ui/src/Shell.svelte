@@ -10,6 +10,7 @@
     Plus, Play, Square, RotateCw, Server, Terminal, Folder, Puzzle, Earth, Users, Archive, CalendarClock, SlidersHorizontal,
     CircleCheck, CircleAlert, FolderOpen, X as Close,
   } from '@lucide/svelte';
+  import { loaderText } from './lib/format.js';
   import { boot } from './lib/boot.svelte.js';
   import { api, post } from './lib/api.js';
   import { live, connect, disconnect, startPing } from './lib/live.svelte.js';
@@ -173,7 +174,7 @@
     }
     for (const s of live.servers) {
       const at = `/server/${encodeURIComponent(s.id)}`;
-      v.push({ id: `srv:${s.id}`, section: 'Servers', icon: Server, title: `Servers › ${s.name}`, hint: [s.loader, s.version].filter(Boolean).join(' '), run: () => go(at) });
+      v.push({ id: `srv:${s.id}`, section: 'Servers', icon: Server, title: `Servers › ${s.name}`, hint: [loaderText(s.loader), s.version].filter(Boolean).join(' '), run: () => go(at) });
       for (const [t, label, icon] of TABS) {
         v.push({ id: `srv:${s.id}:${t}`, section: 'Servers', icon, title: `Servers › ${s.name} › ${label}`, deep: true, run: () => go(`${at}/${t}`) });
       }

@@ -14,6 +14,7 @@
   // so Back keeps its filters and scroll.
   import { onMount, untrack } from 'svelte';
   import { Search, Flame, Sparkles, RefreshCw, Download, ArrowDownAZ, Server, Hammer, SlidersHorizontal, X, SearchX, KeyRound, Package, Puzzle, Braces, Check, Monitor, Layers, Tag, Star, Plus } from '@lucide/svelte';
+  import { loaderText } from './lib/format.js';
   import { api, post } from './lib/api.js';
   import { session } from './lib/me.svelte.js';
   import { live } from './lib/live.svelte.js';
@@ -358,7 +359,7 @@
         <select id="br-into" class="sel" value={into} onchange={(e) => setInto(e.currentTarget.value)}>
           <option value="">Pick a server</option>
           {#if into && !servers.some((s) => s.id === into)}<option value={into}>{target?.name || into}</option>{/if}
-          {#each servers as s (s.id)}<option value={s.id}>{s.name}{s.version ? ` · ${s.version}` : ''}{s.loader ? ` ${s.loader}` : ''}</option>{/each}
+          {#each servers as s (s.id)}<option value={s.id}>{s.name}{s.version ? ` · ${s.version}` : ''}{s.loader ? ` ${loaderText(s.loader)}` : ''}</option>{/each}
         </select>
         {#if targetError}<div class="tiny err">{targetError}</div>{/if}
         {#if type === 'datapacks' && target?.datapack_dirs?.length > 1}
