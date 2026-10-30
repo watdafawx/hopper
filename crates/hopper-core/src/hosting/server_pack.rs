@@ -226,7 +226,7 @@ pub(crate) fn build_from_zip(
                 label
             );
         };
-        let mut create = create_from_instance(inst, opts, &HashSet::new(), job)?;
+        let mut create = create_from_instance(inst, opts, &HashSet::new(), &HashSet::new(), job)?;
 
         let note = format!(
             "{} {why}, so Hopper copied the pack's mods from this instance and left client-only ones out.",

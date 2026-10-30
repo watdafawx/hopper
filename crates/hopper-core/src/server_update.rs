@@ -305,6 +305,7 @@ pub fn update_server(
     inst: &Instance,
     host: &str,
     sync_anyway: &std::collections::HashSet<u64>,
+    hidden: &std::collections::HashSet<String>,
     java: &Path,
     panel: Option<&dyn crate::panel::ServerPanel>,
     job: &Job,
@@ -344,7 +345,9 @@ pub fn update_server(
     // Read by the panel when the server is on a Hopper Server.
     let theirs = crate::rigsync::server_mods(server)?;
     crate::serverpack::annotate(&mut client, inst, sync_anyway);
-    let diff = crate::diff::compute_diff(&client, &theirs);
+    let mut diff = crate::diff::compute_diff(&client, &theirs);
+    // "Never sync" mods: neither copied nor removed.
+    diff.retain(|d| !crate::rigsync::is_hidden(d, hidden));
     let ops = crate::sync::plan(&diff, &inst.mods_dir(), &server.mods_dir());
     job.detail(format!("Syncing {} files", ops.len()));
     let results = crate::sync::execute(ops, &server.root);
@@ -465,7 +468,7 @@ fn remote_loader_live() {
     let inst_root = std::env::temp_dir().join("hopper-remote-loader-inst");
     fs::create_dir_all(inst_root.join("mods")).unwrap();
     let inst = Instance { root: inst_root, loader: format!("neoforge-{}", p[3]), ..Default::default() };
-    let u = update_server(&server, &inst, "127.0.0.1", &Default::default(), Path::new("java"), None, &job);
+    let u = update_server(&server, &inst, "127.0.0.1", &Default::default(), &Default::default(), Path::new("java"), None, &job);
     println!("update_server: {:?}", u.map(|r| r.summary()));
     println!("after: {:?}", server_neoforge(&server.root));
 }

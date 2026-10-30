@@ -637,10 +637,12 @@ pub fn create_from_instance(
     inst: &Instance,
     opts: &CreateOptions,
     sync_anyway: &HashSet<u64>,
+    hidden: &HashSet<String>,
     job: &Job,
 ) -> anyhow::Result<CreateReport> {
     job.detail("Reading the pack's mods");
     let mut client = crate::scan::scan_folder(&inst.mods_dir()).unwrap_or_default();
+    client.retain(|m| !crate::rigsync::mod_hidden(m, hidden));
     let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
     let (keep, skipped) = server_mods(&client);
 
@@ -706,7 +708,7 @@ pub fn create_from_client_pack(
     let mut opts = opts.clone();
     opts.mc_version = inst.game_version.clone();
     opts.loader = ServerLoader::from_instance(&inst.loader)?;
-    let r = create_from_instance(&inst, &opts, &HashSet::new(), job)?;
+    let r = create_from_instance(&inst, &opts, &HashSet::new(), &HashSet::new(), job)?;
     Ok((r, opts))
 }
 

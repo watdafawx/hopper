@@ -239,7 +239,7 @@ pub fn create_from_local_zip(
             let mut o = opts.clone();
             o.mc_version = inst.game_version.clone();
             o.loader = ServerLoader::from_instance(&inst.loader).context("the pack's loader")?;
-            let r = create_from_instance(&inst, &o, &HashSet::new(), job)?;
+            let r = create_from_instance(&inst, &o, &HashSet::new(), &HashSet::new(), job)?;
             let note = (!r.skipped.is_empty()).then(|| format!("{} client-only mods left out", r.skipped.len()));
             Ok((r, o, note))
         }

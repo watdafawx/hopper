@@ -289,10 +289,7 @@ pub struct Filters {
 impl Filters {
     pub fn passes(&self, d: &DiffEntry, blacklist: &HashSet<String>) -> bool {
         let m = d.client.as_ref().or(d.server.as_ref());
-        if m.is_some_and(|m| {
-            blacklist.contains(&m.mod_id.to_lowercase())
-                || blacklist.contains(&m.file_name.to_lowercase())
-        }) {
+        if is_hidden(d, blacklist) {
             return false;
         }
         let env = m.map_or("", |m| m.side.as_str());
@@ -320,6 +317,17 @@ impl Filters {
         };
         self.status.matches(d.status) && ok_env && ok_source && ok_wont && ok_text
     }
+}
+
+/// The mod is on the "Never sync" list (by mod id or file name).
+pub fn mod_hidden(m: &crate::model::ModInfo, blacklist: &HashSet<String>) -> bool {
+    blacklist.contains(&m.mod_id.to_lowercase()) || blacklist.contains(&m.file_name.to_lowercase())
+}
+
+/// A row whose mod is on the "Never sync" list, on either side: syncing
+/// leaves both copies alone.
+pub fn is_hidden(d: &DiffEntry, blacklist: &HashSet<String>) -> bool {
+    [d.client.as_ref(), d.server.as_ref()].into_iter().flatten().any(|m| mod_hidden(m, blacklist))
 }
 
 /// The key a blacklist entry uses for a row's mod.
@@ -540,6 +548,19 @@ pub fn sync_help(add: usize, update: usize, remove: usize, kept_in: &str) -> Str
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn never_sync_mods_drop_out_of_a_full_sync() {
+        use crate::model::ModInfo;
+        let m = |id: &str, file: &str| ModInfo { mod_id: id.into(), file_name: file.into(), ..Default::default() };
+        let client = vec![m("ibp", "InteractiveBlockPrompt-1.0.jar"), m("jei", "jei-1.jar")];
+        let server = vec![m("oldhidden", "OldHidden-2.jar")];
+        let hidden: HashSet<String> = ["ibp".to_string(), "oldhidden-2.jar".to_string()].into();
+        let mut diff = crate::diff::compute_diff(&client, &server);
+        diff.retain(|d| !is_hidden(d, &hidden));
+        let names: Vec<_> = diff.iter().filter_map(|d| d.client.as_ref().or(d.server.as_ref())).map(|m| m.mod_id.as_str()).collect();
+        assert_eq!(names, ["jei"]);
+    }
     use super::*;
 
     fn inst(n: &str) -> Instance {

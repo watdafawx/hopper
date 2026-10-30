@@ -795,13 +795,14 @@ impl SyncPanel {
                     let s = store.read(cx);
                     let host = s.settings().server_host.clone();
                     let anyway = s.settings().sync_anyway.clone();
+                    let hidden = s.settings().sync_blacklist.clone();
                     let java =
                         hopper::launch::installer_java(Path::new(&s.settings().launcher_dir));
                     let panel = hopper::panel::for_server(s.settings(), &server);
                     let (server, inst) = (server.clone(), inst.clone());
                     s.spawn_job(format!("Updating {}", server.name), move |job| {
                         let r = hopper::server_update::update_server(
-                            &server, &inst, &host, &anyway, &java, panel.as_deref(), job,
+                            &server, &inst, &host, &anyway, &hidden, &java, panel.as_deref(), job,
                         )?;
                         job.detail(r.summary());
                         for f in &r.failed {
@@ -1754,6 +1755,7 @@ impl SyncPanel {
                     let below: Vec<AnyElement> = jar
                         .map(|j| {
                             let server = self.server.clone();
+                            let mod_id = s.mod_id.clone();
                             Button::new(ElementId::Name(format!("srv-crash-rm:{i}").into()))
                                 .xsmall()
                                 .outline()
@@ -1765,6 +1767,9 @@ impl SyncPanel {
                                     if let Some(root) = &server {
                                         let path = root.join("mods").join(&j);
                                         this.run(Ops { up: vec![hopper::model::SyncOp::Delete { path }], down: Vec::new() }, cx);
+                                        // Client-only: keep later syncs from copying it back.
+                                        let key = if mod_id.is_empty() { j.to_lowercase() } else { mod_id.to_lowercase() };
+                                        this.store.update(cx, |s, cx| s.update_settings(|st| { st.sync_blacklist.insert(key.clone()); }, cx));
                                     }
                                 }))
                                 .into_any_element()

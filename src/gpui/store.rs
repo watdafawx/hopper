@@ -2069,6 +2069,7 @@ impl Store {
             .filter(|_| self.settings.auto_update_servers);
         let host = self.settings.server_host.clone();
         let anyway = self.settings.sync_anyway.clone();
+        let hidden = self.settings.sync_blacklist.clone();
         let java = hopper::launch::installer_java(Path::new(&self.settings.launcher_dir));
         let panel = match &server {
             Some(s) => hopper::panel::for_server(&self.settings, s),
@@ -2113,7 +2114,7 @@ impl Store {
             if server_up && let Some(s) = &server {
                 job.note(format!("{} is running, so it wasn't updated. Stop it, then use Server sync.", s.name));
             } else if let Some(server) = server {
-                match hopper::server_update::update_server(&server, &full, &host, &anyway, &java, panel.as_deref(), job) {
+                match hopper::server_update::update_server(&server, &full, &host, &anyway, &hidden, &java, panel.as_deref(), job) {
                     Ok(r) => job.note(format!("{}: {}", server.name, r.summary())),
                     Err(e) => job.note(format!("{} not updated: {e:#}", server.name)),
                 }
@@ -2957,6 +2958,7 @@ impl Store {
     ) {
         let inst = from.and_then(|r| self.instance(&r).cloned());
         let anyway = self.settings.sync_anyway.clone();
+        let hidden = self.settings.sync_blacklist.clone();
         let title = format!("Creating {}", opts.name);
         let meta = opts.hosted_meta();
         self.spawn_job(title, move |job| {
@@ -2976,7 +2978,7 @@ impl Store {
                     r.create.root
                 }
                 Some(i) => {
-                    let r = hopper::hosting::create_from_instance(&i, &opts, &anyway, job)?;
+                    let r = hopper::hosting::create_from_instance(&i, &opts, &anyway, &hidden, job)?;
                     job.note(format!(
                         "Copied {} mods; left out {} client-only.",
                         r.mods_copied,
