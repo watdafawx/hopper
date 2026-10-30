@@ -74,6 +74,7 @@ pub mod setup;
 pub mod shortcut;
 pub mod defaultskins;
 pub mod randomskins;
+pub mod remotefs;
 pub mod retention;
 pub mod skin3d;
 pub mod skinhistory;

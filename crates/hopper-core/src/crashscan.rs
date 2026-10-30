@@ -166,6 +166,9 @@ pub fn last_crash(root: &Path) -> Option<crate::crashdetect::Crash> {
             .ok()
             .flatten();
     }
+    if let Err(e) = crate::remotefs::refresh_path(root) {
+        log::warn!("crash scan: {e:#}");
+    }
     crate::crashdetect::server(root)
 }
 

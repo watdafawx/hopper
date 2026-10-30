@@ -107,6 +107,8 @@ pub struct Settings {
     /// Crafty, MCSS and Pterodactyl panels, any number of each. The single
     /// panel of older builds (`panel_kind` / `panel_url`) moves here.
     pub panels: Vec<OtherPanel>,
+    /// Servers reached over SFTP or FTP(S) instead of a shared folder.
+    pub file_sites: Vec<FileSite>,
     /// Server list groups folded shut (panel ids, "local", "folder").
     pub collapsed_groups: HashSet<String>,
     /// Where the GPUI window was last, to open there again.
@@ -249,6 +251,37 @@ impl OtherPanel {
         }
         let host = crate::hopperd::host_name(&crate::panel::base_url(&self.url));
         if host.is_empty() { crate::panel::short_name(&self.kind).to_string() } else { host }
+    }
+}
+
+/// Server files over SFTP or FTP(S): one server, or a folder of them. The
+/// password (or key passphrase) is kept in Credential Manager.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileSite {
+    pub id: String,
+    /// What the list calls it; the host when empty.
+    pub name: String,
+    /// "sftp", "ftps" (FTP with TLS) or "ftp" (plain, not secure).
+    pub proto: String,
+    pub host: String,
+    /// 0: the protocol's usual port.
+    pub port: u16,
+    pub user: String,
+    /// The folder on the server: a server, or a folder of servers.
+    pub folder: String,
+    /// SFTP: a private key file to sign in with instead of a password.
+    pub key_file: String,
+    /// SFTP: the server's key ("SHA256:…"), pinned on the first connect.
+    pub host_key: String,
+    /// FTPS: accept a certificate the server makes for itself.
+    pub self_signed: bool,
+}
+
+impl FileSite {
+    pub fn label(&self) -> String {
+        let n = self.name.trim();
+        if n.is_empty() { self.host.trim().to_string() } else { n.to_string() }
     }
 }
 
@@ -432,6 +465,7 @@ impl Default for Settings {
             panel_ca: String::new(),
             hopper_panels: Vec::new(),
             panels: Vec::new(),
+            file_sites: Vec::new(),
             collapsed_groups: HashSet::new(),
             window: None,
             theme_name: String::new(),

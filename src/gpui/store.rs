@@ -41,6 +41,8 @@ pub enum Msg {
     RigServers(Vec<ServerInfo>),
     /// A Hopper Server's servers (by panel id), or why it couldn't list them.
     PanelServers(String, Result<Vec<ServerInfo>, String>),
+    /// An SFTP / FTP site's servers (and its SSH key, to pin), or why not.
+    SiteServers(String, Result<(Vec<ServerInfo>, Option<String>), String>),
     /// An instance changed on disk; reload it.
     InstanceChanged(PathBuf),
     /// Jars were identified after an older copy went back: reload, then
@@ -260,6 +262,8 @@ pub struct Store {
     folder_servers: Vec<ServerInfo>,
     /// Each Hopper Server's servers (by panel id), or why it couldn't list them.
     panel_servers: HashMap<String, Result<Vec<ServerInfo>, String>>,
+    /// Each SFTP / FTP site's servers (by site id), or why it couldn't list them.
+    site_servers: HashMap<String, Result<Vec<ServerInfo>, String>>,
     /// Pack files that couldn't be downloaded automatically, per instance.
     pending: HashMap<PathBuf, Vec<hopper::modpack::Pending>>,
     /// Servers Hopper hosts on this PC, and the panel that runs them.
@@ -418,6 +422,7 @@ impl Store {
             panel_stats: HashMap::new(),
             folder_servers: Vec::new(),
             panel_servers: HashMap::new(),
+            site_servers: HashMap::new(),
             busy: Default::default(),
             launching: Default::default(),
             update_queue: Default::default(),
@@ -1100,6 +1105,27 @@ impl Store {
                     log::warn!("Hopper Server {panel:?}: {e}");
                 }
                 self.panel_servers.insert(panel, list);
+                self.merge_servers(cx);
+            }
+            Msg::SiteServers(id, r) => {
+                let r = match r {
+                    Ok((list, key)) => {
+                        // The first connect pins the server's SSH key.
+                        if let Some(key) = key {
+                            self.update_settings_quietly(|st| {
+                                if let Some(site) = st.file_sites.iter_mut().find(|x| x.id == id && x.host_key.is_empty()) {
+                                    site.host_key = key;
+                                }
+                            });
+                        }
+                        Ok(list)
+                    }
+                    Err(e) => {
+                        log::warn!("server files {id:?}: {e}");
+                        Err(e)
+                    }
+                };
+                self.site_servers.insert(id, r);
                 self.merge_servers(cx);
             }
             Msg::SessionSaved(root) => cx.emit(StoreEvent::SessionSaved(root)),
@@ -2786,6 +2812,13 @@ impl Store {
                 }
             }
         }
+        // Servers over SFTP / FTP: listed off the UI thread too.
+        let ids: Vec<String> = self.settings.file_sites.iter().map(|p| p.id.clone()).collect();
+        self.site_servers.retain(|k, _| ids.contains(k));
+        for site in self.settings.file_sites.clone() {
+            let id = site.id.clone();
+            self.spawn(move || Msg::SiteServers(id, hopper::remotefs::discover(&site).map_err(|e| format!("{e:#}"))));
+        }
         if rig_root.as_os_str().is_empty() {
             self.folder_servers.clear();
             self.merge_servers_quiet();
@@ -2815,6 +2848,11 @@ impl Store {
         let mut out: Vec<ServerInfo> = Vec::new();
         for p in &self.settings.hopper_panels {
             if let Some(Ok(list)) = self.panel_servers.get(&p.id) {
+                out.extend(list.iter().cloned());
+            }
+        }
+        for site in &self.settings.file_sites {
+            if let Some(Ok(list)) = self.site_servers.get(&site.id) {
                 out.extend(list.iter().cloned());
             }
         }
@@ -2860,6 +2898,24 @@ impl Store {
     /// Whether a paired panel's list has come back (either way).
     pub fn panel_listed(&self, panel: &str) -> bool {
         self.panel_servers.contains_key(panel)
+    }
+
+    /// Why an SFTP / FTP site couldn't list its servers, if it couldn't.
+    pub fn site_error(&self, id: &str) -> Option<&str> {
+        match self.site_servers.get(id) {
+            Some(Err(e)) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// The site has answered (with servers or an error).
+    pub fn site_listed(&self, id: &str) -> bool {
+        self.site_servers.contains_key(id)
+    }
+
+    /// The SFTP / FTP site whose server is in `root`, if it's one.
+    pub fn site_of(&self, root: &Path) -> Option<String> {
+        hopper::remotefs::mirror_of(root).map(|m| m.site.id)
     }
 
     /// Where hosted servers live (HOPPER_HOSTED_ROOT wins, for tests).
@@ -3319,6 +3375,7 @@ impl Store {
         !self.servers.is_empty()
             || !s.servers_root.trim().is_empty()
             || !s.panels.is_empty()
+            || !s.file_sites.is_empty()
             || !s.hopper_panels.is_empty()
             || !s.pairings.is_empty()
             || s.peer_sync

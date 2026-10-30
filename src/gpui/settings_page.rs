@@ -25,6 +25,8 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
+
+mod sites;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -214,6 +216,17 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "panel-key", "API key", "Kept in Windows Credential Manager, not in settings.json.", "token server panel"),
     e(C::Servers, "panel-cert", "Self-signed certificate", "Accept a certificate the panel makes for itself.", "https ssl tls server panel"),
     e(C::Servers, "panel-test", "Connection", "Whether the panel answers with this address and key.", "test server panel"),
+    e(C::Servers, "files-sites", "Server files over the network", "Servers Hopper reaches over SFTP or FTP instead of a shared folder: rented hosts, Pterodactyl's SFTP, a PC with an SSH server. Sync copies mods and configs over it.", "sftp ftp ftps ssh files remote host sync"),
+    e(C::Servers, "files-add", "Add server files", "SFTP, or FTP with or without TLS. Hopper keeps a copy of each server's mods and configs to compare, and changes only what differs.", "sftp ftp ftps ssh add remote"),
+    e(C::Servers, "files-proto", "Connect with", "SFTP is the safe choice. Many hosts offer FTPS; plain FTP only on your own network.", "sftp ftp ftps protocol"),
+    e(C::Servers, "files-host", "Address and port", "The server's name or IP. Leave the port empty for the usual one (22 for SFTP, 21 for FTP; Pterodactyl uses 2022).", "host port address ip"),
+    e(C::Servers, "files-user", "User name", "Pterodactyl: your panel user name, a dot, and the server's short id (shown under SFTP details).", "user login name"),
+    e(C::Servers, "files-pass", "Password", "Kept in Windows Credential Manager, not in settings.json. With a key file, the key's passphrase (if any).", "password secret passphrase"),
+    e(C::Servers, "files-key", "Key file", "Sign in with an SSH private key instead of a password.", "ssh key private id_ed25519 id_rsa"),
+    e(C::Servers, "files-cert", "Self-signed certificate", "Accept a certificate the FTP server makes for itself.", "tls ssl certificate ftps"),
+    e(C::Servers, "files-plain", "Not encrypted", "Plain FTP has no encryption.", "ftp insecure plain"),
+    e(C::Servers, "files-folder", "Folder", "A server's folder, or a folder of server folders. Empty: the folder you land in.", "folder path directory root"),
+    e(C::Servers, "files-test", "Connection", "Whether the server answers with these details. SFTP remembers the server's key the first time and refuses a different one later.", "test connect host key fingerprint"),
     e(C::Content, "cf-key", "CurseForge API key", "Needed for CurseForge: browsing, installs and updates. Get one at console.curseforge.com.", "api key token console"),
     e(C::Content, "browse-source", "Browse searches", "Which site Browse opens on. Switch any time in Browse too.", "modrinth curseforge source search"),
     e(C::Appearance, "theme", "Theme", "Hopper's colors. Your own theme files go in the folder next to it.", "dark light color colour glass mica"),
@@ -412,6 +425,16 @@ pub struct SettingsPage {
     panel_form_ss: bool,
     /// Remove was clicked once on this panel (asks again).
     panel_removing: Option<String>,
+    /// Server files over SFTP / FTP: the form and its state, like the panels'.
+    site_form: sites::SiteForm,
+    site_form_open: bool,
+    site_editing: Option<String>,
+    site_proto: String,
+    site_ss: bool,
+    site_pass_saved: bool,
+    site_tests: HashMap<String, Result<String, String>>,
+    site_testing: HashSet<String>,
+    site_removing: Option<String>,
     /// Hopper Servers found on the LAN (None until looked for).
     found: Option<Vec<hopper::hopperd::Found>>,
     finding: bool,
@@ -507,6 +530,7 @@ impl SettingsPage {
                 cx,
             )
         });
+        let site_form = sites::SiteForm::new(window, cx);
         let mut subs = vec![
             // Java defaults apply as they change.
             cx.observe(&java, |this, java, cx| {
@@ -585,6 +609,13 @@ impl SettingsPage {
         }
         let launchers = cx.new(|_| crate::launchers_list::LaunchersList::new(store.clone()));
         subs.push(cx.observe(&launchers, |_, _, cx| cx.notify()));
+        for e in site_form.inputs() {
+            subs.push(cx.subscribe_in(e, window, |_, _, ev: &InputEvent, _, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    cx.notify()
+                }
+            }));
+        }
         Self {
             store,
             nav_panel: widgets::SidePanel::new(widgets::PanelSpec::new("settings.nav", 15., 12., 24.)),
@@ -606,6 +637,15 @@ impl SettingsPage {
             panel_form_kind: "crafty".into(),
             panel_form_ss: true,
             panel_removing: None,
+            site_form,
+            site_form_open: false,
+            site_editing: None,
+            site_proto: "sftp".into(),
+            site_ss: false,
+            site_pass_saved: false,
+            site_tests: HashMap::new(),
+            site_testing: HashSet::new(),
+            site_removing: None,
             found: None,
             finding: false,
             pairing: Pairing::Idle,
@@ -1473,6 +1513,7 @@ impl SettingsPage {
                 }
                 rows
             }),
+            Block::card(Some("Server files over SFTP or FTP"), self.site_rows(s, window, cx)),
         ]
     }
 

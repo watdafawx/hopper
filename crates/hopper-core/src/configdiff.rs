@@ -288,6 +288,10 @@ pub fn compare(
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> ConfigDiff {
     let (c_root, s_root) = (client_root.join(folder), server_root.join(folder));
+    // Over SFTP / FTP: fetch what changed into Hopper's copy first.
+    if crate::remotefs::refresh_path(server_root).is_ok_and(|n| n > 0) {
+        forget_walk(&s_root);
+    }
     let (c, s) = std::thread::scope(|sc| {
         let a = sc.spawn(|| walk_cached(&c_root));
         let b = walk_cached(&s_root);

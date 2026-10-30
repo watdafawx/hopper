@@ -58,6 +58,12 @@ pub fn execute(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
         };
         return crate::hopperd::execute(ops, &r, &root, &local);
     }
+    // A server reached over SFTP / FTP: change Hopper's copy, then the server.
+    if let Some(m) = crate::remotefs::mirror_of(server_root) {
+        let mut results = execute_local(ops, server_root);
+        crate::remotefs::push(&m, &mut results);
+        return results;
+    }
     execute_local(ops, server_root)
 }
 
