@@ -616,7 +616,7 @@ pub fn remove_loose_file(inst: &Instance, file_name: &str) -> anyhow::Result<()>
     move_out(&inst.root, &inst.mods_dir().join(file_name), false)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Update {
     pub project_id: u64,
     pub name: String,

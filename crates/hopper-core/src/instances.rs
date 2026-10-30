@@ -401,7 +401,7 @@ fn mtime(p: &Path) -> i64 {
 /// Writes `path` through a temp file unique to this process and call, then
 /// renames it into place (retrying briefly: antivirus or an indexer may hold
 /// the target for a moment).
-fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let name = path

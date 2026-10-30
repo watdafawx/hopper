@@ -143,11 +143,9 @@ pub const UPDATES_MAX_AGE: Duration = Duration::from_secs(30 * 60);
 pub const PING_EVERY: Duration = Duration::from_secs(30);
 pub const SELF_UPDATE_EVERY: Duration = Duration::from_secs(30 * 60);
 
-pub enum Updates {
-    Checking,
-    Ready(Vec<Update>),
-    Failed(String),
-}
+/// Pending updates for one instance: the last check's list stays up while
+/// a new check runs or after one fails (see `hopper::update_list`).
+pub use hopper::update_list::UpdateList as Updates;
 
 /// A modpack's page from CurseForge or Modrinth, for the Overviews.
 pub enum PackPage {
@@ -784,16 +782,11 @@ impl Store {
                 // Website-only files: the download window gets them, as the
                 // user asked to update them.
                 self.fetch_pages(pages);
-                let kept = match self.updates.remove(&root) {
-                    Some(Updates::Ready(v)) => Some(Updates::Ready(
-                        v.into_iter().filter(|u| !done.contains(&u.project_id)).collect(),
-                    )),
-                    other => other,
-                };
-                self.handle(Msg::InstanceChanged(root.clone()), cx);
-                if let Some(k) = kept {
-                    self.updates.insert(root, k);
+                if let Some(u) = self.updates.get_mut(&root) {
+                    u.drop_projects(&done);
                 }
+                self.handle(Msg::InstanceChanged(root.clone()), cx);
+                self.save_updates(&root);
             }
             Msg::Reidentified(root) => {
                 self.handle(Msg::InstanceChanged(root.clone()), cx);
@@ -808,15 +801,9 @@ impl Store {
                 if let Some(new) = instances::load(&root) {
                     self.read_pending(&new);
                     // Updates stay listed while their old file is still
-                    // there; asking CurseForge again would blank the list.
-                    let kept = match self.updates.remove(&root) {
-                        Some(Updates::Ready(v)) => Some(Updates::Ready(
-                            v.into_iter()
-                                .filter(|u| new.addons.iter().any(|a| a.project_id == u.project_id && a.file_name == u.from))
-                                .collect(),
-                        )),
-                        _ => None,
-                    };
+                    // there (also while a check runs); asking CurseForge
+                    // again would blank the list.
+                    let dropped = self.updates.get_mut(&root).is_some_and(|u| u.keep_current(&new.addons));
                     let icon = new.icon.clone();
                     match self.instances.iter_mut().find(|i| i.root == root) {
                         Some(slot) => *slot = new,
@@ -825,8 +812,8 @@ impl Store {
                             self.sync_watched();
                         }
                     }
-                    if let Some(k) = kept {
-                        self.updates.insert(root.clone(), k);
+                    if dropped {
+                        self.save_updates(&root);
                     }
                     if let Some(url) = icon {
                         self.want_image(&url);
@@ -1023,13 +1010,14 @@ impl Store {
                         Msg::Breaks(r2, map)
                     });
                 }
-                self.updates.insert(
-                    root,
-                    match result {
-                        Ok(u) => Updates::Ready(u),
-                        Err(e) => Updates::Failed(e),
-                    },
-                );
+                // The new answer replaces the list in one go; a failed check
+                // keeps the old one. Files changed while it ran drop out.
+                let state = self.updates.entry(root.clone()).or_default();
+                state.finish(result);
+                if let Some(inst) = self.instances.iter().find(|i| i.root == root) {
+                    state.keep_current(&inst.addons);
+                }
+                self.save_updates(&root);
             }
             Msg::Breaks(root, map) => {
                 self.breaks.insert(root, map);
@@ -1139,9 +1127,26 @@ impl Store {
                 let _ = hopper::cf::loader_versions(&mc);
             }
         });
-        // Mod updates for every instance, so the list can show counts.
-        self.updates.clear();
-        for root in self.instances.iter().map(|i| i.root.clone()).collect::<Vec<_>>() {
+        // Mod updates for every instance, so the list can show counts. The
+        // lists known so far stay up (or the last run's saved ones) until
+        // the checks answer.
+        let roots: Vec<PathBuf> = self.instances.iter().map(|i| i.root.clone()).collect();
+        self.updates.retain(|r, _| roots.contains(r));
+        for inst in &self.instances {
+            match self.updates.get_mut(&inst.root) {
+                Some(u) => {
+                    u.keep_current(&inst.addons);
+                }
+                None => {
+                    if let Some(l) = hopper::update_list::load(&inst.root, &inst.addons) {
+                        self.updates.insert(inst.root.clone(), Updates::saved(l));
+                    }
+                }
+            }
+        }
+        // A refresh looks again, however recent the last look.
+        self.updates_at.clear();
+        for root in roots {
             self.check_updates(&root, false);
         }
         let icons: Vec<String> = self
@@ -1224,6 +1229,7 @@ impl Store {
     pub fn forget(&mut self, root: &Path) {
         self.instances.retain(|i| i.root != root);
         self.updates.remove(root);
+        hopper::update_list::save(root, None);
         self.sync_watched();
         // Its settings go with it.
         let key = root.to_string_lossy().to_string();
@@ -2082,11 +2088,19 @@ impl Store {
         self.updates.get(root)
     }
 
-    /// No update check yet, or the last one is older than
-    /// [`UPDATES_MAX_AGE`] (mods get new files during the day).
+    /// No update check yet this run, or the last one is older than
+    /// [`UPDATES_MAX_AGE`] (mods get new files during the day). A list
+    /// saved by the last run doesn't count.
     pub fn updates_stale(&self, root: &Path) -> bool {
-        !self.updates.contains_key(root)
-            || self.updates_at.get(root).is_none_or(|t| t.elapsed() > UPDATES_MAX_AGE)
+        self.updates_at.get(root).is_none_or(|t| t.elapsed() > UPDATES_MAX_AGE)
+    }
+
+    /// Saves an instance's update list for the next start.
+    fn save_updates(&self, root: &Path) {
+        let list = self.updates.get(root).and_then(|u| u.ready()).map(Vec::as_slice);
+        if let Some(l) = list {
+            hopper::update_list::save(root, Some(l));
+        }
     }
 
     /// Looks for newer files of everything in the instance when the last
@@ -2099,15 +2113,11 @@ impl Store {
             return;
         };
         self.updates_at.insert(root.to_path_buf(), Instant::now());
-        let prev = match self.updates.get(root) {
-            Some(Updates::Ready(v)) => v.clone(),
-            _ => Vec::new(),
-        };
-        // A stale list stays up while the new one loads, so the update
-        // buttons don't blink out.
-        if force || !matches!(self.updates.get(root), Some(Updates::Ready(_))) {
-            self.updates.insert(root.to_path_buf(), Updates::Checking);
-        }
+        // The last list stays up while the new one loads, so the update
+        // buttons and version chips don't blink out.
+        let state = self.updates.entry(root.to_path_buf()).or_default();
+        let prev = state.ready().cloned().unwrap_or_default();
+        state.begin();
         let root = root.to_path_buf();
         self.spawn(move || Msg::Updates {
             result: install::check_updates(&inst).map_err(|e| format!("{e:#}")),
@@ -2139,7 +2149,7 @@ impl Store {
             from: a.file_name.clone(),
             file: f.clone(),
         };
-        let Some(Updates::Ready(list)) = self.updates.get_mut(root) else {
+        let Some(list) = self.updates.get_mut(root).and_then(|u| u.list.as_mut()) else {
             return false;
         };
         if list.iter().any(|u| u.project_id == project_id && u.file.id >= new.file.id) {
@@ -2467,7 +2477,6 @@ impl Store {
         if locked {
             self.drop_updates(root, &ids);
         } else {
-            self.updates.remove(root);
             self.check_updates(root, true);
         }
         Ok(())
@@ -2476,8 +2485,8 @@ impl Store {
     /// Takes projects off an instance's list of available updates, keeping
     /// the rest (instead of checking every mod again).
     fn drop_updates(&mut self, root: &Path, ids: &[u64]) {
-        if let Some(Updates::Ready(v)) = self.updates.get_mut(root) {
-            v.retain(|u| !ids.contains(&u.project_id));
+        if self.updates.get_mut(root).is_some_and(|u| u.drop_projects(ids)) {
+            self.save_updates(root);
         }
     }
 
