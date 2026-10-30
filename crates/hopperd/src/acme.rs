@@ -529,7 +529,7 @@ impl Acme {
 fn plain_failure(label: &str, port: u16, why: &str) -> String {
     let w = why.to_ascii_lowercase();
     if w.contains("error:tls") || w.contains("unrecognized name") || w.contains("error:unauthorized") || w.contains("acmeidentifier") {
-        format!("Let's Encrypt reached port {port} at {label}, but another server answered (a router or a reverse proxy?). Forward port {port} to this panel, or turn this off if a proxy already has a certificate.")
+        format!("{PROXY_HINT} Port {port} at {label} is answered by another server, likely a reverse proxy (Nginx Proxy Manager, Caddy…) that already gives the panel its certificate, so you don't need this: turn it off. If not, forward port {port} to this panel.")
     } else if w.contains("timeout") || w.contains("timed out") || w.contains("refused") || w.contains("error:connection") {
         format!("Let's Encrypt couldn't connect to port {port} at {label}. Forward port {port} on your router to this panel's port.")
     } else if w.contains("ratelimited") || w.contains("too many") {
@@ -538,6 +538,13 @@ fn plain_failure(label: &str, port: u16, why: &str) -> String {
         format!("Let's Encrypt couldn't check {label} on port {port}: {why}")
     }
 }
+
+/// Starts the failure text when a reverse proxy holds the port.
+const PROXY_HINT: &str = "A reverse proxy seems to handle HTTPS here.";
+
+/// How long to wait before checking again when a proxy holds the port: it
+/// rarely goes away, so a retry a day instead of the usual backoff.
+const PROXY_RETRY: Duration = Duration::from_secs(24 * 3600);
 
 fn san(target: &Target) -> anyhow::Result<rcgen::SanType> {
     Ok(match target {
@@ -790,7 +797,10 @@ pub fn start(app: Arc<crate::App>) {
                 }
                 Err(e) => {
                     failures += 1;
-                    let pause = backoff(failures);
+                    // A proxy on the port: stop the usual retries; switching
+                    // the setting off and on tries again right away.
+                    let proxy = format!("{e:#}").starts_with(PROXY_HINT);
+                    let pause = if proxy { PROXY_RETRY } else { backoff(failures) };
                     log::warn!("Let's Encrypt: {e:#}; trying again in {} min", pause.as_secs() / 60);
                     acme.set_status(|s| {
                         s.last_error = Some(format!("{e:#}"));
@@ -904,7 +914,7 @@ mod tests {
     #[test]
     fn failures_in_plain_words() {
         let other = "API error: 41.47.116.198: remote error: tls: unrecognized name (urn:ietf:params:acme:error:tls)";
-        assert!(plain_failure("41.47.116.198", 443, other).contains("another server answered"));
+        assert!(plain_failure("41.47.116.198", 443, other).starts_with(PROXY_HINT));
         let none = "API error: 81.2.69.160: Timeout during connect (likely firewall problem) (urn:ietf:params:acme:error:connection)";
         assert!(plain_failure("81.2.69.160", 443, none).contains("couldn't connect to port 443"));
         assert!(plain_failure("x", 80, "odd").ends_with("odd"));
