@@ -19,6 +19,31 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const RESOURCES: &str = "https://resources.download.minecraft.net";
 
+/// This OS in Mojang's version files: its name in rules and old-style
+/// `natives` maps, the tag on new-style native jars, the native library
+/// extension and the classpath separator.
+#[cfg(windows)]
+mod os {
+    pub const NAME: &str = "windows";
+    pub const NATIVES: &str = ":natives-windows";
+    pub const LIB_EXT: &[&str] = &[".dll"];
+    pub const CP_SEP: &str = ";";
+}
+#[cfg(target_os = "macos")]
+mod os {
+    pub const NAME: &str = "osx";
+    pub const NATIVES: &str = ":natives-macos";
+    pub const LIB_EXT: &[&str] = &[".dylib", ".jnilib"];
+    pub const CP_SEP: &str = ":";
+}
+#[cfg(not(any(windows, target_os = "macos")))]
+mod os {
+    pub const NAME: &str = "linux";
+    pub const NATIVES: &str = ":natives-linux";
+    pub const LIB_EXT: &[&str] = &[".so"];
+    pub const CP_SEP: &str = ":";
+}
+
 /// Who is playing. `offline` is for testing only (no multiplayer).
 #[derive(Clone)]
 pub struct Player {
@@ -167,7 +192,7 @@ fn rules_allow(rules: &Value, features: &HashMap<&str, bool>) -> bool {
             if os
                 .get("name")
                 .and_then(|n| n.as_str())
-                .is_some_and(|n| n != "windows")
+                .is_some_and(|n| n != os::NAME)
             {
                 applies = false;
             }
@@ -293,7 +318,7 @@ pub fn prepare(
                     size,
                 });
             }
-            if name.contains(":natives-windows") {
+            if name.contains(os::NATIVES) {
                 native_jars.push(dest.clone());
             }
             if !classpath.contains(&dest) {
@@ -301,7 +326,7 @@ pub fn prepare(
             }
         }
         // Pre-1.19: "natives": {"windows": "natives-windows"} + classifiers.
-        if let Some(cls) = l["natives"]["windows"].as_str() {
+        if let Some(cls) = l["natives"][os::NAME].as_str() {
             let cls = cls.replace("${arch}", "64");
             let c = &l["downloads"]["classifiers"][&cls];
             if let (Some(p), Some(u)) = (c["path"].as_str(), c["url"].as_str()) {
@@ -328,7 +353,7 @@ pub fn prepare(
         for i in 0..z.len() {
             let Ok(mut e) = z.by_index(i) else { continue };
             let n = e.name().to_string();
-            if n.ends_with(".dll") && !n.contains("META-INF") {
+            if os::LIB_EXT.iter().any(|x| n.ends_with(x)) && !n.contains("META-INF") {
                 let out = natives.join(n.rsplit('/').next().unwrap_or(&n));
                 if !out.exists()
                     && let Ok(mut o) = fs::File::create(&out)
@@ -467,7 +492,7 @@ pub fn command(
     defaults: &Defaults,
 ) -> Vec<String> {
     let v = &p.version;
-    let cp_sep = ";";
+    let cp_sep = os::CP_SEP;
     let classpath = p
         .classpath
         .iter()
