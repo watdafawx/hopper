@@ -2040,7 +2040,11 @@ impl BrowseView {
                     )
                     .when(!is_pack && target.is_none(), |b| b.disabled(true))
                     .when(!extra.is_empty() && hold.is_none(), |b| b.tooltip(tip))
-                    .on_click(cx.listener(move |this, _, w, cx| this.install(m1.clone(), None, w, cx))),
+                    .on_click(cx.listener(move |this, _, w, cx| {
+                        // Not a click on the card: no peek.
+                        cx.stop_propagation();
+                        this.install(m1.clone(), None, w, cx)
+                    })),
                 )
                 // The newest file's notes, only on the hovered row so the
                 // list stays quiet; the space is kept so Install doesn't move.
