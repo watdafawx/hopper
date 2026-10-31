@@ -462,35 +462,13 @@ impl ServerControl {
     }
 
     /// Asks first where it costs something: a kill always, a stop or
-    /// restart while players are on.
+    /// restart while players are on or when Hopper can't see who is. With
+    /// nobody on it just goes (the toast says so).
     pub(crate) fn request(&mut self, action: PanelAction, window: &mut Window, cx: &mut Context<Self>) {
-        let online = match &self.stats {
-            Some(Ok(s)) => s.online,
-            _ => 0,
-        };
         let name = self.server_name(cx);
-        let ask = match action {
-            PanelAction::Kill => Some(format!(
-                "Kill {name}? The process ends at once: the world isn't saved, so anything since the last autosave is lost."
-            )),
-            PanelAction::Stop | PanelAction::Restart if online > 0 => Some(format!(
-                "{} {name}? {online} player{} online.",
-                action.label(),
-                if online == 1 { " is" } else { "s are" }
-            )),
-            // No players, or Hopper can't see the state: still ask, so a
-            // stop is never one stray click.
-            PanelAction::Stop | PanelAction::Restart if !matches!(&self.stats, Some(Ok(_))) => {
-                Some(format!(
-                    "{} {name}? Hopper can't read its state right now, so it can't tell who is online.",
-                    action.label()
-                ))
-            }
-            PanelAction::Stop | PanelAction::Restart => Some(format!(
-                "{} {name}? Nobody is online.",
-                action.label()
-            )),
-            _ => None,
+        let ask = match &self.stats {
+            Some(Ok(s)) => action.confirm_text(&name, Some(s.online), &s.players),
+            _ => action.confirm_text(&name, None, &[]),
         };
         let Some(text) = ask else {
             self.run(action, window, cx);
@@ -548,6 +526,9 @@ impl ServerControl {
                                 Notification::success(format!("Backing up {name} in {pname}.")),
                                 cx,
                             );
+                        } else if matches!(action, PanelAction::Stop | PanelAction::Restart) {
+                            let doing = if action == PanelAction::Stop { "Stopping" } else { "Restarting" };
+                            window.push_notification(Notification::info(format!("{doing} {name}.")), cx);
                         }
                     }
                     Err(e) => {

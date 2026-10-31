@@ -49,22 +49,40 @@ export function shift(old, now) {
 const LABEL = { start: 'Start', stop: 'Stop', restart: 'Restart', kill: 'Kill' };
 const DONE = { start: 'Starting', stop: 'Stopping', restart: 'Restarting', kill: 'Killed' };
 
+/** "Steve is online.", "Steve and Alex are online.", "Steve, Alex and 3
+ * others are online.". Same words as desktop
+ * (hopper-core `who_online`). */
+export function whoOnline(names) {
+  const n = names.length;
+  if (n === 1) return `${names[0]} is online.`;
+  if (n === 2) return `${names[0]} and ${names[1]} are online.`;
+  if (n === 3) return `${names[0]}, ${names[1]} and ${names[2]} are online.`;
+  return `${names[0]}, ${names[1]} and ${n - 2} others are online.`;
+}
+
+/** What to ask before `action`, or '' to go ahead at once: a kill always,
+ * a stop or restart only while players are on or when the panel can't
+ * tell who is. Nobody on means nothing to lose. Matches desktop
+ * (hopper-core `PanelAction::confirm_text`). */
+export function powerQuestion(server, action) {
+  const name = server.name;
+  if (action === 'kill') {
+    return `Kill ${name}? The process ends at once: the world isn't saved, so anything since the last autosave is lost.`;
+  }
+  if (action !== 'stop' && action !== 'restart') return '';
+  const players = Array.isArray(server.players) ? server.players.filter((p) => p && p.trim()) : null;
+  if (!players) return `${LABEL[action]} ${name}? Hopper Server can't read its state right now, so it can't tell who is online.`;
+  if (!players.length) return '';
+  return `${LABEL[action]} ${name}? ${whoOnline(players)}`;
+}
+
 /**
  * Starts, stops, restarts or kills the server, asking first where it costs
- * something, in desktop's words: a kill always, a stop or restart with who
- * is online. True when it was sent.
+ * something (see powerQuestion). True when it was sent.
  */
 export async function askPower(server, action) {
   const name = server.name;
-  const online = server.players?.length || 0;
-  let text = '';
-  if (action === 'kill') {
-    text = `Kill ${name}? The process ends at once: the world isn't saved, so anything since the last autosave is lost.`;
-  } else if (action === 'stop' || action === 'restart') {
-    text = online > 0
-      ? `${LABEL[action]} ${name}? ${online} player${online === 1 ? ' is' : 's are'} online.`
-      : `${LABEL[action]} ${name}? Nobody is online.`;
-  }
+  const text = powerQuestion(server, action);
   if (text && !(await confirmIt(`${LABEL[action]} the server?`, { body: text, ok: LABEL[action], danger: action === 'kill' }))) {
     return false;
   }

@@ -104,6 +104,40 @@ pub enum BrowseEvent {
 
 impl EventEmitter<BrowseEvent> for BrowseView {}
 
+gpui_kit::actions!(
+    browse,
+    [ResultUp, ResultDown, ResultPageUp, ResultPageDown, ResultFirst, ResultLast, ResultEnter, ResultClose]
+);
+
+/// The results list's keys, while it has focus (Down from the search box
+/// moves there).
+pub fn bind_keys(cx: &mut App) {
+    let ctx = Some("BrowseResults");
+    cx.bind_keys([
+        KeyBinding::new("up", ResultUp, ctx),
+        KeyBinding::new("down", ResultDown, ctx),
+        KeyBinding::new("pageup", ResultPageUp, ctx),
+        KeyBinding::new("pagedown", ResultPageDown, ctx),
+        KeyBinding::new("home", ResultFirst, ctx),
+        KeyBinding::new("end", ResultLast, ctx),
+        KeyBinding::new("enter", ResultEnter, ctx),
+        KeyBinding::new("escape", ResultClose, ctx),
+    ]);
+}
+
+/// How far PageUp / PageDown move the selection.
+const PAGE_STEP: isize = 5;
+
+/// The row a key move lands on: `step` from `cur` (nothing picked counts
+/// as just above the first row), kept inside a list of `len`.
+fn step_row(cur: Option<usize>, step: isize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let at = cur.map_or(-1, |c| c as isize);
+    Some(at.saturating_add(step).clamp(0, len as isize - 1) as usize)
+}
+
 /// The sort a fresh Browse starts on: the one set in Settings, else the
 /// one picked last.
 fn start_sort(st: &hopper::settings::Settings) -> SortField {
@@ -142,6 +176,11 @@ pub struct BrowseView {
     fresh: Vec<cf::Mod>,
     _check: Option<Task<()>>,
     selected: Option<cf::Mod>,
+    /// The results list, focused for its arrow keys.
+    list_focus: FocusHandle,
+    /// A key move past the last result asked for the next page: the row
+    /// to pick once it arrives.
+    key_want: Option<usize>,
     detail: HashMap<u64, Load<Detail>>,
     deps: HashMap<u64, Vec<(cf::Mod, u32)>>,
     /// What installing a project into an instance also downloads.
@@ -265,6 +304,8 @@ impl BrowseView {
             fresh: Vec::new(),
             _check: None,
             selected: None,
+            list_focus: cx.focus_handle(),
+            key_want: None,
             detail: HashMap::new(),
             deps: HashMap::new(),
             plans: HashMap::new(),
@@ -757,6 +798,9 @@ impl BrowseView {
                             && let Some(m) = this.results.first().cloned()
                         {
                             this.open_detail(m, cx);
+                        }
+                        if let Some(ix) = this.key_want.take().filter(|_| append) {
+                            this.key_pick(ix.min(this.results.len().saturating_sub(1)), cx);
                         }
                         this.store
                             .update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
@@ -2275,9 +2319,22 @@ impl BrowseView {
                     .pb_3()
                     .gap_2()
                     .child(
-                        Input::new(&self.search)
-                            .prefix(Icon::new(IconName::Search).small())
-                            .cleanable(true),
+                        div()
+                            // Down from the search box goes into the results.
+                            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveDown, w, cx| {
+                                if !this.shown_results().is_empty() {
+                                    cx.stop_propagation();
+                                    this.list_focus.focus(w, cx);
+                                    if this.selected.is_none() {
+                                        this.key_move(1, w, cx);
+                                    }
+                                }
+                            }))
+                            .child(
+                                Input::new(&self.search)
+                                    .prefix(Icon::new(IconName::Search).small())
+                                    .cleanable(true),
+                            ),
                     )
                     .child(
                         h_flex()
@@ -2396,11 +2453,105 @@ impl BrowseView {
             )
     }
 
+    /// What the list shows: the saved bookmarks or the search results.
+    fn shown_results(&self) -> Vec<cf::Mod> {
+        if self.bookmarked { self.bookmark_results() } else { self.results.clone() }
+    }
+
+    /// Moves the picked result by `step` rows with the keys, opening it
+    /// beside the list like a click. Up from the first row goes back to
+    /// the search box; Down past the last asks for the next page.
+    fn key_move(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let len = self.shown_results().len();
+        let cur = self.key_row();
+        if step < 0 && cur.is_none_or(|c| c == 0) {
+            self.focus_search(window, cx);
+            return;
+        }
+        let Some(ix) = step_row(cur, step, len) else { return };
+        let more = !self.bookmarked && (self.results.len() as u32) < self.total.min(10_000);
+        if step > 0 && more && cur.is_some_and(|c| c as isize + step >= len as isize) {
+            self.key_want = Some(len);
+            if !self.loading {
+                self.run_search(true, cx);
+            }
+        }
+        self.key_pick(ix, cx);
+    }
+
+    /// Home / End: the first or last row loaded.
+    fn key_jump(&mut self, ix: usize, _: &mut Window, cx: &mut Context<Self>) {
+        let len = self.shown_results().len();
+        if len > 0 {
+            self.key_pick(ix.min(len - 1), cx);
+        }
+    }
+
+    /// Where the picked project sits in the list, if it's there.
+    fn key_row(&self) -> Option<usize> {
+        let s = self.selected.as_ref()?;
+        self.shown_results().iter().position(|m| m.id == s.id)
+    }
+
+    /// Picks row `ix` of the list and scrolls it into view.
+    fn key_pick(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(m) = self.shown_results().into_iter().nth(ix) else { return };
+        if self.selected.as_ref().is_none_or(|s| s.id != m.id) {
+            self.open_detail(m, cx);
+        }
+        self.scroll.scroll_to_item(ix);
+        cx.notify();
+    }
+
+    /// Enter: install the picked result when its row offers Install, else
+    /// open one (the first when none is picked). Nothing else for an
+    /// installed one: the panel beside it is already open.
+    fn key_enter(&mut self, _: &ResultEnter, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(m) = self.selected.clone().filter(|_| self.key_row().is_some()) else {
+            self.key_move(1, window, cx);
+            return;
+        };
+        let target = self.target(cx);
+        if self.can_install(&m, target.as_ref(), cx) {
+            self.install(m, None, window, cx);
+        }
+    }
+
+    /// Whether `m`'s row shows a ready Install button (not installed, no
+    /// pack made from it, nothing running for it, somewhere to put it).
+    /// Mirrors the cases in [`Self::result_card`].
+    fn can_install(&self, m: &cf::Mod, target: Option<&Instance>, cx: &App) -> bool {
+        let store = self.store.read(cx);
+        let is_pack = hopper::browse::is_modpack(m, self.class);
+        if is_pack && store.instances().iter().any(|i| i.pack.as_ref().is_some_and(|p| p.project_id == m.id)) {
+            return false;
+        }
+        let tracked = !matches!(m.class_id, Some(cf::CLASS_WORLDS | cf::CLASS_DATAPACKS));
+        let installed = target.filter(|_| tracked).and_then(|t| installed_as(t, m)).is_some()
+            || target.and_then(|t| self.global.get(&t.root)).is_some_and(|g| g.contains_key(&m.id));
+        let (pending, hold, _) = self.install_state(m.id, is_pack, cx);
+        !installed && !pending && hold.is_none() && (is_pack || target.is_some())
+    }
+
     /// The result cards, scrolled by [`Self::scroll`] so the place is kept
     /// while Browse is hidden.
     fn result_list(&self, cards: Vec<AnyElement>, more: bool, searching: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         v_flex()
             .id("browse-results")
+            .track_focus(&self.list_focus)
+            .key_context("BrowseResults")
+            .on_action(cx.listener(|this, _: &ResultUp, w, cx| this.key_move(-1, w, cx)))
+            .on_action(cx.listener(|this, _: &ResultDown, w, cx| this.key_move(1, w, cx)))
+            .on_action(cx.listener(|this, _: &ResultPageUp, w, cx| this.key_move(-PAGE_STEP, w, cx)))
+            .on_action(cx.listener(|this, _: &ResultPageDown, w, cx| this.key_move(PAGE_STEP, w, cx)))
+            .on_action(cx.listener(|this, _: &ResultFirst, w, cx| this.key_jump(0, w, cx)))
+            .on_action(cx.listener(|this, _: &ResultLast, w, cx| this.key_jump(usize::MAX, w, cx)))
+            .on_action(cx.listener(Self::key_enter))
+            .on_action(cx.listener(|this, _: &ResultClose, _, cx| {
+                this.selected = None;
+                this.author = None;
+                cx.notify();
+            }))
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
@@ -3770,4 +3921,20 @@ fn total_label(n: u32) -> String {
         out.push(c);
     }
     if n >= 10_000 { out + "+" } else { out }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::step_row;
+
+    #[test]
+    fn step_row_stays_in_the_list() {
+        assert_eq!(step_row(None, 1, 0), None);
+        assert_eq!(step_row(None, 1, 5), Some(0));
+        assert_eq!(step_row(Some(0), 1, 5), Some(1));
+        assert_eq!(step_row(Some(4), 1, 5), Some(4));
+        assert_eq!(step_row(Some(2), 5, 5), Some(4));
+        assert_eq!(step_row(Some(3), -5, 5), Some(0));
+        assert_eq!(step_row(Some(1), isize::MAX, 5), Some(4));
+    }
 }

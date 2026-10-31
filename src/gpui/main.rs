@@ -102,6 +102,7 @@ fn main() {
             gpui_kit::component::set_locale("en");
             app::bind_keys(cx);
             addons::bind_keys(cx);
+            browse::bind_keys(cx);
             palette::bind_keys(cx);
             let saved = hopper::settings::Settings::load();
             let (name, mode, zoom) = saved

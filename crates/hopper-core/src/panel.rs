@@ -59,6 +59,45 @@ impl PanelAction {
             PanelAction::Restart | PanelAction::Backup => true,
         }
     }
+
+    /// What to ask before doing this to the server called `name`, or None
+    /// to go ahead at once. A kill always asks. A stop or restart asks when
+    /// players are on (naming them) or when Hopper can't tell who is
+    /// (`online` is None); with nobody on there's nothing to lose, so it
+    /// just goes. Hopper Server's panel words it the same way
+    /// (`ui/src/lib/consoleKit.js`).
+    pub fn confirm_text(self, name: &str, online: Option<u32>, players: &[String]) -> Option<String> {
+        match self {
+            PanelAction::Kill => Some(format!(
+                "Kill {name}? The process ends at once: the world isn't saved, so anything since the last autosave is lost."
+            )),
+            PanelAction::Stop | PanelAction::Restart => match online {
+                None => Some(format!(
+                    "{} {name}? Hopper can't read its state right now, so it can't tell who is online.",
+                    self.label()
+                )),
+                Some(0) => None,
+                Some(n) => Some(format!("{} {name}? {}", self.label(), who_online(n, players))),
+            },
+            PanelAction::Start | PanelAction::Backup => None,
+        }
+    }
+}
+
+/// "Steve is online.", "Steve and Alex are online.", "Steve, Alex and 3
+/// others are online.", or just the count when the names aren't known.
+pub fn who_online(n: u32, players: &[String]) -> String {
+    let names: Vec<&str> = players.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if names.is_empty() || names.len() as u32 != n {
+        return format!("{n} player{} online.", if n == 1 { " is" } else { "s are" });
+    }
+    match names.as_slice() {
+        [one] => format!("{one} is online."),
+        [a, b] => format!("{a} and {b} are online."),
+        [a, b, c] => format!("{a}, {b} and {c} are online."),
+        [a, b, rest @ ..] => format!("{a}, {b} and {} others are online.", rest.len()),
+        [] => unreachable!(),
+    }
 }
 
 /// How long a panel may keep saying "stopped" after a start request
@@ -925,6 +964,28 @@ impl ServerPanel for Crafty {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn confirm_skips_an_empty_server() {
+        let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let r = PanelAction::Restart;
+        assert_eq!(r.confirm_text("TNP", Some(0), &[]), None);
+        assert_eq!(PanelAction::Stop.confirm_text("TNP", Some(0), &[]), None);
+        assert!(r.confirm_text("TNP", None, &[]).unwrap().contains("can't tell who is online"));
+        assert_eq!(r.confirm_text("TNP", Some(1), &p(&["Steve"])).unwrap(), "Restart TNP? Steve is online.");
+        assert_eq!(
+            PanelAction::Stop.confirm_text("TNP", Some(2), &p(&["Steve", "Alex"])).unwrap(),
+            "Stop TNP? Steve and Alex are online."
+        );
+        assert_eq!(
+            r.confirm_text("TNP", Some(5), &p(&["a", "b", "c", "d", "e"])).unwrap(),
+            "Restart TNP? a, b and 3 others are online."
+        );
+        // Names that don't match the count: fall back to the number.
+        assert_eq!(r.confirm_text("TNP", Some(3), &p(&["a"])).unwrap(), "Restart TNP? 3 players are online.");
+        assert!(PanelAction::Kill.confirm_text("TNP", Some(0), &[]).is_some());
+        assert_eq!(PanelAction::Start.confirm_text("TNP", None, &[]), None);
+    }
 
     fn st(running: bool, starting: bool, crashed: bool) -> PanelStats {
         PanelStats { running, starting, crashed, ..Default::default() }
