@@ -4510,6 +4510,7 @@ dependencies = [
  "libunftp",
  "log",
  "mdns-sd",
+ "notify",
  "rcgen 0.13.2",
  "regex",
  "rusqlite",

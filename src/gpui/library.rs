@@ -368,6 +368,7 @@ impl LibraryView {
             cx.observe(&peek, |_, _, cx| cx.notify()),
             cx.subscribe(&addons, |this, _, event, cx| this.addons_event(event, cx)),
             cx.subscribe(&worlds, |this, _, event, cx| this.content_event(event, cx)),
+            cx.subscribe(&store, |this, _, event: &store::StoreEvent, cx| this.disk_event(event, cx)),
             cx.observe(&store, |this, _, cx| {
                 this.ensure_selection(cx);
                 this.follow_paired_server(cx);
@@ -396,6 +397,9 @@ impl LibraryView {
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 this.server.update(cx, |p, cx| p.refresh_state(cx));
+                // Packs installed or files added while Hopper was in the
+                // background, in case their file events were missed.
+                this.store.read(cx).disk_check();
             }
         }));
         let mut view = Self {
@@ -579,6 +583,7 @@ impl LibraryView {
 
     fn select(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self.selected = Some(root.clone());
+        self.store.read(cx).watch_open(Some(root.clone()));
         self.watch_paired(true, cx);
         let key = root.to_string_lossy().to_string();
         self.store.update(cx, |s, cx| {
@@ -665,6 +670,26 @@ impl LibraryView {
         });
         self.want_tab_images(cx);
         cx.notify();
+    }
+
+    /// Files changed outside Hopper in the open instance: the tab showing
+    /// them reads them again.
+    fn disk_event(&mut self, event: &store::StoreEvent, cx: &mut Context<Self>) {
+        use hopper::disk_watch::Area;
+        let store::StoreEvent::DiskContent(root, area) = event else { return };
+        if self.selected.as_ref() != Some(root) {
+            return;
+        }
+        let shown = match area {
+            Area::Mods => self.tab == InstTab::Mods,
+            Area::ResourcePacks => self.tab == InstTab::ResourcePacks,
+            Area::ShaderPacks => self.tab == InstTab::Shaders,
+            Area::Worlds => matches!(self.tab, InstTab::Worlds | InstTab::Datapacks),
+            Area::Screenshots => self.tab == InstTab::Screenshots,
+        };
+        if shown {
+            self.want_tab_images(cx);
+        }
     }
 
     fn content_event(&mut self, event: &ContentEvent, cx: &mut Context<Self>) {
