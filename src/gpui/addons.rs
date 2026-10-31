@@ -114,6 +114,145 @@ pub(crate) fn col_trash() -> Div {
     h_flex().w_16().flex_none().justify_end()
 }
 
+/// The table's movable columns, in their default order. The user can drag
+/// their headers to reorder them and hide all but On (header menu).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Col {
+    Author,
+    Side,
+    On,
+    Added,
+}
+
+impl Col {
+    pub(crate) const ALL: [Col; 4] = [Col::Author, Col::Side, Col::On, Col::Added];
+
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Col::Author => "author",
+            Col::Side => "side",
+            Col::On => "on",
+            Col::Added => "added",
+        }
+    }
+
+    fn from_key(k: &str) -> Option<Col> {
+        Col::ALL.into_iter().find(|c| c.key() == k)
+    }
+}
+
+/// The user's column order: saved keys first, then any they lack.
+pub(crate) fn col_order(s: &hopper::settings::Settings) -> Vec<Col> {
+    let mut v: Vec<Col> = s.content_col_order.iter().filter_map(|k| Col::from_key(k)).collect();
+    v.dedup();
+    for c in Col::ALL {
+        if !v.contains(&c) {
+            v.push(c);
+        }
+    }
+    v
+}
+
+/// Whether the user hid this column.
+pub(crate) fn col_hidden(s: &hopper::settings::Settings, c: Col) -> bool {
+    c != Col::On && s.content_hidden_cols.iter().any(|k| k == c.key())
+}
+
+/// Puts a row's or the header's movable cells in the user's order.
+pub(crate) fn in_col_order(order: &[Col], mut cells: Vec<(Col, AnyElement)>) -> Vec<AnyElement> {
+    let mut out = Vec::with_capacity(cells.len());
+    for c in order {
+        if let Some(i) = cells.iter().position(|(k, _)| k == c) {
+            out.push(cells.swap_remove(i).1);
+        }
+    }
+    out
+}
+
+/// The table header's menu (its columns button, or right-click): sort,
+/// show or hide columns, the Server column, reset.
+fn columns_menu(view: &Entity<AddonsView>, menu: PopupMenu, _: &mut Window, cx: &mut App) -> PopupMenu {
+    let this = view.read(cx);
+    let store = this.store.read(cx);
+    let settings = store.settings();
+    let (sort, asc) = this.sort;
+    let has_side = this.class != cf::CLASS_DATAPACKS && this.table.has_side;
+    let server = this.class == cf::CLASS_MODS && this.root.as_ref().is_some_and(|r| store.server_of(r).is_some());
+    let server_on = settings.mods_server_column;
+    let on_label = if this.class == cf::CLASS_SHADERS { "Use" } else { "On" };
+    let mut sorts = vec![(SortCol::Name, "Name"), (SortCol::Author, "Author")];
+    if has_side {
+        sorts.push((SortCol::Env, "Side"));
+    }
+    sorts.extend([(SortCol::Active, on_label), (SortCol::Added, "Added")]);
+    let mut shows = vec![(Col::Author, "Author")];
+    if has_side {
+        shows.push((Col::Side, "Side"));
+    }
+    shows.push((Col::Added, "Added"));
+    let hidden: Vec<(Col, bool)> = shows.iter().map(|(c, _)| (*c, col_hidden(settings, *c))).collect();
+
+    let mut menu = menu.label("Sort by");
+    for (col, label) in sorts {
+        let v = view.clone();
+        let text = if sort == col { format!("{label} {}", if asc { "↑" } else { "↓" }) } else { label.to_string() };
+        menu = menu.item(
+            PopupMenuItem::new(text)
+                .checked(sort == col)
+                .on_click(move |_, _, cx| v.update(cx, |this, cx| this.set_sort(col, cx))),
+        );
+    }
+    menu = menu.separator().label("Columns");
+    for ((col, label), (_, is_hidden)) in shows.into_iter().zip(hidden) {
+        let v = view.clone();
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .checked(!is_hidden)
+                .on_click(move |_, _, cx| v.update(cx, |this, cx| this.set_col_hidden(col, !is_hidden, cx))),
+        );
+    }
+    if server {
+        let v = view.clone();
+        menu = menu.item(
+            PopupMenuItem::new("Server state")
+                .checked(server_on)
+                .on_click(move |_, _, cx| v.update(cx, |this, cx| this.set_server_column(!server_on, cx))),
+        );
+    }
+    let v = view.clone();
+    menu.separator()
+        .item(
+            PopupMenuItem::new("Reset columns")
+                .icon(IconName::RotateCcw)
+                .on_click(move |_, _, cx| v.update(cx, |this, cx| this.reset_cols(cx))),
+        )
+        .label("Drag a header to move its column")
+}
+
+/// A column header being dragged to a new place.
+#[derive(Clone)]
+pub(crate) struct ColDrag {
+    col: Col,
+    label: SharedString,
+}
+
+impl Render for ColDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px_2p5()
+            .py_1()
+            .rounded(theme.radius)
+            .bg(theme.popover)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_md()
+            .text_xs()
+            .font_medium()
+            .child(self.label.clone())
+    }
+}
+
 /// The name column's narrowest (columns step aside below it) and widest
 /// (on wide windows the actions follow the name instead of the far edge).
 const NAME_MIN: f32 = 16.0;
@@ -492,6 +631,8 @@ pub struct AddonsView {
     pub(crate) loose_set: HashSet<String>,
     /// The optional columns that fit; set each frame from `room`.
     pub(crate) cols: Cols,
+    /// The movable columns in the user's order, read each frame.
+    pub(crate) col_order: Vec<Col>,
     /// The work area's width in rem, from the Library (None: the window's).
     pub(crate) room: Option<f32>,
     /// The Library's instance list is open (not the rail).
@@ -613,6 +754,7 @@ impl AddonsView {
             peek,
             logos,
             cols: Cols::default(),
+            col_order: Col::ALL.to_vec(),
             room: None,
             list_open: false,
             hint_gone: false,
@@ -2107,19 +2249,20 @@ impl AddonsView {
                 let queues = store.queues_updates(&inst.root);
                 let hold = if queues { None } else { store.edit_hold_reason(&inst.root) };
                 let busy = !queues && store.is_busy(&inst.root);
-                // The toolbar's one filled button: opens the review first.
-                Button::new("update-all")
-                    .primary()
-                    .small()
+                // Next to Add content and looking like it: opens the review first.
+                let n = all.len();
+                widgets::tinted(Button::new("update-all").small(), cx)
                     .icon(IconName::Download)
-                    .label(if all.len() == 1 {
-                        "Review 1 update".to_string()
-                    } else {
-                        format!("Review {} updates", all.len())
-                    })
+                    .label(format!("Update all ({n})"))
                     .loading(all.is_empty() || busy)
                     .disabled(hold.is_some())
-                    .when_some(hold, |b, why| b.tooltip(why))
+                    .tooltip(hold.map(|w| w.to_string()).unwrap_or_else(|| {
+                        if n == 1 {
+                            "Review 1 update, then update".to_string()
+                        } else {
+                            format!("Review {n} updates, then update")
+                        }
+                    }))
                     .on_click(cx.listener(move |this, _, window, cx| this.review_updates(all.clone(), window, cx)))
                     .into_any_element()
             }
@@ -2131,17 +2274,7 @@ impl AddonsView {
             .gap_3()
             .flex_wrap()
             .child(
-                div().w_56().child(
-                    widgets::search_input(&self.search)
-                        .small()
-                        .prefix(Icon::new(IconName::Search).small())
-                        .cleanable(true),
-                ),
-            )
-            .child(
-                Button::new("add-content")
-                    .small()
-                    .outline()
+                widgets::tinted(Button::new("add-content").small(), cx)
                     .icon(IconName::Plus)
                     .label("Add content")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2165,7 +2298,33 @@ impl AddonsView {
                         }
                     })),
             )
-            .when(self.class == cf::CLASS_MODS, |r| r.child(self.profiles_button(inst, cx)))
+            // Update all and its refresh sit by Add content. The note (checking,
+            // errors) goes after them so they don't move.
+            .child(
+                h_flex().flex_none().gap_2().child(result).child(
+                    Button::new("recheck")
+                        .ghost()
+                        .small()
+                        .icon(IconName::RefreshCw)
+                        .loading(checking)
+                        .tooltip(if checking { "Checking for updates" } else { "Check for updates again" })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.store.update(cx, |s, cx| {
+                                s.check_updates(&root, true);
+                                cx.notify();
+                            })
+                        })),
+                ).children(note),
+            )
+            .child(div().w_px().h_5().flex_none().bg(cx.theme().border))
+            .child(
+                div().flex_1().min_w(rems(12.)).max_w(rems(26.)).child(
+                    widgets::search_input(&self.search)
+                        .small()
+                        .prefix(Icon::new(IconName::Search).small())
+                        .cleanable(true),
+                ),
+            )
             .child(
                 widgets::underline_tabs(
                     "show",
@@ -2179,46 +2338,25 @@ impl AddonsView {
                 ),
             )
             .when(inst.pack.is_some() && self.global_dir().is_none(), |r| {
+                let on = self.added_only;
                 r.child(
-                    Checkbox::new("added-only")
-                        .label(format!("Only yours ({n_added})"))
+                    widgets::toggle_chip("added-only", format!("Only yours ({n_added})"), on, cx)
                         .tooltip("Only what you added on top of the modpack")
-                        .checked(self.added_only)
-                        .on_change(cx.listener(|this, v: &bool, _, cx| {
-                            this.added_only = *v;
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.added_only = !on;
                             cx.notify();
                         })),
                 )
             })
-            .when(
-                self.class == cf::CLASS_MODS
-                    && self.store.read(cx).server_of(&inst.root).is_some(),
-                |r| {
-                    r.child(
-                        Checkbox::new("server-column")
-                            .label("Server")
-                            .tooltip("Show each mod's state on the paired rig server")
-                            .checked(self.store.read(cx).settings().mods_server_column)
-                            .on_change(cx.listener(|this, v: &bool, _, cx| {
-                                let v = *v;
-                                this.store.update(cx, |s, cx| {
-                                    s.update_settings(|st| st.mods_server_column = v, cx)
-                                });
-                                this.marks = None;
-                                this.want_marks(cx);
-                            })),
-                    )
-                },
-            )
-            .child(
-                Checkbox::new("updates-first")
-                    .label("Updates first")
-                    .checked(self.updates_first)
-                    .on_change(cx.listener(|this, v: &bool, _, cx| {
-                        this.updates_first = *v;
+            .child({
+                let on = self.updates_first;
+                widgets::toggle_chip("updates-first", "Updates first", on, cx)
+                    .tooltip("Mods with an update at the top")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.updates_first = !on;
                         cx.notify();
-                    })),
-            )
+                    }))
+            })
             .when(hint, |r| r.child(self.collapse_hint(cx)))
             .child(div().flex_1())
             .when(self.store.read(cx).running(&inst.root).is_some(), |r| {
@@ -2227,24 +2365,7 @@ impl AddonsView {
                         .text_xs(),
                 )
             })
-            // The update status and its refresh wrap as one. The note goes
-            // before the Review button so the button doesn't move.
-            .child(
-                h_flex().flex_none().gap_2().children(note).child(result).child(
-                    Button::new("recheck")
-                        .ghost()
-                        .small()
-                        .icon(IconName::RefreshCw)
-                        .loading(checking)
-                        .tooltip(if checking { "Checking for updates" } else { "Check for updates again" })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.store.update(cx, |s, cx| {
-                                s.check_updates(&root, true);
-                                cx.notify();
-                            })
-                        })),
-                ),
-            )
+            .when(self.class == cf::CLASS_MODS, |r| r.child(self.profiles_button(inst, cx)))
     }
 
     /// "Collapse the list for more room": collapses the instance list, or
@@ -2425,9 +2546,18 @@ impl AddonsView {
         let all = !files.is_empty() && files.iter().all(|f| self.selected.contains(f));
         let theme = cx.theme();
         let (sort, asc) = self.sort;
+        let primary = theme.primary;
+        // A movable header: drag it onto another to put it there.
+        let movable = |c: Col, label: &'static str, el: Stateful<Div>| -> AnyElement {
+            el.cursor_grab()
+                .on_drag(ColDrag { col: c, label: label.into() }, |d, _, _, cx| cx.new(|_| d.clone()))
+                .drag_over::<ColDrag>(move |s, _, _, _| s.border_l_2().border_color(primary))
+                .on_drop(cx.listener(move |this, d: &ColDrag, _, cx| this.move_col(d.col, c, cx)))
+                .into_any_element()
+        };
         let head = |col: SortCol, label: &'static str, cell: Div| {
             let active = sort == col;
-            cell.child(
+            cell.id(SharedString::from(format!("head-{label}"))).child(
                 h_flex()
                     .id(label)
                     .clickable(cx)
@@ -2478,12 +2608,15 @@ impl AddonsView {
             .child(head(SortCol::Name, "Name", self.name_cell()))
             .when(self.action_fits(), |r| r.child(col_action(self.compact)))
             .children(self.spacer())
-            .when(self.cols.author, |r| {
-                r.child(head(SortCol::Author, "Author", col_author()))
-            })
+            .children(in_col_order(&self.col_order, {
+                let mut cells = Vec::new();
+                if self.cols.author {
+                    cells.push((Col::Author, movable(Col::Author, "Author", head(SortCol::Author, "Author", col_author()))));
+                }
             // Data packs run on the server by nature, and packs with no
             // side say nothing: no Side column.
-            .when(self.cols.side, |r| r.child(head(SortCol::Env, "Side", col_env()).id("head-side").tooltip(|w, cx| {
+            if self.cols.side {
+                cells.push((Col::Side, movable(Col::Side, "Side", head(SortCol::Env, "Side", col_env()).tooltip(|w, cx| {
                 gpui_kit::component::tooltip::Tooltip::element(|_, cx| {
                     let muted = cx.theme().muted_foreground;
                     let line = |icon: IconName, text: &'static str| {
@@ -2499,15 +2632,85 @@ impl AddonsView {
                         .child(div().text_xs().text_color(muted).child("Hover a row's icon for more. Click to sort."))
                 })
                 .build(w, cx)
-            })))
-            .child(head(SortCol::Active, if self.class == cf::CLASS_SHADERS { "Use" } else { "On" }, col_active()).id("head-on").tooltip(|w, cx| {
+            }))));
+            }
+            let on = if self.class == cf::CLASS_SHADERS { "Use" } else { "On" };
+            cells.push((Col::On, movable(Col::On, on, head(SortCol::Active, on, col_active()).tooltip(|w, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(
                     "Off keeps the file but the game doesn't load it (renamed to .disabled). Click to sort.",
                 )
                 .build(w, cx)
+            }))));
+            if self.cols.date {
+                cells.push((Col::Added, movable(Col::Added, "Added", head(SortCol::Added, "Added", col_date()))));
+            }
+            cells
             }))
-            .when(self.cols.date, |r| r.child(head(SortCol::Added, "Added", col_date())))
-            .child(col_trash())
+            .child(col_trash().child({
+                let v = cx.entity();
+                Button::new("columns")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Columns3)
+                    .tooltip("Columns · or right-click a header")
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, w, cx| columns_menu(&v, menu, w, cx))
+            }))
+            .context_menu({
+                let v = cx.entity();
+                move |menu, w, cx| columns_menu(&v, menu, w, cx)
+            })
+    }
+
+    /// Moves column `c` to where `to` is.
+    fn move_col(&mut self, c: Col, to: Col, cx: &mut Context<Self>) {
+        if c == to {
+            return;
+        }
+        let mut order = self.col_order.clone();
+        let Some(from) = order.iter().position(|k| *k == c) else { return };
+        order.remove(from);
+        let at = order.iter().position(|k| *k == to).unwrap_or(order.len());
+        // Dropped on a column to its right: after it; to its left: before it.
+        let at = if at >= from { at + 1 } else { at };
+        order.insert(at.min(order.len()), c);
+        let keys: Vec<String> = order.iter().map(|k| k.key().to_string()).collect();
+        self.store.update(cx, |s, cx| s.update_settings(|st| st.content_col_order = keys, cx));
+        cx.notify();
+    }
+
+    fn set_col_hidden(&mut self, c: Col, hide: bool, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| {
+                    st.content_hidden_cols.retain(|k| k != c.key());
+                    if hide {
+                        st.content_hidden_cols.push(c.key().to_string());
+                    }
+                },
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
+    fn reset_cols(&mut self, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| {
+                    st.content_hidden_cols.clear();
+                    st.content_col_order.clear();
+                },
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
+    fn set_server_column(&mut self, v: bool, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, cx| s.update_settings(|st| st.mods_server_column = v, cx));
+        self.marks = None;
+        self.want_marks(cx);
+        cx.notify();
     }
 
     fn render_rows(
@@ -3379,17 +3582,22 @@ Change version", a.file_name).into()
             )
             .when(self.action_fits(), |r| r.child(action))
             .children(self.spacer())
-            .when(self.cols.author, |r| {
-                r.child(
+            .children(in_col_order(&self.col_order, {
+            let mut cells: Vec<(Col, AnyElement)> = Vec::new();
+            if self.cols.author {
+                cells.push((Col::Author,
                     col_author()
                         .text_sm()
                         .truncate()
                         .text_color(theme.muted_foreground)
-                        .child(a.author.clone()),
-                )
-            })
-            .when_some(side_col, |r, el| r.child(col_env().child(el)))
-            .child(col_active().child(if let Some(radio) = shader_radio {
+                        .child(a.author.clone())
+                        .into_any_element(),
+                ));
+            }
+            if let Some(el) = side_col {
+                cells.push((Col::Side, col_env().child(el).into_any_element()));
+            }
+            cells.push((Col::On, col_active().child(if let Some(radio) = shader_radio {
                 radio
             } else {
                 let order = self.order_mode();
@@ -3418,10 +3626,10 @@ Change version", a.file_name).into()
                         })),
                 )
                 .into_any_element()
-            }))
-            .when(self.cols.date, |r| r.child({
+            }).into_any_element()));
+            if self.cols.date {
                 let exact = hopper::time::date_of(&a.date_added);
-                col_date()
+                cells.push((Col::Added, col_date()
                     .id(id("added"))
                     .text_sm()
                     .text_color(theme.muted_foreground)
@@ -3429,6 +3637,9 @@ Change version", a.file_name).into()
                         d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(exact.clone()).build(w, cx))
                     })
                     .child(hopper::time::relative(&a.date_added))
+                    .into_any_element()));
+            }
+            cells
             }))
             .child(
                 col_trash()
@@ -3761,10 +3972,14 @@ Change version", a.file_name).into()
     /// the name's tooltip), Side (to an icon by the name); then Update
     /// shrinks to its icon. Wide, the name stops at NAME_MAX. Only from
     /// widths known before layout, so it never flips back and forth.
-    fn fit_columns(&mut self, window: &Window) {
+    fn fit_columns(&mut self, window: &Window, cx: &App) {
         let room = self.room.unwrap_or_else(|| window.viewport_size().width / window.rem_size());
-        let has_side = self.class != cf::CLASS_DATAPACKS && self.table.has_side;
-        let mut c = Cols { date: !self.tight, author: true, side: has_side, side_inline: false, cap: false };
+        let settings = self.store.read(cx).settings();
+        let (no_author, no_side, no_date) =
+            (col_hidden(settings, Col::Author), col_hidden(settings, Col::Side), col_hidden(settings, Col::Added));
+        self.col_order = col_order(settings);
+        let has_side = self.class != cf::CLASS_DATAPACKS && self.table.has_side && !no_side;
+        let mut c = Cols { date: !self.tight && !no_date, author: !no_author, side: has_side, side_inline: false, cap: false };
         let mut compact = self.compact;
         if self.name_room(room, &c, compact) < NAME_MIN {
             c.date = false;
@@ -4451,7 +4666,7 @@ impl Render for AddonsView {
         // Built by `sync` when the store changes; here only the filters
         // may need applying again (in memory).
         self.ensure_rows();
-        self.fit_columns(window);
+        self.fit_columns(window, cx);
         let Some(inst) = self.table.inst.clone() else {
             return div().into_any_element();
         };

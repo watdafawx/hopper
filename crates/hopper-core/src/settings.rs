@@ -63,6 +63,10 @@ pub struct Settings {
     pub record_sessions: bool,
     /// Mods tab shows a dot per mod for its state on the paired server.
     pub mods_server_column: bool,
+    /// Content tabs' table: columns the user hid ("author", "side", "added").
+    pub content_hidden_cols: Vec<String>,
+    /// Content tabs' table: the user's column order, by key; empty = default.
+    pub content_col_order: Vec<String>,
     /// The GPUI Library shows its instance list as a narrow rail.
     pub sidebar_collapsed: bool,
     /// Width of the GPUI instance list, in rem.
@@ -450,6 +454,8 @@ impl Default for Settings {
             minimize_while_playing: false,
             record_sessions: true,
             mods_server_column: true,
+            content_hidden_cols: Vec::new(),
+            content_col_order: Vec::new(),
             sidebar_collapsed: false,
             sidebar_width: 20.0,
             accounts_sidebar_collapsed: false,
