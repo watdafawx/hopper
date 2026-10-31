@@ -144,6 +144,12 @@ pub fn check_pack(project: &cf::Mod, f: &cf::File) -> anyhow::Result<PackCheck> 
     Ok(c)
 }
 
+/// Whether website-only server pack `f` came through the desktop app's
+/// download window into the pack cache, where [`create_from_zip`] finds it.
+fn from_website(f: &cf::File, job: &Job) -> bool {
+    crate::modpack::can_fetch_from_website() && crate::modpack::fetch_pack_zip(f, job).is_ok()
+}
+
 /// [`WebsiteOnly`] for CurseForge file `f` when Hopper may not download it.
 fn blocked(project_id: u64, f: &cf::File) -> anyhow::Result<Option<WebsiteOnly>> {
     if !cf::website_only(f)? {
@@ -175,7 +181,9 @@ pub fn create_from_server_pack(
     job.detail("Finding the pack's server pack");
     let file = resolve_server_pack(inst)?;
     let project = inst.pack.as_ref().map_or(0, |p| p.project_id);
-    if let Some(w) = blocked(project, &file)? {
+    if let Some(w) = blocked(project, &file)?
+        && !from_website(&file, job)
+    {
         // The instance already has the pack's mods: build from those.
         let mut create = create_from_instance(inst, opts, &HashSet::new(), &HashSet::new(), job)?;
         built_from_pack(&mut create);
@@ -260,6 +268,7 @@ pub fn create_from_server_files(
     let file = crate::browse::server_zip(files)?;
     if files.file.is_none()
         && let Some(w) = blocked(files.project, &file)?
+        && !from_website(&file, job)
     {
         // Build from the client pack instead, as for packs without server
         // files. Its own Minecraft and loader are what `opts` holds already.

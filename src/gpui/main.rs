@@ -81,6 +81,16 @@ fn main() {
     if args.get(1).is_some_and(|a| a == "--fetch") && args.len() > 2 {
         std::process::exit(fetch_window::run(args[2].clone().into(), args[3..].to_vec()));
     }
+    // Website-only pack zips come through the same window, one at a time.
+    #[cfg(windows)]
+    hopper::modpack::set_website_fetcher(Box::new(|dir, url| {
+        static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(exe) = std::env::current_exe() else { return false };
+        let code = std::process::Command::new(exe).arg("--fetch").arg(dir).arg(url).status().map(|s| s.code());
+        log::info!("download window for {url}: {code:?}");
+        matches!(code, Ok(Some(0)))
+    }));
     // The window that plays a description's video: `--video URL [--owner HWND]`.
     #[cfg(windows)]
     if args.get(1).is_some_and(|a| a == "--video") && args.len() > 2 {
