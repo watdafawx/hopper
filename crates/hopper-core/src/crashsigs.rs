@@ -244,10 +244,34 @@ pub fn advice(text: &str, log: &str, native: &str, server: bool) -> String {
             &m[1], &m[2], &m[1]
         );
     }
+    if server && let Some(p) = port_in_use(log).or_else(|| port_in_use(text)) {
+        return p;
+    }
     if !server && (REGISTRY_SYNC.is_match(text) || REGISTRY_SYNC.is_match(log)) {
         return "The server has content this game doesn't: your mods don't match the server's. Install the server's mod list (same mods, same versions).".into();
     }
     String::new()
+}
+
+/// The port a server couldn't open (vanilla's `**** FAILED TO BIND TO
+/// PORT!`, "Failed to bind to port", with the BindException's "Address
+/// already in use" under it), said plainly. Only when the server never
+/// finished starting after it. The port comes from "Starting Minecraft
+/// server on *:25565".
+pub fn port_in_use(log: &str) -> Option<String> {
+    static ON: LazyLock<Regex> = LazyLock::new(|| re(r"Starting Minecraft server on \S*?:(\d+)"));
+    let lower = log.to_ascii_lowercase();
+    let at = lower.rfind("failed to bind to port")?;
+    if log[at..].contains("]: Done (") {
+        return None;
+    }
+    let port = ON.captures_iter(&log[..at]).last().map(|m| m[1].to_string());
+    Some(match port {
+        Some(p) => format!(
+            "Another server or program is already using port {p}, so the server couldn't start. Stop the other one, or give this server another port (server-port in its server.properties)."
+        ),
+        None => "Another server or program is already using the server's port, so it couldn't start. Stop the other one, or give this server another port (server-port in its server.properties).".into(),
+    })
 }
 
 /// Shader mods: a factor when the graphics driver crashed.
@@ -358,6 +382,25 @@ com.electronwill.nightconfig.core.io.ParsingException: Not enough data available
         assert!(out.is_empty());
         let log = "[Render thread/ERROR]: Received a registry sync packet with unknown entries: [somemod:widget]";
         assert!(advice("", log, "", false).contains("your mods don't match the server's"));
+    }
+
+    #[test]
+    fn a_server_port_in_use() {
+        let log = "[12:00:01] [Server thread/INFO] [minecraft/DedicatedServer]: Starting Minecraft server on *:25565
+[12:00:01] [Server thread/WARN] [minecraft/DedicatedServer]: **** FAILED TO BIND TO PORT!
+[12:00:01] [Server thread/WARN] [minecraft/DedicatedServer]: The exception was: java.net.BindException: Address already in use: bind
+[12:00:01] [Server thread/WARN] [minecraft/DedicatedServer]: Perhaps a server is already running on that port?
+[12:00:01] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server
+";
+        let a = port_in_use(log).unwrap();
+        assert!(a.starts_with("Another server or program is already using port 25565"), "{a}");
+        assert!(a.contains("server-port"), "{a}");
+        assert_eq!(advice("", log, "", true), a);
+        // Started fine after all (a later line says so): not the cause.
+        assert_eq!(port_in_use(&format!("{log}[12:00:09] [Server thread/INFO] [minecraft/DedicatedServer]: Done (8.1s)! For help, type \"help\"
+")), None);
+        assert_eq!(port_in_use("[12:00:01] [Server thread/INFO]: Done (8.1s)!"), None);
+        assert!(port_in_use("Failed to bind to port").unwrap().contains("the server's port"));
     }
 
     #[test]

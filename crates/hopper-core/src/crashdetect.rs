@@ -1015,7 +1015,7 @@ fn shaders_as_a_factor(suspects: &mut Vec<Suspect>, mods: &[String], ids: &impl 
 
 /// The reason a client-only mod on a dedicated server gets.
 pub const CLIENT_ONLY_WHY: &str =
-    "It's a client-only mod: it uses parts of the game that only exist on players' computers, not on a server.";
+    "It's a client-only mod: it uses parts of the game that only exist on players' computers, not on a server. Remove it from the server (players keep it). If Hopper syncs this server, mark it Never sync so it isn't copied back.";
 
 /// A dedicated server's last start, if it crashed: its newest crash report
 /// (`crash-reports/crash-…-server.txt` or `-fml.txt`) or Java crash file
@@ -1059,7 +1059,17 @@ pub fn server(root: &Path) -> Option<Crash> {
         .map(|(_, p)| p)
         .filter(|p| this_run(p));
     if report.is_none() && native.is_none() {
-        return None;
+        // No crash report: a server that couldn't open its port stops
+        // without one.
+        let advice = crate::crashsigs::port_in_use(&log)?;
+        return Some(Crash {
+            when: log_end,
+            source: log_path,
+            headline: "The server couldn't start: its port is in use".into(),
+            server: true,
+            advice,
+            ..Default::default()
+        });
     }
     // Each jar's own mod ids, read once (matching asks many times).
     let dir = root.join("mods");
@@ -1080,7 +1090,7 @@ pub fn server(root: &Path) -> Option<Crash> {
     let loading = if log_names_report { loading_lines(&log_path) } else { String::new() };
     let when = report.as_deref().or(native.as_deref()).and_then(modified_secs).unwrap_or(log_end);
     let (mut suspects, stopped) = analyze(root, &text, log, &loading, when, &mods, &ids);
-    client_only(&text, log, &mut suspects, &mods, &ids);
+    client_only(root, &text, log, &mut suspects, &mods, &ids);
     for s in &mut suspects {
         s.why = s.why.replace("while the game was loading", "while the server was loading").replace("the game ran its", "the server ran its");
     }
@@ -1219,15 +1229,26 @@ pub fn config_differs(inst_root: &Path, c: &Crash, server_text: impl Fn(&str) ->
 /// crash report and the log's last lines before it (a client class loaded
 /// on the server, a client mixin that failed, a client class missing; see
 /// `crashscan`): certain, and they go from the server rather than off.
-fn client_only(text: &str, log: &str, suspects: &mut Vec<Suspect>, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) {
+fn client_only(root: &Path, text: &str, log: &str, suspects: &mut Vec<Suspect>, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) {
     let mut last: Vec<&str> = log.lines().rev().take(800).collect();
     last.reverse();
     let last = last.join("\n");
     let mut files: Vec<String> = Vec::new();
+    let mut index: Option<PackageIndex> = None;
     for t in [text, last.as_str()] {
         for h in crate::crashscan::hits(t).0.into_iter().filter(|h| h.reason.contains("client")) {
+            // A mod's own client class (`com/x/client/XScreen`) names its
+            // jar by the package; the game's own client classes don't.
+            let class = h.class.replace('/', ".");
             let r = Raw { mod_id: h.mod_id, jar: h.file_name, certainty: Certainty::Certain, why: String::new(), class: String::new(), needs: Vec::new() };
-            if let Some(f) = match_jar(&r, mods, ids)
+            let by_package = || {
+                if class.is_empty() || LIBRARY_PACKAGES.iter().any(|p| class.starts_with(p)) {
+                    return None;
+                }
+                let idx = index.get_or_insert_with(|| PackageIndex::build(&root.join("mods"), mods));
+                idx.jar_of(&class).map(str::to_string)
+            };
+            if let Some(f) = match_jar(&r, mods, ids).or_else(by_package)
                 && !files.contains(&f)
             {
                 files.push(f);
@@ -2743,6 +2764,49 @@ java.lang.UnsupportedClassVersionError: com/example/addon/Setup has been compile
         let c = from_report(&root, &rp, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
         assert_eq!((c.suspects[0].file_name.as_str(), c.suspects[0].certainty), ("addon-2.0.jar", Certainty::Likely));
         assert!(c.advice.contains("needs Java 21, but it ran on Java 17"), "{}", c.advice);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Hand-written after NeoForge's RuntimeDistCleaner refusing a mod's own
+    /// client class on a dedicated server, with no "-- MOD --" block that
+    /// names it: its jar is found by the class's package.
+    #[test]
+    fn a_client_only_mod_is_found_by_its_class_package() {
+        let report = "---- Minecraft Crash Report ----\nDescription: Exception in server tick loop\n\n\
+java.lang.RuntimeException: Attempted to load class com/example/fancyhud/client/HudScreen for invalid dist DEDICATED_SERVER\n\
+\tat MC-BOOTSTRAP/net.neoforged.fml.loading.RuntimeDistCleaner.processClassWithFlags(RuntimeDistCleaner.java:57) ~[loader-4.0.45.jar%23107!/:4.0] {}\n\
+\tat java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {}\n";
+        let log = "[12:00:00] [main/INFO] [minecraft/DedicatedServer]: Starting minecraft server version 1.21.1\n\
+[12:00:02] [Server thread/ERROR] [ne.ne.fm.lo.RuntimeDistCleaner/DISTXFORM]: Attempted to load class com/example/fancyhud/client/HudScreen for invalid dist DEDICATED_SERVER\n\
+[12:00:03] [Server thread/ERROR] [minecraft/MinecraftServer]: This crash report has been saved to: crash-reports/crash-2026-10-31_12.00.03-server.txt\n";
+        let root = server_root("clientpkg", &[("other-1.0.jar", "other", "Other")], ("crash-2026-10-31_12.00.03-server.txt", report), log);
+        jar_with_classes(&root.join("mods/FancyHud-2.1.jar"), "fancyhud", "Fancy HUD", &["com.example.fancyhud.client.HudScreen"]);
+        let c = server(&root).unwrap();
+        assert_eq!((c.suspects[0].file_name.as_str(), c.suspects[0].certainty), ("FancyHud-2.1.jar", Certainty::Certain));
+        assert!(c.suspects[0].client_only);
+        assert!(c.suspects[0].why.contains("Remove it from the server") && c.suspects[0].why.contains("Never sync"), "{}", c.suspects[0].why);
+        assert!(!c.suspects.iter().any(|s| s.file_name == "other-1.0.jar"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A server whose port is taken stops without a crash report: the card
+    /// says so, with the port, and names no mod.
+    #[test]
+    fn a_server_port_in_use_is_its_own_crash() {
+        let log = "[12:00:00] [Server thread/INFO] [minecraft/DedicatedServer]: Starting minecraft server version 1.21.1\n\
+[12:00:00] [Server thread/INFO] [minecraft/DedicatedServer]: Starting Minecraft server on *:25570\n\
+[12:00:01] [Server thread/WARN] [minecraft/DedicatedServer]: **** FAILED TO BIND TO PORT!\n\
+[12:00:01] [Server thread/WARN] [minecraft/DedicatedServer]: The exception was: java.net.BindException: Address already in use: bind\n\
+[12:00:01] [Server thread/WARN] [minecraft/DedicatedServer]: Perhaps a server is already running on that port?\n\
+[12:00:01] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server\n";
+        let root = server_root("port", &[("other-1.0.jar", "other", "Other")], ("old.txt", "not this run"), log);
+        fs::remove_file(root.join("crash-reports/old.txt")).unwrap();
+        let c = server(&root).unwrap();
+        assert!(c.server && c.suspects.is_empty());
+        assert!(c.advice.contains("already using port 25570"), "{}", c.advice);
+        // A server that started fine has no crash.
+        fs::write(root.join("logs/latest.log"), "[12:00:09] [Server thread/INFO] [minecraft/DedicatedServer]: Done (8.1s)! For help, type \"help\"\n").unwrap();
+        assert!(server(&root).is_none());
         let _ = fs::remove_dir_all(&root);
     }
 
