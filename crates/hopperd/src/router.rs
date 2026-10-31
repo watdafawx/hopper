@@ -307,6 +307,12 @@ async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow
         match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(("127.0.0.1", port))).await {
             Ok(Ok(mut up)) => {
                 let _ = up.set_nodelay(true);
+                // The server list: its own answer with the message filled in now.
+                if !hs.is_login()
+                    && let Some(msg) = crate::motd_live::message(&e).await
+                {
+                    return status_through(&mut sock, &mut up, buf, used, &msg).await;
+                }
                 up.write_all(&buf).await?;
                 tokio::io::copy_bidirectional(&mut sock, &mut up).await?;
                 return Ok(());
@@ -368,7 +374,12 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
     let (motd, max) = match e {
         Some(e) => {
             let p = Properties::load(&e.root.join("server.properties")).unwrap_or_default();
-            (p.get("motd").unwrap_or_default().to_string(), p.get("max-players").and_then(|m| m.trim().parse().ok()).unwrap_or(20))
+            // A template's message filled in now, else the file's.
+            let motd = match crate::motd_live::message(e).await {
+                Some(m) => m,
+                None => p.get("motd").unwrap_or_default().to_string(),
+            };
+            (motd, p.get("max-players").and_then(|m| m.trim().parse().ok()).unwrap_or(20))
         }
         None => (String::new(), 0),
     };
@@ -377,6 +388,40 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
     if let Ok(((1, payload), _)) = read_until(sock, &mut buf, after, |b| packet(b, 64)).await {
         sock.write_all(&core::pong_packet(&payload)).await?;
     }
+    Ok(())
+}
+
+/// Passes a server list request to a running server and its answer back
+/// with `msg` as the message (the rest, mods and players included, as the
+/// server said), then the ping through as is.
+async fn status_through(sock: &mut TcpStream, up: &mut TcpStream, mut buf: Vec<u8>, used: usize, msg: &str) -> anyhow::Result<()> {
+    let (_, after) = read_until(sock, &mut buf, used, |b| packet(b, 16)).await?;
+    up.write_all(&buf[..after]).await?;
+    let mut answer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let (status, end) = loop {
+        match core::read_packet(&answer, 1 << 21)? {
+            Read::Done((0, body), n) => break (core::read_string(body, 1 << 21)?.0, n),
+            // Not a status answer: passed on untouched.
+            Read::Done(_, n) => break (String::new(), n),
+            Read::More => {}
+        }
+        let n = tokio::time::timeout(Duration::from_secs(10), up.read(&mut chunk)).await??;
+        if n == 0 {
+            anyhow::bail!("server closed before answering");
+        }
+        answer.extend_from_slice(&chunk[..n]);
+    };
+    match serde_json::from_str::<Value>(&status) {
+        Ok(mut v) if v.is_object() => {
+            v["description"] = json!({ "text": msg });
+            sock.write_all(&core::status_packet(&v)).await?;
+        }
+        _ => sock.write_all(&answer[..end]).await?,
+    }
+    sock.write_all(&answer[end..]).await?;
+    up.write_all(&buf[after..]).await?;
+    tokio::io::copy_bidirectional(sock, up).await?;
     Ok(())
 }
 

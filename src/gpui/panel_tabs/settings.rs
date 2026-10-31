@@ -3,6 +3,7 @@
 //! server.properties fields, memory and the Java arguments, and the address
 //! players join by wait in one save bar; start files are edited in place.
 
+use super::motd_editor::{MotdChanged, MotdEditor};
 use super::{Load, Target};
 use crate::java_form::JavaForm;
 use crate::store::Store;
@@ -126,6 +127,11 @@ struct Data {
     router: Option<Router>,
     /// stopped, starting, running, stopping, crashed.
     state: String,
+    /// The message's variables and their values now (panels before 0.19 don't say).
+    motd_vars: BTreeMap<String, String>,
+    name: String,
+    /// "2/20" for the message preview.
+    players: String,
 }
 
 impl Data {
@@ -257,6 +263,8 @@ pub struct SettingsTab {
     values: BTreeMap<String, String>,
     /// Text and number fields, by key.
     inputs: HashMap<String, Entity<InputState>>,
+    /// The server list message's editor (it has two lines and a preview).
+    motd: Option<Entity<MotdEditor>>,
     /// Memory and the Java arguments, as an instance has them.
     java_form: Option<Entity<JavaForm>>,
     /// What the form started with: -Xmx and the arguments line (memory first).
@@ -294,6 +302,7 @@ impl SettingsTab {
             search,
             values: BTreeMap::new(),
             inputs: HashMap::new(),
+            motd: None,
             java_form: None,
             xmx_orig: 0,
             args_orig: String::new(),
@@ -367,6 +376,22 @@ impl SettingsTab {
                             addr: addr.as_ref().map(parse_addr),
                             router: router.as_ref().map(parse_router),
                             state: summary.as_ref().map(|v| s(v, "state")).unwrap_or_default(),
+                            motd_vars: p["motd_vars"]
+                                .as_object()
+                                .map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
+                                .unwrap_or_default(),
+                            name: summary.as_ref().map(|v| s(v, "name")).unwrap_or_default(),
+                            players: summary
+                                .as_ref()
+                                .map(|v| {
+                                    let on = if matches!(v["state"].as_str(), Some("running" | "starting")) {
+                                        v["players"].as_array().map_or(0, |a| a.len())
+                                    } else {
+                                        0
+                                    };
+                                    format!("{on}/{}", v["max_players"].as_u64().unwrap_or(20))
+                                })
+                                .unwrap_or_default(),
                         };
                         this.data = Load::Ready(data);
                         this.error = None;
@@ -392,7 +417,7 @@ impl SettingsTab {
         let mut subs = Vec::new();
         let mut inputs = HashMap::new();
         for k in d.orig.keys() {
-            if matches!(d.spec(k).map(|s| &s.kind), Some(Kind::Bool | Kind::Enum(_))) {
+            if k == "motd" || matches!(d.spec(k).map(|s| &s.kind), Some(Kind::Bool | Kind::Enum(_))) {
                 continue;
             }
             let v = d.orig.get(k).cloned().unwrap_or_default();
@@ -412,6 +437,14 @@ impl SettingsTab {
             inputs.insert(k.clone(), input);
         }
         self.inputs = inputs;
+        let (motd, vars, name, players) =
+            (d.orig.get("motd").cloned().unwrap_or_default(), d.motd_vars.clone(), d.name.clone(), d.players.clone());
+        let editor = cx.new(|cx| MotdEditor::new(&motd, vars, name, players, window, cx));
+        subs.push(cx.subscribe(&editor, |this, _, e: &MotdChanged, cx| {
+            this.values.insert("motd".into(), e.0.clone());
+            cx.notify();
+        }));
+        self.motd = Some(editor);
 
         self.java_form = None;
         if let Some(j) = d.jvm.clone() {
@@ -877,6 +910,32 @@ impl SettingsTab {
             Some(i) => div().w(w).child(Input::new(i).small()).into_any_element(),
             None => div().into_any_element(),
         };
+        if k == "motd"
+            && let Some(ed) = &self.motd
+        {
+            // The whole width: tools, two lines and the preview under the label.
+            let (label, desc) = d.spec(k).map_or(("Message of the day".to_string(), String::new()), |s| (s.label.clone(), s.description.clone()));
+            return v_flex()
+                .gap_2()
+                .px_2()
+                .py_2p5()
+                .border_b_1()
+                .border_color(theme.border)
+                .when(dirty, |r| r.bg(theme.primary.opacity(0.08)).rounded(theme.radius))
+                .child(
+                    v_flex().gap_0p5().child(Self::label(label)).child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_x_1p5()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("{desc} Use variables like {{pack_version}} to keep it up to date."))
+                            .child(div().font_family(theme.mono_font_family.clone()).child("motd")),
+                    ),
+                )
+                .child(ed.clone())
+                .into_any_element();
+        }
         let Some(spec) = d.spec(k).cloned() else {
             let label = div().text_sm().font_family(theme.mono_font_family.clone()).child(k.to_string()).into_any_element();
             return Self::row(label, None, None, input(rems(20.)), dirty, cx).into_any_element();

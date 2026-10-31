@@ -15,6 +15,7 @@
   import { confirmIt } from './lib/dialog.svelte.js';
   import { queueUploads, onUploaded } from './lib/transfers.svelte.js';
   import Address from './Address.svelte';
+  import MotdEditor from './MotdEditor.svelte';
   import Avatar from './Avatar.svelte';
   import JavaPage from './JavaPage.svelte';
   import { flagsToText, withoutMemory } from './lib/jvm.js';
@@ -205,7 +206,13 @@
 
 {#snippet field(k)}
   {@const s = spec(k)}
-  {#if s}
+  {#if k === 'motd'}
+    <!-- The message gets the whole width: tools, two lines and a preview. -->
+    <div class="fl full" class:dirty={dirty(k)}>
+      <div class="lab"><div>{s?.label || 'Message of the day'}</div><div class="tiny muted">{s?.description || ''} Use variables like {'{pack_version}'} to keep it up to date. <span class="mono key">motd</span></div></div>
+      <MotdEditor {server} bind:value={values.motd} vars={props?.motd_vars || {}} />
+    </div>
+  {:else if s}
     <div class="fl" class:dirty={dirty(k)}>
       <div class="lab"><div>{s.label}</div><div class="tiny muted">{s.description} <span class="mono key">{s.key}</span></div></div>
       <div class="ctl">
@@ -307,6 +314,7 @@
   .hint { margin-bottom: 6px; }
   .pagehit { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; text-align: left; }
   .fl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 10px 4px; border-bottom: 1px solid var(--line); }
+  .fl.full { grid-template-columns: 1fr; gap: 8px; }
   .fl.dirty { background: var(--acc-dim); border-radius: 6px; }
   .lab > div:first-child { font-weight: 500; }
   .key { color: var(--muted); margin-left: 4px; }

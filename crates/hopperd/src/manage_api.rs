@@ -9,6 +9,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hopper_core::hosting::backup;
+use hopper_core::hosting::motd;
 use hopper_core::hosting::properties::{self, PropKind, Properties};
 use hopper_core::hosting::{self, JvmArgs, JvmPreset, Schedule};
 use hopper_core::jvm_args::{self, Options, Pick, Target};
@@ -64,11 +65,20 @@ async fn get_props(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    let p = blocking(move || Properties::load(&e.root.join("server.properties"))).await?;
-    let values: BTreeMap<&str, &str> = p.entries().collect();
+    // The message as a template ({pack_version}…), with the values its
+    // variables have now for the preview.
+    let (p, motd, vars) = blocking(move || {
+        Ok((Properties::load(&e.root.join("server.properties"))?, motd::template(&e.root), crate::motd_live::vars(&e)))
+    })
+    .await?;
+    let mut values: BTreeMap<&str, &str> = p.entries().collect();
+    if values.contains_key("motd") || !motd.is_empty() {
+        values.insert("motd", &motd);
+    }
     Ok(Json(json!({
         "values": values,
         "specs": properties::COMMON.iter().map(spec_json).collect::<Vec<_>>(),
+        "motd_vars": vars,
     })))
 }
 
@@ -88,7 +98,9 @@ async fn put_props(
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     for (k, v) in &b.values {
-        if k.trim().is_empty() || k.contains(['=', '\n', '\r']) || v.contains(['\n', '\r']) {
+        // The message has two lines; nothing else may break a line.
+        let lines_ok = k == "motd" && v.lines().count() <= 2 && !v.contains('\r');
+        if k.trim().is_empty() || k.contains(['=', '\n', '\r']) || (!lines_ok && v.contains(['\n', '\r'])) {
             return Err(bad(format!("\"{k}\" can't be saved")));
         }
         if let Some(s) = properties::spec(k) {
@@ -97,15 +109,24 @@ async fn put_props(
     }
     let running = e.server.state().is_alive();
     let name = e.name.clone();
+    let sid = e.id.clone();
+    let mut values = b.values;
+    let motd_text = values.remove("motd");
     blocking(move || {
         let path = e.root.join("server.properties");
         let mut p = Properties::load(&path)?;
-        for (k, v) in b.values {
+        for (k, v) in values {
             p.set(&k, v.trim());
         }
-        p.save(&path)
+        p.save(&path)?;
+        // After the rest: {difficulty} and the like fill in from the new values.
+        if let Some(t) = motd_text {
+            motd::save(&e.root, &t)?;
+        }
+        Ok(())
     })
     .await?;
+    crate::motd_live::forget(&sid);
     log::info!("{name}: server.properties saved");
     app.refresh.notify_one();
     Ok(Json(json!({ "ok": true, "restart_needed": running })))

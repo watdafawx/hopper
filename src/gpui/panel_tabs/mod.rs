@@ -10,6 +10,7 @@
 pub mod backups;
 pub mod files;
 pub mod mods;
+pub mod motd_editor;
 pub mod players;
 pub mod schedule;
 pub mod settings;

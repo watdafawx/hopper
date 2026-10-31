@@ -249,7 +249,7 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
 }
 
 /// A string inside a packet body: (value, bytes used).
-fn read_string(b: &[u8], max: usize) -> anyhow::Result<(String, usize)> {
+pub fn read_string(b: &[u8], max: usize) -> anyhow::Result<(String, usize)> {
     let (len, n) = read_varint(b)?.context("string cut short")?;
     let len = usize::try_from(len).context("negative string length")?;
     if len > max {
