@@ -415,7 +415,24 @@ pub(crate) fn fetch_pack_zip(pack_file: &cf::File, job: &Job) -> anyhow::Result<
     // CurseForge file ids are unique, so they make the cache key.
     let zip_path = cache_dir().join(format!("{}.zip", pack_file.id));
     if !cache_hit(&zip_path) {
-        let url = cf::download_url(pack_file)?;
+        let url = match cf::download_url(pack_file) {
+            Ok(u) => u,
+            // Say where to get it by hand, with the project's page.
+            Err(e) => match cf::website_only(pack_file) {
+                Ok(true) => {
+                    let w = match cf::get_mod(pack_file.mod_id) {
+                        Ok(m) => cf::WebsiteOnly::of(&m, pack_file),
+                        Err(_) => cf::WebsiteOnly {
+                            name: pack_file.display_name.clone(),
+                            file_name: pack_file.file_name.clone(),
+                            url: String::new(),
+                        },
+                    };
+                    return Err(w.into());
+                }
+                _ => return Err(e),
+            },
+        };
         job.detail(format!("Downloading {}", pack_file.file_name));
         let total = pack_file.file_length as usize;
         // Size and speed in the detail, refreshed about once a second.

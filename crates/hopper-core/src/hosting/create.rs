@@ -627,6 +627,57 @@ pub struct CreateReport {
     pub files_copied: usize,
     /// Why the pack's server pack wasn't used, if it wasn't.
     pub note: Option<String>,
+    /// Mods the pack wants that weren't downloaded (website-only ones), so
+    /// aren't on the server either. Listed in `missing-mods.txt` there.
+    pub missing: Vec<crate::modpack::Pending>,
+}
+
+impl CreateReport {
+    /// One line per missing mod, for a job's notes.
+    pub fn missing_notes(&self) -> Vec<String> {
+        self.missing
+            .iter()
+            .map(|p| {
+                let name = if p.name.is_empty() { &p.file_name } else { &p.name };
+                format!("{name} isn't on the server: its author only allows downloads from the CurseForge website. Download it from {} and put it in the server's mods folder.", p.url)
+            })
+            .collect()
+    }
+}
+
+/// The mods `inst`'s pack install couldn't download (see
+/// [`crate::modpack::pending_downloads`]).
+pub(crate) fn missing_mods(inst: &Instance) -> Vec<crate::modpack::Pending> {
+    crate::modpack::pending_downloads(inst)
+        .into_iter()
+        .filter(|p| p.folder.is_empty() || p.folder == "mods")
+        // Ones that stay off a server anyway don't need fetching for it.
+        .filter(|p| {
+            !p.addon.as_ref().is_some_and(|a| a.env == "client") && !crate::diff::known_client_only_file(&p.file_name)
+        })
+        .collect()
+}
+
+/// Writes `missing-mods.txt` into a new server listing `missing`.
+pub(crate) fn write_missing(root: &Path, missing: &[crate::modpack::Pending]) {
+    if missing.is_empty() {
+        return;
+    }
+    let lines: Vec<String> = missing
+        .iter()
+        .map(|p| format!("{} ({}): {}", if p.name.is_empty() { &p.file_name } else { &p.name }, p.file_name, p.url))
+        .collect();
+    let _ = fs::write(
+        root.join("missing-mods.txt"),
+        format!(
+            "These mods can only be downloaded from the CurseForge website, so Hopper couldn't put them on the server. Download each one and put it in the mods folder.
+
+{}
+",
+            lines.join("
+")
+        ),
+    );
 }
 
 /// A server for `inst`: makes the folder with `opts` (see
@@ -652,12 +703,17 @@ pub fn create_from_instance(
         let _ = fs::remove_dir_all(&root);
     }
     let (mods_copied, files_copied) = copied?;
+    // Website-only mods the pack install couldn't fetch: the server lacks
+    // them too, so say which and where to get them.
+    let missing = missing_mods(inst);
+    write_missing(&root, &missing);
     Ok(CreateReport {
         root,
         mods_copied,
         skipped,
         files_copied,
         note: note.note,
+        missing,
     })
 }
 
@@ -680,6 +736,11 @@ pub fn create_from_client_pack(
     if opts.folder().exists() {
         bail!("{} already exists.", opts.folder().display());
     }
+    // Before the long install: a website-only pack zip can't be fetched,
+    // so send the player to its page instead of failing halfway.
+    if crate::cf::website_only(file)? {
+        return Err(crate::cf::WebsiteOnly::of(pack, file).into());
+    }
     let stage = opts.servers_root.join(format!(
         ".hopper-build-{}",
         Instance::folder_name(&opts.name)
@@ -700,8 +761,12 @@ pub fn create_from_client_pack(
         target: None,
         dest: None,
     };
+    // The throwaway install's own notes (files to download into it, "run
+    // Update pack again") are about an instance the player never sees.
+    let notes = job.note_count();
     let (root, _) =
         crate::browse::install_project(pack, Some(file.clone()), crate::cf::CLASS_MODPACKS, place, job)?;
+    job.drop_notes_from(notes);
     job.check_cancelled()?;
     let inst = crate::instances::load(&root)
         .with_context(|| format!("reading the installed pack at {}", root.display()))?;

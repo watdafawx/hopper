@@ -230,11 +230,15 @@ pub fn create_from_local_zip(
             }
             let _cleanup = Cleanup(stage.clone());
             job.detail(format!("Installing {} to read its mods and config", info.name));
+            // The throwaway install's notes are about an instance the
+            // player never sees; the server's report lists what's missing.
+            let notes = job.note_count();
             let inst = if info.kind == ZipKind::ModrinthPack {
                 crate::modpack::import_mrpack(&stage, zip_path, job)?
             } else {
                 crate::modpack::import_zip(&stage, zip_path, job)?
             };
+            job.drop_notes_from(notes);
             job.check_cancelled()?;
             let mut o = opts.clone();
             o.mc_version = inst.game_version.clone();

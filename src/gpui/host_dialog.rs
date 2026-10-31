@@ -133,6 +133,9 @@ pub struct PackFiles {
     pub game_version: String,
     /// "NeoForge", "Fabric"…; empty when the site doesn't say.
     pub loader: String,
+    /// What of this version Hopper may download (CurseForge), checked
+    /// before the dialog opens.
+    pub check: hopper::hosting::PackCheck,
 }
 
 impl PackFiles {
@@ -156,8 +159,25 @@ impl PackFiles {
             version: version.display_name.clone(),
             game_version,
             loader,
+            check: Default::default(),
         }
     }
+
+    /// The pack zip itself is website-only: only a zip the player
+    /// downloads will do.
+    fn needs_zip(&self) -> bool {
+        matches!(self.build, Build::ClientPack(..)) && self.check.pack.is_some()
+    }
+}
+
+/// [`hopper::hosting::check_pack`] for a pack version, logged and treated
+/// as "all downloadable" when CurseForge can't be asked: the build then
+/// fails or falls back on its own.
+fn check(pack: &hopper::cf::Mod, f: &hopper::cf::File) -> hopper::hosting::PackCheck {
+    hopper::hosting::check_pack(pack, f).unwrap_or_else(|e| {
+        log::warn!("checking {} on CurseForge: {e:#}", pack.name);
+        Default::default()
+    })
 }
 
 /// What the server starts from.
@@ -185,6 +205,9 @@ pub struct HostForm {
     eula: bool,
     /// Build from the pack's official server pack when it has one.
     server_pack: bool,
+    /// A zip the player downloaded from CurseForge for a website-only pack
+    /// or server pack; the server is made from it instead.
+    zip: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -223,6 +246,7 @@ impl HostForm {
             java: None,
             eula: false,
             server_pack: true,
+            zip: None,
             _subscriptions: subs,
         }
     }
@@ -317,6 +341,9 @@ impl HostForm {
                     self.base.read(cx).choice(cx).ok_or("Pick a version and loader.")?;
                 let l = ServerLoader::from_instance(&loader).map_err(|e| format!("{e:#}"))?;
                 CreateOptions::new(&name, &root, &gv, l, &java)
+            }
+            Source::Files(p) if p.needs_zip() && self.zip.is_none() => {
+                return Err("Download the pack from CurseForge, then pick the zip.".into());
             }
             Source::Files(p) => {
                 // The pack's own loader version replaces this once its
@@ -421,6 +448,13 @@ impl HostForm {
             Err(_) => return false,
         };
         match &this.source {
+            Source::Files(p) if this.zip.is_some() => {
+                let files = match &p.build {
+                    Build::ServerFiles(f) => Some(f.clone()),
+                    Build::ClientPack(..) => None,
+                };
+                this.store.read(cx).create_hosted_from_zip(opts, this.zip.clone().unwrap(), files, |_| {})
+            }
             Source::Files(p) => match &p.build {
                 Build::ServerFiles(files) => {
                     this.store.read(cx).create_hosted_from_files(opts, files.clone(), |_| {})
@@ -445,6 +479,102 @@ impl HostForm {
             cx,
         );
         true
+    }
+}
+
+impl HostForm {
+    /// The notice for a website-only pack or server pack: what Hopper does
+    /// instead, and a way to use the file anyway (its CurseForge page, then
+    /// a picker for the downloaded zip).
+    fn website_only_notice(&self, p: &PackFiles, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (text, url, button) = if p.needs_zip() {
+            let w = p.check.pack.as_ref()?;
+            (
+                format!(
+                    "{} can only be downloaded from the CurseForge website. Download {} there, then pick the zip.",
+                    p.name, w.file_name
+                ),
+                w.url.clone(),
+                "Download on CurseForge",
+            )
+        } else if matches!(p.build, Build::ServerFiles(_)) {
+            let w = p.check.server_files.as_ref()?;
+            (
+                "The pack's server files can't be downloaded outside CurseForge, so Hopper builds the server from the pack itself.".to_string(),
+                w.url.clone(),
+                "Use the server files anyway",
+            )
+        } else {
+            return None;
+        };
+        let theme = cx.theme();
+        let picked = self.zip.is_some();
+        Some(
+            v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .p_2()
+                .rounded_md()
+                .bg(theme.warning.opacity(0.08))
+                .text_sm()
+                .child(div().w_full().min_w_0().child(text))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("host-website-only")
+                                .outline()
+                                .small()
+                                .icon(IconName::ExternalLink)
+                                .label(button)
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.open_url(&url);
+                                    Self::pick_zip(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("host-pick-zip")
+                                .ghost()
+                                .small()
+                                .label(if picked { "Pick another zip" } else { "I have the zip" })
+                                .on_click(cx.listener(|_, _, _, cx| Self::pick_zip(cx))),
+                        )
+                        .when(picked, |r| {
+                            r.child(
+                                Button::new("host-zip-clear")
+                                    .ghost()
+                                    .small()
+                                    .label("Don't use it")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.zip = None;
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Asks for the zip the player downloaded from CurseForge.
+    fn pick_zip(cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Use this zip".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            this.update(cx, |this, cx| {
+                this.zip = Some(path);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 
@@ -528,22 +658,36 @@ impl Render for HostForm {
                         if p.loader.is_empty() { "Minecraft" } else { p.loader.as_str() },
                         p.game_version
                     );
-                    match &p.build {
-                        Build::ServerFiles(_) => format!(
+                    match (&self.zip, &p.build) {
+                        (Some(z), _) => format!(
+                            "From {}, the zip you downloaded.",
+                            z.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                        ),
+                        (None, _) if p.needs_zip() => format!(
+                            "Made from the pack's zip once you download it, on {on}; client-only mods left out."
+                        ),
+                        (None, Build::ServerFiles(_)) if p.check.server_files.is_none() => format!(
                             "The pack author's server mods and configs, on {on}. Often a big download."
                         ),
-                        Build::ClientPack(..) => format!(
+                        (None, _) => format!(
                             "Built from the client pack on {on}, client-only mods left out."
                         ),
                     }
                 })
                 .child(
-                    h_flex()
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
                         .gap_2()
-                        .text_sm()
-                        .child(Icon::new(IconName::Server).small())
-                        .child(div().font_semibold().child(p.name.clone()))
-                        .child(widgets::caption(p.version.clone(), cx)),
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .text_sm()
+                                .child(Icon::new(IconName::Server).small())
+                                .child(div().font_semibold().child(p.name.clone()))
+                                .child(widgets::caption(p.version.clone(), cx)),
+                        )
+                        .children(self.website_only_notice(p, cx)),
                 ),
             None => source_field,
         };
@@ -738,11 +882,23 @@ pub fn open_for_files(
     cx.spawn(async move |cx| {
         let f2 = files.clone();
         let r = cx
-            .background_spawn(async move { hopper::browse::server_files_version(&f2) })
+            .background_spawn(async move {
+                let v = hopper::browse::server_files_version(&f2)?;
+                // Modrinth server zips are always downloadable.
+                let c = match f2.file {
+                    Some(_) => Default::default(),
+                    None => hopper::cf::get_mod(f2.project).map(|m| check(&m, &v)).unwrap_or_default(),
+                };
+                anyhow::Ok((v, c))
+            })
             .await;
         handle
             .update(cx, |_, window, cx| match r {
-                Ok(v) => open_files(store, PackFiles::new(Build::ServerFiles(files), name, &v), window, cx),
+                Ok((v, c)) => {
+                    let mut p = PackFiles::new(Build::ServerFiles(files), name, &v);
+                    p.check = c;
+                    open_files(store, p, window, cx)
+                }
                 Err(e) => window.push_notification(
                     gpui_kit::component::notification::Notification::error(format!(
                         "Couldn't look up {name}: {e:#}"
@@ -762,14 +918,20 @@ pub fn open_for_client_pack(store: Entity<Store>, pack: hopper::cf::Mod, window:
     cx.spawn(async move |cx| {
         let p2 = pack.clone();
         let r = cx
-            .background_spawn(async move { hopper::browse::newest_pack_file(&p2) })
+            .background_spawn(async move {
+                let f = hopper::browse::newest_pack_file(&p2)?;
+                let c = check(&p2, &f);
+                anyhow::Ok((f, c))
+            })
             .await;
         handle
             .update(cx, |_, window, cx| match r {
-                Ok(f) => {
+                Ok((f, c)) => {
                     let name = pack.name.clone();
                     let build = Build::ClientPack(Box::new(pack), Box::new(f.clone()));
-                    open_files(store, PackFiles::new(build, name, &f), window, cx)
+                    let mut p = PackFiles::new(build, name, &f);
+                    p.check = c;
+                    open_files(store, p, window, cx)
                 }
                 Err(e) => window.push_notification(
                     gpui_kit::component::notification::Notification::error(format!(
