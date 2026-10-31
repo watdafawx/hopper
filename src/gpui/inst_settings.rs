@@ -7,6 +7,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::Field;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -38,6 +39,8 @@ pub struct InstanceSettings {
     game_version: String,
     loader: String,
     channel: u32,
+    /// Settings > Minecraft applies here.
+    use_my_options: bool,
     has_pack: bool,
     versions: Vec<String>,
     loaders: HashMap<String, Vec<LoaderVersion>>,
@@ -78,6 +81,7 @@ impl InstanceSettings {
             game_version: String::new(),
             loader: String::new(),
             channel: 1,
+            use_my_options: true,
             has_pack: false,
             versions: Vec::new(),
             loaders: HashMap::new(),
@@ -127,6 +131,7 @@ impl InstanceSettings {
         self.game_version = inst.game_version.clone();
         self.loader = inst.loader.clone();
         self.channel = s.release_channel;
+        self.use_my_options = s.use_my_options;
         self.has_pack = inst.pack.is_some();
         self.want_loaders(cx);
         self.check_cf(inst, cx);
@@ -396,6 +401,7 @@ impl InstanceSettings {
         inst.settings.java_path = path;
         inst.settings.java_args = args;
         inst.settings.release_channel = self.channel;
+        inst.settings.use_my_options = self.use_my_options;
         if !self.has_pack {
             inst.game_version = self.game_version.clone();
         }
@@ -417,8 +423,8 @@ impl InstanceSettings {
         edited.name != saved.name
             || edited.game_version != saved.game_version
             || edited.loader != saved.loader
-            || (a.memory_mb, a.width, a.height, a.release_channel)
-                != (b.memory_mb, b.width, b.height, b.release_channel)
+            || (a.memory_mb, a.width, a.height, a.release_channel, a.use_my_options)
+                != (b.memory_mb, b.width, b.height, b.release_channel, b.use_my_options)
             || a.java_path != b.java_path
             || a.java_args.trim() != b.java_args.trim()
     }
@@ -647,6 +653,21 @@ impl Render for InstanceSettings {
                         rem,
                         pick_channel,
                     ))),
+            )
+            .child(
+                Field::new()
+                    .label("Minecraft settings")
+                    .items_start()
+                    .description("Your sound, mouse, view and keys from Settings > Minecraft, set before the game starts. Off leaves this instance's options as they are.")
+                    .child(
+                        Switch::new("use-my-options")
+                            .checked(self.use_my_options)
+                            .label("Use my Minecraft settings")
+                            .on_click(cx.listener(|this, on: &bool, _, cx| {
+                                this.use_my_options = *on;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(
                 Field::new().label("Folder").child(

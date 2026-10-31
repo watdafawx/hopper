@@ -39,6 +39,11 @@ pub struct Instance {
     /// Total time played through Hopper's watch, in seconds.
     #[serde(default)]
     pub play_seconds: u64,
+    /// The Minecraft settings Hopper last wrote into `options.txt`, by key
+    /// (see [`crate::mcoptions::apply`]), so a "first start" value is given
+    /// only once.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub applied_options: std::collections::BTreeMap<String, String>,
     /// The launcher whose folder this is ("prism"; see
     /// [`crate::launchers::Kind::key`]), or empty for Hopper/CurseForge.
     #[serde(default)]
@@ -146,6 +151,8 @@ pub struct LaunchSettings {
     pub height: u32,
     /// Least stable file type updates may offer: 1 release, 2 beta, 3 alpha.
     pub release_channel: u32,
+    /// Apply the player's Minecraft settings (Settings > Minecraft) here.
+    pub use_my_options: bool,
 }
 
 impl Default for LaunchSettings {
@@ -157,6 +164,7 @@ impl Default for LaunchSettings {
             width: 1280,
             release_channel: 1,
             height: 720,
+            use_my_options: true,
         }
     }
 }
@@ -1049,6 +1057,7 @@ fn import_curseforge(root: &Path) -> Option<Instance> {
             .or(raw.profile_image_path),
         last_played: raw.last_played,
         play_seconds: raw.time_played / 1000,
+        applied_options: Default::default(),
         unreadable: None,
     })
 }

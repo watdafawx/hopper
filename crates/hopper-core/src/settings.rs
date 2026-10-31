@@ -194,6 +194,8 @@ pub struct Settings {
     pub translate_always: Vec<String>,
     /// How long `.hopper-backups` keeps the files behind Undo.
     pub backup_retention: crate::retention::Retention,
+    /// The in-game options Hopper writes into every instance it starts.
+    pub mc_options: crate::mcoptions::McOptions,
     /// Settings this build doesn't know (saved by a newer Hopper), kept as
     /// they are so going back a version and forward again loses none.
     #[serde(flatten)]
@@ -504,6 +506,7 @@ impl Default for Settings {
             translate: false,
             translate_always: Vec::new(),
             backup_retention: Default::default(),
+            mc_options: Default::default(),
             unknown: serde_json::Map::new(),
         }
     }

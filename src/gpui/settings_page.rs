@@ -26,6 +26,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{HashMap, HashSet};
 
+mod minecraft;
 mod sites;
 use std::path::Path;
 use std::rc::Rc;
@@ -48,6 +49,7 @@ pub enum Category {
     Folders,
     Launchers,
     Java,
+    Minecraft,
     Servers,
     Content,
     Appearance,
@@ -56,12 +58,13 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 10] = [
+    pub const ALL: [Category; 11] = [
         Category::General,
         Category::Accounts,
         Category::Folders,
         Category::Launchers,
         Category::Java,
+        Category::Minecraft,
         Category::Servers,
         Category::Content,
         Category::Appearance,
@@ -76,6 +79,7 @@ impl Category {
             Category::Folders => "Library & folders",
             Category::Launchers => "Other launchers",
             Category::Java => "Playing & Java",
+            Category::Minecraft => "Minecraft",
             Category::Servers => "Servers",
             Category::Content => "CurseForge & Modrinth",
             Category::Appearance => "Appearance",
@@ -91,6 +95,7 @@ impl Category {
             Category::Folders => IconName::FolderOpen,
             Category::Launchers => IconName::Layers,
             Category::Java => IconName::Cpu,
+            Category::Minecraft => IconName::Gamepad2,
             Category::Servers => IconName::Server,
             Category::Content => IconName::Compass,
             Category::Appearance => IconName::Palette,
@@ -107,6 +112,7 @@ impl Category {
             Category::Folders => "Where Hopper finds your instances and Minecraft's launcher, and how long backups stay.",
             Category::Launchers => "Instances from other launchers, managed where they are, without copying.",
             Category::Java => "How games start, what happens while one runs, and memory and Java for instances that don't set their own.",
+            Category::Minecraft => "Your usual in-game options: sound, mouse, view and keys. Hopper sets them in each instance before it starts.",
             Category::Servers => "Your server packs, servers hosted on this PC, and the panel that runs them.",
             Category::Content => "The CurseForge API key, and where Browse looks first.",
             Category::Appearance => "Theme and size.",
@@ -200,6 +206,32 @@ const ENTRIES: &[Entry] = &[
     e(C::Java, "java", "Java", "The Java instances use unless they pick one.", "jdk jre runtime path"),
     e(C::Java, "java-args", "Java arguments", "Extra arguments for instances that leave theirs blank.", "jvm flags aikar g1 zgc generator presets xms xmx graalvm"),
     e(C::Java, "get-java", "Get Java", "Downloads into Hopper's own folder; they show in every Java list. GraalVM comes under Oracle's free terms (GraalVM Free Terms and Conditions).", "download temurin graalvm jdk"),
+    e(C::Minecraft, "mc-enabled", "Use my Minecraft settings", "Hopper writes the options you turn on below into each instance's options.txt before it starts, new packs too. Each is set once, then what you change in game stays; with its lock it's set every start. An instance can opt out in its Settings.", "options.txt apply every instance default options first launch"),
+    e(C::Minecraft, "mc-import", "Copy from an instance", "Turns on the sound, mouse, view and video options and the key bindings of a pack you already set up, with its values.", "import copy keybinds controls options.txt"),
+    e(C::Minecraft, "mc-soundCategory_master", "Master volume", "", "sound audio volume"),
+    e(C::Minecraft, "mc-soundCategory_music", "Music", "", "sound audio volume"),
+    e(C::Minecraft, "mc-soundCategory_record", "Jukebox / Note blocks", "", "sound audio volume record"),
+    e(C::Minecraft, "mc-soundCategory_weather", "Weather", "", "sound audio volume rain thunder"),
+    e(C::Minecraft, "mc-soundCategory_block", "Blocks", "", "sound audio volume"),
+    e(C::Minecraft, "mc-soundCategory_hostile", "Hostile creatures", "", "sound audio volume mobs"),
+    e(C::Minecraft, "mc-soundCategory_neutral", "Friendly creatures", "", "sound audio volume animals"),
+    e(C::Minecraft, "mc-soundCategory_player", "Players", "", "sound audio volume"),
+    e(C::Minecraft, "mc-soundCategory_ambient", "Ambient / Environment", "", "sound audio volume"),
+    e(C::Minecraft, "mc-soundCategory_voice", "Voice / Speech", "", "sound audio volume"),
+    e(C::Minecraft, "mc-mouseSensitivity", "Mouse sensitivity", "", "mouse sensitivity dpi"),
+    e(C::Minecraft, "mc-rawMouseInput", "Raw input", "Minecraft 1.15 and newer.", "mouse raw input acceleration"),
+    e(C::Minecraft, "mc-invertYMouse", "Invert mouse", "", "mouse invert y"),
+    e(C::Minecraft, "mc-fov", "Field of view", "", "fov field of view"),
+    e(C::Minecraft, "mc-guiScale", "GUI scale", "", "gui scale size interface"),
+    e(C::Minecraft, "mc-renderDistance", "Render distance", "In chunks.", "render view distance chunks"),
+    e(C::Minecraft, "mc-simulationDistance", "Simulation distance", "In chunks. Minecraft 1.18 and newer.", "simulation distance chunks"),
+    e(C::Minecraft, "mc-maxFps", "Max framerate", "", "fps framerate frame limit"),
+    e(C::Minecraft, "mc-enableVsync", "VSync", "", "vsync vertical sync tearing"),
+    e(C::Minecraft, "mc-fullscreen", "Fullscreen", "", "fullscreen window"),
+    e(C::Minecraft, "mc-lang", "Language", "", "language lang"),
+    e(C::Minecraft, "mc-tutorialStep", "Skip the tutorial hints", "No \"Use W, A, S, D to move\" hints in new worlds.", "tutorial toasts hints first start"),
+    e(C::Minecraft, "mc-narrator", "Narrator off", "Also skips the accessibility screen of Minecraft 1.20 and newer on the first start.", "narrator accessibility onboarding"),
+    e(C::Minecraft, "mc-keys", "Key bindings", "", "keybinds keys controls bindings hotkeys"),
     e(C::Servers, "server-tools", "Server tools", "The Servers page, server buttons on instances, and Peers. Off hides them; Servers stays as a quiet item in the top bar unless you also hide that.", "servers host hosting panel peers opt in turn on off hide"),
     e(C::Servers, "hide-servers", "Hide the Servers item completely", "With server tools off, the top bar shows only Library and Browse. Ctrl+K and the ⋯ menus still reach servers.", "servers top bar nav hide"),
     e(C::Servers, "servers-root", "Server packs", "The folder your server folders are in (a shared folder for a server on another PC).", "folder rig path directory"),
@@ -455,6 +487,7 @@ pub struct SettingsPage {
     installing: bool,
     java: Entity<JavaForm>,
     launchers: Entity<crate::launchers_list::LaunchersList>,
+    mc: minecraft::Mc,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -659,6 +692,7 @@ impl SettingsPage {
             installing: false,
             launchers,
             java,
+            mc: minecraft::Mc::new(&s, cx),
             _subscriptions: subs,
         }
     }
@@ -2734,6 +2768,7 @@ impl Render for SettingsPage {
             Category::Folders => self.folders(cx),
             Category::Launchers => self.launchers(cx),
             Category::Java => self.java(&s, window, cx),
+            Category::Minecraft => self.minecraft(&s, window, cx),
             Category::Servers => self.servers(&s, window, cx),
             Category::Content => self.content(&s, cx),
             Category::Appearance => self.appearance(&s, window, cx),
@@ -2852,6 +2887,10 @@ impl Block {
 /// right, and maybe more under both.
 struct Row {
     id: &'static str,
+    /// Before the label (the switch that turns a Minecraft option on).
+    lead: Option<AnyElement>,
+    /// The label greyed out (an option that's off).
+    muted: bool,
     desc: Option<SharedString>,
     control: Option<AnyElement>,
     note: Option<AnyElement>,
@@ -2862,6 +2901,8 @@ impl Row {
     fn new(id: &'static str) -> Self {
         Self {
             id,
+            lead: None,
+            muted: false,
             desc: None,
             control: None,
             note: None,
@@ -2872,6 +2913,16 @@ impl Row {
     /// A description other than the usual one.
     fn desc(mut self, d: impl Into<SharedString>) -> Self {
         self.desc = Some(d.into());
+        self
+    }
+
+    fn lead(mut self, l: impl IntoElement) -> Self {
+        self.lead = Some(l.into_any_element());
+        self
+    }
+
+    fn muted(mut self, m: bool) -> Self {
+        self.muted = m;
         self
     }
 
@@ -2917,7 +2968,13 @@ impl Row {
             .flex_1()
             .min_w(rems(14.))
             .gap_0p5()
-            .child(div().text_sm().font_medium().child(e.label))
+            .child(
+                div()
+                    .text_sm()
+                    .font_medium()
+                    .when(self.muted, |d| d.text_color(theme.muted_foreground))
+                    .child(e.label),
+            )
             .when(!desc.is_empty(), |c| {
                 c.child(
                     div()
@@ -2933,7 +2990,10 @@ impl Row {
             .flex_wrap()
             .gap_x_6()
             .gap_y_2()
-            .child(text)
+            .child(match self.lead {
+                Some(l) => h_flex().flex_1().min_w(rems(14.)).gap_3().child(div().flex_none().child(l)).child(text).into_any_element(),
+                None => text.into_any_element(),
+            })
             .children(self.control.map(|c| h_flex().flex_none().child(c)));
         v_flex()
             .id(self.id)
