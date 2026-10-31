@@ -19,6 +19,7 @@
   import { historyOf, clip, prefs, store, jump, TEXT, ARCHIVE, PACKED, IMAGE } from './lib/files.svelte.js';
   import { configOwners, ownerOf } from './lib/files-config.js';
   import { startPick, clickSwallowed, tickLabel } from './lib/dragpick.svelte.js';
+  import { rightClear } from './lib/rightclear.js';
   import FileTree from './FileTree.svelte';
   import FileViewer from './FileViewer.svelte';
   import ModPeek from './ModPeek.svelte';
@@ -719,7 +720,7 @@
       </div>
     {/if}
     <form class="input find" onsubmit={searchIn} title="Type to filter; Enter searches inside files here and below">
-      <Search size={13} /><input placeholder="Filter · Enter searches inside" bind:value={filter} />
+      <Search size={13} /><input use:rightClear placeholder="Filter · Enter searches inside" bind:value={filter} />
       <button type="button" class="rx" class:on={regex} title="Regular expression" onclick={() => (regex = !regex)}>.*</button>
     </form>
     <button class="btn sm icon" title="Search inside files here and below" disabled={filter.trim().length < 2 || finding} onclick={searchIn}><TextSearch size={14} /></button>

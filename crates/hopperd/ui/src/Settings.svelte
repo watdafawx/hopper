@@ -18,6 +18,7 @@
   import Avatar from './Avatar.svelte';
   import JavaPage from './JavaPage.svelte';
   import { flagsToText, withoutMemory } from './lib/jvm.js';
+  import { rightClear } from './lib/rightclear.js';
 
   // `start`: the page to open on (the header's "Minecraft 1.21.1" opens Version).
   let { server, start = '' } = $props();
@@ -229,7 +230,7 @@
 
 <div class="layout">
   <nav class="secs">
-    <div class="input find"><Search size={13} /><input placeholder="Find a setting" bind:value={filter} />{#if filter}<button class="x" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
+    <div class="input find"><Search size={13} /><input use:rightClear placeholder="Find a setting" bind:value={filter} />{#if filter}<button class="x" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
     {#each PAGES as [id, label, Icon] (id)}
       <button class="row-hover" class:row-sel={!q && pg === id} onclick={() => { filter = ''; page = id; }}><Icon size={14} />{label}{id === 'all' ? ` ${allKeys.length}` : ''}</button>
     {/each}

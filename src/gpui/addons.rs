@@ -8,7 +8,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -2132,7 +2132,7 @@ impl AddonsView {
             .flex_wrap()
             .child(
                 div().w_56().child(
-                    Input::new(&self.search)
+                    widgets::search_input(&self.search)
                         .small()
                         .prefix(Icon::new(IconName::Search).small())
                         .cleanable(true),

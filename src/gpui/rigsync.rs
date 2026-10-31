@@ -8,7 +8,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
@@ -2151,7 +2151,7 @@ impl SyncPanel {
             .flex_wrap()
             .child(
                 div().w_48().child(
-                    Input::new(&self.search)
+                    widgets::search_input(&self.search)
                         .small()
                         .prefix(Icon::new(IconName::Search).small())
                         .cleanable(true),

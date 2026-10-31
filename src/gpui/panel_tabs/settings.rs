@@ -941,7 +941,7 @@ impl SettingsTab {
             .child(
                 div()
                     .pb_2()
-                    .child(Input::new(&self.search).small().prefix(Icon::new(IconName::Search).small()).cleanable(true)),
+                    .child(widgets::search_input(&self.search).small().prefix(Icon::new(IconName::Search).small()).cleanable(true)),
             )
             .children(PAGES.iter().enumerate().map(|(i, (id, label, icon, _))| {
                 let active = !searching && i == self.page;

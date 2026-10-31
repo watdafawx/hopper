@@ -32,6 +32,7 @@
   import Security from './Security.svelte';
   import Users from './Users.svelte';
   import { ownerLike } from './lib/me.svelte.js';
+  import { rightClear } from './lib/rightclear.js';
   import Webhooks from './Webhooks.svelte';
   import Alerts from './Alerts.svelte';
   import Automations from './Automations.svelte';
@@ -52,7 +53,7 @@
 
 <div class="page">
   <nav class="cats">
-    <div class="input sm"><input bind:value={query} placeholder="Search settings" spellcheck="false" onkeydown={(e) => { if (e.key === 'Enter' && hits?.length) { location.hash = `/settings/${hits[0].id}`; query = ''; } }} /></div>
+    <div class="input sm"><input use:rightClear bind:value={query} placeholder="Search settings" spellcheck="false" onkeydown={(e) => { if (e.key === 'Enter' && hits?.length) { location.hash = `/settings/${hits[0].id}`; query = ''; } }} /></div>
     {#if hits}
       <div class="lbl hits">{hits.length === 0 ? 'No matches' : hits.length === 1 ? '1 match' : `${hits.length} matches`}</div>
       {#each hits as x, i (x.id)}

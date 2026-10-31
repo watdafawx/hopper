@@ -1314,7 +1314,7 @@ impl ConfigsPanel {
             .flex_wrap()
             .child(
                 div().w_48().child(
-                    Input::new(&self.filter)
+                    widgets::search_input(&self.filter)
                         .small()
                         .prefix(Icon::new(IconName::Search).small())
                         .cleanable(true),

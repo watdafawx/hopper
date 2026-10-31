@@ -5,6 +5,7 @@
   // `items`: { id, section, icon, title, hint?, key?, words?, deep?, run }.
   import { onMount, tick, untrack } from 'svelte';
   import { Search, CornerDownLeft } from '@lucide/svelte';
+  import { rightClear } from './lib/rightclear.js';
 
   let { items = [], context = '', onClose } = $props();
 
@@ -146,7 +147,7 @@
     <div class="sr">
       <Search size={16} color="var(--muted)" />
       {#if context}<span class="ctx">{context}</span>{/if}
-      <input bind:this={input} bind:value={text} placeholder="Search or run a command…" spellcheck="false" autocomplete="off" />
+      <input use:rightClear bind:this={input} bind:value={text} placeholder="Search or run a command…" spellcheck="false" autocomplete="off" />
     </div>
     <div class="rows" bind:this={list}>
       {#each rows as r, i (r.head ? `h:${r.head}` : `i:${r.it.id}`)}

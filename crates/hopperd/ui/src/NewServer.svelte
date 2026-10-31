@@ -13,6 +13,7 @@
   import { session } from './lib/me.svelte.js';
   import { uploadIncoming } from './lib/upload.js';
   import { dialog } from './lib/dialog.svelte.js';
+  import { rightClear } from './lib/rightclear.js';
   import FolderPicker from './FolderPicker.svelte';
 
   // `preset`: a pack (and version) from Browse's "Make a server from this".
@@ -509,7 +510,7 @@
                 <button type="button" class:on={source === 'curseforge'} disabled={!cfKey || !!busy} title={cfKey ? '' : 'Needs a CurseForge API key (Access & devices)'} onclick={() => setSource('curseforge')}>CurseForge</button>
                 <button type="button" class:on={source === 'modrinth'} disabled={!!busy} onclick={() => setSource('modrinth')}>Modrinth</button>
               </div>
-              <div class="input grow"><Search size={13} /><input bind:value={query} oninput={searchSoon} placeholder={source === 'both' ? 'Search modpacks on CurseForge and Modrinth' : `Search modpacks on ${SITE[source]}`} /></div>
+              <div class="input grow"><Search size={13} /><input use:rightClear bind:value={query} oninput={searchSoon} placeholder={source === 'both' ? 'Search modpacks on CurseForge and Modrinth' : `Search modpacks on ${SITE[source]}`} /></div>
             </form>
             <div class="results">
               {#each results as r (r.source + r.id)}

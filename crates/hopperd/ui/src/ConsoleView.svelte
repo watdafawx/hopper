@@ -11,6 +11,7 @@
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { kind, shift } from './lib/consoleKit.js';
+  import { rightClear } from './lib/rightclear.js';
 
   let { server, onShare } = $props();
 
@@ -286,7 +287,7 @@
     <button class="chip" class:on={filter === 'c'} onclick={() => (filter = 'c')}>Chat</button>
     {#if filtered}<span class="tiny muted">{shown.length} of {lines.length} lines</span>{/if}
     <span class="sp"></span>
-    <div class="input find"><Search size={13} /><input placeholder="Search this log" bind:value={query} spellcheck="false" />{#if query}<button class="x" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</div>
+    <div class="input find"><Search size={13} /><input use:rightClear placeholder="Search this log" bind:value={query} spellcheck="false" />{#if query}<button class="x" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</div>
   </div>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div class="lines" bind:this={box} onscroll={onScroll} onpointerdown={down} oncontextmenu={context} onkeydown={keys} tabindex="0" role="log" aria-label="Console">

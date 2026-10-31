@@ -18,6 +18,7 @@
   import BrowseRich from './BrowseRich.svelte';
   import BrowsePack from './BrowsePack.svelte';
   import { dialog } from './lib/dialog.svelte.js';
+  import { rightClear } from './lib/rightclear.js';
 
   // `file`: the pack version to update to (the newest by default);
   // `onOtherVersion`: opens the pack's Versions and changelogs to pick another.
@@ -376,7 +377,7 @@
   <div class="tools">
     {#if tabs.length > 1}<div class="utabs" role="tablist">{#each tabs as t, i (i)}<button role="tab" aria-selected={filter === i} class:tab-sel={filter === i} onclick={() => (filter = i)}>{t}</button>{/each}</div>{/if}
     <span class="sp"></span>
-    <div class="input find"><input placeholder="Search" bind:value={query} /></div>
+    <div class="input find"><input use:rightClear placeholder="Search" bind:value={query} /></div>
   </div>
 {/snippet}
 
