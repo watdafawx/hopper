@@ -367,14 +367,21 @@ impl SettingsPage {
     /// Every vanilla action, then the mods' ones that were copied in, each
     /// with its key: click it, then press a key or a mouse button.
     fn mc_key_grid(&self, o: &McOptions, cx: &mut Context<Self>) -> AnyElement {
-        let vanilla: Vec<(String, Option<String>, String)> = mco::DEFAULT_KEYS
+        let mut vanilla: Vec<(String, Option<String>, String)> = mco::DEFAULT_KEYS
             .iter()
             .map(|(a, d)| (a.to_string(), o.keys.get(*a).cloned(), d.to_string()))
             .collect();
+        // Vanilla actions with no key of their own show only once set.
+        vanilla.extend(
+            o.keys
+                .iter()
+                .filter(|(a, _)| mco::vanilla_action(a) && !mco::DEFAULT_KEYS.iter().any(|(d, _)| d == a))
+                .map(|(a, k)| (a.clone(), Some(k.clone()), "key.keyboard.unknown".to_string())),
+        );
         let mut mods: Vec<(String, Option<String>, String)> = o
             .keys
             .iter()
-            .filter(|(a, _)| !mco::DEFAULT_KEYS.iter().any(|(d, _)| d == a))
+            .filter(|(a, _)| !mco::vanilla_action(a))
             .map(|(a, k)| (a.clone(), Some(k.clone()), String::new()))
             .collect();
         // By mod, then by name.
