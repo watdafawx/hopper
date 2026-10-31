@@ -32,6 +32,8 @@ sysinfo.workspace = true
 regex.workspace = true
 keyring.workspace = true
 similar.workspace = true
+# Seeing instance folders change outside Hopper (already in the tree via gpui).
+notify = "8.2"
 # Pterodactyl's console (Wings' websocket), over the same rustls as ureq.
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

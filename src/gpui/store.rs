@@ -16,6 +16,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod disk_sync;
+
 /// Results from worker threads.
 /// Hopper's own update, as far as it has got.
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +47,11 @@ pub enum Msg {
     SiteServers(String, Result<(Vec<ServerInfo>, Option<String>), String>),
     /// An instance changed on disk; reload it.
     InstanceChanged(PathBuf),
+    /// Folders changed outside Hopper (see [`hopper::disk_watch`]).
+    Disk(Vec<hopper::disk_watch::Change>),
+    /// An instance read again after a change outside Hopper, and which
+    /// content folder changed (if that's what it was).
+    DiskLoaded(PathBuf, Option<Box<Instance>>, Option<hopper::disk_watch::Area>),
     /// Jars were identified after an older copy went back: reload, then
     /// ask for updates again (the record now names the older file).
     Reidentified(PathBuf),
@@ -132,6 +139,9 @@ pub enum StoreEvent {
     ShowServer { root: PathBuf, compare: bool },
     /// Open an instance in the Library.
     ShowInstance(PathBuf),
+    /// Files in an instance's content folder changed outside Hopper: the
+    /// tab showing them reads them again.
+    DiskContent(PathBuf, hopper::disk_watch::Area),
 }
 
 impl EventEmitter<StoreEvent> for Store {}
@@ -316,6 +326,11 @@ pub struct Store {
     wake: hopper::waker::Waker,
     /// Settings as last written, to save only real changes.
     saved_settings: String,
+    /// Notices instances changing outside Hopper.
+    disk: hopper::disk_watch::DiskWatch,
+    /// Changes outside Hopper that came while a job was writing: tried
+    /// again once it's done.
+    disk_later: Vec<hopper::disk_watch::Change>,
     _poll: Task<()>,
 }
 
@@ -455,6 +470,8 @@ impl Store {
             pair_asked: false,
             server_files_got: Default::default(),
             watched,
+            disk: disk_sync::start(tx.clone(), wake.clone()),
+            disk_later: Vec::new(),
             tx,
             wake,
             _poll: Self::poll(rx, dirty, ticked, cx),
@@ -787,6 +804,7 @@ impl Store {
                     for m in msgs {
                         store.handle(m, cx);
                     }
+                    store.retry_disk(cx);
                     store.peer_tick(cx);
                     cx.notify();
                 });
@@ -820,27 +838,11 @@ impl Store {
             }
             Msg::InstanceChanged(root) => {
                 if let Some(new) = instances::load(&root) {
-                    self.read_pending(&new);
-                    // Updates stay listed while their old file is still
-                    // there (also while a check runs); asking CurseForge
-                    // again would blank the list.
-                    let dropped = self.updates.get_mut(&root).is_some_and(|u| u.keep_current(&new.addons));
-                    let icon = new.icon.clone();
-                    match self.instances.iter_mut().find(|i| i.root == root) {
-                        Some(slot) => *slot = new,
-                        None => {
-                            self.instances.push(new);
-                            self.sync_watched();
-                        }
-                    }
-                    if dropped {
-                        self.save_updates(&root);
-                    }
-                    if let Some(url) = icon {
-                        self.want_image(&url);
-                    }
+                    self.put_instance(new);
                 }
             }
+            Msg::Disk(changes) => self.disk_changed(changes, cx),
+            Msg::DiskLoaded(root, new, area) => self.disk_loaded(root, new, area, cx),
             Msg::Link(url) => cx.emit(StoreEvent::Link(url)),
             Msg::Running(now) => {
                 if self.running.is_empty() && !now.is_empty() {
@@ -1133,6 +1135,30 @@ impl Store {
         }
     }
 
+    /// Puts a freshly read instance in place of its old copy (or adds it).
+    fn put_instance(&mut self, new: Instance) {
+        let root = new.root.clone();
+        self.read_pending(&new);
+        // Updates stay listed while their old file is still
+        // there (also while a check runs); asking CurseForge
+        // again would blank the list.
+        let dropped = self.updates.get_mut(&root).is_some_and(|u| u.keep_current(&new.addons));
+        let icon = new.icon.clone();
+        match self.instances.iter_mut().find(|i| i.root == root) {
+            Some(slot) => *slot = new,
+            None => {
+                self.instances.push(new);
+                self.sync_watched();
+            }
+        }
+        if dropped {
+            self.save_updates(&root);
+        }
+        if let Some(url) = icon {
+            self.want_image(&url);
+        }
+    }
+
     pub fn refresh(&mut self) {
         // Images that failed (a network blip) get another try.
         self.images.retain(|_, v| !matches!(v, Image::Failed));
@@ -1156,6 +1182,7 @@ impl Store {
             self.read_pending(&i);
         }
         self.sync_watched();
+        self.disk.set_roots(vec![PathBuf::from(&self.settings.instances_root)]);
         self.discover_servers();
         self.check_pack_updates();
         // Loader versions for the Minecraft versions in use, ready before

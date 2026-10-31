@@ -19,6 +19,7 @@ pub mod crashdetect;
 pub mod crashscan;
 pub mod deps;
 pub mod diff;
+pub mod disk_watch;
 pub mod env;
 pub mod extlog;
 pub mod folderrules;
