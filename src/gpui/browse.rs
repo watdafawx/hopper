@@ -32,6 +32,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+#[path = "did_you_mean.rs"]
+mod did_you_mean;
+
 const CLASSES: [(u32, IconName, &str); 6] = [
     (cf::CLASS_MODS, IconName::Puzzle, "Mods"),
     (cf::CLASS_MODPACKS, IconName::Package, "Modpacks"),
@@ -233,6 +236,8 @@ pub struct BrowseView {
     filters_panel: widgets::SidePanel,
     /// The list shows the saved bookmarks instead of search results.
     bookmarked: bool,
+    /// Typo help: "Did you mean X?" and its name lists.
+    suggest: did_you_mean::Suggest,
     /// Modrinth packs' server files, once looked up (`None`: it has none).
     server_files: HashMap<u64, Option<ServerFiles>>,
     _debounce: Option<Task<()>>,
@@ -327,6 +332,7 @@ impl BrowseView {
             drag_width: None,
             filters_panel: widgets::SidePanel::new(FILTERS_PANEL),
             bookmarked: false,
+            suggest: Default::default(),
             server_files: HashMap::new(),
             detail_tab: 0,
             desc,
@@ -791,6 +797,7 @@ impl BrowseView {
                             this.results.extend(mods);
                         } else {
                             this.results = mods;
+                            this.fuzzy_results(cx);
                         }
                         this.total = page.total_count;
                         this.error = None;
@@ -2309,6 +2316,7 @@ impl BrowseView {
             && !self.results.is_empty()
             && (self.results.len() as u32) < self.total.min(10_000);
         let sort_bar = saved.is_none().then(|| self.sort_bar(cx));
+        let did_you_mean = self.did_you_mean_row(saved.is_none(), cx);
         let theme = cx.theme();
         v_flex()
             .flex_1()
@@ -2340,6 +2348,7 @@ impl BrowseView {
                                     .cleanable(true),
                             ),
                     )
+                    .children(did_you_mean)
                     .child(
                         h_flex()
                             .gap_2()
