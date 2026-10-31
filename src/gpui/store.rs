@@ -107,6 +107,11 @@ pub enum Msg {
     LiveCrash(PathBuf, hopper::crashdetect::Crash),
     /// Mods whose mixins failed while a game runs.
     LiveWarnings(PathBuf, Vec<hopper::crashdetect::Suspect>),
+    /// Why the game that just ended couldn't join a server or open a
+    /// world (`None`: it could). See `join_help`.
+    JoinChecked(PathBuf, Option<hopper::joinfail::JoinProblem>),
+    /// The pack compared with its paired server, before it plays.
+    PreJoin(PathBuf, Option<crate::join_help::PreJoin>),
     /// A translation finished (see `crate::translation`).
     Translated,
     /// A translation model finished downloading (by language code).
@@ -128,6 +133,9 @@ pub enum StoreEvent {
     /// An instance's game crashed: (its name, the mod Hopper suspects most,
     /// if any, whether the game is still open on its error screen).
     GameCrashed(String, Option<String>, bool),
+    /// An instance's game couldn't join a server or open a world: (its
+    /// name, the card's title, why).
+    JoinFailed(String, String, String),
     /// The hosted-server scheduler did something: (message, is a problem).
     Schedule(String, bool),
     /// A play session of this instance was saved.
@@ -228,6 +236,8 @@ pub struct Store {
     crashes: HashMap<PathBuf, Option<hopper::crashdetect::Crash>>,
     /// Crash reports already told while their game was still open.
     live_told: HashMap<PathBuf, PathBuf>,
+    /// Join problems and the pre-join comparison (`join_help`).
+    pub(crate) joins: crate::join_help::Joins,
     /// Mixin failures of each instance's current or last game.
     warnings: HashMap<PathBuf, Vec<hopper::crashdetect::Suspect>>,
     jobs: Jobs,
@@ -412,6 +422,7 @@ impl Store {
             running: HashMap::new(),
             crashes: HashMap::new(),
             live_told: HashMap::new(),
+            joins: Default::default(),
             warnings: HashMap::new(),
             jobs: Jobs::with_ticker(wake.clone(), tick),
             job_ticks: cx.new(|_| JobTicks),
@@ -888,7 +899,13 @@ impl Store {
                             let c = hopper::crashdetect::detect(&root, started as i64, &mods, |f| {
                                 hopper::deps::own_ids(&dir.join(f)).0
                             });
-                            let _ = tx.send(Msg::Crashed(root, c));
+                            // No crash: did it fail to join a server, or to open a world?
+                            let join = if c.is_none() { hopper::joinfail::detect(&root, started as i64) } else { None }.map(|mut j| {
+                                j.match_jars(&mods, |f| hopper::deps::own_ids(&dir.join(f)).0);
+                                j
+                            });
+                            let _ = tx.send(Msg::Crashed(root.clone(), c));
+                            let _ = tx.send(Msg::JoinChecked(root, join));
                             wake();
                         });
                     }
@@ -912,6 +929,8 @@ impl Store {
                 self.crashes.insert(root, Some(c));
                 cx.notify();
             }
+            Msg::JoinChecked(root, j) => self.join_checked(root, j, cx),
+            Msg::PreJoin(root, p) => self.pre_join_done(root, p, cx),
             Msg::LiveWarnings(root, w) => {
                 let list = self.warnings.entry(root).or_default();
                 list.extend(w);

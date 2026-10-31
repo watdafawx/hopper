@@ -1,0 +1,5 @@
+[19:00:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to play.example.net, 25565
+[19:00:01] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: Outdated client! Please use 1.21.1
+[19:03:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to play.example.net, 25565
+[19:03:02] [Render thread/INFO] [minecraft/ClientPacketListener]: Player123 logged in with entity id 99 at (0.5, 70.0, 0.5)
+[19:30:00] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: Server closed

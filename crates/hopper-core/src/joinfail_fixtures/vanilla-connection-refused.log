@@ -1,0 +1,6 @@
+[13:00:00] [Worker-Main-4/WARN] [someupdater/]: Update check failed: java.net.ConnectException: Connection refused
+[13:01:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to mc.example.org, 25565
+[13:01:01] [Server Connector #1/ERROR] [minecraft/ConnectScreen]: Couldn't connect to server
+io.netty.channel.AbstractChannel$AnnotatedConnectException: Connection refused: getsockopt: mc.example.org/203.0.113.7:25565
+Caused by: java.net.ConnectException: Connection refused
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method) ~[?:?]

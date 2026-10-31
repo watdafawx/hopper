@@ -340,6 +340,93 @@ pub fn blacklist_key(d: &DiffEntry) -> Option<String> {
     })
 }
 
+// ---- before joining ----------------------------------------------------
+
+/// What would keep this pack from joining its server: a different
+/// NeoForge, and mods on only one side or at other versions. Mods that
+/// belong on one side only (client-only, server-only, flagged) and the
+/// "Never sync" list don't count.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JoinCheck {
+    /// (the pack's, the server's) NeoForge, when they differ.
+    pub loader: Option<(String, String)>,
+    /// Mods in the pack the server lacks (names).
+    pub only_pack: Vec<String>,
+    /// Mods on the server the pack lacks (names).
+    pub only_server: Vec<String>,
+    /// (name, the pack's version, the server's).
+    pub versions: Vec<(String, String, String)>,
+}
+
+impl JoinCheck {
+    pub fn is_empty(&self) -> bool {
+        self.loader.is_none() && self.only_pack.is_empty() && self.only_server.is_empty() && self.versions.is_empty()
+    }
+
+    /// The one-line summary, for the banner.
+    pub fn summary(&self) -> String {
+        let n = |k: usize, one: &str, many: &str| if k == 1 { format!("1 {one}") } else { format!("{k} {many}") };
+        let mut parts = Vec::new();
+        if let Some((p, s)) = &self.loader {
+            parts.push(format!("the server runs NeoForge {s}, this pack {p}"));
+        }
+        if !self.only_pack.is_empty() {
+            parts.push(format!("{} only in the pack", n(self.only_pack.len(), "mod", "mods")));
+        }
+        if !self.only_server.is_empty() {
+            parts.push(format!("{} only on the server", n(self.only_server.len(), "mod", "mods")));
+        }
+        if !self.versions.is_empty() {
+            parts.push(format!("{} at another version", n(self.versions.len(), "mod", "mods")));
+        }
+        let mut s = parts.join(", ");
+        if let Some(c) = s.get(..1) {
+            s = c.to_uppercase() + &s[1..];
+        }
+        s
+    }
+
+    /// A short, stable fingerprint, so a closed banner stays closed until
+    /// something else differs.
+    pub fn signature(&self) -> String {
+        format!("{:?}|{}|{}|{}", self.loader, self.only_pack.join(","), self.only_server.join(","), self.versions.iter().map(|v| format!("{}:{}:{}", v.0, v.1, v.2)).collect::<Vec<_>>().join(","))
+    }
+}
+
+/// [`JoinCheck`] from a comparison and both NeoForge builds (`None` when a
+/// side doesn't run NeoForge or it isn't known).
+pub fn join_check(diff: &[DiffEntry], blacklist: &HashSet<String>, pack_nf: Option<&str>, server_nf: Option<&str>) -> JoinCheck {
+    let mut c = JoinCheck::default();
+    if let (Some(p), Some(s)) = (pack_nf, server_nf)
+        && p != s
+    {
+        c.loader = Some((p.to_string(), s.to_string()));
+    }
+    let name = |d: &DiffEntry| {
+        let m = d.client.as_ref().or(d.server.as_ref());
+        m.map(|m| if m.mod_name.is_empty() { m.file_name.clone() } else { m.mod_name.clone() }).filter(|n| !n.is_empty()).unwrap_or_else(|| d.mod_name.clone())
+    };
+    for d in diff {
+        if is_hidden(d, blacklist) || is_wont(d) {
+            continue;
+        }
+        let side = |m: &Option<ModInfo>| m.as_ref().map_or("", |m| m.side.as_str()).to_string();
+        match d.status {
+            DiffStatus::OnlyClient if side(&d.client) != "client" => c.only_pack.push(name(d)),
+            DiffStatus::OnlyServer if side(&d.server) != "server" => c.only_server.push(name(d)),
+            DiffStatus::ClientNewer | DiffStatus::ServerNewer if side(&d.client) != "client" => {
+                let v = |m: &Option<ModInfo>| m.as_ref().map_or(String::new(), |m| m.version.clone());
+                c.versions.push((name(d), v(&d.client), v(&d.server)));
+            }
+            _ => {}
+        }
+    }
+    c.only_pack.sort();
+    c.only_server.sort();
+    c.versions.sort();
+    c
+}
+
 // ---- operations --------------------------------------------------------
 
 /// File operations for rows: (to the server, to the client).
@@ -562,6 +649,44 @@ mod tests {
         assert_eq!(names, ["jei"]);
     }
     use super::*;
+
+    #[test]
+    fn join_check_leaves_out_one_sided_and_never_sync_mods() {
+        use crate::model::ModInfo;
+        let m = |id: &str, file: &str, ver: &str, side: &str| ModInfo {
+            mod_id: id.into(),
+            mod_name: id.into(),
+            file_name: file.into(),
+            version: ver.into(),
+            side: side.into(),
+            ..Default::default()
+        };
+        let client = vec![
+            m("create", "create-6.0.4.jar", "6.0.4", "both"),
+            m("jei", "jei-19.jar", "19", "both"),
+            m("sodium", "sodium-0.6.jar", "0.6", "client"),
+            m("extra", "extra-1.jar", "1", ""),
+            m("hidden", "hidden-1.jar", "1", ""),
+        ];
+        let server = vec![
+            m("create", "create-6.0.3.jar", "6.0.3", "both"),
+            m("jei", "jei-19.jar", "19", "both"),
+            m("spark_srv", "serveronly-1.jar", "1", "server"),
+            m("waystones", "waystones-21.jar", "21", "both"),
+        ];
+        let diff = crate::diff::compute_diff(&client, &server);
+        let hidden: HashSet<String> = ["hidden".to_string()].into();
+        let c = join_check(&diff, &hidden, Some("21.1.215"), Some("21.1.77"));
+        assert_eq!(c.loader, Some(("21.1.215".into(), "21.1.77".into())));
+        assert_eq!(c.only_pack, ["extra"]);
+        assert_eq!(c.only_server, ["waystones"]);
+        assert_eq!(c.versions.len(), 1, "{:?}", c.versions);
+        assert_eq!(c.versions[0].0, "create");
+        assert!(c.summary().starts_with("The server runs NeoForge 21.1.77, this pack 21.1.215"), "{}", c.summary());
+        // Same NeoForge and the same mods: nothing to say.
+        let same = crate::diff::compute_diff(&server, &server);
+        assert!(join_check(&same, &HashSet::new(), Some("21.1.77"), Some("21.1.77")).is_empty());
+    }
 
     fn inst(n: &str) -> Instance {
         Instance {

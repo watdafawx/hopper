@@ -204,6 +204,9 @@ impl AppView {
                     }
                     crate::tray::notify(&format!("{name} crashed"), &body, true);
                 }
+                StoreEvent::JoinFailed(name, title, why) => {
+                    crate::tray::notify(&format!("{name}: {title}"), &format!("{why} Open Hopper → Logs & crashes for what to do."), true);
+                }
                 StoreEvent::GamesEnded => {
                     if this.store.read(cx).settings().minimize_while_playing {
                         window.activate_window();

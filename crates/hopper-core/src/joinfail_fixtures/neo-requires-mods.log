@@ -1,0 +1,2 @@
+[11:00:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to pack.example.com, 25565
+[11:00:01] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: This server has mods that require NeoForge to be installed on the client. Contact your server admin for more details.

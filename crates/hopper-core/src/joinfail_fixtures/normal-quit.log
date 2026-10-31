@@ -1,0 +1,6 @@
+[17:00:00] [Worker-Main-2/WARN] [someupdater/]: Couldn't check for updates: java.net.UnknownHostException: updates.example.com
+[17:00:10] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to play.example.net, 25565
+[17:00:12] [Render thread/INFO] [minecraft/ClientPacketListener]: Player123 logged in with entity id 214 at (10.5, 64.0, -3.5)
+[17:00:13] [Render thread/INFO] [minecraft/ChatComponent]: [CHAT] Player123 joined the game
+[17:45:00] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: Disconnected
+[17:45:02] [Render thread/INFO] [minecraft/Minecraft]: Stopping!

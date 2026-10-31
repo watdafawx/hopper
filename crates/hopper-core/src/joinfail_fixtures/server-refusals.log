@@ -1,0 +1,9 @@
+[21:00:00] [Server thread/INFO] [minecraft/DedicatedServer]: Done (42.118s)! For help, type "help"
+[21:01:10] [Server thread/INFO] [minecraft/MinecraftServer]: Alex joined the game
+[21:20:00] [Server thread/INFO] [minecraft/ServerGamePacketListenerImpl]: Alex lost connection: Disconnected
+[21:22:05] [Netty Server IO #4/INFO] [minecraft/ServerConfigurationPacketListenerImpl]: Alex (0a1b2c3d-0000-4000-8000-00000000000a) lost connection: Channel negotiation failed. Incompatible network versions:
+  create:main (server: 6, client: 7)
+[21:25:00] [Server thread/INFO] [minecraft/ServerLoginPacketListenerImpl]: Disconnecting Steve (/203.0.113.20:51234): Outdated client! Please use 1.21.1
+[21:26:00] [Server thread/INFO] [minecraft/ServerGamePacketListenerImpl]: Jeb lost connection: Timed out
+[21:30:00] [Netty Server IO #6/INFO] [minecraft/ServerConfigurationPacketListenerImpl]: Notch lost connection: Missing registry entries: mysticalagriculture:inferium_essence
+[21:31:00] [Server thread/INFO] [minecraft/ServerLoginPacketListenerImpl]: Disconnecting com.mojang.authlib.GameProfile@1a2b3c[id=<null>,name=Herobrine,properties={},legacy=false] (/203.0.113.30:40000): Connection closed - mismatched mod channel list

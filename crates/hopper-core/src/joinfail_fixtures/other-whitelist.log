@@ -1,0 +1,2 @@
+[16:00:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to private.example.net, 25565
+[16:00:01] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: You are not white-listed on this server!

@@ -19,6 +19,7 @@ pub mod crashdetect;
 pub mod crashscan;
 pub mod crashsigs;
 pub mod crashtrace;
+pub mod joinfail;
 pub mod deps;
 pub mod diff;
 pub mod disk_watch;

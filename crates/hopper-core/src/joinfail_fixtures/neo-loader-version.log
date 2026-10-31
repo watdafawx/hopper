@@ -1,0 +1,3 @@
+[09:15:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to 192.168.50.3, 25570
+[09:15:01] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: Incompatible client! Please use NeoForge 21.1.77
+[09:15:09] [Render thread/INFO] [minecraft/Minecraft]: Stopping!

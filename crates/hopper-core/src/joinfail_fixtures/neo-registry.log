@@ -1,0 +1,6 @@
+[18:30:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to tnp.example.net, 25565
+[18:30:02] [Netty Client IO #2/ERROR] [ne.ne.ne.re.RegistryManager/REGISTRIES]: Registry remapping failed: missing mysticalagriculture:inferium_essence, mysticalagriculture:prosperity_shard
+	at TRANSFORMER/neoforge@21.1.77/net.neoforged.neoforge.registries.RegistryManager.applySnapshot(RegistryManager.java:180) ~[neoforge-21.1.77-universal.jar%23200!/:?]
+	at TRANSFORMER/architectury@13.0.8/dev.architectury.networking.NetworkManager.handle(NetworkManager.java:90) ~[architectury-13.0.8-neoforge.jar%23201!/:?]
+	at TRANSFORMER/mysticalagriculture@8.0.9/com.blakebr0.mysticalagriculture.net.SyncHandler.accept(SyncHandler.java:41) ~[MysticalAgriculture-1.21.1-8.0.9.jar%23202!/:8.0.9]
+[18:30:02] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: Registry remapping failed
