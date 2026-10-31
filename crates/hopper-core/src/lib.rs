@@ -17,6 +17,7 @@ pub mod configedit;
 pub mod configswitch;
 pub mod crashdetect;
 pub mod crashscan;
+pub mod crashtrace;
 pub mod deps;
 pub mod diff;
 pub mod disk_watch;

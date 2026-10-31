@@ -1,0 +1,262 @@
+[31Okt.2026 15:11:05.661] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "LitematicaTool-neoforge-2.0.0.jar" [locator: {mods folder locator at C:\Users\Player\curseforge\minecraft\Instances\Pack\mods}, reader: mod manifest]
+[31Okt.2026 15:11:05.706] [main/INFO] [net.neoforged.fml.loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "minecolonies-1.1.1403-1.21.1.jar" [locator: {mods folder locator at C:\Users\Player\curseforge\minecraft\Instances\Pack\mods}, reader: mod manifest]
+[31Okt.2026 15:12:27.756] [Server thread/ERROR] [net.neoforged.fml.javafmlmod.FMLModContainer/]: Exception caught during firing event: Itemstack 0 minecraft:air does not exist in tab's list
+	Index: 0
+	Listeners:
+		0: dev.architectury.registry.forge.CreativeTabRegistryImpl$$Lambda/0x0000000801570218@296d4343
+java.lang.IllegalArgumentException: Itemstack 0 minecraft:air does not exist in tab's list
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.assertTargetExists(BuildCreativeModeTabContentsEvent.java:190)
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.insertAfter(BuildCreativeModeTabContentsEvent.java:114)
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl$3.acceptAfter(CreativeTabRegistryImpl.java:176)
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.CreativeTabOutput.accept(CreativeTabOutput.java:38)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab$Output.accept(CreativeModeTab.java:439)
+	at TRANSFORMER/litematicatool@2.0.0/com.finndog.LitematicaTool.lambda$init$1(LitematicaTool.java:27)
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl.lambda$modify$3(CreativeTabRegistryImpl.java:164)
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl.event(CreativeTabRegistryImpl.java:82)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:342)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:177)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$postEvent$13(ModLoader.java:358)
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.postEvent(ModLoader.java:358)
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.EventHooks.onCreativeModeTabBuildContents(EventHooks.java:1121)
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.api.util.CraftingUtils.forEachCreativeTabItems(CraftingUtils.java:195)
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.api.compatibility.CompatibilityManager.discoverAllItems(CompatibilityManager.java:649)
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.api.compatibility.CompatibilityManager.discover(CompatibilityManager.java:187)
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.core.event.DataPackSyncEventHandler$ServerEvents.discoverCompatLists(DataPackSyncEventHandler.java:61)
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.core.event.DataPackSyncEventHandler$ServerEvents.load(DataPackSyncEventHandler.java:153)
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.core.event.FMLEventHandler.onServerTick(FMLEventHandler.java:28)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:328)
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.EventHooks.fireServerTickPre(EventHooks.java:1010)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.tickServer(MinecraftServer.java:915)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.server.IntegratedServer.tickServer(IntegratedServer.java:110)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.runServer(MinecraftServer.java:707)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.lambda$spin$2(MinecraftServer.java:267)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+
+[31Okt.2026 15:12:27.757] [Server thread/ERROR] [net.neoforged.fml.ModContainer/LOADING]: Caught exception during event net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent@40ca5e09 dispatch for modid architectury
+java.lang.IllegalArgumentException: Itemstack 0 minecraft:air does not exist in tab's list
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.assertTargetExists(BuildCreativeModeTabContentsEvent.java:190) ~[neoforge-21.1.259-universal.jar%23424!/:?]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.insertAfter(BuildCreativeModeTabContentsEvent.java:114) ~[neoforge-21.1.259-universal.jar%23424!/:?]
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl$3.acceptAfter(CreativeTabRegistryImpl.java:176) ~[architectury-13.0.11-neoforge.jar%23445!/:?]
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.CreativeTabOutput.accept(CreativeTabOutput.java:38) ~[architectury-13.0.11-neoforge.jar%23445!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab$Output.accept(CreativeModeTab.java:439) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/litematicatool@2.0.0/com.finndog.LitematicaTool.lambda$init$1(LitematicaTool.java:27) ~[LitematicaTool-neoforge-2.0.0.jar%23566!/:?]
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl.lambda$modify$3(CreativeTabRegistryImpl.java:164) ~[architectury-13.0.11-neoforge.jar%23445!/:?]
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl.event(CreativeTabRegistryImpl.java:82) ~[architectury-13.0.11-neoforge.jar%23445!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:342) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:177) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$postEvent$13(ModLoader.java:358) ~[loader-4.0.45.jar%23107!/:4.0]
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75) ~[?:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.postEvent(ModLoader.java:358) ~[loader-4.0.45.jar%23107!/:4.0]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.EventHooks.onCreativeModeTabBuildContents(EventHooks.java:1121) ~[neoforge-21.1.259-universal.jar%23424!/:?]
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.api.util.CraftingUtils.forEachCreativeTabItems(CraftingUtils.java:195) ~[minecolonies-1.1.1403-1.21.1.jar%23586!/:1.1.1403-1.21.1]
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.api.compatibility.CompatibilityManager.discoverAllItems(CompatibilityManager.java:649) ~[minecolonies-1.1.1403-1.21.1.jar%23586!/:1.1.1403-1.21.1]
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.api.compatibility.CompatibilityManager.discover(CompatibilityManager.java:187) ~[minecolonies-1.1.1403-1.21.1.jar%23586!/:1.1.1403-1.21.1]
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.core.event.DataPackSyncEventHandler$ServerEvents.discoverCompatLists(DataPackSyncEventHandler.java:61) ~[minecolonies-1.1.1403-1.21.1.jar%23586!/:1.1.1403-1.21.1]
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.core.event.DataPackSyncEventHandler$ServerEvents.load(DataPackSyncEventHandler.java:153) ~[minecolonies-1.1.1403-1.21.1.jar%23586!/:1.1.1403-1.21.1]
+	at TRANSFORMER/minecolonies@1.1.1403-1.21.1/com.minecolonies.core.event.FMLEventHandler.onServerTick(FMLEventHandler.java:28) ~[minecolonies-1.1.1403-1.21.1.jar%23586!/:1.1.1403-1.21.1]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:328) ~[bus-8.0.5.jar%23110!/:?]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.EventHooks.fireServerTickPre(EventHooks.java:1010) ~[neoforge-21.1.259-universal.jar%23424!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.tickServer(MinecraftServer.java:915) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.server.IntegratedServer.tickServer(IntegratedServer.java:110) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.runServer(MinecraftServer.java:707) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.lambda$spin$2(MinecraftServer.java:267) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?]
+[31Okt.2026 15:12:27.757] [Server thread/WARN] [minecolonies/]: Error populating items for Tools & Utilities
+[31Okt.2026 15:15:19.950] [Render thread/ERROR] [net.neoforged.fml.javafmlmod.FMLModContainer/]: Exception caught during firing event: Itemstack 0 minecraft:air does not exist in tab's list
+	Index: 0
+	Listeners:
+		0: dev.architectury.registry.forge.CreativeTabRegistryImpl$$Lambda/0x0000000801570218@296d4343
+java.lang.IllegalArgumentException: Itemstack 0 minecraft:air does not exist in tab's list
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.assertTargetExists(BuildCreativeModeTabContentsEvent.java:190)
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.insertAfter(BuildCreativeModeTabContentsEvent.java:114)
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl$3.acceptAfter(CreativeTabRegistryImpl.java:176)
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.CreativeTabOutput.accept(CreativeTabOutput.java:38)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab$Output.accept(CreativeModeTab.java:439)
+	at TRANSFORMER/litematicatool@2.0.0/com.finndog.LitematicaTool.lambda$init$1(LitematicaTool.java:27)
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl.lambda$modify$3(CreativeTabRegistryImpl.java:164)
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl.event(CreativeTabRegistryImpl.java:82)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:342)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:177)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$postEvent$13(ModLoader.java:358)
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.postEvent(ModLoader.java:358)
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.EventHooks.onCreativeModeTabBuildContents(EventHooks.java:1121)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents$mixinextras$wrapped$46(CreativeModeTab.java:145)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.mixinextras$bridge$buildContents$mixinextras$wrapped$46$47(CreativeModeTab.java)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.wrapMethod$zbj000$modernfix$buildContentsIfChanged(CreativeModeTab.java:532)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents$mixinextras$wrapped$48(CreativeModeTab.java)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.mixinextras$bridge$buildContents$mixinextras$wrapped$48$49(CreativeModeTab.java)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.wrapMethod$dio000$fancytabsections$fts$buildContents(CreativeModeTab.java:2532)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents(CreativeModeTab.java)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.lambda$buildAllTabContents$48(CreativeModeTabs.java:2166)
+	at java.base/java.util.stream.ForEachOps$ForEachOp$OfRef.accept(ForEachOps.java:184)
+	at java.base/java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:179)
+	at java.base/java.util.Iterator.forEachRemaining(Iterator.java:133)
+	at java.base/java.util.Spliterators$IteratorSpliterator.forEachRemaining(Spliterators.java:1939)
+	at java.base/java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:509)
+	at java.base/java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:499)
+	at java.base/java.util.stream.ForEachOps$ForEachOp.evaluateSequential(ForEachOps.java:151)
+	at java.base/java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(ForEachOps.java:174)
+	at java.base/java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:234)
+	at java.base/java.util.stream.ReferencePipeline.forEach(ReferencePipeline.java:596)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.buildAllTabContents(CreativeModeTabs.java:2166)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.tryRebuildTabContents(CreativeModeTabs.java:2177)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen.tryRebuildTabContents(CreativeModeInventoryScreen.java:148)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen.<init>(CreativeModeInventoryScreen.java:124)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.inventory.InventoryScreen.init(InventoryScreen.java:57)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.Screen.init(Screen.java:317)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.setScreen(Minecraft.java:1057)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.handleKeybinds(Minecraft.java:1974)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.tick(Minecraft.java:1837)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1161)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.run(Minecraft.java:807)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.main.Main.main(Main.java:230)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.runTarget(CommonLaunchHandler.java:136)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.clientService(CommonLaunchHandler.java:124)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonClientLaunchHandler.runService(CommonClientLaunchHandler.java:32)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.lambda$launchService$4(CommonLaunchHandler.java:118)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandlerDecorator.launch(LaunchServiceHandlerDecorator.java:30)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:53)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:71)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.Launcher.run(Launcher.java:103)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.Launcher.main(Launcher.java:74)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:26)
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:23)
+	at cpw.mods.bootstraplauncher@2.0.2/cpw.mods.bootstraplauncher.BootstrapLauncher.run(BootstrapLauncher.java:210)
+	at cpw.mods.bootstraplauncher@2.0.2/cpw.mods.bootstraplauncher.BootstrapLauncher.main(BootstrapLauncher.java:69)
+
+[31Okt.2026 15:15:19.952] [Render thread/ERROR] [net.neoforged.fml.ModContainer/LOADING]: Caught exception during event net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent@501a47c4 dispatch for modid architectury
+java.lang.IllegalArgumentException: Itemstack 0 minecraft:air does not exist in tab's list
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.assertTargetExists(BuildCreativeModeTabContentsEvent.java:190) ~[neoforge-21.1.259-universal.jar%23424!/:?]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent.insertAfter(BuildCreativeModeTabContentsEvent.java:114) ~[neoforge-21.1.259-universal.jar%23424!/:?]
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl$3.acceptAfter(CreativeTabRegistryImpl.java:176) ~[architectury-13.0.11-neoforge.jar%23445!/:?]
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.CreativeTabOutput.accept(CreativeTabOutput.java:38) ~[architectury-13.0.11-neoforge.jar%23445!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab$Output.accept(CreativeModeTab.java:439) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/litematicatool@2.0.0/com.finndog.LitematicaTool.lambda$init$1(LitematicaTool.java:27) ~[LitematicaTool-neoforge-2.0.0.jar%23566!/:?]
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl.lambda$modify$3(CreativeTabRegistryImpl.java:164) ~[architectury-13.0.11-neoforge.jar%23445!/:?]
+	at TRANSFORMER/architectury@13.0.11/dev.architectury.registry.forge.CreativeTabRegistryImpl.event(CreativeTabRegistryImpl.java:82) ~[architectury-13.0.11-neoforge.jar%23445!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:342) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:177) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$postEvent$13(ModLoader.java:358) ~[loader-4.0.45.jar%23107!/:4.0]
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75) ~[?:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.postEvent(ModLoader.java:358) ~[loader-4.0.45.jar%23107!/:4.0]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.EventHooks.onCreativeModeTabBuildContents(EventHooks.java:1121) ~[neoforge-21.1.259-universal.jar%23424!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents$mixinextras$wrapped$46(CreativeModeTab.java:145) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.mixinextras$bridge$buildContents$mixinextras$wrapped$46$47(CreativeModeTab.java) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.wrapMethod$zbj000$modernfix$buildContentsIfChanged(CreativeModeTab.java:532) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents$mixinextras$wrapped$48(CreativeModeTab.java) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.mixinextras$bridge$buildContents$mixinextras$wrapped$48$49(CreativeModeTab.java) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.wrapMethod$dio000$fancytabsections$fts$buildContents(CreativeModeTab.java:2532) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents(CreativeModeTab.java) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.lambda$buildAllTabContents$48(CreativeModeTabs.java:2166) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at java.base/java.util.stream.ForEachOps$ForEachOp$OfRef.accept(ForEachOps.java:184) ~[?:?]
+	at java.base/java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:179) ~[?:?]
+	at java.base/java.util.Iterator.forEachRemaining(Iterator.java:133) ~[?:?]
+	at java.base/java.util.Spliterators$IteratorSpliterator.forEachRemaining(Spliterators.java:1939) ~[?:?]
+	at java.base/java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:509) ~[?:?]
+	at java.base/java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:499) ~[?:?]
+	at java.base/java.util.stream.ForEachOps$ForEachOp.evaluateSequential(ForEachOps.java:151) ~[?:?]
+	at java.base/java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(ForEachOps.java:174) ~[?:?]
+	at java.base/java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:234) ~[?:?]
+	at java.base/java.util.stream.ReferencePipeline.forEach(ReferencePipeline.java:596) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.buildAllTabContents(CreativeModeTabs.java:2166) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.tryRebuildTabContents(CreativeModeTabs.java:2177) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen.tryRebuildTabContents(CreativeModeInventoryScreen.java:148) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen.<init>(CreativeModeInventoryScreen.java:124) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.inventory.InventoryScreen.init(InventoryScreen.java:57) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.Screen.init(Screen.java:317) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.setScreen(Minecraft.java:1057) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.handleKeybinds(Minecraft.java:1974) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.tick(Minecraft.java:1837) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1161) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.run(Minecraft.java:807) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.main.Main.main(Main.java:230) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103) ~[?:?]
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580) ~[?:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.runTarget(CommonLaunchHandler.java:136) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.clientService(CommonLaunchHandler.java:124) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonClientLaunchHandler.runService(CommonClientLaunchHandler.java:32) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.lambda$launchService$4(CommonLaunchHandler.java:118) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandlerDecorator.launch(LaunchServiceHandlerDecorator.java:30) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:53) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:71) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.Launcher.run(Launcher.java:103) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.Launcher.main(Launcher.java:74) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:26) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:23) [modlauncher-11.0.5.jar%23112!/:?]
+	at cpw.mods.bootstraplauncher@2.0.2/cpw.mods.bootstraplauncher.BootstrapLauncher.run(BootstrapLauncher.java:210) [bootstraplauncher-2.0.2.jar:?]
+	at cpw.mods.bootstraplauncher@2.0.2/cpw.mods.bootstraplauncher.BootstrapLauncher.main(BootstrapLauncher.java:69) [bootstraplauncher-2.0.2.jar:?]
+[31Okt.2026 15:15:19.955] [Render thread/ERROR] [net.minecraft.client.Minecraft/FATAL]: Unreported exception thrown!
+net.neoforged.fml.ModLoadingException: Loading errors encountered:
+	- Architectury (architectury) encountered an error while dispatching the net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent event
+	  java.lang.IllegalArgumentException: Itemstack 0 minecraft:air does not exist in tab's list
+
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:181) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$postEvent$13(ModLoader.java:358) ~[loader-4.0.45.jar%23107!/:4.0]
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75) ~[?:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.postEvent(ModLoader.java:358) ~[loader-4.0.45.jar%23107!/:4.0]
+	at TRANSFORMER/neoforge@21.1.259/net.neoforged.neoforge.event.EventHooks.onCreativeModeTabBuildContents(EventHooks.java:1121) ~[neoforge-21.1.259-universal.jar%23424!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents$mixinextras$wrapped$46(CreativeModeTab.java:145) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.mixinextras$bridge$buildContents$mixinextras$wrapped$46$47(CreativeModeTab.java) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.wrapMethod$zbj000$modernfix$buildContentsIfChanged(CreativeModeTab.java:532) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents$mixinextras$wrapped$48(CreativeModeTab.java) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.mixinextras$bridge$buildContents$mixinextras$wrapped$48$49(CreativeModeTab.java) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.wrapMethod$dio000$fancytabsections$fts$buildContents(CreativeModeTab.java:2532) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTab.buildContents(CreativeModeTab.java) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.lambda$buildAllTabContents$48(CreativeModeTabs.java:2166) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at java.base/java.util.stream.ForEachOps$ForEachOp$OfRef.accept(ForEachOps.java:184) ~[?:?]
+	at java.base/java.util.stream.ReferencePipeline$2$1.accept(ReferencePipeline.java:179) ~[?:?]
+	at java.base/java.util.Iterator.forEachRemaining(Iterator.java:133) ~[?:?]
+	at java.base/java.util.Spliterators$IteratorSpliterator.forEachRemaining(Spliterators.java:1939) ~[?:?]
+	at java.base/java.util.stream.AbstractPipeline.copyInto(AbstractPipeline.java:509) ~[?:?]
+	at java.base/java.util.stream.AbstractPipeline.wrapAndCopyInto(AbstractPipeline.java:499) ~[?:?]
+	at java.base/java.util.stream.ForEachOps$ForEachOp.evaluateSequential(ForEachOps.java:151) ~[?:?]
+	at java.base/java.util.stream.ForEachOps$ForEachOp$OfRef.evaluateSequential(ForEachOps.java:174) ~[?:?]
+	at java.base/java.util.stream.AbstractPipeline.evaluate(AbstractPipeline.java:234) ~[?:?]
+	at java.base/java.util.stream.ReferencePipeline.forEach(ReferencePipeline.java:596) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.buildAllTabContents(CreativeModeTabs.java:2166) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.CreativeModeTabs.tryRebuildTabContents(CreativeModeTabs.java:2177) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen.tryRebuildTabContents(CreativeModeInventoryScreen.java:148) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen.<init>(CreativeModeInventoryScreen.java:124) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.inventory.InventoryScreen.init(InventoryScreen.java:57) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.Screen.init(Screen.java:317) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.setScreen(Minecraft.java:1057) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.handleKeybinds(Minecraft.java:1974) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.tick(Minecraft.java:1837) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1161) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.run(Minecraft.java:807) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.main.Main.main(Main.java:230) ~[client-1.21.1-20240808.144430-srg.jar%23423!/:?]
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103) ~[?:?]
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580) ~[?:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.runTarget(CommonLaunchHandler.java:136) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.clientService(CommonLaunchHandler.java:124) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonClientLaunchHandler.runService(CommonClientLaunchHandler.java:32) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.loading.targets.CommonLaunchHandler.lambda$launchService$4(CommonLaunchHandler.java:118) ~[loader-4.0.45.jar%23107!/:4.0]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandlerDecorator.launch(LaunchServiceHandlerDecorator.java:30) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:53) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchServiceHandler.launch(LaunchServiceHandler.java:71) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.Launcher.run(Launcher.java:103) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.Launcher.main(Launcher.java:74) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:26) [modlauncher-11.0.5.jar%23112!/:?]
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.BootstrapLaunchConsumer.accept(BootstrapLaunchConsumer.java:23) [modlauncher-11.0.5.jar%23112!/:?]
+	at cpw.mods.bootstraplauncher@2.0.2/cpw.mods.bootstraplauncher.BootstrapLauncher.run(BootstrapLauncher.java:210) [bootstraplauncher-2.0.2.jar:?]
+	at cpw.mods.bootstraplauncher@2.0.2/cpw.mods.bootstraplauncher.BootstrapLauncher.main(BootstrapLauncher.java:69) [bootstraplauncher-2.0.2.jar:?]
+[31Okt.2026 15:15:20.960] [Render thread/FATAL] [net.neoforged.neoforge.common.NeoForgeMod/]: Preparing crash report with UUID 8c6630ff-78e7-4ef9-af49-8fd48b8489a6
