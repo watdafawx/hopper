@@ -175,6 +175,15 @@ fn provided_ids(on: &[(PathBuf, Arc<JarInfo>)], v: View) -> HashSet<String> {
 /// (required, optional, incompatible), as in [`JarInfo`].
 type TomlDeps = (Vec<(String, String)>, Vec<(String, String)>, Vec<(String, String, String)>);
 
+/// A mods.toml `versionRange` as the loader reads it. FML parses it as a
+/// Maven range, where a version without brackets ("1.20.1-47.4.12") is only
+/// a recommendation that every version satisfies, so it becomes "*". Particle
+/// Effects 1.6.0 asks for Forge that way and loads on 47.4.10 (Cozy Zen).
+fn maven_range(r: &str) -> String {
+    let r = r.trim();
+    if r.is_empty() || r.starts_with(['[', '(']) { r.to_string() } else { "*".to_string() }
+}
+
 fn toml_deps(t: &Toml) -> TomlDeps {
     let mut out = TomlDeps::default();
     for deps in t.dependencies.values() {
@@ -189,11 +198,11 @@ fn toml_deps(t: &Toml) -> TomlDeps {
                 || d.mandatory == Some(true)
                 || (d.kind.is_empty() && d.mandatory.is_none());
             if required {
-                out.0.push((id, d.version_range.clone()));
+                out.0.push((id, maven_range(&d.version_range)));
             } else if d.kind.eq_ignore_ascii_case("incompatible") {
-                out.2.push((id, d.version_range.clone(), d.reason.clone()));
+                out.2.push((id, maven_range(&d.version_range), d.reason.clone()));
             } else if d.kind.eq_ignore_ascii_case("optional") || d.mandatory == Some(false) {
-                out.1.push((id, d.version_range.clone()));
+                out.1.push((id, maven_range(&d.version_range)));
             }
         }
     }
@@ -1266,6 +1275,71 @@ side=\"BOTH\"
             ],
         );
         assert_eq!(missing(&dir), vec![]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bare_maven_version_is_only_a_recommendation() {
+        // Particle Effects 1.6.0 (Cozy Zen 1.4, Forge 47.4.10): its
+        // mods.toml as shipped. FML reads "1.20.1-47.4.12" without brackets
+        // as a recommended version that any Forge satisfies, and loads it.
+        let pe = r#"license = "CC-BY-ND 4.0"
+modLoader="javafml"
+loaderVersion="[1,)"
+
+[[mods]]
+modId = "particle_effects"
+version = "1.6.0+1.20.1+forge"
+displayName = "Particle Effects"
+side="CLIENT"
+
+[[dependencies.particle_effects]]
+modId = "forge"
+mandatory = true
+versionRange = "1.20.1-47.4.12"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.particle_effects]]
+modId = "minecraft"
+mandatory = true
+versionRange = "1.20.1"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.particle_effects]]
+modId = "oldpotions"
+mandatory = false
+versionRange = "*"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.particle_effects]]
+modId = "inventory_particles"
+mandatory = false
+versionRange = "[2.0.1,)"
+ordering = "NONE"
+side = "BOTH"
+"#;
+        let dir = std::env::temp_dir().join(format!("hopper-deps-bare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        jar(&dir.join("ParticleEffects-1.6.0+1.20.1+forge.jar"), &[("META-INF/mods.toml", pe)]);
+        assert_eq!(blockers(&dir, "forge-47.4.10", "1.20.1"), vec![]);
+        assert_eq!(missing(&dir), vec![]);
+        // A real range is still held to: an optional mod below it stops loading.
+        let ip = "modLoader=\"javafml\"\n[[mods]]\nmodId=\"inventory_particles\"\nversion=\"1.9.0\"\n";
+        jar(&dir.join("ip.jar"), &[("META-INF/mods.toml", ip)]);
+        let b = blockers(&dir, "forge-47.4.10", "1.20.1");
+        assert_eq!(b.len(), 1);
+        assert!(matches!(&b[0].kind, BlockerKind::WrongVersion { needs, .. } if needs == "inventory_particles"));
+        // And a bracketed loader range too.
+        let strict = pe.replace("\"1.20.1-47.4.12\"", "\"[47.4.12,)\"");
+        std::fs::remove_file(dir.join("ip.jar")).unwrap();
+        std::fs::remove_file(dir.join("ParticleEffects-1.6.0+1.20.1+forge.jar")).unwrap();
+        jar(&dir.join("pe-strict.jar"), &[("META-INF/mods.toml", &strict)]);
+        let b = blockers(&dir, "forge-47.4.10", "1.20.1");
+        assert!(matches!(&b[..], [Blocker { kind: BlockerKind::Loader { id, .. }, .. }] if id == "forge"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
