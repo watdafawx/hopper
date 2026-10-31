@@ -11,7 +11,7 @@ use crate::args_editor::{self, ArgsEditor};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::java::{JavaInstall, PRESETS, recommended_major};
@@ -971,8 +971,8 @@ impl Render for JavaGet {
             .icon(IconName::Download)
             .tooltip(self.tooltip.clone());
         let b = match (&running, progress) {
-            (Some(_), Some(p)) => b.loading(true).disabled(true).label(format!("Downloading {}%", (p * 100.0).floor() as u32)),
-            (Some(_), None) => b.loading(true).disabled(true).label("Downloading…"),
+            (Some(_), Some(p)) => b.loading(true).label(format!("Downloading {}%", (p * 100.0).floor() as u32)),
+            (Some(_), None) => b.loading(true).label("Downloading…"),
             (None, _) => b.label(self.label.clone()).on_click(cx.listener(|this, _, _, cx| this.start(cx))),
         };
         widgets::progress_fill(b, progress, cx)
