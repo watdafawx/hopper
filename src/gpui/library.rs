@@ -129,8 +129,6 @@ impl InstTab {
 }
 
 /// The bar's tabs, left to right; `ResourcePacks` stands for "Packs".
-/// Peers (with server tools on) and Settings follow them. Server isn't a
-/// bar tab: the header's server button opens it (also Ctrl+K and MCP).
 const BAR: [InstTab; 7] = [
     InstTab::Overview,
     InstTab::Mods,
@@ -140,6 +138,8 @@ const BAR: [InstTab; 7] = [
     InstTab::Logs,
     InstTab::Performance,
 ];
+// Settings, Server and Peers aren't bar tabs: the header's Settings and
+// server buttons open the first two, the ⋯ menu Peers (also Ctrl+K and MCP).
 
 /// Where the header's server menu goes on the Server tab.
 #[derive(Clone, Copy)]
@@ -246,8 +246,6 @@ pub struct LibraryView {
     peers: Entity<PeersView>,
     search: Entity<InputState>,
     query: String,
-    /// The shown instance's snapshot count, read at most every few seconds.
-    snap_count: std::cell::RefCell<Option<(PathBuf, std::time::Instant, usize)>>,
     /// The instance list and the instance's page (made on first draw, see
     /// `part.rs`): a redraw from the docked peek (a GIF in its
     /// description) or from the logo layer reuses them, mod table and all.
@@ -429,7 +427,6 @@ impl LibraryView {
             peers,
             search,
             query: String::new(),
-            snap_count: Default::default(),
             parts: None,
             addons_drawn: Default::default(),
             logo_layer,
@@ -1816,6 +1813,15 @@ impl LibraryView {
                                         .on_click(move |_, _, cx| cx.open_url(&url)),
                                 )
                             })
+                            // Named, here beside Folder, so it's easy to find.
+                            .child(
+                                Button::new("inst-settings")
+                                    .outline()
+                                    .selected(self.tab == InstTab::Settings)
+                                    .icon(IconName::SlidersHorizontal)
+                                    .label("Settings")
+                                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Settings, cx))),
+                            )
                             .child(
                                 Button::new("more")
                                     .outline()
@@ -2199,44 +2205,31 @@ impl LibraryView {
         hero.h(rems(if taller { HERO + 1.5 } else { HERO })).into_any_element()
     }
 
-    /// The tab bar: content tabs, then Peers and Settings, with an
-    /// underline that slides from the last tab to the picked one, and a
-    /// Backups button at the right end. Tabs that don't fit the window go
-    /// in a "More" menu, except Settings, which always shows. Tabs report
-    /// where they were laid out; the underline is placed from that (one
-    /// frame late the very first time).
+    /// The tab bar: content tabs with an underline that slides from the
+    /// last tab to the picked one. Tabs that don't fit the window go in a
+    /// "More" menu. Tabs
+    /// report where they were laid out; the underline is placed from that
+    /// (one frame late the very first time).
     fn tabs(&self, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let slot = |tab: InstTab| if tab.is_pack() { InstTab::ResourcePacks } else { tab };
-        // Peers is a server tool: hidden with them off (unless it's open).
-        let peers = self.store.read(cx).server_tools() || self.tab == InstTab::Peers;
-        let bar: Vec<InstTab> = BAR.iter().copied().chain(peers.then_some(InstTab::Peers)).collect();
         // Which bar tabs fit: a rough width per tab from its label, against
-        // the room the window leaves beside the instance list, Settings and
-        // the Backups button.
+        // the room the window leaves beside the instance list.
         let settings = self.store.read(cx).settings();
         let side = if settings.sidebar_collapsed { RAIL } else { settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX) };
+        let room = self.view_w - self.rem * (side + 3.5);
         let want = |t: InstTab| px(40. + Self::bar_label(t).len() as f32 * 6.8 + if t == InstTab::Mods { 30. } else { 0. });
-        let room = self.view_w - self.rem * (side + 3.5) - px(24.) - want(InstTab::Settings);
-        let fit = |room: Pixels| {
-            let mut used = px(0.);
-            let (mut shown, mut folded) = (Vec::new(), Vec::new());
-            for (i, t) in bar.iter().enumerate() {
-                let more = if i + 1 < bar.len() { px(84.) } else { px(0.) };
-                if folded.is_empty() && used + want(*t) + more <= room {
-                    used += want(*t);
-                    shown.push(*t);
-                } else {
-                    folded.push(*t);
-                }
+        let mut used = px(0.);
+        let mut shown: Vec<InstTab> = Vec::new();
+        let mut folded: Vec<InstTab> = Vec::new();
+        for (i, t) in BAR.iter().enumerate() {
+            let more = if i + 1 < BAR.len() { px(84.) } else { px(0.) };
+            if folded.is_empty() && used + want(*t) + more <= room {
+                used += want(*t);
+                shown.push(*t);
+            } else {
+                folded.push(*t);
             }
-            (shown, folded)
-        };
-        // Backups shows its name while every tab fits, else just its icon.
-        let (mut shown, mut folded) = fit(room - px(120.));
-        let labeled = folded.is_empty();
-        if !labeled {
-            (shown, folded) = fit(room - px(34.));
         }
         // The open tab always shows.
         if let Some(i) = folded.iter().position(|t| *t == slot(self.tab)) {
@@ -2246,8 +2239,6 @@ impl LibraryView {
             }
             shown.push(t);
         }
-        // Settings is what people look for here, so it never folds.
-        shown.push(InstTab::Settings);
         let pos = |tab: InstTab| shown.iter().position(|t| *t == slot(tab));
         let (to, from) = (pos(self.tab), pos(self.tab_from));
         let items = shown.iter().enumerate().map(|(i, t)| {
@@ -2340,70 +2331,6 @@ impl LibraryView {
                     })
                 })
         });
-        // Backups: snapshots to undo an update, and what was removed. A
-        // dialog, not a page, so a button rather than a tab.
-        let backups = {
-            let n = self.snapshot_count(&inst.root);
-            let (store, root) = (self.store.clone(), inst.root.clone());
-            // Gold when old backups wait for Clean up (or it's over its limit).
-            let over = hopper::retention::needs_cleanup(&inst.root);
-            let muted = if over { theme.warning } else { theme.muted_foreground };
-            div()
-                .id("inst-backups")
-                .relative()
-                .flex_none()
-                .h(rems(2.))
-                .flex()
-                .gap_2()
-                .items_center()
-                .justify_center()
-                .map(|d| if labeled { d.px_2p5() } else { d.w(rems(2.)) })
-                .rounded(theme.radius)
-                .clickable(cx)
-                .hover(|s| widgets::row_hover(s, cx))
-                .child(Icon::new(IconName::Archive).small().text_color(muted))
-                .when(labeled, |d| {
-                    d.child(div().text_sm().font_weight(FontWeight::MEDIUM).text_color(muted).child("Backups"))
-                        .when(n > 0, |d| {
-                            d.child(
-                                div()
-                                    .px_1p5()
-                                    .rounded_full()
-                                    .bg(if over { theme.warning.opacity(0.15) } else { theme.secondary })
-                                    .text_xs()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(muted)
-                                    .child(n.to_string()),
-                            )
-                        })
-                })
-                .when(n > 0 && !labeled, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(-2.))
-                            .right(px(-4.))
-                            .px_1()
-                            .rounded_full()
-                            .bg(theme.secondary)
-                            .border_1()
-                            .border_color(if over { theme.warning.opacity(0.4) } else { theme.border })
-                            .text_size(rems(0.625))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(muted)
-                            .child(n.to_string()),
-                    )
-                })
-                .tooltip(move |w, cx| {
-                    let t = if over {
-                        "Snapshots and backups: old backups to clean up"
-                    } else {
-                        "Snapshots and backups: undo an update or a removal"
-                    };
-                    gpui_kit::component::tooltip::Tooltip::new(t).build(w, cx)
-                })
-                .on_click(move |_, window, cx| crate::backups_view::open(store.clone(), root.clone(), window, cx))
-        };
         div()
             .flex_none()
             .px_6()
@@ -2421,25 +2348,8 @@ impl LibraryView {
                             .child(div().relative().child(strip).children(underline)),
                     )
                     .children(more)
-                    .child(div().w(px(1.)).h(rems(1.25)).bg(theme.border))
-                    .child(backups),
             )
             .into_any_element()
-    }
-
-    /// `root`'s snapshot count, cached for a few seconds (the tab row draws
-    /// often).
-    fn snapshot_count(&self, root: &Path) -> usize {
-        let mut c = self.snap_count.borrow_mut();
-        if let Some((r, t, n)) = c.as_ref()
-            && r == root
-            && t.elapsed() < std::time::Duration::from_secs(5)
-        {
-            return *n;
-        }
-        let n = hopper::snapshots::count(root);
-        *c = Some((root.to_path_buf(), std::time::Instant::now(), n));
-        n
     }
 
     /// A bar tab's name: "Packs" for the pack tabs.
@@ -2936,6 +2846,9 @@ fn instance_menu(
     let s = store.read(cx);
     let Some(inst) = s.instance(root) else { return menu };
     let playing = s.running(root).is_some();
+    let tools = s.server_tools();
+    // Snapshots and backups, counted when the menu opens.
+    let snaps = hopper::snapshots::count(root);
     // Another launcher's instance: deleting it here would break it there.
     let launcher = hopper::launchers::Kind::from_key(&inst.source).map(|k| k.name());
     let pack = inst.pack.as_ref().map(|p| (p.project_id, s.pack_update(inst).cloned()));
@@ -2967,7 +2880,7 @@ fn instance_menu(
                 .on_click(move |_, _, _| store::open_path(&r2)),
         )
     })
-    // The header has the Settings tab right below it.
+    // The header has its own Settings button.
     .when(!header, |m| {
         let (v, r) = vr();
         m.item(PopupMenuItem::new("Settings").icon(IconName::SlidersHorizontal).on_click(move |_, _, cx| {
@@ -3021,6 +2934,16 @@ fn instance_menu(
                     this.set_tab(InstTab::Server, cx);
                 })
             })
+    })
+    // Peers is a server tool: only with them on.
+    .when(tools, |m| {
+        let (v, r) = vr();
+        m.item(PopupMenuItem::new("Peers").icon(IconName::Users).on_click(move |_, _, cx| {
+            v.update(cx, |this, cx| {
+                this.select(r.clone(), cx);
+                this.set_tab(InstTab::Peers, cx);
+            })
+        }))
     })
     .when_some(server_pack.clone(), |m, (pid, fid, name)| {
         let s = st();
@@ -3091,7 +3014,7 @@ fn instance_menu(
     })
     .item({
         let (s, r) = (st(), r.clone());
-        PopupMenuItem::new("Backups…")
+        PopupMenuItem::new(if snaps > 0 { format!("Backups ({snaps})…") } else { "Backups…".to_string() })
             .icon(IconName::Archive)
             .on_click(move |_, window, cx| crate::backups_view::open(s.clone(), r.clone(), window, cx))
     })
