@@ -46,6 +46,7 @@ pub mod launch_native;
 pub mod links;
 pub mod logs;
 pub mod mclogs;
+pub mod mcoptions;
 pub mod mcp;
 pub mod mcprofile;
 pub mod model;

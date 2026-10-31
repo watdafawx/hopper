@@ -1975,11 +1975,13 @@ impl Store {
         };
         let dir = PathBuf::from(&self.settings.launcher_dir);
         let defaults = self.launch_defaults();
+        let mc = full.settings.use_my_options.then(|| self.settings.mc_options.clone());
         if self.settings.launch_native {
             if !hopper::msauth::has_saved_login() {
                 return Err("Sign in with Microsoft in Settings first.".into());
             }
             self.spawn_launch(root.to_path_buf(), format!("Starting {}", full.name), move |job| {
+                apply_mc_options(&mut full, mc.as_ref(), job);
                 job.detail("Signing in");
                 let session = hopper::msauth::session_from_saved()?;
                 let player = hopper::launch_native::Player::from_session(&session);
@@ -1991,6 +1993,7 @@ impl Store {
             });
         } else {
             self.spawn_launch(root.to_path_buf(), format!("Launching {}", full.name), move |job| {
+                apply_mc_options(&mut full, mc.as_ref(), job);
                 hopper::launch::launch(&full, &dir, &defaults, job)?;
                 full.last_played = Some(hopper::time::now_iso());
                 full.save()?;
@@ -3662,6 +3665,23 @@ fn sync_cf_pack(inst: &mut hopper::instances::Instance, job: &Job) -> bool {
 }
 
 /// What Play would install for `inst`'s loader, done ahead of time.
+/// Writes the player's Minecraft settings (Settings > Minecraft) into the
+/// instance's options.txt before it starts. A failure only goes to the
+/// log: the game should still start with the pack's own options.
+fn apply_mc_options(inst: &mut hopper::instances::Instance, opts: Option<&hopper::mcoptions::McOptions>, job: &Job) {
+    let Some(opts) = opts else { return };
+    match hopper::mcoptions::apply(&inst.root, &inst.game_version, &inst.loader, opts, &mut inst.applied_options) {
+        Ok(r) if r.written > 0 => {
+            job.detail(match r.written {
+                1 => "Set 1 of your Minecraft settings".to_string(),
+                n => format!("Set {n} of your Minecraft settings"),
+            });
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("Minecraft settings for {}: {e:#}", inst.name),
+    }
+}
+
 fn prepare_loader(
     inst: &hopper::instances::Instance,
     dir: &Path,
