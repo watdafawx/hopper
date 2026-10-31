@@ -8,7 +8,7 @@ use crate::widgets::Clickable as _;
 use crate::app::{AppView, Page};
 use crate::store::Store;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -737,7 +737,7 @@ impl Render for Palette {
                                         .child(c),
                                 )
                             })
-                            .child(div().flex_1().child(Input::new(&self.input).appearance(false).cleanable(false))),
+                            .child(div().flex_1().child(crate::widgets::search_input(&self.input).appearance(false).cleanable(false))),
                     )
                     .child(
                         div()

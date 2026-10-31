@@ -21,6 +21,7 @@
   import { say } from './lib/toast.svelte.js';
   import { followJob } from './lib/jobs.js';
   import { SITE, TYPES, count, ago, preset, store, browseHash, andList } from './lib/browse.js';
+  import { rightClear } from './lib/rightclear.js';
   import BrowsePack from './BrowsePack.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
   import NewServer from './NewServer.svelte';
@@ -397,7 +398,7 @@
     </aside>
 
     <div class="results" bind:this={listEl}>
-      <div class="input"><Search size={14} /><input bind:value={query} oninput={soon} onkeydown={(e) => e.key === 'Enter' && (clearTimeout(timer), run(false))} placeholder={both ? `Search ${T.label.toLowerCase()} on CurseForge and Modrinth` : `Search ${T.label.toLowerCase()} on ${SITE[source]}`} />
+      <div class="input"><Search size={14} /><input use:rightClear bind:value={query} oninput={soon} onkeydown={(e) => e.key === 'Enter' && (clearTimeout(timer), run(false))} placeholder={both ? `Search ${T.label.toLowerCase()} on CurseForge and Modrinth` : `Search ${T.label.toLowerCase()} on ${SITE[source]}`} />
         {#if query}<button class="clr" title="Clear" onclick={() => { query = ''; run(false); }}><X size={13} /></button>{/if}</div>
       {#if intoServer && !into}
         <div class="small muted row note-bar"><Server size={13} />Pick a server under Install into to add {T.label.toLowerCase()} to it; its Minecraft and loader set the filters.</div>

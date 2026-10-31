@@ -7,7 +7,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -1283,7 +1283,7 @@ impl UpdatePreview {
                     .w(rems(13.))
                     // Enter in the box would take the dialog's Update.
                     .on_action(|_: &gpui_kit::component::dialog::Confirm, _, _| {})
-                    .child(Input::new(&self.search).small().cleanable(true)),
+                    .child(widgets::search_input(&self.search).small().cleanable(true)),
             )
     }
 

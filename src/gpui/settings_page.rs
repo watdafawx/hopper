@@ -2725,7 +2725,7 @@ impl SettingsPage {
                     .gap_3()
                     .child(div().px_1().text_lg().font_semibold().child("Settings"))
                     .child(
-                        Input::new(&self.search)
+                        widgets::search_input(&self.search)
                             .small()
                             .prefix(Icon::new(IconName::Search).small())
                             .cleanable(true),

@@ -17,6 +17,7 @@
   import { download } from './lib/transfers.svelte.js';
   import { jump } from './lib/files.svelte.js';
   import { configOwners, ownerOf, siblingsOf } from './lib/files-config.js';
+  import { rightClear } from './lib/rightclear.js';
 
   let { server, path, close } = $props();
   let sharing = $state(false);
@@ -342,7 +343,7 @@
     {#if problem}<span class="chip crashed" title={problem}><AlertTriangle size={12} />{problem.length > 60 ? `${problem.slice(0, 60)}…` : problem}</span>{/if}
     <span class="sp"></span>
     {#if view === 'settings' && !versions}
-      <label class="input find"><Search size={13} /><input placeholder="Search settings" bind:value={query} />{#if query}<button class="clr" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</label>
+      <label class="input find"><Search size={13} /><input use:rightClear placeholder="Search settings" bind:value={query} />{#if query}<button class="clr" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</label>
     {/if}
     <button class="btn sm" class:on={versions} title="Earlier versions" onclick={history}><History size={14} />History</button>
     {#if /^(logs\/[^/]+\.log(\.gz)?|crash-reports\/[^/]+\.txt)$/i.test(path)}<button class="btn sm" title="Share on mclo.gs" onclick={() => (sharing = true)}><Share2 size={14} />Share</button>{/if}

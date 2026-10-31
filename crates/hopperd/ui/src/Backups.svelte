@@ -11,6 +11,7 @@
   import { download } from './lib/transfers.svelte.js';
   import { startPick, clickSwallowed, tickLabel } from './lib/dragpick.svelte.js';
   import { whenLabel, fullDate, plural } from './lib/worlds.js';
+  import { rightClear } from './lib/rightclear.js';
   import BackupRestore from './BackupRestore.svelte';
 
   let { server, openSchedule } = $props();
@@ -355,7 +356,7 @@
                     <div class="tiny muted">Reading its files…</div>
                   {:else}
                     <div class="row">
-                      <div class="input sm grow"><input placeholder="Filter {plural(entries.length, 'file')}" bind:value={filter} /></div>
+                      <div class="input sm grow"><input use:rightClear placeholder="Filter {plural(entries.length, 'file')}" bind:value={filter} /></div>
                       {#if pick.size}<button class="btn sm ghost" onclick={() => (pick = new Set())}>Clear</button>{/if}
                       <button class="btn sm" disabled={!pick.size || alive || !!busy} title={alive ? 'Stop the server first' : pick.size ? '' : 'Tick files to restore only those'} onclick={() => restore(b, [...pick])}><Undo2 size={13} />Restore {pick.size || ''}</button>
                     </div>

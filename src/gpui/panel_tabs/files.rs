@@ -796,7 +796,7 @@ impl FilesTab {
                     })),
             )
             .child(crumbs)
-            .child(div().w_56().flex_none().child(Input::new(&self.filter).small().cleanable(true)))
+            .child(div().w_56().flex_none().child(widgets::search_input(&self.filter).small().cleanable(true)))
             .child(
                 Button::new("files-search")
                     .ghost()

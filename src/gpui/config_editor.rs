@@ -586,7 +586,7 @@ impl Render for ConfigEditor {
                     .gap_3()
                     .child(file_pick)
                     .child(div().flex_1())
-                    .when(!self.text_view && readable, |d| d.child(div().w(rems(16.)).child(Input::new(&self.search).small().cleanable(true)))),
+                    .when(!self.text_view && readable, |d| d.child(div().w(rems(16.)).child(widgets::search_input(&self.search).small().cleanable(true)))),
             )
             .child(tabs)
             .when(running, |d| {

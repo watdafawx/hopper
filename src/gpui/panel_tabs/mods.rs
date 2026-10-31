@@ -1265,7 +1265,7 @@ impl ModsTab {
             .child(div().flex_1())
             .child(
                 div().w_56().child(
-                    Input::new(&self.search).small().prefix(Icon::new(IconName::Search).small()).cleanable(true),
+                    widgets::search_input(&self.search).small().prefix(Icon::new(IconName::Search).small()).cleanable(true),
                 ),
             )
             .child(
@@ -1552,7 +1552,7 @@ impl ModsTab {
                     )
                     .child(
                         div().flex_1().child(
-                            Input::new(&self.add_query)
+                            widgets::search_input(&self.add_query)
                                 .small()
                                 .prefix(Icon::new(IconName::Search).small())
                                 .cleanable(true),

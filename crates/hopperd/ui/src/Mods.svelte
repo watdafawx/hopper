@@ -29,6 +29,7 @@
     setOn, removeMods, problems, setLocked, resetConfig, switchSource, setVersionLock, configFiles, versionLocked, wordsMatch, ago, dateOf,
   } from './lib/modops.js';
   import { pick, startPick, swept, sweeping, clickSwallowed, tickLabel, countLabel } from './lib/dragpick.svelte.js';
+  import { rightClear } from './lib/rightclear.js';
 
   let { server } = $props();
   // The live feed hands over a new `server` object every second; effects
@@ -568,7 +569,7 @@
     <ModBackups {server} onChanged={() => { load(); loadBackupCount(); checkUpdates(false); }} />
   {:else}
     <div class="row wrap toolbar">
-      <div class="input find"><Search size={13} /><input placeholder="Search" bind:value={filter} />{#if filter}<button class="clr" title="Clear" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
+      <div class="input find"><Search size={13} /><input use:rightClear placeholder="Search" bind:value={filter} />{#if filter}<button class="clr" title="Clear" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
       <a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a>
       <ModProfiles {base} {alive} onChanged={() => changed(false)} />
       <div class="utabs" role="tablist">

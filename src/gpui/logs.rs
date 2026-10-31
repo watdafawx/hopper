@@ -10,7 +10,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
@@ -1190,7 +1190,7 @@ impl LogsView {
             .items_center()
             .gap_2()
             .children(crash_pick)
-            .child(div().w(rems(16.)).child(Input::new(&self.query).small().cleanable(true)))
+            .child(div().w(rems(16.)).child(widgets::search_input(&self.query).small().cleanable(true)))
             .child(
                 Checkbox::new("errors-only")
                     .label("Errors and warnings only")

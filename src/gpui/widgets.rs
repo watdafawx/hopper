@@ -2022,3 +2022,33 @@ mod tests {
         assert_eq!(job_label("Comparing files", None), "Comparing files");
     }
 }
+
+/// A search or filter field that empties when right-clicked, like the search
+/// boxes in Minecraft's creative inventory and JEI. Players expect it there,
+/// so search fields get it instead of the cut / copy / paste menu.
+pub fn search_input(
+    state: &Entity<gpui_kit::component::input::InputState>,
+) -> gpui_kit::component::input::Input {
+    let st = state.clone();
+    // The custom menu runs on right-click; it clears the field and returns no
+    // items, and an empty menu isn't shown.
+    gpui_kit::component::input::Input::new(state).context_menu(move |menu, window, cx| {
+        clear_search(&st, window, cx);
+        menu
+    })
+}
+
+/// Empties a search field the way deleting the text by hand would: the
+/// field's change event fires, so whatever filters on it refreshes, and
+/// Ctrl+Z brings the text back.
+pub fn clear_search(
+    state: &Entity<gpui_kit::component::input::InputState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    state.update(cx, |s, cx| {
+        if !s.value().is_empty() {
+            s.replace_all("", window, cx);
+        }
+    });
+}

@@ -1151,7 +1151,7 @@ impl LibraryView {
                             ),
                     )
                     .child(
-                        Input::new(&self.search)
+                        widgets::search_input(&self.search)
                             .small()
                             .prefix(Icon::new(IconName::Search).small())
                             .cleanable(true),
