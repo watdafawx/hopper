@@ -23,6 +23,7 @@ mod drag_pick;
 mod fetch_window;
 mod crash_help;
 mod crash_view;
+mod hero;
 mod host_dialog;
 mod hopper_versions;
 mod inst_settings;

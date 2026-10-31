@@ -624,6 +624,97 @@ pub fn strip_formatting(s: &str) -> String {
     out
 }
 
+/// A run of Minecraft text in one style (see [`mc_spans`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McSpan {
+    pub text: String,
+    /// The `§` color as 0xRRGGBB; None: the default color.
+    pub color: Option<u32>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+}
+
+/// The sixteen `§0`–`§f` colors, as Minecraft draws them.
+const MC_COLORS: [u32; 16] = [
+    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xFFAA00, 0xAAAAAA,
+    0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+];
+
+/// Undoes Java properties escapes (`§`, `\n`, `\:`…): server.properties
+/// keeps the MOTD's `§` and line break written that way.
+pub fn unescape_property(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => {}
+            Some('u') => {
+                let hex: String = it.clone().take(4).collect();
+                match u32::from_str_radix(&hex, 16).ok().filter(|_| hex.len() == 4).and_then(char::from_u32) {
+                    Some(ch) => {
+                        out.push(ch);
+                        for _ in 0..4 {
+                            it.next();
+                        }
+                    }
+                    None => out.push_str("\\u"),
+                }
+            }
+            Some(o) => out.push(o),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Minecraft formatted text (`§6Gold §lbold`) split into styled runs, the
+/// way the multiplayer list draws a MOTD. A color code resets the styles,
+/// `§r` resets everything; unknown codes are dropped. Line breaks stay in
+/// the text.
+pub fn mc_spans(s: &str) -> Vec<McSpan> {
+    let mut out: Vec<McSpan> = Vec::new();
+    let mut cur = McSpan { text: String::new(), color: None, bold: false, italic: false, underline: false, strike: false };
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '§' {
+            cur.text.push(c);
+            continue;
+        }
+        let Some(code) = it.next() else { break };
+        let mut next = McSpan { text: String::new(), ..cur.clone() };
+        match code.to_ascii_lowercase() {
+            d @ ('0'..='9' | 'a'..='f') => {
+                let i = d.to_digit(16).unwrap_or(15) as usize;
+                next = McSpan { text: String::new(), color: Some(MC_COLORS[i]), bold: false, italic: false, underline: false, strike: false };
+            }
+            'l' => next.bold = true,
+            'o' => next.italic = true,
+            'n' => next.underline = true,
+            'm' => next.strike = true,
+            'r' => next = McSpan { text: String::new(), color: None, bold: false, italic: false, underline: false, strike: false },
+            // §k (obfuscated) and anything else: no change.
+            _ => continue,
+        }
+        if !cur.text.is_empty() {
+            out.push(std::mem::replace(&mut cur, next));
+        } else {
+            cur = next;
+        }
+    }
+    if !cur.text.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 fn mcmeta_description(v: &serde_json::Value) -> String {
     fn text(v: &serde_json::Value) -> String {
         match v {
@@ -849,6 +940,25 @@ pub fn human_bytes(b: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn motd_escapes_and_colors() {
+        let raw = r"§6Cozy §l§aTest§r plain\nline two \: ok";
+        let s = unescape_property(raw);
+        assert_eq!(s, "§6Cozy §l§aTest§r plain\nline two : ok");
+        let spans = mc_spans(&s);
+        assert_eq!(spans.len(), 3);
+        assert_eq!((spans[0].text.as_str(), spans[0].color), ("Cozy ", Some(0xFFAA00)));
+        // A color after §l resets bold, as in Minecraft.
+        assert_eq!((spans[1].text.as_str(), spans[1].color, spans[1].bold), ("Test", Some(0x55FF55), false));
+        assert_eq!((spans[2].text.as_str(), spans[2].color), (" plain\nline two : ok", None));
+        let b = mc_spans("§aGo §lfast");
+        assert_eq!((b[1].text.as_str(), b[1].color, b[1].bold), ("fast", Some(0x55FF55), true));
+        // Unknown codes and a trailing § vanish; bad \u stays as typed.
+        assert_eq!(mc_spans("a§zb§")[0].text, "ab");
+        assert_eq!(unescape_property(r"\uZZ"), r"\uZZ");
+        assert!(mc_spans("").is_empty());
+    }
 
     #[test]
     fn sizes_add_up_and_read_well() {

@@ -768,6 +768,24 @@ impl Client {
         Ok(())
     }
 
+    /// Saves the server's `server-icon.png` to `local` (any role may read
+    /// it, unlike the file routes).
+    pub fn icon(&self, id: &str, local: &Path) -> anyhow::Result<()> {
+        let url = self.url(&Self::server_path(id, "/icon"));
+        let mut resp = self.send_via(false, |a| a.get(&url).header("Authorization", &self.auth()).call())?;
+        if !resp.status().is_success() {
+            bail!("no icon ({})", resp.status());
+        }
+        let png = resp.body_mut().with_config().limit(4 << 20).read_to_vec()?;
+        if let Some(p) = local.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        let tmp = local.with_extension("hopper-download");
+        std::fs::write(&tmp, png)?;
+        std::fs::rename(&tmp, local)?;
+        Ok(())
+    }
+
     /// Moves files on the server to its trash.
     pub fn trash(&self, id: &str, rels: &[String]) -> anyhow::Result<()> {
         self.post(&format!("/fs/{}/ops", enc(id)), json!({ "ops": [{ "op": "trash", "paths": rels }] }))?;

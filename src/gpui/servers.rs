@@ -28,17 +28,8 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-/// A small round status light: the panel's state when there is one, else
-/// whether the server answers pings.
-fn status_dot(status: Option<&Status>, panel: Option<&PanelStats>, cx: &App) -> Div {
-    div()
-        .size_2()
-        .flex_none()
-        .rounded_full()
-        .bg(status_color(status, panel, cx))
-}
-
-/// The color of a server's state (see [`status_dot`]).
+/// The color of a server's state light: the panel's state when there is
+/// one, else whether the server answers pings.
 fn status_color(status: Option<&Status>, panel: Option<&PanelStats>, cx: &App) -> Hsla {
     let theme = cx.theme();
     match (panel, status) {
@@ -51,28 +42,6 @@ fn status_color(status: Option<&Status>, panel: Option<&PanelStats>, cx: &App) -
         (None, Some(Status::Online { .. })) => theme.success,
         (None, Some(Status::Offline)) => theme.muted_foreground,
         (None, None) => theme.border,
-    }
-}
-
-fn status_text(status: Option<&Status>, panel: Option<&PanelStats>) -> String {
-    match (panel, status) {
-        (Some(p), _) if p.crashed => return "Crashed".into(),
-        (Some(p), _) if p.starting => return "Starting".into(),
-        (Some(p), Some(Status::Offline) | None) if p.running => {
-            return "Starting up (running, not answering pings yet)".into();
-        }
-        (Some(p), _) if !p.running => return "Stopped".into(),
-        _ => {}
-    }
-    match status {
-        Some(Status::Online {
-            players,
-            max,
-            version,
-            ms,
-        }) => format!("Online · {players}/{max} players · {version} · {}", ping_text(*ms)),
-        Some(Status::Offline) => "Offline".into(),
-        None => "Checking".into(),
     }
 }
 
@@ -116,6 +85,106 @@ pub(crate) fn ping_bars(root: &std::path::Path, ms: u32, cx: &App) -> Stateful<D
         .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(ping_text(ms)).build(w, cx))
 }
 
+/// A server without a picture: its initials on a tile tinted from its name
+/// (the same name always gets the same tint).
+fn letter_tile(name: &str, text: Rems) -> Div {
+    let initials: String = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter_map(|w| w.chars().next())
+        .take(2)
+        .collect::<String>()
+        .to_uppercase();
+    let hue = name.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(hue as f32 / 360., 0.32, 0.3, 1.))
+        .text_color(hsla(hue as f32 / 360., 0.5, 0.88, 1.))
+        .text_size(text)
+        .font_weight(FontWeight::BOLD)
+        .child(initials)
+}
+
+/// A server's picture (its server-icon.png or its pack's logo, else a
+/// letter tile) with its state light on the corner, like a status badge.
+fn server_thumb(art: Option<&std::path::Path>, name: &str, size: Rems, light: Option<Hsla>, cx: &App) -> Div {
+    let theme = cx.theme();
+    div()
+        .relative()
+        .flex_none()
+        .size(size)
+        .child(
+            div()
+                .size_full()
+                .rounded(theme.radius)
+                .overflow_hidden()
+                .bg(theme.muted)
+                .map(|d| match art {
+                    Some(p) => d.child(img(p.to_path_buf()).size_full().object_fit(ObjectFit::Cover)),
+                    None => d.child(letter_tile(name, size * 0.36)),
+                }),
+        )
+        .when_some(light, |d, c| {
+            d.child(
+                div()
+                    .absolute()
+                    .right(px(-3.))
+                    .bottom(px(-3.))
+                    .size(px(11.))
+                    .rounded_full()
+                    .bg(c)
+                    .border_2()
+                    .border_color(theme.sidebar),
+            )
+        })
+}
+
+/// A MOTD as the multiplayer list draws it: Minecraft's colors, bold and
+/// italic; its two lines side by side.
+fn motd_line(raw: &str, cx: &App) -> Option<Div> {
+    let text = hopper::instance_ops::unescape_property(raw).replace('\n', "  ");
+    let spans = hopper::instance_ops::mc_spans(&text);
+    if spans.iter().all(|s| s.text.trim().is_empty()) {
+        return None;
+    }
+    let fg = cx.theme().foreground;
+    Some(
+        h_flex()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .children(spans.into_iter().map(move |s| {
+                let color = s.color.map_or(fg, |c| rgb(c).into());
+                div()
+                    .flex_none()
+                    .text_color(color)
+                    .when(s.bold, |d| d.font_weight(FontWeight::BOLD))
+                    .when(s.italic, |d| d.italic())
+                    .when(s.underline, |d| d.underline())
+                    .when(s.strike, |d| d.line_through())
+                    .child(s.text)
+            })),
+    )
+}
+
+/// The state word for a header pill: short, as the list's pills say it.
+fn short_state(status: Option<&Status>, panel: Option<&PanelStats>) -> String {
+    match (panel, status) {
+        (Some(p), _) if p.crashed => "Crashed".into(),
+        (Some(p), _) if p.starting => "Starting".into(),
+        (Some(p), _) if p.running => {
+            let up = p.up_text();
+            if up.is_empty() { "Running".into() } else { format!("Running · {}", up.trim_start_matches("Up ").trim_start_matches("up ")) }
+        }
+        (Some(_), _) => "Stopped".into(),
+        (None, Some(Status::Online { .. })) => "Online".into(),
+        (None, Some(Status::Offline)) => "Offline".into(),
+        (None, None) => "Checking".into(),
+    }
+}
+
 /// "No servers yet", with the Host action when the page has one.
 fn no_servers(on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>, cx: &App) -> Div {
     widgets::empty_state(
@@ -145,6 +214,7 @@ fn server_list(
     id: &'static str,
     store: &Entity<Store>,
     picked: Option<&PathBuf>,
+    arts: &HashMap<PathBuf, PathBuf>,
     collapsed: bool,
     rem: Pixels,
     on_pick: Rc<dyn Fn(PathBuf, &mut Window, &mut App)>,
@@ -152,7 +222,7 @@ fn server_list(
     cx: &App,
 ) -> Stateful<Div> {
     if collapsed {
-        return server_rail(id, store, picked, on_pick, cx);
+        return server_rail(id, store, picked, arts, on_pick, cx);
     }
     let s = store.read(cx);
     let theme = cx.theme();
@@ -183,6 +253,7 @@ fn server_list(
                 Button::new(ElementId::Name(format!("pair-link:{}", srv.root.display()).into()))
                     .ghost()
                     .xsmall()
+                    .text_color(theme.muted_foreground)
                     .icon(IconName::Link)
                     .label("Pair a pack…")
                     .tooltip("Choose the instance this server runs, to compare their mods")
@@ -204,20 +275,27 @@ fn server_list(
         } else {
             None
         };
-        let row = v_flex()
+        // One quiet line: loader and pack; the address and other panel
+        // in its tooltip.
+        let mut sub: Vec<String> = Vec::new();
+        if let Some(l) = srv.loader.as_deref().filter(|l| !l.trim().is_empty()) {
+            sub.push(hopper::server::loader_facts(l).0);
+        }
+        if let Some(p) = &paired {
+            sub.push(p.clone());
+        }
+        let tip: Option<SharedString> = caption_for(s, srv).map(Into::into);
+        let row = h_flex()
             .id(ElementId::Name(
                 format!("server:{}", srv.root.display()).into(),
             ))
-            .gap_2()
-            .px_3()
-            .py_2()
+            .gap_3()
+            .px_2()
+            .py_1p5()
             .rounded(theme.radius_lg)
-            .border_1()
-            .border_color(theme.transparent)
             .clickable(cx)
             .when(active, |r| widgets::row_selected(r, cx))
             .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
-
             .on_click(move |_, w, cx| pick(root.clone(), w, cx))
             .context_menu({
                 let (store, root) = (store.clone(), srv.root.clone());
@@ -256,52 +334,73 @@ fn server_list(
                         )
                 }
             })
+            .child(server_thumb(
+                arts.get(&srv.root).map(PathBuf::as_path),
+                &srv.name,
+                rems(2.5),
+                Some(status_color(s.status(&srv.root), s.panel_stats(&srv.root), cx)),
+                cx,
+            ))
             .child(
-                h_flex()
-                    .gap_2()
-                    .child(status_dot(s.status(&srv.root), s.panel_stats(&srv.root), cx))
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .font_medium()
-                            .truncate()
-                            .child(srv.name.clone()),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_medium()
+                                    .truncate()
+                                    .child(srv.name.clone()),
+                            )
+                            // Its ping, while it answers.
+                            .when_some(s.status(&srv.root).and_then(|st| st.ms()), |r, ms| {
+                                r.child(ping_bars(&srv.root, ms, cx))
+                            })
+                            // A stopped server is just the grey light on its
+                            // picture; pills are for running, starting and
+                            // failing ones.
+                            .when_some(s.panel_stats(&srv.root).filter(|p| p.running || p.starting || p.crashed), |r, p| {
+                                let live = p.running && !p.starting && !p.crashed;
+                                let text = if live {
+                                    format!("{}/{}", p.online, p.max)
+                                } else {
+                                    p.state().to_string()
+                                };
+                                r.when_some(p.tps.filter(|_| live), |r, t| {
+                                    r.child(widgets::tps_chip(
+                                        ElementId::Name(format!("tps:{}", srv.root.display()).into()),
+                                        &t,
+                                        cx,
+                                    ))
+                                })
+                                .child(widgets::pill(text, status_color(s.status(&srv.root), Some(p), cx), live))
+                            }),
                     )
-                    // Its ping, while it answers (a stopped one is just its
-                    // grey dot).
-                    .when_some(s.status(&srv.root).and_then(|st| st.ms()), |r, ms| {
-                        r.child(ping_bars(&srv.root, ms, cx))
-                    })
-                    // A stopped server is just its grey dot; pills are for
-                    // running, starting and failing ones.
-                    .when_some(s.panel_stats(&srv.root).filter(|p| p.running || p.starting || p.crashed), |r, p| {
-                        let live = p.running && !p.starting && !p.crashed;
-                        let text = if live {
-                            format!("{}/{}", p.online, p.max)
-                        } else {
-                            p.state().to_string()
-                        };
-                        r.when_some(p.tps.filter(|_| live), |r, t| {
-                            r.child(widgets::tps_chip(
-                                ElementId::Name(format!("tps:{}", srv.root.display()).into()),
-                                &t,
-                                cx,
-                            ))
-                        })
-                        .child(widgets::pill(text, status_color(s.status(&srv.root), Some(p), cx), live))
-                    }),
-            )
-            .when_some(caption_for(s, srv), |r, c| r.child(widgets::caption(c, cx).text_xs().pl_4().truncate()))
-            .when(paired.is_some(), |r| {
-                r.child(
-                    widgets::caption(paired.clone().unwrap_or_default(), cx)
-                        .text_xs()
-                        .pl_4(),
-                )
-            })
-            .children(pairing.map(|p| div().pl_4().child(p)));
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .min_w_0()
+                            .when(!sub.is_empty(), |r| {
+                                r.child(
+                                    widgets::caption(sub.join(" · "), cx)
+                                        .id(ElementId::Name(format!("server-sub:{}", srv.root.display()).into()))
+                                        .text_xs()
+                                        .min_w_0()
+                                        .truncate()
+                                        .when_some(tip, |d, t| {
+                                            d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(t.clone()).build(w, cx))
+                                        }),
+                                )
+                            })
+                            .children(pairing.map(|p| div().flex_none().child(p))),
+                    ),
+            );
         row.into_any_element()
     };
     let mut rows: Vec<AnyElement> = Vec::new();
@@ -577,6 +676,7 @@ fn server_rail(
     id: &'static str,
     store: &Entity<Store>,
     picked: Option<&PathBuf>,
+    arts: &HashMap<PathBuf, PathBuf>,
     on_pick: Rc<dyn Fn(PathBuf, &mut Window, &mut App)>,
     cx: &App,
 ) -> Stateful<Div> {
@@ -590,39 +690,25 @@ fn server_rail(
             let active = picked == Some(&srv.root);
             let (root, pick) = (srv.root.clone(), on_pick.clone());
             let name: SharedString = srv.name.clone().into();
-            let initials: String = srv
-                .name
-                .split(|c: char| !c.is_alphanumeric())
-                .filter_map(|w| w.chars().next())
-                .take(2)
-                .collect::<String>()
-                .to_uppercase();
             div()
                 .id(ElementId::Name(format!("server-tile:{}", srv.root.display()).into()))
                 .relative()
                 .size(rems(2.75))
                 .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
+                .p_0p5()
                 .rounded(theme.radius_lg)
-                .border_1()
-                .border_color(theme.border)
-                .text_sm()
-                .font_semibold()
                 .clickable(cx)
                 .when(active, |r| widgets::row_selected(r, cx))
                 .when(!active, |r| r.hover(|s| widgets::row_hover(s, cx)))
                 .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx))
                 .on_click(move |_, w, cx| pick(root.clone(), w, cx))
-                .child(initials)
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(3.))
-                        .right(px(3.))
-                        .child(status_dot(s.status(&srv.root), s.panel_stats(&srv.root), cx)),
-                )
+                .child(server_thumb(
+                    arts.get(&srv.root).map(PathBuf::as_path),
+                    &srv.name,
+                    rems(2.5),
+                    Some(status_color(s.status(&srv.root), s.panel_stats(&srv.root), cx)),
+                    cx,
+                ))
                 .into_any_element()
         })
         .collect();
@@ -681,6 +767,13 @@ pub struct ServersView {
     sync_away: bool,
     /// The Overview's modpack readme shows in full.
     pack_open: bool,
+    /// Each server's server-icon.png on this PC, by root: (the panel's
+    /// stamp for it, the file once there).
+    icons: HashMap<PathBuf, (Option<u64>, Option<PathBuf>)>,
+    /// Header art blurred for its backdrop, by art path.
+    blurs: HashMap<PathBuf, Option<PathBuf>>,
+    /// The detail area's width in rem, for the header's figures.
+    detail_w: f32,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -769,6 +862,7 @@ impl ServersView {
             }),
             cx.observe(&store, |this, _, cx| {
                 this.ensure_pick(cx);
+                this.want_icons(cx);
                 this.retarget(cx);
                 cx.notify();
             }),
@@ -809,9 +903,13 @@ impl ServersView {
             tab: 0,
             sync_away: false,
             pack_open: false,
+            icons: HashMap::new(),
+            blurs: HashMap::new(),
+            detail_w: 80.0,
             _subscriptions: subs,
         };
         v.ensure_pick(cx);
+        v.want_icons(cx);
         v
     }
 
@@ -901,6 +999,115 @@ impl ServersView {
         {
             self.sync.update(cx, |p, cx| p.show(r, cx));
         }
+    }
+
+    /// Finds each server's picture: server-icon.png in its folder, or for a
+    /// Hopper Server the panel's copy, fetched once per change into the
+    /// cache. Asks for paired packs' logos too (the fallback).
+    fn want_icons(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let cache = hopper::paths::dirs().map(|d| d.cache_dir().join("server-icons"));
+        let mut fetch = Vec::new();
+        let mut logos = Vec::new();
+        for srv in store.servers() {
+            if let Some(u) = store.paired(srv).and_then(|i| i.icon.clone())
+                && store.image(&u).is_none()
+            {
+                logos.push(u);
+            }
+            // A folder's icon is looked for once; a panel's when its stamp
+            // changes (or first shows).
+            let stamp = match &srv.remote {
+                Some(_) => store.panel_stats(&srv.root).and_then(|p| p.icon),
+                None => Some(0),
+            };
+            if self.icons.get(&srv.root).is_some_and(|(s, _)| *s == stamp) {
+                continue;
+            }
+            let found = match (&srv.remote, stamp) {
+                (_, None) => None,
+                (None, Some(_)) => Some(srv.root.join("server-icon.png")).filter(|p| p.is_file()),
+                (Some(r), Some(m)) => {
+                    let safe = |t: &str| t.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>();
+                    let local = cache.as_ref().map(|c| c.join(format!("{}-{}-{m}.png", safe(&r.panel), safe(&r.id))));
+                    match local {
+                        Some(l) if l.is_file() => Some(l),
+                        Some(l) => {
+                            fetch.push((srv.root.clone(), r.clone(), l));
+                            None
+                        }
+                        None => None,
+                    }
+                }
+            };
+            self.icons.insert(srv.root.clone(), (stamp, found));
+        }
+        if !logos.is_empty() {
+            self.store.update(cx, |s, _| logos.iter().for_each(|u| s.want_image(u)));
+        }
+        for (root, remote, local) in fetch {
+            cx.spawn(async move |this, cx| {
+                let to = local.clone();
+                let r = cx
+                    .background_spawn(async move {
+                        hopper::hopperd::Client::for_remote(&remote)?.icon(&remote.id, &to)
+                    })
+                    .await;
+                match r {
+                    Ok(()) => {
+                        this.update(cx, |this, cx| {
+                            if let Some(e) = this.icons.get_mut(&root) {
+                                e.1 = Some(local);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Err(e) => log::debug!("server icon {}: {e:#}", root.display()),
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Each server's picture: its own icon, else its pack's logo.
+    fn arts(&self, cx: &App) -> HashMap<PathBuf, PathBuf> {
+        let store = self.store.read(cx);
+        store
+            .servers()
+            .iter()
+            .filter_map(|srv| {
+                let own = self.icons.get(&srv.root).and_then(|(_, p)| p.clone());
+                let logo = || {
+                    let u = store.paired(srv)?.icon.clone()?;
+                    store.image(&u).map(std::path::Path::to_path_buf)
+                };
+                own.or_else(logo).map(|p| (srv.root.clone(), p))
+            })
+            .collect()
+    }
+
+    /// Starts blurring `art` for the header's backdrop, once.
+    fn want_blur(&mut self, art: &std::path::Path, cx: &mut Context<Self>) {
+        if self.blurs.contains_key(art) {
+            return;
+        }
+        let art = art.to_path_buf();
+        self.blurs.insert(art.clone(), None);
+        cx.spawn(async move |this, cx| {
+            let src = art.clone();
+            match cx.background_spawn(async move { hopper::imgcache::blurred(&src) }).await {
+                Ok(p) => {
+                    this.update(cx, |this, cx| {
+                        this.blurs.insert(art, Some(p));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(e) => log::debug!("blur {}: {e:#}", art.display()),
+            }
+        })
+        .detach();
     }
 
     /// The picked server's panel, made again when it changes.
@@ -1028,7 +1235,7 @@ impl ServersView {
             .collect()
     }
 
-    fn detail(&self, s: &ServerInfo, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn detail(&self, s: &ServerInfo, art: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // The paired pack's page, for the Overview.
         let pack_id = self
             .store
@@ -1043,7 +1250,6 @@ impl ServersView {
         let status = store.status(&s.root);
         let pstats = store.panel_stats(&s.root).cloned();
         let paired = store.paired(s).cloned();
-        let configured = self.control.read(cx).configured(cx);
         let remote = s.remote.is_some();
         let also = remote && (store.also_in_folder(s) || !matches!(s.manager, Manager::Unknown));
         let manager = match s.manager {
@@ -1070,17 +1276,24 @@ impl ServersView {
                 info = info.item("Crash restarts", why, 1);
             }
         }
+        let hosted_meta = hopper::hosting::HostedMeta::load(&s.root);
+        let (loader_label, loader_mc) = match (&s.loader, &hosted_meta) {
+            (Some(l), _) => {
+                let (label, mc) = hopper::server::loader_facts(l);
+                (Some(label), mc)
+            }
+            (None, Some(m)) => (Some(hopper::server::loader_facts(&m.loader).0), Some(m.minecraft.clone())),
+            (None, None) => (None, None),
+        };
+        // The pinged version is the truth while it runs.
+        let minecraft = pstats
+            .as_ref()
+            .map(|p| p.version.trim().to_string())
+            .filter(|v| v.starts_with("1."))
+            .or(loader_mc);
         let mut info = info
             .item("Managed by", manager, 1)
-            .item(
-                "Loader",
-                s.loader.clone().unwrap_or_else(|| {
-                    hopper::hosting::HostedMeta::load(&s.root)
-                        .map(|m| format!("{} · Minecraft {}", m.loader, m.minecraft))
-                        .unwrap_or("Unknown".into())
-                }),
-                1,
-            )
+            .item("Loader", loader_label.clone().unwrap_or("Unknown".into()), 1)
             .item("Java", s.java.clone().unwrap_or("Unknown".into()), 1)
             .item(
                 "Max memory",
@@ -1096,31 +1309,46 @@ impl ServersView {
         if !addresses.is_empty() {
             info = info.item("Address", addresses.join(", "), 1);
         }
+        let mut pack_version = None;
         if let Some(inst) = &paired {
             let ok = s.loader.as_deref() == Some(inst.loader.replace('-', " ").as_str());
             info = info.item(
                 "Pack loader",
                 format!(
                     "{}{}",
-                    inst.loader,
+                    crate::store::loader_label(&inst.loader),
                     if ok { " (matches)" } else { " (differs)" }
                 ),
                 1,
             );
-            if let Some(p) = &inst.pack {
+            if let Some(p) = inst.pack.as_ref().filter(|p| !p.version.trim().is_empty()) {
                 info = info.item("Pack version", p.version.clone(), 1);
+                pack_version = Some(p.version.clone());
             }
         }
-        for key in [
-            "motd",
-            "max-players",
-            "level-name",
-            "difficulty",
-            "view-distance",
+        // server.properties, in words (the MOTD is in the header).
+        for (key, label) in [
+            ("max-players", "Max players"),
+            ("level-name", "World name"),
+            ("difficulty", "Difficulty"),
+            ("gamemode", "Game mode"),
+            ("view-distance", "View distance"),
+            ("online-mode", "Online mode"),
+            ("white-list", "Whitelist"),
         ] {
-            if let Some(v) = s.properties.get(key) {
-                info = info.item(key, hopper::instance_ops::strip_formatting(v), 1);
-            }
+            let Some(v) = s.properties.get(key).map(|v| v.trim()).filter(|v| !v.is_empty()) else { continue };
+            let v = match key {
+                "view-distance" => format!("{v} chunks"),
+                "online-mode" | "white-list" => if v == "true" { "On" } else { "Off" }.to_string(),
+                "level-name" | "max-players" => hopper::instance_ops::strip_formatting(v),
+                // "hard" → "Hard", as the game's menus say it.
+                _ => {
+                    let v = hopper::instance_ops::strip_formatting(v);
+                    let mut c = v.chars();
+                    c.next().map_or(String::new(), |f| f.to_uppercase().collect::<String>() + c.as_str())
+                }
+            };
+            info = info.item(label, v, 1);
         }
         let (root, server) = (s.root.clone(), s.clone());
         let jars: AnyElement = match self.mods.get(&s.root) {
@@ -1154,106 +1382,121 @@ impl ServersView {
             }
         };
         let n_jars = self.rows().len();
-        v_flex()
-            .size_full()
-            .px_6()
-            .py_5()
-            .gap_5()
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1p5()
-                                    .child(
-                                        h_flex()
-                                            .gap_1p5()
-                                            .flex_wrap()
-                                            // A panel shows its state beside Start.
-                                            .when(!configured, |r| {
-                                                r.child(widgets::pill(
-                                                    status_text(status, pstats.as_ref()),
-                                                    status_color(status, pstats.as_ref(), cx),
-                                                    true,
-                                                ))
-                                            })
-                                            .child(widgets::pill(
-                                                manager,
-                                                cx.theme().muted_foreground,
-                                                false,
-                                            ))
-                                            .when(also, |r| {
-                                                r.child(widgets::pill(
-                                                    if matches!(s.manager, Manager::Mcss) { "Also in MCSS" } else { "Also in Crafty" },
-                                                    cx.theme().muted_foreground,
-                                                    false,
-                                                ))
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(rems(1.75))
-                                            .font_weight(FontWeight::EXTRA_BOLD)
-                                            .truncate()
-                                            .child(s.name.clone()),
-                                    ),
-                            )
-                            .child(self.control.update(cx, |c, cx| c.controls(cx))),
-                    )
-                    .child(widgets::caption(
-                        if configured {
-                            format!(
-                                "Runs through {}. Its mods sync with its pack on the Sync tab.",
-                                self.control.read(cx).panel_name(cx)
-                            )
-                        } else {
-                            "Start and stop stay in the server panel unless Hopper is connected to it."
-                                .to_string()
+        let theme = cx.theme().clone();
+        // The header: like an instance's, with the server's picture.
+        let light = status_color(status, pstats.as_ref(), cx);
+        let mut pills: Vec<AnyElement> = vec![
+            widgets::pill(short_state(status, pstats.as_ref()), light, true).into_any_element(),
+            widgets::pill(manager, theme.muted_foreground, false).into_any_element(),
+        ];
+        if also {
+            pills.push(
+                widgets::pill(
+                    if matches!(s.manager, Manager::Mcss) { "Also in MCSS" } else { "Also in Crafty" },
+                    theme.muted_foreground,
+                    false,
+                )
+                .into_any_element(),
+            );
+        }
+        let facts = crate::hero::facts_row(cx)
+            .when_some(minecraft, |r, v| r.child(crate::hero::fact(IconName::Box, theme.success, format!("Minecraft {v}"))))
+            .when_some(loader_label, |r, l| r.child(crate::hero::fact(IconName::Blocks, theme.warning, l)))
+            .when_some(pack_version, |r, v| {
+                let v = if v.starts_with(|c: char| c.is_ascii_digit()) { format!("v{v}") } else { v };
+                r.child(crate::hero::fact(IconName::Tag, theme.info, v))
+            })
+            .when_some(addresses.first().cloned(), |r, a| r.child(crate::hero::soft_fact(IconName::Globe, a, cx)));
+        let motd = s.properties.get("motd").and_then(|m| motd_line(m, cx)).map(|m| m.text_sm().into_any_element());
+        // Figures: live ones while it runs, what it's set to while not.
+        let live = pstats.as_ref().filter(|p| p.running && !p.starting);
+        let mut stats: Vec<(String, String)> = Vec::new();
+        match live {
+            Some(p) => {
+                stats.push((format!("{}/{}", p.online, p.max), "Players".into()));
+                if let Some(t) = p.tps {
+                    stats.push((t.text(), "TPS".into()));
+                }
+                if !p.mem.is_empty() {
+                    stats.push((p.mem.clone(), "Memory".into()));
+                }
+            }
+            None => {
+                if let Some(m) = s.properties.get("max-players").filter(|m| !m.trim().is_empty()) {
+                    stats.push((m.trim().to_string(), "Slots".into()));
+                }
+                if !remote && matches!(self.mods.get(&s.root), Some(Some(Ok(_)))) {
+                    stats.push((n_jars.to_string(), "Mods".into()));
+                }
+                if let Some(m) = &s.max_memory {
+                    stats.push((m.clone(), "Max memory".into()));
+                }
+            }
+        }
+        stats.truncate(crate::library::hero_room(self.detail_w));
+        let blur = art.as_ref().and_then(|a| self.blurs.get(a).cloned().flatten());
+        // A panel that says it is stopped won't answer a ping: no button
+        // that can only say so.
+        let pingable = !pstats.as_ref().is_some_and(|p| !p.running && !p.starting);
+        let open = {
+            // How this PC reaches the panel, as the panel sees it (the web
+            // panel's status bar says the same).
+            let via = pstats.as_ref().and_then(|p| p.via).filter(|_| remote);
+            let tls = s.remote.as_ref().is_some_and(|r| r.base.starts_with("https:"));
+            let b = Button::new("open-server")
+                .outline()
+                .icon(if remote { IconName::ExternalLink } else { IconName::FolderOpen })
+                .label(match via {
+                    Some(v) => format!("Open in browser · {v}"),
+                    None if remote => "Open in browser".to_string(),
+                    None => "Folder".to_string(),
+                })
+                .on_click(move |_, _, _| crate::store::open_path(&root));
+            match via {
+                Some(v) => b
+                    .when(tls, |b| b.child(Icon::new(IconName::Lock).xsmall().text_color(theme.muted_foreground)))
+                    .tooltip(format!(
+                        "{} · {}",
+                        match v {
+                            "LAN" => "The panel is on your network",
+                            "Tailscale" => "The panel is reached over Tailscale",
+                            "Local" => "The panel is on this PC",
+                            _ => "The panel is reached over the internet",
                         },
-                        cx,
+                        if tls { "encrypted" } else { "not encrypted (http)" }
                     )),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child({
-                        // How this PC reaches the panel, as the panel sees it
-                        // (the web panel's status bar says the same).
-                        let via = pstats.as_ref().and_then(|p| p.via).filter(|_| remote);
-                        let tls = s.remote.as_ref().is_some_and(|r| r.base.starts_with("https:"));
-                        let b = Button::new("open-server")
-                            .outline()
-                            .small()
-                            .icon(if remote { IconName::ExternalLink } else { IconName::FolderOpen })
-                            .label(match via {
-                                Some(v) => format!("Open in browser · {v}"),
-                                None if remote => "Open in browser".to_string(),
-                                None => "Folder".to_string(),
-                            })
-                            .on_click(move |_, _, _| crate::store::open_path(&root));
-                        match via {
-                            Some(v) => b
-                                .when(tls, |b| b.child(Icon::new(IconName::Lock).xsmall().text_color(cx.theme().muted_foreground)))
-                                .tooltip(format!(
-                                    "{} · {}",
-                                    match v {
-                                        "LAN" => "The panel is on your network",
-                                        "Tailscale" => "The panel is reached over Tailscale",
-                                        "Local" => "The panel is on this PC",
-                                        _ => "The panel is reached over the internet",
-                                    },
-                                    if tls { "encrypted" } else { "not encrypted (http)" }
-                                )),
-                            None => b,
-                        }
-                    })
-                    .child(ping_button(&self.store, &server, cx))
-            )
+                None => b,
+            }
+        };
+        let actions = h_flex()
+            .flex_none()
+            .flex_nowrap()
+            .gap_2()
+            .child(self.control.update(cx, |c, cx| c.controls_hero(cx)))
+            .child(open)
+            .when(pingable, |r| r.child(ping_button(&self.store, &server, cx)))
+            .children(self.control.update(cx, |c, cx| c.more_button(cx)));
+        let header = crate::hero::render(
+            crate::hero::Hero {
+                art,
+                blur,
+                no_art: letter_tile(&s.name, rems(2.25)).into_any_element(),
+                pills,
+                title: s.name.clone().into(),
+                facts,
+                summary: motd,
+                stats,
+                actions,
+            },
+            cx,
+        );
+        let body = v_flex()
+            .flex_1()
+            .min_h_0()
+            .px_6()
+            .pt_2()
+            .pb_5()
+            .gap_5()
             .child({
                 let codes = tabs_for(remote);
                 let online = pstats.as_ref().filter(|p| p.running).map(|p| p.online);
@@ -1291,7 +1534,13 @@ impl ServersView {
             })
             .when(self.tab == TAB_OVERVIEW, |c| {
                 let players = self.control.update(cx, |ctl, cx| ctl.players_view(cx));
-                let cards = self.control.update(cx, |ctl, cx| ctl.stat_cards(cx));
+                // Stopped, the cards would be all dashes: the header's
+                // figures say what there is.
+                let cards = pstats
+                    .as_ref()
+                    .is_some_and(|p| p.running || p.starting || p.crashed)
+                    .then(|| self.control.update(cx, |ctl, cx| ctl.stat_cards(cx)))
+                    .flatten();
                 if pack_id != 0 {
                     self.pack_desc.update(cx, |d, _| d.show_pack(pack_id));
                 }
@@ -1405,8 +1654,8 @@ impl ServersView {
             ))
             .when(self.tab == TAB_SYNC, |c| {
                 c.child(div().flex_1().min_h_0().child(self.sync.clone()))
-            })
-            .into_any_element()
+            });
+        v_flex().size_full().child(header).child(body).into_any_element()
     }
 }
 
@@ -1546,10 +1795,16 @@ impl Render for ServersView {
         // The Sync tab fits its rows to the room beside the list.
         let room = window.viewport_size().width / window.rem_size() - layout.width;
         self.sync.update(cx, |p, _| p.room = Some(room));
+        self.detail_w = room;
+        let arts = self.arts(cx);
+        if let Some(a) = self.picked.as_ref().and_then(|p| arts.get(p)).cloned() {
+            self.want_blur(&a, cx);
+        }
         let list = server_list(
             "servers-list",
             &self.store,
             self.picked.as_ref(),
+            &arts,
             collapsed,
             window.rem_size(),
             Rc::new(move |root, _, cx| view.update(cx, |v, cx| v.pick(root, cx))),
@@ -1577,7 +1832,7 @@ impl Render for ServersView {
         let detail: AnyElement = match server {
             Some(s) => widgets::enter(
                 ElementId::Name(format!("server-detail:{}", s.root.display()).into()),
-                div().size_full().child(self.detail(&s, window, cx)),
+                div().size_full().child(self.detail(&s, arts.get(&s.root).cloned(), window, cx)),
             ),
             None if self.store.read(cx).servers().is_empty() => {
                 let store = self.store.clone();

@@ -146,6 +146,43 @@ pub fn signal_bars(ms: Option<u32>) -> u8 {
     }
 }
 
+/// A server's loader line ("neoforge 21.1.259", "forge 1.20.1-47.4.15",
+/// "fabric 0.18.1") as (label, Minecraft version when it says):
+/// ("NeoForge 21.1.259", Some("1.21.1")), ("Forge 47.4.15", Some("1.20.1")),
+/// ("Fabric 0.18.1", None).
+pub fn loader_facts(loader: &str) -> (String, Option<String>) {
+    let (kind, ver) = loader.trim().split_once([' ', '-']).unwrap_or((loader.trim(), ""));
+    let name = match kind.to_ascii_lowercase().as_str() {
+        "neoforge" => "NeoForge",
+        "forge" => "Forge",
+        "fabric" => "Fabric",
+        "quilt" => "Quilt",
+        "vanilla" => "Vanilla",
+        _ => kind,
+    };
+    let ver = ver.trim();
+    let lower = kind.to_ascii_lowercase();
+    let (mc, ver) = match lower.as_str() {
+        // Forge says "1.20.1-47.4.15": Minecraft, then Forge.
+        "forge" => match ver.split_once('-') {
+            Some((m, f)) if m.starts_with("1.") => (Some(m.to_string()), f),
+            _ => (None, ver),
+        },
+        // NeoForge 21.1.x is for Minecraft 1.21.1; 21.0.x for 1.21.
+        "neoforge" => {
+            let mut p = ver.split('.');
+            let mc = match (p.next().and_then(|a| a.parse::<u32>().ok()), p.next().and_then(|b| b.parse::<u32>().ok())) {
+                (Some(a), Some(0)) if a >= 20 => Some(format!("1.{a}")),
+                (Some(a), Some(b)) if a >= 20 => Some(format!("1.{a}.{b}")),
+                _ => None,
+            };
+            (mc, ver)
+        }
+        _ => (None, ver),
+    };
+    (format!("{name} {ver}").trim().to_string(), mc)
+}
+
 /// A ping as the server list writes it: "34 ms", or "<1 ms" on the same
 /// network where it rounds to nothing.
 pub fn ping_text(ms: u32) -> String {
@@ -267,6 +304,16 @@ fn read_varint(r: &mut impl Read) -> anyhow::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loader_lines_read_well() {
+        assert_eq!(loader_facts("neoforge 21.1.259"), ("NeoForge 21.1.259".into(), Some("1.21.1".into())));
+        assert_eq!(loader_facts("neoforge 21.0.167"), ("NeoForge 21.0.167".into(), Some("1.21".into())));
+        assert_eq!(loader_facts("forge 1.20.1-47.4.15"), ("Forge 47.4.15".into(), Some("1.20.1".into())));
+        assert_eq!(loader_facts("fabric 0.18.1"), ("Fabric 0.18.1".into(), None));
+        assert_eq!(loader_facts("neoforge-21.1.9"), ("NeoForge 21.1.9".into(), Some("1.21.1".into())));
+        assert_eq!(loader_facts("paper"), ("paper".into(), None));
+    }
 
     /// A one-connection server that answers the status request with
     /// `json`, then echoes the ping packet.

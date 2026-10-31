@@ -88,6 +88,7 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
         tps: None,
         no_tps: None,
         via: None,
+        icon: v["icon"].as_u64(),
         version: v["version"].as_str().unwrap_or("").to_string(),
         world_size: String::new(),
         started: v["uptime_secs"]

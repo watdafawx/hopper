@@ -32,8 +32,15 @@ use std::time::{Duration, Instant};
 /// How long the tab underline and the hero's height take to move.
 const MOTION: Duration = Duration::from_millis(300);
 
-/// The hero's height in rem, the same on every tab.
-const HERO: f32 = 9.5;
+/// How many figures fit the hero beside the title, by the detail area's
+/// width in rem (the servers page uses the same).
+pub(crate) fn hero_room(w: f32) -> usize {
+    match w {
+        w if w >= 80.0 => 3,
+        w if w >= 64.0 => 2,
+        _ => 0,
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstTab {
@@ -1791,7 +1798,6 @@ impl LibraryView {
         let play_color = if playing { theme.danger } else { theme.success };
         // First in the row on every tab, so it never moves.
         let play_small = Some(widgets::glow(play.min_w_24(), play_color, cx));
-        let play_big: Option<Div> = None;
         let site = self.pack_facts(inst, cx).map(|(_, _, _, url, mr)| (url, mr));
         let actions = h_flex()
                             .flex_none()
@@ -1827,7 +1833,7 @@ impl LibraryView {
                                         instance_menu(menu, &view, &r_more, true, cx)
                                     }),
                             );
-        self.hero(inst, icon, playing, actions, play_big, cx)
+        self.hero(inst, icon, actions, cx)
     }
 
     /// On Overview, the pack's page facts the banner shows in place of the
@@ -1856,16 +1862,12 @@ impl LibraryView {
         &self,
         inst: &Instance,
         icon: Option<PathBuf>,
-        playing: bool,
         actions: Div,
-        play_big: Option<Div>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let page = self.pack_facts(inst, cx);
         let store = self.store.read(cx);
         let theme = cx.theme();
-        let glass = widgets::glass(cx);
-        let dark = theme.mode.is_dark();
 
         // State pills.
         let mut pills: Vec<AnyElement> = Vec::new();
@@ -1880,8 +1882,6 @@ impl LibraryView {
                 format!("{mins}m")
             };
             pills.push(widgets::pill(format!("Running · {up}"), theme.success, true).into_any_element());
-        } else if playing {
-            pills.push(widgets::pill("Running", theme.success, true).into_any_element());
         }
         if store.is_busy(&inst.root) {
             pills.push(widgets::pill("Working", theme.warning, true).into_any_element());
@@ -1948,18 +1948,9 @@ impl LibraryView {
                 IconName::Blocks => theme.warning,
                 _ => theme.info,
             };
-            h_flex()
-                .flex_none()
-                .gap_1p5()
-                .child(Icon::new(icon).xsmall().text_color(color))
-                .child(text)
+            crate::hero::fact(icon, color, text)
         };
-        let facts = h_flex()
-            .gap_4()
-            .min_w_0()
-            .overflow_hidden()
-            .text_sm()
-            .text_color(theme.foreground.opacity(0.8))
+        let facts = crate::hero::facts_row(cx)
             .child(fact(IconName::Box, format!("Minecraft {}", inst.game_version)))
             .child({
                 let f = fact(IconName::Blocks, store::loader_label(&inst.loader));
@@ -2008,16 +1999,8 @@ impl LibraryView {
                 )
             })
             .when_some(page.clone(), |r, (author, downloads, ..)| {
-                let soft = |icon: IconName, text: String| {
-                    h_flex()
-                        .flex_none()
-                        .gap_1p5()
-                        .text_color(theme.muted_foreground)
-                        .child(Icon::new(icon).xsmall())
-                        .child(text)
-                };
-                r.child(soft(IconName::User, format!("by {author}")))
-                    .child(soft(IconName::Download, downloads))
+                r.child(crate::hero::soft_fact(IconName::User, format!("by {author}"), cx))
+                    .child(crate::hero::soft_fact(IconName::Download, downloads, cx))
             });
         let summary = page
             .map(|(_, _, s, ..)| s)
@@ -2029,175 +2012,43 @@ impl LibraryView {
                     .truncate()
                     .child(s)
             });
-        let taller = summary.is_some();
-
-        // The art: large, rounded, lifted off the backdrop.
-        let art = div()
-            .flex_none()
-            .rounded(rems(1.))
-            .overflow_hidden()
-            .bg(theme.muted)
-            .border_1()
-            .border_color(white().opacity(0.12))
-            .shadow(vec![
-                BoxShadow::new(px(0.), px(14.), black().opacity(if dark { 0.5 } else { 0.25 }))
-                    .blur_radius(px(32.)),
-            ])
-            .map(|d| match icon.clone() {
-                Some(p) => d.child(img(p).size_full().object_fit(ObjectFit::Cover)),
-                None => d
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::Package).large()),
-            });
-        let art = art.size(rems(6.5));
-
-        // The banner: pills over the title, the facts under it; on the right
-        // the figures in one box over the actions.
-        let content = {
-            let mods = inst.addons.iter().filter(|a| in_class(a, cf::CLASS_MODS)).count();
-            let (time, time_label) = match store::played(inst.play_seconds) {
-                Some(t) => (t, "Played"),
-                None => (
-                    inst.last_played
-                        .as_deref()
-                        .map(hopper::time::relative)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "Never".into()),
-                    "Last played",
-                ),
-            };
-            let size = match self.sizes.get(&inst.root) {
-                Some(Some(n)) => Some(hopper::instance_ops::human_bytes(*n)),
-                _ => None,
-            };
-            let room = match self.detail_w {
-                w if w >= 80.0 => 3,
-                w if w >= 64.0 => 2,
-                _ => 0,
-            };
-            let cells: Vec<(String, &str)> = [Some((time, time_label)), Some((mods.to_string(), "Mods")), size.map(|s| (s, "Size"))]
-                .into_iter()
-                .flatten()
-                .take(room)
-                .collect();
-            let line = white().opacity(0.08);
-            let stats = (!cells.is_empty()).then(|| {
-                h_flex()
-                    .flex_none()
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(line)
-                    .bg(black().opacity(if dark { 0.3 } else { 0.08 }))
-                    .children(cells.into_iter().enumerate().map(|(i, (v, l))| {
-                        v_flex()
-                            .min_w(rems(5.75))
-                            .px_4()
-                            .py_1p5()
-                            .when(i > 0, |c| c.border_l_1().border_color(line))
-                            .child(div().text_base().font_weight(FontWeight::BOLD).child(v))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.muted_foreground)
-                                    .child(l.to_uppercase()),
-                            )
-                    }))
-            });
-            h_flex()
-                .absolute()
-                .inset_0()
-                .items_center()
-                .gap_5()
-                .px_6()
-                .child(art)
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_1p5()
-                        .child(h_flex().gap_1p5().flex_wrap().children(pills))
-                        .child(
-                            div()
-                                .text_size(rems(1.65))
-                                .font_weight(FontWeight::EXTRA_BOLD)
-                                .line_height(relative(1.15))
-                                .truncate()
-                                .child(inst.name.clone()),
-                        )
-                        .child(facts)
-                        .children(summary),
-                )
-                .child(
-                    v_flex()
-                        .flex_none()
-                        .items_end()
-                        .gap_3()
-                        .children(stats)
-                        .child(actions),
-                )
-                .children(play_big)
+        let mods = inst.addons.iter().filter(|a| in_class(a, cf::CLASS_MODS)).count();
+        let (time, time_label) = match store::played(inst.play_seconds) {
+            Some(t) => (t, "Played"),
+            None => (
+                inst.last_played
+                    .as_deref()
+                    .map(hopper::time::relative)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Never".into()),
+                "Last played",
+            ),
         };
-
-        // The backdrop: the art blurred and stretched, faded into the page
-        // (or, on glass, into a tint that keeps text readable).
+        let size = match self.sizes.get(&inst.root) {
+            Some(Some(n)) => Some(hopper::instance_ops::human_bytes(*n)),
+            _ => None,
+        };
+        let stats: Vec<(String, String)> = [Some((time, time_label)), Some((mods.to_string(), "Mods")), size.map(|s| (s, "Size"))]
+            .into_iter()
+            .flatten()
+            .take(hero_room(self.detail_w))
+            .map(|(v, l)| (v, l.to_string()))
+            .collect();
         let blur = icon.as_ref().and_then(|p| self.blurs.get(p).cloned().flatten());
-        let base = if glass {
-            if dark { black() } else { white() }
-        } else {
-            theme.background
-        };
-        let (top_a, bottom_a, side_a) = if glass { (0.05, 0.6, 0.5) } else { (0.15, 1.0, 0.85) };
-        let backdrop = div()
-            .absolute()
-            .inset_0()
-            .map(|d| match blur {
-                Some(p) => d.child(
-                    img(p)
-                        .size_full()
-                        .object_fit(ObjectFit::Cover)
-                        .opacity(if dark { 0.75 } else { 0.55 }),
-                ),
-                None => d.bg(linear_gradient(
-                    135.,
-                    linear_color_stop(theme.primary.opacity(0.22), 0.),
-                    linear_color_stop(theme.primary.opacity(0.), 1.),
-                )),
-            })
-            .child(div().absolute().inset_0().bg(linear_gradient(
-                180.,
-                linear_color_stop(base.opacity(top_a), 0.),
-                linear_color_stop(base.opacity(bottom_a), 1.),
-            )))
-            .child(div().absolute().inset_0().bg(linear_gradient(
-                90.,
-                linear_color_stop(base.opacity(side_a), 0.),
-                linear_color_stop(base.opacity(0.), 0.7),
-            )));
-
-        let hero = div()
-            .relative()
-            .flex_none()
-            .overflow_hidden()
-            .map(|d| {
-                if glass {
-                    // A floating translucent panel, lit along its top edge.
-                    d.mx_3()
-                        .mt_3()
-                        .rounded(rems(1.))
-                        .border_1()
-                        .border_color(white().opacity(if dark { 0.1 } else { 0.5 }))
-                        .bg(theme.foreground.opacity(0.03))
-                } else {
-                    d.border_b_1().border_color(theme.border)
-                }
-            })
-            .child(backdrop)
-            .child(content);
-        hero.h(rems(if taller { HERO + 1.5 } else { HERO })).into_any_element()
+        crate::hero::render(
+            crate::hero::Hero {
+                art: icon,
+                blur,
+                no_art: Icon::new(IconName::Package).large().text_color(theme.muted_foreground).into_any_element(),
+                pills,
+                title: inst.name.clone().into(),
+                facts,
+                summary: summary.map(IntoElement::into_any_element),
+                stats,
+                actions,
+            },
+            cx,
+        )
     }
 
     /// The tab bar: content tabs with an underline that slides from the
