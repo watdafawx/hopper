@@ -17,6 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::hosting::properties::{COMMON, PropKind};
 use crate::java_form::JavaForm;
+use crate::panel_tabs::motd_editor::{MotdChanged, MotdEditor};
 use hopper::hosting::{JvmArgs, Properties};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,6 +33,11 @@ pub struct ServerSettings {
     values: HashMap<&'static str, String>,
     /// Text and number fields, by key.
     inputs: HashMap<&'static str, Entity<InputState>>,
+    /// The server list message: its editor, and the template it loaded
+    /// with (`{pack_version}`…; see `hopper::hosting::motd`).
+    motd: Option<Entity<MotdEditor>>,
+    motd_orig: String,
+    motd_sub: Option<Subscription>,
     /// Memory (-Xms/-Xmx) and the Java arguments, as an instance has them.
     java_form: Entity<JavaForm>,
     /// The arguments line the form loaded with (memory first).
@@ -59,7 +65,7 @@ impl ServerSettings {
         let mut inputs = HashMap::new();
         let mut subs = vec![cx.observe(&java_form, |_, _, cx| cx.notify())];
         for spec in COMMON {
-            if matches!(spec.kind, PropKind::String | PropKind::Int { .. }) {
+            if spec.key != "motd" && matches!(spec.kind, PropKind::String | PropKind::Int { .. }) {
                 let input = cx.new(|cx| InputState::new(window, cx).placeholder(spec.default));
                 let key = spec.key;
                 subs.push(cx.subscribe(&input, move |this, state, e: &InputEvent, cx| {
@@ -94,6 +100,9 @@ impl ServerSettings {
             jvm: JvmArgs::default(),
             values: HashMap::new(),
             inputs,
+            motd: None,
+            motd_orig: String::new(),
+            motd_sub: None,
             java_form,
             args_orig: String::new(),
             java: None,
@@ -126,6 +135,19 @@ impl ServerSettings {
             }
             self.values.insert(spec.key, v);
         }
+        // The message as a template, with its variables' values for the preview.
+        let template = hopper::hosting::motd::template(&root);
+        let vars = hopper::hosting::motd::vars(&root, &Default::default());
+        let name = hopper::server::load(&root).name;
+        let players = format!("0/{}", self.props.get("max-players").unwrap_or("20").trim());
+        self.values.insert("motd", template.clone());
+        self.motd_orig = template.clone();
+        let editor = cx.new(|cx| MotdEditor::new(&template, vars, name, players, window, cx));
+        self.motd_sub = Some(cx.subscribe(&editor, |this, _, e: &MotdChanged, cx| {
+            this.values.insert("motd", e.0.clone());
+            cx.notify();
+        }));
+        self.motd = Some(editor);
         self.schedule = hopper::hosting::Schedule::load(&root);
         self.sched = self.schedule.clone();
         let (r, w, m) = (
@@ -171,7 +193,8 @@ impl ServerSettings {
 
     fn changed(&self, cx: &App) -> bool {
         let props = COMMON.iter().any(|s| {
-            self.values.get(s.key).map(String::as_str) != Some(self.props.get(s.key).unwrap_or(s.default))
+            let was = if s.key == "motd" { self.motd_orig.as_str() } else { self.props.get(s.key).unwrap_or(s.default) };
+            self.values.get(s.key).map(String::as_str) != Some(was)
         });
         props
             || self.sched != self.schedule
@@ -208,6 +231,9 @@ impl ServerSettings {
         }
         let mut props = self.props.clone();
         for spec in COMMON {
+            if spec.key == "motd" {
+                continue;
+            }
             if let Some(v) = self.values.get(spec.key) {
                 let on_disk = self.props.get(spec.key);
                 // Leave keys the file doesn't have alone unless changed.
@@ -231,11 +257,16 @@ impl ServerSettings {
             return;
         }
         let sched = (hosted && self.sched != self.schedule).then(|| self.sched.clone());
+        let motd = self.values.get("motd").filter(|v| **v != self.motd_orig).cloned();
         let r = (|| -> anyhow::Result<()> {
             if let Some(s) = &sched {
                 s.save(&root)?;
             }
             props.save(&root.join("server.properties"))?;
+            // After the rest: {difficulty} and the like fill in from the new values.
+            if let Some(t) = &motd {
+                hopper::hosting::motd::save(&root, t)?;
+            }
             jvm.save(&root)?;
             if let Some(j) = java {
                 let bat = root.join("run.bat");
@@ -273,6 +304,14 @@ impl ServerSettings {
 
     fn field(&self, spec: &'static hopper::hosting::PropSpec, rem: Pixels, cx: &mut Context<Self>) -> Field {
         let value = self.values.get(spec.key).cloned().unwrap_or_default();
+        if spec.key == "motd"
+            && let Some(ed) = &self.motd
+        {
+            return Field::new()
+                .label(spec.label)
+                .description(format!("{} Use variables like {{pack_version}} to keep it up to date.", spec.description))
+                .child(div().w_full().child(ed.clone()));
+        }
         let control: AnyElement = match spec.kind {
             PropKind::Bool => Switch::new(spec.key)
                 .checked(value.trim() == "true")

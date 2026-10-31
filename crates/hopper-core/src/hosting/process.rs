@@ -434,6 +434,10 @@ impl LocalServer {
         if !super::eula_accepted(&self.root) {
             bail!("Accept the Minecraft EULA for this server first (eula.txt).");
         }
+        // The server list message's {pack_version}, {day}…, filled in for this run.
+        if let Err(e) = super::motd::apply(&self.root) {
+            log::warn!("{}: couldn't fill in the server list message: {e:#}", self.name());
+        }
         let props = super::properties::Properties::load(&self.root.join("server.properties"))?;
         let port = props.port();
         if !super::port_free(port) {

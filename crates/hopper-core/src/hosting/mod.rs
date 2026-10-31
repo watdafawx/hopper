@@ -13,6 +13,7 @@ pub mod jvm;
 pub mod local_panel;
 pub mod logparse;
 pub mod logshare;
+pub mod motd;
 pub mod process;
 pub mod properties;
 pub mod rcon;

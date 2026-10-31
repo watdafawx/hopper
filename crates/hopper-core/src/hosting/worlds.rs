@@ -104,7 +104,7 @@ fn mtime(p: &Path) -> u64 {
 /// Bytes in a world folder. Each file's own metadata, not the directory
 /// listing's: Windows only updates a listed size when the file is closed,
 /// so a running server's region files would read as 0.
-fn world_size(dir: &Path) -> u64 {
+pub fn world_size(dir: &Path) -> u64 {
     let mut total = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -407,9 +407,12 @@ pub struct LevelInfo {
     pub seed: Option<i64>,
     /// Milliseconds.
     pub last_played: Option<i64>,
+    /// Ticks since the world began (24000 a day).
+    pub day_time: Option<i64>,
 }
 
-/// The seed and last played time from a (gzipped NBT) `level.dat`.
+/// The seed, last played time and time of day from a (gzipped NBT)
+/// `level.dat`.
 pub fn read_level(path: &Path) -> LevelInfo {
     let Ok(f) = fs::File::open(path) else { return LevelInfo::default() };
     let mut buf = Vec::new();
@@ -422,7 +425,7 @@ pub fn read_level(path: &Path) -> LevelInfo {
     info
 }
 
-/// Just enough NBT to find `Data.LastPlayed`, `Data.WorldGenSettings.seed`
+/// Just enough NBT to find `Data.LastPlayed`, `Data.DayTime`, `Data.WorldGenSettings.seed`
 /// (1.16+) and `Data.RandomSeed` (older).
 struct Nbt<'a> {
     b: &'a [u8],
@@ -471,6 +474,7 @@ impl Nbt<'_> {
                 let p: Vec<&str> = self.path.iter().map(String::as_str).collect();
                 match p.as_slice() {
                     ["Data", "LastPlayed"] => self.info.last_played = Some(v),
+                    ["Data", "DayTime"] => self.info.day_time = Some(v),
                     ["Data", "WorldGenSettings", "seed"] => self.info.seed = Some(v),
                     ["Data", "RandomSeed"] if self.info.seed.is_none() => self.info.seed = Some(v),
                     _ => {}

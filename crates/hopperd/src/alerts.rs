@@ -304,6 +304,17 @@ fn ask_rcon(id: &str, port: u16, pass: &str, cmd: &str, allowed: &dyn Fn() -> bo
     }
 }
 
+/// One command over the server's RCON (sharing the TPS reading's
+/// connection), when RCON is on and the server isn't stopping.
+pub fn rcon_once(e: &crate::servers::Entry, cmd: &str) -> Option<String> {
+    if !e.server.rcon_allowed() {
+        return None;
+    }
+    let (port, pass) = rcon::settings(&e.root)?;
+    let server = e.server.clone();
+    ask_rcon(&e.id, port, &pass, cmd, &|| server.rcon_allowed()).ok()
+}
+
 /// Returns a connection to the map after a command, unless it was cut
 /// meanwhile (then it's dropped, which closes it).
 fn put_back(id: &str, c: rcon::Rcon) {
