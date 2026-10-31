@@ -3,7 +3,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::Path;
@@ -1533,6 +1533,28 @@ pub fn progress_fill(el: impl IntoElement, p: Option<f32>, cx: &App) -> Div {
                 .bg(color),
         )
     })
+}
+
+/// A button whose job is running: it can't be clicked, but it keeps full
+/// contrast (the disabled look fades the label to near nothing) and the
+/// job's progress `p` fills it from the left, while known. No spinner: an
+/// animation redraws the whole column it sits in every frame.
+pub fn busy_button(b: Button, p: Option<f32>, cx: &App) -> Button {
+    let theme = cx.theme();
+    let rest = theme.primary.opacity(0.1);
+    // A caller's own colors outlast the disabled styling.
+    let b = b.disabled(true).text_color(theme.foreground).border_color(theme.primary.opacity(0.55));
+    match p {
+        Some(p) => {
+            let p = p.clamp(0.0, 1.0);
+            b.bg(linear_gradient(
+                90.,
+                linear_color_stop(theme.primary.opacity(0.45), p),
+                linear_color_stop(rest, p),
+            ))
+        }
+        None => b.bg(rest),
+    }
 }
 
 /// A running job's detail as a button label, with its percent:

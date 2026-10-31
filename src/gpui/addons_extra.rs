@@ -637,9 +637,10 @@ impl AddonsView {
                                 Button::new(SharedString::from(format!("getting:{}:{}", name, m.needs)))
                                     .xsmall()
                                     .outline()
+                                    // Loading already blocks clicks; disabled
+                                    // would fade the label.
                                     .loading(true)
-                                    .label(label)
-                                    .disabled(true),
+                                    .label(label),
                                 p,
                                 cx,
                             )

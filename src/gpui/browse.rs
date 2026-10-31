@@ -3196,7 +3196,8 @@ impl BrowseView {
         let store = self.store.read(cx);
         let theme = cx.theme();
         let (pending, hold, progress) = self.install_state(m.id, false, cx);
-        let size = |b: u64| hopper::instance_ops::human_bytes(b);
+        // A no-break space: "127 MB" never splits over two lines.
+        let size = |b: u64| hopper::instance_ops::human_bytes(b).replace(' ', "\u{a0}");
 
         let summary: AnyElement = match plan {
             Load::Loading => h_flex()
@@ -3213,25 +3214,36 @@ impl BrowseView {
                     1 => format!("Also downloads 1 required mod · {} total", size(total)),
                     n => format!("Also downloads {n} required mods · {} total", size(total)),
                 };
+                // Wraps under its icon in a narrow panel instead of running
+                // on under the button.
                 h_flex()
                     .gap_1p5()
+                    .items_start()
                     .text_sm()
                     .text_color(if n == 0 { theme.success } else { theme.muted_foreground })
                     .child(
                         Icon::new(if n == 0 { IconName::CircleCheck } else { IconName::Layers })
-                            .xsmall(),
+                            .xsmall()
+                            .flex_none()
+                            .mt_1(),
                     )
-                    .child(text)
+                    .child(div().flex_1().min_w_0().child(text))
                     .into_any_element()
             }
         };
 
         let m1 = m.clone();
+        // The button sits right of the title while the title keeps 12rem,
+        // else it wraps onto its own line below; text never runs under it.
         let head = h_flex()
-            .gap_3()
+            .flex_wrap()
+            .gap_x_3()
+            .gap_y_2()
             .child(
                 v_flex()
-                    .flex_1()
+                    .flex_grow_1()
+                    .flex_shrink(1.)
+                    .flex_basis(rems(12.))
                     .min_w_0()
                     .gap_0p5()
                     .child(
@@ -3251,6 +3263,10 @@ impl BrowseView {
                     hold,
                     cx,
                 )
+                .flex_none()
+                // One width from "Install" to "Installing 100%": the header
+                // doesn't jump as the percent grows.
+                .min_w(rems(8.))
                 .on_click(cx.listener(move |this, _, w, cx| this.install(m1.clone(), None, w, cx))),
             );
 
@@ -3406,30 +3422,22 @@ impl BrowseView {
     }
 }
 
-/// An install button: "Installing…" with an hourglass while its install
-/// runs, and off with the reason while the instance can't be changed.
+/// An install button: "Installing 42%" with an hourglass while its install
+/// runs, filling from the left at full contrast (`widgets::busy_button`),
+/// and off with the reason while the instance can't be changed.
 /// Not a spinner: an animation redraws the whole column it sits in (every
 /// card, or the panel and its description) each frame, which dropped
 /// frames through every install. The tasks button shows it's moving.
 fn install_button(b: Button, label: &'static str, pending: bool, progress: Option<f32>, hold: Option<&'static str>, cx: &App) -> Button {
-    let fill = cx.theme().primary.opacity(0.28);
-    b.label(match (pending, progress) {
+    let b = b.label(match (pending, progress) {
         (true, Some(p)) => format!("Installing {}%", (p * 100.0).floor() as u32),
         (true, None) => "Installing…".to_string(),
         _ => label.to_string(),
-    })
-        .when(pending, |b| b.icon(IconName::Hourglass))
-        // The download fills the button from the left.
-        .when_some(progress.filter(|_| pending), |b, p| {
-            let p = p.clamp(0.0, 1.0);
-            b.bg(linear_gradient(
-                90.,
-                linear_color_stop(fill, p),
-                linear_color_stop(gpui_kit::transparent_black(), p),
-            ))
-        })
-        .disabled(pending || hold.is_some())
-        .when_some(hold.filter(|_| !pending), |b, why| b.tooltip(why))
+    });
+    if pending {
+        return widgets::busy_button(b.icon(IconName::Hourglass), progress, cx);
+    }
+    b.disabled(hold.is_some()).when_some(hold, |b, why| b.tooltip(why))
 }
 
 /// An icon and a value, for a project's stats, colored by what it counts
@@ -3464,12 +3472,21 @@ fn stats(m: &cf::Mod, full: bool, on_cat: Option<OnCategory>, cx: &App) -> Div {
     let n = cats.len();
     let names = cats.into_iter().enumerate().map(|(i, (id, name))| {
         let text = if i + 1 < n { format!("{name},") } else { name.to_string() };
+        // The panel wraps the names. A card's one line ends in "…": each
+        // name gives way far more than the one before, so the last goes
+        // first and the first keeps its room longest.
+        let fit = |d: Div| {
+            if full {
+                d.flex_none()
+            } else {
+                d.min_w_0().truncate().flex_shrink(1000f32.powi(i as i32))
+            }
+        };
         match &on_cat {
             Some(f) => {
                 let f = f.clone();
-                div()
+                fit(div())
                     .id(ElementId::Name(format!("cat:{}:{id}", m.id).into()))
-                    .flex_none()
                     .clickable(cx)
                     .hover(move |s| s.text_color(fg).underline())
                     .child(text)
@@ -3480,7 +3497,7 @@ fn stats(m: &cf::Mod, full: bool, on_cat: Option<OnCategory>, cx: &App) -> Div {
                     })
                     .into_any_element()
             }
-            None => div().flex_none().child(text).into_any_element(),
+            None => fit(div()).child(text).into_any_element(),
         }
     });
     let cats: Vec<AnyElement> = names.collect();
@@ -3509,7 +3526,8 @@ fn stats(m: &cf::Mod, full: bool, on_cat: Option<OnCategory>, cx: &App) -> Div {
                 h_flex()
                     .gap_1()
                     .min_w_0()
-                    .overflow_hidden()
+                    .when(full, |r| r.flex_wrap())
+                    .when(!full, |r| r.overflow_hidden())
                     .text_color(muted)
                     .child(Icon::new(IconName::Tag).xsmall().flex_none())
                     .children(cats),
