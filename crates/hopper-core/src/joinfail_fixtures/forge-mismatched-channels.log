@@ -1,0 +1,4 @@
+[20:10:03] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to mc.friends.lan, 25565
+[20:10:04] [Netty Client IO #3/ERROR] [ne.mi.ne.HandshakeHandler/FMLHANDSHAKE]: Channels [waystones:network] rejected their server side version number
+[20:10:04] [Netty Client IO #3/ERROR] [ne.mi.ne.HandshakeHandler/FMLHANDSHAKE]: Terminating connection with server, mismatched mod list
+[20:10:04] [Render thread/INFO] [minecraft/Minecraft]: Disconnected from server: Connection closed - mismatched mod channel list

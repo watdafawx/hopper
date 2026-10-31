@@ -556,7 +556,9 @@ impl Render for LogsView {
             let started = s.running(&root).map_or(i64::MAX, |r| r.started as i64);
             s.crash(&root).is_some_and(|c| c.when >= started)
         });
-        if !self.tab_picked && self.tab == LogTab::Game && ((!running && self.crash.is_some()) || caught) {
+        // So does a game that couldn't join a server or open a world.
+        let join_failed = !running && self.store.update(cx, |s, _| s.join_problem(&root).is_some());
+        if !self.tab_picked && self.tab == LogTab::Game && ((!running && self.crash.is_some()) || caught || join_failed) {
             self.select(LogTab::Help, cx);
         }
         let tab_ix = match self.tab {
@@ -594,6 +596,12 @@ impl Render for LogsView {
             });
             let card_source = detected.as_ref().map(|c| c.source.clone());
             let card = detected.map(|c| self.crash_card(&root, &c, cx));
+            // No crash, but the game couldn't join a server or open a world.
+            let join = self
+                .store
+                .update(cx, |s, _| s.join_problem(&root).cloned())
+                .filter(|_| card.is_none())
+                .map(|p| crate::join_help::card(&self.store.clone(), &root, &p, cx));
             let warned = self.warnings_card(&root, cx);
             let crash = self.crash.as_ref().filter(|_| card.is_none()).and_then(|c| {
                 let name = c.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -664,7 +672,7 @@ impl Render for LogsView {
                 widgets::closable_notice(body, key, widgets::Closed::Chip, "Latest crash", theme.danger, &self.store, cx)
             });
             // No crash: say so, rather than leave the space blank.
-            let calm = (card.is_none() && crash.is_none()).then(|| {
+            let calm = (card.is_none() && crash.is_none() && join.is_none()).then(|| {
                 widgets::empty_state(
                     IconName::CircleCheck,
                     "No crashes",
@@ -716,6 +724,7 @@ impl Render for LogsView {
                         .gap_4()
                         .pb_2()
                         .children(card)
+                        .children(join)
                         .children(warned)
                         .children(crash)
                         .children(calm)

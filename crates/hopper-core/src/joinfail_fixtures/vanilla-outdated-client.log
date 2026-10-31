@@ -1,0 +1,2 @@
+[10:00:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to vanilla.example.com, 25565
+[10:00:01] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: translation{key='multiplayer.disconnect.outdated_client', args=[1.21.4]}

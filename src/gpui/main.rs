@@ -26,6 +26,7 @@ mod crash_view;
 mod host_dialog;
 mod hopper_versions;
 mod inst_settings;
+mod join_help;
 mod java_form;
 mod launchers_list;
 mod library;

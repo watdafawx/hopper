@@ -1,5 +1,6 @@
-//! Alerts: a server crashed, its TPS is low, a drive is nearly full, or the
-//! PC is nearly out of memory. Each fires once (to webhooks and the panel),
+//! Alerts: a server crashed, its TPS is low, it turned a player away for
+//! mods or versions that don't match, a drive is nearly full, or the PC is
+//! nearly out of memory. Each fires once (to webhooks and the panel),
 //! then again only after it has been clear for ten minutes.
 //!
 //! TPS is read where it's cheap: over RCON every 30 seconds, with the
@@ -59,7 +60,7 @@ pub struct Alert {
     /// Empty for the whole panel (a drive, the PC's memory).
     pub server_id: String,
     pub server: String,
-    /// crash, tps, disk, ram.
+    /// crash, tps, join, disk, ram.
     pub kind: &'static str,
     pub text: String,
     pub since: u64,
@@ -86,6 +87,9 @@ struct Tracker {
     /// Servers whose RCON was turned on while they ran, with when that run
     /// started: RCON comes up at their next start.
     rcon_waits: HashMap<String, Option<std::time::SystemTime>>,
+    /// How far each server's `logs/latest.log` was read for players it
+    /// turned away.
+    log_read: HashMap<String, u64>,
 }
 
 fn state() -> &'static Mutex<Tracker> {
@@ -138,6 +142,41 @@ pub fn note_crash_restart(app: &App, id: &str, name: &str, attempt: u32) {
     log::warn!("alert: {text}");
     let a = Alert { server_id: id.to_string(), server: name.to_string(), kind: "crash", text, since: now(), dismissed: false };
     state().lock().unwrap().active.insert((id.to_string(), "restarted"), a);
+}
+
+/// Players the server's log shows it turned away since the last look (mods,
+/// registries or versions that don't match the player's): the newest one
+/// becomes the server's "join" alert, until dismissed or for a day. A
+/// player who just left or whose connection dropped isn't one.
+fn turned_away(st: &mut Tracker, id: &str, name: &str, root: &std::path::Path) {
+    use std::io::{Read, Seek, SeekFrom};
+    let log = root.join("logs").join("latest.log");
+    let len = std::fs::metadata(&log).map_or(0, |m| m.len());
+    // First look: from the end, so an old run's refusals don't show up.
+    let from = *st.log_read.entry(id.to_string()).or_insert(len);
+    let from = if len < from { 0 } else { from }; // a new log
+    st.log_read.insert(id.to_string(), len);
+    if len == from {
+        return;
+    }
+    let Ok(mut f) = std::fs::File::open(&log) else { return };
+    let start = from.max(len.saturating_sub(1 << 20));
+    let _ = f.seek(SeekFrom::Start(start));
+    let mut buf = Vec::new();
+    let _ = f.take(len - start).read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let Some(r) = hopper_core::joinfail::server_refusals(&text).pop() else { return };
+    let who = if r.player.is_empty() { "A player".to_string() } else { format!("**{}**", r.player) };
+    let mods = if r.mods.is_empty() {
+        String::new()
+    } else {
+        let shown: Vec<&str> = r.mods.iter().take(5).map(String::as_str).collect();
+        format!(" Mods named: {}.", shown.join(", "))
+    };
+    let text = format!("{who} couldn't join **{name}**: {}{mods} {} (\"{}\")", r.why, r.fix, r.reason);
+    log::warn!("alert: {text}");
+    let a = Alert { server_id: id.to_string(), server: name.to_string(), kind: "join", text, since: now(), dismissed: false };
+    st.active.insert((id.to_string(), "join"), a);
 }
 
 /// True once `cond` has held for `minutes`.
@@ -398,7 +437,10 @@ fn check(app: &Arc<App>, disks: &mut sysinfo::Disks) {
     disks.refresh(true);
     let mut st = state().lock().unwrap();
     let t = now();
-    st.active.retain(|k, a| k.1 != "restarted" || t.saturating_sub(a.since) < RESTARTED_FOR);
+    st.active.retain(|k, a| !matches!(k.1, "restarted" | "join") || t.saturating_sub(a.since) < RESTARTED_FOR);
+    for e in app.servers.list() {
+        turned_away(&mut st, &e.id, &e.name, &e.root);
+    }
     for srv in &snap.servers {
         let id = srv.id.clone();
         let crashed = s.crash && srv.state == "crashed";
@@ -628,6 +670,31 @@ mod tests {
                 return;
             }
         }
+    }
+
+    #[test]
+    fn a_turned_away_player_becomes_a_join_alert() {
+        let dir = std::env::temp_dir().join(format!("hopperd-join-{}", std::process::id()));
+        let logs = dir.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let log = logs.join("latest.log");
+        std::fs::write(&log, "[21:00:00] [Server thread/INFO] [minecraft/DedicatedServer]: Done (4.1s)!
+").unwrap();
+        let mut st = Tracker::default();
+        // The first look starts at the end.
+        turned_away(&mut st, "s1", "Test", &dir);
+        assert!(st.active.is_empty());
+        let mut more = std::fs::read_to_string(&log).unwrap();
+        more.push_str("[21:01:00] [Server thread/INFO] [minecraft/ServerGamePacketListenerImpl]: Jeb lost connection: Disconnected
+");
+        more.push_str("[21:02:00] [Netty Server IO #4/INFO] [minecraft/ServerConfigurationPacketListenerImpl]: Alex lost connection: Missing registry entries: create:brass_casing
+");
+        std::fs::write(&log, more).unwrap();
+        turned_away(&mut st, "s1", "Test", &dir);
+        let a = st.active.get(&("s1".to_string(), "join")).expect("join alert");
+        assert!(a.text.contains("**Alex** couldn't join **Test**"), "{}", a.text);
+        assert!(a.text.contains("create"), "{}", a.text);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

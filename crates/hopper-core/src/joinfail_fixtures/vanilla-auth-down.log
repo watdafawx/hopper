@@ -1,0 +1,2 @@
+[12:10:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to vanilla.example.com, 25565
+[12:10:05] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: translation{key='disconnect.loginFailedInfo', args=[translation{key='disconnect.loginFailedInfo.serversUnavailable', args=[]}]}

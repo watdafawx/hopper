@@ -1,0 +1,3 @@
+[13:20:00] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to far.example.org, 25565
+[13:20:30] [Server Connector #2/ERROR] [minecraft/ConnectScreen]: Couldn't connect to server
+io.netty.channel.ConnectTimeoutException: connection timed out: far.example.org/198.51.100.9:25565

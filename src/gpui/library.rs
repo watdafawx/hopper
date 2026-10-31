@@ -2684,6 +2684,7 @@ impl LibraryView {
         let header = self.header(&inst, cx);
         let hint = self.server_hint(&inst, cx);
         let pending = self.pending_banner(&inst, cx);
+        let pre_join = crate::join_help::pre_join_bar(&self.store, &inst.root, cx);
         let tabs = self.tabs(&inst, cx);
         let pack_tabs = self.pack_tabs(&inst, cx);
         let body = self.tab_body(&inst, cx);
@@ -2696,6 +2697,7 @@ impl LibraryView {
             ))
             .children(hint)
             .children(pending)
+            .children(pre_join)
             .child(tabs)
             .children(pack_tabs)
             .child(div().flex_1().min_h_0().pt_3().child(widgets::enter(

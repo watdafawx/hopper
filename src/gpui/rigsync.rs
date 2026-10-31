@@ -765,54 +765,7 @@ impl SyncPanel {
         let Some((server, inst)) = self.pair(cx) else {
             return;
         };
-        let server_nf = hopper::server_update::server_neoforge(&server.root);
-        let pack_nf = inst.loader.strip_prefix("neoforge-").map(str::to_string);
-        let remote = server.remote.is_some();
-        let what = match (&pack_nf, &server_nf) {
-            (Some(p), Some(sv)) if p != sv && remote => {
-                format!("have Hopper Server install NeoForge {p} (it backs the server up first), then sync mods")
-            }
-            (Some(p), Some(sv)) if p != sv => {
-                format!("install NeoForge {p}, point run.bat at it, and sync mods")
-            }
-            _ => "sync mods".to_string(),
-        };
-        let store = self.store.clone();
-        let name = server.name.clone();
-        let body = format!(
-            "This will {what} in {}. Replaced files go to {}.",
-            server.place(&self.store.read(cx).settings().hopper_panels),
-            self.kept_in(),
-        );
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let (store, server, inst) = (store.clone(), server.clone(), inst.clone());
-            alert
-                .title(format!("Sync {name} to this pack?"))
-                .description(body.clone())
-                .confirm()
-                .ok_text("Sync to server")
-                .on_ok(move |_, _, cx| {
-                    let s = store.read(cx);
-                    let host = s.settings().server_host.clone();
-                    let anyway = s.settings().sync_anyway.clone();
-                    let hidden = s.settings().sync_blacklist.clone();
-                    let java =
-                        hopper::launch::installer_java(Path::new(&s.settings().launcher_dir));
-                    let panel = hopper::panel::for_server(s.settings(), &server);
-                    let (server, inst) = (server.clone(), inst.clone());
-                    s.spawn_job(format!("Updating {}", server.name), move |job| {
-                        let r = hopper::server_update::update_server(
-                            &server, &inst, &host, &anyway, &hidden, &java, panel.as_deref(), job,
-                        )?;
-                        job.detail(r.summary());
-                        for f in &r.failed {
-                            job.note(f.clone());
-                        }
-                        Ok(Msg::ServersChanged)
-                    });
-                    true
-                })
-        });
+        confirm_update_server(&self.store, server, inst, window, cx);
     }
 
     /// Hide asks first: the picked mods leave this comparison until shown
@@ -3333,3 +3286,58 @@ fn action_line<'a>(rows: impl Iterator<Item = &'a DiffEntry>) -> String {
         .collect::<Vec<_>>()
         .join(" · ")
 }
+
+/// Asks, then brings the server in step with the pack: its NeoForge when
+/// it differs, then the mods (the same as Sync to server). Also offered
+/// where joining failed or is about to.
+pub fn confirm_update_server(store: &Entity<Store>, server: ServerInfo, inst: Instance, window: &mut Window, cx: &mut App) {
+    let server_nf = hopper::server_update::server_neoforge(&server.root);
+    let pack_nf = inst.loader.strip_prefix("neoforge-").map(str::to_string);
+    let remote = server.remote.is_some();
+    let what = match (&pack_nf, &server_nf) {
+        (Some(p), Some(sv)) if p != sv && remote => {
+            format!("have Hopper Server install NeoForge {p} (it backs the server up first), then sync mods")
+        }
+        (Some(p), Some(sv)) if p != sv => {
+            format!("install NeoForge {p}, point run.bat at it, and sync mods")
+        }
+        _ => "sync mods".to_string(),
+    };
+    let store = store.clone();
+    let name = server.name.clone();
+    let body = format!(
+        "This will {what} in {}. Replaced files go to {}.",
+        server.place(&store.read(cx).settings().hopper_panels),
+        if hopper::hopperd::is_remote_root(&server.root) { "Hopper Server's trash" } else { ".hopper-backups" },
+    );
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let (store, server, inst) = (store.clone(), server.clone(), inst.clone());
+        alert
+            .title(format!("Sync {name} to this pack?"))
+            .description(body.clone())
+            .confirm()
+            .ok_text("Sync to server")
+            .on_ok(move |_, _, cx| {
+                let s = store.read(cx);
+                let host = s.settings().server_host.clone();
+                let anyway = s.settings().sync_anyway.clone();
+                let hidden = s.settings().sync_blacklist.clone();
+                let java =
+                    hopper::launch::installer_java(Path::new(&s.settings().launcher_dir));
+                let panel = hopper::panel::for_server(s.settings(), &server);
+                let (server, inst) = (server.clone(), inst.clone());
+                s.spawn_job(format!("Updating {}", server.name), move |job| {
+                    let r = hopper::server_update::update_server(
+                        &server, &inst, &host, &anyway, &hidden, &java, panel.as_deref(), job,
+                    )?;
+                    job.detail(r.summary());
+                    for f in &r.failed {
+                        job.note(f.clone());
+                    }
+                    Ok(Msg::ServersChanged)
+                });
+                true
+            })
+    });
+}
+

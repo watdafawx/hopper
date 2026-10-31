@@ -1,0 +1,8 @@
+[14:02:11] [Render thread/INFO] [minecraft/Minecraft]: Setting user: Player123
+[14:02:40] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to play.example.net, 25565
+[14:02:41] [Netty Client IO #1/ERROR] [ne.ne.ne.re.NetworkRegistry/]: Failed to negotiate network components with server
+[14:02:41] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: Channel negotiation failed. Incompatible network versions:
+  create:main (server: 6, client: 7)
+  sophisticatedbackpacks:channel (server: 3, client: 4)
+  balm:networking (server: 2, client: 3)
+[14:02:45] [Render thread/INFO] [minecraft/Minecraft]: Stopping!

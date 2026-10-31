@@ -1,0 +1,2 @@
+[07:44:10] [Render thread/INFO] [minecraft/ConnectScreen]: Connecting to arcane.example.net, 25565
+[07:44:12] [Render thread/INFO] [minecraft/ClientCommonPacketListenerImpl]: Client disconnected with reason: Missing registries: [ars_nouveau:glyph_type, ars_nouveau:spell_school]
