@@ -145,9 +145,8 @@ const BAR: [InstTab; 7] = [
     InstTab::Logs,
     InstTab::Performance,
 ];
-/// Tools around the pack, as icon buttons at the bar's right end. Server
-/// isn't one: the header's server button opens it (also Ctrl+K and MCP).
-const MANAGE: [InstTab; 2] = [InstTab::Peers, InstTab::Settings];
+// Settings, Server and Peers aren't bar tabs: the header's Settings and
+// server buttons open the first two, the ⋯ menu Peers (also Ctrl+K and MCP).
 
 /// Where the header's server menu goes on the Server tab.
 #[derive(Clone, Copy)]
@@ -254,8 +253,6 @@ pub struct LibraryView {
     peers: Entity<PeersView>,
     search: Entity<InputState>,
     query: String,
-    /// The shown instance's snapshot count, read at most every few seconds.
-    snap_count: std::cell::RefCell<Option<(PathBuf, std::time::Instant, usize)>>,
     /// The instance list and the instance's page (made on first draw, see
     /// `part.rs`): a redraw from the docked peek (a GIF in its
     /// description) or from the logo layer reuses them, mod table and all.
@@ -437,7 +434,6 @@ impl LibraryView {
             peers,
             search,
             query: String::new(),
-            snap_count: Default::default(),
             parts: None,
             addons_drawn: Default::default(),
             logo_layer,
@@ -1823,6 +1819,15 @@ impl LibraryView {
                                         .on_click(move |_, _, cx| cx.open_url(&url)),
                                 )
                             })
+                            // Named, here beside Folder, so it's easy to find.
+                            .child(
+                                Button::new("inst-settings")
+                                    .outline()
+                                    .selected(self.tab == InstTab::Settings)
+                                    .icon(IconName::SlidersHorizontal)
+                                    .label("Settings")
+                                    .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Settings, cx))),
+                            )
                             .child(
                                 Button::new("more")
                                     .outline()
@@ -2052,8 +2057,8 @@ impl LibraryView {
     }
 
     /// The tab bar: content tabs with an underline that slides from the
-    /// last tab to the picked one, then Peers and Settings as icon
-    /// buttons. Tabs that don't fit the window go in a "More" menu. Tabs
+    /// last tab to the picked one. Tabs that don't fit the window go in a
+    /// "More" menu. Tabs
     /// report where they were laid out; the underline is placed from that
     /// (one frame late the very first time).
     fn tabs(&self, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
@@ -2063,8 +2068,8 @@ impl LibraryView {
         // the room the window leaves beside the instance list.
         let settings = self.store.read(cx).settings();
         let side = if settings.sidebar_collapsed { RAIL } else { settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX) };
-        let room = self.view_w - self.rem * (side + 3.5) - px(MANAGE.len() as f32 * 34. + 24.);
-        let want = |t: InstTab| px(46. + Self::bar_label(t).len() as f32 * 7.6 + if t == InstTab::Mods { 30. } else { 0. });
+        let room = self.view_w - self.rem * (side + 3.5);
+        let want = |t: InstTab| px(40. + Self::bar_label(t).len() as f32 * 6.8 + if t == InstTab::Mods { 30. } else { 0. });
         let mut used = px(0.);
         let mut shown: Vec<InstTab> = Vec::new();
         let mut folded: Vec<InstTab> = Vec::new();
@@ -2177,69 +2182,6 @@ impl LibraryView {
                     })
                 })
         });
-        // Peers is a server tool: hidden with them off (unless it's open).
-        let tools = self.store.read(cx).server_tools();
-        let manage = MANAGE.iter().filter(|t| tools || **t != InstTab::Peers || self.tab == InstTab::Peers).map(|t| {
-            let (tab, active) = (*t, *t == self.tab);
-            div()
-                .id(SharedString::from(format!("inst-manage:{}", t.key())))
-                .size(rems(2.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(theme.radius)
-                .clickable(cx)
-                .when(active, |d| d.bg(theme.primary.opacity(widgets::alpha::SELECTED)))
-                .when(!active, |d| d.hover(|s| widgets::row_hover(s, cx)))
-                .child(Icon::new(t.icon()).small().text_color(if active { theme.primary } else { theme.muted_foreground }))
-                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tab.label()).build(w, cx))
-                .on_click(cx.listener(move |this, _, _, cx| this.set_tab(tab, cx)))
-        });
-        // Backups: snapshots to undo an update, and what was removed.
-        let backups = {
-            let n = self.snapshot_count(&inst.root);
-            let (store, root) = (self.store.clone(), inst.root.clone());
-            // Gold when old backups wait for Clean up (or it's over its limit).
-            let over = hopper::retention::needs_cleanup(&inst.root);
-            let muted = if over { theme.warning } else { theme.muted_foreground };
-            div()
-                .id("inst-backups")
-                .relative()
-                .size(rems(2.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(theme.radius)
-                .clickable(cx)
-                .hover(|s| widgets::row_hover(s, cx))
-                .child(Icon::new(IconName::Archive).small().text_color(muted))
-                .when(n > 0, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(-2.))
-                            .right(px(-4.))
-                            .px_1()
-                            .rounded_full()
-                            .bg(theme.secondary)
-                            .border_1()
-                            .border_color(if over { theme.warning.opacity(0.4) } else { theme.border })
-                            .text_size(rems(0.625))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(muted)
-                            .child(n.to_string()),
-                    )
-                })
-                .tooltip(move |w, cx| {
-                    let t = if over {
-                        "Snapshots and backups: old backups to clean up"
-                    } else {
-                        "Snapshots and backups: undo an update or a removal"
-                    };
-                    gpui_kit::component::tooltip::Tooltip::new(t).build(w, cx)
-                })
-                .on_click(move |_, window, cx| crate::backups_view::open(store.clone(), root.clone(), window, cx))
-        };
         div()
             .flex_none()
             .px_6()
@@ -2257,25 +2199,8 @@ impl LibraryView {
                             .child(div().relative().child(strip).children(underline)),
                     )
                     .children(more)
-                    .child(div().w(px(1.)).h(rems(1.25)).bg(theme.border))
-                    .child(h_flex().gap_0p5().child(backups).children(manage)),
             )
             .into_any_element()
-    }
-
-    /// `root`'s snapshot count, cached for a few seconds (the tab row draws
-    /// often).
-    fn snapshot_count(&self, root: &Path) -> usize {
-        let mut c = self.snap_count.borrow_mut();
-        if let Some((r, t, n)) = c.as_ref()
-            && r == root
-            && t.elapsed() < std::time::Duration::from_secs(5)
-        {
-            return *n;
-        }
-        let n = hopper::snapshots::count(root);
-        *c = Some((root.to_path_buf(), std::time::Instant::now(), n));
-        n
     }
 
     /// A bar tab's name: "Packs" for the pack tabs.
@@ -2772,6 +2697,9 @@ fn instance_menu(
     let s = store.read(cx);
     let Some(inst) = s.instance(root) else { return menu };
     let playing = s.running(root).is_some();
+    let tools = s.server_tools();
+    // Snapshots and backups, counted when the menu opens.
+    let snaps = hopper::snapshots::count(root);
     // Another launcher's instance: deleting it here would break it there.
     let launcher = hopper::launchers::Kind::from_key(&inst.source).map(|k| k.name());
     let pack = inst.pack.as_ref().map(|p| (p.project_id, s.pack_update(inst).cloned()));
@@ -2803,7 +2731,7 @@ fn instance_menu(
                 .on_click(move |_, _, _| store::open_path(&r2)),
         )
     })
-    // The header has the Settings tab right below it.
+    // The header has its own Settings button.
     .when(!header, |m| {
         let (v, r) = vr();
         m.item(PopupMenuItem::new("Settings").icon(IconName::SlidersHorizontal).on_click(move |_, _, cx| {
@@ -2857,6 +2785,16 @@ fn instance_menu(
                     this.set_tab(InstTab::Server, cx);
                 })
             })
+    })
+    // Peers is a server tool: only with them on.
+    .when(tools, |m| {
+        let (v, r) = vr();
+        m.item(PopupMenuItem::new("Peers").icon(IconName::Users).on_click(move |_, _, cx| {
+            v.update(cx, |this, cx| {
+                this.select(r.clone(), cx);
+                this.set_tab(InstTab::Peers, cx);
+            })
+        }))
     })
     .when_some(server_pack.clone(), |m, (pid, fid, name)| {
         let s = st();
@@ -2927,7 +2865,7 @@ fn instance_menu(
     })
     .item({
         let (s, r) = (st(), r.clone());
-        PopupMenuItem::new("Backups…")
+        PopupMenuItem::new(if snaps > 0 { format!("Backups ({snaps})…") } else { "Backups…".to_string() })
             .icon(IconName::Archive)
             .on_click(move |_, window, cx| crate::backups_view::open(s.clone(), r.clone(), window, cx))
     })
