@@ -24,6 +24,7 @@ pub mod env;
 pub mod extlog;
 pub mod folderrules;
 pub mod fuzzy;
+pub mod namematch;
 pub mod game;
 pub mod history;
 pub mod hopperd;
