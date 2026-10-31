@@ -90,6 +90,10 @@
   // A pack from Browse shows as picked; Change opens the search.
   let showSearch = $state(true);
   let searchTimer;
+  // What of the picked CurseForge version Hopper may download (see /packs/check):
+  // website-only server files fall back to the client pack; a website-only
+  // pack needs a zip the player downloads.
+  let check = $state(null);
 
   const options = $derived(loaders[loader] || []);
   const domain = $derived(router?.config?.enabled ? router.config.domain : '');
@@ -114,7 +118,7 @@
             ? mc && (OPTIONAL_VERSION.includes(loader) || lv)
             : from === 'zip'
               ? !!(zipFile || zipPath) && zipInfo && (!needsPick || (mc && (OPTIONAL_VERSION.includes(loader) || lv)))
-              : !!pack && !!packFile)),
+              : !!pack && !!packFile && check?.choice !== 'needs_zip')),
   );
   // Why Create server is off, shown beside it (desktop shows its problem the same way).
   const why = $derived.by(() => {
@@ -125,6 +129,7 @@
     if (from === 'zip' && !zipInfo) return error ? '' : 'Reading the zip…';
     if (from === 'pack' && !pack) return 'Pick a modpack.';
     if (from === 'pack' && !packFile) return loadingVersions ? 'Loading its versions…' : 'Pick a version.';
+    if (from === 'pack' && check?.choice === 'needs_zip') return 'Download the pack from CurseForge, then pick the zip.';
     if (from === 'fresh' || needsPick) {
       if (!mc) return 'Pick a Minecraft version.';
       if (!OPTIONAL_VERSION.includes(loader) && !lv) return loadingLoaders ? 'Loading builds' : `No ${loaderLabel(loader)} builds for ${mc}: pick another version.`;
@@ -273,6 +278,23 @@
     return `${l || 'Minecraft'} ${v?.mc_version || ''}`.trim();
   }
 
+  let checkSeq = 0;
+  $effect(() => {
+    const p = pack, f = packFile;
+    check = null;
+    if (!p || !f || p.source !== 'curseforge') return;
+    const my = ++checkSeq;
+    api(`/packs/check?${new URLSearchParams({ project: p.id, file: f, source: p.source })}`).then(
+      (r) => my === checkSeq && (check = r),
+      () => {},
+    );
+  });
+  /** Opens the website-only file's page and switches to Zip, for the download. */
+  function useZipFrom(url) {
+    window.open(url, '_blank', 'noopener,noreferrer');
+    pickFrom('zip');
+  }
+
   let packSeq = 0;
   let loadingVersions = $state(false);
   async function choosePack(r, file = '', version = null) {
@@ -322,7 +344,7 @@
         busy = 'Starting';
         r = await followJob(job, (st) => (busy = st.detail || 'Working'));
       }
-      say(from === 'folder' && !copy ? 'Added. It runs where it is.' : `Made ${name.trim() || 'the server'}${r?.left_out ? `: ${r.left_out} client-only mods left out (see left-out-client-mods.txt)` : ''}`);
+      say(from === 'folder' && !copy ? 'Added. It runs where it is.' : `Made ${name.trim() || 'the server'}${r?.left_out ? `: ${r.left_out} client-only mods left out (see left-out-client-mods.txt)` : ''}${r?.missing ? `. ${r.missing} mods can only be downloaded from CurseForge: see missing-mods.txt in the server folder` : ''}`);
       close();
       if (r?.id) location.hash = `/server/${encodeURIComponent(r.id)}/console`;
     } catch (e) {
@@ -507,7 +529,18 @@
                 {#if !packVersions.length}<option value="">{loadingVersions ? 'Loading versions…' : 'No versions'}</option>{/if}
                 {#each packVersions as v (v.id)}<option value={v.id}>{v.name}{v.mc_version ? ` · ${v.mc_version}` : ''}{v.server_files ? ' · server files' : ''}</option>{/each}
               </select>
-              {#if pickedVersion}<div class="tiny muted">{pickedVersion.server_files ? `The pack author's server mods and configs, on ${runsOn(pickedVersion)}. Often a big download.` : `Built from the client pack on ${runsOn(pickedVersion)}, client-only mods left out.`}</div>{/if}
+              {#if pickedVersion}<div class="tiny muted">{pickedVersion.server_files && check?.choice !== 'client_pack' ? `The pack author's server mods and configs, on ${runsOn(pickedVersion)}. Often a big download.` : `Built from the client pack on ${runsOn(pickedVersion)}, client-only mods left out.`}</div>{/if}
+              {#if check?.choice === 'needs_zip' && check.pack}
+                <div class="notice small">
+                  <span><b>{pack.name}</b> can only be downloaded from the CurseForge website. Download {check.pack.file_name} there, then make the server from the zip.</span>
+                  <div class="row"><button class="btn sm" onclick={() => useZipFrom(check.pack.url)}><ExternalLink size={13} />Download on CurseForge</button><button class="btn sm ghost" onclick={() => pickFrom('zip')}>I have the zip</button></div>
+                </div>
+              {:else if check?.server_files}
+                <div class="notice small">
+                  <span>The pack's server files can't be downloaded outside CurseForge, so Hopper builds the server from the pack itself.</span>
+                  <div class="row"><button class="btn sm ghost" onclick={() => useZipFrom(check.server_files.url)}><ExternalLink size={13} />Use the server files anyway</button></div>
+                </div>
+              {/if}
             </div>
           {/if}
         {/if}
@@ -604,6 +637,8 @@
   .drop:hover { border-color: #f9731688; }
   .bar { flex: none; }
   .warn { color: var(--gold); }
+  .notice { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border-radius: 8px; background: #eab30814; color: var(--text); }
+  .notice .row { gap: 8px; flex-wrap: wrap; }
   .link { color: var(--acc); text-decoration: underline; }
   .search { flex-wrap: wrap; }
   .search .input { min-width: 160px; }

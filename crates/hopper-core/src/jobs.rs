@@ -233,6 +233,16 @@ impl Job {
         self.jobs.update(self.id, |j| j.notes.push(n));
     }
 
+    /// How many notes the job has, for [`Job::drop_notes_from`].
+    pub fn note_count(&self) -> usize {
+        self.jobs.snapshot().iter().find(|j| j.id == self.id).map_or(0, |j| j.notes.len())
+    }
+
+    /// Forgets the notes added since there were `n`.
+    pub fn drop_notes_from(&self, n: usize) {
+        self.jobs.update(self.id, |j| j.notes.truncate(n));
+    }
+
     /// Marks the job finished with `result`.
     pub fn finish<T>(&self, result: &anyhow::Result<T>) {
         let err = result.as_ref().err().map(|e| format!("{e:#}"));

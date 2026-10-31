@@ -2966,13 +2966,18 @@ impl Store {
                 // The pack author's own server pack: exactly their mod set.
                 Some(i) if server_pack => {
                     let r = hopper::hosting::create_from_server_pack(&i, &opts, job)?;
-                    job.note(format!(
-                        "From {}: {} mods{}",
-                        r.server_pack,
-                        r.create.mods_copied,
-                        if r.used_server_pack_mods { "" } else { " (from the instance; the server pack downloads its mods itself)" }
-                    ));
+                    if r.website_only.is_none() {
+                        job.note(format!(
+                            "From {}: {} mods{}",
+                            r.server_pack,
+                            r.create.mods_copied,
+                            if r.used_server_pack_mods { "" } else { " (from the instance; the server pack downloads its mods itself)" }
+                        ));
+                    }
                     if let Some(n) = r.create.note.clone() {
+                        job.note(n);
+                    }
+                    for n in r.create.missing_notes() {
                         job.note(n);
                     }
                     r.create.root
@@ -2984,6 +2989,9 @@ impl Store {
                         r.mods_copied,
                         r.skipped.len()
                     ));
+                    for n in r.missing_notes() {
+                        job.note(n);
+                    }
                     r.root
                 }
                 None => hopper::hosting::create_server(&opts, job)?,
@@ -3009,9 +3017,59 @@ impl Store {
             opts.mc_version = t.mc_version;
             opts.loader = hopper::hosting::ServerLoader::from_instance(&t.loader)?;
             let r = hopper::hosting::create_from_server_files(&files, &opts, job)?;
-            job.note(format!("From {}: {} mods", r.server_pack, r.create.mods_copied));
+            if r.website_only.is_some() {
+                job.note(hopper::hosting::BUILT_FROM_PACK);
+                job.note(format!(
+                    "{} mods copied, {} left out as client-only.",
+                    r.create.mods_copied,
+                    r.create.skipped.len()
+                ));
+            } else {
+                job.note(format!("From {}: {} mods", r.server_pack, r.create.mods_copied));
+            }
+            for n in r.create.missing_notes() {
+                job.note(n);
+            }
             let _ = opts.hosted_meta().save(&r.create.root);
             done(r.create.root);
+            Ok(Msg::ServersChanged)
+        });
+    }
+
+    /// Makes a server to host here from a zip the player downloaded from
+    /// CurseForge (a website-only pack or server pack), then lists it. A
+    /// client pack zip brings its own Minecraft and loader; a server pack
+    /// zip that doesn't say takes them from `files`' pack.
+    pub fn create_hosted_from_zip(
+        &self,
+        mut opts: hopper::hosting::CreateOptions,
+        zip: PathBuf,
+        files: Option<hopper::browse::ServerFiles>,
+        done: impl FnOnce(PathBuf) + Send + 'static,
+    ) {
+        let title = format!("Creating {}", opts.name);
+        self.spawn_job(title, move |job| {
+            job.detail("Reading the zip");
+            let info = hopper::hosting::zip_import::inspect(&zip)?;
+            if info.kind == hopper::hosting::zip_import::ZipKind::ServerPack {
+                let t = match (info.target, &files) {
+                    (Some(t), _) => t,
+                    (None, Some(f)) => hopper::hosting::pack_target(f, job)?,
+                    (None, None) => anyhow::bail!("Hopper can't tell which Minecraft and loader this zip is for."),
+                };
+                opts.mc_version = t.mc_version;
+                opts.loader = hopper::hosting::ServerLoader::from_instance(&t.loader)?;
+            }
+            let (r, used, note) = hopper::hosting::zip_import::create_from_local_zip(&zip, &opts, job)?;
+            job.note(format!("Made from {}: {} mods", zip.display(), r.mods_copied));
+            if let Some(n) = note {
+                job.note(n);
+            }
+            for n in r.missing_notes() {
+                job.note(n);
+            }
+            let _ = used.hosted_meta().save(&r.root);
+            done(r.root);
             Ok(Msg::ServersChanged)
         });
     }
@@ -3036,6 +3094,9 @@ impl Store {
                 r.mods_copied,
                 r.skipped.len()
             ));
+            for n in r.missing_notes() {
+                job.note(n);
+            }
             if !r.skipped.is_empty() {
                 let lines: Vec<String> = r.skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
                 let _ = std::fs::write(

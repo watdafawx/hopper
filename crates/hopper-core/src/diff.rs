@@ -136,6 +136,11 @@ fn known_client_only(m: &ModInfo) -> bool {
     })
 }
 
+/// Whether a jar named `file_name` is on the built-in client-only list.
+pub fn known_client_only_file(file_name: &str) -> bool {
+    known_client_only(&ModInfo { file_name: file_name.to_string(), ..Default::default() })
+}
+
 /// Matches each client jar to a server jar by file name, then by name without
 /// the version, then by mod id. The client is the source of truth.
 pub fn compute_diff(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {

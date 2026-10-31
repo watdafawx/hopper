@@ -1130,6 +1130,75 @@ pub fn download_url(f: &File) -> anyhow::Result<String> {
     }
 }
 
+/// `true` when the author lets `f` be downloaded only from the CurseForge
+/// website, so Hopper can't fetch it. Asks CurseForge when the file carries
+/// no URL; network trouble is an error, not a "no", so callers don't send
+/// the player to the website for a dropped connection. Modrinth files are
+/// always downloadable.
+pub fn website_only(f: &File) -> anyhow::Result<bool> {
+    if carries_url(f) {
+        return Ok(false);
+    }
+    let r: anyhow::Result<Data<Option<String>>> = get(
+        &format!("/v1/mods/{}/files/{}/download-url", f.mod_id, f.id),
+        &[],
+    );
+    match r {
+        Ok(Data { data }) => Ok(data.is_none_or(|u| u.is_empty())),
+        // A refusal for this one file (403 or 404): the file was already
+        // looked up with the same key, so it isn't the key.
+        Err(e) if http_status(&e).is_some_and(|s| s == 403 || s == 404) => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `f` is downloadable by what it says itself (a download URL, or
+/// a Modrinth file), with no request.
+pub fn carries_url(f: &File) -> bool {
+    f.modrinth.is_some() || f.download_url.as_ref().is_some_and(|u| !u.is_empty())
+}
+
+/// A pack file whose author allows downloads only from the CurseForge
+/// website. As an error it tells the player where to get it and what to do
+/// with it; callers can downcast to it to offer the page and a zip picker.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WebsiteOnly {
+    /// The project's name.
+    pub name: String,
+    pub file_name: String,
+    /// The file's page on CurseForge.
+    pub url: String,
+}
+
+impl WebsiteOnly {
+    pub fn of(project: &Mod, f: &File) -> Self {
+        WebsiteOnly {
+            name: project.name.clone(),
+            file_name: f.file_name.clone(),
+            url: file_page(&project.page(), f.id),
+        }
+    }
+}
+
+impl std::fmt::Display for WebsiteOnly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}'s author lets it be downloaded only from the CurseForge website, so Hopper can't fetch it. ", self.name)?;
+        if self.url.is_empty() {
+            write!(f, "Download {} there, then pick that zip in Hopper.", self.file_name)
+        } else {
+            write!(f, "Download {} from {}, then pick that zip in Hopper.", self.file_name, self.url)
+        }
+    }
+}
+
+impl std::error::Error for WebsiteOnly {}
+
+/// The CurseForge page of file `file_id` of the project at `project_url`
+/// (its website URL), where the player can download it by hand.
+pub fn file_page(project_url: &str, file_id: u64) -> String {
+    format!("{}/files/{file_id}", project_url.trim_end_matches('/'))
+}
+
 /// What a finished download must be; zero or empty skips that check.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Expect {

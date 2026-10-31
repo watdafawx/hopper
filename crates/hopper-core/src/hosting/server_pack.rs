@@ -78,6 +78,87 @@ pub struct ServerPackReport {
     pub copied: Vec<(String, usize)>,
     /// server.properties keys taken from the server pack.
     pub properties_from_pack: Vec<String>,
+    /// Set when the server pack can only be downloaded from the CurseForge
+    /// website and Hopper built the server from the pack itself instead.
+    pub website_only: Option<WebsiteOnly>,
+}
+
+/// What players read when the server pack was website-only.
+pub const BUILT_FROM_PACK: &str = "The pack's server files can't be downloaded outside CurseForge, so Hopper built the server from the pack itself.";
+
+pub use crate::cf::WebsiteOnly;
+
+/// What Hopper may download of a CurseForge pack version, checked before a
+/// server build starts. `None` means downloadable (or not there).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PackCheck {
+    /// The pack zip itself.
+    pub pack: Option<WebsiteOnly>,
+    /// The version's server pack, when it has one.
+    pub server_files: Option<WebsiteOnly>,
+    pub has_server_files: bool,
+}
+
+/// How a server for a pack version gets built, given [`PackCheck`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildChoice {
+    /// From the author's server files.
+    ServerFiles,
+    /// From the client pack, client-only mods left out (no server files,
+    /// or they're website-only).
+    ClientPack,
+    /// Nothing Hopper may download: the player downloads a zip from the
+    /// website and picks it.
+    NeedsZip,
+}
+
+impl PackCheck {
+    pub fn choice(&self) -> BuildChoice {
+        if self.has_server_files && self.server_files.is_none() {
+            BuildChoice::ServerFiles
+        } else if self.pack.is_none() {
+            BuildChoice::ClientPack
+        } else {
+            BuildChoice::NeedsZip
+        }
+    }
+}
+
+/// Checks which of pack version `f` (of `project`) and its server pack
+/// Hopper may download. A couple of small requests; no download.
+pub fn check_pack(project: &cf::Mod, f: &cf::File) -> anyhow::Result<PackCheck> {
+    if project.modrinth.is_some() {
+        return Ok(PackCheck::default());
+    }
+    let mut c = PackCheck::default();
+    if cf::website_only(f)? {
+        c.pack = Some(WebsiteOnly::of(project, f));
+    }
+    if let Some(id) = f.server_pack_file_id.filter(|i| *i != 0) {
+        c.has_server_files = true;
+        let sp = cf::file(project.id, id).context("looking up the server pack on CurseForge")?;
+        if cf::website_only(&sp)? {
+            c.server_files = Some(WebsiteOnly::of(project, &sp));
+        }
+    }
+    Ok(c)
+}
+
+/// [`WebsiteOnly`] for CurseForge file `f` when Hopper may not download it.
+fn blocked(project_id: u64, f: &cf::File) -> anyhow::Result<Option<WebsiteOnly>> {
+    if !cf::website_only(f)? {
+        return Ok(None);
+    }
+    let m = cf::get_mod(project_id).context("looking up the pack on CurseForge")?;
+    Ok(Some(WebsiteOnly::of(&m, f)))
+}
+
+/// Puts [`BUILT_FROM_PACK`] in front of the report's note.
+fn built_from_pack(create: &mut CreateReport) {
+    create.note = Some(match create.note.take() {
+        Some(n) => format!("{BUILT_FROM_PACK} {n}"),
+        None => BUILT_FROM_PACK.to_string(),
+    });
 }
 
 /// A server for `inst` from its pack's server pack. `opts` as for
@@ -93,6 +174,18 @@ pub fn create_from_server_pack(
     check_folder(opts)?;
     job.detail("Finding the pack's server pack");
     let file = resolve_server_pack(inst)?;
+    let project = inst.pack.as_ref().map_or(0, |p| p.project_id);
+    if let Some(w) = blocked(project, &file)? {
+        // The instance already has the pack's mods: build from those.
+        let mut create = create_from_instance(inst, opts, &HashSet::new(), &HashSet::new(), job)?;
+        built_from_pack(&mut create);
+        return Ok(ServerPackReport {
+            create,
+            server_pack: file.file_name.clone(),
+            website_only: Some(w),
+            ..Default::default()
+        });
+    }
     let r = create_from_zip(&file, Some(inst), opts, job)?;
     if let Some(p) = &inst.pack {
         remember(&r, p.project_id, p.file_id, &file);
@@ -165,6 +258,22 @@ pub fn create_from_server_files(
     check_folder(opts)?;
     job.detail("Finding the pack's server files");
     let file = crate::browse::server_zip(files)?;
+    if files.file.is_none()
+        && let Some(w) = blocked(files.project, &file)?
+    {
+        // Build from the client pack instead, as for packs without server
+        // files. Its own Minecraft and loader are what `opts` holds already.
+        let pack = cf::get_mod(files.project).context("looking up the pack on CurseForge")?;
+        let pack_file = cf::file(files.project, files.pack_file).context("looking up the pack on CurseForge")?;
+        let (mut create, _) = super::create::create_from_client_pack(&pack, &pack_file, opts, job)?;
+        built_from_pack(&mut create);
+        return Ok(ServerPackReport {
+            create,
+            server_pack: file.file_name.clone(),
+            website_only: Some(w),
+            ..Default::default()
+        });
+    }
     let r = create_from_zip(&file, None, opts, job)?;
     if files.file.is_none() {
         remember(&r, files.project, files.pack_file, &file);
@@ -259,6 +368,7 @@ pub(crate) fn build_from_zip(
             skipped: plan.skipped(),
             files_copied: o.files,
             note: None,
+            missing: Vec::new(),
         };
         out.used_server_pack_mods = true;
         Ok(())
@@ -883,6 +993,90 @@ mod tests {
         inst.pack.as_mut().unwrap().server_pack_file_id = 2;
         assert!(has_server_pack(&inst));
         assert!(resolve_server_pack(&Instance::default()).is_err());
+    }
+
+    /// A server pack file as CurseForge sends it when the author turned
+    /// third-party downloads off ("Cozy Zen - Server Edition").
+    const BLOCKED_FILE: &str = r#"{"id":9014270,"modId":1654081,"displayName":"Cozy Zen - Server Edition","fileName":"Cozy Zen - Server Edition.zip","releaseType":1,"fileLength":49860658,"downloadUrl":null,"gameVersions":["1.20.1","Forge"],"isServerPack":false}"#;
+
+    #[test]
+    fn a_file_without_a_download_url_needs_asking() {
+        let f: cf::File = serde_json::from_str(BLOCKED_FILE).unwrap();
+        assert!(f.download_url.is_none());
+        assert!(!cf::carries_url(&f));
+        let mut ok = f.clone();
+        ok.download_url = Some("https://edge.forgecdn.net/files/9014/270/x.zip".into());
+        assert!(cf::carries_url(&ok));
+        assert!(!cf::website_only(&ok).unwrap(), "a URL needs no request");
+        ok.download_url = Some(String::new());
+        assert!(!cf::carries_url(&ok), "an empty URL is no URL");
+        assert_eq!(
+            cf::file_page("https://www.curseforge.com/minecraft/modpacks/cozy-zen-server-edition/", f.id),
+            "https://www.curseforge.com/minecraft/modpacks/cozy-zen-server-edition/files/9014270"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_client_pack_when_server_files_are_website_only() {
+        let w = WebsiteOnly {
+            name: "Cozy Zen".into(),
+            file_name: "Cozy Zen Server.zip".into(),
+            url: "https://www.curseforge.com/minecraft/modpacks/cozy-zen/files/1".into(),
+        };
+        let c = |has, server: bool, pack: bool| PackCheck {
+            has_server_files: has,
+            server_files: server.then(|| w.clone()),
+            pack: pack.then(|| w.clone()),
+        };
+        assert_eq!(c(true, false, false).choice(), BuildChoice::ServerFiles);
+        // Server files website-only: build from the pack itself.
+        assert_eq!(c(true, true, false).choice(), BuildChoice::ClientPack);
+        assert_eq!(c(false, false, false).choice(), BuildChoice::ClientPack);
+        // The pack zip too (or a pack with no server files): only a zip
+        // the player downloads will do.
+        assert_eq!(c(true, true, true).choice(), BuildChoice::NeedsZip);
+        assert_eq!(c(false, false, true).choice(), BuildChoice::NeedsZip);
+        // Server files fine, client zip blocked: the server files win.
+        assert_eq!(c(true, false, true).choice(), BuildChoice::ServerFiles);
+        let msg = w.to_string();
+        assert!(msg.contains("only from the CurseForge website") && msg.contains(&w.url), "{msg}");
+        let e: anyhow::Error = w.clone().into();
+        assert_eq!(e.downcast_ref::<WebsiteOnly>(), Some(&w));
+    }
+
+    #[test]
+    fn lists_website_only_mods_missing_from_a_server() {
+        let dir = temp("missing");
+        let inst_root = dir.join("inst");
+        fs::create_dir_all(inst_root.join("mods")).unwrap();
+        fs::write(inst_root.join("mods/kept.jar"), "x").unwrap();
+        let p = crate::modpack::Pending {
+            name: "Blocked Mod".into(),
+            file_name: "blocked-1.0.jar".into(),
+            folder: "mods".into(),
+            url: "https://www.curseforge.com/minecraft/mc-mods/blocked/files/5".into(),
+            ..Default::default()
+        };
+        let rp = crate::modpack::Pending { folder: "resourcepacks".into(), file_name: "rp.zip".into(), ..p.clone() };
+        // Client-only: stays off the server anyway, so isn't "missing".
+        let culling = crate::modpack::Pending { file_name: "entityculling-forge-1.11.3-mc1.20.1.jar".into(), ..p.clone() };
+        let tagged = crate::modpack::Pending {
+            file_name: "skinlayers3d-forge-1.11.4.jar".into(),
+            addon: Some(crate::instances::Addon { env: "client".into(), ..Default::default() }),
+            ..p.clone()
+        };
+        crate::modpack::add_pending(&inst_root, &[p.clone(), rp, culling, tagged]).unwrap();
+        let inst = Instance { root: inst_root.clone(), name: "T".into(), ..Default::default() };
+        let mut create = CreateReport { root: dir.join("server"), ..Default::default() };
+        fs::create_dir_all(&create.root).unwrap();
+        create.missing = super::super::create::missing_mods(&inst);
+        super::super::create::write_missing(&create.root, &create.missing);
+        assert_eq!(create.missing, vec![p.clone()]);
+        let notes = create.missing_notes();
+        assert!(notes[0].contains("Blocked Mod") && notes[0].contains(&p.url), "{notes:?}");
+        let txt = fs::read_to_string(create.root.join("missing-mods.txt")).unwrap();
+        assert!(txt.contains("blocked-1.0.jar") && !txt.contains("rp.zip"), "{txt}");
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// Resolves All the Mods 10's server pack on CurseForge and plans it

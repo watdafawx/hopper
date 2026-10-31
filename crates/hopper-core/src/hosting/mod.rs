@@ -35,7 +35,8 @@ pub use properties::{PropKind, PropSpec, Properties};
 pub use schedule::{Schedule, ScheduleEvent, Scheduler};
 pub use script::{Launch, LaunchTarget};
 pub use server_pack::{
-    PackTarget, ServerPackReport, create_from_server_files, create_from_server_pack, has_server_pack,
+    BUILT_FROM_PACK, BuildChoice, PackCheck, PackTarget, ServerPackReport, WebsiteOnly, check_pack,
+    create_from_server_files, create_from_server_pack, has_server_pack,
     pack_target, resolve_server_pack,
 };
 

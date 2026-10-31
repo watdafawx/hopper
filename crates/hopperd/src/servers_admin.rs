@@ -43,6 +43,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/import-zip", post(import_zip))
         .route("/api/v1/packs/search", get(pack_search))
         .route("/api/v1/packs/versions", get(pack_versions))
+        .route("/api/v1/packs/check", get(pack_check))
         .route("/api/v1/servers/create-from-pack", post(create_from_pack))
         .route("/api/v1/servers/{id}/remove", post(remove))
         .route("/api/v1/deleted/{name}/restore", put(restore))
@@ -554,6 +555,9 @@ fn start_zip_job(app: &Arc<App>, b: ZipBody) -> ApiResult<u64> {
         if let Some(n) = note {
             job.note(n);
         }
+        for n in r.missing_notes() {
+            job.note(n);
+        }
         // An upload is done with once it's a server.
         if zip.starts_with(a.data_dir.join(INCOMING)) {
             let _ = std::fs::remove_file(&zip);
@@ -639,6 +643,32 @@ async fn pack_versions(State(app): State<Arc<App>>, headers: HeaderMap, method: 
     Ok(Json(json!({ "versions": v })))
 }
 
+/// Which of a CurseForge pack version and its server files Hopper may
+/// download, before the player starts a build: `choice` is "server_files",
+/// "client_pack" or "needs_zip"; `pack` / `server_files` give the page of a
+/// website-only file.
+async fn pack_check(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Query<HashMap<String, String>>) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let project: u64 = q.get("project").and_then(|p| p.parse().ok()).ok_or_else(|| bad("Which pack?"))?;
+    let file: u64 = q.get("file").and_then(|p| p.parse().ok()).ok_or_else(|| bad("Which version?"))?;
+    if q.get("source").is_some_and(|s| s == "modrinth") {
+        return Ok(Json(json!({ "choice": "any", "pack": null, "server_files": null })));
+    }
+    let c = blocking(move || {
+        let m = cf::get_mod(project)?;
+        let f = cf::file(project, file)?;
+        hopper_core::hosting::check_pack(&m, &f)
+    })
+    .await?;
+    let page = |w: &Option<hopper_core::hosting::WebsiteOnly>| w.as_ref().map(|w| json!({ "file_name": w.file_name, "url": w.url }));
+    let choice = match c.choice() {
+        hopper_core::hosting::BuildChoice::ServerFiles => "server_files",
+        hopper_core::hosting::BuildChoice::ClientPack => "client_pack",
+        hopper_core::hosting::BuildChoice::NeedsZip => "needs_zip",
+    };
+    Ok(Json(json!({ "choice": choice, "pack": page(&c.pack), "server_files": page(&c.server_files) })))
+}
+
 #[derive(Deserialize)]
 struct PackBody {
     source: String,
@@ -687,19 +717,39 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
             let memory = b.memory_mb.or(Some(t.recommended_mb).filter(|m| *m >= 2048));
             let o = options(&c, &b.name, &t.mc_version, ServerLoader::from_instance(&t.loader)?, &java, memory, b.port);
             let r = hopper_core::hosting::create_from_server_files(&files, &o, job)?;
-            job.note(format!("From {}: {} mods", r.server_pack, r.create.mods_copied));
+            if r.website_only.is_some() {
+                job.note(hopper_core::hosting::BUILT_FROM_PACK);
+                job.note(format!("{} mods copied, {} left out as client-only.", r.create.mods_copied, r.create.skipped.len()));
+            } else {
+                job.note(format!("From {}: {} mods", r.server_pack, r.create.mods_copied));
+            }
+            for n in r.create.missing_notes() {
+                job.note(n);
+            }
             crate::pack_api::link_new_server(&r.create.root, mr, project, file_id);
-            return finish(&a, &r.create.root, c.address, &r.create.skipped);
+            let mut v = finish(&a, &r.create.root, c.address, &r.create.skipped)?;
+            v["built_from_pack"] = json!(r.website_only.is_some());
+            v["missing"] = json!(r.create.missing.len());
+            return Ok(v);
         }
         let (pack, file) = client.expect("one of the two");
+        // Before finding Java: a website-only pack zip can't be built from.
+        if cf::website_only(&file)? {
+            return Err(cf::WebsiteOnly::of(&pack, &file).into());
+        }
         let mc = mc_of(&file.game_versions);
         let java = crate::manage_api::java_for(&mc, job)?;
         // The pack's own Minecraft and loader replace these.
         let o = options(&c, &b.name, &mc, ServerLoader::Vanilla, &java, b.memory_mb, b.port);
         let (r, _used) = hopper_core::hosting::create_from_client_pack(&pack, &file, &o, job)?;
         job.note(format!("Built from the client pack: {} mods copied, {} left out as client-only.", r.mods_copied, r.skipped.len()));
+        for n in r.missing_notes() {
+            job.note(n);
+        }
         crate::pack_api::link_new_server(&r.root, mr, project, file_id);
-        finish(&a, &r.root, c.address, &r.skipped)
+        let mut v = finish(&a, &r.root, c.address, &r.skipped)?;
+        v["missing"] = json!(r.missing.len());
+        Ok(v)
     });
     Ok(Json(json!({ "job": job })))
 }
