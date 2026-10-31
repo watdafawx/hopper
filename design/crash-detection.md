@@ -105,6 +105,39 @@ Hopper Server (`ServerCrash.svelte`) and on desktop's server banner
 - Wording says "server" where the game card says "game": "stopped the
   server from starting", "Then the server crashed in".
 
+## Errors inside a library's event (2026-10-31: built; `crashtrace.rs`)
+
+Case: a NeoForge 1.21.1 pack crashed opening the creative inventory. The
+report said "Architectury encountered an error while dispatching the
+BuildCreativeModeTabContentsEvent event: Itemstack 0 minecraft:air does not
+exist in tab's list", and its trace had only the game, the loader and two
+mixins. Hopper said "Certain: Architectury". The real cause was in
+`latest.log`: the same error with the frames inside Architectury's
+listener, where Litematica Tool's `lambda$init$1` put its item after one
+that isn't in the game. MineColonies only rebuilt the tabs.
+
+- **Read the full trace.** When the loader names a library that runs other
+  mods' code (`crashtrace::is_pass_through`: Architectury, Balm, Kotlin for
+  Forge, Cloth Config, ModernFix, MixinExtras, Puzzles Lib, the Fabric API
+  parts, …) or the report's trace names no mod of its own, the game log (then
+  `debug.log`) is searched for the same error line; its last copy with a
+  mod's frame is the trace. Frames without a jar count there (NeoForge's
+  first copy prints only `TRANSFORMER/<id>@<ver>/`).
+- **Libraries pass the blame on.** In any trace, a library's frames don't
+  take "first" from a mod further down: the first other mod is where it
+  happened, the library is possible. A library is still the likely one when
+  no other mod is in the trace. `$$Lambda` frames count as their class.
+- **The loader's word isn't final.** A library the loader named drops to
+  possible ("it only passed the game's event on"); the mod inside is certain.
+  Mods further down (callers) stay possible.
+- **Known errors, said plainly** (`crashtrace::explain`): "does not exist in
+  tab's list" tells the player the mod puts its items next to an item that
+  isn't there, and to update or remove it, or add (or turn back on) the
+  missing item.
+
+Test: `a_mod_inside_a_library_s_event_is_the_cause`, with a cut-down,
+anonymized copy of the report and log (`litematicatool-tab-*`).
+
 ## Goal
 
 When a game started from Hopper crashes, Hopper tells the player which mods

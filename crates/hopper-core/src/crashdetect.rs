@@ -138,6 +138,10 @@ pub struct Crash {
     /// until Minecraft's watchdog ended it (0: it exited).
     #[serde(default)]
     pub lingered: i64,
+    /// One plain sentence about a cause that isn't one mod, with what to do
+    /// (the wrong Java, a graphics driver, a world entry whose mod is gone).
+    #[serde(default)]
+    pub advice: String,
 }
 
 impl Crash {
@@ -197,7 +201,7 @@ static MIXIN_FAILED: LazyLock<Regex> = LazyLock::new(|| re(r"Mixin apply for mod
 static MIXIN_ERROR: LazyLock<Regex> =
     LazyLock::new(|| re(r"Mixin \[[^\]]*? from mod ([\w.-]+)\] from phase \[\w+\] in config \[[^\]]+\] FAILED during \w+"));
 /// What a mod whose mixin threw gets.
-const MIXIN_ERROR_WHY: &str = "Its change to the code of the game or another mod (a mixin) didn't fit, so the game stopped. It was likely made for a different version of the mod it changes.";
+pub(crate) const MIXIN_ERROR_WHY: &str = "Its change to the code of the game or another mod (a mixin) didn't fit, so the game stopped. It was likely made for a different version of the mod it changes.";
 /// A mixin that couldn't fit because another mod's mixin had already
 /// rewritten the same method: `cannot inject into net/x/Y::m()V merged by
 /// com.other.mixin.YMixin with priority 1000`.
@@ -297,7 +301,12 @@ pub fn signals(text: &str) -> Vec<Raw> {
             .map(|n| cut(n.strip_prefix("java.lang.").unwrap_or(n), 200))
             .unwrap_or_default();
         let during = m.get(2).map(|e| format!(" while the game ran its {} step", e.as_str())).unwrap_or_default();
-        let why = if error.is_empty() {
+        // A known error, in its own mod's handler: said plainly. (A library
+        // named here gets a second look at the log's trace, in `analyze`.)
+        let known = Some(&error).filter(|_| !crate::crashtrace::is_pass_through(&id)).and_then(|e| crate::crashtrace::explain(e));
+        let why = if let Some(k) = known {
+            k
+        } else if error.is_empty() {
             format!("The loader says it failed{during}.")
         } else {
             format!("The loader says it failed{during}: {error}")
@@ -336,62 +345,9 @@ pub fn signals(text: &str) -> Vec<Raw> {
     // The exception's own trace: the first stack, up to the first blank
     // line or the report's details.
     if let Some(start) = lines.iter().position(|l| FRAME.is_match(l)) {
-        // With a mod already named by the loader, the mods in the stack
-        // only set the event off.
-        let mut first = named.is_empty();
-        let mut first_name = named.clone();
-        for l in lines[start..].iter().take_while(|l| !l.trim().is_empty() && !l.starts_with("A detailed")) {
-            let Some(m) = FRAME.captures(l) else { continue };
-            let id = m.get(1).map_or("", |g| g.as_str()).to_string();
-            let jar = m[2].to_string();
-            // A mod's change to the game's own code (a mixin) runs in the
-            // game's frames: `Minecraft.handler$jip000$omegaconfig$onReturn`.
-            if let Some(mx) = MIXIN_METHOD.captures(l) {
-                let mid = mx[1].to_string();
-                if !out.iter().any(|r| r.mod_id == mid) {
-                    let (certainty, why) = if first {
-                        first_name = mid.clone();
-                        (Certainty::Likely, "Its change to the game's code (a mixin) was running when it crashed.".to_string())
-                    } else {
-                        (
-                            Certainty::Possible,
-                            if named.is_empty() {
-                                format!("Its change to the game's code (a mixin) called {first_name}, where the error happened.")
-                            } else if mixin_named {
-                                format!("Its change to the game's code (a mixin) was running when {named}'s change failed.")
-                            } else {
-                                format!("Its change to the game's code (a mixin) was in the step where {named} failed.")
-                            },
-                        )
-                    };
-                    first = false;
-                    add(&mut out, Raw { mod_id: mid, jar: String::new(), certainty, why, class: String::new(), needs: Vec::new() });
-                }
-                continue;
-            }
-            if NOT_MODS.contains(&id.as_str()) || is_loader_jar(&jar) {
-                continue;
-            }
-            if out.iter().any(|r| same(r, &id, &jar)) {
-                continue;
-            }
-            let name = if id.is_empty() { jar.clone() } else { id.clone() };
-            let (certainty, why) = if first {
-                first_name = name;
-                (Certainty::Likely, "The error happened in its code.".to_string())
-            } else {
-                let why = if named.is_empty() {
-                    format!("Its code called {first_name}, where the error happened.")
-                } else if mixin_named {
-                    format!("Its code was running when {named}'s change failed.")
-                } else {
-                    format!("Its code set off the step where {named} failed.")
-                };
-                (Certainty::Possible, why)
-            };
-            first = false;
-            add(&mut out, Raw { mod_id: id, jar, certainty, why, class: String::new(), needs: Vec::new() });
-        }
+        let frames: Vec<&str> =
+            lines[start..].iter().take_while(|l| !l.trim().is_empty() && !l.starts_with("A detailed")).copied().collect();
+        walk(&frames, &named, mixin_named, true, &mut out);
     }
 
     // Mixin's failures.
@@ -410,6 +366,19 @@ pub fn signals(text: &str) -> Vec<Raw> {
             );
         }
     }
+    // The loader's and Java's own messages with a known cause.
+    let mut known = Vec::new();
+    crate::crashsigs::mod_signals(&lines, &mut known);
+    if let Some(owner) = crate::crashtrace::report_error(text).and_then(|e| crate::crashsigs::missing_owner(&e)) {
+        known.push(owner);
+    }
+    for r in known {
+        if r.class.is_empty() {
+            add(&mut out, r);
+        } else {
+            out.push(r);
+        }
+    }
     fabric_signals(&lines, &mut out);
     // The watchdog's own stack is only the watchdog: where the server was
     // stuck is in the thread dump.
@@ -419,6 +388,141 @@ pub fn signals(text: &str) -> Vec<Raw> {
     blame_the_mixin(&mut out, text);
     out.sort_by_key(|r| r.certainty);
     out
+}
+
+/// The mods in one stack trace, from the throw down. The first mod's code
+/// is where it happened (likely) unless the loader already named a mod;
+/// the mods further down only led there (possible). A library that runs
+/// other mods' code ([`crate::crashtrace::is_pass_through`]) doesn't take
+/// the blame from a mod further down: the error only passed through it.
+/// It is the likely one only when no other mod is in the trace.
+/// `need_jar`: only frames that print their jar count (a mod's mixins
+/// always do). A log's own copy of the crash's error passes false: its
+/// first copy prints no jars.
+fn walk(frames: &[&str], named: &str, mixin_named: bool, need_jar: bool, out: &mut Vec<Raw>) {
+    // With a mod already named by the loader, the mods in the stack
+    // only set the event off.
+    let mut first = named.is_empty();
+    let mut first_name = named.to_string();
+    // Libraries met before the first mod: placed once it is known.
+    let mut held: Vec<Raw> = Vec::new();
+    for l in frames {
+        // A mod's change to the game's own code (a mixin) runs in the
+        // game's frames: `Minecraft.handler$jip000$omegaconfig$onReturn`.
+        let (id, jar, mixin) = if let Some(mx) = MIXIN_METHOD.captures(l) {
+            (mx[1].to_string(), String::new(), true)
+        } else if let Some((id, jar)) = crate::crashtrace::frame_mod(l).filter(|(_, jar)| !need_jar || !jar.is_empty()) {
+            (id, jar, false)
+        } else {
+            continue;
+        };
+        if NOT_MODS.contains(&id.as_str()) || is_loader_jar(&jar) {
+            continue;
+        }
+        if out.iter().chain(&held).any(|r| if mixin { r.mod_id == id } else { same(r, &id, &jar) }) {
+            continue;
+        }
+        let what = if mixin { "Its change to the game's code (a mixin)" } else { "Its code" };
+        if first && crate::crashtrace::is_pass_through(&id) {
+            held.push(Raw { mod_id: id, jar, certainty: Certainty::Possible, why: what.into(), class: String::new(), needs: Vec::new() });
+            continue;
+        }
+        let name = if id.is_empty() { jar.clone() } else { id.clone() };
+        let (certainty, why) = if first {
+            first_name = name.clone();
+            let why = if mixin { "Its change to the game's code (a mixin) was running when it crashed." } else { "The error happened in its code." };
+            (Certainty::Likely, why.to_string())
+        } else {
+            let why = if named.is_empty() {
+                format!("{what} called {first_name}, where the error happened.")
+            } else if mixin_named {
+                format!("{what} was running when {named}'s change failed.")
+            } else if mixin {
+                format!("{what} was in the step where {named} failed.")
+            } else {
+                format!("{what} set off the step where {named} failed.")
+            };
+            (Certainty::Possible, why)
+        };
+        add(out, Raw { mod_id: id, jar, certainty, why, class: String::new(), needs: Vec::new() });
+        if first {
+            for mut h in held.drain(..) {
+                h.why = format!("A library: the error passed through its code, but {name} called it there and is more likely the cause.");
+                add(out, h);
+            }
+        }
+        first = false;
+    }
+    // Only libraries: the first is where it happened.
+    let mut held = held.into_iter();
+    if let Some(mut h) = held.next() {
+        let lib = if h.mod_id.is_empty() { h.jar.clone() } else { h.mod_id.clone() };
+        h.certainty = Certainty::Likely;
+        h.why = "The error happened in its code.".into();
+        add(out, h);
+        for mut h in held {
+            h.why = format!("{} called {lib}, where the error happened.", h.why);
+            add(out, h);
+        }
+    }
+}
+
+/// When the crash report's trace names no mod of its own, or the loader
+/// names a library that only passed an event on, the game log's full trace
+/// of the same error says whose code threw: the first mod inside the
+/// library's frames. It is certain when the loader named the library in
+/// its place; the library drops to possible. `log` is the game log; `debug`
+/// reads `debug.log`, asked only when the game log has no such trace.
+fn blame_inside(raws: &mut Vec<Raw>, text: &str, log: &str, debug: &dyn Fn() -> Option<String>) {
+    let Some(error) = crate::crashtrace::report_error(text) else { return };
+    let lines: Vec<&str> = text.lines().collect();
+    let named = lines.iter().filter(|l| !after_loading_event(l)).find_map(|l| LOADING_ERROR.captures(l).map(|m| m[1].to_string()));
+    let dispatcher = named.as_deref().is_some_and(crate::crashtrace::is_pass_through);
+    // The report's trace already names a mod that isn't a library.
+    let own = lines.iter().position(|l| FRAME.is_match(l)).is_some_and(|start| {
+        lines[start..].iter().take_while(|l| !l.trim().is_empty()).any(|l| {
+            let id = MIXIN_METHOD
+                .captures(l)
+                .map(|m| m[1].to_string())
+                .or_else(|| crate::crashtrace::frame_mod(l).filter(|(_, jar)| !is_loader_jar(jar)).map(|(id, jar)| if id.is_empty() { jar } else { id }));
+            id.is_some_and(|id| !NOT_MODS.contains(&id.as_str()) && !crate::crashtrace::is_pass_through(&id))
+        })
+    });
+    if !dispatcher && (named.is_some() || own) {
+        return;
+    }
+    let own_trace = |log: &str| crate::crashtrace::trace_of(log, &error).map(|b| b.iter().map(|l| l.to_string()).collect::<Vec<_>>());
+    let Some(block) = own_trace(log).or_else(|| debug().and_then(|d| own_trace(&d))) else { return };
+    let block: Vec<&str> = block.iter().map(String::as_str).collect();
+    let mut found = Vec::new();
+    walk(&block, "", false, false, &mut found);
+    let Some(culprit) = found
+        .iter()
+        .find(|r| r.certainty == Certainty::Likely && !crate::crashtrace::is_pass_through(&r.mod_id))
+        .map(|r| if r.mod_id.is_empty() { r.jar.clone() } else { r.mod_id.clone() })
+    else {
+        return;
+    };
+    for mut r in found {
+        if r.certainty == Certainty::Likely {
+            r.certainty = if dispatcher { Certainty::Certain } else { Certainty::Likely };
+            r.why = crate::crashtrace::explain(&error).unwrap_or_else(|| match &named {
+                Some(n) => format!("The loader names {n} for this, but the error happened in this mod's code, which {n} was running."),
+                None => "The error happened in its code (the game log has the full trace).".into(),
+            });
+        }
+        add(raws, r);
+    }
+    if let Some(n) = named.filter(|_| dispatcher) {
+        for r in raws.iter_mut().filter(|r| r.mod_id.eq_ignore_ascii_case(&n)) {
+            r.certainty = Certainty::Possible;
+            r.why = format!("The loader names it, but it only passed the game's event on: the error came from {culprit} when it ran.");
+        }
+        // The rest of the report's mods were in the step where that mod failed.
+        for r in raws.iter_mut().filter(|r| !r.mod_id.eq_ignore_ascii_case(&n)) {
+            r.why = r.why.replace(&format!(" {n} failed"), &format!(" {culprit} failed"));
+        }
+    }
 }
 
 /// The mod whose mixin failed to apply, if one did.
@@ -476,18 +580,25 @@ static FABRIC_MOD: LazyLock<Regex> =
     LazyLock::new(|| re(r"Mod '[^']+' \(([\w.-]+)\) \S+ (requires|is incompatible with|conflicts with|breaks) (.+)$"));
 /// `mod 'Sodium' (sodium)` inside such a line.
 static FABRIC_OTHER: LazyLock<Regex> = LazyLock::new(|| re(r"mod '[^']+' \(([\w.-]+)\)"));
-/// A frame with no jar: `at com.x.Y.z(Y.java:1)` (any module prefix).
-static PLAIN_FRAME: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*at\s+(?:[\w.@-]+/)*([\w$]+(?:\.[\w$]+)+)\.[\w$<>]+\("));
+/// A frame with no jar: `at com.x.Y.z(Y.java:1)` (any module prefix). A
+/// lambda's frame (`com.x.Y$$Lambda/0x…`) counts as its class's.
+static PLAIN_FRAME: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"^\s*at\s+(?:[\w.@-]+/)*([\w$]+(?:\.[\w$]+)+?)(?:\$\$Lambda[\w$]*(?:/0x[0-9a-fA-F]+)?)?\.[\w$<>]+\(")
+});
 /// A mixin's injected method: `handler$zza000$sodium$onRender`.
 static MIXIN_METHOD: LazyLock<Regex> = LazyLock::new(|| {
-    re(r"\.(?:handler|redirect|modify\w*|wrapOperation|wrapWithCondition|localvar|constant)\$\w+\$([a-z][\w-]*)\$")
+    re(r"\.(?:handler|redirect|modify\w*|wrapOperation|wrapWithCondition|wrapMethod|localvar|constant)\$\w+\$([a-z][\w-]*)\$")
 });
 
-/// Classes that are the game, the loaders or common libraries.
-const LIBRARY_PACKAGES: [&str; 18] = [
+/// Classes that are the game, the loaders or common libraries, including
+/// mod libraries that only pass other mods' work on (see
+/// [`crate::crashtrace::is_pass_through`]).
+const LIBRARY_PACKAGES: [&str; 25] = [
     "java.", "javax.", "jdk.", "sun.", "com.sun.", "net.minecraft.", "com.mojang.", "net.fabricmc.",
     "org.quiltmc.", "net.neoforged.", "net.minecraftforge.", "cpw.mods.", "org.spongepowered.", "com.google.",
-    "org.apache.", "io.netty.", "it.unimi.", "org.lwjgl.",
+    "org.apache.", "io.netty.", "it.unimi.", "org.lwjgl.", "dev.architectury.", "net.blay09.mods.balm.",
+    "thedarkcolour.kotlinforforge.", "me.shedaniel.clothconfig2.", "me.shedaniel.autoconfig.", "com.llamalad7.mixinextras.",
+    "org.embeddedt.modernfix.",
 ];
 
 /// Fabric and Quilt: the loader's refusals, and the exception's frames,
@@ -573,14 +684,18 @@ fn demote_libraries(suspects: &mut [Suspect], dependents: &std::collections::Has
         }
         own.iter().map(|i| dependents.get(i).copied().unwrap_or(0)).max().unwrap_or(0)
     };
+    let pass_through = |s: &Suspect| crate::crashtrace::is_pass_through(&s.mod_id) || ids(&s.file_name).iter().any(|i| crate::crashtrace::is_pass_through(i));
+    let is_library = |s: &Suspect| users(s) >= crate::bisect::LIBRARY_MIN || pass_through(s);
     let mut library: Option<String> = None;
     for s in suspects.iter_mut().filter(|s| s.certainty == Certainty::Likely) {
         let n = users(s);
-        if n >= crate::bisect::LIBRARY_MIN {
+        if is_library(s) {
             s.certainty = Certainty::Possible;
-            s.why = format!(
-                "A library {n} of your mods use: the error happened in its code, but the mod that used it is more often the cause."
-            );
+            s.why = if n >= crate::bisect::LIBRARY_MIN {
+                format!("A library {n} of your mods use: the error happened in its code, but the mod that used it is more often the cause.")
+            } else {
+                "A library: the error happened in its code, but the mod that used it is more often the cause.".into()
+            };
             library.get_or_insert_with(|| if s.mod_id.is_empty() { s.file_name.clone() } else { s.mod_id.clone() });
         }
     }
@@ -589,7 +704,7 @@ fn demote_libraries(suspects: &mut [Suspect], dependents: &std::collections::Has
         return;
     }
     // The first mod in the chain that isn't a library.
-    if let Some(s) = suspects.iter_mut().find(|s| s.certainty == Certainty::Possible && users(s) < crate::bisect::LIBRARY_MIN) {
+    if let Some(s) = suspects.iter_mut().find(|s| s.certainty == Certainty::Possible && !is_library(s)) {
         s.certainty = Certainty::Likely;
         s.why = format!("Its code called {lib}, where the error happened: more likely the cause than the library.");
     }
@@ -764,7 +879,12 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
     let loading = loading_lines(&log_path);
     // Backups made after this crash (by a fix) aren't what changed before it.
     let before = report.as_deref().and_then(modified_secs).unwrap_or(now);
-    let (suspects, stopped) = analyze(root, &text, &log, &loading, before, mods, &ids);
+    let (mut suspects, stopped) = analyze(root, &text, &log, &loading, before, mods, &ids);
+    let native_text = native.as_deref().map(|n| tail(n, 64 << 10)).unwrap_or_default();
+    let advice = crate::crashsigs::advice(&text, &log, &native_text, false);
+    if crate::crashsigs::driver_crash(&native_text).is_some() {
+        shaders_as_a_factor(&mut suspects, mods, &ids);
+    }
     let out_of_memory = text.contains("OutOfMemoryError") || log.contains("java.lang.OutOfMemoryError");
     let kind = if !suspects.is_empty() {
         CrashKind::Mods
@@ -782,7 +902,7 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         _ => String::new(),
     };
     let (switches, switched_off) = switches(root, &text, &suspects);
-    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0 })
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice })
 }
 
 /// A saved crash read again from its report with today's rules (which mods
@@ -802,10 +922,13 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
         _ => false,
     };
     let loading = if same_run { loading_lines(&log_path) } else { String::new() };
+    // It also has the error's full trace, as when the crash was first read.
+    let log = if same_run { before_crash(&tail(&log_path, 2 << 20)).to_string() } else { String::new() };
     let before = modified_secs(&saved.source).unwrap_or(saved.when);
     let text = tail(&saved.source, 2 << 20);
-    let (mut suspects, stopped) = analyze(root, &text, "", &loading, before, mods, &ids);
+    let (mut suspects, stopped) = analyze(root, &text, &log, &loading, before, mods, &ids);
     let (switches, switched_off) = switches(root, &text, &suspects);
+    let advice = crate::crashsigs::advice(&text, &log, "", saved.server);
     // A change already put back (its older copy left backups for the mods
     // folder) stays on the card, to say so.
     for s in suspects.iter_mut().filter(|s| s.changed.is_none()) {
@@ -818,11 +941,16 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
         }
     }
     if suspects.is_empty()
-        || (suspects == saved.suspects && stopped == saved.stopped && switches == saved.switches && switched_off == saved.switched_off)
+        || (suspects == saved.suspects
+            && stopped == saved.stopped
+            && switches == saved.switches
+            && switched_off == saved.switched_off
+            && (advice.is_empty() || advice == saved.advice))
     {
         return None;
     }
-    Some(Crash { suspects, stopped, switches, switched_off, ..saved.clone() })
+    let advice = if advice.is_empty() { saved.advice.clone() } else { advice };
+    Some(Crash { suspects, stopped, switches, switched_off, advice, ..saved.clone() })
 }
 
 /// What a crash report names, for a report Hopper didn't see the game
@@ -847,7 +975,8 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
         CrashKind::Unknown
     };
     let (switches, switched_off) = switches(root, &text, &suspects);
-    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0 })
+    let advice = crate::crashsigs::advice(&text, &log, "", false);
+    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice })
 }
 
 /// What the game or server logs as it writes its crash report. After it
@@ -863,9 +992,30 @@ pub fn before_crash(log: &str) -> &str {
     }
 }
 
+/// When the graphics driver crashed Java, an installed shader mod is a
+/// factor: shaders work the driver hardest.
+fn shaders_as_a_factor(suspects: &mut Vec<Suspect>, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) {
+    for f in mods.iter().filter(|f| f.ends_with(".jar")) {
+        let own = ids(f);
+        let Some(id) = own.iter().find(|i| crate::crashsigs::SHADER_MODS.contains(&i.as_str())) else { continue };
+        if suspects.iter().any(|s| &s.file_name == f) {
+            continue;
+        }
+        suspects.push(Suspect {
+            file_name: f.clone(),
+            mod_id: id.clone(),
+            certainty: Certainty::Possible,
+            why: "Shaders work the graphics driver hardest. If a new driver doesn't help, try once with shaders off.".into(),
+            needs: Vec::new(),
+            changed: None,
+            client_only: false,
+        });
+    }
+}
+
 /// The reason a client-only mod on a dedicated server gets.
 pub const CLIENT_ONLY_WHY: &str =
-    "It's a client-only mod: it uses parts of the game that only exist on players' computers, not on a server.";
+    "It's a client-only mod: it uses parts of the game that only exist on players' computers, not on a server. Remove it from the server (players keep it). If Hopper syncs this server, mark it Never sync so it isn't copied back.";
 
 /// A dedicated server's last start, if it crashed: its newest crash report
 /// (`crash-reports/crash-…-server.txt` or `-fml.txt`) or Java crash file
@@ -909,7 +1059,17 @@ pub fn server(root: &Path) -> Option<Crash> {
         .map(|(_, p)| p)
         .filter(|p| this_run(p));
     if report.is_none() && native.is_none() {
-        return None;
+        // No crash report: a server that couldn't open its port stops
+        // without one.
+        let advice = crate::crashsigs::port_in_use(&log)?;
+        return Some(Crash {
+            when: log_end,
+            source: log_path,
+            headline: "The server couldn't start: its port is in use".into(),
+            server: true,
+            advice,
+            ..Default::default()
+        });
     }
     // Each jar's own mod ids, read once (matching asks many times).
     let dir = root.join("mods");
@@ -930,7 +1090,7 @@ pub fn server(root: &Path) -> Option<Crash> {
     let loading = if log_names_report { loading_lines(&log_path) } else { String::new() };
     let when = report.as_deref().or(native.as_deref()).and_then(modified_secs).unwrap_or(log_end);
     let (mut suspects, stopped) = analyze(root, &text, log, &loading, when, &mods, &ids);
-    client_only(&text, log, &mut suspects, &mods, &ids);
+    client_only(root, &text, log, &mut suspects, &mods, &ids);
     for s in &mut suspects {
         s.why = s.why.replace("while the game was loading", "while the server was loading").replace("the game ran its", "the server ran its");
     }
@@ -949,8 +1109,9 @@ pub fn server(root: &Path) -> Option<Crash> {
         _ => String::new(),
     };
     let (switches, switched_off) = switches(root, &text, &suspects);
+    let advice = crate::crashsigs::advice(&text, log, &native.as_deref().map(|n| tail(n, 64 << 10)).unwrap_or_default(), true);
     let source = report.or(native).unwrap_or_default();
-    Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true, lingered })
+    Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true, lingered, advice })
 }
 
 /// Whether a crash report is Minecraft's watchdog firing after the server
@@ -1068,15 +1229,26 @@ pub fn config_differs(inst_root: &Path, c: &Crash, server_text: impl Fn(&str) ->
 /// crash report and the log's last lines before it (a client class loaded
 /// on the server, a client mixin that failed, a client class missing; see
 /// `crashscan`): certain, and they go from the server rather than off.
-fn client_only(text: &str, log: &str, suspects: &mut Vec<Suspect>, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) {
+fn client_only(root: &Path, text: &str, log: &str, suspects: &mut Vec<Suspect>, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) {
     let mut last: Vec<&str> = log.lines().rev().take(800).collect();
     last.reverse();
     let last = last.join("\n");
     let mut files: Vec<String> = Vec::new();
+    let mut index: Option<PackageIndex> = None;
     for t in [text, last.as_str()] {
         for h in crate::crashscan::hits(t).0.into_iter().filter(|h| h.reason.contains("client")) {
+            // A mod's own client class (`com/x/client/XScreen`) names its
+            // jar by the package; the game's own client classes don't.
+            let class = h.class.replace('/', ".");
             let r = Raw { mod_id: h.mod_id, jar: h.file_name, certainty: Certainty::Certain, why: String::new(), class: String::new(), needs: Vec::new() };
-            if let Some(f) = match_jar(&r, mods, ids)
+            let by_package = || {
+                if class.is_empty() || LIBRARY_PACKAGES.iter().any(|p| class.starts_with(p)) {
+                    return None;
+                }
+                let idx = index.get_or_insert_with(|| PackageIndex::build(&root.join("mods"), mods));
+                idx.jar_of(&class).map(str::to_string)
+            };
+            if let Some(f) = match_jar(&r, mods, ids).or_else(by_package)
                 && !files.contains(&f)
             {
                 files.push(f);
@@ -1132,6 +1304,7 @@ fn analyze(
     ids: &impl Fn(&str) -> Vec<String>,
 ) -> (Vec<Suspect>, Option<Stopped>) {
     let mut raws = signals(text);
+    crate::crashsigs::report_signals(text, &mut raws);
     // The report's own loader list names the mod that failed first: the
     // crash is that failure itself, not a knock-on effect of it.
     // A failed mixin in the report is the crash itself too.
@@ -1143,6 +1316,22 @@ fn analyze(
     let loading = if direct { "" } else { loading };
     for r in signals(log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
         add(&mut raws, r);
+    }
+    // The full trace, when the report's is thin: latest.log, then debug.log
+    // (only when latest.log is from the same run: `log` is empty otherwise).
+    if !log.is_empty() {
+        let debug = || {
+            let p = root.join("logs").join("debug.log");
+            let same_run = modified_secs(&p).is_some_and(|t| (t - before).abs() < 300);
+            same_run.then(|| before_crash(&tail(&p, 8 << 20)).to_string())
+        };
+        blame_inside(&mut raws, text, log, &debug);
+    }
+    // The mod whose code threw a known error is told what it means.
+    if let Some(known) = crate::crashtrace::report_error(text).and_then(|e| crate::crashtrace::explain(&e)) {
+        for r in raws.iter_mut().filter(|r| r.certainty == Certainty::Likely && r.why == "The error happened in its code.") {
+            r.why = known.clone();
+        }
     }
     knock_on(&mut raws, loading);
     // The log's loader list names the mod again as certain: the report's
@@ -1677,8 +1866,8 @@ net.neoforged.fml.ModLoadingException: Loading errors encountered:\n\
             headline(report),
             "Exception in server tick loop · IllegalArgumentException: Itemstack 1 mysticalagricultureplus:fe_seeds does not exist in tab's list"
         );
-        assert!(s[0].why.contains("BuildCreativeModeTabContents"), "{}", s[0].why);
-        assert!(s[0].why.contains("IllegalArgumentException: Itemstack 1"), "{}", s[0].why);
+        // A known error, said plainly, with what to do.
+        assert!(s[0].why.contains("creative tab next to mysticalagricultureplus:fe_seeds"), "{}", s[0].why);
         let cc = s.iter().find(|r| r.mod_id == "computercraft").unwrap();
         assert_eq!(cc.certainty, Certainty::Possible);
         assert!(cc.why.contains("mysticalagricultureplus failed"), "{}", cc.why);
@@ -2004,7 +2193,8 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         let got: Vec<(&str, Certainty)> = raws.iter().map(|r| (r.mod_id.as_str(), r.certainty)).collect();
         assert_eq!(
             got,
-            [("mekanism_magic", Certainty::Certain), ("architectury", Certainty::Possible), ("omegaconfig", Certainty::Possible)]
+            // OmegaConfig called Architectury, where it threw: the mod ranks above the library.
+            [("mekanism_magic", Certainty::Certain), ("omegaconfig", Certainty::Possible), ("architectury", Certainty::Possible)]
         );
         assert!(raws[0].why.contains("requires 2.6.1 + Valhelsia Core 1.1.5; found 2.6.2"), "{}", raws[0].why);
         assert!(raws[1].why.contains("after mekanism_magic had already failed to load"), "{}", raws[1].why);
@@ -2170,7 +2360,7 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         assert_eq!(c.kind, CrashKind::Mods);
         let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.mod_id.as_str(), s.certainty)).collect();
         assert_eq!(got, [("mysticalagricultureplus", Certainty::Certain), ("computercraft", Certainty::Possible)]);
-        assert!(c.suspects[0].why.contains("while the server ran its BuildCreativeModeTabContents step"), "{}", c.suspects[0].why);
+        assert!(c.suspects[0].why.contains("creative tab next to mysticalagricultureplus:fe_seeds"), "{}", c.suspects[0].why);
         assert!(c.suspects[1].why.contains("set off the step where mysticalagricultureplus failed"), "{}", c.suspects[1].why);
         assert!(c.stopped.is_none(), "the report itself names it: no knock-on story");
         assert!(!c.suspects.iter().any(|s| s.client_only));
@@ -2447,6 +2637,210 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         assert!(c.suspects[2].why.contains("securitycraft's change"), "{}", c.suspects[2].why);
         assert!(c.stopped.is_none());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    const TAB_REPORT: &str = include_str!("crashdetect_fixtures/litematicatool-tab-crash.txt");
+    const TAB_LOG: &str = include_str!("crashdetect_fixtures/litematicatool-tab-latest.log");
+
+    /// A NeoForge 1.21.1 pack (about 400 mods), 2026-10-31, cut down and
+    /// anonymized: opening the creative inventory crashed. The report names
+    /// Architectury ("encountered an error while dispatching the
+    /// BuildCreativeModeTabContentsEvent event") and its trace has only the
+    /// game, the loader and two mixins. latest.log has the same error with
+    /// the frames inside Architectury's listener: Litematica Tool's
+    /// `lambda$init$1` put its item after one that isn't in the game.
+    /// MineColonies only rebuilt the tabs (on the server thread, earlier).
+    #[test]
+    fn a_mod_inside_a_library_s_event_is_the_cause() {
+        // The report alone names only the library: it must not stand.
+        assert!(signals(TAB_REPORT).iter().any(|r| r.mod_id == "architectury" && r.certainty == Certainty::Certain));
+        assert!(!signals(TAB_REPORT).iter().any(|r| r.mod_id == "litematicatool"));
+
+        let root = std::env::temp_dir().join(format!("hopper-crash-tab-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dir = root.join("mods");
+        for (file, id, name) in [
+            ("architectury-13.0.11-neoforge.jar", "architectury", "Architectury"),
+            ("fancytabsections-6.2.1-NEOFORGE-1.21.1.jar", "fancytabsections", "Fancy Tab Sections"),
+            ("LitematicaTool-neoforge-2.0.0.jar", "litematicatool", "LitematicaTool"),
+            ("minecolonies-1.1.1403-1.21.1.jar", "minecolonies", "MineColonies"),
+            ("modernfix-neoforge-5.27.27+mc1.21.1.jar", "modernfix", "ModernFix"),
+        ] {
+            fake_jar(&dir.join(file), id, name, "1.0");
+        }
+        let report = root.join("crash-reports/crash-2026-10-31_15.15.20-client.txt");
+        fs::write(&report, TAB_REPORT).unwrap();
+        fs::write(root.join("logs/latest.log"), TAB_LOG).unwrap();
+        let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let c = from_report(&root, &report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.mod_id.as_str(), s.certainty)).collect();
+        assert_eq!(got[0], ("litematicatool", Certainty::Certain), "{:#?}", c.suspects);
+        assert_eq!(c.suspects[0].file_name, "LitematicaTool-neoforge-2.0.0.jar");
+        assert!(c.suspects[0].why.contains("creative tab") && c.suspects[0].why.contains("Update or remove this mod"), "{}", c.suspects[0].why);
+        let arch = c.suspects.iter().find(|s| s.mod_id == "architectury").unwrap();
+        assert_eq!(arch.certainty, Certainty::Possible);
+        assert!(arch.why.contains("passed the game's event on") && arch.why.contains(" litematicatool "), "{}", arch.why);
+        assert!(c.suspects[1..].iter().all(|s| s.certainty == Certainty::Possible), "{:#?}", c.suspects);
+        // The library's own wrapper (a mixin) isn't blamed above it either.
+        assert!(c.suspects.iter().filter(|s| s.mod_id == "modernfix").all(|s| s.certainty == Certainty::Possible));
+        assert!(c.stopped.is_none());
+
+        // Read again later (the card's reread), the answer holds.
+        let saved = Crash { suspects: Vec::new(), ..c.clone() };
+        let again = reread(&root, &saved, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        assert_eq!(again.suspects, c.suspects);
+
+        // The log without the client's copy: the server thread's trace,
+        // where MineColonies only rebuilt the tabs. It ranks below.
+        let server_part = &TAB_LOG[..TAB_LOG.find("[31Okt.2026 15:15:19.950]").unwrap()];
+        let mut raws = signals(TAB_REPORT);
+        blame_inside(&mut raws, TAB_REPORT, server_part, &|| None);
+        raws.sort_by_key(|r| r.certainty);
+        assert_eq!((raws[0].mod_id.as_str(), raws[0].certainty), ("litematicatool", Certainty::Certain));
+        let mc = raws.iter().find(|r| r.mod_id == "minecolonies").unwrap();
+        assert_eq!(mc.certainty, Certainty::Possible);
+        assert!(mc.why.contains("called litematicatool"), "{}", mc.why);
+        // No full trace anywhere: the loader's word stays (and is the only one).
+        let mut raws = signals(TAB_REPORT);
+        blame_inside(&mut raws, TAB_REPORT, "", &|| None);
+        assert_eq!(raws[0].mod_id, "architectury");
+        // debug.log is read when latest.log has no trace.
+        let mut raws = signals(TAB_REPORT);
+        blame_inside(&mut raws, TAB_REPORT, "nothing here", &|| Some(TAB_LOG.to_string()));
+        raws.sort_by_key(|r| r.certainty);
+        assert_eq!(raws[0].mod_id, "litematicatool");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A jar with mod metadata and these (empty) classes, so its packages
+    /// can be found.
+    fn jar_with_classes(p: &Path, id: &str, name: &str, classes: &[&str]) {
+        use std::io::Write;
+        let mut z = zip::ZipWriter::new(fs::File::create(p).unwrap());
+        z.start_file::<_, ()>("META-INF/neoforge.mods.toml", Default::default()).unwrap();
+        write!(z, "modLoader=\"javafml\"\n[[mods]]\nmodId=\"{id}\"\nversion=\"1.0\"\ndisplayName=\"{name}\"\n").unwrap();
+        for c in classes {
+            z.start_file::<_, ()>(format!("{}.class", c.replace('.', "/")), Default::default()).unwrap();
+            z.write_all(b"\xca\xfe\xba\xbe").unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    /// Hand-written after a common NeoForge crash: an addon calls a method
+    /// its library no longer has. The addon's frame threw (likely, told what
+    /// it means); the library is named too, by the class's package.
+    #[test]
+    fn a_missing_method_names_both_mods_with_the_fix() {
+        let report = "---- Minecraft Crash Report ----\nDescription: Mod loading error has occurred\n\n\
+java.lang.NoSuchMethodError: 'void com.example.corelib.api.Registry.add(java.lang.String, int)'\n\
+\tat TRANSFORMER/addon@2.0/com.example.addon.Setup.init(Setup.java:40) ~[addon-2.0.jar%23300!/:2.0] {re:classloading}\n\
+\tat TRANSFORMER/corelib@3.0/com.example.corelib.events.Bus.fire(Bus.java:12) ~[corelib-3.0.jar%23301!/:3.0] {}\n\
+\tat java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {}\n";
+        let root = std::env::temp_dir().join(format!("hopper-crash-nosuchmethod-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dir = root.join("mods");
+        jar_with_classes(&dir.join("addon-2.0.jar"), "addon", "Addon", &["com.example.addon.Setup"]);
+        jar_with_classes(&dir.join("corelib-3.0.jar"), "corelib", "Core Lib", &["com.example.corelib.api.Registry", "com.example.corelib.events.Bus"]);
+        let rp = root.join("crash-reports/crash-2026-10-31_12.00.00-client.txt");
+        fs::write(&rp, report).unwrap();
+        let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let c = from_report(&root, &rp, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.file_name.as_str(), s.certainty)).collect();
+        assert_eq!(got, [("addon-2.0.jar", Certainty::Likely), ("corelib-3.0.jar", Certainty::Possible)]);
+        assert!(c.suspects[0].why.contains("the method com.example.corelib.api.Registry.add, which isn't there"), "{}", c.suspects[0].why);
+        assert!(c.suspects[0].why.contains("Update this mod and the mod it needs"), "{}", c.suspects[0].why);
+
+        // A class built for a newer Java: its jar, and the advice to switch Java.
+        let report = "---- Minecraft Crash Report ----\nDescription: Mod loading error has occurred\n\n\
+java.lang.UnsupportedClassVersionError: com/example/addon/Setup has been compiled by a more recent version of the Java Runtime (class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 61.0\n\
+\tat java.base/java.lang.ClassLoader.defineClass1(Native Method) ~[?:?] {}\n";
+        fs::write(&rp, report).unwrap();
+        let c = from_report(&root, &rp, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        assert_eq!((c.suspects[0].file_name.as_str(), c.suspects[0].certainty), ("addon-2.0.jar", Certainty::Likely));
+        assert!(c.advice.contains("needs Java 21, but it ran on Java 17"), "{}", c.advice);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Hand-written after NeoForge's RuntimeDistCleaner refusing a mod's own
+    /// client class on a dedicated server, with no "-- MOD --" block that
+    /// names it: its jar is found by the class's package.
+    #[test]
+    fn a_client_only_mod_is_found_by_its_class_package() {
+        let report = "---- Minecraft Crash Report ----\nDescription: Exception in server tick loop\n\n\
+java.lang.RuntimeException: Attempted to load class com/example/fancyhud/client/HudScreen for invalid dist DEDICATED_SERVER\n\
+\tat MC-BOOTSTRAP/net.neoforged.fml.loading.RuntimeDistCleaner.processClassWithFlags(RuntimeDistCleaner.java:57) ~[loader-4.0.45.jar%23107!/:4.0] {}\n\
+\tat java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {}\n";
+        let log = "[12:00:00] [main/INFO] [minecraft/DedicatedServer]: Starting minecraft server version 1.21.1\n\
+[12:00:02] [Server thread/ERROR] [ne.ne.fm.lo.RuntimeDistCleaner/DISTXFORM]: Attempted to load class com/example/fancyhud/client/HudScreen for invalid dist DEDICATED_SERVER\n\
+[12:00:03] [Server thread/ERROR] [minecraft/MinecraftServer]: This crash report has been saved to: crash-reports/crash-2026-10-31_12.00.03-server.txt\n";
+        let root = server_root("clientpkg", &[("other-1.0.jar", "other", "Other")], ("crash-2026-10-31_12.00.03-server.txt", report), log);
+        jar_with_classes(&root.join("mods/FancyHud-2.1.jar"), "fancyhud", "Fancy HUD", &["com.example.fancyhud.client.HudScreen"]);
+        let c = server(&root).unwrap();
+        assert_eq!((c.suspects[0].file_name.as_str(), c.suspects[0].certainty), ("FancyHud-2.1.jar", Certainty::Certain));
+        assert!(c.suspects[0].client_only);
+        assert!(c.suspects[0].why.contains("Remove it from the server") && c.suspects[0].why.contains("Never sync"), "{}", c.suspects[0].why);
+        assert!(!c.suspects.iter().any(|s| s.file_name == "other-1.0.jar"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A server whose port is taken stops without a crash report: the card
+    /// says so, with the port, and names no mod.
+    #[test]
+    fn a_server_port_in_use_is_its_own_crash() {
+        let log = "[12:00:00] [Server thread/INFO] [minecraft/DedicatedServer]: Starting minecraft server version 1.21.1\n\
+[12:00:00] [Server thread/INFO] [minecraft/DedicatedServer]: Starting Minecraft server on *:25570\n\
+[12:00:01] [Server thread/WARN] [minecraft/DedicatedServer]: **** FAILED TO BIND TO PORT!\n\
+[12:00:01] [Server thread/WARN] [minecraft/DedicatedServer]: The exception was: java.net.BindException: Address already in use: bind\n\
+[12:00:01] [Server thread/WARN] [minecraft/DedicatedServer]: Perhaps a server is already running on that port?\n\
+[12:00:01] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server\n";
+        let root = server_root("port", &[("other-1.0.jar", "other", "Other")], ("old.txt", "not this run"), log);
+        fs::remove_file(root.join("crash-reports/old.txt")).unwrap();
+        let c = server(&root).unwrap();
+        assert!(c.server && c.suspects.is_empty());
+        assert!(c.advice.contains("already using port 25570"), "{}", c.advice);
+        // A server that started fine has no crash.
+        fs::write(root.join("logs/latest.log"), "[12:00:09] [Server thread/INFO] [minecraft/DedicatedServer]: Done (8.1s)! For help, type \"help\"\n").unwrap();
+        assert!(server(&root).is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_driver_crash_names_shader_mods_as_a_factor() {
+        let mut s = Vec::new();
+        let ids = |f: &str| if f.starts_with("iris") { vec!["iris".to_string()] } else { vec!["sodium".to_string()] };
+        shaders_as_a_factor(&mut s, &["iris-1.8.jar".into(), "sodium-0.6.jar".into()], &ids);
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].file_name.as_str(), s[0].certainty), ("iris-1.8.jar", Certainty::Possible));
+    }
+
+    /// A library's frames above the mod that called it don't take "first";
+    /// a lambda frame counts as its class.
+    #[test]
+    fn library_frames_pass_the_blame_to_the_mod_inside() {
+        let frames = [
+            "\tat TRANSFORMER/neoforge@21.1.259/net.neoforged.X.y(X.java:1) ~[neoforge-21.1.259-universal.jar%23424!/:?]",
+            "\tat TRANSFORMER/architectury@13.0.11/dev.architectury.A.b(A.java:1) ~[architectury-13.0.11-neoforge.jar%23445!/:?]",
+            "\tat TRANSFORMER/somemod@1.0/com.some.Mod$$Lambda/0x0000000801570218.accept(Unknown Source)",
+            "\tat TRANSFORMER/caller@1.0/com.caller.C.d(C.java:1) ~[caller-1.0.jar%2312!/:?]",
+        ];
+        let mut out = Vec::new();
+        walk(&frames, "", false, false, &mut out);
+        let got: Vec<(&str, Certainty)> = out.iter().map(|r| (r.mod_id.as_str(), r.certainty)).collect();
+        assert_eq!(got, [("somemod", Certainty::Likely), ("architectury", Certainty::Possible), ("caller", Certainty::Possible)]);
+        // Only a library: it's still where the error happened.
+        let mut out = Vec::new();
+        walk(&frames[..2], "", false, false, &mut out);
+        assert_eq!((out[0].mod_id.as_str(), out[0].certainty), ("architectury", Certainty::Likely));
+        // Fabric: a lambda's frame names its class.
+        let m = PLAIN_FRAME.captures("\tat com.some.Mod$$Lambda/0x0000000801570218.accept(Unknown Source)").unwrap();
+        assert_eq!(&m[1], "com.some.Mod");
+        assert_eq!(&PLAIN_FRAME.captures("\tat com.some.Mod.run(Mod.java:3)").unwrap()[1], "com.some.Mod");
     }
 
     /// Prints what the real crash reports of every instance name.
