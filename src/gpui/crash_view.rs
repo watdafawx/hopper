@@ -168,14 +168,19 @@ pub fn what_happened(c: &Crash, st: &Stopped, changed: Option<(&Changed, &str)>,
 }
 
 /// The note for a crash that names no mod.
-pub fn note(c: &Crash) -> Option<&'static str> {
+pub fn note(c: &Crash) -> Option<String> {
     use hopper::crashdetect::CrashKind;
-    match (c.kind, c.server) {
+    // A cause that isn't one mod, said by the crash itself, comes first.
+    if !c.advice.is_empty() {
+        return Some(c.advice.clone());
+    }
+    let n = match (c.kind, c.server) {
         (CrashKind::Mods, _) => None,
         (CrashKind::Memory, false) => Some("Java ran out of memory. Give this instance more in Settings › Memory."),
         (CrashKind::Memory, true) => Some("Java ran out of memory. Give the server more in its Java settings."),
         (CrashKind::Native, false) => Some("Java itself crashed. Try another Java in Settings › Java, or update your graphics driver."),
         (CrashKind::Native, true) => Some("Java itself crashed. Try another Java in the server's Java settings."),
         (CrashKind::Unknown, _) => Some("Hopper couldn't tell which mod. The crash report has the details."),
-    }
+    };
+    n.map(str::to_string)
 }

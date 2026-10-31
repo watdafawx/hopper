@@ -49,7 +49,9 @@ static TAB_MISSING: LazyLock<Regex> = LazyLock::new(|| re(r"Itemstack \d+ (\S+) 
 /// A plain explanation for the mod whose code threw a known error, with
 /// what to do.
 pub fn explain(error: &str) -> Option<String> {
-    let item = TAB_MISSING.captures(error)?.get(1)?.as_str().to_string();
+    let Some(item) = TAB_MISSING.captures(error).and_then(|m| m.get(1)).map(|m| m.as_str().to_string()) else {
+        return crate::crashsigs::explain_code(error);
+    };
     Some(if item == "minecraft:air" {
         "It puts its items in a creative tab next to an item that isn't in the game (the game sees empty air there), so the game couldn't fill its creative tabs. Update or remove this mod, or add the mod that adds the missing item."
             .to_string()

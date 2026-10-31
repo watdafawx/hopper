@@ -77,7 +77,9 @@
   const offAlready = $derived(likely.filter((s) => !s.client_only && modOf(s.file_name) && !isOn(s.file_name)));
   const knock = $derived(suspects.filter((s) => s.certainty === 'Possible'));
   const knockError = $derived((crash?.headline || '').split(' · ').slice(1).join(' · ') || crash?.headline || '');
+  // A cause that isn't one mod, said by the crash itself, comes first.
   const note = $derived(
+    crash?.advice ||
     {
       Memory: 'Java ran out of memory. Give the server more in its Java settings.',
       Native: 'Java itself crashed. Try another Java in the server\'s Java settings.',
