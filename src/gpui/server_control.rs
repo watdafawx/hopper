@@ -570,21 +570,27 @@ impl ServerControl {
 
     /// The state and the buttons, for the server's header.
     pub fn controls(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.controls_in(false, cx)
+        self.controls_in(false, false, cx)
+    }
+
+    /// For the Servers page's header: full-size buttons, Start green like
+    /// Play, and no state chip (the header has the state pill).
+    pub fn controls_hero(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.controls_in(false, true, cx)
     }
 
     /// The same, narrow: Stop and Restart as icons with tooltips, for a
     /// side column.
     pub fn controls_compact(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.controls_in(true, cx)
+        self.controls_in(true, false, cx)
     }
 
-    fn controls_in(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn controls_in(&self, compact: bool, hero: bool, cx: &mut Context<Self>) -> AnyElement {
+        let size = move |b: Button| if hero { b } else { b.small() };
         let theme = cx.theme().clone();
         let pname = self.panel_name(cx);
         if !self.configured(cx) {
-            return Button::new("panel-set-up")
-                .small()
+            return size(Button::new("panel-set-up"))
                 .outline()
                 .icon(IconName::Settings)
                 .label("Control from Hopper…")
@@ -628,15 +634,14 @@ impl ServerControl {
             (Some(_), None) => (widgets::chip(cx.theme().muted_foreground), "Stopped"),
             (None, None) => (widgets::chip(cx.theme().muted_foreground), "…"),
         };
-        let menu_view = cx.entity();
         let success = theme.success;
         h_flex()
             .gap_2()
             // A narrow column wraps instead of pushing buttons out.
             .when(compact, |r| r.flex_wrap())
-            // Compact (a card that names the state already): only a
-            // transition shows.
-            .when(!compact || busy.is_some(), |r| {
+            // Compact (a card that names the state already) and the
+            // header (its pill does): only a transition shows.
+            .when((!compact && !hero) || busy.is_some(), |r| {
                 r.child(
                     h_flex()
                         .gap_1p5()
@@ -644,12 +649,11 @@ impl ServerControl {
                         .child(tag.small().child(state)),
                 )
             })
-            .when(!compact, |r| r.child(div().w_px().h_5().bg(theme.border)))
+            .when(!compact && !hero, |r| r.child(div().w_px().h_5().bg(theme.border)))
             .map(|r| {
                 if running {
                     r.child(
-                        Button::new("panel-stop")
-                            .small()
+                        size(Button::new("panel-stop"))
                             .outline()
                             .icon(IconName::Square)
                             .map(|b| if compact { b.tooltip("Stop") } else { b.label("Stop") })
@@ -659,8 +663,7 @@ impl ServerControl {
                             })),
                     )
                     .child(
-                        Button::new("panel-restart")
-                            .small()
+                        size(Button::new("panel-restart"))
                             .outline()
                             .icon(IconName::RotateCcw)
                             .map(|b| if compact { b.tooltip("Restart") } else { b.label("Restart") })
@@ -669,6 +672,21 @@ impl ServerControl {
                                 this.request(PanelAction::Restart, window, cx)
                             })),
                     )
+                } else if hero {
+                    // The page's main action, green like Play.
+                    r.child(widgets::glow(
+                        Button::new("panel-start")
+                            .success()
+                            .icon(IconName::Play)
+                            .label("Start")
+                            .min_w_24()
+                            .disabled(busy.is_some())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.request(PanelAction::Start, window, cx)
+                            })),
+                        success,
+                        cx,
+                    ))
                 } else {
                     // Outline: Play is the only green button. The icon
                     // keeps the color.
@@ -703,33 +721,34 @@ impl ServerControl {
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(ControlEvent::Console))),
                 )
             })
-            .child(
-                Button::new("panel-more")
-                    .small()
-                    .ghost()
-                    .icon(IconName::Ellipsis)
-                    .dropdown_menu(move |menu, _, _| {
-                        let (v1, v2) = (menu_view.clone(), menu_view.clone());
-                        menu.item(PopupMenuItem::new("Back up now").on_click(
-                            move |_, window, cx| {
-                                v1.update(cx, |this, cx| {
-                                    this.request(PanelAction::Backup, window, cx)
-                                })
-                            },
-                        ))
-                        .separator()
-                        .item(
-                            PopupMenuItem::new("Kill (no save)")
-                                .disabled(!running)
-                                .on_click(move |_, window, cx| {
-                                    v2.update(cx, |this, cx| {
-                                        this.request(PanelAction::Kill, window, cx)
-                                    })
-                                }),
-                        )
-                    }),
-            )
+            // The header puts ⋯ last, after its own buttons.
+            .when(!hero, |r| r.child(self.more_menu(Button::new("panel-more").small().ghost(), running, cx)))
             .into_any_element()
+    }
+
+    /// ⋯ with Back up now and Kill, for the header's end (see
+    /// [`Self::controls_hero`]); None until the panel lists the server.
+    pub fn more_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.configured(cx) || self.id.is_none() || !matches!(self.stats, Some(Ok(_))) {
+            return None;
+        }
+        let running = matches!(&self.stats, Some(Ok(s)) if s.running);
+        Some(self.more_menu(Button::new("panel-more").outline().icon(IconName::Ellipsis).tooltip("More"), running, cx))
+    }
+
+    fn more_menu(&self, b: Button, running: bool, cx: &mut Context<Self>) -> AnyElement {
+        let menu_view = cx.entity();
+        b.icon(IconName::Ellipsis).dropdown_menu(move |menu, _, _| {
+            let (v1, v2) = (menu_view.clone(), menu_view.clone());
+            menu.item(PopupMenuItem::new("Back up now").on_click(move |_, window, cx| {
+                v1.update(cx, |this, cx| this.request(PanelAction::Backup, window, cx))
+            }))
+            .separator()
+            .item(PopupMenuItem::new("Kill (no save)").disabled(!running).on_click(move |_, window, cx| {
+                v2.update(cx, |this, cx| this.request(PanelAction::Kill, window, cx))
+            }))
+        })
+        .into_any_element()
     }
 
     /// The panel's last stats for `root`, when this control shows it.

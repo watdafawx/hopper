@@ -144,6 +144,9 @@ pub struct PanelStats {
     /// "Tailscale", "Internet" or "Local". The panel decides from the real
     /// client address, so a public name that points home still says LAN.
     pub via: Option<&'static str>,
+    /// Hopper Server: `server-icon.png`'s modified time, when it has one
+    /// (fetch it with [`crate::hopperd::Client::icon`]).
+    pub icon: Option<u64>,
 }
 
 /// Hopper Server's `via` (from /hello) in words, as the web panel shows it.
