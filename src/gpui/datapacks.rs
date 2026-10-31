@@ -1000,10 +1000,20 @@ impl AddonsView {
             )
             .when(self.action_fits(), |r| r.child(col_action(self.compact)))
             .children(self.spacer())
-            .when(self.cols.author, |r| r.child(col_author()))
-            .when(self.cols.side, |r| r.child(col_env()))
-            .child(col_active().child(radio))
-            .when(self.cols.date, |r| r.child(col_date()))
+            .children(crate::addons::in_col_order(&self.col_order, {
+                use crate::addons::Col;
+                let mut cells = vec![(Col::On, col_active().child(radio).into_any_element())];
+                if self.cols.author {
+                    cells.push((Col::Author, col_author().into_any_element()));
+                }
+                if self.cols.side {
+                    cells.push((Col::Side, col_env().into_any_element()));
+                }
+                if self.cols.date {
+                    cells.push((Col::Added, col_date().into_any_element()));
+                }
+                cells
+            }))
             .child(col_trash())
             .into_any_element()
     }

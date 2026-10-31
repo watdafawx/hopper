@@ -170,6 +170,39 @@ pub fn split_alone(
         .on_click(on_click)
 }
 
+/// A toolbar's main actions (Add content, Update all): primary tint with
+/// primary text, louder than outline but not a filled button.
+pub fn tinted(b: Button, cx: &App) -> Button {
+    let theme = cx.theme();
+    // The button paints its resting color at a fifth of its strength, so
+    // full primary rests as a soft tint; hover and press paint as given.
+    let mix = |a: f32| theme.background.blend(theme.primary.opacity(a));
+    b.custom(
+        gpui_kit::component::button::ButtonCustomVariant::new(cx)
+            .color(theme.primary)
+            .foreground(theme.primary)
+            .hover(mix(0.24))
+            .active(mix(0.30)),
+    )
+}
+
+/// A filter that is on or off, as a chip: quiet grey off, primary tint on.
+pub fn toggle_chip(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool, cx: &App) -> Button {
+    let theme = cx.theme();
+    let b = Button::new(id).small().label(label);
+    if on {
+        tinted(b, cx)
+    } else {
+        b.custom(
+            gpui_kit::component::button::ButtonCustomVariant::new(cx)
+                .color(theme.secondary)
+                .foreground(theme.muted_foreground)
+                .hover(theme.secondary_hover)
+                .active(theme.secondary_active),
+        )
+    }
+}
+
 /// A button to the CurseForge key in Settings, when `error` is CurseForge
 /// rejecting the key; put it next to wherever a CurseForge error shows.
 pub fn cf_key_fix(id: impl Into<ElementId>, error: &str) -> Option<Button> {
