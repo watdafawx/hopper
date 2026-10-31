@@ -736,9 +736,10 @@ pub fn create_from_client_pack(
     if opts.folder().exists() {
         bail!("{} already exists.", opts.folder().display());
     }
-    // Before the long install: a website-only pack zip can't be fetched,
-    // so send the player to its page instead of failing halfway.
-    if crate::cf::website_only(file)? {
+    // Before the long install: a website-only pack zip can't be fetched
+    // without the desktop app's download window, so send the player to its
+    // page instead of failing halfway.
+    if !crate::modpack::can_fetch_from_website() && crate::cf::website_only(file)? {
         return Err(crate::cf::WebsiteOnly::of(pack, file).into());
     }
     let stage = opts.servers_root.join(format!(

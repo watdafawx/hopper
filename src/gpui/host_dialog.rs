@@ -164,9 +164,14 @@ impl PackFiles {
     }
 
     /// The pack zip itself is website-only: only a zip the player
-    /// downloads will do.
+    /// downloads will do, unless Hopper's download window gets it.
     fn needs_zip(&self) -> bool {
         matches!(self.build, Build::ClientPack(..)) && self.check.pack.is_some()
+    }
+
+    /// [`Self::needs_zip`] with no download window to get it either.
+    fn must_pick_zip(&self) -> bool {
+        self.needs_zip() && !hopper::modpack::can_fetch_from_website()
     }
 }
 
@@ -342,7 +347,7 @@ impl HostForm {
                 let l = ServerLoader::from_instance(&loader).map_err(|e| format!("{e:#}"))?;
                 CreateOptions::new(&name, &root, &gv, l, &java)
             }
-            Source::Files(p) if p.needs_zip() && self.zip.is_none() => {
+            Source::Files(p) if p.must_pick_zip() && self.zip.is_none() => {
                 return Err("Download the pack from CurseForge, then pick the zip.".into());
             }
             Source::Files(p) => {
@@ -487,20 +492,32 @@ impl HostForm {
     /// instead, and a way to use the file anyway (its CurseForge page, then
     /// a picker for the downloaded zip).
     fn website_only_notice(&self, p: &PackFiles, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let window = hopper::modpack::can_fetch_from_website();
         let (text, url, button) = if p.needs_zip() {
             let w = p.check.pack.as_ref()?;
             (
-                format!(
-                    "{} can only be downloaded from the CurseForge website. Download {} there, then pick the zip.",
-                    p.name, w.file_name
-                ),
+                if window {
+                    format!(
+                        "{} can only be downloaded from the CurseForge website. Hopper opens its page in a download window to get {}.",
+                        p.name, w.file_name
+                    )
+                } else {
+                    format!(
+                        "{} can only be downloaded from the CurseForge website. Download {} there, then pick the zip.",
+                        p.name, w.file_name
+                    )
+                },
                 w.url.clone(),
-                "Download on CurseForge",
+                if window { "Download it yourself" } else { "Download on CurseForge" },
             )
         } else if matches!(p.build, Build::ServerFiles(_)) {
             let w = p.check.server_files.as_ref()?;
             (
-                "The pack's server files can't be downloaded outside CurseForge, so Hopper builds the server from the pack itself.".to_string(),
+                if window {
+                    "The pack's server files can only be downloaded from the CurseForge website. Hopper opens their page in a download window to get them, or builds the server from the pack itself if that fails.".to_string()
+                } else {
+                    "The pack's server files can't be downloaded outside CurseForge, so Hopper builds the server from the pack itself.".to_string()
+                },
                 w.url.clone(),
                 "Use the server files anyway",
             )
@@ -663,8 +680,11 @@ impl Render for HostForm {
                             "From {}, the zip you downloaded.",
                             z.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                         ),
-                        (None, _) if p.needs_zip() => format!(
+                        (None, _) if p.must_pick_zip() => format!(
                             "Made from the pack's zip once you download it, on {on}; client-only mods left out."
+                        ),
+                        (None, Build::ServerFiles(_)) if hopper::modpack::can_fetch_from_website() => format!(
+                            "The pack author's server mods and configs, on {on}. Often a big download."
                         ),
                         (None, Build::ServerFiles(_)) if p.check.server_files.is_none() => format!(
                             "The pack author's server mods and configs, on {on}. Often a big download."

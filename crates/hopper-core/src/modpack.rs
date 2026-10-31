@@ -411,6 +411,59 @@ fn prune_dir(
     Ok(freed)
 }
 
+/// Gets a website-only file from its CurseForge page into a folder and
+/// says whether every file came. The desktop app sets one (its WebView2
+/// download window); the server panel has none.
+pub type WebsiteFetcher = dyn Fn(&Path, &str) -> bool + Send + Sync;
+
+static WEBSITE_FETCHER: std::sync::OnceLock<Box<WebsiteFetcher>> = std::sync::OnceLock::new();
+
+/// Lets website-only pack zips download through `f` instead of stopping
+/// with [`cf::WebsiteOnly`]. Set once, at startup.
+pub fn set_website_fetcher(f: Box<WebsiteFetcher>) {
+    let _ = WEBSITE_FETCHER.set(f);
+}
+
+/// Whether website-only files can be fetched here.
+pub fn can_fetch_from_website() -> bool {
+    WEBSITE_FETCHER.get().is_some()
+}
+
+/// Gets the file on CurseForge page `url` through the website fetcher into
+/// `dir`, checks it against `expect` and moves it to `dest`. `Ok(false)`
+/// when there's no fetcher or the page gave no file.
+pub fn fetch_from_website(url: &str, dir: &Path, expect: &cf::Expect, dest: &Path, job: &Job) -> anyhow::Result<bool> {
+    let Some(fetch) = WEBSITE_FETCHER.get() else {
+        return Ok(false);
+    };
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir)?;
+    struct Cleanup<'a>(&'a Path);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(self.0);
+        }
+    }
+    let _cleanup = Cleanup(dir);
+    let came = fetch(dir, url);
+    // The window saves the file under the page's own name; take the one
+    // finished file it left.
+    let file = fs::read_dir(dir)?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .find(|p| !p.extension().is_some_and(|x| x == "hopper-tmp"));
+    let Some(file) = file else {
+        log::warn!("website fetch of {url} gave no file (window said {came})");
+        return Ok(false);
+    };
+    let total = expect.len as usize;
+    cf::write_checked(fs::File::open(&file)?, dest, expect, &|| job.is_cancelled(), &mut |n| {
+        job.progress(n as usize, total)
+    })?;
+    Ok(true)
+}
+
 pub(crate) fn fetch_pack_zip(pack_file: &cf::File, job: &Job) -> anyhow::Result<PathBuf> {
     // CurseForge file ids are unique, so they make the cache key.
     let zip_path = cache_dir().join(format!("{}.zip", pack_file.id));
@@ -428,6 +481,19 @@ pub(crate) fn fetch_pack_zip(pack_file: &cf::File, job: &Job) -> anyhow::Result<
                             url: String::new(),
                         },
                     };
+                    // The app's download window can get it from the page;
+                    // without one (or when it fails) the player picks the zip.
+                    if !w.url.is_empty() {
+                        job.detail(format!("Getting {} from the CurseForge website", pack_file.file_name));
+                        // The download page starts the file by itself; the
+                        // file's page only shows it.
+                        let page = w.url.replace(&format!("/files/{}", pack_file.id), &format!("/download/{}", pack_file.id));
+                        match fetch_from_website(&page, &zip_path.with_extension("web"), &pack_file.expect(), &zip_path, job) {
+                            Ok(true) => return Ok(zip_path),
+                            Ok(false) => {}
+                            Err(e) => log::warn!("getting {} from the website: {e:#}", pack_file.file_name),
+                        }
+                    }
                     return Err(w.into());
                 }
                 _ => return Err(e),
