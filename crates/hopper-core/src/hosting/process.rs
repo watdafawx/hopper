@@ -1428,8 +1428,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Generous: CI starts several PowerShell stand-ins at once, and a cold
+    // PowerShell there can take well over 20 s to print its first line.
     fn wait_for(s: &LocalServer, line: &str) -> bool {
-        let end = Instant::now() + Duration::from_secs(20);
+        let end = Instant::now() + Duration::from_secs(60);
         while Instant::now() < end {
             if s.console().iter().any(|l| l == line) {
                 return true;
