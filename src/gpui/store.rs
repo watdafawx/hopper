@@ -420,6 +420,7 @@ impl Store {
                 wake();
             });
         }
+        crate::hero_drift::set_still(settings.still_header);
         let mut store = Self {
             saved_settings: serde_json::to_string(&settings).unwrap_or_default(),
             settings,
@@ -1311,6 +1312,7 @@ impl Store {
     pub fn update_settings(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         edit(&mut self.settings);
         hopper::retention::set_policy(self.settings.backup_retention);
+        crate::hero_drift::set_still(self.settings.still_header);
         let now = serde_json::to_string(&self.settings).unwrap_or_default();
         if now != self.saved_settings {
             if let Err(e) = self.settings.save() {
@@ -1826,6 +1828,7 @@ impl Store {
     ) -> u64 {
         let job = self.jobs.start(title);
         let id = job.id();
+        crate::hero_drift::job_started();
         if let Some(r) = &root {
             *self.busy.lock().unwrap_or_else(|e| e.into_inner()).entry(r.clone()).or_default() += 1;
         }
@@ -1842,6 +1845,7 @@ impl Store {
                     Err(anyhow::anyhow!("Hopper hit a bug and stopped this task. {why}"))
                 });
             job.finish(&r);
+            crate::hero_drift::job_ended();
             if let Some(r) = &root {
                 let mut b = busy.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(n) = b.get_mut(r) {

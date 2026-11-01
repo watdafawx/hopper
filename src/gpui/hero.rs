@@ -65,6 +65,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     let glass = widgets::glass(cx);
     let dark = theme.mode.is_dark();
     let taller = h.summary.is_some();
+    let fx = crate::hero_drift::backdrop(h.art.as_deref(), h.title.as_ref(), cx);
 
     // The art: large, rounded, lifted off the backdrop.
     let art = div()
@@ -143,13 +144,14 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     } else {
         theme.background
     };
-    let (top_a, bottom_a, side_a) = if glass { (0.05, 0.6, 0.5) } else { (0.15, 1.0, 0.85) };
+    let (top_a, bottom_a, side_a) = if glass { (0.05, 0.6, 0.5) } else if fx.is_some() { (0.1, 0.9, 0.6) } else { (0.15, 1.0, 0.85) };
     let backdrop = div()
         .absolute()
         .inset_0()
-        .map(|d| match h.blur {
-            Some(p) => d.child(img(p).size_full().object_fit(ObjectFit::Cover).opacity(if dark { 0.75 } else { 0.55 })),
-            None => d.bg(linear_gradient(
+        .map(|d| match (fx, h.blur) {
+            (Some(fx), _) => d.child(fx),
+            (None, Some(p)) => d.child(img(p).size_full().object_fit(ObjectFit::Cover).opacity(if dark { 0.75 } else { 0.55 })),
+            (None, None) => d.bg(linear_gradient(
                 135.,
                 linear_color_stop(theme.primary.opacity(0.22), 0.),
                 linear_color_stop(theme.primary.opacity(0.), 1.),

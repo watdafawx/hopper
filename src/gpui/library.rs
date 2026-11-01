@@ -660,6 +660,8 @@ impl LibraryView {
             self.server.update(cx, |p, cx| p.hidden(cx));
         }
         if tab != self.tab {
+            let (a, b) = (self.tab as i32, tab as i32);
+            crate::hero_drift::kick(1., (b - a).signum() as f32);
             self.tab_from = self.tab;
             self.tab_moved = Some(Instant::now());
             self.tab_serial += 1;
@@ -779,7 +781,10 @@ impl LibraryView {
         cx.spawn(async move |this, cx| {
             let src = icon.clone();
             let r = cx
-                .background_spawn(async move { hopper::imgcache::blurred(&src) })
+                .background_spawn(async move {
+                    crate::hero_drift::prepare(&src);
+                    hopper::imgcache::blurred(&src)
+                })
                 .await;
             match r {
                 Ok(p) => {
@@ -855,6 +860,7 @@ impl LibraryView {
     }
 
     fn play(&mut self, root: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        crate::hero_drift::kick(1.6, 0.);
         let native = self.store.read(cx).settings().launch_native;
         if native && !hopper::msauth::has_saved_login() {
             crate::dialogs::open_sign_in(self.store.clone(), window, cx);

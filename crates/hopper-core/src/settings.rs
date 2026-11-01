@@ -194,6 +194,9 @@ pub struct Settings {
     /// PC. Off until the user turns it on: nothing is detected, shown or
     /// downloaded before.
     pub translate: bool,
+    /// Keep the instance and server header still (the blurred art) instead
+    /// of the slow color drift.
+    pub still_header: bool,
     /// Languages (`translate::Lang::code`) translated without asking.
     pub translate_always: Vec<String>,
     /// How long `.hopper-backups` keeps the files behind Undo.
@@ -510,6 +513,7 @@ impl Default for Settings {
             dismissed_notices: Vec::new(),
             update_holds: Vec::new(),
             translate: false,
+            still_header: false,
             translate_always: Vec::new(),
             backup_retention: Default::default(),
             mc_options: Default::default(),

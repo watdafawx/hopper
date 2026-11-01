@@ -493,6 +493,7 @@ impl ServerControl {
     /// restart while players are on or when Hopper can't see who is. With
     /// nobody on it just goes (the toast says so).
     pub(crate) fn request(&mut self, action: PanelAction, window: &mut Window, cx: &mut Context<Self>) {
+        crate::hero_drift::kick(1.6, 0.);
         let name = self.server_name(cx);
         let ask = match &self.stats {
             Some(Ok(s)) => action.confirm_text(&name, Some(s.online), &s.players),

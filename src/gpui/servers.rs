@@ -961,6 +961,9 @@ impl ServersView {
     /// and Sync compares again each time it opens.
     pub(crate) fn set_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
         let was = self.tab;
+        if was != tab {
+            crate::hero_drift::kick(1., (tab as i32 - was as i32).signum() as f32);
+        }
         self.tab = tab;
         self.control.update(cx, |c, cx| c.set_console_open(tab == TAB_CONSOLE, cx));
         if tab == TAB_SYNC {
@@ -1100,7 +1103,10 @@ impl ServersView {
         self.blurs.insert(art.clone(), None);
         cx.spawn(async move |this, cx| {
             let src = art.clone();
-            match cx.background_spawn(async move { hopper::imgcache::blurred(&src) }).await {
+            match cx.background_spawn(async move {
+                crate::hero_drift::prepare(&src);
+                hopper::imgcache::blurred(&src)
+            }).await {
                 Ok(p) => {
                     this.update(cx, |this, cx| {
                         this.blurs.insert(art, Some(p));

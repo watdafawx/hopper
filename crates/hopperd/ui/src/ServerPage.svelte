@@ -28,6 +28,8 @@
   import Addr from './Addr.svelte';
   import ServerAlerts from './ServerAlerts.svelte';
   import Progress from './Progress.svelte';
+  import HeroDrift from './HeroDrift.svelte';
+  import { kick, jobStarted, jobEnded } from './lib/heroDrift.js';
   import ShareLog from './ShareLog.svelte';
   import PackUpdate from './PackUpdate.svelte';
   import PackVersions from './PackVersions.svelte';
@@ -67,6 +69,23 @@
     ['settings', 'Settings', Settings2],
   ];
   const onTab = (t) => (t === 'files' ? filesTab : tab === t);
+
+  // The header backdrop bends toward the new tab, and quickens on Start/Stop/Restart and while a start or stop runs.
+  let prevTab = -1;
+  $effect(() => {
+    const i = TABS.findIndex(([t]) => onTab(t));
+    if (prevTab >= 0 && i !== prevTab) kick(1, Math.sign(i - prevTab));
+    prevTab = i;
+  });
+  $effect(() => {
+    if (!s?.progress) return;
+    jobStarted();
+    return jobEnded;
+  });
+  function power(action) {
+    kick(1.6, 0);
+    return askPower(s, action);
+  }
 
   async function backUpNow() {
     more = false;
@@ -156,6 +175,7 @@
   <div class="pad muted">{live.servers.length ? 'No server with that id.' : 'Loading…'}</div>
 {:else}
   <div class="head">
+    <HeroDrift src={s.icon ? `/api/v1/servers/${encodeURIComponent(s.id)}/icon?v=${s.icon}` : ''} />
     <Avatar server={s} cls="ic big" />
     <div class="ttl">
       <div class="row wrap">
@@ -177,10 +197,10 @@
     </div>
     <div class="row acts">
       {#if !alive}
-        <button class="btn go" onclick={() => askPower(s, 'start')}><Play size={14} />Start</button>
+        <button class="btn go" onclick={() => power('start')}><Play size={14} />Start</button>
       {:else}
-        <button class="btn" disabled={s.state === 'stopping'} onclick={() => askPower(s, 'stop')}><Square size={14} />Stop</button>
-        <button class="btn" disabled={s.state === 'stopping'} onclick={() => askPower(s, 'restart')}><RotateCw size={14} />Restart</button>
+        <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('stop')}><Square size={14} />Stop</button>
+        <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('restart')}><RotateCw size={14} />Restart</button>
       {/if}
       <div class="morewrap">
         <button class="btn icon ghost" title="More" aria-haspopup="menu" aria-expanded={more} onclick={(e) => { e.stopPropagation(); playerMenu = null; more = !more; }}><Ellipsis size={15} /></button>
@@ -285,7 +305,8 @@
 <ModsRemove />
 <style>
   .pad { padding: 18px; }
-  .head { display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; flex-wrap: wrap; }
+  .head { position: relative; display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; flex-wrap: wrap; }
+  .head > :global(*:not(.drift)) { position: relative; z-index: 1; }
   .ttl { flex: 1; min-width: 220px; }
   .wrap { flex-wrap: wrap; }
   h2 { font-size: 17px; font-weight: 700; }
