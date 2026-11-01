@@ -267,7 +267,9 @@ pub fn fill(inst: &mut Instance) {
     let mods = inst.mods_dir();
     for a in inst.addons.iter_mut().filter(|a| a.folder() == "mods") {
         let ours = a.project_id == 0 || a.source.is_some();
-        let needs_icon = a.icon.is_empty() || (is_jar_logo(&a.icon) && !Path::new(&a.icon).is_file());
+        // A logo that came from a jar (or the owner's picture standing in for
+        // one) is re-read from the jar there now: an update may bring a new one.
+        let needs_icon = a.icon.is_empty() || is_jar_logo(&a.icon) || (ours && a.icon.starts_with("https://github.com/") && a.icon.ends_with(".png?size=128"));
         if !ours && !needs_icon {
             continue;
         }
