@@ -683,7 +683,6 @@ impl ModsTab {
         self.busy = Some("Updating".into());
         self.note = None;
         let title = if ids.len() == 1 { "Updating a server mod".to_string() } else { format!("Updating {} server mods", ids.len()) };
-        let applied = ids.clone();
         job(cx, &self.store, &t, title, t.sp("/mods/update"), json!({ "project_ids": ids }), self.fresh(
             move |this: &mut Self, r: Result<Value, String>, cx| {
                 this.busy = None;
@@ -695,9 +694,12 @@ impl ModsTab {
                             if n == 1 { "it" } else { "them" }
                         ));
                         this.reviewing = false;
-                        // The rest stay listed while the check runs.
+                        // Only the ones now in place leave the list (a failed
+                        // or website-only file is still to come); the rest
+                        // stay listed while the check runs.
+                        let placed: Vec<&str> = arr(&v, "updated_ids").iter().filter_map(Value::as_str).collect();
                         if let Some(u) = this.updates.as_mut() {
-                            u.retain(|u| !applied.contains(&u.project_id));
+                            u.retain(|u| !placed.contains(&u.project_id.as_str()));
                         }
                         this.check_updates(false, cx);
                         this.load_backups(cx);
