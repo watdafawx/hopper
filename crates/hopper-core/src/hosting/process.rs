@@ -234,6 +234,9 @@ struct Shared {
     pid: Option<u32>,
     stop_requested: bool,
     started_at: Option<SystemTime>,
+    /// Its mods when it started ([`crate::disk_watch::content_stamp`]),
+    /// to tell whether they changed since.
+    started_with: Option<std::collections::BTreeSet<(String, u64)>>,
     exit: Option<Option<i32>>,
     info: Option<RunInfo>,
     root: PathBuf,
@@ -499,6 +502,16 @@ impl LocalServer {
         self.lock().started_at
     }
 
+    /// Mods were added, updated, turned off or removed since it started:
+    /// they load on its next start. False while it's stopped.
+    pub fn changed_since_start(&self) -> bool {
+        if !self.state().is_alive() {
+            return false;
+        }
+        let Some(start) = self.lock().started_with.clone() else { return false };
+        crate::disk_watch::content_stamp(&self.root) != start
+    }
+
     /// Starts the server as its run.bat would. Fails when it is already
     /// running, the EULA isn't accepted or the port is taken.
     pub fn start(&self) -> anyhow::Result<()> {
@@ -599,6 +612,7 @@ impl LocalServer {
         };
         #[cfg(not(windows))]
         let (proc, info) = (child, None);
+        let stamp = crate::disk_watch::content_stamp(&self.root);
         let run = {
             let mut g = self.lock();
             g.run += 1;
@@ -612,6 +626,7 @@ impl LocalServer {
             g.stop_requested = false;
             g.exit = None;
             g.started_at = Some(started);
+            g.started_with = Some(stamp);
             g.root = self.root.clone();
             g.info = info;
             g.save_run();
@@ -664,6 +679,8 @@ impl LocalServer {
             g.stop_requested = info.stop_requested;
             g.exit = None;
             g.started_at = Some(UNIX_EPOCH + Duration::from_secs(info.started));
+            // Found running: what it loaded is unknown, so from now.
+            g.started_with = Some(crate::disk_watch::content_stamp(&self.root));
             g.root = self.root.clone();
             g.info = Some(info);
             g.note("[Hopper] Reconnected to the running server.");

@@ -14,7 +14,7 @@
 //! minute otherwise, and at once when the window comes back into focus
 //! ([`DiskWatch::check`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant, SystemTime};
@@ -526,6 +526,40 @@ fn run(rx: Receiver<Cmd>, events: Sender<Cmd>, on_change: impl Fn(Vec<Change>)) 
     }
 }
 
+/// What a game loads from an instance: each mod, resource pack and shader
+/// pack directly in its folder (a jar, a zip, a `.disabled` one or a pack
+/// folder), with its size. Taken when the game starts and again later, a
+/// difference means the player changed content the game won't see until its
+/// next start. Files games write there themselves (Iris's shader settings,
+/// dot folders) don't count, or the game would trip it.
+pub fn content_stamp(root: &Path) -> BTreeSet<(String, u64)> {
+    let mut out = BTreeSet::new();
+    for area in [Area::Mods, Area::ResourcePacks, Area::ShaderPacks] {
+        let Ok(rd) = std::fs::read_dir(root.join(area.dir())) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let lower = name.to_ascii_lowercase();
+            if lower.starts_with('.') || ignored(&lower) {
+                continue;
+            }
+            let Ok(meta) = e.metadata() else { continue };
+            let size = if meta.is_dir() {
+                // Only packs come as folders; a folder in mods is a mod's own.
+                if area == Area::Mods {
+                    continue;
+                }
+                0
+            } else if lower.ends_with(".jar") || lower.ends_with(".zip") || lower.ends_with(".disabled") {
+                meta.len()
+            } else {
+                continue;
+            };
+            out.insert((format!("{}/{name}", area.dir()), size));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,5 +783,33 @@ mod tests {
         assert!(seen_gone, "removal reported");
         drop(w);
         let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn the_content_stamp_sees_the_players_changes_not_the_games() {
+        let d = scratch("stamp");
+        for f in ["mods", "resourcepacks", "shaderpacks"] {
+            std::fs::create_dir_all(d.join(f)).unwrap();
+        }
+        std::fs::write(d.join("mods").join("a.jar"), "x").unwrap();
+        std::fs::write(d.join("shaderpacks").join("bsl.zip"), "x").unwrap();
+        let start = content_stamp(&d);
+        // What the game writes itself.
+        std::fs::write(d.join("shaderpacks").join("bsl.zip.txt"), "x").unwrap();
+        std::fs::create_dir_all(d.join("mods").join(".connector")).unwrap();
+        std::fs::create_dir_all(d.join("mods").join("config")).unwrap();
+        std::fs::write(d.join("mods").join("a.jar.part"), "x").unwrap();
+        assert_eq!(content_stamp(&d), start);
+        // Turned off, then back on: no change left.
+        std::fs::rename(d.join("mods").join("a.jar"), d.join("mods").join("a.jar.disabled")).unwrap();
+        assert_ne!(content_stamp(&d), start);
+        std::fs::rename(d.join("mods").join("a.jar.disabled"), d.join("mods").join("a.jar")).unwrap();
+        assert_eq!(content_stamp(&d), start);
+        // Updated in place (same name, new file) and a pack folder added.
+        std::fs::write(d.join("mods").join("a.jar"), "xy").unwrap();
+        assert_ne!(content_stamp(&d), start);
+        std::fs::write(d.join("mods").join("a.jar"), "x").unwrap();
+        std::fs::create_dir_all(d.join("resourcepacks").join("Faithful")).unwrap();
+        assert_ne!(content_stamp(&d), start);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
