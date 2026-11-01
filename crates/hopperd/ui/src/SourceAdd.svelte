@@ -3,7 +3,7 @@
   // as on desktop: paste a link, Hopper finds the file for this server (or
   // lists them when it can't tell), says who publishes it the first time,
   // then adds it. Updates come through the normal update check.
-  import { X, Package, CircleCheck, Circle, CircleX } from '@lucide/svelte';
+  import { X, Package, CircleCheck, Circle, CircleX, Info } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { followJob } from './lib/jobs.js';
@@ -133,6 +133,10 @@
       </div>
       <div class="row end"><button class="btn sm" onclick={onClose}>Cancel</button><button class="btn sm pri" onclick={turnOn}>Turn on</button></div>
     {:else if allowed}
+      {#if follow && (follow.source === 'curseforge' || follow.source === 'modrinth')}
+        {@const site = follow.source === 'modrinth' ? 'Modrinth' : 'CurseForge'}
+        <div class="row small note"><Info size={14} /><span>This mod comes from {site} now. Once it follows a source, its updates come from there instead of {site}. Stop following puts it back.</span></div>
+      {/if}
       <label class="col lbl small subtle">A GitHub repo or release, a Maven repo, a Jenkins job, or a link to a .jar
         <form class="row" onsubmit={(e) => { e.preventDefault(); lookUp(); }}>
           <div class="input grow"><input bind:value={link} placeholder="https://github.com/owner/repo" autocomplete="off" spellcheck="false" oninput={() => { found = null; plan = null; error = ''; }} /></div>
@@ -216,6 +220,7 @@
   .file { gap: 10px; padding: 10px 12px; border-radius: var(--radius-lg); background: var(--panel-2, rgba(255,255,255,.04)); }
   .warn { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--radius-lg); background: var(--gold-dim, rgba(240,180,60,.12)); }
   .err { color: var(--red, #f87171); gap: 6px; }
+  .note { gap: 8px; align-items: flex-start; padding: 8px 10px; border-radius: var(--radius-lg); background: var(--blue-dim); }
   .skel { height: 34px; border-radius: var(--radius); background: rgba(255,255,255,.05); }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .icon { padding: 3px 5px; }

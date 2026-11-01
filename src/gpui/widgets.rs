@@ -134,6 +134,27 @@ pub fn split(
     h_flex().flex_none().items_center().child(lead).child(tail)
 }
 
+/// A split button whose right half is a ▾ that opens `menu`: the usual
+/// action on the left, the other ways to do it behind the arrow.
+pub fn split_menu(
+    lead: impl IntoElement,
+    id: impl Into<ElementId>,
+    size: gpui_kit::component::Size,
+    tip: impl Into<SharedString>,
+    menu: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
+) -> Div {
+    let tail = Button::new(id)
+        .icon(Icon::new(IconName::ChevronDown))
+        .outline()
+        .with_size(size)
+        .border_l_0()
+        .rounded_tl(px(0.))
+        .rounded_bl(px(0.))
+        .tooltip(tip)
+        .dropdown_menu(menu);
+    h_flex().flex_none().items_center().child(lead).child(tail)
+}
+
 /// How wide a row's update pill is, so the changelog button that stands in
 /// for it when there's no update takes the same space.
 pub const SPLIT_W: f32 = 9.45;
