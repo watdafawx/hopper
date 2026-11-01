@@ -687,8 +687,9 @@ impl SyncPanel {
         let words = h_flex()
             .gap_2()
             .items_start()
+            .when(narrow, |r| r.w_full())
             .child(Icon::new(IconName::Info).small().flex_none().mt_0p5())
-            .child(div().min_w_0().child(text));
+            .child(div().flex_1().min_w_0().child(text));
         Some(
             div()
                 .flex()
