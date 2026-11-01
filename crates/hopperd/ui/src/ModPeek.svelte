@@ -2,12 +2,12 @@
   // A mod's side panel: what it is, its actions (update, ignore updates,
   // reset config, switch site, remove) and the same Versions and changelogs
   // view the dialog shows.
-  import { X, TriangleAlert, Download, Lock, LockOpen, Settings2, Trash2, ExternalLink, Shuffle, Search } from '@lucide/svelte';
+  import { X, TriangleAlert, Download, Lock, LockOpen, Settings2, Trash2, ExternalLink, Shuffle, Search, Link } from '@lucide/svelte';
   import { browseHash } from './lib/browse.js';
   import ModVersions from './ModVersions.svelte';
   import { resetConfig, setLocked, removeMods, switchSource, versionLocked, problems } from './lib/modops.js';
 
-  let { server, mod, onClose, onChanged, onUpdate } = $props();
+  let { server, mod, onClose, onChanged, onUpdate, onFollow } = $props();
   let busy = $state('');
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -33,6 +33,7 @@
     {#if browse && (mod.source !== 'modrinth' || mod.mr_project)}<a class="btn sm ghost icon" href={browse} title="Open in Browse"><Search size={13} /></a>{/if}
     {#if mod.page}<a class="btn sm ghost icon" href={mod.page} target="_blank" rel="noreferrer" title="Open on {site}"><ExternalLink size={13} /></a>{/if}
     {#if mod.source}<button class="btn sm ghost icon" title="Switch to {mod.source === 'modrinth' ? 'CurseForge' : 'Modrinth'}" disabled={!!busy} onclick={async () => (await switchSource(base, mod, alive, (s) => (busy = s))) && onChanged(true)}><Shuffle size={13} /></button>{/if}
+    {#if onFollow}<button class="btn sm ghost icon" title={mod.source === 'link' ? 'Change source…' : 'Follow a source…'} onclick={() => onFollow(mod)}><Link size={13} /></button>{/if}
     <button class="btn sm ghost icon bad" title="Remove (kept in Backups)" onclick={async () => { if (await removeMods(base, [mod], alive, { onUndo: () => onChanged(true) })) { onChanged(true); onClose(); } }}><Trash2 size={13} /></button>
   </div>
   {#if mod.update && !mod.locked && problems(mod.update).length}

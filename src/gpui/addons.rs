@@ -2349,36 +2349,20 @@ impl AddonsView {
             .gap_3()
             .flex_wrap()
             .child({
-                let add = Button::new("add-content").small().outline().icon(IconName::Plus).label("Add content");
-                // Mods can also come from GitHub and other links.
-                if self.class == cf::CLASS_MODS && self.global_dir().is_none() {
-                    let (v1, v2) = (cx.entity(), cx.entity());
-                    add.dropdown_caret(true)
-                        .dropdown_menu(move |menu, _, _| {
-                            let (v1, v2) = (v1.clone(), v2.clone());
-                            menu.item(
-                                PopupMenuItem::new("Browse CurseForge and Modrinth")
-                                    .icon(IconName::Search)
-                                    .on_click(move |_, _, cx| v1.update(cx, |this, cx| this.add_content(cx))),
-                            )
-                            .item(
-                                PopupMenuItem::new("From GitHub or a link…")
-                                    .icon(IconName::Link)
-                                    .on_click(move |_, window, cx| {
-                                        let (store, root) = {
-                                            let this = v2.read(cx);
-                                            (this.store.clone(), this.root.clone())
-                                        };
-                                        if let Some(root) = root {
-                                            crate::source_dialog::open_add(store, root, window, cx);
-                                        }
-                                    }),
-                            )
-                        })
-                        .into_any_element()
-                } else {
-                    add.on_click(cx.listener(|this, _, _, cx| this.add_content(cx))).into_any_element()
-                }
+                // A click browses, as it always did; the arrow and a
+                // right-click offer the other ways to add.
+                let menu = self.add_menu(cx);
+                let m2 = menu.clone();
+                widgets::split_menu(
+                    div().id("add-content-wrap").flex_none().context_menu(move |m, w, cx| m2(m, w, cx)).child(
+                        widgets::split_lead(Button::new("add-content").small().outline().icon(IconName::Plus).label("Add content"))
+                            .on_click(cx.listener(|this, _, _, cx| this.add_content(cx))),
+                    ),
+                    "add-content-more",
+                    gpui_kit::component::Size::Small,
+                    "Other ways to add",
+                    move |m, w, cx| menu(m, w, cx),
+                )
             })
             // Jars nobody knows: follow their sources in one go.
             .when_some(
@@ -3001,6 +2985,7 @@ impl AddonsView {
                     .into_any_element(),
                 Row::Loose(name) => {
                     let file = name.clone();
+                    let menu = self.loose_menu(name, cx);
                     h_flex()
                         .id(ElementId::Name(format!("loose:{name}").into()))
                         .h(rems(ROW_H))
@@ -3010,6 +2995,7 @@ impl AddonsView {
                         .gap_3()
                         .rounded(cx.theme().radius)
                         .hover(|s| widgets::row_hover(s, cx))
+                        .context_menu(move |m, w, cx| menu(m, w, cx))
                         .child(col_check())
                         .child(widgets::thumb(None, rems(2.5), cx))
                         .child(
@@ -3052,6 +3038,51 @@ impl AddonsView {
                         .into_any_element()
                 }
             }
+    }
+
+    /// A jar Hopper doesn't track: its right-click menu. Following a source
+    /// is offered whether or not mods from links are on yet (choosing it
+    /// asks to turn them on).
+    fn loose_menu(&self, name: &str, cx: &mut Context<Self>) -> Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> {
+        let view = cx.entity();
+        let file = name.to_string();
+        let mods = self.class == cf::CLASS_MODS && self.global_dir().is_none();
+        let dir = self
+            .global_dir()
+            .or_else(|| self.own_dir())
+            .or_else(|| self.root.as_ref().map(|r| r.join(hopper::instances::folder_for_class(self.class))));
+        Rc::new(move |menu, _, _| {
+            let (v1, v2, f1, f2) = (view.clone(), view.clone(), file.clone(), file.clone());
+            let dir = dir.clone();
+            menu.when(mods, |m| {
+                m.item(PopupMenuItem::new("Follow a source…").icon(IconName::Link).on_click(move |_, window, cx| {
+                    let (store, root) = {
+                        let this = v1.read(cx);
+                        (this.store.clone(), this.root.clone())
+                    };
+                    if let Some(root) = root {
+                        let f = f1.trim_end_matches(".disabled").to_string();
+                        let n = hopper::scan::strip_version_suffix(&f);
+                        crate::source_dialog::open_follow(store, root, f, n, String::new(), window, cx);
+                    }
+                }))
+                .separator()
+            })
+            .when_some(dir, |m, dir| {
+                let f = file.clone();
+                m.item(
+                    PopupMenuItem::new("Show in folder")
+                        .icon(IconName::FolderOpen)
+                        .on_click(move |_, _, _| crate::store::reveal_path(&Self::global_path(&dir, &f))),
+                )
+            })
+            .separator()
+            .item(
+                PopupMenuItem::new("Remove")
+                    .icon(IconName::Trash)
+                    .on_click(move |_, window, cx| v2.update(cx, |this, cx| this.ask_remove(vec![f2.clone()], window, cx))),
+            )
+        })
     }
 
     /// The file of row `ix`, when it's an addon or loose jar.
@@ -3954,6 +3985,47 @@ Change version", a.file_name).into()
                 }))
             }
         }
+    }
+
+    /// Add content's menu (its arrow, or a right-click): Browse, mods from
+    /// GitHub and other links, and the folder to drop files in yourself.
+    fn add_menu(&self, cx: &mut Context<Self>) -> Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> {
+        let view = cx.entity();
+        let links = self.class == cf::CLASS_MODS && self.global_dir().is_none();
+        // Data packs live in each world: only a picked folder has one place.
+        let folder = self.global_dir().or_else(|| {
+            let r = self.root.as_ref().filter(|_| self.class != cf::CLASS_DATAPACKS)?;
+            Some(r.join(hopper::instances::folder_for_class(self.class)))
+        });
+        Rc::new(move |menu, _, _| {
+            let (v1, v2) = (view.clone(), view.clone());
+            menu.item(
+                PopupMenuItem::new("Browse CurseForge and Modrinth")
+                    .icon(IconName::Search)
+                    .on_click(move |_, _, cx| v1.update(cx, |this, cx| this.add_content(cx))),
+            )
+            .when(links, |m| {
+                m.item(PopupMenuItem::new("From GitHub or a link…").icon(IconName::Link).on_click(move |_, window, cx| {
+                    let (store, root) = {
+                        let this = v2.read(cx);
+                        (this.store.clone(), this.root.clone())
+                    };
+                    if let Some(root) = root {
+                        crate::source_dialog::open_add(store, root, window, cx);
+                    }
+                }))
+            })
+            .when_some(folder.clone(), |m, dir| {
+                m.separator().item(
+                    PopupMenuItem::new("Open the folder")
+                        .icon(IconName::FolderOpen)
+                        .on_click(move |_, _, _| {
+                            let _ = std::fs::create_dir_all(&dir);
+                            crate::store::open_path(&dir);
+                        }),
+                )
+            })
+        })
     }
 
     /// Add content: Browse for this kind of content (into Paxi's folder

@@ -38,7 +38,7 @@
   <div class="card col src">
     <h3><Link size={14} />GitHub and other links</h3>
     <label class="row small"><input type="checkbox" checked={st.allowed} disabled={saving} onchange={(e) => put({ allowed: e.currentTarget.checked })} /><b>Allow mods from GitHub and other links</b></label>
-    <div class="small subtle">Add content gets "From GitHub or a link", and a mod's menu gets "Follow a source". These files skip CurseForge's and Modrinth's checks, so add them only from people you trust.</div>
+    <div class="small subtle">Lets Add content's "From GitHub or a link" and a mod's "Follow a source" get mods from there. These files skip CurseForge's and Modrinth's checks, so add them only from people you trust.</div>
     {#if st.allowed}
       <div class="row small"><b>GitHub token</b><span class="chip {st.github_token ? 'running' : ''}">{st.github_token ? 'Saved' : 'None'}</span>
         {#if st.github_token}<span class="sp"></span><button class="btn sm ghost" disabled={saving} onclick={() => put({ github_token: '' }, 'GitHub token removed.')}>Remove</button>{/if}</div>

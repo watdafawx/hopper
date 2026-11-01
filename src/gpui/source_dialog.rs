@@ -293,6 +293,19 @@ impl Render for SourceForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let mut body = v_flex().gap_3();
+        // A CurseForge or Modrinth mod switched to a source: say what changes.
+        let site = self.follow.as_ref().and_then(|(file, _)| {
+            let store = self.store.read(cx);
+            let a = store.instance(&self.root)?.addon_by_file(file)?;
+            (a.project_id != 0 && a.source.is_none()).then(|| if a.mr_project.is_empty() { "CurseForge" } else { "Modrinth" })
+        });
+        if let Some(site) = site {
+            body = body.child(
+                widgets::notice_bar(theme.info, IconName::Info, cx).child(div().flex_1().min_w_0().text_sm().child(format!(
+                    "This mod comes from {site} now. Once it follows a source, its updates come from there instead of {site}. Stop following puts it back."
+                ))),
+            );
+        }
         body = body.child(
             v_flex()
                 .gap_1()

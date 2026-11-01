@@ -613,15 +613,25 @@
   // Escape: a menu closes first; then the picks go (not while a dialog is up).
   function escape(e) {
     if (e.key !== 'Escape') return;
-    if (menu || colMenu) {
+    if (menu || colMenu || addMenu) {
       menu = null;
       colMenu = null;
+      addMenu = null;
     } else if (!versionsFor && !reviewing && !cfgPick && !loaderOpen && !document.querySelector('.dialog-back') && !e.target.closest?.('input, textarea')) selected = new Set();
   }
 
+  // Add content browses; its arrow (under the button) or a right-click
+  // (at the pointer) opens the other ways to add.
   function openAdd(e) {
     e.stopPropagation();
-    const r = e.currentTarget.getBoundingClientRect();
+    if (e.type === 'contextmenu') {
+      e.preventDefault();
+      menu = null;
+      colMenu = null;
+      addMenu = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    const r = e.currentTarget.parentElement.getBoundingClientRect();
     addMenu = addMenu ? null : { x: r.left, y: r.bottom + 4 };
   }
 
@@ -738,7 +748,7 @@
   {:else}
     <!-- Laid out as desktop's: actions, search, what's listed (Filter), in what order (Sort). -->
     <div class="row wrap toolbar">
-      <button class="btn sm" aria-haspopup="menu" aria-expanded={!!addMenu} onclick={openAdd}><Plus size={13} />Add content<ChevronDown size={12} /></button>
+      <span class="addsplit"><a class="btn sm" href="#{browseHash('mods', server.id)}" oncontextmenu={openAdd}><Plus size={13} />Add content</a><button class="btn sm" title="Other ways to add" aria-label="Other ways to add" aria-haspopup="menu" aria-expanded={!!addMenu} onclick={openAdd}><ChevronDown size={12} /></button></span>
       <span class="row upd">
         <!-- The last check's results stay up while a new one runs; with results on screen the refresh button spins instead, so nothing moves. -->
         {#if pendingUpdates.length}<button class="btn sm pri" disabled={!!busy} title="Review {pendingUpdates.length === 1 ? '1 update' : `${pendingUpdates.length} updates`}, then update" onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Update all ({pendingUpdates.length})</button>
@@ -870,7 +880,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
           {/if}
         {/if}
       </div>
-      {#if pickedMod}<ModPeek {server} mod={pickedMod} onClose={() => (picked = null)} onChanged={changed} onUpdate={(m) => applyUpdates([m.project_id])} />{/if}
+      {#if pickedMod}<ModPeek {server} mod={pickedMod} onClose={() => (picked = null)} onChanged={changed} onUpdate={(m) => applyUpdates([m.project_id])} onFollow={(m) => (sourceFor = { follow: m })} />{/if}
     </div>
 
     {#if selMods.length}
@@ -951,6 +961,8 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   <div class="ctx popover menu" style:left="{addMenu.x}px" style:top="{addMenu.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
     <a class="menu-item" href="#{browseHash('mods', server.id)}" onclick={() => (addMenu = null)}><Search size={13} />Browse CurseForge and Modrinth</a>
     <button class="menu-item" onclick={() => { addMenu = null; sourceFor = { follow: null }; }}><Link size={13} />From GitHub or a link…</button>
+    <div class="menu-sep"></div>
+    <a class="menu-item" href="#/server/{encodeURIComponent(server.id)}/files/mods" onclick={() => (addMenu = null)}><FolderOpen size={13} />Open the folder</a>
   </div>
 {/if}
 {#if finding}<SourceFind {server} onClose={() => (finding = false)} onChanged={changed} />{/if}
@@ -991,6 +1003,9 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .vr { width: 1px; height: 20px; background: var(--line2); margin: 0 2px; }
   .bad { color: var(--red); }
   .split { display: flex; gap: 12px; align-items: flex-start; }
+  .addsplit { display: inline-flex; }
+  .addsplit > .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .addsplit > .btn:last-child { border-left: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; padding-left: 6px; padding-right: 6px; }
   .list { flex: 1; min-width: 0; }
   /* Desktop's columns: check, icon, name, Update / Changelog, Author, Side, On, Added, menu. */
   /* Check, icon, name, Update / Changelog, the movable columns in the user's order, menu (--cols, built in the script). */
