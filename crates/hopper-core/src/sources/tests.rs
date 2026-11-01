@@ -521,3 +521,159 @@ fn sync_carries_pins_to_a_server_folder() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+// ---- looks: logos, authors, versions and sides from the jar ----
+
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+fn jar_bytes(files: &[(&str, &[u8])]) -> std::io::Cursor<Vec<u8>> {
+    use std::io::Write;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut buf);
+        for (name, body) in files {
+            z.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(body).unwrap();
+        }
+        z.finish().unwrap();
+    }
+    buf.set_position(0);
+    buf
+}
+
+#[test]
+fn neoforge_logo_authors_version_and_side() {
+    let logo = png(16, 16);
+    let toml = br#"modLoader="javafml"
+license="MIT"
+logoFile="wrong.png"
+[[mods]]
+modId="foxstweaks"
+displayName="Fox's Tweaks"
+version="${file.jarVersion}"
+authors="watdafawx, Someone Else"
+logoFile="foxstweaks.png"
+displayTest="IGNORE_SERVER_VERSION"
+"#;
+    let manifest = b"Manifest-Version: 1.0\r\nImplementation-Version: 1.18.0\r\n";
+    let j = looks::read_from(jar_bytes(&[
+        ("META-INF/neoforge.mods.toml", toml),
+        ("META-INF/MANIFEST.MF", manifest),
+        ("foxstweaks.png", &logo),
+    ]))
+    .unwrap();
+    // The mod's own logoFile wins over the file-level one.
+    assert_eq!(j.logo.as_ref().map(|(p, b)| (p.as_str(), b.len())), Some(("foxstweaks.png", logo.len())));
+    assert_eq!(j.authors, ["watdafawx", "Someone Else"]);
+    // `${file.jarVersion}` comes from the manifest.
+    assert_eq!(j.version, "1.18.0");
+    assert_eq!(j.side, "client");
+
+    // Only a file-level logo, under a folder, written with a leading slash.
+    let toml = br#"logoFile="/assets/emi/logo.png"
+[[mods]]
+modId="emi"
+version="0.1.0"
+"#;
+    let j = looks::read_from(jar_bytes(&[("META-INF/neoforge.mods.toml", toml), ("assets/emi/logo.png", &logo)])).unwrap();
+    assert_eq!(j.logo.map(|(p, _)| p), Some("assets/emi/logo.png".to_string()));
+    assert_eq!((j.version.as_str(), j.side.as_str()), ("0.1.0", ""));
+
+    // A logo the jar names but doesn't have: none.
+    let toml = b"[[mods]]\nmodId=\"x\"\nlogoFile=\"gone.png\"\n";
+    assert!(looks::read_from(jar_bytes(&[("META-INF/mods.toml", toml)])).unwrap().logo.is_none());
+}
+
+#[test]
+fn fabric_logo_authors_and_side() {
+    let (small, big) = (png(64, 64), png(512, 512));
+    let json = br#"{"schemaVersion":1,"id":"emi_slim","version":"0.1.0","environment":"client",
+        "authors":["watdafawx",{"name":"Helper","contact":{}}],
+        "icon":{"64":"assets/emi_slim/icon64.png","512":"assets/emi_slim/icon512.png"}}"#;
+    let j = looks::read_from(jar_bytes(&[
+        ("fabric.mod.json", json),
+        ("assets/emi_slim/icon64.png", &small),
+        ("assets/emi_slim/icon512.png", &big),
+    ]))
+    .unwrap();
+    // The largest at most 128.
+    assert_eq!(j.logo.map(|(p, _)| p), Some("assets/emi_slim/icon64.png".to_string()));
+    assert_eq!(j.authors, ["watdafawx", "Helper"]);
+    assert_eq!((j.version.as_str(), j.side.as_str()), ("0.1.0", "client"));
+
+    // Only bigger sizes: the smallest of them. A plain string: that path.
+    let only_big = serde_json::json!({"256": "a.png", "1024": "b.png"});
+    assert_eq!(looks::fabric_icon(&only_big).as_deref(), Some("a.png"));
+    assert_eq!(looks::fabric_icon(&serde_json::json!("icon.png")).as_deref(), Some("icon.png"));
+
+    // "*" runs on both sides.
+    let json = br#"{"id":"x","version":"1","environment":"*","icon":"x.png"}"#;
+    assert_eq!(looks::read_from(jar_bytes(&[("fabric.mod.json", json)])).unwrap().side, "both");
+}
+
+#[test]
+fn logo_is_saved_small() {
+    let saved = looks::save_logo(&png(512, 256)).unwrap();
+    let (w, h) = image::image_dimensions(&saved).unwrap();
+    assert_eq!((w, h), (128, 64));
+    assert!(looks::is_jar_logo(&saved.to_string_lossy()));
+    let tiny = looks::save_logo(&png(16, 16)).unwrap();
+    assert_eq!(image::image_dimensions(&tiny).unwrap(), (16, 16));
+}
+
+// ---- the peek: README links, and never CurseForge for a source mod ----
+
+#[test]
+fn readme_links_point_into_the_repo() {
+    let md = "![logo](docs/logo.png) see [the guide](./GUIDE.md) and [site](https://x.dev)\n\
+<p align=\"center\"><img src=\"art/banner.png\" width=\"300\"></p>\n\
+![shot](https://github.com/watdafawx/emi-slim/blob/main/shots/a.png) [top](#usage) ![root](/icon.png)";
+    let out = page::resolve_relative(md, "watdafawx/emi-slim", "main", "README.md");
+    assert!(out.contains("![logo](https://raw.githubusercontent.com/watdafawx/emi-slim/main/docs/logo.png)"), "{out}");
+    assert!(out.contains("[the guide](https://github.com/watdafawx/emi-slim/blob/main/GUIDE.md)"), "{out}");
+    assert!(out.contains("[site](https://x.dev)"));
+    assert!(out.contains("src=\"https://raw.githubusercontent.com/watdafawx/emi-slim/main/art/banner.png\""), "{out}");
+    assert!(out.contains("![shot](https://raw.githubusercontent.com/watdafawx/emi-slim/main/shots/a.png)"), "{out}");
+    assert!(out.contains("[top](#usage)"));
+    assert!(out.contains("![root](https://raw.githubusercontent.com/watdafawx/emi-slim/main/icon.png)"), "{out}");
+    // A README in a folder: relative to that folder.
+    let out = page::resolve_relative("![a](a.png)", "o/r", "dev", "docs/README.md");
+    assert_eq!(out, "![a](https://raw.githubusercontent.com/o/r/dev/docs/a.png)");
+}
+
+#[test]
+fn source_mods_never_ask_curseforge() {
+    // Unknown to this run: an answer from Hopper, not a CurseForge 404.
+    let stray = src_id("github:nobody/never-remembered");
+    let e = crate::source::description(stray).unwrap_err().to_string();
+    assert!(e.contains("doesn't know where this mod comes from"), "{e}");
+    // A file of a source mod without release notes: no CurseForge changelog call.
+    let f = cf::File { id: 5, mod_id: stray, ..Default::default() };
+    assert!(!crate::source::changelog(&f).unwrap().is_empty());
+
+    // The peek's header facts come from the source.
+    let src = ModSource { kind: Kind::Maven, url: "https://maven.example.net/releases/com/x/coolmod".into(), ..Default::default() };
+    let id = src_id(&src.key());
+    remember(id, &src, "Cool Mod");
+    let o = page::origin(id).unwrap();
+    assert_eq!((o.kind, o.name.as_str(), o.open_label()), (Kind::Maven, "coolmod", "Open link"));
+    let gh = ModSource { kind: Kind::GitHub, url: "watdafawx/emi-slim".into(), publisher: "watdafawx/emi-slim".into(), ..Default::default() };
+    let gid = src_id(&gh.key());
+    remember(gid, &gh, "EMI Slim");
+    let o = page::origin(gid).unwrap();
+    assert_eq!((o.page.as_str(), o.open_label()), ("https://github.com/watdafawx/emi-slim", "Open on GitHub"));
+    // No jar seen: the owner's picture, and the repo as the author.
+    let m = get_mod(gid).unwrap();
+    assert_eq!(m.icon(), Some("https://github.com/watdafawx.png?size=128"));
+    assert_eq!(m.author(), "watdafawx/emi-slim");
+    remember_looks(gid, r"C:\cache\logo.png", "watdafawx");
+    let m = get_mod(gid).unwrap();
+    assert_eq!((m.icon(), m.author()), (Some(r"C:\cache\logo.png"), "watdafawx"));
+}

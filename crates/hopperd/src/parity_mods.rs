@@ -105,7 +105,7 @@ async fn orphans(
                 json!({
                     "file": a.file_name,
                     "name": if a.name.is_empty() { a.file_name.clone() } else { a.name.clone() },
-                    "icon": a.icon,
+                    "icon": crate::mods_api::icon_url(&a.icon),
                 })
             })
             .collect();

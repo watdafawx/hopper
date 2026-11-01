@@ -69,6 +69,9 @@ pub fn changelog(f: &cf::File) -> anyhow::Result<Vec<Block>> {
         let notes = if s.notes.trim().is_empty() { "No release notes." } else { s.notes.as_str() };
         return Ok(richtext::parse_markdown(notes));
     }
+    if crate::sources::is_src(f.mod_id) {
+        return Ok(richtext::parse_markdown("No release notes."));
+    }
     let blocks = match &f.modrinth {
         Some(m) => richtext::parse_markdown(&m.changelog),
         None => richtext::parse(&cf::changelog(f.mod_id, f.id)?),
@@ -78,6 +81,10 @@ pub fn changelog(f: &cf::File) -> anyhow::Result<Vec<Block>> {
 
 /// A project's description, parsed.
 pub fn description(id: u64) -> anyhow::Result<Vec<Block>> {
+    // GitHub, Maven and links: never asked of CurseForge or Modrinth.
+    if crate::sources::is_src(id) {
+        return crate::sources::page::description(id);
+    }
     if !is_mr(id) {
         return Ok(richtext::parse(&cf::description(id)?));
     }

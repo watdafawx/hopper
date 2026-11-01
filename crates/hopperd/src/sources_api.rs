@@ -29,6 +29,36 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mods/source/adopt-many", post(adopt_many))
         .route("/api/v1/servers/{id}/mods/source/trust", post(trust))
         .route("/api/v1/servers/{id}/mods/sources", axum::routing::put(put_pins))
+        .route("/api/v1/servers/{id}/mods/source/page", get(page))
+}
+
+/// The peek's page for a mod from GitHub or a link: the README (or what's
+/// known about a Maven artifact, Jenkins job or link) and the header's
+/// facts. Never asks CurseForge or Modrinth.
+async fn page(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let v = run(move || {
+        let inst = instance(&e)?;
+        let a = inst
+            .addon_by_file(&q.file)
+            .filter(|a| a.source.is_some())
+            .ok_or_else(|| anyhow::anyhow!("{} doesn't come from GitHub or a link", q.file))?;
+        let blocks = hopper_core::source::description(a.project_id)?;
+        let o = sources::page::origin(a.project_id).unwrap_or_default();
+        Ok(json!({
+            "kind": o.kind.label(), "name": o.name, "page": o.page, "open_label": o.open_label(),
+            "stars": o.stars, "license": o.license, "released": o.released, "summary": o.summary,
+            "description": crate::browse_api::blocks_json(&blocks),
+        }))
+    })
+    .await?;
+    Ok(Json(v))
 }
 
 fn allowed(app: &App) -> ApiResult<()> {

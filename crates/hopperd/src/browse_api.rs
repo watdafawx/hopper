@@ -402,9 +402,15 @@ async fn pack(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Q
             (m, richtext::parse_markdown(&p.body))
         } else {
             let n: u64 = id.parse().map_err(|_| anyhow::anyhow!("Which pack?"))?;
-            let m = cf::get_mod(n)?;
-            let d = cf::description(n).unwrap_or_default();
-            (m, richtext::parse(&d))
+            if hopper_core::sources::is_src(n) {
+                // From GitHub or a link: its own page, not CurseForge's.
+                let m = hopper_core::source::get_mod(n)?;
+                (m, hopper_core::source::description(n).unwrap_or_default())
+            } else {
+                let m = cf::get_mod(n)?;
+                let d = cf::description(n).unwrap_or_default();
+                (m, richtext::parse(&d))
+            }
         };
         let packs = class == cf::CLASS_MODPACKS;
         if packs {

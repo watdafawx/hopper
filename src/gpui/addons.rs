@@ -1066,9 +1066,13 @@ impl AddonsView {
         let (Some(inst), class) = (self.table.inst.clone(), self.class) else {
             return;
         };
+        let loose: Vec<String> = self.loose.1.iter().filter_map(|f| self.loose_icon(f)).collect();
         self.store.update(cx, |s, _| {
             for a in inst.addons.iter().filter(|a| in_class(a, class)) {
                 s.want_image(&a.icon);
+            }
+            for f in &loose {
+                s.want_image(f);
             }
             s.want_categories(inst.addons.iter().filter(|a| in_class(a, class)));
         });
@@ -1278,7 +1282,19 @@ impl AddonsView {
         let key = mtime.map(|t| (inst.root.clone(), t, tracked));
         if key.is_none() || self.loose.0 != key {
             self.loose = (key, hopper::install::loose_jars(inst));
+            // Read each jar's looks once (kept per file version).
+            let mods = inst.mods_dir();
+            for f in &self.loose.1 {
+                hopper::sources::looks::loose(&mods.join(f));
+            }
         }
+    }
+
+    /// A loose jar's icon, as [`Self::refresh_loose`] read it.
+    fn loose_icon(&self, file: &str) -> Option<String> {
+        let inst = self.table.inst.as_ref()?;
+        let icon = hopper::sources::looks::known(&inst.mods_dir().join(file))?.icon;
+        (!icon.is_empty()).then_some(icon)
     }
 
     fn rows(&self, inst: &Instance, updates: &HashMap<u64, Update>) -> Vec<Row> {
@@ -3011,7 +3027,12 @@ impl AddonsView {
                         .rounded(cx.theme().radius)
                         .hover(|s| widgets::row_hover(s, cx))
                         .child(col_check())
-                        .child(widgets::thumb(None, rems(2.5), cx))
+                        .child({
+                            // Its own logo, else its GitHub owner's (read when listed).
+                            let url = self.loose_icon(name);
+                            let still = url.as_deref().and_then(|u| self.store.read(cx).image(u)).map(Path::to_path_buf);
+                            crate::logos::thumb(&self.logos, url.as_deref(), still.as_deref(), rems(2.5), cx)
+                        })
                         .child(
                             div()
                                 .flex_1()
@@ -3745,11 +3766,16 @@ It stays disabled after updating: turn it on in the On column.")
                                     ),
                             ),
                             None => {
-                                let v = if global {
+                                let mut v = if global {
                                     hopper::instance_ops::pack_version_label(&a.file_name)
                                 } else {
                                     hopper::scan::short_version(&a.file_name)
                                 };
+                                // A name that doesn't say ("foxstweaks-1.18.0+neoforge-1.21.1"
+                                // reads as two Minecraft versions): the jar's, else the release's.
+                                if v.is_empty() && !global && let Some(inst) = &self.table.inst {
+                                    v = hopper::sources::looks::version_for(inst, &a.file_name);
+                                }
                                 (!v.is_empty()).then(|| {
                                     chip.bg(theme.muted)
                                         .text_color(theme.muted_foreground)
@@ -3809,12 +3835,28 @@ Change version", a.file_name).into()
             .children(in_col_order(&self.col_order, {
             let mut cells: Vec<(Col, AnyElement)> = Vec::new();
             if self.cols.author {
+                // A mod from GitHub or a link: who made it, and the repo
+                // (or host) it comes from on hover.
+                let from: Option<SharedString> = a
+                    .source
+                    .as_ref()
+                    .filter(|s| !s.publisher.is_empty())
+                    .map(|s| format!("From {}: {}", s.kind.label(), s.publisher).into());
+                let author = if a.author.is_empty() {
+                    a.source.as_ref().map(|s| s.publisher.clone()).unwrap_or_default()
+                } else {
+                    a.author.clone()
+                };
                 cells.push((Col::Author,
                     col_author()
+                        .id(id("author"))
                         .text_sm()
                         .truncate()
                         .text_color(theme.muted_foreground)
-                        .child(a.author.clone())
+                        .child(author)
+                        .when_some(from, |d, from| {
+                            d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(from.clone()).build(w, cx))
+                        })
                         .into_any_element(),
                 ));
             }
