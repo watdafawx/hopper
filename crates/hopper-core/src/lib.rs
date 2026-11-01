@@ -95,3 +95,4 @@ pub mod tls;
 pub mod translate;
 pub mod update_list;
 pub mod waker;
+pub mod webfetch;

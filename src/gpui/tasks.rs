@@ -191,9 +191,25 @@ impl TasksButton {
                             // A snapshot this task took to undo it.
                             let snap = done.then(|| hopper::snapshots::of_job(id)).flatten();
                             let store_s = store.clone();
+                            // A pack zip coming through the download window.
+                            let fetch = !done && crate::fetch_progress::job_waits_on_window(&j.detail);
                             h_flex()
                                 .flex_none()
                                 .gap_1()
+                                .when(fetch, |r| {
+                                    r.child(
+                                        Button::new(ElementId::Name(format!("task-fetch-{id}").into()))
+                                            .icon(IconName::ExternalLink)
+                                            .xsmall()
+                                            .ghost()
+                                            .label("Show window")
+                                            .tooltip("Brings the CurseForge download window to the front")
+                                            .on_click(move |_, _, cx| {
+                                                cx.stop_propagation();
+                                                crate::fetch_progress::show_window();
+                                            }),
+                                    )
+                                })
                                 .when_some(snap, |r, (root, snap)| {
                                     r.child(
                                         Button::new(ElementId::Name(format!("task-snap-{id}").into()))

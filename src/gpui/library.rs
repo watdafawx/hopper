@@ -1543,9 +1543,13 @@ impl LibraryView {
         if pending.is_empty() {
             return None;
         }
+        // While the download window works on them: one progress for all,
+        // and each file's step under Show files.
+        let (fetch, files) = self.store.read(cx).fetch_files(&inst.root);
         let theme = cx.theme();
         let (root, n) = (inst.root.clone(), pending.len());
         let list = pending.clone();
+        drop(files);
         Some(
             h_flex()
                 .mx_6()
@@ -1557,41 +1561,80 @@ impl LibraryView {
                 .border_1()
                 .border_color(theme.warning.opacity(0.5))
                 .bg(theme.warning.opacity(0.08))
-                .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
+                .child(
+                    Icon::new(if fetch.as_ref().is_some_and(|v| v.running()) { IconName::Hourglass } else { IconName::TriangleAlert })
+                        .small()
+                        .text_color(theme.warning),
+                )
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(if n == 1 {
-                            format!("{} to download in your browser", pending[0].name)
-                        } else {
-                            format!("{n} files to download in your browser")
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).truncate().child(match &fetch {
+                            Some(v) if v.running() => format!("Downloading from CurseForge…{}", if v.total > 1 { format!(" {} of {}", (v.done + 1).min(v.total), v.total) } else { String::new() }),
+                            _ if n == 1 => format!("{} to download in your browser", pending[0].name),
+                            _ => format!("{n} files to download in your browser"),
                         }))
-                        .child(widgets::caption(
-                            "Their authors only allow downloads from the CurseForge website. Download opens each page in a small window that saves the file and closes; files you download yourself are picked up from Downloads too.",
-                            cx,
-                        )),
+                        .child(match &fetch {
+                            Some(v) => widgets::caption(v.detail(), cx).when(!v.running(), |c| c.text_color(theme.warning)),
+                            None => widgets::caption(
+                                "Their authors only allow downloads from the CurseForge website. Download opens each page in a small window that saves the file and closes; files you download yourself are picked up from Downloads too.",
+                                cx,
+                            ),
+                        })
+                        .when_some(fetch.as_ref().filter(|v| v.running()), |c, v| {
+                            let p = v.progress.unwrap_or(0.0).clamp(0.0, 1.0);
+                            c.child(
+                                div()
+                                    .mt_1p5()
+                                    .h(px(4.))
+                                    .w_full()
+                                    .rounded_full()
+                                    .bg(theme.primary.opacity(0.15))
+                                    .child(div().h_full().w(relative(p)).rounded_full().bg(theme.primary)),
+                            )
+                        }),
                 )
                 .child({
                     let urls: Vec<String> = pending.iter().map(|p| p.url.clone()).filter(|u| !u.is_empty()).collect();
-                    let store = self.store.clone();
-                    Button::new("pending-open-all")
-                        .small()
-                        .primary()
-                        .icon(IconName::Download)
-                        .label(if urls.len() == 1 { "Download".to_string() } else { format!("Download {}", urls.len()) })
-                        .tooltip("Opens each page in a small Hopper window that saves the file and closes")
-                        .disabled(urls.is_empty())
-                        .on_click(move |_, _, cx| store.read(cx).fetch_pages(urls.clone()))
+                    let (store, root2) = (self.store.clone(), root.clone());
+                    match &fetch {
+                        // Running: brings the window up. Stuck: tries those again.
+                        Some(v) => {
+                            let (store, v1) = (store.clone(), v.clone());
+                            let b = Button::new("pending-open-all").small();
+                            let b = if v.running() {
+                                b.outline()
+                                    .icon(IconName::ExternalLink)
+                                    .label("Show window")
+                                    .tooltip("Brings the download window to the front")
+                                    .disabled(!v.step.is_open())
+                            } else {
+                                b.primary().icon(IconName::RefreshCw).label("Retry").tooltip("Opens the download window again for the files that didn't come")
+                            };
+                            b.on_click(move |_, _, cx| crate::fetch_progress::click(&store, &v1, cx))
+                        }
+                        None => Button::new("pending-open-all")
+                            .small()
+                            .primary()
+                            .icon(IconName::Download)
+                            .label(if urls.len() == 1 { "Download".to_string() } else { format!("Download {}", urls.len()) })
+                            .tooltip("Opens each page in a small Hopper window that saves the file and closes")
+                            .disabled(urls.is_empty())
+                            .on_click(move |_, _, cx| store.read(cx).fetch_pages(&root2, urls.clone(), None)),
+                    }
                 })
-                .child(
+                .child({
+                    let (store, root) = (self.store.clone(), root.clone());
                     Button::new("pending-show")
                         .small()
                         .outline()
                         .label("Show files")
                         .on_click(move |_, window, cx| {
-                            let list = list.clone();
+                            let (list, store, root) = (list.clone(), store.clone(), root.clone());
                             window.open_dialog(cx, move |d, _, cx| {
+                                // Each file's step, as the window goes.
+                                let files = store.read(cx).fetch_files(&root).1;
                                 d.title("Download these by hand").child(
                                     v_flex().gap_2().children(list.iter().enumerate().map(|(i, p)| {
                                         let url = p.url.clone();
@@ -1602,7 +1645,14 @@ impl LibraryView {
                                                     .flex_1()
                                                     .min_w_0()
                                                     .child(div().text_sm().truncate().child(p.name.clone()))
-                                                    .child(widgets::caption(p.file_name.clone(), cx).text_xs()),
+                                                    .child(widgets::caption(
+                                                        match files.iter().find(|f| f.url == p.url) {
+                                                            Some(f) => format!("{} · {}", p.file_name, f.step.label(f.size)),
+                                                            None => p.file_name.clone(),
+                                                        },
+                                                        cx,
+                                                    )
+                                                    .text_xs()),
                                             )
                                             .child(
                                                 Button::new(("pending-open", i))
@@ -1615,8 +1665,8 @@ impl LibraryView {
                                     })),
                                 )
                             });
-                        }),
-                )
+                        })
+                })
                 .child({
                     let r = root.clone();
                     Button::new("pending-dismiss")

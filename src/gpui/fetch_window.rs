@@ -5,14 +5,19 @@
 //!
 //! It runs as its own process so a stuck page can't touch the app's window
 //! loop. Exit code: 0 every file came, 1 some didn't, 2 no WebView2.
+//! Each step goes to stdout as a [`hopper::webfetch::Event`] line, so the
+//! app can show the player what it's waiting for.
 
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::io::Write;
 use std::time::Duration;
+use hopper::webfetch::Event as Say;
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::platform::windows::WindowExtWindows;
 use tao::window::WindowBuilder;
 use wry::{NewWindowResponse, WebContext, WebViewBuilder};
 
@@ -25,6 +30,13 @@ enum Ev {
     Done(usize, bool),
     /// Page `n` didn't start a download in time.
     Timeout(usize),
+}
+
+/// Tells the app a step. A closed pipe (the app quit) is no reason to stop.
+fn say(e: Say) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{}", e.line());
+    let _ = out.flush();
 }
 
 pub fn run(dir: PathBuf, urls: Vec<String>) -> i32 {
@@ -52,6 +64,7 @@ pub fn run(dir: PathBuf, urls: Vec<String>) -> i32 {
     else {
         return 2;
     };
+    say(Say::Window(window.hwnd() as i64));
     let current = Rc::new(Cell::new(0usize));
     let started = Rc::new(Cell::new(false));
     // Cookies (Cloudflare's clearance) kept between runs, not next to the exe.
@@ -59,6 +72,18 @@ pub fn run(dir: PathBuf, urls: Vec<String>) -> i32 {
     let mut context = WebContext::new(data);
     let webview = WebViewBuilder::new_with_web_context(&mut context)
         .with_url(&urls[0])
+        // Cloudflare's check page is "Just a moment..."; CurseForge's own
+        // page counts down to the download.
+        .with_document_title_changed_handler({
+            let (started, current) = (started.clone(), current.clone());
+            move |title| {
+                if started.get() || title.trim().is_empty() || title.starts_with("http") {
+                    return;
+                }
+                let i = current.get();
+                say(if title.to_lowercase().contains("just a moment") { Say::Check(i) } else { Say::Countdown(i) });
+            }
+        })
         .with_download_started_handler({
             let (dir, started, current, proxy) = (dir.clone(), started.clone(), current.clone(), proxy.clone());
             move |url, path| {
@@ -85,6 +110,9 @@ pub fn run(dir: PathBuf, urls: Vec<String>) -> i32 {
                         std::thread::sleep(Duration::from_millis(500));
                         let len = std::fs::metadata(&path).ok().map(|m| m.len()).filter(|l| *l > 0);
                         same = if len.is_some() && len == last { same + 1 } else { 0 };
+                        if let Some(n) = len.filter(|_| same == 0) {
+                            say(Say::Bytes(i, n));
+                        }
                         last = len;
                         // Done growing for 1.5 s. The app checks size and
                         // SHA-1 before using it, so a stalled copy is caught.
@@ -120,6 +148,7 @@ pub fn run(dir: PathBuf, urls: Vec<String>) -> i32 {
             });
         }
     };
+    say(Say::Opening(0));
     timeout(0);
     let mut failed = 0;
     event_loop.run(move |event, _, flow| {
@@ -128,16 +157,19 @@ pub fn run(dir: PathBuf, urls: Vec<String>) -> i32 {
         let _ = &context;
         let next = match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                say(Say::Closed);
                 std::process::exit(if failed == 0 && current.get() + 1 >= n { 0 } else { 1 });
             }
             Event::UserEvent(Ev::Done(i, ok)) if i == current.get() => {
                 if !ok {
                     failed += 1;
                 }
+                say(if ok { Say::Done(i) } else { Say::Failed(i) });
                 true
             }
             Event::UserEvent(Ev::Timeout(i)) if i == current.get() && !started.get() => {
                 failed += 1;
+                say(Say::Failed(i));
                 true
             }
             _ => false,
@@ -150,6 +182,7 @@ pub fn run(dir: PathBuf, urls: Vec<String>) -> i32 {
             current.set(i);
             started.set(false);
             window.set_title(&title(i));
+            say(Say::Opening(i));
             let _ = webview.load_url(&urls[i]);
             timeout(i);
         }
