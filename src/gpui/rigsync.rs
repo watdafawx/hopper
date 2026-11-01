@@ -1064,6 +1064,14 @@ impl SyncPanel {
             .then(|| self.control.update(cx, |c, cx| c.controls_compact(cx)));
         let online = self.online(cx);
         let (dot, word) = self.state(cx);
+        // While starting or stopping, the pill's words: "starting 45%".
+        let word: String = self
+            .control
+            .read(cx)
+            .stats_of(&server.root)
+            .and_then(|s| s.progress.as_ref())
+            .map(|p| p.pill().to_lowercase())
+            .unwrap_or_else(|| word.to_string());
         let view = cx.entity();
         let theme = cx.theme().clone();
         let card = || {

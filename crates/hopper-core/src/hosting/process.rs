@@ -5,6 +5,7 @@
 
 use super::boot::{BOOT_FILE, Boot, BootHistory, BootRecord, BootStatus};
 use super::logparse::{LogEvent, parse_line};
+use super::progress::{FINISHED_FRESH_SECS, Finished, Halt, Progress, ProgressKind};
 use super::script::{Launch, launch_command};
 use anyhow::{Context as _, bail};
 use std::collections::{BTreeSet, VecDeque};
@@ -85,6 +86,8 @@ pub struct Tracker {
     pub heard_at: Option<Instant>,
     /// How far the start has got.
     pub boot: Boot,
+    /// How far a stop has got.
+    pub halt: Halt,
 }
 
 impl Tracker {
@@ -92,6 +95,7 @@ impl Tracker {
         let now = Instant::now();
         self.heard_at = Some(now);
         self.boot.push(&line, now);
+        self.halt.push(&line, now);
         match parse_line(&line) {
             Some(LogEvent::Done) => self.done = true,
             Some(LogEvent::Joined(n)) => {
@@ -243,6 +247,10 @@ struct Shared {
     boot_last: Option<BootRecord>,
     /// This start's times are in `.hopper-boot.json`.
     boot_saved: bool,
+    /// The last start or stop that ended, and when (for "Started in 1m 32s").
+    finished: Option<(Finished, Instant)>,
+    /// A restart is under way: the stop, then the start.
+    restarting: bool,
 }
 
 impl Shared {
@@ -265,6 +273,8 @@ impl Shared {
             return;
         };
         self.boot_saved = true;
+        self.finished = Some((Finished { kind: ProgressKind::Start, secs: r.secs.round() as u32, ago_secs: 0, restarting: false }, Instant::now()));
+        self.restarting = false;
         let mut h = BootHistory::load(&self.root);
         h.add(r);
         if let Err(e) = h.save(&self.root) {
@@ -387,6 +397,76 @@ impl LocalServer {
         reap(&mut g);
         let starting = state_of(g.proc.is_some(), g.tracker.done, g.stop_requested, g.exit) == ServerState::Starting;
         starting.then(|| g.tracker.boot.status(Instant::now(), g.boot_last.as_ref()))
+    }
+
+    /// A start or stop under way, ready to show; None when neither.
+    pub fn progress(&self) -> Option<Progress> {
+        let mut g = self.lock();
+        reap(&mut g);
+        let now = Instant::now();
+        let mut p = match state_of(g.proc.is_some(), g.tracker.done, g.stop_requested, g.exit) {
+            ServerState::Starting => Some(Progress::start(&g.tracker.boot.status(now, g.boot_last.as_ref()))),
+            ServerState::Stopping => {
+                let mut wait = g.stop_wait.unwrap_or_default();
+                wait.linger = g.linger.unwrap_or(wait.linger);
+                // A kill, or a stop from before this Hopper: no "stop" seen.
+                let halt = if g.tracker.halt.began.is_some() { g.tracker.halt.clone() } else { Halt::asked(now) };
+                let deadline = halt.began.map(|a| wait.deadline(a, &g.tracker));
+                halt.status(now, g.tracker.heard_at, deadline)
+            }
+            _ => None,
+        };
+        if let Some(p) = p.as_mut() {
+            p.restarting = g.restarting;
+        }
+        p
+    }
+
+    /// The start or stop that just ended, while it is news.
+    pub fn finished(&self) -> Option<Finished> {
+        let g = self.lock();
+        let (f, at) = g.finished.as_ref()?;
+        let ago = at.elapsed().as_secs();
+        (ago < FINISHED_FRESH_SECS).then(|| Finished { ago_secs: ago as u32, ..f.clone() })
+    }
+
+    /// A restart is under way.
+    pub fn restarting(&self) -> bool {
+        self.lock().restarting
+    }
+
+    /// Marks a restart that a caller drives (the schedule's daily restart):
+    /// its stop and start show as one restart.
+    pub fn set_restarting(&self, on: bool) {
+        self.lock().restarting = on;
+    }
+
+    /// Stops the server, waits for it to end (as long as a stop may take),
+    /// then starts it again. Returns at once; a stopped server just starts.
+    pub fn restart(self: &Arc<Self>) -> anyhow::Result<()> {
+        if !self.state().is_alive() {
+            return self.start();
+        }
+        self.set_restarting(true);
+        if let Err(e) = self.stop() {
+            self.set_restarting(false);
+            return Err(e);
+        }
+        let s = self.clone();
+        std::thread::Builder::new()
+            .name("server-restart".into())
+            .spawn(move || {
+                // As long as the stop may take: a big world can save for minutes.
+                let end = Instant::now() + s.stop_longest();
+                while s.state().is_alive() && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                if let Err(e) = s.start() {
+                    s.set_restarting(false);
+                    log::warn!("restarting {}: {e:#}", s.root().display());
+                }
+            })?;
+        Ok(())
     }
 
     /// How long the last start took, in seconds.
@@ -613,6 +693,7 @@ impl LocalServer {
         stdin.flush()?;
         if line == "stop" {
             g.stop_requested = true;
+            g.tracker.halt.began.get_or_insert(Instant::now());
             if let Some(i) = g.info.as_mut() {
                 i.stop_requested = true;
             }
@@ -781,6 +862,12 @@ fn reap(g: &mut Shared) {
     let Some(p) = g.proc.as_mut() else { return };
     match try_wait(p) {
         Ok(Some(code)) => {
+            if let Some(began) = g.tracker.halt.began.filter(|_| g.stop_requested) {
+                g.finished = Some((Finished { kind: ProgressKind::Stop, secs: began.elapsed().as_secs() as u32, ago_secs: 0, restarting: g.restarting }, Instant::now()));
+            } else {
+                // Ended on its own: a restart under way won't get to its start.
+                g.restarting = false;
+            }
             g.exit = Some(code);
             g.proc = None;
             g.stdin = None;

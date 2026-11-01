@@ -27,6 +27,7 @@
   import Worlds from './Worlds.svelte';
   import Addr from './Addr.svelte';
   import ServerAlerts from './ServerAlerts.svelte';
+  import Progress from './Progress.svelte';
   import ShareLog from './ShareLog.svelte';
   import PackUpdate from './PackUpdate.svelte';
   import PackVersions from './PackVersions.svelte';
@@ -159,13 +160,15 @@
     <div class="ttl">
       <div class="row wrap">
         <h2>{s.name}</h2>
-        <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateText(s)}{s.boot ? ` · ${s.boot.label}` : ''}{alive ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
+        <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateText(s)}{s.boot && !s.progress ? ` · ${s.boot.label}` : ''}{alive && !s.progress ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
         {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />
         {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => openUpdate()}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
       </div>
       <div class="small muted ell">{#if packCheck?.pack}<button class="vlink" title="{packCheck.pack.name}: versions and changelogs" onclick={openVersions}>{packCheck.pack.current.name}</button>{' · '}{/if}{#if s.version}<button class="vlink" title="Change Minecraft version (Settings › Version)" onclick={() => nav('settings', 'version')}>Minecraft {s.version}</button>{:else}Minecraft{/if}{#if s.loader}{' · '}{#if hasLoader}<button class="vlink" title="Loader versions and changelog" onclick={() => (loaderOpen = true)}>{loaderText(s.loader)}</button>{:else}{loaderText(s.loader)}{/if}{/if} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gl={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gl">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
-      {#if s.state === 'starting' && s.boot}
-        <!-- How far the start has got; the server list shows players the same. -->
+      {#if s.progress}
+        <!-- How far a start or stop has got; the server list shows players the same. -->
+        <Progress server={s} />
+      {:else if s.state === 'starting' && s.boot}
         <div class="boot" title={s.boot.steps.map((x) => `${x.state === 'done' ? '✔' : x.state === 'now' ? '▶' : '·'} ${x.label}`).join('\n')}>
           <div class="bar" class:b={!s.boot.slow} class:slow={s.boot.slow}><i style="width: {s.boot.percent}%"></i></div>
           <span class="tiny muted">{bootLeft(s.boot)}</span>

@@ -33,8 +33,9 @@ use std::rc::Rc;
 fn status_color(status: Option<&Status>, panel: Option<&PanelStats>, cx: &App) -> Hsla {
     let theme = cx.theme();
     match (panel, status) {
+        (Some(p), _) if p.progress.as_ref().is_some_and(|g| g.stuck) => theme.danger,
         (Some(p), _) if p.crashed => theme.danger,
-        (Some(p), _) if p.starting || p.updating => theme.warning,
+        (Some(p), _) if p.starting || p.stopping || p.updating => theme.warning,
         // Running in the panel but not answering yet: still loading.
         (Some(p), Some(Status::Online { .. })) if p.running => theme.success,
         (Some(p), _) if p.running => theme.warning,
@@ -172,6 +173,7 @@ fn motd_line(raw: &str, cx: &App) -> Option<Div> {
 /// The state word for a header pill: short, as the list's pills say it.
 fn short_state(status: Option<&Status>, panel: Option<&PanelStats>) -> String {
     match (panel, status) {
+        (Some(p), _) if p.progress.is_some() => p.progress.as_ref().map(|g| g.pill()).unwrap_or_default(),
         (Some(p), _) if p.crashed => "Crashed".into(),
         (Some(p), _) if p.starting => "Starting".into(),
         (Some(p), _) if p.running => {
@@ -366,8 +368,10 @@ fn server_list(
                             // picture; pills are for running, starting and
                             // failing ones.
                             .when_some(s.panel_stats(&srv.root).filter(|p| p.running || p.starting || p.crashed), |r, p| {
-                                let live = p.running && !p.starting && !p.crashed;
-                                let text = if live {
+                                let live = p.running && !p.starting && !p.stopping && !p.crashed;
+                                let text = if let Some(g) = &p.progress {
+                                    g.pill()
+                                } else if live {
                                     format!("{}/{}", p.online, p.max)
                                 } else {
                                     p.state().to_string()
@@ -1246,9 +1250,12 @@ impl ServersView {
         if self.tab == 0 && pack_id != 0 {
             self.store.update(cx, |st, _| st.want_pack_page(pack_id));
         }
+        // The control polls this server every second or two; the store's
+        // copy is slower, so the header's pill follows the control's.
+        let fresh = self.control.read(cx).stats_of(&s.root).cloned();
         let store = self.store.read(cx);
         let status = store.status(&s.root);
-        let pstats = store.panel_stats(&s.root).cloned();
+        let pstats = fresh.or_else(|| store.panel_stats(&s.root).cloned());
         let paired = store.paired(s).cloned();
         let remote = s.remote.is_some();
         let also = remote && (store.also_in_folder(s) || !matches!(s.manager, Manager::Unknown));

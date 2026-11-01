@@ -15,6 +15,7 @@
   import { api, post } from './lib/api.js';
   import { live, connect, disconnect, startPing } from './lib/live.svelte.js';
   import { toast, say, hush } from './lib/toast.svelte.js';
+  import { noteFinished } from './lib/finished.js';
   import { power } from './lib/power.js';
   import Overview from './Overview.svelte';
   import Browse from './Browse.svelte';
@@ -38,6 +39,9 @@
   let { hello, me, onSignOut } = $props();
   const owner = $derived(ownerLike(me));
   const canPower = $derived(me?.role !== 'viewer');
+  // A toast when a start or stop ends ("TNP-LL8 started in 1m 32s.").
+  $effect(() => noteFinished(live.servers));
+
   $effect(() => {
     session.owner = owner;
     session.trueOwner = me?.role === 'owner';

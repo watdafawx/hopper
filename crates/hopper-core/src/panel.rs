@@ -147,6 +147,13 @@ pub struct PanelStats {
     /// Hopper Server: `server-icon.png`'s modified time, when it has one
     /// (fetch it with [`crate::hopperd::Client::icon`]).
     pub icon: Option<u64>,
+    /// Stopping (asked to, waiting for Java to end).
+    pub stopping: bool,
+    /// A start or stop under way, from panels that read the console
+    /// (Hopper's own servers, Hopper Server).
+    pub progress: Option<crate::hosting::progress::Progress>,
+    /// A start or stop that just ended ("Started in 1m 32s").
+    pub finished: Option<crate::hosting::progress::Finished>,
 }
 
 /// Hopper Server's `via` (from /hello) in words, as the web panel shows it.
@@ -219,6 +226,8 @@ impl PanelStats {
             "Updating"
         } else if self.starting {
             "Starting"
+        } else if self.stopping {
+            "Stopping"
         } else if self.running {
             "Running"
         } else {

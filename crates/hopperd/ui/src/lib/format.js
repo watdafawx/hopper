@@ -65,10 +65,29 @@ export const stateLabel = {
 /** A server's state in words; a stop that is saving its worlds says so,
  * a start how far it has got. */
 export const stateText = (s) => {
+  if (s.progress) return progressPill(s.progress);
   if (s.state === 'stopping' && s.saving) return 'Saving worlds…';
   if (s.state === 'starting' && s.boot) return `Starting ${s.boot.percent}%`;
   return stateLabel[s.state];
 };
+
+/** The state pill while starting or stopping, as desktop words it
+ * (hopper-core `Progress::pill`). */
+export function progressPill(p) {
+  if (p.kind === 'stop') return p.stuck ? 'Not stopping' : p.restarting ? 'Restarting' : 'Stopping';
+  return `${p.restarting ? 'Restarting' : 'Starting'} ${p.percent}%`;
+}
+
+/** A start's or stop's steps for a tooltip, one a line. */
+export const progressSteps = (p) =>
+  (p?.steps || []).map((x) => `${x.state === 'done' ? '✓' : x.state === 'now' ? '▶' : '·'} ${x.label}`).join('\n');
+
+/** "8s", "1m 32s", "12m": to the second, for a time that has passed. */
+export function exactTime(secs) {
+  const m = Math.floor(secs / 60);
+  const r = secs % 60;
+  return !m ? `${r}s` : r ? `${m}m ${r}s` : `${m}m`;
+}
 
 /** "45s", "1m 20s", "3m": rounded like the server list says it. */
 export function shortTime(secs) {
@@ -89,7 +108,7 @@ export function bootLeft(b) {
 }
 
 /** A start's progress for a tooltip: what it is doing, then the time. */
-export const bootText = (s) => (s.state === 'starting' && s.boot ? `${s.boot.label} · ${bootLeft(s.boot)}` : '');
+export const bootText = (s) => (s.progress ? `${s.progress.label} · ${s.progress.detail}` : s.state === 'starting' && s.boot ? `${s.boot.label} · ${bootLeft(s.boot)}` : '');
 
 const PRIVATE = [/^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /\.local$/];
 const TAILSCALE = [/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /\.ts\.net$/];
