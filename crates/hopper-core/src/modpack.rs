@@ -129,6 +129,10 @@ pub struct Pending {
     pub sha1: String,
     /// The instance's entry for it once it's in place.
     pub addon: Option<crate::instances::Addon>,
+    /// For a file the instance doesn't track (a pack in Paxi's or another
+    /// loader's folder): the old file in `folder` it replaces, which goes
+    /// to the instance's backups when the new one is in place.
+    pub replaces: String,
 }
 
 /// Files the last pack install or update of `inst` could not download.
@@ -260,6 +264,7 @@ pub fn place_downloads(inst: &mut Instance, dir: &Path) -> anyhow::Result<Vec<St
             }
             None => {
                 fs::rename(&tmp, &dest)?;
+                retire_replaced(&inst.root, folder, p)?;
             }
         }
         let _ = fs::remove_file(&tmp);
@@ -276,6 +281,22 @@ pub fn place_downloads(inst: &mut Instance, dir: &Path) -> anyhow::Result<Vec<St
         inst.save()?;
     }
     Ok(placed)
+}
+
+/// Moves the old file a loose pending file replaces (see
+/// [`Pending::replaces`]) into the instance's backups, once the new one is
+/// in its folder. Nothing to do when it has the new file's name (just
+/// overwritten) or is gone.
+fn retire_replaced(root: &Path, folder: &str, p: &Pending) -> anyhow::Result<()> {
+    let old = p.replaces.as_str();
+    if old.is_empty() || old == p.file_name || !plain_file_name(old) {
+        return Ok(());
+    }
+    let at = root.join(folder).join(old);
+    if at.exists() {
+        crate::sync::backup_into(root, &at)?;
+    }
+    Ok(())
 }
 
 /// The user's Downloads folder.
@@ -1053,6 +1074,7 @@ fn apply_pack(
                 size: f.expect().len,
                 sha1: f.expect().sha1,
                 addon: Some(crate::install::addon_from(m, f, true)),
+                replaces: String::new(),
             })
         };
         let r = match cf::download_url(f) {

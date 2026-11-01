@@ -314,7 +314,7 @@ fn fetch(m: &cf::Mod, f: &cf::File, job: &Job) -> anyhow::Result<PathBuf> {
     let url = cf::download_url(f).map_err(|_| {
         anyhow::anyhow!(
             "The author blocks downloads from other apps; get it from {}",
-            f.manual_url(m)
+            f.manual_url(&cf::full_project(m))
         )
     })?;
     let dir = crate::paths::temp_dir().join("hopper-downloads");
@@ -478,13 +478,36 @@ pub fn resourcepack_targets(inst: &Instance) -> Vec<(String, String)> {
     out
 }
 
-/// Puts a data pack into `dir` (a world's `datapacks/` or a global folder).
-pub fn install_datapack(
+/// Where a pack file put in a loose folder went.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Placed {
+    /// Downloaded to this path.
+    File(PathBuf),
+    /// The author allows downloads from the CurseForge website only: the
+    /// file is on the instance's pending list for that folder, and Hopper's
+    /// download window gets it from this page.
+    Pending(String),
+}
+
+/// Puts a pack into `dir` of the instance at `root` (a world's
+/// `datapacks/`, a loader's folder such as Paxi's, or the instance's own
+/// pack folder). `replaces` is the old file it takes the place of, which
+/// goes to backups once the new one is in (now, or when a website-only
+/// file arrives).
+pub fn put_pack(
+    root: &Path,
     dir: &Path,
     m: &cf::Mod,
     f: &cf::File,
+    replaces: Option<&Path>,
     job: &Job,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<Placed> {
+    if cf::download_url(f).is_err() {
+        let p = loose_pending(root, dir, &cf::full_project(m), f, replaces)?;
+        let url = p.url.clone();
+        crate::modpack::add_pending(root, &[p])?;
+        return Ok(Placed::Pending(url));
+    }
     let tmp = fetch(m, f, job)?;
     fs::create_dir_all(dir)?;
     let dest = dir.join(&f.file_name);
@@ -492,7 +515,63 @@ pub fn install_datapack(
         fs::copy(&tmp, &dest)?;
         let _ = fs::remove_file(&tmp);
     }
-    Ok(dest)
+    if let Some(old) = replaces.filter(|o| *o != dest && o.exists()) {
+        crate::sync::backup_into(root, old)?;
+    }
+    Ok(Placed::File(dest))
+}
+
+/// The pending entry for a website-only pack file headed for `dir`: its
+/// folder relative to the instance, so the download watcher puts it back
+/// where the old one was (not in `resourcepacks/`).
+fn loose_pending(
+    root: &Path,
+    dir: &Path,
+    m: &cf::Mod,
+    f: &cf::File,
+    replaces: Option<&Path>,
+) -> anyhow::Result<crate::modpack::Pending> {
+    let folder = dir
+        .strip_prefix(root)
+        .ok()
+        .map(|r| r.to_string_lossy().replace('\\', "/"))
+        .filter(|r| crate::configdiff::safe_rel(r))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "The author blocks downloads from other apps; get it from {}",
+                f.manual_url(m)
+            )
+        })?;
+    let e = f.expect();
+    Ok(crate::modpack::Pending {
+        name: m.name.clone(),
+        file_name: f.file_name.clone(),
+        folder,
+        project_id: m.id,
+        file_id: f.id,
+        url: f.manual_url(m),
+        reason: "The author only allows downloads from the CurseForge website".into(),
+        size: e.len,
+        sha1: e.sha1,
+        addon: None,
+        replaces: replaces
+            .filter(|o| o.parent() == Some(dir))
+            .and_then(|o| o.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    })
+}
+
+/// Puts a data pack into `dir` (a world's `datapacks/` or a global folder)
+/// of the instance at `root`.
+pub fn install_datapack(
+    root: &Path,
+    dir: &Path,
+    m: &cf::Mod,
+    f: &cf::File,
+    job: &Job,
+) -> anyhow::Result<Placed> {
+    put_pack(root, dir, m, f, None, job)
 }
 
 /// Data packs in a folder (zips, jars and folders).
@@ -1113,7 +1192,9 @@ mod tests {
         println!("world {} -> {}", m.name, w.display());
         assert!(w.join("level.dat").exists());
         let (dm, df) = pick(cf::CLASS_DATAPACKS, "");
-        let d = install_datapack(&w.join("datapacks"), &dm, &df, &jobs.start("d")).unwrap();
+        let Placed::File(d) = install_datapack(&inst.root, &w.join("datapacks"), &dm, &df, &jobs.start("d")).unwrap() else {
+            panic!("a downloadable data pack went to the pending list")
+        };
         println!("datapack {} -> {}", dm.name, d.display());
         assert_eq!(datapacks(&w.join("datapacks")), [d]);
         let _ = fs::remove_dir_all(&root);
@@ -1335,13 +1416,9 @@ fn pack_version(inst: &Instance, path: &Path, m: &PackMatch) -> PackVersion {
 
 /// Replaces a pack with `file` of its project in the same folder; the old
 /// one goes to the instance's backups.
-pub fn update_pack(root: &Path, old: &Path, m: &cf::Mod, file: &cf::File, job: &Job) -> anyhow::Result<PathBuf> {
+pub fn update_pack(root: &Path, old: &Path, m: &cf::Mod, file: &cf::File, job: &Job) -> anyhow::Result<Placed> {
     let dir = old.parent().context("the pack has no folder")?;
-    let new = install_datapack(dir, m, file, job)?;
-    if new != old {
-        crate::sync::backup_into(root, old)?;
-    }
-    Ok(new)
+    put_pack(root, dir, m, file, Some(old), job)
 }
 
 /// The version to show for a pack file: "3.1.0" of "Abibliophobia-3.1.0.zip".
@@ -1351,6 +1428,67 @@ pub fn pack_version_label(file_name: &str) -> String {
         .or_else(|| file_name.strip_suffix(".jar"))
         .unwrap_or(file_name);
     crate::scan::short_version(&format!("{stem}.jar"))
+}
+
+#[cfg(test)]
+mod loose_pending_tests {
+    use super::*;
+
+    /// A website-only update of a pack in a loader's folder (Paxi's here)
+    /// comes back to that folder, and the old version goes to backups.
+    #[test]
+    fn paxi_pack_round_trip() {
+        let t = std::env::temp_dir().join(format!("hopper-paxi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t);
+        let (root, dl) = (t.join("inst"), t.join("fetched"));
+        for (dir, _, _) in GLOBAL_RESOURCEPACK_DIRS.iter().chain(GLOBAL_DATAPACK_DIRS) {
+            let paxi = root.join(dir);
+            fs::create_dir_all(&paxi).unwrap();
+            fs::create_dir_all(&dl).unwrap();
+            let old = paxi.join("IconsCompats-1.0.zip");
+            fs::write(&old, b"old").unwrap();
+            let body = b"new pack bytes".to_vec();
+            let m = cf::Mod {
+                id: 1577414,
+                name: "Icons Compats".into(),
+                slug: "icons-compats".into(),
+                class_id: Some(cf::CLASS_RESOURCE_PACKS),
+                ..Default::default()
+            };
+            let f = cf::File {
+                id: 9383879,
+                file_name: "IconsCompats-1.1.zip".into(),
+                file_length: body.len() as u64,
+                hashes: vec![cf::FileHash { value: crate::modrinth::sha1(&body), algo: 1 }],
+                ..Default::default()
+            };
+            let p = loose_pending(&root, &paxi, &m, &f, Some(&old)).unwrap();
+            assert_eq!(p.folder, *dir, "the folder it came from, not resourcepacks/");
+            assert_eq!(p.replaces, "IconsCompats-1.0.zip");
+            assert_eq!(p.url, "https://www.curseforge.com/minecraft/texture-packs/icons-compats/download/9383879");
+            assert!(p.addon.is_none(), "loader folders aren't tracked");
+            crate::modpack::add_pending(&root, &[p]).unwrap();
+            // The download window saved it.
+            fs::write(dl.join("IconsCompats-1.1.zip"), &body).unwrap();
+            let mut inst = Instance { root: root.clone(), name: "t".into(), ..Default::default() };
+            let placed = crate::modpack::place_downloads(&mut inst, &dl).unwrap();
+            assert_eq!(placed, ["Icons Compats"]);
+            assert_eq!(fs::read(paxi.join("IconsCompats-1.1.zip")).unwrap(), body);
+            assert!(!old.exists(), "the old version left the folder");
+            assert!(!root.join("resourcepacks/IconsCompats-1.1.zip").exists());
+            let backed_up = walk(&root.join(crate::sync::BACKUP_DIR))
+                .iter()
+                .any(|b| b.file_name().is_some_and(|n| n == "IconsCompats-1.0.zip"));
+            assert!(backed_up, "the old version is in .hopper-backups");
+            assert!(crate::modpack::pending_downloads(&inst).is_empty());
+            assert!(inst.addons.is_empty());
+            let _ = fs::remove_dir_all(&root);
+        }
+        // A folder outside the instance has no pending entry to hold it.
+        let m = cf::Mod { id: 1, slug: "x".into(), ..Default::default() };
+        assert!(loose_pending(&root, &t.join("elsewhere"), &m, &cf::File::default(), None).is_err());
+        let _ = fs::remove_dir_all(&t);
+    }
 }
 
 #[cfg(test)]
