@@ -13,7 +13,7 @@ use gpui_kit::component::input::{
     Editor, EditorState, Input, InputEvent, InputState, Position, RangeDecoration, RangeDecorationCollection, RangeDecorationStyle,
 };
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::switch::Switch;
+use crate::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;

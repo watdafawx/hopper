@@ -221,14 +221,14 @@
   .card { display: flex; flex-direction: column; gap: 8px; }
   .card h3 { margin-bottom: 2px; }
   .wide { grid-column: 1 / -1; }
-  .qr { width: 200px; height: 200px; background: #fff; border-radius: 8px; padding: 6px; }
+  .qr { width: 200px; height: 200px; background: #fff; border-radius: var(--radius); padding: 6px; }
   .qr :global(svg) { width: 100%; height: 100%; }
   .brk { word-break: break-all; }
   .grow { flex: 1; min-width: 0; }
   .w { width: 90px; }
   .wrap { flex-wrap: wrap; }
   .tk { padding: 6px 0; border-bottom: 1px solid var(--line); }
-  .made { border: 1px solid #22c55e55; background: var(--green-dim); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .made { border: 1px solid #22c55e55; background: var(--green-dim); border-radius: var(--radius-lg); padding: 10px; display: flex; flex-direction: column; gap: 6px; }
   .new { border-top: 1px solid var(--line); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .chk { display: flex; gap: 6px; align-items: center; }
   .chk input { accent-color: var(--acc); }

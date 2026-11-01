@@ -13,7 +13,7 @@ use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMen
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::switch::Switch;
+use crate::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
     v_flex,
@@ -3715,7 +3715,8 @@ It stays disabled after updating: turn it on in the On column.")
                             .overflow_hidden()
                             .gap_1()
                             .px_1p5()
-                            .rounded(theme.radius)
+                            .map(widgets::chip_lift)
+                            .rounded(crate::theme::radius_sm())
                             .text_xs();
                         let chip = match update.map(|u| u.versions()) {
                             // The update inline: installed → offered.
@@ -4034,7 +4035,8 @@ Change version", a.file_name).into()
                     .flex_none()
                     .gap_1()
                     .px_1p5()
-                    .rounded(theme.radius)
+                    .map(widgets::chip_lift)
+                    .rounded(crate::theme::radius_sm())
                     .text_xs()
                     .bg(warn.opacity(widgets::alpha::TINT))
                     .text_color(warn)
@@ -4066,7 +4068,8 @@ Change version", a.file_name).into()
                     .flex_none()
                     .gap_1()
                     .px_1p5()
-                    .rounded(theme.radius)
+                    .map(widgets::chip_lift)
+                    .rounded(crate::theme::radius_sm())
                     .text_xs()
                     .bg(warn.opacity(widgets::alpha::TINT))
                     .text_color(warn)
@@ -4689,7 +4692,7 @@ impl Render for UpdateReview {
                                 .min_w_0()
                                 .gap_1()
                                 .px_1p5()
-                                .rounded(px(crate::theme::RADIUS))
+                                .rounded(crate::theme::radius_sm())
                                 .bg(theme.primary.opacity(widgets::alpha::TINT))
                                 .text_xs()
                                 .child(div().min_w_0().truncate().text_color(theme.muted_foreground).child(r.from.clone()))

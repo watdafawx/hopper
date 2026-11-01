@@ -63,7 +63,7 @@
 {/if}
 
 <style>
-  .panel { position: fixed; right: 16px; bottom: 16px; width: min(360px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--line2); border-radius: 10px; box-shadow: 0 16px 40px #000a; z-index: 40; overflow: hidden; }
+  .panel { position: fixed; right: 16px; bottom: 16px; width: min(360px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--line2); border-radius: var(--radius-lg); box-shadow: 0 16px 40px #000a; z-index: 40; overflow: hidden; }
   .hd { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; text-align: left; }
   .items { max-height: 50vh; overflow: auto; border-top: 1px solid var(--line); }
   .q { padding: 9px 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 5px; }

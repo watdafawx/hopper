@@ -98,7 +98,7 @@
 </div>
 
 <style>
-  .wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--base); }
+  .wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; background: var(--base); }
   .ftool { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   .list { flex: 1; overflow: auto; }
   .it { padding: 8px 12px; border-bottom: 1px solid #26262c; }

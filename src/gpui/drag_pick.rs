@@ -54,7 +54,7 @@ impl Render for PickChip {
             .mt_3()
             .px_2p5()
             .py_0p5()
-            .rounded(theme.radius)
+            .rounded(crate::theme::radius_sm())
             .bg(theme.primary)
             .text_color(theme.primary_foreground)
             .text_xs()

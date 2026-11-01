@@ -65,7 +65,7 @@
 </div>
 
 <style>
-  .danger { border: 1px solid #ef444455; background: #ef44440a; border-radius: 10px; padding: 10px 12px; margin-top: 4px; }
+  .danger { border: 1px solid #ef444455; background: #ef44440a; border-radius: var(--radius-lg); padding: 10px 12px; margin-top: 4px; }
   .grow { flex: 1; min-width: 200px; color: var(--subtle); }
   .wrap { flex-wrap: wrap; gap: 8px; }
   .warn { color: var(--gold); }

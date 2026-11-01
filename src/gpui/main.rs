@@ -68,6 +68,7 @@ mod video;
 #[cfg(windows)]
 mod video_window;
 mod whats_new;
+mod switch;
 mod widgets;
 
 use gpui_kit::component::TitleBar;

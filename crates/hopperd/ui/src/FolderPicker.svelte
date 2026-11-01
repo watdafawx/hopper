@@ -74,9 +74,9 @@
 </div>
 
 <style>
-  .fp { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line2); border-radius: 8px; padding: 8px; background: var(--base); }
+  .fp { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line2); border-radius: var(--radius-lg); padding: 8px; background: var(--base); }
   .list { max-height: 240px; overflow: auto; display: flex; flex-direction: column; }
-  .ent { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 5px; text-align: left; font-size: 12.5px; }
+  .ent { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--radius-sm); text-align: left; font-size: 12.5px; }
   .ent :global(.ok) { color: var(--green); }
   .grow { flex: 1; min-width: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

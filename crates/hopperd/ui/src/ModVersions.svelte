@@ -145,22 +145,22 @@
   .scroll { overflow: auto; gap: 10px; min-height: 0; padding-right: 2px; }
   .inl { gap: 8px; }
   .col { display: flex; flex-direction: column; }
-  .head img, .ph { width: 40px; height: 40px; border-radius: 8px; background: var(--raise); flex: none; }
+  .head img, .ph { width: 40px; height: 40px; border-radius: var(--radius); background: var(--raise); flex: none; }
   .grow { flex: 1; min-width: 0; }
   .wrap { flex-wrap: wrap; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .nowrap { white-space: nowrap; }
   .status b { color: var(--acc); font-size: 13px; }
   .status b.ok { color: var(--green); }
-  .vc { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .vc { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 12px; }
   .vc.target { border-color: var(--acc); }
   .vc.cur { background: #ffffff07; }
   .vname { overflow-wrap: anywhere; min-width: 0; }
-  .oth { background: #ffffff07; border-radius: 10px; padding: 7px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .oth { background: #ffffff07; border-radius: var(--radius-lg); padding: 7px 10px; display: flex; flex-direction: column; gap: 6px; }
   .ohead { gap: 6px; text-align: left; font-size: 12.5px; }
   .lbl { padding-top: 4px; }
-  .locknote { gap: 8px; background: var(--raise); border-radius: 8px; padding: 8px 10px; }
-  .notes { background: var(--base); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-height: 320px; overflow: auto; overflow-wrap: anywhere; }
+  .locknote { gap: 8px; background: var(--raise); border-radius: var(--radius-lg); padding: 8px 10px; }
+  .notes { background: var(--base); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; max-height: 320px; overflow: auto; overflow-wrap: anywhere; }
   .notes :global(ul) { margin: 4px 0 4px 18px; }
   .notes :global(h1), .notes :global(h2), .notes :global(h3) { font-size: 13px; margin: 6px 0 2px; }
   .notes :global(a) { color: var(--blue); }

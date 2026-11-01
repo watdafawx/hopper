@@ -104,18 +104,18 @@
   .box { width: min(820px, 100%); height: calc(100dvh - var(--dialog-top) - 24px); gap: 12px; padding: 14px; }
   .box h3 { margin: 0; font-size: 15px; font-weight: 600; }
   .hd { gap: 12px; }
-  .pi { border-radius: 8px; background: var(--raise); flex: none; display: grid; place-items: center; width: 40px; height: 40px; }
+  .pi { border-radius: var(--radius); background: var(--raise); flex: none; display: grid; place-items: center; width: 40px; height: 40px; }
   .g2 { gap: 2px; min-width: 0; }
   .grow { flex: 1; min-width: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .behind { color: var(--acc); }
   .scroll { overflow: auto; min-height: 0; flex: 1; gap: 8px; padding-right: 4px; }
-  .ver { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .ver { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
   .ver.top { border-color: var(--acc); }
   .ver.installed { background: #ffffff06; }
   .vh { gap: 8px; text-align: left; }
   .vh:hover b { color: var(--acc); }
-  .chip.xs { font-size: 10.5px; padding: 0 6px; }
+  .chip.xs { font-size: 10.5px; height: 18px; padding: 0 6px 2px; }
   .notes { padding: 4px 4px 4px 22px; overflow-wrap: anywhere; }
   .icon { padding: 3px 5px; }
 </style>

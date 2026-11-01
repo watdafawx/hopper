@@ -236,7 +236,7 @@
   .md :global(ul) { margin: 4px 0; padding-left: 18px; }
   .md :global(h1), .md :global(h2), .md :global(h3), .md :global(h4) { font-size: 13px; margin: 8px 0 2px; color: var(--text); }
   .md :global(p) { margin: 4px 0; }
-  .chip.xs { font-size: 10.5px; padding: 0 6px; }
+  .chip.xs { font-size: 10.5px; height: 18px; padding: 0 6px 2px; }
   .icon { padding: 3px 5px; }
   @media (max-width: 640px) {
     .cols { flex-direction: column; }

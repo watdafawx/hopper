@@ -211,12 +211,12 @@
   .input.grow { padding: 5px 9px; }
   .end { justify-content: flex-end; gap: 8px; }
   .list { overflow: auto; display: flex; flex-direction: column; gap: 2px; min-height: 0; max-height: 260px; }
-  .it { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; text-align: left; font-size: 12.5px; }
+  .it { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius); text-align: left; font-size: 12.5px; }
   .sz { width: 56px; text-align: right; }
-  .file { gap: 10px; padding: 10px 12px; border-radius: 8px; background: var(--panel-2, rgba(255,255,255,.04)); }
-  .warn { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 8px; background: var(--gold-dim, rgba(240,180,60,.12)); }
+  .file { gap: 10px; padding: 10px 12px; border-radius: var(--radius-lg); background: var(--panel-2, rgba(255,255,255,.04)); }
+  .warn { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--radius-lg); background: var(--gold-dim, rgba(240,180,60,.12)); }
   .err { color: var(--red, #f87171); gap: 6px; }
-  .skel { height: 34px; border-radius: 6px; background: rgba(255,255,255,.05); }
+  .skel { height: 34px; border-radius: var(--radius); background: rgba(255,255,255,.05); }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .icon { padding: 3px 5px; }
 </style>

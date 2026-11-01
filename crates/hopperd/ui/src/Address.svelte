@@ -203,7 +203,7 @@
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .add { align-self: flex-start; }
   .icon { padding: 3px 5px; }
-  .warn { display: flex; gap: 8px; align-items: flex-start; color: var(--gold); background: var(--gold-dim); border: 1px solid #eab30855; border-radius: 8px; padding: 8px 10px; }
+  .warn { display: flex; gap: 8px; align-items: flex-start; color: var(--gold); background: var(--gold-dim); border: 1px solid #eab30855; border-radius: var(--radius-lg); padding: 8px 10px; }
   .warn > div { display: flex; flex-direction: column; gap: 6px; color: var(--text); }
   .unsaved { color: var(--gold); font-size: 11.5px; font-weight: 600; }
   .gold { color: var(--gold); }

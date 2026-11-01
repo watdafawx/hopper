@@ -1091,7 +1091,7 @@ impl AppView {
         let hide_servers = !tools && self.store.read(cx).settings().hide_servers_item;
         let theme = cx.theme();
         // The tools sit in an outlined track.
-        let (line, radius) = (theme.border, px(10.));
+        let (line, radius) = (theme.border, theme.radius_lg);
         TitleBar::new().h(px(42.)).child(
             h_flex()
                 .flex_1()

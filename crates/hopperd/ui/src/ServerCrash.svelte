@@ -306,7 +306,7 @@
   code { font-family: var(--mono, Consolas, monospace); font-size: 12px; color: var(--gold); }
   .mod { display: inline-flex; align-items: center; gap: 7px; flex: none; color: var(--text); padding: 0; max-width: 100%; }
   button.mod:hover b { color: var(--acc); }
-  .mod img, .ph { width: 18px; height: 18px; border-radius: 4px; background: var(--raise); flex: none; display: inline-block; }
+  .mod img, .ph { width: 18px; height: 18px; border-radius: var(--radius-sm); background: var(--raise); flex: none; display: inline-block; }
   .mod b { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tag { font-size: 11px; padding: 0 6px; }
   .tag.certain { color: var(--red); background: var(--red-dim); }

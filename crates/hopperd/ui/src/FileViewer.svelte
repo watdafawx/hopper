@@ -165,20 +165,20 @@
   .grow { flex: 1; text-align: left; }
   .icon { padding: 3px 5px; }
   .img { width: min(1100px, 100%); height: calc(100vh - var(--dialog-top) - 24px); max-height: 900px; gap: 8px; color: var(--text); }
-  .stage { flex: 1; min-height: 0; display: grid; place-items: center; position: relative; background: repeating-conic-gradient(#1b1b20 0% 25%, #222228 0% 50%) 50% / 24px 24px; border-radius: 10px; overflow: hidden; }
+  .stage { flex: 1; min-height: 0; display: grid; place-items: center; position: relative; background: repeating-conic-gradient(#1b1b20 0% 25%, #222228 0% 50%) 50% / 24px 24px; border-radius: var(--radius-lg); overflow: hidden; }
   .stage img { max-width: 100%; max-height: 100%; image-rendering: pixelated; object-fit: contain; min-width: 64px; }
-  .nav { position: absolute; top: 50%; transform: translateY(-50%); background: #000a; border-radius: 99px; padding: 8px; color: #fff; }
+  .nav { position: absolute; top: 50%; transform: translateY(-50%); background: #000a; border-radius: var(--radius); padding: 8px; color: #fff; }
   .nav.l { left: 10px; } .nav.r { right: 10px; }
   .box { width: min(1000px, 100%); height: min(calc(100vh - var(--dialog-top) - 24px), 760px); gap: 8px; padding: 14px; }
   .crumbs { gap: 6px; }
   .split2 { flex: 1; min-height: 0; display: flex; gap: 10px; }
-  .zl { flex: 1; min-width: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--base); }
+  .zl { flex: 1; min-width: 0; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--base); }
   .ze { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 10px; border-bottom: 1px solid #24242a; font-size: 12.5px; }
 
   .ze :global(.fo) { color: var(--acc); flex: none; }
   .ze :global(.fi) { color: var(--muted); flex: none; }
   .zp { width: 45%; min-width: 260px; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
-  .zp pre { flex: 1; overflow: auto; margin: 0; background: var(--term); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 11.5px; white-space: pre-wrap; }
-  .pimg { max-width: 100%; image-rendering: pixelated; background: var(--raise); border-radius: 8px; }
+  .zp pre { flex: 1; overflow: auto; margin: 0; background: var(--term); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 8px 10px; font-size: 11.5px; white-space: pre-wrap; }
+  .pimg { max-width: 100%; image-rendering: pixelated; background: var(--raise); border-radius: var(--radius); }
   .pad { padding: 12px; }
 </style>

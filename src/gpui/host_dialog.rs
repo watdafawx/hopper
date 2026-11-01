@@ -538,7 +538,7 @@ impl HostForm {
                 .min_w_0()
                 .gap_2()
                 .p_2()
-                .rounded_md()
+                .rounded(px(crate::theme::RADIUS))
                 .bg(theme.warning.opacity(0.08))
                 .text_sm()
                 .child(div().w_full().min_w_0().child(text))

@@ -184,7 +184,6 @@ pub fn toggle_chip(id: impl Into<ElementId>, label: impl Into<SharedString>, on:
         .small()
         .label(label)
         .custom(variant)
-        .rounded_full()
         .border_1()
         .when(on, |b| b.icon(IconName::Check).bg(theme.secondary_active).border_color(theme.muted_foreground.opacity(0.55)))
         .when(!on, |b| b.border_color(theme.input))
@@ -434,11 +433,14 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
         .gap_1p5()
         .h(rems(1.375))
         .px_2p5()
-        // The theme's button radius (theme.json "radius"), like every chip.
-        .rounded(px(crate::theme::RADIUS))
+        // The small radius, like every chip.
+        .rounded(crate::theme::radius_sm())
         .bg(color.opacity(alpha::TINT))
         .text_color(color)
         .text_xs()
+        // The UI font's tall ascent leaves centred capitals about a pixel
+        // low; a little more room below lifts them to the middle.
+        .pb(px(2.))
         .font_weight(FontWeight::SEMIBOLD)
         .when(dot, |d| {
             d.child(
@@ -636,13 +638,27 @@ pub trait Clickable: InteractiveElement + Styled + Sized {
 
 impl<E: InteractiveElement + Styled> Clickable for E {}
 
-/// A chip: `color` text on a faint fill of it, no border, the theme's
+/// A chip: `color` text on a faint fill of it, no border, the small
 /// radius. gpui_kit's xsmall tag size; `.small()` still works.
 pub fn chip(color: Hsla) -> gpui_kit::component::tag::Tag {
     gpui_kit::component::tag::Tag::custom(color.opacity(alpha::TINT), color, gpui_kit::transparent_black())
         .xsmall()
         .flex_none()
-        .rounded(px(crate::theme::RADIUS))
+        .rounded(crate::theme::radius_sm())
+        .map(chip_pad)
+}
+
+/// A chip's vertical padding: gpui_kit's tag total, a pixel less above than
+/// below. Centred as laid out, the UI font's tall ascent leaves capitals
+/// about a pixel low; this lifts the label to the middle.
+pub fn chip_pad<E: Styled>(el: E) -> E {
+    el.pt(px(1.)).pb(px(3.))
+}
+
+/// A hand-built chip sized by its text (no vertical padding of its own):
+/// the same height as `chip`, its label lifted to the middle like it.
+pub fn chip_lift<E: Styled>(el: E) -> E {
+    el.h(rems(1.2)).pb(px(2.))
 }
 
 /// A tinted bar across a page with an icon at its start, for a notice or
@@ -700,8 +716,8 @@ where
                             .flex_none()
                             .gap_1p5()
                             .px_2()
-                            .py_0p5()
-                            .rounded(px(crate::theme::RADIUS))
+                            .map(chip_pad)
+                            .rounded(crate::theme::radius_sm())
                             .bg(color.opacity(alpha::TINT))
                             .text_xs()
                             .text_color(color)
@@ -762,7 +778,7 @@ pub fn summary_row(
             div()
                 .flex_none()
                 .size(rems(1.25))
-                .rounded(px(crate::theme::RADIUS))
+                .rounded(crate::theme::radius_sm())
                 .bg(color.opacity(alpha::TINT))
                 .flex()
                 .items_center()
@@ -940,7 +956,7 @@ pub fn picker_with(
                         PopupMenuItem::element(move |_, _| {
                             h_flex()
                                 .gap_2()
-                                .child(img(path.clone()).size(rems(1.25)).rounded_sm().flex_none())
+                                .child(img(path.clone()).size(rems(1.25)).rounded(crate::theme::radius_sm()).flex_none())
                                 .child(l.clone())
                         })
                     }
@@ -1571,7 +1587,7 @@ pub fn progress_fill(el: impl IntoElement, p: Option<f32>, cx: &App) -> Div {
                 .bottom_0()
                 .left_0()
                 .w(relative(p.clamp(0.0, 1.0)))
-                .rounded(px(5.))
+                .rounded(px(crate::theme::RADIUS))
                 .bg(color),
         )
     })

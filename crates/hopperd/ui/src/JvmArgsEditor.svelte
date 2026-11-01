@@ -218,7 +218,7 @@
 {#if problems}<div class="tiny count">{problems} flag{problems === 1 ? '' : 's'} with a problem: hover {problems === 1 ? 'it' : 'them'} to see why.</div>{/if}
 
 <style>
-  .ed { position: relative; background: var(--term); border: 1px solid var(--line); border-radius: 8px; }
+  .ed { position: relative; background: var(--term); border: 1px solid var(--line); border-radius: var(--radius-lg); }
   .ed:focus-within { border-color: var(--acc); }
   .ed.dirty { border-color: #f9731677; }
   /* One flag per line, never broken inside: long ones scroll sideways. */
@@ -228,7 +228,7 @@
   .hl, textarea { clip-path: inset(0 0 0 var(--gut)); }
   .gut { position: absolute; top: 0; bottom: 0; left: 0; z-index: 1; width: var(--gut); padding: 10px 6px 10px 0; text-align: right; overflow: hidden; color: var(--muted); opacity: 0.7; background: var(--term); border-right: 1px solid var(--line); border-radius: 8px 0 0 8px; pointer-events: none; user-select: none; scrollbar-gutter: auto; }
   textarea { position: relative; display: block; width: 100%; background: transparent; border: 0; color: transparent; caret-color: var(--text); resize: none; overflow: auto; outline: none; }
-  .grip { position: absolute; left: 0; right: 0; bottom: -5px; height: 10px; z-index: 2; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 4px; background: transparent; cursor: ns-resize; touch-action: none; }
+  .grip { position: absolute; left: 0; right: 0; bottom: -5px; height: 10px; z-index: 2; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; cursor: ns-resize; touch-action: none; }
   .grip span { width: 36px; height: 3px; border-radius: 2px; background: var(--muted); opacity: 0.5; }
   .grip:hover, .grip.on { background: color-mix(in srgb, var(--acc) 35%, transparent); }
   .grip:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }

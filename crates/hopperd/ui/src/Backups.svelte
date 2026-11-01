@@ -483,8 +483,8 @@
   .card h3 { margin-bottom: 6px; }
   .list { margin-top: 8px; }
   /* One card per backup, as desktop's snapshot rows: click to open its files. */
-  .bk { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; }
-  .bk .b { padding: 10px 12px; border: 0; cursor: pointer; border-radius: 10px; }
+  .bk { border: 1px solid var(--line); border-radius: var(--radius-lg); margin-bottom: 8px; }
+  .bk .b { padding: 10px 12px; border: 0; cursor: pointer; border-radius: var(--radius-lg); }
   .b { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-bottom: 1px solid var(--line); }
   .b:last-child { border-bottom: 0; }
   .b :global(.chev) { flex: none; color: var(--subtle); }
@@ -503,7 +503,7 @@
   .lnk { color: var(--acc); font-size: inherit; padding: 0; }
   .busy { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--gold); }
   .entries { max-height: 420px; overflow: auto; font-size: 12px; }
-  .ent { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 5px; cursor: pointer; }
+  .ent { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: var(--radius-sm); cursor: pointer; }
   .ent input, .tck input { accent-color: var(--acc); }
   .chip.ok { color: var(--green); background: var(--green-dim); }
   .chip.wait { color: var(--gold); background: var(--gold-dim); }

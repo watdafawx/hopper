@@ -306,22 +306,22 @@
   .secs { width: 210px; flex: none; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; }
   .find { padding: 5px 9px; margin-bottom: 8px; }
   .find .x { color: var(--muted); }
-  .secs > button { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: 6px; color: var(--subtle); text-align: left; }
+  .secs > button { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border-radius: var(--radius); color: var(--subtle); text-align: left; }
   .secs > button.row-sel { color: var(--text); }
   .form { flex: 1; min-width: 0; max-width: 860px; display: flex; flex-direction: column; }
   .form h2 { font-size: 17px; margin-bottom: 6px; }
   .form :global(h4) { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 2px; }
   .hint { margin-bottom: 6px; }
-  .pagehit { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; text-align: left; }
+  .pagehit { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-lg); margin-bottom: 6px; text-align: left; }
   .fl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 10px 4px; border-bottom: 1px solid var(--line); }
   .fl.full { grid-template-columns: 1fr; gap: 8px; }
-  .fl.dirty { background: var(--acc-dim); border-radius: 6px; }
+  .fl.dirty { background: var(--acc-dim); border-radius: var(--radius); }
   .lab > div:first-child { font-weight: 500; }
   .key { color: var(--muted); margin-left: 4px; }
   .ctl { display: flex; align-items: center; gap: 8px; justify-content: flex-end; min-width: 0; }
   .w { width: 100px; padding: 5px 8px; }
   .wide { width: 300px; padding: 5px 9px; }
-  .sel { background: var(--base); border: 1px solid var(--line2); border-radius: 6px; padding: 5px 8px; color: var(--text); width: 12rem; font: inherit; }
+  .sel { background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 5px 8px; color: var(--text); width: 12rem; font: inherit; }
   .grow { flex: 1; min-width: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 380px; display: block; }
   .savebar .ell { max-width: none; }

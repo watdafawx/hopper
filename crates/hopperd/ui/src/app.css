@@ -14,7 +14,10 @@
   /* widgets::alpha: hovered rows (foreground at 6%), selected rows (primary at 12%). */
   --hover: #ededef0f; --sel: #f973161f;
   --popover: #17171a; --overlay: #0000008c; --skeleton: #ffffff1a;
-  --radius: 6px; --radius-lg: 10px;
+  /* One corner scale for both apps (theme::RADIUS_SM / RADIUS / RADIUS_LG on desktop):
+     sm for chips, pills and small icons; the base for buttons, inputs, switches and rows;
+     lg for cards, panels, dialogs and popovers. Only dots and avatars are round. */
+  --radius-sm: 4px; --radius: 6px; --radius-lg: 10px;
   /* Title bar height, and where every dialog's top sits (widgets::DIALOG_TOP). */
   --titlebar: 42px; --dialog-top: 56px;
   --mono: ui-monospace, 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
@@ -67,8 +70,10 @@ a.btn { color: var(--text); }
 .btn.ghost.bad:hover:not(:disabled) { background: var(--red-dim); color: var(--red); }
 .btn.sm { padding: 3px 8px; font-size: 12px; }
 .btn.icon { padding: 5px 6px; }
-/* Tinted, no border, the theme's radius: the same rule as Hopper desktop's chips. */
-.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; padding: 1px 8px; border-radius: var(--radius); border: 1px solid transparent; background: #ededef14; color: var(--subtle); white-space: nowrap; }
+/* Tinted, no border, the small radius: the same rule as Hopper desktop's chips. A set height, a line
+   box no taller than the text, and 2px more padding below than above: centred as laid out, the UI
+   font's tall ascent leaves capitals a pixel low (desktop's widgets::chip_pad). */
+.chip { display: inline-flex; align-items: center; gap: 5px; box-sizing: border-box; height: 20px; line-height: 1; font-size: 11.5px; padding: 0 8px 2px; border-radius: var(--radius-sm); border: 1px solid transparent; background: #ededef14; color: var(--subtle); white-space: nowrap; }
 .chip.running { color: var(--green); border-color: transparent; background: var(--green-dim); }
 .chip.starting, .chip.stopping, .chip.warn { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
 .chip.crashed { color: var(--red); border-color: transparent; background: var(--red-dim); }
@@ -76,7 +81,7 @@ a.btn { color: var(--text); }
 .chip.ts { color: var(--violet); border-color: transparent; background: var(--violet-dim); }
 .chip.acc, .chip.on { color: var(--acc); border-color: transparent; background: var(--acc-dim); }
 /* A status pill (widgets::pill): coloured text on its tint, semibold, with a glowing dot. */
-.pill { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 20px; padding: 0 9px; border-radius: var(--radius); font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--muted); background: #9a9aa31a; }
+.pill { display: inline-flex; align-items: center; gap: 6px; flex: none; box-sizing: border-box; height: 20px; line-height: 1; padding: 0 9px 2px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--muted); background: #9a9aa31a; }
 .pill.running { color: var(--green); background: var(--green-dim); }
 .pill.starting, .pill.stopping { color: var(--gold); background: var(--gold-dim); }
 .pill.crashed { color: var(--red); background: var(--red-dim); }
@@ -99,7 +104,7 @@ a.btn { color: var(--text); }
 .utabs button:hover { color: var(--text); }
 /* A filter that is on or off (desktop's widgets::toggle_chip): a grey outline off; a grey fill and a ✓ on.
    Grey, not orange, so it never reads as an action button. Use a <button aria-pressed>. */
-.tpill { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 11px; border-radius: 999px; border: 1px solid var(--line2); color: var(--subtle); font-size: 12.5px; white-space: nowrap; }
+.tpill { display: inline-flex; align-items: center; gap: 5px; box-sizing: border-box; height: 24px; line-height: 1; padding: 0 11px; border-radius: var(--radius); border: 1px solid var(--line2); color: var(--subtle); font-size: 12.5px; white-space: nowrap; }
 .tpill:hover { background: var(--hover); color: var(--text); }
 .tpill[aria-pressed='true'] { background: #2e2e34; border-color: #6a6a74; color: var(--text); padding-left: 8px; }
 /* The muted label in front of a group of filters ("Filter"). */
@@ -114,9 +119,9 @@ a.btn { color: var(--text); }
 .bar.busy i { width: 35% !important; animation: bar-slide 1.2s ease-in-out infinite; }
 @keyframes bar-slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
 .err { color: var(--red); font-size: 12.5px; }
-.kbd { font: 11px var(--mono); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--subtle); background: var(--surface); }
-.ic { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; font-weight: 800; color: #1a1a1f; flex: none; }
-.sic { width: 20px; height: 20px; border-radius: 5px; flex: none; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #1a1a1f; }
+.kbd { font: 11px var(--mono); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: var(--radius-sm); padding: 0 5px; color: var(--subtle); background: var(--surface); }
+.ic { width: 34px; height: 34px; border-radius: var(--radius); display: grid; place-items: center; font-weight: 800; color: #1a1a1f; flex: none; }
+.sic { width: 20px; height: 20px; border-radius: var(--radius-sm); flex: none; display: grid; place-items: center; font-size: 10px; font-weight: 700; color: #1a1a1f; }
 .ic.big { width: 40px; height: 40px; font-size: 16px; }
 /* Notifications: desktop's look (popover, icon); bottom centre so they never cover a page's top-right actions. */
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); display: flex; align-items: flex-start; gap: 9px; background: var(--popover); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 14px; box-shadow: 0 16px 40px #000a; z-index: 100; cursor: default; width: max-content; max-width: min(380px, calc(100vw - 32px)); font-size: 12.5px; animation: toast-in .18s ease-out; }
@@ -152,13 +157,13 @@ a.btn { color: var(--text); }
 .spinner { width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; flex: none; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 /* Drag across rows (lib/dragpick): the label beside the pointer, and no text picking meanwhile. */
-.pick-chip { position: fixed; z-index: 200; pointer-events: none; background: var(--acc); color: #1a1a1f; font-size: 11.5px; font-weight: 600; border-radius: 6px; padding: 1px 8px; box-shadow: 0 6px 18px #000a; white-space: nowrap; }
+.pick-chip { position: fixed; z-index: 200; pointer-events: none; background: var(--acc); color: #1a1a1f; font-size: 11.5px; font-weight: 600; border-radius: var(--radius-sm); padding: 1px 8px; box-shadow: 0 6px 18px #000a; white-space: nowrap; }
 body.picking, body.picking * { user-select: none !important; cursor: grabbing !important; }
 /* An on/off switch: <label class="switch"><input type="checkbox" …><span></span></label>. Off grey, on accent (desktop's Switch). */
 .switch { position: relative; display: inline-block; width: 32px; height: 18px; flex: none; cursor: pointer; }
 .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
-.switch span { position: absolute; inset: 0; background: #64646e; border-radius: 99px; transition: background .15s; }
-.switch span::after { content: ''; position: absolute; width: 14px; height: 14px; border-radius: 50%; background: #fff; top: 2px; left: 2px; transition: left .15s; }
+.switch span { position: absolute; inset: 0; background: #64646e; border-radius: var(--radius); transition: background .15s; }
+.switch span::after { content: ''; position: absolute; width: 14px; height: 14px; border-radius: var(--radius-sm); background: #fff; top: 2px; left: 2px; transition: left .15s; }
 .switch input:checked + span { background: var(--acc); }
 .switch input:checked + span::after { left: 16px; }
 .switch input:focus-visible + span { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--acc); }

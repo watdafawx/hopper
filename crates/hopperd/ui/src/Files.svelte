@@ -968,19 +968,19 @@
 {#if viewer}<FileViewer {base} {sid} mode={viewer.mode} path={viewer.path} images={viewer.images || []} onClose={() => (viewer = null)} {openMods} />{/if}
 
 <style>
-  .fx { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--base); }
+  .fx { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; background: var(--base); }
   .ftool { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-  .addr { flex: 1; min-width: 220px; display: flex; align-items: center; gap: 2px; border: 1px solid var(--line2); border-radius: 6px; padding: 2px 6px; background: var(--bg); cursor: text; min-height: 30px; }
+  .addr { flex: 1; min-width: 220px; display: flex; align-items: center; gap: 2px; border: 1px solid var(--line2); border-radius: var(--radius); padding: 2px 6px; background: var(--bg); cursor: text; min-height: 30px; }
   .addr.input { padding: 3px 8px; }
   .crumbs { color: var(--subtle); font-size: 12.5px; overflow: hidden; }
-  .crumb { display: inline-flex; align-items: center; gap: 5px; padding: 2px 5px; border-radius: 5px; white-space: nowrap; cursor: pointer; }
+  .crumb { display: inline-flex; align-items: center; gap: 5px; padding: 2px 5px; border-radius: var(--radius-sm); white-space: nowrap; cursor: pointer; }
   .crumb:hover { background: var(--raise); color: var(--text); }
   .crumb.cur { color: var(--text); font-weight: 600; }
   .sep { color: var(--muted); }
   .find { padding: 3px 8px; width: 210px; }
-  .find .rx { font: 600 11px var(--mono); color: var(--muted); padding: 0 3px; border-radius: 4px; }
+  .find .rx { font: 600 11px var(--mono); color: var(--muted); padding: 0 3px; border-radius: var(--radius-sm); }
   .find .rx.on { color: var(--acc); background: var(--acc-dim); }
-  .seg { display: flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; }
+  .seg { display: flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; }
   .seg button { padding: 4px 7px; color: var(--subtle); }
   .seg button.on { background: var(--raise); color: var(--text); }
   .btn.on { background: var(--raise); color: var(--text); }
@@ -1001,18 +1001,18 @@
   .frow { position: absolute; left: 0; right: 0; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid #26262c; cursor: default; }
   .tile.sel, .tile.sel:hover { background: var(--sel); box-shadow: inset 0 0 0 1px #f9731655; }
   .ghead { background: var(--base); gap: 8px; }
-  .gh { display: inline-flex; align-items: center; gap: 8px; min-width: 0; padding: 2px 6px 2px 2px; border-radius: 5px; font-size: 12.5px; }
+  .gh { display: inline-flex; align-items: center; gap: 8px; min-width: 0; padding: 2px 6px 2px 2px; border-radius: var(--radius-sm); font-size: 12.5px; }
   button.gh:hover { background: var(--hover); }
-  .gh img, .gh .ph { width: 18px; height: 18px; border-radius: 4px; flex: none; background: var(--raise); display: grid; place-items: center; color: var(--muted); }
-  .modtag { display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; padding: 1px 7px 1px 3px; border-radius: 99px; background: #ffffff0d; color: var(--subtle); font-size: 11px; max-width: 200px; min-width: 0; flex: 0 1 auto; }
+  .gh img, .gh .ph { width: 18px; height: 18px; border-radius: var(--radius-sm); flex: none; background: var(--raise); display: grid; place-items: center; color: var(--muted); }
+  .modtag { display: inline-flex; align-items: center; gap: 5px; margin-left: 10px; padding: 1px 7px 1px 3px; border-radius: var(--radius-sm); background: #ffffff0d; color: var(--subtle); font-size: 11px; max-width: 200px; min-width: 0; flex: 0 1 auto; }
   .modtag:hover { background: #ffffff1a; color: var(--text); }
-  .modtag img { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+  .modtag img { width: 14px; height: 14px; border-radius: var(--radius-sm); flex: none; }
   .modtag.big { margin: 0; align-self: flex-start; font-size: 12px; padding: 3px 9px 3px 4px; max-width: 100%; }
   .modtag.big img { width: 18px; height: 18px; }
   .fpr { display: flex; align-items: center; gap: 6px; padding-left: 12px; }
   .fpr .fp { padding-left: 0; }
   .modic { display: grid; place-items: center; width: 16px; height: 16px; color: var(--muted); }
-  .modic img { width: 16px; height: 16px; border-radius: 3px; }
+  .modic img { width: 16px; height: 16px; border-radius: var(--radius-sm); }
   .modn:hover { color: var(--text); }
   .peekpane { flex: none; border-left: 1px solid var(--line); padding: 8px; overflow: auto; }
   .peekpane :global(.peek) { width: 340px; max-height: none; position: static; }
@@ -1029,9 +1029,9 @@
   .list :global(.fold) { color: var(--acc); flex: none; }
   .list :global(.fic) { color: var(--muted); flex: none; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px; padding: 10px; }
-  .tile { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px 8px; border-radius: 8px; text-align: center; cursor: default; }
-  .dragh.big { width: 56px; height: 56px; justify-content: center; border-radius: 8px; overflow: hidden; }
-  .dragh.big img { width: 56px; height: 56px; object-fit: contain; image-rendering: pixelated; background: var(--raise); border-radius: 6px; }
+  .tile { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px 8px; border-radius: var(--radius); text-align: center; cursor: default; }
+  .dragh.big { width: 56px; height: 56px; justify-content: center; border-radius: var(--radius); overflow: hidden; }
+  .dragh.big img { width: 56px; height: 56px; object-fit: contain; image-rendering: pixelated; background: var(--raise); border-radius: var(--radius); }
   .tn { font-size: 11.5px; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .band { position: absolute; border: 1px solid var(--acc); background: #f9731622; pointer-events: none; z-index: 3; }
   .selbar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--surface); flex-wrap: wrap; }
@@ -1039,14 +1039,14 @@
   .pv-h { display: flex; align-items: center; gap: 8px; }
   .prev :global(.fold) { color: var(--acc); }
   .prev :global(.fic) { color: var(--muted); }
-  .prev pre { margin: 0; background: var(--term); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow: auto; }
-  .pimg { max-width: 100%; image-rendering: pixelated; background: var(--raise); border-radius: 6px; }
+  .prev pre { margin: 0; background: var(--term); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow: auto; }
+  .pimg { max-width: 100%; image-rendering: pixelated; background: var(--raise); border-radius: var(--radius); }
   .zlist { display: flex; flex-direction: column; gap: 1px; max-height: 360px; overflow: auto; }
   .keys { line-height: 1.6; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .row.wrap { flex-wrap: wrap; }
-  .drop { position: absolute; inset: 0; border: 2px dashed var(--acc); border-radius: 10px; background: #f9731614; display: grid; place-items: center; text-align: center; color: var(--text); pointer-events: none; }
-  .drop > div { display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--surface); padding: 16px 22px; border-radius: 10px; }
+  .drop { position: absolute; inset: 0; border: 2px dashed var(--acc); border-radius: var(--radius-lg); background: #f9731614; display: grid; place-items: center; text-align: center; color: var(--text); pointer-events: none; }
+  .drop > div { display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--surface); padding: 16px 22px; border-radius: var(--radius-lg); }
   .ctx { position: fixed; z-index: 80; width: 240px; }
   .ctx .menu-item:disabled { opacity: 0.45; cursor: default; background: none; }
   .ctx .menu-item.bad { color: var(--red); }

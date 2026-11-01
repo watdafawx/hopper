@@ -9,7 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::Field;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::switch::Switch;
+use crate::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };

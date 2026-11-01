@@ -9,7 +9,7 @@ use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Editor, Input, InputEvent, InputState};
 use crate::args_editor::{self, ArgsEditor};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::switch::Switch;
+use crate::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;

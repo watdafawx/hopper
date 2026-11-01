@@ -102,7 +102,7 @@
   .cats .input { margin-bottom: 10px; padding: 5px 9px; }
   .cat { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 10px; border-radius: var(--radius); color: var(--text); }
   .cat.row-sel { font-weight: 500; }
-  .badge { margin-left: auto; background: var(--acc); color: #1c0d02; border-radius: 99px; font-size: 11px; font-weight: 700; padding: 0 6px; }
+  .badge { margin-left: auto; background: var(--acc); color: #1c0d02; border-radius: var(--radius-sm); font-size: 11px; font-weight: 700; padding: 0 6px; }
   .hits { padding: 0 10px 4px; }
   .hit { display: flex; flex-direction: column; padding: 6px 10px; border-radius: var(--radius); color: var(--text); }
   .hit.first { background: var(--hover); }

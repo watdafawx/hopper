@@ -30,7 +30,7 @@
 
 <style>
   .sbar { flex: none; height: 28px; display: flex; align-items: center; gap: 10px; padding: 0 10px; background: var(--side); border-top: 1px solid var(--side-line); font-size: 11.5px; }
-  .chip { text-decoration: none; border-radius: 999px; }
+  .chip { text-decoration: none; }
   .ms { opacity: 0.75; }
   .txt { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>

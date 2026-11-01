@@ -111,17 +111,17 @@
   .f { display: flex; align-items: center; gap: 16px; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); }
   .w { width: 100px; padding: 4px 8px; flex: none; }
   .wide { width: 190px; padding: 4px 8px; flex: none; }
-  .sel { background: var(--base); border: 1px solid var(--line2); border-radius: 6px; padding: 5px 8px; color: var(--text); }
+  .sel { background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 5px 8px; color: var(--text); }
   .f.stack { flex-direction: column; align-items: stretch; gap: 6px; }
   label.row input[type='checkbox'] { width: 15px; height: 15px; accent-color: var(--acc); }
-  .warn { display: flex; gap: 8px; align-items: flex-start; color: var(--gold); background: var(--gold-dim); border: 1px solid #eab30855; border-radius: 8px; padding: 8px 10px; }
+  .warn { display: flex; gap: 8px; align-items: flex-start; color: var(--gold); background: var(--gold-dim); border: 1px solid #eab30855; border-radius: var(--radius-lg); padding: 8px 10px; }
   .warn span { color: var(--text); }
-  .dns { display: grid; grid-template-columns: 50px 1fr 1fr; gap: 3px 10px; font-size: 12px; background: var(--base); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; }
+  .dns { display: grid; grid-template-columns: 50px 1fr 1fr; gap: 3px 10px; font-size: 12px; background: var(--base); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 10px; }
   .dns b { font: 600 10.5px Inter, system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .okc { color: var(--green); }
   .list { display: flex; flex-direction: column; }
-  .srow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: 10px; align-items: center; padding: 5px 8px; border-radius: 6px; color: inherit; text-decoration: none; font-size: 12.5px; }
+  .srow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: 10px; align-items: center; padding: 5px 8px; border-radius: var(--radius); color: inherit; text-decoration: none; font-size: 12.5px; }
   .srow:hover { background: var(--hover); }
   .srow .mono { font-size: 12px; }
   .badc { color: var(--gold); }

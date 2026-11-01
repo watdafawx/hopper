@@ -16,7 +16,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::switch::Switch;
+use crate::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ 
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
@@ -3187,7 +3187,7 @@ fn theme_row(name: &str, cx: &App) -> AnyElement {
         .child(
             div()
                 .flex_none()
-                .rounded(px(3.))
+                .rounded(crate::theme::radius_sm())
                 .overflow_hidden()
                 .border_1()
                 .border_color(theme.border)

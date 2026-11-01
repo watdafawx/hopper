@@ -45,7 +45,7 @@
 
 <style>
   .peek { gap: 8px; width: 400px; flex: none; position: sticky; top: 0; max-height: calc(100vh - 170px); overflow: auto; }
-  .top img, .ph { width: 40px; height: 40px; border-radius: 8px; background: var(--raise); flex: none; }
+  .top img, .ph { width: 40px; height: 40px; border-radius: var(--radius); background: var(--raise); flex: none; }
   .nm { font-weight: 600; font-size: 14px; }
   .grow { flex: 1; min-width: 0; }
   .wrap { flex-wrap: wrap; }

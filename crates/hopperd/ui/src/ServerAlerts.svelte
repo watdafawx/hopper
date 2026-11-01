@@ -81,7 +81,7 @@
   .chip.good { color: var(--green); background: var(--green-dim); }
   .chip.warn { color: var(--gold); background: var(--gold-dim); }
   .chip.bad { color: var(--red); background: var(--red-dim); }
-  .ban { display: flex; align-items: center; gap: 10px; margin: 0 18px 10px; padding: 7px 12px; border-radius: 8px; background: var(--gold-dim); border: 1px solid #eab30840; color: var(--text); font-size: 12.5px; }
+  .ban { display: flex; align-items: center; gap: 10px; margin: 0 18px 10px; padding: 7px 12px; border-radius: var(--radius-lg); background: var(--gold-dim); border: 1px solid #eab30840; color: var(--text); font-size: 12.5px; }
   .ban.red { background: var(--red-dim); border-color: #ef444440; }
   .ban :global(svg) { color: var(--gold); flex: none; }
   .ban.red :global(svg) { color: var(--red); }

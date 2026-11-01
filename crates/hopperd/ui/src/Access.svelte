@@ -130,7 +130,7 @@
   .req { padding-bottom: 12px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
   .req:last-child { border: 0; margin: 0; padding: 0; }
   .code { display: flex; gap: 8px; justify-content: center; margin: 14px 0; }
-  .code span { width: 42px; height: 52px; border-radius: 9px; background: var(--base); border: 1px solid var(--line2); display: grid; place-items: center; font: 600 24px var(--mono); }
+  .code span { width: 42px; height: 52px; border-radius: var(--radius); background: var(--base); border: 1px solid var(--line2); display: grid; place-items: center; font: 600 24px var(--mono); }
   .center { justify-content: center; }
   .path { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #38bdf84d; border-radius: var(--radius-lg); background: var(--blue-dim); color: var(--blue); }
   .path.ts { border-color: #a78bfa4d; background: var(--violet-dim); color: var(--violet); }

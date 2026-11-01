@@ -603,13 +603,13 @@
   .sec { font-size: 12px; font-weight: 600; color: var(--subtle); padding-top: 10px; border-top: 1px solid var(--line); margin-top: 2px; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
   .span { grid-column: 1 / -1; }
-  .sel { background: var(--base); border: 1px solid var(--line2); border-radius: 6px; padding: 7px 8px; color: var(--text); width: 100%; font: inherit; }
+  .sel { background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 7px 8px; color: var(--text); width: 100%; font: inherit; }
   .sel:focus { border-color: var(--acc); outline: none; }
   .sel.ghost { border-style: dashed; }
   .range { width: 100%; accent-color: var(--acc); }
   .eula { display: flex; gap: 8px; align-items: center; }
   .eula label { gap: 8px; cursor: pointer; }
-  .pi { border-radius: 6px; flex: none; }
+  .pi { border-radius: var(--radius); flex: none; }
   .curseforge { color: var(--acc); }
   .modrinth { color: #1bd96a; }
   .flag { color: var(--gold); flex: none; display: grid; }
@@ -623,30 +623,30 @@
   .tabs button:disabled { opacity: 0.5; cursor: default; }
   .desc { min-height: 1.45em; }
   /* Secondary choices: a tint, not a filled button (one filled orange per region). */
-  .seg { display: flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; flex: none; align-self: flex-start; max-width: 100%; }
+  .seg { display: flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; flex: none; align-self: flex-start; max-width: 100%; }
   .seg button { padding: 5px 11px; font-size: 12.5px; color: var(--subtle); }
   .seg button + button { border-left: 1px solid var(--line2); }
   .seg button:hover:not(:disabled):not(.on) { background: #ffffff08; }
   .seg button.on { background: var(--acc-dim); color: var(--acc); font-weight: 600; }
   .seg button:disabled { opacity: 0.4; }
-  .picked { gap: 8px; border: 1px solid var(--line2); border-radius: 8px; padding: 6px 8px; background: var(--base); }
+  .picked { gap: 8px; border: 1px solid var(--line2); border-radius: var(--radius-lg); padding: 6px 8px; background: var(--base); }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .blk { display: block; }
   .wrap { flex-wrap: wrap; gap: 6px; }
-  .drop { display: flex; align-items: center; justify-content: center; gap: 8px; border: 2px dashed var(--line2); border-radius: 10px; padding: 20px; color: var(--subtle); cursor: pointer; text-align: center; min-width: 0; }
+  .drop { display: flex; align-items: center; justify-content: center; gap: 8px; border: 2px dashed var(--line2); border-radius: var(--radius-lg); padding: 20px; color: var(--subtle); cursor: pointer; text-align: center; min-width: 0; }
   .drop.has { color: var(--text); border-style: solid; border-width: 1px; padding: 12px; }
   .drop:hover { border-color: #f9731688; }
   .bar { flex: none; }
   .warn { color: var(--gold); }
-  .notice { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border-radius: 8px; background: #eab30814; color: var(--text); }
+  .notice { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border-radius: var(--radius-lg); background: #eab30814; color: var(--text); }
   .notice .row { gap: 8px; flex-wrap: wrap; }
   .link { color: var(--acc); text-decoration: underline; }
   .search { flex-wrap: wrap; }
   .search .input { min-width: 160px; }
-  .results { max-height: 240px; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 2px; flex: none; border: 1px solid var(--line); border-radius: 8px; padding: 4px; background: var(--base); }
+  .results { max-height: 240px; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 2px; flex: none; border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 4px; background: var(--base); }
   .empty { padding: 14px 8px; text-align: center; }
-  .res { display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 6px; text-align: left; min-width: 0; }
-  .res img, .ph { width: 34px; height: 34px; border-radius: 6px; background: var(--raise); flex: none; }
+  .res { display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: var(--radius); text-align: left; min-width: 0; }
+  .res img, .ph { width: 34px; height: 34px; border-radius: var(--radius); background: var(--raise); flex: none; }
   .ph { display: grid; place-items: center; color: var(--muted); }
   @media (max-width: 520px) {
     .box { height: calc(100dvh - var(--dialog-top) - 16px); }
