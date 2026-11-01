@@ -200,6 +200,7 @@ fn fetch_file(
         // The author allows website downloads only: the user downloads it in
         // the browser and Hopper picks it up from Downloads.
         let e = f.expect();
+        let m = &cf::full_project(m);
         return Ok(Fetched::Pending(crate::modpack::Pending {
             name: m.name.clone(),
             file_name: f.file_name.clone(),
@@ -211,6 +212,7 @@ fn fetch_file(
             size: e.len,
             sha1: e.sha1,
             addon: Some(addon_from(m, f, from_pack)),
+            replaces: String::new(),
         }));
     };
     let dest = root.join(folder).join(&f.file_name);

@@ -37,6 +37,16 @@ pub fn found(p: &PackFile) -> Option<Option<Found>> {
     FOUND.lock().ok()?.as_ref()?.get(&key(p)).cloned()
 }
 
+/// The project the pack file at `path` (switched on or off) was found to
+/// be, when it's project `id`.
+pub fn found_project(path: &std::path::Path, id: u64) -> Option<cf::Mod> {
+    let want = instance_ops::enabled_path(path);
+    let g = FOUND.lock().ok()?;
+    g.as_ref()?
+        .iter()
+        .find_map(|((p, _, _), f)| f.as_ref().filter(|f| *p == want && f.project.id == id).map(|f| f.project.clone()))
+}
+
 /// Packs looked up whose versions aren't checked yet, by key.
 static UNCHECKED: Mutex<Option<HashMap<Key, PackMatch>>> = Mutex::new(None);
 
@@ -94,14 +104,22 @@ pub fn check_versions(packs: &[PackFile], inst: &Instance) -> bool {
 }
 
 /// Replaces `p` with its newer file in the same folder, as a job on the
-/// instance (the old file goes to backups).
+/// instance (the old file goes to backups). A website-only file comes
+/// through the download window and lands in that same folder.
 pub fn update(store: &Entity<Store>, root: PathBuf, p: &PackFile, f: &Found, cx: &mut App) {
     let Some(file) = f.version.update.clone() else { return };
     let (old, project) = (p.path.clone(), f.project.clone());
     let title = format!("Updating {}", project.name);
     store.read(cx).spawn_instance_job(&root.clone(), title, move |job| {
-        let new = instance_ops::update_pack(&root, &old, &project, &file, job)?;
-        job.detail(format!("Now {}", new.file_name().unwrap_or_default().to_string_lossy()));
-        Ok(Msg::InstanceChanged(root))
+        match instance_ops::update_pack(&root, &old, &project, &file, job)? {
+            instance_ops::Placed::File(new) => {
+                job.detail(format!("Now {}", new.file_name().unwrap_or_default().to_string_lossy()));
+                Ok(Msg::InstanceChanged(root))
+            }
+            instance_ops::Placed::Pending(url) => {
+                job.detail(format!("{}: getting it from the CurseForge website", project.name));
+                Ok(Msg::Updated(root, Vec::new(), vec![url], None))
+            }
+        }
     });
 }

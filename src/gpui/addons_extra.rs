@@ -383,7 +383,14 @@ impl AddonsView {
         for u in updates {
             let Some(a) = inst.addons.iter().find(|a| a.project_id == u.project_id) else { continue };
             let p = PackFile { path: Self::global_path(&dir, &a.file_name), ..Default::default() };
-            let project = cf::Mod { id: a.project_id, name: a.name.clone(), ..Default::default() };
+            // The project the lookup found (its slug and class name the
+            // website's download page); else a stand-in the update looks up.
+            let project = crate::pack_lookup::found_project(&p.path, a.project_id).unwrap_or_else(|| cf::Mod {
+                id: a.project_id,
+                name: a.name.clone(),
+                class_id: Some(self.class),
+                ..Default::default()
+            });
             let found = crate::pack_lookup::Found {
                 project,
                 version: hopper::instance_ops::PackVersion { installed: None, update: Some(u.file.clone()) },

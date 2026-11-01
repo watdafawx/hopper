@@ -93,8 +93,13 @@ pub fn install_project(
             )
         })?;
         let f = pick(&inst)?;
-        instance_ops::install_datapack(&dir, m, &f, job)?;
-        format!("Added to {}", rel(&dir))
+        match instance_ops::install_datapack(&inst.root, &dir, m, &f, job)? {
+            instance_ops::Placed::File(_) => format!("Added to {}", rel(&dir)),
+            // The download window gets it; it lands in this same folder.
+            instance_ops::Placed::Pending(_) => {
+                format!("{}: getting it from the CurseForge website, for {}", m.name, rel(&dir))
+            }
+        }
     } else {
         let f = match file {
             Some(f) => f,

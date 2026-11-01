@@ -18,6 +18,21 @@ pub const CLASS_RESOURCE_PACKS: u32 = 12;
 pub const CLASS_SHADERS: u32 = 6552;
 pub const CLASS_WORLDS: u32 = 17;
 pub const CLASS_DATAPACKS: u32 = 6945;
+pub const CLASS_CUSTOMIZATION: u32 = 4546;
+
+/// The CurseForge website's folder for projects of a class. A page under
+/// another class's folder is a 404, download pages included.
+pub fn class_path(class_id: Option<u32>) -> &'static str {
+    match class_id.unwrap_or(CLASS_MODS) {
+        CLASS_RESOURCE_PACKS => "texture-packs",
+        CLASS_SHADERS => "shaders",
+        CLASS_DATAPACKS => "data-packs",
+        CLASS_MODPACKS => "modpacks",
+        CLASS_WORLDS => "worlds",
+        CLASS_CUSTOMIZATION => "customization",
+        _ => "mc-mods",
+    }
+}
 
 /// Dependency `relationType` values.
 pub const DEP_REQUIRED: u32 = 3;
@@ -191,11 +206,20 @@ impl Mod {
     }
 
     pub fn page(&self) -> String {
-        if self.links.website_url.is_empty() {
-            format!("https://www.curseforge.com/minecraft/mc-mods/{}", self.slug)
-        } else {
+        if !self.links.website_url.is_empty() {
             self.links.website_url.clone()
+        } else if self.slug.is_empty() {
+            // CurseForge sends a project id to its page, whatever its class.
+            format!("https://www.curseforge.com/projects/{}", self.id)
+        } else {
+            format!("https://www.curseforge.com/minecraft/{}/{}", class_path(self.class_id), self.slug)
         }
+    }
+
+    /// Whether this is only an id and a name (a row's stand-in), without
+    /// the slug and links the website's pages need.
+    pub fn is_stub(&self) -> bool {
+        self.modrinth.is_none() && self.slug.is_empty() && self.links.website_url.is_empty()
     }
 
     /// Minecraft versions with a file, newest first.
@@ -427,7 +451,13 @@ impl File {
     }
 
     /// Where a user downloads the file by hand when the API gives no URL.
+    /// Needs the project's class and slug (or its website link): the
+    /// download page lives under the class's folder only.
     pub fn manual_url(&self, m: &Mod) -> String {
+        if m.is_stub() {
+            // No download page to name: the project's page, where the file is.
+            return m.page();
+        }
         format!("{}/download/{}", m.page().trim_end_matches('/'), self.id)
     }
 
@@ -789,6 +819,19 @@ pub fn get_mods(ids: &[u64]) -> anyhow::Result<Vec<Mod>> {
         return Ok(Vec::new());
     }
     Ok(post::<Data<Vec<Mod>>>("/v1/mods", &serde_json::json!({ "modIds": ids }))?.data)
+}
+
+/// `m` with its slug, class and links: a stand-in (see [`Mod::is_stub`])
+/// is looked up, so its website pages can be named. As it was when the
+/// lookup fails.
+pub fn full_project(m: &Mod) -> Mod {
+    if !m.is_stub() || m.id == 0 {
+        return m.clone();
+    }
+    match get_mods(&[m.id]).ok().and_then(|v| v.into_iter().find(|x| x.id == m.id)) {
+        Some(full) => full,
+        None => m.clone(),
+    }
 }
 
 pub fn description(id: u64) -> anyhow::Result<String> {
@@ -1385,6 +1428,34 @@ pub fn fetch_range(url: &str, start: u64, end: u64) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A download page lives under its project's class folder only: a
+    /// resource pack's under `mc-mods/` is a 404 (checked on the site).
+    #[test]
+    fn download_page_per_class() {
+        let url = |class: u32, slug: &str| {
+            let m = Mod { id: 1577414, slug: slug.into(), class_id: Some(class), ..Default::default() };
+            File { id: 9383879, ..Default::default() }.manual_url(&m)
+        };
+        let site = "https://www.curseforge.com/minecraft";
+        assert_eq!(url(CLASS_RESOURCE_PACKS, "icons-compats"), format!("{site}/texture-packs/icons-compats/download/9383879"));
+        assert_eq!(url(CLASS_MODS, "jei"), format!("{site}/mc-mods/jei/download/9383879"));
+        assert_eq!(url(CLASS_SHADERS, "complementary"), format!("{site}/shaders/complementary/download/9383879"));
+        assert_eq!(url(CLASS_DATAPACKS, "terralith"), format!("{site}/data-packs/terralith/download/9383879"));
+        assert_eq!(url(CLASS_MODPACKS, "atm10"), format!("{site}/modpacks/atm10/download/9383879"));
+        assert_eq!(url(CLASS_WORLDS, "skyblock"), format!("{site}/worlds/skyblock/download/9383879"));
+        // The project's own link wins.
+        let linked = Mod {
+            links: Links { website_url: format!("{site}/texture-packs/icons-compats/"), ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(File { id: 5, ..Default::default() }.manual_url(&linked), format!("{site}/texture-packs/icons-compats/download/5"));
+        // Only an id: no download page can be named (the old
+        // "mc-mods/download/<id>" was a 404), so the project's page.
+        let stub = Mod { id: 1577414, name: "Icons Compats".into(), ..Default::default() };
+        assert!(stub.is_stub());
+        assert_eq!(File { id: 9383879, ..Default::default() }.manual_url(&stub), "https://www.curseforge.com/projects/1577414");
+    }
 
     #[test]
     fn mojang_releases_only_newest_first() {
