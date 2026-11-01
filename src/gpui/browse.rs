@@ -2123,12 +2123,12 @@ impl BrowseView {
                     .children(self.server_badge(m, id("server"), false, cx))
                     .when(off, |r| {
                         let tip: SharedString = match target {
-                            Some(t) => format!("Off in {}. Updating keeps it off.", t.name),
+                            Some(t) => format!("Disabled in {}. Updating keeps it disabled.", t.name),
                             None => "Disabled. Updating keeps it disabled.".to_string(),
                         }
                         .into();
                         r.child(
-                            widgets::pill("Off", theme.warning, false)
+                            widgets::pill("Disabled", theme.warning, false)
                                 .id(id("off"))
                                 .mr_1()
                                 .tooltip(move |w, cx| {

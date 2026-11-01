@@ -14,12 +14,13 @@
   import ReviewUpdates from './ReviewUpdates.svelte';
   import ModBackups from './ModBackups.svelte';
   import ModProfiles from './ModProfiles.svelte';
+  import SortMenu from './SortMenu.svelte';
   import ModsConfigPick from './ModsConfigPick.svelte';
   import LoaderVersions from './LoaderVersions.svelte';
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
-    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package,
+    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check,
   } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -90,7 +91,7 @@
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
   const mods = $derived(data?.mods || []);
-  // "Yours" only means something on a server made from a pack.
+  // "Added by you" only means something on a server made from a pack.
   const hasPack = $derived(!!data?.pack);
   const yours = (m) => hasPack && m.source && !m.from_pack;
   const pending = (m) => !!m.update && !m.locked && !done.has(m.project_id);
@@ -104,11 +105,13 @@
     yours: mods.filter(yours).length,
   });
   // Desktop's All / Updates / Off, then the server's own two when any.
-  const CHIPS = [['all', 'All'], ['updates', 'Updates'], ['off', 'Off'], ['client', 'Client-only'], ['unknown', 'Unknown']];
+  const CHIPS = [['all', 'All'], ['updates', 'Updates'], ['off', 'Disabled'], ['client', 'Client-only'], ['unknown', 'Unknown']];
   const fits = {
     all: () => true, updates: pending, off: (m) => !m.enabled,
     client: (m) => m.side === 'client', unknown: (m) => !m.source,
   };
+  // The orders the list can take, named as their column headers are.
+  const SORTS = $derived([['name', 'Name'], ['author', 'Author'], ...(hasSide ? [['side', 'Side']] : []), ['on', 'On'], ['added', 'Added']]);
   const by = {
     name: (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
     author: (a, b) => (a.author || '').toLowerCase().localeCompare((b.author || '').toLowerCase()),
@@ -568,27 +571,32 @@
   {#if sub === 'backups'}
     <ModBackups {server} onChanged={() => { load(); loadBackupCount(); checkUpdates(false); }} />
   {:else}
+    <!-- Laid out as desktop's: actions, search, what's listed (Filter), in what order (Sort). -->
     <div class="row wrap toolbar">
-      <div class="input find"><Search size={13} /><input use:rightClear placeholder="Search" bind:value={filter} />{#if filter}<button class="clr" title="Clear" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
       <a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a>
-      <ModProfiles {base} {alive} onChanged={() => changed(false)} />
-      <div class="utabs" role="tablist">
-        {#each CHIPS as [k, label] (k)}
-          {#if k === 'all' || k === 'updates' || k === 'off' || counts[k] || chip === k}<button role="tab" aria-selected={chip === k} class:tab-sel={chip === k} onclick={() => (chip = k)}>{label}{k === 'all' ? '' : ` ${counts[k]}`}</button>{/if}
-        {/each}
+      <span class="row upd">
+        <!-- The last check's results stay up while a new one runs; with results on screen the refresh button spins instead, so nothing moves. -->
+        {#if pendingUpdates.length}<button class="btn sm pri" disabled={!!busy} title="Review {pendingUpdates.length === 1 ? '1 update' : `${pendingUpdates.length} updates`}, then update" onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Update all ({pendingUpdates.length})</button>
+        {:else if updates && !checking}<span class="small okt row"><CircleCheck size={14} />Up to date</span>{/if}
+        <button class="btn sm ghost icon" disabled={checking} title={checking ? 'Checking for updates' : 'Check for updates again'} onclick={() => checkUpdates(true)}>{#if checking && pendingUpdates.length}<span class="spinner blue"></span>{:else}<RefreshCw size={13} />{/if}</button>
+        {#if checking && !pendingUpdates.length}<span class="small muted row"><span class="spinner blue"></span>Checking for updates</span>{/if}
+      </span>
+      <span class="vr"></span>
+      <div class="input find"><Search size={13} /><input use:rightClear placeholder="Search" bind:value={filter} />{#if filter}<button class="clr" title="Clear" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
+      <div class="row fgroup">
+        <span class="glabel"><Funnel size={12} />Filter</span>
+        <div class="utabs" role="tablist">
+          {#each CHIPS as [k, label] (k)}
+            {#if k === 'all' || k === 'updates' || k === 'off' || counts[k] || chip === k}<button role="tab" aria-selected={chip === k} class:tab-sel={chip === k} onclick={() => (chip = k)}>{label}{k === 'all' ? '' : ` ${counts[k]}`}</button>{/if}
+          {/each}
+        </div>
+        {#if hasPack}<button class="tpill" aria-pressed={onlyYours} title="Only what you added on top of the modpack" onclick={() => (onlyYours = !onlyYours)}>{#if onlyYours}<Check size={13} />{/if}Added by you ({counts.yours})</button>{/if}
       </div>
-      {#if hasPack}<label class="cbl" title="Only what you added on top of the modpack"><input type="checkbox" bind:checked={onlyYours} />Only yours ({counts.yours})</label>{/if}
-      <label class="cbl"><input type="checkbox" bind:checked={updatesFirst} />Updates first</label>
+      <SortMenu choices={SORTS} {sort} bind:updatesFirst onSort={setSort} />
       <span class="sp"></span>
       {#if alive}<span class="tiny muted">The server is running: changes apply on its next start</span>{/if}
       {#if counts.unknown}<button class="btn sm ghost" disabled={!!identifying} onclick={() => identify(false)} title="Look jars up on CurseForge and Modrinth"><ScanSearch size={13} />Identify {counts.unknown}</button>{/if}
-      <span class="row upd">
-        <!-- The last check's results stay up while a new one runs; with results on screen the refresh button spins instead, so nothing moves. -->
-        {#if checking && !pendingUpdates.length}<span class="small muted row"><span class="spinner blue"></span>Checking for updates</span>{/if}
-        {#if pendingUpdates.length}<button class="btn sm pri" disabled={!!busy} onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Review {pendingUpdates.length} update{pendingUpdates.length === 1 ? '' : 's'}</button>
-        {:else if updates && !checking}<span class="small okt row"><CircleCheck size={14} />Up to date</span>{/if}
-        <button class="btn sm ghost icon" disabled={checking} title={checking ? 'Checking for updates' : 'Check for updates again'} onclick={() => checkUpdates(true)}>{#if checking && pendingUpdates.length}<span class="spinner blue"></span>{:else}<RefreshCw size={13} />{/if}</button>
-      </span>
+      <ModProfiles {base} {alive} onChanged={() => changed(false)} />
     </div>
     {#if identifying}<div class="banner small"><span class="spinner blue"></span>{identifying}… names, icons and updates fill in when it's done.</div>{/if}
     {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
@@ -605,7 +613,7 @@
           <span class="c-act"></span>
           {@render sortHead('author', 'Author', 'c-author', '')}
           {#if hasSide}{@render sortHead('side', 'Side', 'c-side', SIDE_HEAD)}{/if}
-          {@render sortHead('on', 'On', 'c-on', "Off keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.")}
+          {@render sortHead('on', 'On', 'c-on', "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.")}
           {@render sortHead('added', 'Added', 'c-added', '')}
           <span class="c-end"></span>
         </div>
@@ -638,7 +646,7 @@
               </div>
               <div class="tags">
                 {#if isNew(m) && !yours(m)}<span class="chip tag okc">New</span>{/if}
-                {#if yours(m)}<span class="chip tag gold">Yours</span>{/if}
+                {#if yours(m)}<span class="chip tag gold">Added by you</span>{/if}
                 {#if !m.source}<span class="chip tag">Unknown</span>{/if}
                 {#if SIDE_TAG[m.side]}<span class="chip tag {SIDE_TAG[m.side][1]}">{SIDE_TAG[m.side][0]}</span>{/if}
                 {#if !(up && (vl || breaking))}
@@ -753,6 +761,8 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .tab:hover { color: var(--text); }
   .subtabs .chip { margin-bottom: 6px; }
   .toolbar { gap: 6px 10px; }
+  .fgroup { gap: 8px; flex: none; }
+  .toolbar .vr { margin: 0; }
   .cbl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--subtle); cursor: pointer; padding: 0 4px; }
   .cbl input, .c-ck input { width: 15px; height: 15px; accent-color: var(--acc); }
   .upd { gap: 4px; flex: none; }

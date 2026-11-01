@@ -170,37 +170,24 @@ pub fn split_alone(
         .on_click(on_click)
 }
 
-/// A toolbar's main actions (Add content, Update all): primary tint with
-/// primary text, louder than outline but not a filled button.
-pub fn tinted(b: Button, cx: &App) -> Button {
-    let theme = cx.theme();
-    // The button paints its resting color at a fifth of its strength, so
-    // full primary rests as a soft tint; hover and press paint as given.
-    let mix = |a: f32| theme.background.blend(theme.primary.opacity(a));
-    b.custom(
-        gpui_kit::component::button::ButtonCustomVariant::new(cx)
-            .color(theme.primary)
-            .foreground(theme.primary)
-            .hover(mix(0.24))
-            .active(mix(0.30)),
-    )
-}
-
-/// A filter that is on or off, as a chip: quiet grey off, primary tint on.
+/// A filter that is on or off, as a neutral pill: a grey outline with muted
+/// text off; a grey fill, a ✓ and full-strength text on. Grey, not orange,
+/// so it never reads as one of the toolbar's action buttons.
 pub fn toggle_chip(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool, cx: &App) -> Button {
     let theme = cx.theme();
-    let b = Button::new(id).small().label(label);
-    if on {
-        tinted(b, cx)
-    } else {
-        b.custom(
-            gpui_kit::component::button::ButtonCustomVariant::new(cx)
-                .color(theme.secondary)
-                .foreground(theme.muted_foreground)
-                .hover(theme.secondary_hover)
-                .active(theme.secondary_active),
-        )
-    }
+    let variant = gpui_kit::component::button::ButtonCustomVariant::new(cx)
+        .color(theme.transparent)
+        .foreground(if on { theme.foreground } else { theme.muted_foreground })
+        .hover(if on { theme.secondary_active } else { theme.secondary_hover })
+        .active(theme.secondary_active);
+    Button::new(id)
+        .small()
+        .label(label)
+        .custom(variant)
+        .rounded_full()
+        .border_1()
+        .when(on, |b| b.icon(IconName::Check).bg(theme.secondary_active).border_color(theme.muted_foreground.opacity(0.55)))
+        .when(!on, |b| b.border_color(theme.input))
 }
 
 /// A button to the CurseForge key in Settings, when `error` is CurseForge
@@ -367,7 +354,7 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
         .children(crashed)
         .when(t.in_use, |r| r.child(tag(info, "In use".into())))
         .when(t.new, |r| r.child(tag(ok, "New".into())))
-        .when(t.added, |r| r.child(tag(warn, "Yours".into())))
+        .when(t.added, |r| r.child(tag(warn, "Added by you".into())))
         .children(env)
         .children(
             t.categories

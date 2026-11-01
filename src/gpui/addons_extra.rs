@@ -62,7 +62,7 @@ pub fn datapacks(dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// A pack file as a table row: what the lookup found it to be (project,
-/// author, version) and its update. `from_pack` false marks it "Yours".
+/// author, version) and its update. `from_pack` false marks it "Added by you".
 pub(crate) fn pack_addon(p: &PackFile, class: u32, from_pack: bool) -> (Addon, Option<Update>) {
     let file = p.path.file_name().unwrap_or_default().to_string_lossy().to_string();
     let enabled = !file.ends_with(".disabled");
