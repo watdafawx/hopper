@@ -90,7 +90,7 @@
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
   const mods = $derived(data?.mods || []);
-  // "Yours" only means something on a server made from a pack.
+  // "Added by you" only means something on a server made from a pack.
   const hasPack = $derived(!!data?.pack);
   const yours = (m) => hasPack && m.source && !m.from_pack;
   const pending = (m) => !!m.update && !m.locked && !done.has(m.project_id);
@@ -104,7 +104,7 @@
     yours: mods.filter(yours).length,
   });
   // Desktop's All / Updates / Off, then the server's own two when any.
-  const CHIPS = [['all', 'All'], ['updates', 'Updates'], ['off', 'Off'], ['client', 'Client-only'], ['unknown', 'Unknown']];
+  const CHIPS = [['all', 'All'], ['updates', 'Updates'], ['off', 'Disabled'], ['client', 'Client-only'], ['unknown', 'Unknown']];
   const fits = {
     all: () => true, updates: pending, off: (m) => !m.enabled,
     client: (m) => m.side === 'client', unknown: (m) => !m.source,
@@ -577,7 +577,7 @@
           {#if k === 'all' || k === 'updates' || k === 'off' || counts[k] || chip === k}<button role="tab" aria-selected={chip === k} class:tab-sel={chip === k} onclick={() => (chip = k)}>{label}{k === 'all' ? '' : ` ${counts[k]}`}</button>{/if}
         {/each}
       </div>
-      {#if hasPack}<label class="cbl" title="Only what you added on top of the modpack"><input type="checkbox" bind:checked={onlyYours} />Only yours ({counts.yours})</label>{/if}
+      {#if hasPack}<label class="cbl" title="Only what you added on top of the modpack"><input type="checkbox" bind:checked={onlyYours} />Added by you ({counts.yours})</label>{/if}
       <label class="cbl"><input type="checkbox" bind:checked={updatesFirst} />Updates first</label>
       <span class="sp"></span>
       {#if alive}<span class="tiny muted">The server is running: changes apply on its next start</span>{/if}
@@ -638,7 +638,7 @@
               </div>
               <div class="tags">
                 {#if isNew(m) && !yours(m)}<span class="chip tag okc">New</span>{/if}
-                {#if yours(m)}<span class="chip tag gold">Yours</span>{/if}
+                {#if yours(m)}<span class="chip tag gold">Added by you</span>{/if}
                 {#if !m.source}<span class="chip tag">Unknown</span>{/if}
                 {#if SIDE_TAG[m.side]}<span class="chip tag {SIDE_TAG[m.side][1]}">{SIDE_TAG[m.side][0]}</span>{/if}
                 {#if !(up && (vl || breaking))}

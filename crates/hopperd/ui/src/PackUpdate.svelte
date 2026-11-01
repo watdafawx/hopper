@@ -325,7 +325,7 @@
       .filter((r) => matches(r.m.name) || matches(r.m.from))
       .sort((a, b) => Number(!!b.need) - Number(!!a.need) || a.m.name.localeCompare(b.m.name, undefined, { sensitivity: 'base' })),
   );
-  const edited = $derived(files.filter((f) => ['KeepYours', 'KeepDropped'].includes(f.action) || (f.action === 'Conflict' && !take.has(f.rel))).map((f) => ({ rel: f.rel, chip: ['Yours', ''], diff: true })));
+  const edited = $derived(files.filter((f) => ['KeepYours', 'KeepDropped'].includes(f.action) || (f.action === 'Conflict' && !take.has(f.rel))).map((f) => ({ rel: f.rel, chip: ['Changed by you', ''], diff: true })));
 
   function toggleKeep(file) {
     const s = new Set(keep);
@@ -620,7 +620,7 @@
                     {:else}
                       <div class="list">
                         {#each stayMods.slice(0, LIST_CAP) as r (r.m.name + r.m.from)}
-                          <div class="mr row-hover">{@render modCell(r.m)}<span class="tiny muted ell grow">{r.need ? `⚠ needs ${r.need}, which the pack drops` : r.m.from}</span><span class="chip xs" class:starting={r.need}>Yours</span></div>
+                          <div class="mr row-hover">{@render modCell(r.m)}<span class="tiny muted ell grow">{r.need ? `⚠ needs ${r.need}, which the pack drops` : r.m.from}</span><span class="chip xs" class:starting={r.need}>Added by you</span></div>
                         {/each}
                       </div>
                     {/if}

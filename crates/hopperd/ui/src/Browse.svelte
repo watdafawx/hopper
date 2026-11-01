@@ -450,7 +450,7 @@
                 {#if session.owner}<button class="btn sm" onclick={(e) => { e.stopPropagation(); making = preset(r); }}>Make a server</button>{/if}
               {:else}
                 {#if r.side === 'client'}<span class="chip starting" title="Modrinth says this runs on the client only: a server doesn't need it"><Monitor size={11} />Client only</span>{/if}
-                {#if have && have.enabled === false}<span class="chip starting" title="Off in {target?.name}. Updating keeps it off.">Off</span>{/if}
+                {#if have && have.enabled === false}<span class="chip starting" title="Disabled in {target?.name}. Updating keeps it disabled.">Disabled</span>{/if}
                 {#if b}<span class="busy small"><span class="spinner"></span><span class="ell">{b}</span></span>
                 {:else if have?.update}<button class="btn sm" title={have.enabled === false ? 'A newer file is out; replaces the installed one, which stays disabled' : 'A newer file is out; replaces the installed one'} onclick={(e) => { e.stopPropagation(); install(r); }}><Download size={13} />Update</button>
                 {:else if have}<span class="chip running" title="{target?.name} has this already{have.file ? `: ${have.file}` : ''}"><Check size={11} />{have.same_project === false && have.from && have.from !== r.source ? `Installed (${SITE[have.from]})` : 'Installed'}</span>

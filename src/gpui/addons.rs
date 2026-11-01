@@ -179,12 +179,7 @@ fn columns_menu(view: &Entity<AddonsView>, menu: PopupMenu, _: &mut Window, cx: 
     let has_side = this.class != cf::CLASS_DATAPACKS && this.table.has_side;
     let server = this.class == cf::CLASS_MODS && this.root.as_ref().is_some_and(|r| store.server_of(r).is_some());
     let server_on = settings.mods_server_column;
-    let on_label = if this.class == cf::CLASS_SHADERS { "Use" } else { "On" };
-    let mut sorts = vec![(SortCol::Name, "Name"), (SortCol::Author, "Author")];
-    if has_side {
-        sorts.push((SortCol::Env, "Side"));
-    }
-    sorts.extend([(SortCol::Active, on_label), (SortCol::Added, "Added")]);
+    let sorts = this.sort_choices();
     let mut shows = vec![(Col::Author, "Author")];
     if has_side {
         shows.push((Col::Side, "Side"));
@@ -227,6 +222,19 @@ fn columns_menu(view: &Entity<AddonsView>, menu: PopupMenu, _: &mut Window, cx: 
                 .on_click(move |_, _, cx| v.update(cx, |this, cx| this.reset_cols(cx))),
         )
         .label("Drag a header to move its column")
+}
+
+/// Which way an order runs, in words, for the Sort menu.
+fn sort_direction(col: SortCol, asc: bool) -> &'static str {
+    match (col, asc) {
+        (SortCol::Added, false) => "Newest first",
+        (SortCol::Added, true) => "Oldest first",
+        // Off sorts before on.
+        (SortCol::Active, true) => "Disabled first",
+        (SortCol::Active, false) => "Enabled first",
+        (_, true) => "A to Z",
+        (_, false) => "Z to A",
+    }
 }
 
 /// A column header being dragged to a new place.
@@ -2163,6 +2171,71 @@ impl AddonsView {
         }));
     }
 
+    /// The orders the list can take, named as their column headers are.
+    fn sort_choices(&self) -> Vec<(SortCol, &'static str)> {
+        let on_label = if self.class == cf::CLASS_SHADERS { "Use" } else { "On" };
+        let mut sorts = vec![(SortCol::Name, "Name"), (SortCol::Author, "Author")];
+        if self.class != cf::CLASS_DATAPACKS && self.table.has_side {
+            sorts.push((SortCol::Env, "Side"));
+        }
+        sorts.extend([(SortCol::Active, on_label), (SortCol::Added, "Added")]);
+        sorts
+    }
+
+    /// The toolbar's Sort button: shows the current order and opens a menu
+    /// that sets the same order the column headers do.
+    fn sort_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let (sort, asc) = self.sort;
+        let first = self.updates_first;
+        let choices = self.sort_choices();
+        let name = choices.iter().find(|(c, _)| *c == sort).map_or("Name", |(_, l)| *l);
+        // Arrows are icons: the UI font has no clean ↑ ↓.
+        let arrow = |up: bool| Icon::new(if up { IconName::ArrowUp } else { IconName::ArrowDown }).xsmall();
+        let order = if first { format!("Updates first, then {name}") } else { name.to_string() };
+        let muted = cx.theme().muted_foreground;
+        let view = cx.entity();
+        Button::new("sort")
+            .small()
+            .outline()
+            .icon(Icon::new(IconName::ArrowUpDown).text_color(muted))
+            .child(h_flex().gap_1().child(div().text_color(muted).child("Sort:")).child(order).child(arrow(asc)))
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu.label("Sort by");
+                for (col, label) in choices.clone() {
+                    let v = view.clone();
+                    let dir = (sort == col).then(|| sort_direction(col, asc));
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            h_flex()
+                                .w_full()
+                                .gap_4()
+                                .child(div().when(dir.is_some(), |d| d.font_semibold()).child(label))
+                                .child(div().flex_1())
+                                .children(dir.map(|d| {
+                                    h_flex()
+                                        .gap_1()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(d)
+                                        .child(arrow(asc))
+                                }))
+                        })
+                        .checked(sort == col)
+                        .on_click(move |_, _, cx| v.update(cx, |this, cx| this.set_sort(col, cx))),
+                    );
+                }
+                let v = view.clone();
+                menu.separator()
+                    .item(PopupMenuItem::new("Updates first").checked(first).on_click(move |_, _, cx| {
+                        v.update(cx, |this, cx| {
+                            this.updates_first = !first;
+                            cx.notify();
+                        })
+                    }))
+                    .label("Clicking a column header changes this too.")
+            })
+    }
+
     fn set_sort(&mut self, col: SortCol, cx: &mut Context<Self>) {
         self.sort = if self.sort.0 == col {
             (col, !self.sort.1)
@@ -2249,9 +2322,11 @@ impl AddonsView {
                 let queues = store.queues_updates(&inst.root);
                 let hold = if queues { None } else { store.edit_hold_reason(&inst.root) };
                 let busy = !queues && store.is_busy(&inst.root);
-                // Next to Add content and looking like it: opens the review first.
+                // The toolbar's one filled button: opens the review first.
                 let n = all.len();
-                widgets::tinted(Button::new("update-all").small(), cx)
+                Button::new("update-all")
+                    .small()
+                    .primary()
                     .icon(IconName::Download)
                     .label(format!("Update all ({n})"))
                     .loading(all.is_empty() || busy)
@@ -2274,7 +2349,9 @@ impl AddonsView {
             .gap_3()
             .flex_wrap()
             .child(
-                widgets::tinted(Button::new("add-content").small(), cx)
+                Button::new("add-content")
+                    .small()
+                    .outline()
                     .icon(IconName::Plus)
                     .label("Add content")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2325,38 +2402,46 @@ impl AddonsView {
                         .cleanable(true),
                 ),
             )
+            // What's listed (the filters) and in what order (the sort), each
+            // labelled so they don't read as more action buttons.
             .child(
-                widgets::underline_tabs(
-                    "show",
-                    vec![("All".into(), None), ("Updates".into(), Some(n_up)), ("Off".into(), Some(n_off))],
-                    show_ix,
-                    cx.listener(|this, ix: &usize, _, cx| {
-                        this.show = [Show::All, Show::Updates, Show::Disabled][*ix];
-                        cx.notify();
-                    }),
-                    cx,
-                ),
-            )
-            .when(inst.pack.is_some() && self.global_dir().is_none(), |r| {
-                let on = self.added_only;
-                r.child(
-                    widgets::toggle_chip("added-only", format!("Only yours ({n_added})"), on, cx)
-                        .tooltip("Only what you added on top of the modpack")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.added_only = !on;
+                h_flex()
+                    .flex_none()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(Icon::new(IconName::Funnel).xsmall())
+                            .child("Filter"),
+                    )
+                    .child(widgets::underline_tabs(
+                        "show",
+                        vec![("All".into(), None), ("Updates".into(), Some(n_up)), ("Disabled".into(), Some(n_off))],
+                        show_ix,
+                        cx.listener(|this, ix: &usize, _, cx| {
+                            this.show = [Show::All, Show::Updates, Show::Disabled][*ix];
                             cx.notify();
-                        })),
-                )
-            })
-            .child({
-                let on = self.updates_first;
-                widgets::toggle_chip("updates-first", "Updates first", on, cx)
-                    .tooltip("Mods with an update at the top")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.updates_first = !on;
-                        cx.notify();
-                    }))
-            })
+                        }),
+                        cx,
+                    ))
+                    .when(inst.pack.is_some() && self.global_dir().is_none(), |r| {
+                        let on = self.added_only;
+                        r.child(
+                            widgets::toggle_chip("added-only", format!("Added by you ({n_added})"), on, cx)
+                                .tooltip("Only what you added on top of the modpack")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.added_only = !on;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
+            // No divider before Sort: when the bar wraps, it would be left
+            // hanging at the end of a line.
+            .child(self.sort_button(cx))
             .when(hint, |r| r.child(self.collapse_hint(cx)))
             .child(div().flex_1())
             .when(self.store.read(cx).running(&inst.root).is_some(), |r| {
@@ -3180,7 +3265,7 @@ impl AddonsView {
                 key: &file,
                 // Shaders say "Active" instead.
                 in_use: flags.in_use && self.class != cf::CLASS_SHADERS,
-                // One marker: "Yours" says it's new to the pack already.
+                // One marker: "Added by you" says it's new to the pack already.
                 new: flags.new && !flags.added,
                 added: flags.added,
                 env: &a.env,

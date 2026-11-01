@@ -219,8 +219,8 @@ impl Filter {
         match self {
             Filter::All => "All",
             Filter::On => "On",
-            Filter::Off => "Off",
-            Filter::Yours => "Only yours",
+            Filter::Off => "Disabled",
+            Filter::Yours => "Added by you",
             Filter::Client => "Client-only",
             Filter::Updates => "Updates",
             Filter::Unknown => "Unknown",
