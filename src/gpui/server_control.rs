@@ -71,6 +71,8 @@ pub struct ServerControl {
     /// running (or starting), to tell when it's over.
     busy_since: std::time::Instant,
     busy_seen_up: bool,
+    /// The last finished start or stop seen, so its toast shows once.
+    last_finished: Option<(hopper::hosting::progress::ProgressKind, u32)>,
     /// The server's backup setups and files, once asked for.
     backups: Option<Result<Vec<BackupSet>, String>>,
     /// Backups a backup mod in the server made, once looked for.
@@ -148,6 +150,7 @@ impl ServerControl {
             busy: None,
             busy_since: std::time::Instant::now(),
             busy_seen_up: false,
+            last_finished: None,
             backups: None,
             mod_backups: None,
             command,
@@ -389,11 +392,34 @@ impl ServerControl {
             }
             Err(_) => {}
         }
-        if stats.is_ok() {
+        if let Ok(s) = &stats {
             self.seen = Some(std::time::Instant::now());
+            self.toast_finished(s, cx);
         }
         self.stats = Some(stats);
         cx.notify();
+    }
+
+    /// "TNP-LL8 started in 1m 32s.", once, when a start or stop ends. The
+    /// stop half of a restart stays quiet: its start says it. One that
+    /// ended a while before Hopper looked is old news.
+    fn toast_finished(&mut self, s: &PanelStats, cx: &mut Context<Self>) {
+        let Some(f) = &s.finished else { return };
+        let key = (f.kind, f.secs);
+        if self.last_finished == Some(key) {
+            return;
+        }
+        self.last_finished = Some(key);
+        if f.ago_secs > 8 || f.restarting {
+            return;
+        }
+        let text = format!("{} {}.", self.server_name(cx), f.text().to_lowercase());
+        let Some(win) = cx.active_window().or_else(|| cx.windows().into_iter().next()) else {
+            return;
+        };
+        cx.defer(move |cx| {
+            let _ = win.update(cx, |_, window, cx| window.push_notification(Notification::success(text), cx));
+        });
     }
 
     /// How long until the next poll: faster while the console shows (the
@@ -403,7 +429,9 @@ impl ServerControl {
         if matches!(self.stats, Some(Err(_))) {
             return POLL_BACKOFF;
         }
-        match (self.active && self.console_open, self.console_full) {
+        // A start or stop under way: its bar moves every second.
+        let moving = self.busy.is_some() || matches!(&self.stats, Some(Ok(s)) if s.progress.is_some());
+        match (self.active && (self.console_open || moving), self.console_full && !moving) {
             (true, false) => Duration::from_secs(1),
             (true, true) => Duration::from_secs(5),
             _ if self.active => POLL,
@@ -617,6 +645,9 @@ impl ServerControl {
         };
         let busy = self.busy;
         let running = stats.as_ref().is_some_and(|s| s.running);
+        if let Some(p) = stats.as_ref().and_then(|s| s.progress.clone()) {
+            return self.progress_controls(&p, compact, hero, running, cx);
+        }
         let (tag, state) = match (&stats, busy) {
             (_, Some(a)) => (
                 widgets::chip(cx.theme().warning),
@@ -722,6 +753,73 @@ impl ServerControl {
                 )
             })
             // The header puts ⋯ last, after its own buttons.
+            .when(!hero, |r| r.child(self.more_menu(Button::new("panel-more").small().ghost(), running, cx)))
+            .into_any_element()
+    }
+
+    /// A start or stop under way, in place of the buttons: the step, a bar
+    /// and the time, beside Stop (while starting) or Kill… (a stop that
+    /// has gone quiet; it still asks first). Console and ⋯ stay.
+    fn progress_controls(
+        &self,
+        p: &hopper::hosting::progress::Progress,
+        compact: bool,
+        hero: bool,
+        running: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use hopper::hosting::progress::ProgressKind;
+        let size = move |b: Button| if hero { b } else { b.small() };
+        let button = if p.stuck {
+            Some(
+                size(Button::new("panel-kill"))
+                    .outline()
+                    .text_color(cx.theme().danger)
+                    .label("Kill…")
+                    .tooltip("End Java now. Changes since the last save are lost.")
+                    .on_click(cx.listener(|this, _, window, cx| this.request(PanelAction::Kill, window, cx)))
+                    .into_any_element(),
+            )
+        } else if p.kind == ProgressKind::Start {
+            Some(
+                size(Button::new("panel-stop"))
+                    .map(|b| if compact { b.ghost().icon(IconName::Square).tooltip("Stop") } else { b.outline().icon(IconName::Square).label("Stop") })
+                    .on_click(cx.listener(|this, _, window, cx| this.request(PanelAction::Stop, window, cx)))
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        if compact {
+            // A narrow card: the bar gets the whole width, the buttons
+            // their usual row under it.
+            return v_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .child(crate::server_progress::block("srv-progress", p, true, cx))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .children(button)
+                        .child(
+                            Button::new("panel-console")
+                                .small()
+                                .ghost()
+                                .icon(IconName::SquareTerminal)
+                                .tooltip("Console")
+                                .on_click(cx.listener(|_, _, _, cx| cx.emit(ControlEvent::Console))),
+                        )
+                        .child(self.more_menu(Button::new("panel-more").small().ghost(), running, cx)),
+                )
+                .into_any_element();
+        }
+        // The header keeps its buttons' width, so nothing jumps.
+        let block = crate::server_progress::row("srv-progress", p, false, button, cx).w(px(if hero { 340. } else { 300. }));
+        h_flex()
+            .gap_2()
+            .min_w_0()
+            .child(block)
             .when(!hero, |r| r.child(self.more_menu(Button::new("panel-more").small().ghost(), running, cx)))
             .into_any_element()
     }
@@ -1836,9 +1934,12 @@ pub fn state_of(
 ) -> (Hsla, &'static str) {
     let theme = cx.theme();
     match (busy, stats) {
+        (_, Some(s)) if s.progress.as_ref().is_some_and(|p| p.stuck) => (theme.danger, "not stopping"),
         (Some(PanelAction::Start), _) => (theme.warning, "starting"),
         (Some(PanelAction::Stop | PanelAction::Kill), _) => (theme.warning, "stopping"),
         (Some(PanelAction::Restart), _) => (theme.warning, "restarting"),
+        (_, Some(s)) if s.progress.as_ref().is_some_and(|p| p.restarting) => (theme.warning, "restarting"),
+        (_, Some(s)) if s.stopping => (theme.warning, "stopping"),
         (_, Some(s)) if s.starting => (theme.warning, "starting"),
         (_, Some(s)) if s.running => (theme.success, "running"),
         (_, None) if pinged == Some(true) => (theme.success, "running"),

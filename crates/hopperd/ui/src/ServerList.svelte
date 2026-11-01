@@ -13,6 +13,7 @@
   import { packUpdates } from './lib/packs.svelte.js';
   import { stateText, bootText, loaderText } from './lib/format.js';
   import Avatar from './Avatar.svelte';
+  import Progress from './Progress.svelte';
 
   let { selected = null, owner = false, canPower = true, onNew, onRescan } = $props();
 
@@ -198,7 +199,7 @@
           {#if up}<span class="upd" title="Pack update: {up.from} → {up.to}"></span>{/if}
           {#if p}<span class="pill {s.state}" title={bootText(s) || undefined}>{#if p.glow}<span class="glow"></span>{/if}{p.text}</span>{/if}
         </div>
-        {#if cap}<div class="cap">{cap}</div>{/if}
+        {#if s.progress}<Progress server={s} compact />{:else if cap}<div class="cap">{cap}</div>{/if}
       </a>
     {:else}
       {#if !loading}

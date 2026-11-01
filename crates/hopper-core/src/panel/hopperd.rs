@@ -89,6 +89,10 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
         no_tps: None,
         via: None,
         icon: v["icon"].as_u64(),
+        stopping: state == "stopping",
+        // Older Hopper Servers send only `boot`: their starts still show.
+        progress: serde_json::from_value(v["progress"].clone()).ok().or_else(|| old_boot(&v["boot"])),
+        finished: serde_json::from_value(v["finished"].clone()).ok(),
         version: v["version"].as_str().unwrap_or("").to_string(),
         world_size: String::new(),
         started: v["uptime_secs"]
@@ -96,6 +100,21 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
             .map(|s| format!("up {}", crate::hosting::local_panel::uptime(s)))
             .unwrap_or_default(),
     }
+}
+
+/// A start from a Hopper Server older than `progress`: its `boot`.
+fn old_boot(b: &Value) -> Option<crate::hosting::progress::Progress> {
+    let percent = b["percent"].as_u64()? as u8;
+    let left = b["left_secs"].as_u64().map(|l| l as u32);
+    Some(crate::hosting::progress::Progress {
+        percent,
+        label: b["label"].as_str().unwrap_or("Starting").to_string(),
+        short: left.map(|l| format!("~{} left", crate::hosting::boot::short_time(l))).unwrap_or_default(),
+        elapsed_secs: b["elapsed_secs"].as_u64().unwrap_or(0) as u32,
+        left_secs: left,
+        steps: serde_json::from_value(b["steps"].clone()).unwrap_or_default(),
+        ..Default::default()
+    })
 }
 
 impl ServerPanel for HopperServer {
@@ -188,5 +207,22 @@ mod tests {
         assert_eq!(s.started, "up 1h 01m");
         let c = stats_from(&serde_json::json!({ "state": "crashed" }), 0);
         assert_eq!(c.state(), "Crashed");
+    }
+
+    /// A start or stop under way comes across as the panel sends it; an
+    /// older panel's `boot` still shows as a start.
+    #[test]
+    fn progress_from_summary() {
+        let p = crate::hosting::progress::Progress { percent: 45, label: "Loading 40 mods".into(), restarting: true, ..Default::default() };
+        let f = crate::hosting::progress::Finished { kind: crate::hosting::progress::ProgressKind::Stop, secs: 8, ago_secs: 2, restarting: false };
+        let v = serde_json::json!({ "state": "starting", "progress": p, "finished": f });
+        let s = stats_from(&v, 0);
+        assert_eq!(s.progress.as_ref().unwrap().pill(), "Restarting 45%");
+        assert_eq!(s.finished.unwrap().text(), "Stopped in 8s");
+        let old = serde_json::json!({ "state": "starting", "boot": { "percent": 31, "label": "Preparing mods", "elapsed_secs": 20, "left_secs": 60, "steps": [] } });
+        let s = stats_from(&old, 0);
+        assert_eq!((s.progress.as_ref().unwrap().percent, s.progress.unwrap().short.as_str()), (31, "~1m left"));
+        let st = stats_from(&serde_json::json!({ "state": "stopping" }), 0);
+        assert_eq!(st.state(), "Stopping");
     }
 }

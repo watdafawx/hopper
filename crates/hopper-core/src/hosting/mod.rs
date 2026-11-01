@@ -15,6 +15,7 @@ pub mod logparse;
 pub mod logshare;
 pub mod motd;
 pub mod process;
+pub mod progress;
 pub mod properties;
 pub mod rcon;
 pub mod router;

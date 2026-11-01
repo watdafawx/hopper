@@ -183,6 +183,9 @@ impl ServerPanel for LocalPanel {
             version: t.version,
             world_size: String::new(),
             started,
+            stopping: state == ServerState::Stopping,
+            progress: s.progress(),
+            finished: s.finished(),
             ..Default::default()
         })
     }
@@ -193,25 +196,7 @@ impl ServerPanel for LocalPanel {
             PanelAction::Start => s.start(),
             PanelAction::Stop => s.stop(),
             PanelAction::Kill => s.kill(),
-            PanelAction::Restart => {
-                if !s.state().is_alive() {
-                    return s.start();
-                }
-                s.stop()?;
-                std::thread::Builder::new()
-                    .name("server-restart".into())
-                    .spawn(move || {
-                        // As long as the stop may take: a big world can save for minutes.
-                        let end = std::time::Instant::now() + s.stop_longest();
-                        while s.state().is_alive() && std::time::Instant::now() < end {
-                            std::thread::sleep(std::time::Duration::from_millis(250));
-                        }
-                        if let Err(e) = s.start() {
-                            log::warn!("restarting {}: {e:#}", s.root().display());
-                        }
-                    })?;
-                Ok(())
-            }
+            PanelAction::Restart => s.restart(),
             PanelAction::Backup => bail!("Hopper doesn't back up hosted servers yet."),
         }
     }

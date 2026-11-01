@@ -45,6 +45,7 @@ mod perf_view;
 mod revert_ui;
 mod rigsync;
 mod server_control;
+mod server_progress;
 mod server_settings;
 mod panel_tabs;
 mod part;

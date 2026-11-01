@@ -48,6 +48,12 @@ pub struct Summary {
     pub saving: bool,
     /// While starting: what it is doing, how far along, time left.
     pub boot: Option<hopper_core::hosting::boot::BootStatus>,
+    /// A start or stop under way: bar, step, time (both apps show it).
+    pub progress: Option<hopper_core::hosting::progress::Progress>,
+    /// A start or stop that just ended ("Started in 1m 32s").
+    pub finished: Option<hopper_core::hosting::progress::Finished>,
+    /// A restart is under way (its stop, then its start).
+    pub restarting: bool,
     /// Addresses players join it by (server addresses / the router):
     /// saved ones, or the default `name.<domain>` (see
     /// [`crate::router::effective`], which the callers fill in).
@@ -212,6 +218,9 @@ impl Servers {
             state: state_name(&state),
             saving: state == ServerState::Stopping && t.saving_at.is_some() && t.saved_at.is_none(),
             boot: e.server.boot_status(),
+            progress: e.server.progress(),
+            finished: e.server.finished(),
+            restarting: e.server.restarting(),
             exit_code: match state {
                 ServerState::Crashed(c) => c,
                 _ => None,

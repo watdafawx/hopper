@@ -9,6 +9,7 @@
   import Spark from './Spark.svelte';
   import Addr from './Addr.svelte';
   import ServerAlerts from './ServerAlerts.svelte';
+  import Progress from './Progress.svelte';
 
   let { onNew = () => {} } = $props();
 
@@ -92,6 +93,7 @@
             <span class="pill {s.state}" title={bootText(s) || undefined}>{stateText(s)}{s.exit_code != null ? ` (${s.exit_code})` : ''}</span>
           {/if}
         </div>
+        {#if s.progress}<Progress server={s} />{/if}
         <!-- One chip fits beside the footer's buttons; several get their own row. -->
         {#if nchips > 1}<div class="row chips">{@render chips(s, up)}</div>{/if}
         <!-- Players show once, in the header pill; the two meters get half the card each. -->

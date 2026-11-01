@@ -290,6 +290,8 @@ pub trait ScheduledServer {
     fn last_backup(&self) -> Option<i64> {
         None
     }
+    /// A scheduled restart is under way (shown as one restart).
+    fn set_restarting(&self, _on: bool) {}
 }
 
 impl ScheduledServer for LocalServer {
@@ -307,6 +309,9 @@ impl ScheduledServer for LocalServer {
     }
     fn command(&self, line: &str) -> anyhow::Result<()> {
         LocalServer::command(self, line)
+    }
+    fn set_restarting(&self, on: bool) {
+        LocalServer::set_restarting(self, on)
     }
     fn backup(&self, scope: super::backup::Scope, keep: u32) -> anyhow::Result<String> {
         let root = LocalServer::root(self);
@@ -468,7 +473,10 @@ fn tick_server(
             t.last_restart_day = Some(day);
             let _ = s.command("say Server is restarting now.");
             match s.stop() {
-                Ok(()) => t.pending_start = Some(format!("daily restart at {}", hhmm(minute))),
+                Ok(()) => {
+                    s.set_restarting(true);
+                    t.pending_start = Some(format!("daily restart at {}", hhmm(minute)));
+                }
                 Err(e) => events.push(ScheduleEvent::Failed {
                     root: root.clone(),
                     error: format!("couldn't stop for the daily restart: {e:#}"),
