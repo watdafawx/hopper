@@ -186,11 +186,21 @@ impl Render for MotdEditor {
             },
         ));
 
-        let shown: Vec<String> = (0..2)
+        let filled: Vec<String> = (0..2)
             .map(|i| motd::expand(&motd::amp_to_section(&self.lines[i].read(cx).value()), &self.vars))
             .collect();
+        // As the game draws it: word-wrapped at the list's width, two rows.
+        let (shown, fits) = motd::list_lines(&filled[0], &filled[1]);
+        let hint = motd::fit_hint(&fits, !filled[1].is_empty());
         let line_row = |i: usize| {
-            let n = motd::visible(&shown[i]);
+            let (n, fit) = motd::fit_count(&filled[i], &fits[i]);
+            let color = if fits[i].width > motd::LIST_WIDTH {
+                theme.danger
+            } else if fits[i].width > motd::LIST_WIDTH - 12 {
+                theme.warning
+            } else {
+                theme.muted_foreground
+            };
             h_flex()
                 .gap_2()
                 .child(div().w(rems(3.)).flex_none().text_xs().text_color(theme.muted_foreground).child(format!("Line {}", i + 1)))
@@ -201,8 +211,8 @@ impl Render for MotdEditor {
                         .flex_none()
                         .text_right()
                         .text_xs()
-                        .text_color(if n > motd::LINE_CHARS { theme.warning } else { theme.muted_foreground })
-                        .child(format!("{n} / {}", motd::LINE_CHARS)),
+                        .text_color(color)
+                        .child(format!("{n} / {fit}")),
                 )
         };
 
@@ -210,11 +220,13 @@ impl Render for MotdEditor {
         // and player count, then the two lines.
         let letter = self.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
         let mc_font = theme.mono_font_family.clone();
-        let preview = div().p_2p5().rounded(theme.radius).bg(rgb(0x1d150e)).child(
+        // At 1.5x the game's GUI scale 1: the message area is LIST_WIDTH
+        // game pixels, and a 6 px letter is one monospace cell (0.55 em).
+        let scale = 1.5;
+        let preview = div().p_2p5().overflow_hidden().rounded(theme.radius).bg(rgb(0x1d150e)).child(
             h_flex()
                 .items_start()
                 .gap_1p5()
-                .max_w(px(430.))
                 .child(
                     div()
                         .size(px(64.))
@@ -230,10 +242,10 @@ impl Render for MotdEditor {
                 )
                 .child(
                     v_flex()
-                        .flex_1()
-                        .min_w_0()
+                        .flex_none()
+                        .w(px(motd::LIST_WIDTH as f32 * scale))
                         .font_family(mc_font)
-                        .text_size(px(15.))
+                        .text_size(px(6. * scale / 0.55))
                         .line_height(px(19.))
                         .child(
                             h_flex()
@@ -241,7 +253,7 @@ impl Render for MotdEditor {
                                 .child(div().text_color(white()).child(self.name.clone()))
                                 .child(div().text_color(rgb(0xaaaaaa)).child(self.players.clone())),
                         )
-                        .children(shown.iter().map(|l| div().h(px(19.)).overflow_hidden().whitespace_nowrap().child(Self::preview_line(l)))),
+                        .children(shown.iter().map(|l| div().h(px(19.)).whitespace_nowrap().child(Self::preview_line(l)))),
                 ),
         );
 
@@ -253,6 +265,7 @@ impl Render for MotdEditor {
             .child(tools)
             .child(line_row(0))
             .child(line_row(1))
+            .children(hint.map(|h| div().text_xs().text_color(theme.warning).child(h)))
             .child(widgets::fine_print(
                 "& codes like &6 work as a shortcut for §6. Variables fill in when the server starts; players, day and world size refresh every minute while it runs, for players using its address.",
                 cx,

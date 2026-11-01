@@ -16,8 +16,81 @@ export const FORMATS = [
   ['l', 'Bold', 'B'], ['o', 'Italic', 'I'], ['n', 'Underline', 'U'], ['m', 'Strikethrough', 'S'], ['k', 'Obfuscated (scrambled letters)', '?'], ['r', 'Reset: back to plain gray', 'R'],
 ];
 
-/** The server list shows two lines of about this many characters. */
-export const LINE_CHARS = 45;
+/** How wide (in Minecraft's pixels, GUI scale 1) the server list's
+ * message area is: the 305 px row less the 32 px icon and 2 px gap. The
+ * game word-wraps the message at this width and shows two lines. */
+export const LIST_WIDTH = 271;
+
+// Minecraft's default font: how far each character moves the pen (glyph
+// width plus 1 px), for the ones that aren't 6. Bold adds 1. Mirrors
+// hopper_core::hosting::motd::advance.
+const NARROW = { ' ': 4, '!': 2, "'": 2, ',': 2, '.': 2, ':': 2, ';': 2, '|': 2, i: 2, '`': 3, l: 3, '"': 4, I: 4, '[': 4, ']': 4, t: 4, '(': 5, ')': 5, '*': 5, '<': 5, '>': 5, '{': 5, '}': 5, f: 5, k: 5, '@': 7, '~': 7 };
+const advance = (c, bold) => (NARROW[c] ?? 6) + (bold ? 1 : 0);
+
+/** How wide `line` (with § codes) is in the server list. */
+export function lineWidth(line) {
+  return runs(line).reduce((w, r) => w + [...r.text].reduce((a, c) => a + advance(c, r.l), 0), 0);
+}
+
+/** One message line as the server list breaks it: pieces that fit
+ * LIST_WIDTH, broken at the last space like the game (the space goes),
+ * else mid-word. Each piece starts with the codes in force, so it draws
+ * on its own. */
+export function wrapLine(line) {
+  const out = [];
+  let piece = '';
+  let width = 0;
+  let codes = '';
+  let bold = false;
+  let space = null; // the last space in this piece: [index, codes in force there]
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '§' && i + 1 < line.length) {
+      const code = line[i + 1].toLowerCase();
+      if (HEX[code] || code === 'r') { codes = code === 'r' ? '' : `§${code}`; bold = false; }
+      else if ('lonmk'.includes(code)) { codes += `§${code}`; bold ||= code === 'l'; }
+      piece += c + line[i + 1];
+      i++;
+      continue;
+    }
+    const w = advance(c, bold);
+    if (width + w > LIST_WIDTH && piece.replace(/§./g, '')) {
+      if (space && lineWidth(space[1] + piece.slice(space[0] + 1)) + w <= LIST_WIDTH) {
+        const [at, codesThen] = space;
+        out.push(piece.slice(0, at));
+        const rest = piece.slice(at + 1);
+        piece = codesThen + rest;
+        width = lineWidth(piece);
+      } else {
+        out.push(piece);
+        piece = codes;
+        width = 0;
+      }
+      space = null;
+    }
+    if (c === ' ') space = [piece.length, codes];
+    piece += c;
+    width += w;
+  }
+  out.push(piece);
+  return out;
+}
+
+/** The two lines players see for `lines` (line 1 and line 2, filled in),
+ * and how each line fares: `width` in Minecraft pixels; `wraps` when it's
+ * wider than the list; `cut`, when its end doesn't show, how many of its
+ * characters do (0: none, as line 2 is pushed out when line 1 wraps). */
+export function listLines(lines) {
+  const a = wrapLine(lines[0] ?? '');
+  const b = lines[1] ? wrapLine(lines[1]) : [];
+  return {
+    shown: [...a, ...b].slice(0, 2),
+    lines: [
+      { width: lineWidth(lines[0] ?? ''), wraps: a.length > 1, cut: a.length > 2 ? visible(a[0]) + visible(a[1]) : undefined },
+      { width: lineWidth(lines[1] ?? ''), wraps: b.length > 1, cut: !b.length ? undefined : a.length > 1 ? 0 : b.length > 1 ? visible(b[0]) : undefined },
+    ],
+  };
+}
 
 /** `&c` typed as a shortcut becomes `§c` (only before a real code). */
 export const ampToSection = (s) => s.replace(/&([0-9a-fk-or])/gi, '§$1');

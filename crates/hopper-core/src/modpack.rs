@@ -547,6 +547,58 @@ pub(crate) fn read_manifest(zip_path: &Path) -> anyhow::Result<PackManifest> {
     Ok(serde_json::from_str(&s)?)
 }
 
+/// The CurseForge projects a pack file's manifest lists: what the pack
+/// ships. From the cached pack zip, else a small list kept in the cache,
+/// else read from CurseForge (just the manifest, by range: a server never
+/// downloads the client pack). `None` when none of those work; a failed
+/// lookup isn't tried again for ten minutes.
+pub fn pack_project_ids(project_id: u64, file_id: u64) -> Option<HashSet<u64>> {
+    static TRIED: Mutex<Option<HashMap<u64, std::time::Instant>>> = Mutex::new(None);
+    if project_id == 0 || file_id == 0 || crate::modrinth::is_mr(project_id) {
+        return None;
+    }
+    let ids = |m: PackManifest| m.files.iter().map(|f| f.project_id).collect::<HashSet<u64>>();
+    if let Ok(m) = read_manifest(&cache_dir().join(format!("{file_id}.zip"))) {
+        return Some(ids(m));
+    }
+    let list = cache_dir().join(format!("{file_id}.mods.json"));
+    if let Some(v) = fs::read(&list).ok().and_then(|b| serde_json::from_slice::<Vec<u64>>(&b).ok()) {
+        return Some(v.into_iter().collect());
+    }
+    if cf::api_key().is_none() {
+        return None;
+    }
+    {
+        let mut t = TRIED.lock().unwrap_or_else(|e| e.into_inner());
+        let t = t.get_or_insert_with(HashMap::new);
+        if t.get(&file_id).is_some_and(|at| at.elapsed() < Duration::from_secs(600)) {
+            return None;
+        }
+        t.insert(file_id, std::time::Instant::now());
+    }
+    let got = (|| -> anyhow::Result<HashSet<u64>> {
+        let f = cf::file(project_id, file_id)?;
+        let url = cf::download_url(&f)?;
+        let entries = crate::serverpack::remote_zip_entries(&url, f.file_length)?;
+        let e = entries.iter().find(|e| e.name == "manifest.json").context("pack has no manifest.json")?;
+        let m: PackManifest = serde_json::from_slice(&crate::serverpack::remote_zip_read(&url, e)?)?;
+        Ok(ids(m))
+    })();
+    match got {
+        Ok(set) => {
+            let mut v: Vec<u64> = set.iter().copied().collect();
+            v.sort_unstable();
+            let _ = fs::create_dir_all(cache_dir());
+            let _ = fs::write(&list, serde_json::to_vec(&v).unwrap_or_default());
+            Some(set)
+        }
+        Err(e) => {
+            log::warn!("reading pack {project_id}/{file_id}'s mod list: {e:#}");
+            None
+        }
+    }
+}
+
 /// The files under a downloaded pack's overrides folder, in zip order with
 /// backslashes, as CurseForge lists them in `modpackOverrides`. `None` when
 /// the pack file isn't in Hopper's cache.
