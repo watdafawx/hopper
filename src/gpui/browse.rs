@@ -2834,7 +2834,7 @@ impl BrowseView {
                 let locked = installed.is_some_and(|a| a.locked);
                 let is_pack = hopper::browse::is_modpack(m, self.class);
                 let can = is_pack || target.is_some();
-                let (pending, hold, progress, _) = self.install_state(m.id, is_pack, cx);
+                let (pending, hold, progress, fetch) = self.install_state(m.id, is_pack, cx);
                 let files = v_flex()
                     .gap_0p5()
                     .children(d.files.iter().take(40).map(|f| {
@@ -2882,7 +2882,7 @@ impl BrowseView {
                                 this_file,
                                 progress.filter(|_| this_file),
                                 hold,
-                                None,
+                                fetch.as_ref().filter(|v| v.file_ids.contains(&f.id)),
                                 cx,
                             )
                             .when(!can || locked || other_file, |b| b.disabled(true))

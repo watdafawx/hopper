@@ -1647,7 +1647,7 @@ impl LibraryView {
                                                     .child(div().text_sm().truncate().child(p.name.clone()))
                                                     .child(widgets::caption(
                                                         match files.iter().find(|f| f.url == p.url) {
-                                                            Some(f) => format!("{} · {}", p.file_name, f.step.label(f.size)),
+                                                            Some(f) => format!("{} · {}", p.file_name, f.shown_step().label(f.size)),
                                                             None => p.file_name.clone(),
                                                         },
                                                         cx,

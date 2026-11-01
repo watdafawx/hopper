@@ -3368,6 +3368,14 @@ Details").into()),
             let view = cx.entity();
             let f_sweep = a.file_name.clone();
             let can_run = hold.is_none() && updating.is_none() && !from_web;
+            // Its new file waits for the website but no window is on it (Hopper
+            // restarted, or the player picked it by hand): a click starts one.
+            let web_url = self
+                .root
+                .as_ref()
+                .filter(|_| from_web && fetch.is_none() && hold.is_none())
+                .and_then(|r| store.pending(r).iter().find(|p| p.project_id == a.project_id && !p.url.is_empty()))
+                .map(|p| p.url.clone());
             let (fetch, fetch_tip) = (fetch.clone(), fetch.as_ref().map(|v| {
                 if v.running() {
                     format!("{}. Click to show the download window", v.detail())
@@ -3414,7 +3422,7 @@ Details").into()),
                                     (Some(true), Some(p)) => format!("Updating {}%", (p * 100.0).floor() as u32),
                                     (Some(true), None) => "Updating".to_string(),
                                     (Some(false), _) => "Queued".to_string(),
-                                    (None, _) if from_web => "From website".to_string(),
+                                    (None, _) if from_web => "Download".to_string(),
                                     (None, _) => "Update".to_string(),
                                 })
                             })
@@ -3422,7 +3430,7 @@ Details").into()),
                             .tooltip(if let Some(t) = fetch_tip {
                                 t
                             } else if from_web && updating.is_none() {
-                                "The author only allows downloads from CurseForge's website: Hopper's download window is getting it, and adds it when it arrives".to_string()
+                                "The author only allows downloads from CurseForge's website. Click to get it through Hopper's download window; a file you download yourself is picked up from Downloads too".to_string()
                             } else if let Some(h) = hold {
                                 h.to_string()
                             } else if vlocked {
@@ -3443,13 +3451,17 @@ It stays disabled after updating: turn it on in the On column.")
                             } else {
                                 tip
                             })
-                            .disabled(!can_run && fetch.is_none())
+                            .disabled(!can_run && fetch.is_none() && web_url.is_none())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if drag_pick::click_swallowed(this) {
                                     return;
                                 }
                                 if let Some(v) = &fetch {
                                     crate::fetch_progress::click(&this.store, v, cx);
+                                    return;
+                                }
+                                if let (Some(u), Some(r)) = (&web_url, this.root.clone()) {
+                                    this.store.read(cx).fetch_pages(&r, vec![u.clone()], None);
                                     return;
                                 }
                                 // A locked version installs only with Shift.

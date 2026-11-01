@@ -82,6 +82,9 @@ pub enum Step {
     Failed,
     /// The window was closed before it came.
     Closed,
+    /// It came, but isn't the file CurseForge lists (size or SHA-1), so
+    /// Hopper didn't use it. The app decides this; the window never says it.
+    Unusable,
 }
 
 impl Step {
@@ -97,7 +100,7 @@ impl Step {
 
     /// It didn't come, and won't without the player.
     pub fn is_stuck(self) -> bool {
-        matches!(self, Step::Failed | Step::Closed)
+        matches!(self, Step::Failed | Step::Closed | Step::Unusable)
     }
 
     /// How far it is (0..=1) when that's known; `size` is the file's
@@ -125,6 +128,7 @@ impl Step {
             Step::Done => "Downloaded".to_string(),
             Step::Failed => "CurseForge didn't start the download".to_string(),
             Step::Closed => "The download window was closed".to_string(),
+            Step::Unusable => "The downloaded file didn't match what CurseForge lists".to_string(),
         }
     }
 }
@@ -244,5 +248,6 @@ mod tests {
         assert_eq!(Step::Countdown.label(0), "Waiting for CurseForge's countdown");
         assert!(Step::Queued.is_open() && !Step::Queued.is_active());
         assert!(Step::Closed.is_stuck() && !Step::Done.is_stuck());
+        assert!(Step::Unusable.is_stuck() && !Step::Unusable.is_open());
     }
 }

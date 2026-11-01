@@ -369,6 +369,7 @@ impl Store {
             let dirty = dirty.clone();
             Arc::new(move || dirty.store(true, Ordering::Relaxed))
         };
+        crate::fetch_progress::set_waker(wake.clone());
         let ticked = Arc::new(AtomicBool::new(false));
         let tick: hopper::waker::Waker = {
             let ticked = ticked.clone();
@@ -2392,9 +2393,11 @@ impl Store {
                     root: root.to_path_buf(),
                     by,
                     project_id: p.map_or(0, |p| p.project_id),
+                    file_id: p.map_or(0, |p| p.file_id),
                     name: p.map_or_else(|| "the file".to_string(), |p| p.name.clone()),
                     size: p.map_or(0, |p| p.size),
                     step: Step::Queued,
+                    done_at: None,
                 });
             }
         }
@@ -2433,6 +2436,9 @@ impl Store {
                 let mut f = fetching.lock().unwrap_or_else(|e| e.into_inner());
                 for (u, step) in urls.iter().zip(&run.steps) {
                     if let Some(x) = f.iter_mut().find(|x| &x.url == u) {
+                        if *step == Step::Done && x.done_at.is_none() {
+                            x.done_at = Some(std::time::Instant::now());
+                        }
                         x.step = *step;
                     }
                 }
@@ -2446,6 +2452,15 @@ impl Store {
                 // Pages it left unfinished didn't come.
                 run.end(Step::Failed);
                 copy(&run);
+                // A saved file the watcher never takes turns unusable after a
+                // while; look again then, even if nothing else redraws.
+                if run.steps.contains(&Step::Done) {
+                    let wake = wake.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(crate::fetch_progress::PLACE_WITHIN + Duration::from_secs(1));
+                        wake();
+                    });
+                }
             } else {
                 log::warn!("download window: {code:?}");
                 fetching.lock().unwrap_or_else(|e| e.into_inner()).retain(|f| !urls.contains(&f.url));

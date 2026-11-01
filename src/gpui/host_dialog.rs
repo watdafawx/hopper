@@ -452,6 +452,10 @@ impl HostForm {
             Ok(o) => o,
             Err(_) => return false,
         };
+        // A website-only pack or server pack comes through Hopper's download
+        // window first; the dialog closes, so say where to follow it.
+        let via_window = hopper::modpack::can_fetch_from_website()
+            && matches!(&this.source, Source::Files(p) if this.zip.is_none() && (p.check.pack.is_some() || p.check.server_files.is_some()));
         match &this.source {
             Source::Files(p) if this.zip.is_some() => {
                 let files = match &p.build {
@@ -478,9 +482,11 @@ impl HostForm {
             Source::Fresh => this.store.read(cx).create_hosted(opts, None, false, |_| {}),
         }
         window.push_notification(
-            gpui_kit::component::notification::Notification::info(
-                "Creating the server. It shows up under Servers when it's ready.",
-            ),
+            gpui_kit::component::notification::Notification::info(if via_window {
+                "Creating the server. Hopper's download window gets the pack from CurseForge first: follow it from the top bar or the task list. The server shows up under Servers when it's ready."
+            } else {
+                "Creating the server. It shows up under Servers when it's ready."
+            }),
             cx,
         );
         true

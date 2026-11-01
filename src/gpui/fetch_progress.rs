@@ -15,9 +15,29 @@ use gpui_kit::*;
 use hopper::webfetch::{Event, Step};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, Instant};
 
 /// The open download window's handle (0: none), for "Show window".
 static WINDOW: AtomicI64 = AtomicI64::new(0);
+
+/// Redraws the app when the window opens, reports a step or closes (the
+/// title bar's chip and dialogs follow it). Set once by the store.
+static WAKE: std::sync::OnceLock<hopper::waker::Waker> = std::sync::OnceLock::new();
+
+pub fn set_waker(w: hopper::waker::Waker) {
+    let _ = WAKE.set(w);
+}
+
+fn wake() {
+    if let Some(w) = WAKE.get() {
+        w();
+    }
+}
+
+/// How long a saved file may wait for the download watcher (it looks every
+/// few seconds) before it counts as unusable: the watcher only takes a file
+/// whose size and SHA-1 match what CurseForge lists.
+pub const PLACE_WITHIN: Duration = Duration::from_secs(30);
 
 /// Runs `hopper --fetch DIR URL...` and passes each step it reports to
 /// `on`. Its exit code; `None` when it couldn't start.
@@ -40,11 +60,13 @@ pub fn run_window(dir: &Path, urls: &[String], mut on: impl FnMut(Event)) -> Opt
                 WINDOW.store(h, Ordering::Relaxed);
             }
             on(e);
+            wake();
         }
     }
     let code = child.wait().ok().and_then(|s| s.code());
     // Another window may have opened meanwhile; that one stays.
     let _ = WINDOW.compare_exchange(mine, 0, Ordering::Relaxed, Ordering::Relaxed);
+    wake();
     code
 }
 
@@ -88,10 +110,25 @@ pub struct FetchFile {
     /// this one, a pack), when that's not the file's own project.
     pub by: Option<u64>,
     pub project_id: u64,
+    /// The CurseForge file, for the Files list's row of it.
+    pub file_id: u64,
     pub name: String,
     /// Expected size, 0 when unknown.
     pub size: u64,
     pub step: Step,
+    /// When the window saved it.
+    pub done_at: Option<Instant>,
+}
+
+impl FetchFile {
+    /// Its step as the player should see it: a saved file the download
+    /// watcher still hasn't used after [`PLACE_WITHIN`] didn't match.
+    pub fn shown_step(&self) -> Step {
+        match (self.step, self.done_at) {
+            (Step::Done, Some(t)) if t.elapsed() > PLACE_WITHIN => Step::Unusable,
+            (s, _) => s,
+        }
+    }
 }
 
 /// Several files' progress as one: what a button or banner shows.
@@ -107,6 +144,8 @@ pub struct FetchView {
     pub progress: Option<f32>,
     /// Pages of the files that didn't come, to try again.
     pub stuck: Vec<String>,
+    /// The CurseForge files it's about.
+    pub file_ids: Vec<u64>,
 }
 
 impl FetchView {
@@ -114,26 +153,28 @@ impl FetchView {
     /// download watcher puts them in place (the store lets go of them then),
     /// so the button doesn't flash back to "Install" in between.
     pub fn of<'a>(files: impl IntoIterator<Item = &'a FetchFile>) -> Option<FetchView> {
-        let files: Vec<&FetchFile> = files.into_iter().collect();
-        let lead = files
+        let files: Vec<(&FetchFile, Step)> = files.into_iter().map(|f| (f, f.shown_step())).collect();
+        let (lead, step) = files
             .iter()
-            .find(|f| f.step.is_active())
-            .or_else(|| files.iter().find(|f| f.step == Step::Queued))
-            .or_else(|| files.iter().find(|f| f.step.is_stuck()))
-            .or_else(|| files.first())?;
+            .find(|(_, s)| s.is_active())
+            .or_else(|| files.iter().find(|(_, s)| *s == Step::Queued))
+            .or_else(|| files.iter().find(|(_, s)| s.is_stuck()))
+            .or_else(|| files.first())
+            .copied()?;
         let total = files.len();
-        let done = files.iter().filter(|f| f.step == Step::Done).count();
-        let sum: f32 = files.iter().map(|f| f.step.progress(f.size).unwrap_or(0.0)).sum();
-        let known = files.iter().any(|f| f.step.progress(f.size).is_some());
+        let done = files.iter().filter(|(_, s)| *s == Step::Done).count();
+        let sum: f32 = files.iter().map(|(f, s)| s.progress(f.size).unwrap_or(0.0)).sum();
+        let known = files.iter().any(|(f, s)| s.progress(f.size).is_some());
         Some(FetchView {
             root: lead.root.clone(),
             total,
             done,
             name: lead.name.clone(),
-            step: lead.step,
+            step,
             size: lead.size,
             progress: known.then(|| sum / total as f32),
-            stuck: files.iter().filter(|f| f.step.is_stuck()).map(|f| f.url.clone()).collect(),
+            stuck: files.iter().filter(|(_, s)| s.is_stuck()).map(|(f, _)| f.url.clone()).collect(),
+            file_ids: files.iter().map(|(f, _)| f.file_id).collect(),
         })
     }
 
@@ -186,6 +227,8 @@ impl FetchView {
     /// A sentence for a caption or tooltip: "Downloading from CurseForge:
     /// Waystones, waiting for CurseForge's countdown · 2 of 5".
     pub fn detail(&self) -> String {
+        // "The download window…" mid-sentence; "CurseForge" stays as it is.
+        let lower = |s: String| s[..1].to_lowercase() + &s[1..];
         if self.step == Step::Done {
             if self.total > 1 {
                 format!("Downloaded {} files; adding them to the instance", self.total)
@@ -193,13 +236,12 @@ impl FetchView {
                 format!("Downloaded {}; adding it to the instance", self.name)
             }
         } else if self.running() {
-            let step = self.step.label(self.size);
-            let step = step[..1].to_lowercase() + &step[1..];
+            let step = lower(self.step.label(self.size));
             format!("Getting {} from the CurseForge website: {step}{}", self.name, self.count())
         } else if self.stuck.len() == 1 {
-            format!("{}: {}", self.name, self.step.label(self.size).to_lowercase())
+            format!("{}: {}", self.name, lower(self.step.label(self.size)))
         } else {
-            format!("{} of {} files didn't download: {}", self.stuck.len(), self.total, self.step.label(self.size).to_lowercase())
+            format!("{} of {} files didn't download: {}", self.stuck.len(), self.total, lower(self.step.label(self.size)))
         }
     }
 }
@@ -212,6 +254,29 @@ pub fn click(store: &Entity<Store>, v: &FetchView, cx: &mut App) {
     } else {
         store.read(cx).fetch_pages(&v.root, v.stuck.clone(), None);
     }
+}
+
+/// The title bar's sign that a download window is open, whatever opened it
+/// (a mod, a pack, a new server whose dialog already closed): click to
+/// bring the window up.
+pub fn title_chip(cx: &App) -> Option<AnyElement> {
+    if !window_open() {
+        return None;
+    }
+    let theme = cx.theme();
+    Some(
+        Button::new("fetch-window-chip")
+            .xsmall()
+            .ghost()
+            .icon(IconName::Hourglass)
+            .label("Getting files from CurseForge…")
+            .text_color(theme.warning)
+            .tooltip("Hopper's download window is waiting for CurseForge. Click to show it")
+            .on_click(|_, _, _| {
+                show_window();
+            })
+            .into_any_element(),
+    )
 }
 
 /// `b` while the download window works for it: the busy look with the
@@ -283,10 +348,25 @@ mod tests {
             root: PathBuf::from("r"),
             by: None,
             project_id: 1,
+            file_id: 7,
             name: "Waystones".into(),
             size: 100,
             step,
+            done_at: None,
         }
+    }
+
+    #[test]
+    fn saved_file_never_used_turns_unusable() {
+        let mut f = file(Step::Done);
+        f.done_at = Some(std::time::Instant::now());
+        assert_eq!(f.shown_step(), Step::Done);
+        f.done_at = std::time::Instant::now().checked_sub(super::PLACE_WITHIN + std::time::Duration::from_secs(1));
+        assert_eq!(f.shown_step(), Step::Unusable);
+        let v = FetchView::of(&[f]).unwrap();
+        assert!(!v.running());
+        assert_eq!(v.button_label(), "Retry");
+        assert_eq!(v.file_ids, vec![7]);
     }
 
     #[test]
