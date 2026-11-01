@@ -193,7 +193,6 @@ pub struct SyncPanel {
     settle: widgets::Settle,
     _ticker: Option<Task<()>>,
     result: Option<Result<String, Vec<String>>>,
-    allow_online: bool,
     /// The store's server revision this comparison is for.
     seen_rev: u64,
     scroll: UniformListScrollHandle,
@@ -221,6 +220,7 @@ impl SyncPanel {
                     this.seen_rev = rev;
                     this.rescan(cx);
                 }
+                this.check_restarted(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&search, window, |this, state, event, _, cx| {
@@ -241,7 +241,10 @@ impl SyncPanel {
         });
         // The Configs tab shows how many files need syncing.
         subs.push(cx.subscribe(&configs, |_, _, _: &crate::configs::NeedsChanged, cx| cx.notify()));
-        subs.push(cx.observe(&control, |_, _, cx| cx.notify()));
+        subs.push(cx.observe(&control, |this, _, cx| {
+            this.check_restarted(cx);
+            cx.notify()
+        }));
         subs.push(cx.subscribe(&control, |this, _, e: &crate::server_control::ControlEvent, cx| {
             if let crate::server_control::ControlEvent::Console = e {
                 this.open_console(cx);
@@ -297,7 +300,6 @@ impl SyncPanel {
             settle: Default::default(),
             _ticker: None,
             result: None,
-            allow_online: false,
             seen_rev,
             scroll: UniformListScrollHandle::new(),
             room: None,
@@ -634,6 +636,86 @@ impl SyncPanel {
         server_online(self.store.read(cx), Some(self.control.read(cx)), r)
     }
 
+    /// Syncing while the server runs is allowed (the default; settings
+    /// keep the player's choice).
+    fn allow_online(&self, cx: &App) -> bool {
+        self.store.read(cx).settings().sync_while_online
+    }
+
+    /// A sync just finished: if the server runs, it needs a restart.
+    fn mark_live_sync(&self, cx: &mut Context<Self>) {
+        if let Some(r) = self.server.clone()
+            && self.online(cx)
+        {
+            note_live_sync(&self.store, Some(&self.control), &r, cx);
+        }
+    }
+
+    /// The server stopped or restarted since a sync while it ran: the
+    /// "restart to load" line goes.
+    fn check_restarted(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.server.clone() else { return };
+        let Some(was) = self.store.read(cx).live_sync(&r).map(str::to_string) else { return };
+        let now = server_started(self.store.read(cx), Some(self.control.read(cx)), &r);
+        let restarted = !was.is_empty() && !now.is_empty() && now != was;
+        if restarted || !self.online(cx) {
+            self.store.update(cx, |s, cx| {
+                s.clear_live_sync(&r);
+                cx.notify();
+            });
+        }
+    }
+
+    /// "Synced while running: restart the server...", with Restart when
+    /// Hopper can restart it; only after a sync while it ran. `narrow`: the
+    /// side card's, the button under the words.
+    fn restart_line(&self, narrow: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let r = self.server.as_ref()?;
+        self.store.read(cx).live_sync(r)?;
+        if !self.online(cx) {
+            return None;
+        }
+        let control = self.control.read(cx);
+        let can = control.configured(cx) && control.ready();
+        let busy = control.busy().is_some();
+        let theme = cx.theme();
+        let text = if can {
+            "Synced while running: restart the server to load the changes"
+        } else {
+            "Synced while running: restart the server in its panel to load the changes"
+        };
+        let words = h_flex()
+            .gap_2()
+            .items_start()
+            .when(narrow, |r| r.w_full())
+            .child(Icon::new(IconName::Info).small().flex_none().mt_0p5())
+            .child(div().flex_1().min_w_0().child(text));
+        Some(
+            div()
+                .flex()
+                .map(|r| if narrow { r.flex_col().items_start().gap_1p5().text_xs() } else { r.items_center().gap_2().text_sm() })
+                .text_color(theme.muted_foreground)
+                .child(words)
+                .when(can, |r| {
+                    let control = self.control.clone();
+                    r.child(
+                        Button::new("live-sync-restart")
+                            .xsmall()
+                            .outline()
+                            .icon(IconName::RotateCcw)
+                            .label("Restart")
+                            .disabled(busy)
+                            .on_click(move |_, window, cx| {
+                                control.update(cx, |c, cx| {
+                                    c.request(hopper::panel::PanelAction::Restart, window, cx)
+                                })
+                            }),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     fn run(&mut self, ops: Ops, cx: &mut Context<Self>) {
         let Some((server, inst)) = self.pair(cx) else {
             return;
@@ -650,6 +732,9 @@ impl SyncPanel {
             this.update(cx, |this, cx| {
                 this.running = false;
                 this.result = Some(rigsync::summary(&results));
+                if matches!(this.result, Some(Ok(_))) {
+                    this.mark_live_sync(cx);
+                }
                 this.rescan(cx);
             })
             .ok();
@@ -688,6 +773,7 @@ impl SyncPanel {
                 match rigsync::summary(&results) {
                     Ok(_) => {
                         this.acted.insert(key, words.1);
+                        this.mark_live_sync(cx);
                     }
                     Err(e) => this.result = Some(Err(e)),
                 }
@@ -859,7 +945,7 @@ impl SyncPanel {
             _ => return None,
         };
         let key = row_key(d);
-        let blocked = self.running || (self.online(cx) && !self.allow_online);
+        let blocked = self.running || (self.online(cx) && !self.allow_online(cx));
         if blocked || self.acted.contains_key(&key) || self.acting.contains_key(&key) {
             return None;
         }
@@ -1062,6 +1148,7 @@ impl SyncPanel {
             .read(cx)
             .configured(cx)
             .then(|| self.control.update(cx, |c, cx| c.controls_compact(cx)));
+        let live = self.restart_line(true, cx);
         let online = self.online(cx);
         let (dot, word) = self.state(cx);
         // While starting or stopping, the pill's words: "starting 45%".
@@ -1126,16 +1213,7 @@ impl SyncPanel {
             })
             .when_some(reason, |c, r| c.child(div().text_xs().text_color(theme.danger).child(r)))
             .children(controls)
-            .when(online, |c| {
-                c.child(
-                    h_flex()
-                        .gap_1p5()
-                        .text_xs()
-                        .text_color(theme.warning)
-                        .child(Icon::new(IconName::TriangleAlert).xsmall())
-                        .child("Running: stop it before syncing"),
-                )
-            });
+            .children(live);
 
         // The loader: a fix when it differs from the pack, else a quiet line.
         let pack_nf = inst.loader.strip_prefix("neoforge-").map(str::to_string);
@@ -1359,7 +1437,7 @@ impl SyncPanel {
                 .w(rems(14.))
                 .child(self.pair_picker(&server.root, inst.name.clone(), Some(&inst.root), cx))
         });
-        let stop_where = if self.control.read(cx).configured(cx) { "stop it here" } else { "stop it in Crafty/MCSS" };
+        let live = self.restart_line(false, cx);
         let in_instance = self.in_instance;
         let store = self.store.read(cx);
         let theme = cx.theme();
@@ -1469,16 +1547,7 @@ impl SyncPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
                     ),
             )
-            .when(online, |r| {
-                r.child(
-                    h_flex()
-                        .gap_2()
-                        .text_sm()
-                        .text_color(theme.warning)
-                        .child(Icon::new(IconName::TriangleAlert).small())
-                        .child(format!("Server is online. Mods load at startup, so {stop_where} before syncing.")),
-                )
-            })
+            .children(live)
     }
 
     /// A mod on the server's crash card, by its jar: the pack's copy gives
@@ -2132,7 +2201,9 @@ impl SyncPanel {
         let nf_differs = self.pair_header(cx).is_some_and(|(_, inst)| {
             matches!((inst.loader.strip_prefix("neoforge-"), &self.server_nf), (Some(p), Some(sv)) if p != sv)
         });
-        let online = self.online(cx);
+        // Mods can go while it runs (they load on its restart); a NeoForge
+        // install can't: the running server holds its files.
+        let held = self.online(cx) && (nf_differs || !self.allow_online(cx));
         let sync = Some(()).map(|_| {
             Button::new("update-server")
                 .small()
@@ -2144,12 +2215,14 @@ impl SyncPanel {
                 })
                 // Picked rows have their own filled button below.
                 .map(|b| if to_change > 0 && n_sel == 0 { b.primary() } else { b.outline() })
-                .tooltip(if online {
-                    SharedString::from("Stop the server first: mods load at startup.")
+                .tooltip(if held && nf_differs {
+                    SharedString::from("Stop the server first: it needs the pack's NeoForge, which can't be installed while it runs.")
+                } else if held {
+                    SharedString::from("Stop the server first, or tick Allow while online.")
                 } else {
                     SharedString::from(format!("Makes the server's mods match this instance (leaving client-only ones out), and installs the pack's NeoForge on it if needed. Asks first; replaced files go to {}.", self.kept_in()))
                 })
-                .disabled(online || self.running)
+                .disabled(held || self.running)
                 .on_click(cx.listener(|this, _, w, cx| this.confirm_update(w, cx)))
         });
         h_flex()
@@ -2234,7 +2307,7 @@ impl SyncPanel {
                 .count()
         };
         let online = self.online(cx);
-        let blocked = self.running || (online && !self.allow_online);
+        let blocked = self.running || (online && !self.allow_online(cx));
         let n_sel = picked.len();
         let n_remove = count(Group::ServerOnly, None);
         let (n_add, n_update) = (count(Group::Add, None) + count(Group::KeptOff, None), count(Group::Update, None));
@@ -2276,9 +2349,10 @@ impl SyncPanel {
                 r.child(
                     Checkbox::new("allow-online")
                         .label("Allow while online")
-                        .checked(self.allow_online)
+                        .checked(self.allow_online(cx))
                         .on_change(cx.listener(|this, v: &bool, _, cx| {
-                            this.allow_online = *v;
+                            let on = *v;
+                            this.store.update(cx, |s, cx| s.update_settings(|st| st.sync_while_online = on, cx));
                             cx.notify();
                         })),
                 )
@@ -2570,7 +2644,7 @@ impl SyncPanel {
         };
         let picked = g.pickable() && self.selected.contains(&key);
         let online = self.online(cx);
-        let blocked = self.running || (online && !self.allow_online);
+        let blocked = self.running || (online && !self.allow_online(cx));
         let anyway = self.store.read(cx).settings().sync_anyway.clone();
         let pair = self.pair_header(cx);
         let kept = self.kept_in();
@@ -3274,6 +3348,35 @@ impl Render for SyncPanel {
 /// controls know it (the freshest, and it counts a server still starting),
 /// else the ping or the panel's polled stats. The status card and the
 /// Configs section both ask this, so they agree.
+/// When the server started, as its panel says (the page's control's poll,
+/// else the store's); empty when unknown.
+pub(crate) fn server_started(
+    store: &Store,
+    control: Option<&crate::server_control::ServerControl>,
+    root: &Path,
+) -> String {
+    control
+        .and_then(|c| c.started())
+        .map(str::to_string)
+        .or_else(|| store.panel_stats(root).map(|p| p.started.clone()))
+        .unwrap_or_default()
+}
+
+/// Remembers that `root` got synced while it ran, so its pages offer a
+/// restart until it stops or restarts.
+pub(crate) fn note_live_sync(
+    store: &Entity<Store>,
+    control: Option<&Entity<crate::server_control::ServerControl>>,
+    root: &Path,
+    cx: &mut App,
+) {
+    let started = server_started(store.read(cx), control.map(|c| c.read(cx)), root);
+    store.update(cx, |s, cx| {
+        s.note_live_sync(root, started);
+        cx.notify();
+    });
+}
+
 pub(crate) fn server_online(
     store: &Store,
     control: Option<&crate::server_control::ServerControl>,
@@ -3389,6 +3492,8 @@ pub fn confirm_update_server(store: &Entity<Store>, server: ServerInfo, inst: In
                 let java =
                     hopper::launch::installer_java(Path::new(&s.settings().launcher_dir));
                 let panel = hopper::panel::for_server(s.settings(), &server);
+                // Running: its pages offer a restart once this is done.
+                let live = server_online(s, None, &server.root).then(|| server_started(s, None, &server.root));
                 let (server, inst) = (server.clone(), inst.clone());
                 s.spawn_job(format!("Updating {}", server.name), move |job| {
                     let r = hopper::server_update::update_server(
@@ -3398,7 +3503,10 @@ pub fn confirm_update_server(store: &Entity<Store>, server: ServerInfo, inst: In
                     for f in &r.failed {
                         job.note(f.clone());
                     }
-                    Ok(Msg::ServersChanged)
+                    Ok(match live {
+                        Some(started) if r.copied + r.removed > 0 => Msg::SyncedLive(server.root.clone(), started),
+                        _ => Msg::ServersChanged,
+                    })
                 });
                 true
             })

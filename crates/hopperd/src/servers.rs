@@ -54,6 +54,8 @@ pub struct Summary {
     pub finished: Option<hopper_core::hosting::progress::Finished>,
     /// A restart is under way (its stop, then its start).
     pub restarting: bool,
+    /// Its mods changed while it runs: they load on its next start.
+    pub changed_since_start: bool,
     /// Addresses players join it by (server addresses / the router):
     /// saved ones, or the default `name.<domain>` (see
     /// [`crate::router::effective`], which the callers fill in).
@@ -221,6 +223,7 @@ impl Servers {
             progress: e.server.progress(),
             finished: e.server.finished(),
             restarting: e.server.restarting(),
+            changed_since_start: state.is_alive() && e.server.changed_since_start(),
             exit_code: match state {
                 ServerState::Crashed(c) => c,
                 _ => None,

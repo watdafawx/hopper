@@ -44,6 +44,10 @@ impl Store {
             let root = match &c {
                 Change::Instance(r) | Change::Gone(r) | Change::Content(r, _) => r.clone(),
             };
+            // Mods or packs changed under a running game: say so in its tabs.
+            if let Change::Content(_, Area::Mods | Area::ResourcePacks | Area::ShaderPacks) = &c {
+                self.note_content(&root);
+            }
             // Hopper's own job reads the instance again when it ends; what
             // happened meanwhile is looked at then.
             if self.writing(&root) {

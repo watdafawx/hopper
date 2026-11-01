@@ -297,7 +297,9 @@ pub fn set_remote_neoforge(r: &crate::hopperd::Remote, want: &str, job: &Job) ->
 }
 
 /// Brings `server` up to `inst`: loader first, then mods with the usual
-/// skip rules. Refuses while the server answers a ping. A `panel` that keeps
+/// skip rules. Mods can change while it runs (they load on its restart);
+/// a NeoForge change can't, so that refuses while the server answers a
+/// ping. A `panel` that keeps
 /// its own launch command (Crafty's Server Execution Command) is pointed at
 /// the new loader too, or it would keep starting the old one.
 pub fn update_server(
@@ -311,8 +313,13 @@ pub fn update_server(
     job: &Job,
 ) -> anyhow::Result<Report> {
     crate::remotefs::local_only(&server.root, "Updating the server's pack")?;
-    if server.remote.is_none() && matches!(server::ping(host, server.port()), Status::Online { .. }) {
-        bail!("{} is running. Stop it in Crafty/MCSS first.", server.name);
+    let new_loader = server.remote.is_none()
+        && matches!(
+            (inst.loader.strip_prefix("neoforge-"), server_neoforge(&server.root)),
+            (Some(want), Some(have)) if want != have
+        );
+    if new_loader && matches!(server::ping(host, server.port()), Status::Online { .. }) {
+        bail!("{} is running and needs a new NeoForge. Stop it first.", server.name);
     }
     let mut report = Report::default();
 

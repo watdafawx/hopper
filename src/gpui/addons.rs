@@ -2444,12 +2444,6 @@ impl AddonsView {
             .child(self.sort_button(cx))
             .when(hint, |r| r.child(self.collapse_hint(cx)))
             .child(div().flex_1())
-            .when(self.store.read(cx).running(&inst.root).is_some(), |r| {
-                r.child(
-                    widgets::caption("The game is running: changes apply on its next start", cx)
-                        .text_xs(),
-                )
-            })
             .when(self.class == cf::CLASS_MODS, |r| r.child(self.profiles_button(inst, cx)))
     }
 
@@ -4808,6 +4802,7 @@ impl Render for AddonsView {
         let dups = self.duplicate_banner(&inst, cx);
         let blockers = self.blocker_banner(&inst, cx);
         let shaders = self.shader_notes(&inst, cx);
+        let restart = self.restart_note(&inst, cx);
         let updates = self.table.updates.clone();
         let rows = self.table.rows.clone();
         // Narrow with the instance list open: offer its room, once.
@@ -4932,6 +4927,7 @@ impl Render for AddonsView {
             .children(tabs)
             .children(global_head)
             .child(toolbar)
+            .children(restart)
             .children(blockers)
             .children(dups)
             .children(missing)
