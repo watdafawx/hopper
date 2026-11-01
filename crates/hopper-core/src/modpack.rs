@@ -599,6 +599,42 @@ pub fn pack_project_ids(project_id: u64, file_id: u64) -> Option<HashSet<u64>> {
     }
 }
 
+/// Which of an instance's mods its modpack ships (the rest were added on
+/// top: the Mods tab's "Only yours").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PackMods {
+    /// Hopper marked them when it installed the pack (`from_pack`).
+    Marked,
+    /// Nothing is marked (a server set up from a server pack): the
+    /// projects the pack's manifest lists.
+    Listed(HashSet<u64>),
+}
+
+impl PackMods {
+    /// For an instance or server made from a pack; `None` without a pack,
+    /// or when its list can't be had.
+    pub fn of(inst: &Instance) -> Option<Self> {
+        if inst.addons.iter().any(|a| a.from_pack) {
+            return Some(PackMods::Marked);
+        }
+        let (pid, fid) = match &inst.pack {
+            Some(p) => (p.project_id, p.file_id),
+            None => {
+                let m = crate::server_pack_update::recorded(&inst.root)?;
+                (m.project_id, m.pack_file_id)
+            }
+        };
+        pack_project_ids(pid, fid).map(PackMods::Listed)
+    }
+
+    pub fn has(&self, a: &crate::instances::Addon) -> bool {
+        match self {
+            PackMods::Marked => a.from_pack,
+            PackMods::Listed(ids) => ids.contains(&a.project_id),
+        }
+    }
+}
+
 /// The files under a downloaded pack's overrides folder, in zip order with
 /// backslashes, as CurseForge lists them in `modpackOverrides`. `None` when
 /// the pack file isn't in Hopper's cache.

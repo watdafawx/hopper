@@ -17,6 +17,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use hopper_core::cf::{self, Loader};
 use hopper_core::instances::{self, Addon, Instance};
+use hopper_core::modpack::PackMods;
 use hopper_core::{install, modrinth};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -314,6 +315,7 @@ async fn list(
             HashMap::new()
         };
         let (cats, cats_pending) = crate::mods_table::categories(&inst);
+        let pack = PackMods::of(&inst);
         let mut rows: Vec<Value> = Vec::new();
         let mut known = std::collections::HashSet::new();
         // The jars in mods/ (on or off), by name without ".disabled".
@@ -339,7 +341,7 @@ async fn list(
                 "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": a.icon, "enabled": a.enabled,
                 "side": if a.env.is_empty() { s.map(|s| s.side.clone()).unwrap_or_default() } else { side_label(&a.env).to_string() },
                 "project_id": id_str(a.project_id), "source": if a.project_id == 0 { "" } else if modrinth::is_mr(a.project_id) { "modrinth" } else { "curseforge" },
-                "from_pack": a.from_pack, "page": a.page, "author": a.author,
+                "from_pack": pack_mod(&pack, a), "page": a.page, "author": a.author,
                 "locked": a.locked, "file_id": id_str(a.file_id), "release_type": a.release_type,
                 "update": ups.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).cloned(),
                 "date_added": a.date_added, "file_date": a.file_date,
@@ -603,6 +605,26 @@ async fn install_mod(
     Ok(Json(json!({ "job": job })))
 }
 
+/// A mod the paired pack ships: the pack sets its version (updating it
+/// alone would leave the server out of step with players' copies), so it
+/// gets no update of its own; a pack update brings it. Without the pack's
+/// list, the marks Hopper made.
+fn pack_mod(pack: &Option<PackMods>, a: &Addon) -> bool {
+    pack.as_ref().map_or(a.from_pack, |p| p.has(a))
+}
+
+/// The updates worth offering, each with the entry it was checked for
+/// (by file: a mod can be in twice): mods added on top of the pack whose
+/// jar isn't already the offered file.
+fn offered<'a>(inst: &'a Instance, pack: &Option<PackMods>, ups: &'a [install::Update]) -> Vec<(&'a install::Update, &'a Addon)> {
+    ups.iter()
+        .filter_map(|u| {
+            let a = inst.addons.iter().find(|a| a.file_name == u.from).or_else(|| inst.addons.iter().find(|a| a.project_id == u.project_id))?;
+            (!pack_mod(pack, a) && !u.same_file()).then_some((u, a))
+        })
+        .collect()
+}
+
 async fn updates(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -617,17 +639,13 @@ async fn updates(
     }
     let v = blocking(move || {
         let inst = instance(&e)?;
+        let pack = PackMods::of(&inst);
         let ups = install::check_updates(&inst)?;
         // Names of required mods the server lacks, looked up once; `None`
         // is one that's installed after all (from the other site).
         let mut names: HashMap<u64, Option<String>> = HashMap::new();
-        Ok(ups
-            .iter()
-            .filter_map(|u| {
-                // The entry it was checked for (by file: a mod can be in twice).
-                let a = inst.addons.iter().find(|a| a.file_name == u.from).or_else(|| inst.addons.iter().find(|a| a.project_id == u.project_id))?;
-                (!a.from_pack).then_some((u, a))
-            })
+        Ok(offered(&inst, &pack, &ups)
+            .into_iter()
             .map(|(u, a)| {
                 let (from, to) = u.versions();
                 let risk = install::Risk::of(u);
@@ -685,6 +703,7 @@ async fn update(
     let sid = id.clone();
     let job = crate::pack_api::spawn(&app, format!("Updating {}'s mods", e.name), move |job| {
         let mut inst = instance(&e)?;
+        let pack = PackMods::of(&inst);
         // The offers the last check found; only a mod it didn't cover is
         // checked again (a whole check takes long on a big pack).
         let cached = cached_updates(&sid).unwrap_or_default();
@@ -696,7 +715,7 @@ async fn update(
                 .and_then(|u| u["from_file"].as_str())
                 .and_then(|f| inst.addons.iter().find(|a| a.file_name == f))
                 .or_else(|| inst.addons.iter().find(|a| a.project_id == *pid));
-            let Some(a) = a.filter(|a| !a.from_pack) else { continue };
+            let Some(a) = a.filter(|a| !pack_mod(&pack, a)) else { continue };
             match offer.and_then(|u| u["file_id"].as_str()?.parse::<u64>().ok()).and_then(|f| hopper_core::source::file(*pid, f).ok()) {
                 Some(file) => ups.push(install::Update { project_id: *pid, name: a.name.clone(), from: a.file_name.clone(), file }),
                 None => unknown.push(*pid),
@@ -704,7 +723,7 @@ async fn update(
         }
         if !unknown.is_empty() {
             ups.extend(install::check_updates(&inst)?.into_iter().filter(|u| {
-                unknown.contains(&u.project_id) && inst.addons.iter().any(|a| a.file_name == u.from && !a.from_pack)
+                unknown.contains(&u.project_id) && !u.same_file() && inst.addons.iter().any(|a| a.file_name == u.from && !pack_mod(&pack, a))
             }));
         }
         let froms: Vec<String> = ups.iter().map(|u| u.from.clone()).collect();
@@ -789,5 +808,37 @@ mod tests {
         assert_eq!(files, vec![("dh-3.2.0.jar", 1, false), ("jei.jar", 3, true)]);
         assert!(!super::heal(&mut i));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_mods_added_on_top_of_the_pack_get_updates() {
+        use hopper_core::cf::File;
+        use hopper_core::install::Update;
+        use hopper_core::instances::{Addon, Instance};
+        use hopper_core::modpack::PackMods;
+        let a = |id: u64, f: &str, from_pack: bool| Addon { project_id: id, file_name: f.into(), from_pack, ..Default::default() };
+        let up = |id: u64, from: &str, to: &str| Update { project_id: id, name: String::new(), from: from.into(), file: File { file_name: to.into(), ..Default::default() } };
+        let ups = [
+            up(1, "pack-1.0.jar", "pack-1.1.jar"),
+            up(2, "pack2-2.0.jar", "pack2-2.1.jar"),
+            up(3, "mine-1.0.jar", "mine-1.1.jar"),
+            // Hopper's note of the file is old, the jar isn't.
+            up(4, "same-3.0.jar", "same-3.0.jar"),
+        ];
+        let ids = |o: Vec<(&Update, &Addon)>| o.iter().map(|(u, _)| u.project_id).collect::<Vec<_>>();
+        // A server made from a server pack: nothing marked, the manifest lists 1 and 2.
+        let mut inst = Instance {
+            addons: vec![a(1, "pack-1.0.jar", false), a(2, "pack2-2.0.jar", false), a(3, "mine-1.0.jar", false), a(4, "same-3.0.jar", false)],
+            ..Default::default()
+        };
+        assert_eq!(ids(super::offered(&inst, &Some(PackMods::Listed([1, 2].into_iter().collect())), &ups)), [3]);
+        // Marked when Hopper installed the pack.
+        inst.addons[0].from_pack = true;
+        inst.addons[1].from_pack = true;
+        assert_eq!(ids(super::offered(&inst, &Some(PackMods::Marked), &ups)), [3]);
+        // No pack list and no marks: every mod is the player's.
+        inst.addons[0].from_pack = false;
+        inst.addons[1].from_pack = false;
+        assert_eq!(ids(super::offered(&inst, &None, &ups)), [1, 2, 3]);
     }
 }

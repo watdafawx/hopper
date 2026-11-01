@@ -194,19 +194,14 @@ pub fn vars(root: &Path, live: &Live) -> BTreeMap<String, String> {
         .filter(|n| n.to_lowercase().ends_with(".jar"))
         .collect();
     put("mods", jars.len().to_string());
-    // The pack's own list when Hopper didn't record which mods came with
-    // it (a server set up from a server pack); without either, no number
-    // beats a wrong one.
-    let pack_ids = || {
-        let (pid, fid) = match inst.as_ref().and_then(|i| i.pack.as_ref()) {
-            Some(p) => (p.project_id, p.file_id),
-            None => marker.as_ref().map_or((0, 0), |m| (m.project_id, m.pack_file_id)),
-        };
-        crate::modpack::pack_project_ids(pid, fid)
+    // Without a pack nothing is extra; with one whose mods can't be
+    // told apart, no number beats a wrong one.
+    let extra = match &inst {
+        Some(i) if i.pack.is_some() || marker.is_some() => {
+            crate::modpack::PackMods::of(i).map(|p| extra_mods(&i.addons, &jars, &p))
+        }
+        _ => Some(0),
     };
-    let addons = inst.as_ref().map_or(&[][..], |i| &i.addons[..]);
-    let has_pack = inst.as_ref().is_some_and(|i| i.pack.is_some()) || marker.is_some();
-    let extra = if has_pack { extra_mods(addons, &jars, pack_ids) } else { Some(0) };
     put("extra_mods", extra.map(|n| n.to_string()).unwrap_or_default());
 
     put("difficulty", prop("difficulty", "easy"));
@@ -223,22 +218,10 @@ pub fn vars(root: &Path, live: &Live) -> BTreeMap<String, String> {
 
 /// Mods added on top of the pack, counted like the Mods tab's "Only
 /// yours": mods Hopper knows (jars it couldn't name aren't counted; packs
-/// ship some of those themselves) that are on and aren't the pack's. The
-/// pack's are the ones marked as such, or, when none are, the projects in
-/// the pack's manifest (`pack_ids`, asked only then). `None` when neither
-/// says.
-fn extra_mods(
-    addons: &[crate::instances::Addon],
-    jars: &[String],
-    pack_ids: impl FnOnce() -> Option<std::collections::HashSet<u64>>,
-) -> Option<usize> {
+/// ship some of those themselves) that are on and aren't the pack's.
+fn extra_mods(addons: &[crate::instances::Addon], jars: &[String], pack: &crate::modpack::PackMods) -> usize {
     let on: std::collections::HashSet<String> = jars.iter().map(|j| j.to_lowercase()).collect();
-    let mods: Vec<_> = addons.iter().filter(|a| a.folder() == "mods" && on.contains(&a.file_name.to_lowercase())).collect();
-    if addons.iter().any(|a| a.from_pack) {
-        return Some(mods.iter().filter(|a| !a.from_pack).count());
-    }
-    let ids = pack_ids()?;
-    Some(mods.iter().filter(|a| !ids.contains(&a.project_id)).count())
+    addons.iter().filter(|a| a.folder() == "mods" && on.contains(&a.file_name.to_lowercase()) && !pack.has(a)).count()
 }
 
 fn load_saved(root: &Path) -> Option<Saved> {
@@ -771,14 +754,13 @@ mod tests {
         use crate::instances::Addon;
         let a = |id: u64, f: &str, from_pack: bool| Addon { project_id: id, file_name: f.into(), from_pack, ..Default::default() };
         let jars: Vec<String> = ["a.jar", "b.jar", "c.jar", "loose.jar"].map(String::from).to_vec();
-        // Marked by Hopper: those marks win and the manifest isn't asked.
+        use crate::modpack::PackMods;
+        // Marked by Hopper when it installed the pack.
         let marked = [a(1, "a.jar", true), a(2, "b.jar", false), a(3, "c.jar", true), a(4, "off.jar", false)];
-        assert_eq!(extra_mods(&marked, &jars, || panic!("not asked")), Some(1));
+        assert_eq!(extra_mods(&marked, &jars, &PackMods::Marked), 1);
         // No marks (a server made from a server pack): the manifest says.
         let unmarked = [a(1, "a.jar", false), a(2, "b.jar", false), a(3, "C.JAR", false)];
-        assert_eq!(extra_mods(&unmarked, &jars, || Some([1, 3].into_iter().collect())), Some(1));
-        // Neither: no number rather than every jar.
-        assert_eq!(extra_mods(&unmarked, &jars, || None), None);
+        assert_eq!(extra_mods(&unmarked, &jars, &PackMods::Listed([1, 3].into_iter().collect())), 1);
     }
 
     #[test]

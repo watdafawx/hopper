@@ -638,6 +638,15 @@ impl Update {
         }
         (old, new)
     }
+
+    /// The jar installed already has the offered file's name: it is that
+    /// version, and only Hopper's note of which file it is lags behind
+    /// (a jar copied in by hand or from another copy of the pack). Not an
+    /// update; offering it would show a date for a version it can't name.
+    pub fn same_file(&self) -> bool {
+        let jar = |n: &str| n.to_ascii_lowercase().trim_end_matches(".disabled").to_string();
+        jar(&self.from).ends_with(".jar") && jar(&self.from) == jar(&self.file.file_name)
+    }
 }
 
 /// How big a jump an update is, for the review before updating several.
