@@ -1483,7 +1483,9 @@ impl ServersView {
             .child(open)
             .when(pingable, |r| r.child(ping_button(&self.store, &server, cx)))
             .children(self.control.update(cx, |c, cx| c.more_button(cx)));
-        let header = crate::hero::render(
+        // Past Overview the hero folds to one row: the tab's content gets the room.
+        let render_hero = if self.tab == TAB_OVERVIEW { crate::hero::render } else { crate::hero::render_compact };
+        let header = render_hero(
             crate::hero::Hero {
                 art,
                 blur,
@@ -1503,7 +1505,7 @@ impl ServersView {
             .px_6()
             .pt_2()
             .pb_5()
-            .gap_5()
+            .map(|c| if self.tab == TAB_OVERVIEW { c.gap_5() } else { c.gap_3() })
             .child({
                 let codes = tabs_for(remote);
                 let online = pstats.as_ref().filter(|p| p.running).map(|p| p.online);

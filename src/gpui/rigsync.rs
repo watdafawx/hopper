@@ -1451,27 +1451,36 @@ impl SyncPanel {
             (Some(p), Some(sv)) if p != sv => Some(format!("Server NeoForge {sv}, pack {p}")),
             _ => None,
         };
-        // One line of facts: loader, then what the server pack said.
-        let mut facts = Vec::new();
-        if nf_mismatch.is_none()
-            && let (Some(p), Some(_)) = (&pack_nf, &self.server_nf)
-        {
-            facts.push(format!("NeoForge {p} on both"));
-        }
-        match self.note.as_ref().map(|a| (a.server_pack_jars, &a.note, a.flagged)) {
-            Some((Some(n), _, _)) => facts.push(format!("the pack's server pack lists {n} mods")),
-            Some((None, Some(note), f)) => facts.push(format!("{note} {f} mods flagged.")),
+        // The pairing's facts as chips on the title row (loader, server
+        // pack), not lines of their own: the list keeps the room.
+        let mut chips: Vec<AnyElement> = Vec::new();
+        match (&nf_mismatch, &pack_nf, &self.server_nf) {
+            (Some(t), _, _) => chips.push(
+                widgets::chip(theme.warning)
+                    .child(h_flex().gap_1().child(Icon::new(IconName::TriangleAlert).xsmall()).child(t.clone()))
+                    .into_any_element(),
+            ),
+            (None, Some(p), Some(_)) => chips.push(
+                widgets::chip(theme.success)
+                    .child(h_flex().gap_1().child(Icon::new(IconName::CircleCheck).xsmall()).child(format!("NeoForge {p} on both")))
+                    .into_any_element(),
+            ),
             _ => {}
         }
-        let facts = (!facts.is_empty()).then(|| {
-            let mut t = facts.join(" · ");
-            if let Some(c) = t.get(0..1) {
-                t.replace_range(0..1, &c.to_uppercase());
+        match self.note.as_ref().map(|a| (a.server_pack_jars, &a.note, a.flagged)) {
+            Some((Some(n), _, _)) => chips.push(
+                widgets::chip(theme.muted_foreground)
+                    .child(format!("Server pack lists {n} mods"))
+                    .into_any_element(),
+            ),
+            Some((None, Some(note), f)) => {
+                chips.push(widgets::caption(format!("{note} {f} mods flagged."), cx).truncate().into_any_element())
             }
-            t
-        });
+            _ => {}
+        }
         let title = h_flex()
-            .flex_1()
+            .flex_none()
+            .max_w(rems(30.))
             .min_w_0()
             .gap_2()
             .text_lg()
@@ -1498,6 +1507,7 @@ impl SyncPanel {
                     .gap_3()
                     .when(!in_instance, |r| r.child(widgets::thumb(icon.as_deref(), rems(if in_server_page { 2. } else { 2.5 }), cx)))
                     .child(title)
+                    .child(h_flex().flex_1().min_w_0().gap_1p5().overflow_hidden().children(chips))
                     .children(controls)
                     .when(
                         inst.pack
@@ -1536,17 +1546,6 @@ impl SyncPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
                     ),
             )
-            .when_some(nf_mismatch, |r, t| {
-                r.child(
-                    h_flex()
-                        .gap_1p5()
-                        .text_sm()
-                        .text_color(theme.warning)
-                        .child(Icon::new(IconName::TriangleAlert).small())
-                        .child(t),
-                )
-            })
-            .when_some(facts, |r, t| r.child(widgets::caption(t, cx)))
             .children(live)
     }
 
@@ -1949,18 +1948,64 @@ impl SyncPanel {
         cx.notify();
     }
 
+    /// The drift notice's key: closing it hides it until something else changes.
+    fn drift_key(&self, d: &hopper::configdiff::Drift) -> String {
+        let place = self.server.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        hopper::settings::notice_key(&place, "drift", &format!("{:016x}", d.signature()))
+    }
+
+    /// "Also differs" folded to a chip beside the section tabs; clicking it
+    /// opens the full notice under them (see [`Self::drift_banner`]).
+    fn drift_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let d = self.drift.as_ref().filter(|d| !d.is_empty())?;
+        if self.section != Section::Mods || self.drift_open || self.store.read(cx).notice_hidden(&self.drift_key(d)) {
+            return None;
+        }
+        let warn = cx.theme().warning;
+        Some(
+            widgets::clickable(
+                h_flex()
+                    .id("drift-chip")
+                    .flex_none()
+                    .gap_1p5()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(crate::theme::RADIUS))
+                    .bg(warn.opacity(widgets::alpha::TINT))
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(warn)
+                    .child(Icon::new(IconName::TriangleAlert).xsmall())
+                    .child(format!("Also differs: {}", d.summary()))
+                    .child(Icon::new(IconName::ChevronRight).xsmall()),
+                cx,
+            )
+            .hover(move |s| s.bg(warn.opacity(widgets::alpha::TINT * 2.)))
+            .tooltip(|w, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(
+                    "Pack and server updates don't always bring these along. Click to see what differs.",
+                )
+                .build(w, cx)
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.drift_open = true;
+                cx.notify();
+            }))
+            .into_any_element(),
+        )
+    }
+
     /// Pack and server updates often leave global datapacks and the configs
     /// of new mods behind: which differ from the pack, each a click from
     /// its files in Configs.
     fn drift_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use hopper::configdiff::{DriftGroup, FileStatus};
         let d = self.drift.as_ref().filter(|d| !d.is_empty())?;
-        if self.section != Section::Mods {
+        // Closed, it's the chip beside the section tabs.
+        if self.section != Section::Mods || !self.drift_open {
             return None;
         }
-        let place = self.server.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        // Hidden until something else changes.
-        let key = hopper::settings::notice_key(&place, "drift", &format!("{:016x}", d.signature()));
+        let key = self.drift_key(d);
         let theme = cx.theme().clone();
         let counts = |g: &DriftGroup| {
             let mut v = Vec::new();
@@ -3117,6 +3162,7 @@ impl Render for SyncPanel {
         let sidebar = side.then(|| self.sidebar(&server, &inst, window, cx));
         let crash = self.crash_banner(cx);
         let drift = self.drift_banner(cx);
+        let drift_chip = self.drift_chip(cx);
         // The console is a section where the panel is set up (in an
         // instance; the Servers page has its own).
         let console = side && self.control.read(cx).configured(cx);
@@ -3158,6 +3204,12 @@ impl Render for SyncPanel {
                 let s = [Section::Mods, Section::Configs, Section::History, Section::Console][(*ix).min(3)];
                 this.set_section(s, cx);
             }));
+        // The section tabs with "Also differs" folded to a chip at their end.
+        let sections = h_flex()
+            .gap_3()
+            .items_center()
+            .child(div().flex_1().min_w_0().child(sections))
+            .children(drift_chip);
         // The list's width: the work area less the side column and padding.
         let room = self.room.unwrap_or_else(|| window.viewport_size().width / window.rem_size());
         let side_w = if side {
@@ -3220,7 +3272,10 @@ impl Render for SyncPanel {
                     .min_h_0()
                     .gap_3()
                     .child(toolbar)
-                    .child(v_flex().flex_1().min_h_0().child(columns).child(
+                    // The list as tall as its rows (shrinking to fit), so the
+                    // apply bar and the result sit right under it, not at the
+                    // window's bottom past empty space.
+                    .child(v_flex().flex_shrink(1.).min_h_0().child(columns).child(
                         div()
                             .id("sync-rows-area")
                             .on_drag_move::<PickDrag>(cx.listener(|this, e: &DragMoveEvent<PickDrag>, window, cx| {
@@ -3230,7 +3285,8 @@ impl Render for SyncPanel {
                             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                             .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
-                            .flex_1()
+                            .h(rems(ROW_H * count as f32 + 0.25))
+                            .flex_shrink(1.)
                             .min_h_0()
                             .relative()
                             .child(
@@ -3277,11 +3333,11 @@ impl Render for SyncPanel {
         v_flex()
             .size_full()
             .when(pad, |c| c.px_6().py_5())
-            .gap_4()
+            .gap_3()
             .children(header)
             .children(crash)
-            .children(drift)
             .child(sections)
+            .children(drift)
             .child(v_flex().flex_1().min_h_0().child(body))
             .into_any_element()
     }
