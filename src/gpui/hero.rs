@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 /// The hero's height in rem, the same on every tab.
 pub const HERO: f32 = 9.5;
+/// The folded hero's height in rem (see [`render_compact`]).
+pub const HERO_COMPACT: f32 = 4.0;
 
 /// What a hero shows.
 pub struct Hero {
@@ -136,35 +138,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         )
         .child(v_flex().flex_none().items_end().gap_3().children(stats).child(h.actions));
 
-    // The backdrop: the art blurred and stretched, faded into the page
-    // (or, on glass, into a tint that keeps text readable).
-    let base = if glass {
-        if dark { black() } else { white() }
-    } else {
-        theme.background
-    };
-    let (top_a, bottom_a, side_a) = if glass { (0.05, 0.6, 0.5) } else { (0.15, 1.0, 0.85) };
-    let backdrop = div()
-        .absolute()
-        .inset_0()
-        .map(|d| match h.blur {
-            Some(p) => d.child(img(p).size_full().object_fit(ObjectFit::Cover).opacity(if dark { 0.75 } else { 0.55 })),
-            None => d.bg(linear_gradient(
-                135.,
-                linear_color_stop(theme.primary.opacity(0.22), 0.),
-                linear_color_stop(theme.primary.opacity(0.), 1.),
-            )),
-        })
-        .child(div().absolute().inset_0().bg(linear_gradient(
-            180.,
-            linear_color_stop(base.opacity(top_a), 0.),
-            linear_color_stop(base.opacity(bottom_a), 1.),
-        )))
-        .child(div().absolute().inset_0().bg(linear_gradient(
-            90.,
-            linear_color_stop(base.opacity(side_a), 0.),
-            linear_color_stop(base.opacity(0.), 0.7),
-        )));
+    let backdrop = backdrop(h.blur, cx);
 
     div()
         .relative()
@@ -186,5 +160,116 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         .child(backdrop)
         .child(content)
         .h(rems(if taller { HERO + 1.5 } else { HERO }))
+        .into_any_element()
+}
+
+/// The backdrop: the art blurred and stretched, faded into the page
+/// (or, on glass, into a tint that keeps text readable).
+fn backdrop(blur: Option<PathBuf>, cx: &App) -> Div {
+    let theme = cx.theme();
+    let glass = widgets::glass(cx);
+    let dark = theme.mode.is_dark();
+    let base = if glass {
+        if dark { black() } else { white() }
+    } else {
+        theme.background
+    };
+    let (top_a, bottom_a, side_a) = if glass { (0.05, 0.6, 0.5) } else { (0.15, 1.0, 0.85) };
+    div()
+        .absolute()
+        .inset_0()
+        .map(|d| match blur {
+            Some(p) => d.child(img(p).size_full().object_fit(ObjectFit::Cover).opacity(if dark { 0.75 } else { 0.55 })),
+            None => d.bg(linear_gradient(
+                135.,
+                linear_color_stop(theme.primary.opacity(0.22), 0.),
+                linear_color_stop(theme.primary.opacity(0.), 1.),
+            )),
+        })
+        .child(div().absolute().inset_0().bg(linear_gradient(
+            180.,
+            linear_color_stop(base.opacity(top_a), 0.),
+            linear_color_stop(base.opacity(bottom_a), 1.),
+        )))
+        .child(div().absolute().inset_0().bg(linear_gradient(
+            90.,
+            linear_color_stop(base.opacity(side_a), 0.),
+            linear_color_stop(base.opacity(0.), 0.7),
+        )))
+}
+
+/// The hero folded to one row, for the tabs past Overview: the same art,
+/// name, state, facts, figures and actions, without the height. The
+/// summary line and all but the first pill (the state) are left out:
+/// Overview shows them.
+pub fn render_compact(h: Hero, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let glass = widgets::glass(cx);
+    let dark = theme.mode.is_dark();
+    let art = div()
+        .flex_none()
+        .size(rems(2.5))
+        .rounded(rems(0.5))
+        .overflow_hidden()
+        .bg(theme.muted)
+        .border_1()
+        .border_color(white().opacity(0.12))
+        .map(|d| match h.art.clone() {
+            Some(p) => d.child(img(p).size_full().object_fit(ObjectFit::Cover)),
+            None => d.flex().items_center().justify_center().child(h.no_art),
+        });
+    // Figures as one quiet line: "0/16 players · 20.0 TPS · 17.1 GB memory".
+    let stats = (!h.stats.is_empty()).then(|| {
+        h_flex()
+            .flex_none()
+            .gap_3()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .children(h.stats.into_iter().map(|(v, l)| {
+                h_flex()
+                    .gap_1()
+                    .child(div().font_weight(FontWeight::BOLD).text_color(theme.foreground).child(v))
+                    .child(l.to_lowercase())
+            }))
+    });
+    let content = h_flex()
+        .absolute()
+        .inset_0()
+        .items_center()
+        .gap_3()
+        .px_6()
+        .child(art)
+        .child(
+            div()
+                .flex_none()
+                .max_w(rems(18.))
+                .text_size(rems(1.15))
+                .font_weight(FontWeight::EXTRA_BOLD)
+                .truncate()
+                .child(h.title),
+        )
+        .child(h_flex().flex_none().gap_1p5().children(h.pills.into_iter().take(1)))
+        .child(h.facts.flex_1())
+        .children(stats)
+        .child(h.actions);
+    div()
+        .relative()
+        .flex_none()
+        .overflow_hidden()
+        .map(|d| {
+            if glass {
+                d.mx_3()
+                    .mt_3()
+                    .rounded(rems(1.))
+                    .border_1()
+                    .border_color(white().opacity(if dark { 0.1 } else { 0.5 }))
+                    .bg(theme.foreground.opacity(0.03))
+            } else {
+                d.border_b_1().border_color(theme.border)
+            }
+        })
+        .child(backdrop(h.blur, cx))
+        .child(content)
+        .h(rems(HERO_COMPACT))
         .into_any_element()
 }
