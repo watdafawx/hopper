@@ -64,7 +64,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/settings/curseforge", get(cf_key_status).put(set_cf_key))
 }
 
-fn entry(app: &App, headers: &HeaderMap, method: &Method, id: &str) -> ApiResult<Arc<Entry>> {
+pub(crate) fn entry(app: &App, headers: &HeaderMap, method: &Method, id: &str) -> ApiResult<Arc<Entry>> {
     require(app, headers, method)?;
     app.servers.get(id).ok_or_else(|| not_found("server"))
 }
@@ -237,7 +237,7 @@ fn heal(i: &mut Instance) -> bool {
     changed || i.addons.len() != before
 }
 
-fn instance(e: &Entry) -> anyhow::Result<Instance> {
+pub(crate) fn instance(e: &Entry) -> anyhow::Result<Instance> {
     if e.root.join(instances::HOPPER_FILE).is_file()
         && let Some(mut i) = instances::load(&e.root)
     {
@@ -340,7 +340,11 @@ async fn list(
                 "file": a.file_name, "name": if a.name.is_empty() { s.map(|s| s.mod_name.clone()).unwrap_or_default() } else { a.name.clone() },
                 "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": a.icon, "enabled": a.enabled,
                 "side": if a.env.is_empty() { s.map(|s| s.side.clone()).unwrap_or_default() } else { side_label(&a.env).to_string() },
-                "project_id": id_str(a.project_id), "source": if a.project_id == 0 { "" } else if modrinth::is_mr(a.project_id) { "modrinth" } else { "curseforge" },
+                "project_id": id_str(a.project_id), "source": if a.source.is_some() { "link" } else if a.project_id == 0 { "" } else if modrinth::is_mr(a.project_id) { "modrinth" } else { "curseforge" },
+                // From GitHub or another link: its chip and page.
+                "src_label": a.source.as_ref().map(|s| s.kind.label()), "src_page": a.source.as_ref().map(|s| s.page()),
+                // Came with a sync or pack and not confirmed here yet: no updates until it is.
+                "src_trusted": a.source.as_ref().map(hopper_core::sources::trusted), "src_publisher": a.source.as_ref().map(|s| s.publisher.clone()),
                 "from_pack": pack_mod(&pack, a), "page": a.page, "author": a.author,
                 "locked": a.locked, "file_id": id_str(a.file_id), "release_type": a.release_type,
                 "update": ups.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).cloned(),
@@ -677,6 +681,9 @@ async fn updates(
                     "risk": risk.key(), "issues": issues,
                     // A test version in place of a release starts unticked.
                     "pre_skip": risk == install::Risk::Pre && a.release_type <= 1,
+                    // From GitHub or a link: its file changed under the same
+                    // release. Shown, never installed by Update all.
+                    "changed": u.file.source.as_ref().is_some_and(|s| s.changed),
                 })
             })
             .collect::<Vec<_>>())

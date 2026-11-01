@@ -2348,32 +2348,63 @@ impl AddonsView {
             .px_6()
             .gap_3()
             .flex_wrap()
-            .child(
-                Button::new("add-content")
-                    .small()
-                    .outline()
-                    .icon(IconName::Plus)
-                    .label("Add content")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let Some(root) = this.root.clone() else { return };
-                        // With Paxi's folder shown, what's added goes there.
-                        let rel = this
-                            .folder
-                            .clone()
-                            .filter(|_| this.class == cf::CLASS_DATAPACKS)
-                            .or_else(|| this.globals.picked.filter(|_| this.class == cf::CLASS_RESOURCE_PACKS).map(str::to_string));
-                        match rel {
-                            Some(rel) => cx.emit(AddonsEvent::AddTo {
-                                root,
-                                class: this.class,
-                                dest: rel,
-                            }),
-                            None => cx.emit(AddonsEvent::AddContent {
-                                root,
-                                class: this.class,
-                            }),
-                        }
-                    })),
+            .child({
+                let add = Button::new("add-content").small().outline().icon(IconName::Plus).label("Add content");
+                // Mods can also come from GitHub and other links.
+                if self.class == cf::CLASS_MODS && self.global_dir().is_none() {
+                    let (v1, v2) = (cx.entity(), cx.entity());
+                    add.dropdown_caret(true)
+                        .dropdown_menu(move |menu, _, _| {
+                            let (v1, v2) = (v1.clone(), v2.clone());
+                            menu.item(
+                                PopupMenuItem::new("Browse CurseForge and Modrinth")
+                                    .icon(IconName::Search)
+                                    .on_click(move |_, _, cx| v1.update(cx, |this, cx| this.add_content(cx))),
+                            )
+                            .item(
+                                PopupMenuItem::new("From GitHub or a link…")
+                                    .icon(IconName::Link)
+                                    .on_click(move |_, window, cx| {
+                                        let (store, root) = {
+                                            let this = v2.read(cx);
+                                            (this.store.clone(), this.root.clone())
+                                        };
+                                        if let Some(root) = root {
+                                            crate::source_dialog::open_add(store, root, window, cx);
+                                        }
+                                    }),
+                            )
+                        })
+                        .into_any_element()
+                } else {
+                    add.on_click(cx.listener(|this, _, _, cx| this.add_content(cx))).into_any_element()
+                }
+            })
+            // Jars nobody knows: follow their sources in one go.
+            .when_some(
+                (self.class == cf::CLASS_MODS && self.global_dir().is_none() && self.store.read(cx).settings().allow_sources)
+                    .then(|| {
+                        let inst = self.store.read(cx).instance(&inst.root)?;
+                        let n = inst.addons.iter().filter(|a| a.project_id == 0 && a.source.is_none() && a.folder() == "mods").count()
+                            + hopper::install::loose_jars(inst).len();
+                        (n > 0).then_some(n)
+                    })
+                    .flatten(),
+                |r, n| {
+                    r.child(
+                        Button::new("find-sources-bar")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Link)
+                            .label(format!("Find sources ({n})"))
+                            .tooltip(if n == 1 { "Find a source for 1 unknown mod".to_string() } else { format!("Find sources for {n} unknown mods") })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if let Some(root) = this.root.clone() {
+                                    crate::source_dialog::open_find(this.store.clone(), root, window, cx);
+                                }
+                            })),
+                    )
+                },
             )
             // Update all and its refresh sit by Add content. The note (checking,
             // errors) goes after them so they don't move.
@@ -2952,6 +2983,21 @@ impl AddonsView {
                                 }
                             })),
                     )
+                    .when(self.store.read(cx).settings().allow_sources, |r| {
+                        r.child(
+                            Button::new("find-sources")
+                                .small()
+                                .ghost()
+                                .icon(IconName::Link)
+                                .label("Find their sources")
+                                .tooltip("Jars that link to their GitHub repo can follow it for updates")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if let Some(root) = this.root.clone() {
+                                        crate::source_dialog::open_find(this.store.clone(), root, window, cx);
+                                    }
+                                })),
+                        )
+                    })
                     .into_any_element(),
                 Row::Loose(name) => {
                     let file = name.clone();
@@ -2975,6 +3021,22 @@ impl AddonsView {
                                 .truncate()
                                 .child(name.clone()),
                         )
+                        .when(self.class == cf::CLASS_MODS && self.store.read(cx).settings().allow_sources, |r| {
+                            let f = name.trim_end_matches(".disabled").to_string();
+                            r.child(
+                                Button::new(ElementId::Name(format!("src-loose:{name}").into()))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Link)
+                                    .label("Add a source to get updates")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(root) = this.root.clone() {
+                                            let n = hopper::scan::strip_version_suffix(&f);
+                                            crate::source_dialog::open_follow(this.store.clone(), root, f.clone(), n, String::new(), window, cx);
+                                        }
+                                    })),
+                            )
+                        })
                         .child(
                             col_trash().child(
                                 Button::new(ElementId::Name(format!("rm-loose:{name}").into()))
@@ -3268,6 +3330,8 @@ impl AddonsView {
                 modrinth: !a.mr_project.is_empty(),
                 crashed: self.crashed.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).map(String::as_str),
                 max_categories: lock_line.then_some(0),
+                source: a.source.as_ref().map(|s| s.kind.label()),
+                source_changed: update.is_some_and(|u| u.file.source.as_ref().is_some_and(|s| s.changed)),
             },
             cx,
         );
@@ -3329,6 +3393,38 @@ Details").into()),
                 )
             });
 
+        // An unknown jar: a quiet way to follow its source. A source that
+        // came with a pack or sync: a way to turn its updates on.
+        let src_prompt: Option<(SharedString, Option<hopper::sources::ModSource>)> =
+            if self.class != cf::CLASS_MODS || global || !store.settings().allow_sources {
+                None
+            } else if a.project_id == 0 && a.source.is_none() {
+                Some(("Add a source to get updates".into(), None))
+            } else {
+                a.source
+                    .as_ref()
+                    .filter(|s| !hopper::sources::trusted(s))
+                    .map(|s| (format!("Turn on updates from {}", s.publisher).into(), Some(s.clone())))
+            };
+        let name_line = name_line.when_some(src_prompt, |r, (label, src)| {
+            let (f, n) = (a.file_name.clone(), a.name.clone());
+            r.child(
+                Button::new(id("src-prompt"))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Link)
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        let Some(root) = this.root.clone() else { return };
+                        let store = this.store.clone();
+                        match &src {
+                            Some(s) => crate::source_dialog::confirm_trust(store, root, s.clone(), window, cx),
+                            None => crate::source_dialog::open_follow(store, root, f.clone(), n.clone(), String::new(), window, cx),
+                        }
+                    })),
+            )
+        });
         let done = self.recent.contains_key(&a.project_id);
         let breaking = (!breaks.is_empty() || needs.is_some()) && !vlocked;
         // A drag across switches or Update buttons: what letting go does.
@@ -3525,6 +3621,11 @@ It stays disabled after updating: turn it on in the On column.")
             !a.mr_project.is_empty(),
             a.project_id != 0,
         );
+        // Following a source (or able to): only mods of the instance itself.
+        let src_menu = (!global && self.class == cf::CLASS_MODS).then(|| SrcMenu {
+            name: a.name.clone(),
+            source: a.source.as_ref().map(|s| (s.kind.label(), s.page())),
+        });
         let menu_fn = Self::row_menu(
             view,
             f_menu,
@@ -3534,6 +3635,7 @@ It stays disabled after updating: turn it on in the On column.")
             reset_cfg,
             (pid_menu, locked, mr, has_project, global, on),
             update.map(|u| (u.versions(), u.file.file_name.clone(), vlocked)),
+            src_menu,
         );
         h_flex()
             .id(id("row"))
@@ -3806,6 +3908,70 @@ Change version", a.file_name).into()
             .into_any_element()
     }
 
+    /// The row menu's source items: "Follow a source…", or for a mod that
+    /// follows one, open it, change it or stop following.
+    fn src_items(menu: PopupMenu, view: &Entity<Self>, file: &str, s: SrcMenu) -> PopupMenu {
+        let open = {
+            let (v, f, name) = (view.clone(), file.to_string(), s.name.clone());
+            move |link: String, window: &mut Window, cx: &mut App| {
+                let (store, root) = {
+                    let this = v.read(cx);
+                    (this.store.clone(), this.root.clone())
+                };
+                if let Some(root) = root {
+                    crate::source_dialog::open_follow(store, root, f.clone(), name.clone(), link, window, cx);
+                }
+            }
+        };
+        let menu = menu.separator();
+        match s.source {
+            None => menu.item(
+                PopupMenuItem::new("Follow a source…")
+                    .icon(IconName::Link)
+                    .on_click(move |_, window, cx| open(String::new(), window, cx)),
+            ),
+            Some((label, page)) => {
+                let (v, f) = (view.clone(), file.to_string());
+                let p2 = page.clone();
+                menu.item(
+                    PopupMenuItem::new(format!("Open on {label}"))
+                        .icon(IconName::ExternalLink)
+                        .on_click(move |_, _, cx| cx.open_url(&p2)),
+                )
+                .item(
+                    PopupMenuItem::new("Change source…")
+                        .icon(IconName::Link)
+                        .on_click(move |_, window, cx| open(String::new(), window, cx)),
+                )
+                .item(PopupMenuItem::new("Stop following").icon(IconName::Unlink).on_click(move |_, _, cx| {
+                    let (store, root) = {
+                        let this = v.read(cx);
+                        (this.store.clone(), this.root.clone())
+                    };
+                    if let Some(root) = root {
+                        crate::source_dialog::unfollow(store, root, f.clone(), cx);
+                    }
+                }))
+            }
+        }
+    }
+
+    /// Add content: Browse for this kind of content (into Paxi's folder
+    /// when that's the one shown).
+    fn add_content(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        // With Paxi's folder shown, what's added goes there.
+        let rel = self
+            .folder
+            .clone()
+            .filter(|_| self.class == cf::CLASS_DATAPACKS)
+            .or_else(|| self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS).map(str::to_string));
+        match rel {
+            Some(rel) => cx.emit(AddonsEvent::AddTo { root, class: self.class, dest: rel }),
+            None => cx.emit(AddonsEvent::AddContent { root, class: self.class }),
+        }
+    }
+
     /// Locks the offered file of `file`'s mod out (`Some(its file name)`),
     /// or lifts the lock (`None`).
     pub(crate) fn lock_version(&mut self, file: String, lock: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
@@ -3954,7 +4120,11 @@ Change version", a.file_name).into()
         (pid_menu, locked, mr, has_project, global, on): (u64, bool, bool, bool, bool, bool),
         // The offered update's (versions, file name, locked out).
         vlock: Option<((String, String), String, bool)>,
+        src_menu: Option<SrcMenu>,
     ) -> Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> {
+            // A source-tracked mod isn't on either site.
+            let followed = src_menu.as_ref().is_some_and(|s| s.source.is_some());
+            let has_site = has_project && !followed;
             Rc::new(move |menu, _, _| {
                 let f = f_menu.clone();
                 let (v1, v2, v3, v4, v5) = (
@@ -3968,7 +4138,7 @@ Change version", a.file_name).into()
                 let page = page.clone();
                 let (v6, v7) = (view.clone(), view.clone());
                 let upd = update_file.clone();
-                let menu = menu.when(has_project, |m| {
+                let menu = menu.when(has_site, |m| {
                     m.item(
                         PopupMenuItem::new("Open in Browse")
                             .icon(IconName::Search)
@@ -3980,7 +4150,9 @@ Change version", a.file_name).into()
                                 })
                             }),
                     )
-                    .item(
+                })
+                .when(has_project, |m| {
+                    m.item(
                         PopupMenuItem::new("Versions and changelogs")
                             .icon(IconName::Clock)
                             .on_click(move |_, window, cx| {
@@ -4012,14 +4184,15 @@ Change version", a.file_name).into()
                             }),
                     )
                 })
-                .when(!page.is_empty(), |m| {
+                .when(!page.is_empty() && !followed, |m| {
                     m.item(
                         PopupMenuItem::new(if mr { "Open on Modrinth" } else { "Open on CurseForge" })
                             .icon(IconName::ExternalLink)
                             .on_click(move |_, _, cx| cx.open_url(&page)),
                     )
                 })
-                .when(has_project && !global, |m| {
+                .when_some(src_menu.clone(), |m, s| Self::src_items(m, &view, &f_menu, s))
+                .when(has_site && !global, |m| {
                     m.item(
                         PopupMenuItem::new(if mr {
                             "Switch to CurseForge"
@@ -4967,4 +5140,12 @@ mod tests {
         assert_eq!(find_backup(&root, &root.join("mods").join("c.jar"), since), Some(moved));
         let _ = std::fs::remove_dir_all(&root);
     }
+}
+
+/// What a mod row's menu needs for its source items.
+#[derive(Clone)]
+struct SrcMenu {
+    name: String,
+    /// The source's chip label and page, when it follows one.
+    source: Option<(&'static str, String)>,
 }

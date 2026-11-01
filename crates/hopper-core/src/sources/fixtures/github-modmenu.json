@@ -1,0 +1,632 @@
+[
+ {
+  "tag_name": "v22.0.0-alpha.3",
+  "name": "v22.0.0-alpha.3 for 26.4-snapshot-6",
+  "body": "- Update to Minecraft 26.4-snapshot-6\n- Reset ModMenu config when malformed (resolves #1079)",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-10-27T20:20:08Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v22.0.0-alpha.3",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-22.0.0-alpha.3.jar",
+    "size": 857021,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v22.0.0-alpha.3/modmenu-22.0.0-alpha.3.jar",
+    "updated_at": "2026-10-27T20:20:09Z",
+    "digest": "sha256:67a48a0f6eb1092ce369859e660b12b1c62308dd8b611268023ea0cda442d81e"
+   }
+  ]
+ },
+ {
+  "tag_name": "v22.0.0-alpha.2",
+  "name": "v22.0.0-alpha.2 for 26.4-snapshot-3",
+  "body": "- Allow opening contributor homepages, thanks LostLuma\n- Update to Minecraft 26.4 snapshot 3",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-10-12T23:02:44Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v22.0.0-alpha.2",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-22.0.0-alpha.2.jar",
+    "size": 857307,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v22.0.0-alpha.2/modmenu-22.0.0-alpha.2.jar",
+    "updated_at": "2026-10-12T23:02:45Z",
+    "digest": "sha256:a6bd4d98ffda98335979d2fac9e483dc7c07d839e47e974afccbd0441865eb4c"
+   }
+  ]
+ },
+ {
+  "tag_name": "v22.0.0-alpha.1",
+  "name": "v22.0.0-alpha.1 for 26.4-snapshot-1",
+  "body": "- Rebuild for Minecraft 26.4-snapshot-1",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-09-24T20:43:55Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v22.0.0-alpha.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-22.0.0-alpha.1.jar",
+    "size": 856814,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v22.0.0-alpha.1/modmenu-22.0.0-alpha.1.jar",
+    "updated_at": "2026-09-24T20:43:56Z",
+    "digest": "sha256:3c2fba797fcf5283f8391b9e4b0f543cbff8c08a410a39f1bbfdf4918e69bc5d"
+   }
+  ]
+ },
+ {
+  "tag_name": "v20.0.3",
+  "name": "v20.0.3 for 26.2",
+  "body": "- Translation backports and fixes\n- Update Polish translations, thanks lumiscosity\n- Update Belarusian translation, thanks The518thGuy\n- Updated Spanish (Argentina) translations, thanks Texaliuz\n- Update Estonian translation, thanks Madis0\n- Use a better word for \"Credits\" in the Russian translation (resolves #1098)",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-24T19:34:08Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v20.0.3",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-20.0.3.jar",
+    "size": 616919,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v20.0.3/modmenu-20.0.3.jar",
+    "updated_at": "2026-09-24T19:34:08Z",
+    "digest": "sha256:00865605007fbf26d4712b40ccdd55b1cdebad79a9ccfcc1ff635ed522f5bb27"
+   }
+  ]
+ },
+ {
+  "tag_name": "v18.0.2",
+  "name": "v18.0.2 for 26.1",
+  "body": "- Translation backports and fixes\n- Update Polish translations, thanks lumiscosity\n- Update Belarusian translation, thanks The518thGuy\n- Updated Spanish (Argentina) translations, thanks Texaliuz\n- Use a better word for \"Credits\" in the Russian translation (resolves #1098)\n- Fix Chinese (zh_cn) translations (resolves #1100)",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-24T19:22:16Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v18.0.2",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-18.0.2.jar",
+    "size": 859999,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v18.0.2/modmenu-18.0.2.jar",
+    "updated_at": "2026-09-24T19:22:17Z",
+    "digest": "sha256:87ab58f8907dad8346ecc4500a522d66dd4c907462df5bff23c60b07caca8c96"
+   }
+  ]
+ },
+ {
+  "tag_name": "v17.0.1",
+  "name": "v17.0.1 for 1.21.11",
+  "body": "- Add uzbek localization, thanks itsbilolbek",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-24T19:10:30Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v17.0.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-17.0.1.jar",
+    "size": 960882,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v17.0.1/modmenu-17.0.1.jar",
+    "updated_at": "2026-09-24T19:10:30Z",
+    "digest": "sha256:2eb2d6db9964fcf2e44e2be1e4d172b8c4e829e385c8f31636de94a1708c2076"
+   }
+  ]
+ },
+ {
+  "tag_name": "v11.0.5",
+  "name": "v11.0.5 for 1.21",
+  "body": "- Update uk_ua.json, thanks StarmanMine142\n- Add uzbek localization, thanks itsbilolbek",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-24T18:59:53Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v11.0.5",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-11.0.5.jar",
+    "size": 975846,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v11.0.5/modmenu-11.0.5.jar",
+    "updated_at": "2026-09-24T18:59:54Z",
+    "digest": "sha256:afa55fe4e7c48560126dbe654fa9647f141bc6ffd3ce35525b65dd65d88251b5"
+   }
+  ]
+ },
+ {
+  "tag_name": "v21.0.0",
+  "name": "v21.0.0 for 26.3",
+  "body": "- Update deps for 26.3 release (resolves #1092)\n- Update Estonian translation, thanks Madis0\n- Use a better word for \"Credits\" in the Russian translation (resolves #1098)",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-23T21:30:52Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v21.0.0",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-21.0.0.jar",
+    "size": 856779,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v21.0.0/modmenu-21.0.0.jar",
+    "updated_at": "2026-09-23T21:30:53Z",
+    "digest": "sha256:837812c6c98d66141db7b5dcae668f27fb78d557e8f4c0c89912985fc26a5e6f"
+   }
+  ]
+ },
+ {
+  "tag_name": "v21.0.0-beta.1",
+  "name": "v21.0.0-beta.1 for 26.3-rc-1",
+  "body": "- Update Chinese translations, thanks Rain-Clear\n- Update Polish translations, thanks lumiscosity\n- Update Belarusian translation, thanks The518thGuy\n- Updated Spanish (Argentina) translations, thanks Texaliuz\n- Uzbek localization, thanks itsbilolbek\n- Update to 26.3-rc-1\n- Publish to Terraformers maven",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-09-11T00:52:31Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v21.0.0-beta.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-21.0.0-beta.1.jar",
+    "size": 856788,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v21.0.0-beta.1/modmenu-21.0.0-beta.1.jar",
+    "updated_at": "2026-09-11T00:52:32Z",
+    "digest": "sha256:d08bbecdf9bc79fb2a84b46f726259cb40a8f33f080ee77ff9c08a329770a8fe"
+   }
+  ]
+ },
+ {
+  "tag_name": "v20.0.2",
+  "name": "v20.0.2 for 26.2",
+  "body": "- Add uzbek localization, thanks itsbilolbek\n- Update Chinese translations, thanks Rain-Clear",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-11T00:48:18Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v20.0.2",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-20.0.2.jar",
+    "size": 616610,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v20.0.2/modmenu-20.0.2.jar",
+    "updated_at": "2026-09-11T00:48:19Z",
+    "digest": "sha256:1bf32f327b2257266e9dbd00b394800885c3a7c5ff86dc62be0dec129c1da482"
+   }
+  ]
+ },
+ {
+  "tag_name": "v18.0.1",
+  "name": "v18.0.1 for 26.1",
+  "body": "- Add uzbek localization, thanks itsbilolbek\n- Update Chinese translations, thanks Rain-Clear",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-11T00:34:15Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v18.0.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-18.0.1.jar",
+    "size": 859754,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v18.0.1/modmenu-18.0.1.jar",
+    "updated_at": "2026-09-11T00:34:16Z",
+    "digest": "sha256:b21bffc8214d9a662d53a80f978094554d1fa10c00044e7c0c90657d45512a42"
+   }
+  ]
+ },
+ {
+  "tag_name": "v21.0.0-alpha.1",
+  "name": "v21.0.0-alpha.1 for 26.3-snapshot-5",
+  "body": "- Update to 26.3-snapshot-5\n- Publish to gnomecraft maven\n- Update to 26.3-snapshot; thanks Jab125 and  EnderPhantomWing",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-07-23T05:58:26Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v21.0.0-alpha.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-21.0.0-alpha.1.jar",
+    "size": 851128,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v21.0.0-alpha.1/modmenu-21.0.0-alpha.1.jar",
+    "updated_at": "2026-07-23T05:58:27Z",
+    "digest": "sha256:776c976135ae728046eea14ad58bc2eb55d1c0f77bd216b3314e6040f6a80f37"
+   }
+  ]
+ },
+ {
+  "tag_name": "v20.0.1",
+  "name": "v20.0.1 for 26.2",
+  "body": "- Fix allowing 26.3-snapshot-1 and -2",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-07-09T21:54:11Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v20.0.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-20.0.1.jar",
+    "size": 614002,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v20.0.1/modmenu-20.0.1.jar",
+    "updated_at": "2026-07-09T21:54:12Z",
+    "digest": "sha256:81bfbca06012c57c74949072f2ffaad06360badee4d00dc59bfaeac80dd24bd8"
+   }
+  ]
+ },
+ {
+  "tag_name": "v18.0.0",
+  "name": "v18.0.0 for 26.1",
+  "body": "- Update zh_tw.json, thanks StarsShine11904\n- Update en_ud.json, thanks Fhilips613\n- Update Malay and Malay (Jawi) translations (thanks NuruddinPlays)\n- Update Estonian translation, thanks Madis0\n- Again fix selection and scroll amount not restoring, thanks fishstiz (resolves #1020)\n- Apply SHOW_LIBRARIES config to child mods; thanks to NotRyken\n- Update uk_ua.json, thanks StarmanMine142",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-07-09T01:33:49Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v18.0.0",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-18.0.0.jar",
+    "size": 857151,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v18.0.0/modmenu-18.0.0.jar",
+    "updated_at": "2026-07-09T01:33:50Z",
+    "digest": "sha256:ea15f4eb0812f23ebe20cc6b0144cdd5455da0a0a0b1f21b5b733970b20a4d7e"
+   }
+  ]
+ },
+ {
+  "tag_name": "v17.0.1-beta.1",
+  "name": "v17.0.1-beta.1 for 1.21.11",
+  "body": "- Again fix selection and scroll amount not restoring, thanks fishstiz (resolves #1020)\n- Apply SHOW_LIBRARIES config to child mods; thanks to NotRyken\n- Fix mod list entry width after filtering thanks to Zaxoosh (resolves #1015)\n- Improve how update checking is executed (thanks litetex)\n- Fix extra comma in es_es.json\n- Delete untranslated l18n files (thanks Madis0)\n- Delete untranslated l18n fil",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-07-09T02:48:06Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v17.0.1-beta.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-17.0.1-beta.1.jar",
+    "size": 958351,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v17.0.1-beta.1/modmenu-17.0.1-beta.1.jar",
+    "updated_at": "2026-07-09T02:48:06Z",
+    "digest": "sha256:38e3843946307a61adb30f9d9f6497879012d32cb8a8b179bf03c773f06dbd44"
+   }
+  ]
+ },
+ {
+  "tag_name": "v20.0.0",
+  "name": "v20.0.0 for 26.2",
+  "body": "- Releasing stable for 26.2\n- Update zh_tw.json, thanks StarsShine11904\n- Update en_ud.json, thanks Fhilips613",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-07-08T23:58:57Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v20.0.0",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-20.0.0.jar",
+    "size": 614003,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v20.0.0/modmenu-20.0.0.jar",
+    "updated_at": "2026-07-08T23:58:58Z",
+    "digest": "sha256:fcec913598d68124321d29ae2334f2b326c608b75560421daaf09b05ad70967e"
+   }
+  ]
+ },
+ {
+  "tag_name": "v20.0.0-beta.4",
+  "name": "v20.0.0-beta.4 for 26.2",
+  "body": "- Update uk_ua.json, thanks StarmanMine142\n- Update Malay and Malay (Jawi) translations (thanks NuruddinPlays)\n- Change small buttons to SpriteIconButton (mod compat) (thanks, samswi)",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-06-22T19:40:09Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v20.0.0-beta.4",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-20.0.0-beta.4.jar",
+    "size": 613011,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v20.0.0-beta.4/modmenu-20.0.0-beta.4.jar",
+    "updated_at": "2026-06-22T19:40:09Z",
+    "digest": "sha256:8e370529288f3d744051604347f32d00c8ea95f2a9efe453c29fe2c4de4bd45b"
+   }
+  ]
+ },
+ {
+  "tag_name": "v20.0.0-beta.3",
+  "name": "v20.0.0-beta.3 for 26.2",
+  "body": "- Update to 26.2 release\n- Update Estonian translation, thanks Madis0\n- Add new default option to show only configurable libraries, thanks Patbox",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-06-18T23:33:07Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v20.0.0-beta.3",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-20.0.0-beta.3.jar",
+    "size": 635877,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v20.0.0-beta.3/modmenu-20.0.0-beta.3.jar",
+    "updated_at": "2026-06-18T23:33:07Z",
+    "digest": "sha256:f2b3235f5239c7198bfc3922721313efd13febe72a2735b776fe09d6222eb645"
+   }
+  ]
+ },
+ {
+  "tag_name": "v20.0.0-beta.2",
+  "name": "v20.0.0-beta.2 for 26.2-rc-2",
+  "body": "- Identical to beta.1; testing CF work-around",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-06-14T01:06:28Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v20.0.0-beta.2",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-20.0.0-beta.2.jar",
+    "size": 633864,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v20.0.0-beta.2/modmenu-20.0.0-beta.2.jar",
+    "updated_at": "2026-06-14T01:06:29Z",
+    "digest": "sha256:03fb3ec00a5cdeee7d39a47fdd2687fb7521401436bfb58722a8528051234089"
+   }
+  ]
+ },
+ {
+  "tag_name": "v20.0.0-beta.1",
+  "name": "v20.0.0-beta.1 for 26.2-rc-2",
+  "body": "- Again fix selection and scroll amount not restoring, thanks fishstiz (resolves #1020)\r\n- Apply SHOW_LIBRARIES config to child mods; thanks to NotRyken\r\n- Improve handling of \"modded version\" in TitleScreen; thanks litetex\r\n- Update to Minecraft 26.2-rc-2, thanks Jab125",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-06-13T21:35:50Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v20.0.0-beta.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-20.0.0-beta.1.jar",
+    "size": 633864,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v20.0.0-beta.1/modmenu-20.0.0-beta.1.jar",
+    "updated_at": "2026-06-13T21:35:50Z",
+    "digest": "sha256:abee505fe940afa6417066c13b922ba1e2e4f50573fd8e121bd628adf3d7fb67"
+   }
+  ]
+ },
+ {
+  "tag_name": "v20.0.0-alpha.1",
+  "name": "v20.0.0-alpha.1 for 26.2-pre-2",
+  "body": "- Bump Text Placeholder API\n- Update Korean \"Buy Me a Coffee\" (Resolves #1029)\n- Update to 26.2-pre-2 (thanks, Jab125)",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-05-29T20:23:16Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v20.0.0-alpha.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-20.0.0-alpha.1.jar",
+    "size": 626743,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v20.0.0-alpha.1/modmenu-20.0.0-alpha.1.jar",
+    "updated_at": "2026-05-29T20:23:17Z",
+    "digest": "sha256:b55b241d6407bde834dad640534a9b252e1b878dbee9bde2d9686918dd972198"
+   }
+  ]
+ },
+ {
+  "tag_name": "v19.0.0-alpha.1",
+  "name": "v19.0.0-alpha.1 for 26.2-snapshot-6",
+  "body": "- Update to 26.2-snapshot-6\n- Update to 26.2-snapshot-5",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-05-09T23:14:29Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v19.0.0-alpha.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-19.0.0-alpha.1.jar",
+    "size": 860896,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v19.0.0-alpha.1/modmenu-19.0.0-alpha.1.jar",
+    "updated_at": "2026-05-09T23:14:29Z",
+    "digest": "sha256:6cac132a28bfc3dd189ef62deb511e1619ddf8bff63e34a9c988ebc98f0b27a7"
+   }
+  ]
+ },
+ {
+  "tag_name": "v18.0.0-beta.1",
+  "name": "v18.0.0-beta.1 for 26.1",
+  "body": "- Fix mod list entry width after filtering thanks to Zaxoosh (resolves #1015)\n- Minor updates to Polish translation thanks to lumiscosity\n- Update Korean localization thanks to minejango2\n- Update fil_ph.json thanks to StartsMercury",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-05-09T21:30:49Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v18.0.0-beta.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-18.0.0-beta.1.jar",
+    "size": 855297,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v18.0.0-beta.1/modmenu-18.0.0-beta.1.jar",
+    "updated_at": "2026-05-09T21:30:50Z",
+    "digest": "sha256:6387950861dd000601a920549b8ff8b0a6d309db32e187187cfe7f39911a2cf7"
+   }
+  ]
+ },
+ {
+  "tag_name": "v18.0.0-alpha.8",
+  "name": "v18.0.0-alpha.8 for 26.1",
+  "body": "- Prevent dev dependency on Text Placeholder API\n- Restore Text Placeholders",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-03-25T22:45:06Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v18.0.0-alpha.8",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-18.0.0-alpha.8.jar",
+    "size": 847389,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v18.0.0-alpha.8/modmenu-18.0.0-alpha.8.jar",
+    "updated_at": "2026-03-25T22:45:07Z",
+    "digest": "sha256:bb482d08e5409cdc721dcb25a3ecbd97f8c21ac15bf94fd8f2ca225229616430"
+   }
+  ]
+ },
+ {
+  "tag_name": "v17.0.0",
+  "name": "v17.0.0 for 1.21.11",
+  "body": "- Fix inversion of config mode (thanks sisby-folk)",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-03-25T02:08:45Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v17.0.0",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-17.0.0.jar",
+    "size": 1115809,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v17.0.0/modmenu-17.0.0.jar",
+    "updated_at": "2026-03-25T02:08:45Z",
+    "digest": "sha256:95f2c9571ca4a1e30d473783ed909c6b9d997b0b3e1418ea189cad73282c5128"
+   }
+  ]
+ },
+ {
+  "tag_name": "v16.0.1",
+  "name": "v16.0.1 for 1.21.9",
+  "body": "- Fix inversion of config mode (thanks sisby-folk)",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-03-25T01:55:31Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v16.0.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-16.0.1.jar",
+    "size": 1083558,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v16.0.1/modmenu-16.0.1.jar",
+    "updated_at": "2026-03-25T01:55:32Z",
+    "digest": "sha256:0f71522cc5abe17afe5d6a1698c410262f27ac58c9753c8bc295349d43a848f2"
+   }
+  ]
+ },
+ {
+  "tag_name": "v15.0.2",
+  "name": "v15.0.2 for 1.21.8",
+  "body": "- Fix inversion of config mode (thanks sisby-folk)",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-03-25T01:50:47Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v15.0.2",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-15.0.2.jar",
+    "size": 1087256,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v15.0.2/modmenu-15.0.2.jar",
+    "updated_at": "2026-03-25T01:50:47Z",
+    "digest": "sha256:87a802ef196cae3bf94a6dd611e5b3cb7c94930fdaf27e9399e11931093ac7cd"
+   }
+  ]
+ },
+ {
+  "tag_name": "v14.0.2",
+  "name": "v14.0.2 for 1.21.5",
+  "body": "- Fix inversion of config mode (thanks sisby-folk)",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-03-25T01:41:01Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v14.0.2",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-14.0.2.jar",
+    "size": 1069803,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v14.0.2/modmenu-14.0.2.jar",
+    "updated_at": "2026-03-25T01:41:02Z",
+    "digest": "sha256:47138b672a97c03a908aa225ab31977e611aef9876f349b37503198414e10167"
+   }
+  ]
+ },
+ {
+  "tag_name": "v13.0.4",
+  "name": "v13.0.4 for 1.21.4",
+  "body": "- Fix inversion of config mode (thanks sisby-folk)",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-03-25T01:16:37Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v13.0.4",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-13.0.4.jar",
+    "size": 1050885,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v13.0.4/modmenu-13.0.4.jar",
+    "updated_at": "2026-03-25T01:16:38Z",
+    "digest": "sha256:9774ff929f747d913458d469b1ad539bc0c61294a8f3aa58fe89b1b212cfc066"
+   }
+  ]
+ },
+ {
+  "tag_name": "v12.0.1",
+  "name": "v12.0.1 for 1.21.3",
+  "body": "- Fix inversion of config mode (thanks sisby-folk)",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-03-25T01:11:09Z",
+  "html_url": "https://github.com/TerraformersMC/ModMenu/releases/tag/v12.0.1",
+  "author": {
+   "login": "Prospector"
+  },
+  "assets": [
+   {
+    "name": "modmenu-12.0.1.jar",
+    "size": 986251,
+    "browser_download_url": "https://github.com/TerraformersMC/ModMenu/releases/download/v12.0.1/modmenu-12.0.1.jar",
+    "updated_at": "2026-03-25T01:11:10Z",
+    "digest": "sha256:9dc371fac5aa9911169ce53bb8191a84825ece2f0d250bef7e123bf4bf66be63"
+   }
+  ]
+ }
+]

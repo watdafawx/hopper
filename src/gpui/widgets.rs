@@ -319,6 +319,12 @@ pub struct ModTags<'a> {
     /// Categories shown before the rest fold into "+n" (default 2). Fewer
     /// when the line has other chips to fit, so "+n" isn't clipped off.
     pub max_categories: Option<usize>,
+    /// Where the mod comes from when it's not CurseForge or Modrinth
+    /// ("GitHub", "Maven", "Jenkins", "Link").
+    pub source: Option<&'static str>,
+    /// Its source replaced the installed release's file (same name, other
+    /// contents): flagged, not installed.
+    pub source_changed: bool,
 }
 
 /// Categories shown before the rest fold into "+n".
@@ -375,6 +381,22 @@ pub fn mod_tags(t: ModTags, cx: &App) -> Div {
             )
         })
         .when(t.modrinth, |r| r.child(site_tag(true)))
+        .when_some(t.source, |r, s| r.child(chip(info).child(s)))
+        .when(t.source_changed, |r| {
+            let key = t.key.to_string();
+            r.child(
+                div()
+                    .id(ElementId::Name(format!("src-changed:{key}").into()))
+                    .flex_none()
+                    .child(chip(bad).child("Changed at source"))
+                    .tooltip(|w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            "The file of the installed release was replaced at its source without a new release. Hopper won't install it on its own; install it from Versions if you trust the change.",
+                        )
+                        .build(w, cx)
+                    }),
+            )
+        })
 }
 
 /// CurseForge's orange or Modrinth's green, wherever a site is named.

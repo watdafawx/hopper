@@ -81,7 +81,7 @@ impl Category {
             Category::Java => "Playing & Java",
             Category::Minecraft => "Minecraft",
             Category::Servers => "Servers",
-            Category::Content => "CurseForge & Modrinth",
+            Category::Content => "Mod sources",
             Category::Appearance => "Appearance",
             Category::Updates => "Updates & install",
             Category::Advanced => "Advanced",
@@ -114,7 +114,7 @@ impl Category {
             Category::Java => "How games start, what happens while one runs, and memory and Java for instances that don't set their own.",
             Category::Minecraft => "Your usual in-game options: sound, mouse, view and keys. Hopper sets them in each instance before it starts.",
             Category::Servers => "Your server packs, servers hosted on this PC, and the panel that runs them.",
-            Category::Content => "The CurseForge API key, and where Browse looks first.",
+            Category::Content => "The CurseForge API key, where Browse looks first, and mods from GitHub and other links.",
             Category::Appearance => "Theme and size.",
             Category::Updates => "Hopper's version, its updates, and installing it.",
             Category::Advanced => "AI assistants (MCP), the notification-area icon, website links and Hopper's own files.",
@@ -127,6 +127,10 @@ impl Category {
         let w = word.trim().to_lowercase();
         if w.is_empty() {
             return None;
+        }
+        // The sites by name find the category that holds their keys.
+        if ["curseforge", "modrinth", "github"].iter().any(|s| s.starts_with(&w) && w.len() >= 3) {
+            return Some(Category::Content);
         }
         Category::ALL
             .into_iter()
@@ -261,6 +265,8 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "files-test", "Connection", "Whether the server answers with these details. SFTP remembers the server's key the first time and refuses a different one later.", "test connect host key fingerprint"),
     e(C::Content, "cf-key", "CurseForge API key", "Needed for CurseForge: browsing, installs and updates. Get one at console.curseforge.com.", "api key token console"),
     e(C::Content, "browse-source", "Browse searches", "Which site Browse opens on. Switch any time in Browse too.", "modrinth curseforge source search"),
+    e(C::Content, "allow-sources", "Allow mods from GitHub and other links", "Add content gets \"From GitHub or a link\", and a mod's menu gets \"Follow a source\". These files skip CurseForge's and Modrinth's checks, so add them only from people you trust.", "github maven jenkins link url source release jar"),
+    e(C::Content, "github-token", "GitHub token", "Optional. Without one GitHub allows 60 checks an hour; Hopper asks only when something may have changed. A token (no scopes needed) raises that to 5,000. Kept in Windows Credential Manager.", "github token api rate limit"),
     e(C::Appearance, "theme", "Theme", "Hopper's colors. Your own theme files go in the folder next to it.", "dark light color colour glass mica"),
     e(C::Appearance, "still-header", "Still header", "Keep the header on instance and server pages still. Off, its colors drift slowly and react to what you do; they stop while Hopper isn't the focused window, after 20 seconds without input, and with reduced motion.", "animation animated motion gradient background drift header hero"),
     e(C::Appearance, "zoom", "Zoom", "Ctrl + and Ctrl - change it anywhere; Ctrl 0 resets it.", "scale size font bigger smaller"),
@@ -483,6 +489,7 @@ pub struct SettingsPage {
     removing: Option<String>,
     /// A new CurseForge key; empty keeps the current one.
     cf_key: Entity<InputState>,
+    gh_token: Entity<InputState>,
     cf_test: Option<Result<String, String>>,
     cf_testing: bool,
     installing: bool,
@@ -549,6 +556,13 @@ impl SettingsPage {
                     "Paste your CurseForge API key"
                 },
             )
+        });
+        let gh_token = cx.new(|cx| {
+            InputState::new(window, cx).masked(true).placeholder(if hopper::sources::http::has_github_token() {
+                SAVED_KEY
+            } else {
+                "Paste a GitHub token (optional)"
+            })
         });
         let panel_key_saved = false;
         let panel_token = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste the panel's API key"));
@@ -688,6 +702,7 @@ impl SettingsPage {
             repair: None,
             removing: None,
             cf_key,
+            gh_token,
             cf_test: None,
             cf_testing: false,
             installing: false,
@@ -980,6 +995,27 @@ impl SettingsPage {
                     cx.notify();
                 });
                 window.push_notification(Notification::success("CurseForge key saved."), cx);
+            }
+            Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
+        }
+        cx.notify();
+    }
+
+    /// Saves the typed GitHub token (or removes the saved one). The token
+    /// goes to the credential store; it is never shown or logged.
+    fn save_gh_token(&mut self, remove: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let token = if remove { String::new() } else { self.gh_token.read(cx).value().trim().to_string() };
+        if !remove && token.is_empty() {
+            return;
+        }
+        match hopper::sources::http::set_github_token(&token) {
+            Ok(()) => {
+                self.gh_token.update(cx, |s, cx| {
+                    s.set_value(String::new(), window, cx);
+                    s.set_placeholder(if remove { "Paste a GitHub token (optional)" } else { SAVED_KEY }, window, cx);
+                });
+                let msg = if remove { "GitHub token removed." } else { "GitHub token saved." };
+                window.push_notification(Notification::success(msg), cx);
             }
             Err(e) => window.push_notification(Notification::error(format!("{e:#}")), cx),
         }
@@ -2114,7 +2150,49 @@ impl SettingsPage {
                     cx.emit(SettingsEvent::BrowseSource(*ix == 1))
                 })),
         );
-        vec![Block::card(None, vec![key, browse])]
+        let allow = Row::new("allow-sources").control(self.switch(
+            "allow-sources",
+            s.allow_sources,
+            |st, v| st.allow_sources = v,
+            cx,
+        ));
+        let mut rows = vec![key, browse, allow];
+        if s.allow_sources {
+            let saved = hopper::sources::http::has_github_token();
+            let typed = !self.gh_token.read(cx).value().trim().is_empty();
+            rows.push(
+                Row::new("github-token")
+                    .control(if saved {
+                        widgets::pill("Saved", theme.success, true)
+                    } else {
+                        widgets::pill("None", theme.muted_foreground, true)
+                    })
+                    .below(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(div().w(rems(22.)).child(Input::new(&self.gh_token).small().mask_toggle()))
+                            .child(
+                                Button::new("gh-token-save")
+                                    .small()
+                                    .outline()
+                                    .label("Save")
+                                    .disabled(!typed)
+                                    .on_click(cx.listener(|this, _, window, cx| this.save_gh_token(false, window, cx))),
+                            )
+                            .when(saved, |r| {
+                                r.child(
+                                    Button::new("gh-token-remove")
+                                        .small()
+                                        .ghost()
+                                        .label("Remove")
+                                        .on_click(cx.listener(|this, _, window, cx| this.save_gh_token(true, window, cx))),
+                                )
+                            }),
+                    ),
+            );
+        }
+        vec![Block::card(None, rows)]
     }
 
     fn appearance(&self, s: &hopper::settings::Settings, window: &mut Window, cx: &mut Context<Self>) -> Vec<Block> {
