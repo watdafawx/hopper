@@ -153,7 +153,7 @@
     client: (m) => m.side === 'client', unknown: (m) => !m.source,
   };
   // The orders the list can take, named as their column headers are.
-  const SORTS = $derived([['name', 'Name'], ['author', 'Author'], ...(hasSide ? [['side', 'Side']] : []), ['on', 'On'], ['added', 'Added']]);
+  const SORTS = $derived([['name', 'Name'], ['author', 'Author'], ...(hasSide ? [['side', 'Side']] : []), ['on', 'Enabled'], ['added', 'Added']]);
   const by = {
     name: (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
     author: (a, b) => (a.author || '').toLowerCase().localeCompare((b.author || '').toLowerCase()),
@@ -189,7 +189,7 @@
     return true;
   };
   const cols = $derived(colOrder.filter((c) => c === 'on' || (!colHidden.includes(c) && fitsCol(c))));
-  const COL_W = { author: '130px', side: '40px', on: '44px', added: '86px' };
+  const COL_W = { author: '130px', side: '40px', on: '64px', added: '86px' };
   // Check, icon, name, Update / Changelog, the movable columns, ⋯ and Remove.
   const gridCols = $derived(`22px 30px minmax(0, 1fr) ${narrow ? 110 : 190}px ${cols.map((c) => COL_W[c]).join(' ')} 52px`);
   // The same mod in twice (an old jar left beside the new one): every
@@ -690,7 +690,7 @@
   const SIDE_TAG = { client: ['Client only', 'warnc'], server: ['Server only', 'info'], both: ['Client + server', ''] };
   const ON_HEAD = "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.";
   const SIDE_HEAD = 'Where the mod runs:\nClient only: players need it\nServer only\nClient and server: both need it\nHover a row\'s icon for more. Click to sort.';
-  const HEADS = { author: ['Author', ''], side: ['Side', SIDE_HEAD], on: ['On', ON_HEAD], added: ['Added', ''] };
+  const HEADS = { author: ['Author', ''], side: ['Side', SIDE_HEAD], on: ['Enabled', ON_HEAD], added: ['Added', ''] };
   const site = (m) => (m.source === 'modrinth' ? 'Modrinth' : m.source === 'link' ? m.src_label : 'CurseForge');
   // On CurseForge or Modrinth (a mod from GitHub or a link is neither).
   const onSite = (m) => m.source === 'curseforge' || m.source === 'modrinth';

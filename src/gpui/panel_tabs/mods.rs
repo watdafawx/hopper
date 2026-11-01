@@ -218,7 +218,7 @@ impl Filter {
     fn label(self) -> &'static str {
         match self {
             Filter::All => "All",
-            Filter::On => "On",
+            Filter::On => "Enabled",
             Filter::Off => "Disabled",
             Filter::Yours => "Added by you",
             Filter::Client => "Client-only",

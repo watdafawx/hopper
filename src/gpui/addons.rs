@@ -104,7 +104,8 @@ pub(crate) fn col_env() -> Div {
     div().w_12().flex_none()
 }
 pub(crate) fn col_active() -> Div {
-    div().w_16().flex_none()
+    // Room for "Enabled" and the sort arrow.
+    div().w(rems(4.75)).flex_none()
 }
 pub(crate) fn col_date() -> Div {
     div().w_24().flex_none()
@@ -2171,9 +2172,23 @@ impl AddonsView {
         }));
     }
 
+    /// The switch column's name. Mostly it's whether the file is enabled,
+    /// the word the Disabled filter uses. Shaders pick the one pack in use
+    /// instead, and an instance's resource packs are on when the game uses
+    /// them (options.txt), which isn't the same as the file being enabled.
+    fn on_label(&self) -> &'static str {
+        if self.class == cf::CLASS_SHADERS {
+            "Use"
+        } else if self.order_mode() {
+            "On"
+        } else {
+            "Enabled"
+        }
+    }
+
     /// The orders the list can take, named as their column headers are.
     fn sort_choices(&self) -> Vec<(SortCol, &'static str)> {
-        let on_label = if self.class == cf::CLASS_SHADERS { "Use" } else { "On" };
+        let on_label = self.on_label();
         let mut sorts = vec![(SortCol::Name, "Name"), (SortCol::Author, "Author")];
         if self.class != cf::CLASS_DATAPACKS && self.table.has_side {
             sorts.push((SortCol::Env, "Side"));
@@ -2744,12 +2759,14 @@ impl AddonsView {
                 .build(w, cx)
             }))));
             }
-            let on = if self.class == cf::CLASS_SHADERS { "Use" } else { "On" };
-            cells.push((Col::On, movable(Col::On, on, head(SortCol::Active, on, col_active()).tooltip(|w, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(
-                    "Off keeps the file but the game doesn't load it (renamed to .disabled). Click to sort.",
-                )
-                .build(w, cx)
+            let on = self.on_label();
+            let tip = if on == "Enabled" {
+                "Disabled keeps the file but the game doesn't load it (renamed to .disabled). Click to sort."
+            } else {
+                "Off keeps the file but the game doesn't load it (renamed to .disabled). Click to sort."
+            };
+            cells.push((Col::On, movable(Col::On, on, head(SortCol::Active, on, col_active()).tooltip(move |w, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx)
             }))));
             if self.cols.date {
                 cells.push((Col::Added, movable(Col::Added, "Added", head(SortCol::Added, "Added", col_date()))));
