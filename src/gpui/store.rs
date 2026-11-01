@@ -59,8 +59,9 @@ pub enum Msg {
     /// projects leave its list of available updates (no full re-check).
     /// Pages to open in the browser (Hopper's download window couldn't).
     OpenUrls(Vec<String>),
-    /// Projects updated, and download pages to fetch.
-    Updated(PathBuf, Vec<u64>, Vec<String>),
+    /// Projects updated, download pages to fetch, and the project whose
+    /// install or update asked for them (its button shows their progress).
+    Updated(PathBuf, Vec<u64>, Vec<String>, Option<u64>),
     Running(HashMap<PathBuf, Running>),
     /// Categories looked up for installed projects, by [`hopper::modmeta::key`].
     Categories(HashMap<String, Vec<String>>),
@@ -304,6 +305,9 @@ pub struct Store {
     java_jobs: HashMap<String, u64>,
     /// Pages for the download window, and whether it's open.
     fetch_queue: Arc<Mutex<(bool, Vec<String>)>>,
+    /// Files the download window gets or got, with each one's step, for
+    /// the buttons waiting on them ([`Store::fetch_view`]).
+    fetching: Arc<Mutex<Vec<crate::fetch_progress::FetchFile>>>,
     /// Image URLs waiting for the download workers.
     image_queue: Arc<(std::sync::Mutex<std::collections::VecDeque<String>>, std::sync::Condvar)>,
     /// Hopper's own update, once checked.
@@ -365,6 +369,7 @@ impl Store {
             let dirty = dirty.clone();
             Arc::new(move || dirty.store(true, Ordering::Relaxed))
         };
+        crate::fetch_progress::set_waker(wake.clone());
         let ticked = Arc::new(AtomicBool::new(false));
         let tick: hopper::waker::Waker = {
             let ticked = ticked.clone();
@@ -463,6 +468,7 @@ impl Store {
             }),
             tr_tick: cx.new(|_| TrTick),
             fetch_queue: Default::default(),
+            fetching: Default::default(),
             pending: HashMap::new(),
             local: Arc::new(hopper::hosting::LocalPanel::new()),
             scheduler: None,
@@ -828,15 +834,16 @@ impl Store {
 
     fn handle(&mut self, msg: Msg, cx: &mut Context<Self>) {
         match msg {
-            Msg::Updated(root, done, pages) => {
-                // Website-only files: the download window gets them, as the
-                // user asked to update them.
-                self.fetch_pages(pages);
+            Msg::Updated(root, done, pages, by) => {
                 if let Some(u) = self.updates.get_mut(&root) {
                     u.drop_projects(&done);
                 }
                 self.handle(Msg::InstanceChanged(root.clone()), cx);
                 self.save_updates(&root);
+                // Website-only files: the download window gets them, as the
+                // user asked to update them. After the reload, so their
+                // names and sizes are known.
+                self.fetch_pages(&root, pages, by);
             }
             Msg::Reidentified(root) => {
                 self.handle(Msg::InstanceChanged(root.clone()), cx);
@@ -851,6 +858,7 @@ impl Store {
                 if let Some(new) = instances::load(&root) {
                     self.put_instance(new);
                 }
+                self.prune_fetches(&root);
             }
             Msg::Disk(changes) => self.disk_changed(changes, cx),
             Msg::DiskLoaded(root, new, area) => self.disk_loaded(root, new, area, cx),
@@ -1866,6 +1874,7 @@ impl Store {
             let _ = hopper::modpack::clear_pending(&inst);
         }
         self.pending.remove(root);
+        self.prune_fetches(root);
     }
 
     /// Pack files still to download by hand.
@@ -1889,7 +1898,7 @@ impl Store {
             });
             // Website-only files: the download window gets them.
             let pages = hopper::modpack::pending_urls_at(&inst.root);
-            Ok(Msg::Updated(inst.root.clone(), Vec::new(), pages))
+            Ok(Msg::Updated(inst.root.clone(), Vec::new(), pages, Some(pack.project_id)))
         });
     }
 
@@ -2171,7 +2180,7 @@ impl Store {
             // Website-only files the pack wants: the download window gets
             // them, as for mod updates.
             let pages = hopper::modpack::pending_urls_at(&full.root);
-            Ok(Msg::Updated(full.root.clone(), Vec::new(), pages))
+            Ok(Msg::Updated(full.root.clone(), Vec::new(), pages, Some(pid)))
         });
         Some(id)
     }
@@ -2355,16 +2364,45 @@ impl Store {
                     job.note(warn);
                 }
             });
-            Ok(Msg::Updated(inst.root.clone(), done, pages))
+            Ok(Msg::Updated(inst.root.clone(), done, pages, None))
         });
     }
 
-    /// Gets website-only files through Hopper's download window, one page
-    /// after another; pages asked for while it's open go next. Without
-    /// WebView2 the pages open in the browser instead.
-    pub fn fetch_pages(&self, urls: Vec<String>) {
+    /// Gets website-only files for the instance at `root` through Hopper's
+    /// download window, one page after another; pages asked for while it's
+    /// open go next. `by` is the project whose install asked for them, when
+    /// they're not its own files. Each file's step is kept for the buttons
+    /// waiting on it. Without WebView2 the pages open in the browser.
+    pub fn fetch_pages(&self, root: &Path, urls: Vec<String>, by: Option<u64>) {
+        use crate::fetch_progress::FetchFile;
+        use hopper::webfetch::Step;
+        let urls: Vec<String> = urls.into_iter().filter(|u| !u.is_empty()).collect();
+        if urls.is_empty() {
+            return;
+        }
+        {
+            let pending = self.pending(root);
+            let mut f = self.fetching.lock().unwrap_or_else(|e| e.into_inner());
+            for u in &urls {
+                let p = pending.iter().find(|p| &p.url == u);
+                // A retry takes over the file's old entry.
+                let by = by.or_else(|| f.iter().find(|x| &x.url == u).and_then(|x| x.by));
+                f.retain(|x| &x.url != u);
+                f.push(FetchFile {
+                    url: u.clone(),
+                    root: root.to_path_buf(),
+                    by,
+                    project_id: p.map_or(0, |p| p.project_id),
+                    file_id: p.map_or(0, |p| p.file_id),
+                    name: p.map_or_else(|| "the file".to_string(), |p| p.name.clone()),
+                    size: p.map_or(0, |p| p.size),
+                    step: Step::Queued,
+                    done_at: None,
+                });
+            }
+        }
         let mut q = self.fetch_queue.lock().unwrap_or_else(|e| e.into_inner());
-        for u in urls.into_iter().filter(|u| !u.is_empty()) {
+        for u in urls {
             if !q.1.contains(&u) {
                 q.1.push(u);
             }
@@ -2374,7 +2412,7 @@ impl Store {
         }
         q.0 = true;
         drop(q);
-        let (queue, tx, wake) = (self.fetch_queue.clone(), self.tx.clone(), self.wake.clone());
+        let (queue, fetching, tx, wake) = (self.fetch_queue.clone(), self.fetching.clone(), self.tx.clone(), self.wake.clone());
         std::thread::spawn(move || loop {
             let urls = {
                 let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -2386,18 +2424,91 @@ impl Store {
             };
             // The download window is WebView2 (Windows); elsewhere the browser
             // downloads them and the download watcher picks them up.
-            let (true, Ok(exe), Some(dir)) = (cfg!(windows), std::env::current_exe(), hopper::modpack::fetch_dir()) else {
+            let (true, Some(dir)) = (cfg!(windows), hopper::modpack::fetch_dir()) else {
+                fetching.lock().unwrap_or_else(|e| e.into_inner()).retain(|f| !urls.contains(&f.url));
                 let _ = tx.send(Msg::OpenUrls(urls));
                 wake();
                 continue;
             };
-            let code = std::process::Command::new(exe).arg("--fetch").arg(&dir).args(&urls).status().map(|s| s.code());
-            if !matches!(code, Ok(Some(0 | 1))) {
+            // Each step the window reports goes to the file it's about.
+            let mut run = hopper::webfetch::Run::new(urls.len());
+            let copy = |run: &hopper::webfetch::Run| {
+                let mut f = fetching.lock().unwrap_or_else(|e| e.into_inner());
+                for (u, step) in urls.iter().zip(&run.steps) {
+                    if let Some(x) = f.iter_mut().find(|x| &x.url == u) {
+                        if *step == Step::Done && x.done_at.is_none() {
+                            x.done_at = Some(std::time::Instant::now());
+                        }
+                        x.step = *step;
+                    }
+                }
+            };
+            let code = crate::fetch_progress::run_window(&dir, &urls, |e| {
+                run.apply(e);
+                copy(&run);
+                wake();
+            });
+            if matches!(code, Some(0 | 1)) {
+                // Pages it left unfinished didn't come.
+                run.end(Step::Failed);
+                copy(&run);
+                // A saved file the watcher never takes turns unusable after a
+                // while; look again then, even if nothing else redraws.
+                if run.steps.contains(&Step::Done) {
+                    let wake = wake.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(crate::fetch_progress::PLACE_WITHIN + Duration::from_secs(1));
+                        wake();
+                    });
+                }
+            } else {
                 log::warn!("download window: {code:?}");
+                fetching.lock().unwrap_or_else(|e| e.into_inner()).retain(|f| !urls.contains(&f.url));
                 let _ = tx.send(Msg::OpenUrls(urls));
             }
             wake();
         });
+    }
+
+    /// The download window's progress for `project`: its own website-only
+    /// file, or the ones its install asked for. Only in the instance at
+    /// `root` when given (a pack's files are in the instance it made).
+    pub fn fetch_view(&self, root: Option<&Path>, project: u64) -> Option<crate::fetch_progress::FetchView> {
+        let f = self.fetching.lock().unwrap_or_else(|e| e.into_inner());
+        crate::fetch_progress::FetchView::of(f.iter().filter(|x| {
+            root.is_none_or(|r| x.root == r) && project != 0 && (x.project_id == project || x.by == Some(project))
+        }))
+    }
+
+    /// The download window's progress for every file of the instance at
+    /// `root`, and each file.
+    pub fn fetch_files(&self, root: &Path) -> (Option<crate::fetch_progress::FetchView>, Vec<crate::fetch_progress::FetchFile>) {
+        let f = self.fetching.lock().unwrap_or_else(|e| e.into_inner());
+        let mine: Vec<_> = f.iter().filter(|x| x.root == root).cloned().collect();
+        (crate::fetch_progress::FetchView::of(&mine), mine)
+    }
+
+    /// The player gets these files from their pages in the browser: the
+    /// pages open and the buttons go back to waiting for Downloads.
+    pub fn fetch_by_hand(&mut self, root: &Path, urls: &[String], cx: &mut Context<Self>) {
+        for u in urls {
+            cx.open_url(u);
+        }
+        self.fetching
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|f| !(f.root == root && urls.contains(&f.url)));
+        cx.notify();
+    }
+
+    /// Lets go of finished or failed files the instance no longer waits
+    /// for (they're in place, or the player dismissed them).
+    fn prune_fetches(&mut self, root: &Path) {
+        let still: Vec<String> = self.pending(root).iter().map(|p| p.url.clone()).collect();
+        self.fetching
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|f| f.root != root || f.step.is_open() || still.contains(&f.url));
     }
 
     /// Whether an update job on this instance takes more updates.

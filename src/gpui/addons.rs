@@ -3352,6 +3352,10 @@ Details").into()),
             .as_ref()
             .filter(|_| updating == Some(true))
             .and_then(|r| store.update_progress(r, a.project_id));
+        // The new file comes through the download window: its step on the
+        // button, which shows the window (or retries once it failed).
+        let fetch = self.root.as_ref().and_then(|r| store.fetch_view(Some(r), a.project_id)).filter(|_| from_web);
+        let progress = progress.or_else(|| fetch.as_ref().filter(|v| v.running()).and_then(|v| v.progress));
         let compact = self.compact;
         let pill_w = rems(if compact { widgets::SPLIT_W_COMPACT } else { widgets::SPLIT_W });
         let action = col_action(compact).when(done, |c| {
@@ -3364,6 +3368,21 @@ Details").into()),
             let view = cx.entity();
             let f_sweep = a.file_name.clone();
             let can_run = hold.is_none() && updating.is_none() && !from_web;
+            // Its new file waits for the website but no window is on it (Hopper
+            // restarted, or the player picked it by hand): a click starts one.
+            let web_url = self
+                .root
+                .as_ref()
+                .filter(|_| from_web && fetch.is_none() && hold.is_none())
+                .and_then(|r| store.pending(r).iter().find(|p| p.project_id == a.project_id && !p.url.is_empty()))
+                .map(|p| p.url.clone());
+            let (fetch, fetch_tip) = (fetch.clone(), fetch.as_ref().map(|v| {
+                if v.running() {
+                    format!("{}. Click to show the download window", v.detail())
+                } else {
+                    format!("{}. Click to open the download window again", v.detail())
+                }
+            }));
             // Drag-updates pass over a locked or breaking update.
             let sweepable = can_run && !vlocked && breaks.is_empty();
             let split = widgets::split(
@@ -3387,7 +3406,9 @@ Details").into()),
                                 }
                             })
                             .when(vlocked, |b| b.opacity(0.6))
-                            .icon(if vlocked {
+                            .icon(if let Some(v) = &fetch {
+                                if v.running() { IconName::Hourglass } else { IconName::RefreshCw }
+                            } else if vlocked {
                                 IconName::Lock
                             } else if breaking {
                                 IconName::TriangleAlert
@@ -3397,16 +3418,19 @@ Details").into()),
                             // Narrow, the icon alone (the tooltip says the rest).
                             .when(!compact, |b| {
                                 b.label(match (updating, progress) {
+                                    _ if fetch.is_some() => fetch.as_ref().map(|v| v.pill_label()).unwrap_or_default(),
                                     (Some(true), Some(p)) => format!("Updating {}%", (p * 100.0).floor() as u32),
                                     (Some(true), None) => "Updating".to_string(),
                                     (Some(false), _) => "Queued".to_string(),
-                                    (None, _) if from_web => "From website".to_string(),
+                                    (None, _) if from_web => "Download".to_string(),
                                     (None, _) => "Update".to_string(),
                                 })
                             })
                             .loading(updating == Some(true))
-                            .tooltip(if from_web && updating.is_none() {
-                                "The author only allows downloads from CurseForge's website: Hopper's download window is getting it, and adds it when it arrives".to_string()
+                            .tooltip(if let Some(t) = fetch_tip {
+                                t
+                            } else if from_web && updating.is_none() {
+                                "The author only allows downloads from CurseForge's website. Click to get it through Hopper's download window; a file you download yourself is picked up from Downloads too".to_string()
                             } else if let Some(h) = hold {
                                 h.to_string()
                             } else if vlocked {
@@ -3427,9 +3451,17 @@ It stays disabled after updating: turn it on in the On column.")
                             } else {
                                 tip
                             })
-                            .disabled(!can_run)
+                            .disabled(!can_run && fetch.is_none() && web_url.is_none())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if drag_pick::click_swallowed(this) {
+                                    return;
+                                }
+                                if let Some(v) = &fetch {
+                                    crate::fetch_progress::click(&this.store, v, cx);
+                                    return;
+                                }
+                                if let (Some(u), Some(r)) = (&web_url, this.root.clone()) {
+                                    this.store.read(cx).fetch_pages(&r, vec![u.clone()], None);
                                     return;
                                 }
                                 // A locked version installs only with Shift.
@@ -3455,9 +3487,20 @@ It stays disabled after updating: turn it on in the On column.")
             // The download fills the button from the left.
             c.child(widgets::progress_fill(split.min_w(pill_w), progress, cx))
         })
+        // Its new file comes through the download window (the update itself
+        // finished): the window's step in the pill's place.
+        .when_some(fetch.clone().filter(|_| update.is_none() && !done), |c, v| {
+            let store = self.store.clone();
+            let b = Button::new(id("fetch")).small().outline().min_w(pill_w);
+            let v2 = v.clone();
+            c.child(crate::fetch_progress::button(b, &v, cx).on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                crate::fetch_progress::click(&store, &v2, cx)
+            }))
+        })
         // Nothing to update: the changelog alone, in the pill's place, only
         // on the hovered or selected row so the column stays quiet.
-        .when(update.is_none() && !done && a.project_id != 0, |c| {
+        .when(update.is_none() && !done && a.project_id != 0 && fetch.is_none(), |c| {
             let (pid, view) = (a.project_id, cx.entity());
             c.child(
                 div()

@@ -2377,10 +2377,21 @@ fn go_button(id: &'static str, icon: IconName, label: &'static str) -> Button {
 /// A dialog's main button while its job runs: filled as far as it got.
 /// Outline, like every other button that fills (the fill wouldn't show on
 /// a filled one); loading keeps it from being clicked.
+/// While the pack comes through the download window, a click brings the
+/// window up instead.
 fn busy_button(id: &'static str, icon: IconName, label: String, p: Option<f32>, cx: &App) -> AnyElement {
-    widgets::progress_fill(Button::new(id).outline().w_full().icon(icon).loading(true).label(label), p, cx)
-        .w_full()
-        .into_any_element()
+    let window = crate::fetch_progress::job_waits_on_window(&label);
+    let b = Button::new(id).outline().w_full().icon(icon).label(label);
+    let b = if window {
+        b.icon(IconName::Hourglass)
+            .tooltip("Getting it from the CurseForge website. Click to show the download window")
+            .on_click(|_, _, _| {
+                crate::fetch_progress::show_window();
+            })
+    } else {
+        b.loading(true)
+    };
+    widgets::progress_fill(b, p, cx).w_full().into_any_element()
 }
 
 /// A dialog's main button following job `j`: its progress while it runs,

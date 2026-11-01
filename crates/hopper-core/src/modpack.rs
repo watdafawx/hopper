@@ -412,9 +412,10 @@ fn prune_dir(
 }
 
 /// Gets a website-only file from its CurseForge page into a folder and
-/// says whether every file came. The desktop app sets one (its WebView2
-/// download window); the server panel has none.
-pub type WebsiteFetcher = dyn Fn(&Path, &str) -> bool + Send + Sync;
+/// says whether every file came, reporting each step of the window to the
+/// callback. The desktop app sets one (its WebView2 download window); the
+/// server panel has none.
+pub type WebsiteFetcher = dyn Fn(&Path, &str, &dyn Fn(crate::webfetch::Event)) -> bool + Send + Sync;
 
 static WEBSITE_FETCHER: std::sync::OnceLock<Box<WebsiteFetcher>> = std::sync::OnceLock::new();
 
@@ -429,10 +430,10 @@ pub fn can_fetch_from_website() -> bool {
     WEBSITE_FETCHER.get().is_some()
 }
 
-/// Gets the file on CurseForge page `url` through the website fetcher into
+/// Gets the file `name` on CurseForge page `url` through the website fetcher into
 /// `dir`, checks it against `expect` and moves it to `dest`. `Ok(false)`
 /// when there's no fetcher or the page gave no file.
-pub fn fetch_from_website(url: &str, dir: &Path, expect: &cf::Expect, dest: &Path, job: &Job) -> anyhow::Result<bool> {
+pub fn fetch_from_website(url: &str, name: &str, dir: &Path, expect: &cf::Expect, dest: &Path, job: &Job) -> anyhow::Result<bool> {
     let Some(fetch) = WEBSITE_FETCHER.get() else {
         return Ok(false);
     };
@@ -445,7 +446,20 @@ pub fn fetch_from_website(url: &str, dir: &Path, expect: &cf::Expect, dest: &Pat
         }
     }
     let _cleanup = Cleanup(dir);
-    let came = fetch(dir, url);
+    // The window's steps in the job, so the dialog that started it shows
+    // the wait for CurseForge instead of standing still.
+    let run = std::sync::Mutex::new(crate::webfetch::Run::new(1));
+    let came = fetch(dir, url, &|e| {
+        let mut r = run.lock().unwrap_or_else(|e| e.into_inner());
+        r.apply(e);
+        let step = r.steps[0];
+        if let crate::webfetch::Step::Downloading(n) = step {
+            job.progress(n as usize, expect.len as usize);
+            job.detail(download_detail(name, n, expect.len, 0.0));
+        } else if step.is_active() {
+            job.detail(step.label(expect.len));
+        }
+    });
     // The window saves the file under the page's own name; take the one
     // finished file it left.
     let file = fs::read_dir(dir)?
@@ -488,7 +502,7 @@ pub(crate) fn fetch_pack_zip(pack_file: &cf::File, job: &Job) -> anyhow::Result<
                         // The download page starts the file by itself; the
                         // file's page only shows it.
                         let page = w.url.replace(&format!("/files/{}", pack_file.id), &format!("/download/{}", pack_file.id));
-                        match fetch_from_website(&page, &zip_path.with_extension("web"), &pack_file.expect(), &zip_path, job) {
+                        match fetch_from_website(&page, &pack_file.file_name, &zip_path.with_extension("web"), &pack_file.expect(), &zip_path, job) {
                             Ok(true) => return Ok(zip_path),
                             Ok(false) => {}
                             Err(e) => log::warn!("getting {} from the website: {e:#}", pack_file.file_name),

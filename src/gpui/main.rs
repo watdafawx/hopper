@@ -19,6 +19,7 @@ mod content;
 mod datapacks;
 mod dialogs;
 mod drag_pick;
+mod fetch_progress;
 #[cfg(windows)]
 mod fetch_window;
 mod crash_help;
@@ -85,13 +86,12 @@ fn main() {
     }
     // Website-only pack zips come through the same window, one at a time.
     #[cfg(windows)]
-    hopper::modpack::set_website_fetcher(Box::new(|dir, url| {
+    hopper::modpack::set_website_fetcher(Box::new(|dir, url, on| {
         static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
-        let Ok(exe) = std::env::current_exe() else { return false };
-        let code = std::process::Command::new(exe).arg("--fetch").arg(dir).arg(url).status().map(|s| s.code());
+        let code = fetch_progress::run_window(dir, &[url.to_string()], on);
         log::info!("download window for {url}: {code:?}");
-        matches!(code, Ok(Some(0)))
+        code == Some(0)
     }));
     // The window that plays a description's video: `--video URL [--owner HWND]`.
     #[cfg(windows)]

@@ -1190,6 +1190,8 @@ impl AppView {
                                     .child("No CurseForge key"),
                             )
                         })
+                        // A download window is open (it may sit behind Hopper).
+                        .children(crate::fetch_progress::title_chip(cx))
                         .child(self.tasks.clone())
                         // Tools: search, re-read, settings.
                         .child(
