@@ -369,7 +369,8 @@ pub fn signals(text: &str) -> Vec<Raw> {
     // The loader's and Java's own messages with a known cause.
     let mut known = Vec::new();
     crate::crashsigs::mod_signals(&lines, &mut known);
-    if let Some(owner) = crate::crashtrace::report_error(text).and_then(|e| crate::crashsigs::missing_owner(&e)) {
+    let error = crate::crashtrace::report_error(text);
+    if let Some(owner) = error.as_deref().and_then(crate::crashsigs::missing_owner) {
         known.push(owner);
     }
     for r in known {
@@ -377,6 +378,17 @@ pub fn signals(text: &str) -> Vec<Raw> {
             add(&mut out, r);
         } else {
             out.push(r);
+        }
+    }
+    // A mod and the code it works with that don't fit (an event fired
+    // wrong, a type or method that changed), and what the player was doing.
+    if let Some(error) = &error {
+        let frames = crate::crashtrace::frames_after(text, error);
+        crate::crashsigs::mismatch_signals(error, &frames, &mut out);
+        if let Some(a) = crate::crashtrace::player_action(&frames) {
+            for r in out.iter_mut().filter(|r| r.why == "The error happened in its code.") {
+                r.why = format!("The error happened in its code{}.", a.phrase());
+            }
         }
     }
     fabric_signals(&lines, &mut out);
@@ -406,6 +418,10 @@ fn walk(frames: &[&str], named: &str, mixin_named: bool, need_jar: bool, out: &m
     let mut first_name = named.to_string();
     // Libraries met before the first mod: placed once it is known.
     let mut held: Vec<Raw> = Vec::new();
+    // Mods that wrap a step of the game's here (a mixin redirect or
+    // wrapper): every call of that step runs through them, so they are on
+    // the way to the error, not its cause.
+    let wrappers: Vec<String> = frames.iter().filter_map(|l| MIXIN_METHOD.captures(l).map(|m| m[1].to_string())).collect();
     for l in frames {
         // A mod's change to the game's own code (a mixin) runs in the
         // game's frames: `Minecraft.handler$jip000$omegaconfig$onReturn`.
@@ -433,7 +449,9 @@ fn walk(frames: &[&str], named: &str, mixin_named: bool, need_jar: bool, out: &m
             let why = if mixin { "Its change to the game's code (a mixin) was running when it crashed." } else { "The error happened in its code." };
             (Certainty::Likely, why.to_string())
         } else {
-            let why = if named.is_empty() {
+            let why = if named.is_empty() && wrappers.iter().any(|w| w.eq_ignore_ascii_case(&id)) {
+                format!("It wraps this step of the game (a mixin), so the call went through its code on the way to {first_name}, where the error happened. Involved, but unlikely the cause.")
+            } else if named.is_empty() {
                 format!("{what} called {first_name}, where the error happened.")
             } else if mixin_named {
                 format!("{what} was running when {named}'s change failed.")
@@ -1329,7 +1347,7 @@ fn analyze(
     }
     // The mod whose code threw a known error is told what it means.
     if let Some(known) = crate::crashtrace::report_error(text).and_then(|e| crate::crashtrace::explain(&e)) {
-        for r in raws.iter_mut().filter(|r| r.certainty == Certainty::Likely && r.why == "The error happened in its code.") {
+        for r in raws.iter_mut().filter(|r| r.certainty == Certainty::Likely && r.why.starts_with("The error happened in its code") && !r.why.contains("game log")) {
             r.why = known.clone();
         }
     }
@@ -2819,6 +2837,109 @@ java.lang.RuntimeException: Attempted to load class com/example/fancyhud/client/
         assert_eq!((s[0].file_name.as_str(), s[0].certainty), ("iris-1.8.jar", Certainty::Possible));
     }
 
+    const LOOT_CRATE_REPORT: &str = include_str!("crashdetect_fixtures/ftbquests-loot-crate-crash.txt");
+
+    /// A NeoForge 1.21.1 pack, 2026-11-01, cut down (transformer tags and
+    /// the details sections removed): right-clicking an FTB Quests loot
+    /// crate crashed. FTB Quests fires its own `OpenLootCrateEvent`, made
+    /// with Architectury's `createEventResult` but declared to return a
+    /// `CompoundEventResult`, so the event's proxy fails its cast. The top
+    /// mod frames are Architectury's types (in the error) and Ars Fusion's
+    /// wrapper around every item use: neither is the cause.
+    #[test]
+    fn a_mod_that_fires_its_event_wrong_is_the_cause() {
+        let root = std::env::temp_dir().join(format!("hopper-crash-lootcrate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dir = root.join("mods");
+        for (file, id, name) in [
+            ("architectury-13.0.11-neoforge.jar", "architectury", "Architectury"),
+            ("ars-fusion-0.1.7-mc1.21.1-neoforge.jar", "ars_fusion", "Ars Fusion"),
+            ("BetterThirdPerson-neoforge-1.9.0.jar", "betterthirdperson", "Better Third Person"),
+            ("ftb-quests-neoforge-2101.1.37.jar", "ftbquests", "FTB Quests"),
+            ("smoothloading-neoforge-1.21.1-0.1.6-alpha.1.jar", "smoothloading", "Smooth Loading"),
+        ] {
+            fake_jar(&dir.join(file), id, name, "1.0");
+        }
+        let report = root.join("crash-reports/crash-2026-11-01_04.07.15-client.txt");
+        fs::write(&report, LOOT_CRATE_REPORT).unwrap();
+        let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let c = from_report(&root, &report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        let first = &c.suspects[0];
+        assert_eq!((first.file_name.as_str(), first.certainty), ("ftb-quests-neoforge-2101.1.37.jar", Certainty::Certain), "{:#?}", c.suspects);
+        for words in ["fired one of its own events", "Architectury's event system", "using an item (Loot Crate)", "this version (2101.1.37)", "Architectury 13.0.11", "Update it", "update the pack", "don't use the Loot Crate"] {
+            assert!(first.why.contains(words), "{words}: {}", first.why);
+        }
+        assert!(c.suspects[1..].iter().all(|s| s.certainty == Certainty::Possible), "{:#?}", c.suspects);
+        for id in ["ars_fusion", "betterthirdperson", "smoothloading"] {
+            let s = c.suspects.iter().find(|s| s.mod_id == id).unwrap();
+            assert!(s.why.contains("wraps this step") && s.why.contains("unlikely the cause"), "{id}: {}", s.why);
+        }
+        let arch = c.suspects.iter().find(|s| s.mod_id == "architectury").unwrap();
+        assert!(arch.why.contains("ftbquests fired the event wrong"), "{}", arch.why);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Hand-written after the shapes Java gives a mod and a library that
+    /// don't fit: a class cast between their types, a method an interface
+    /// asks for that the mod's class lacks, and a class that changed shape.
+    #[test]
+    fn a_mod_and_its_library_that_dont_fit() {
+        let root = std::env::temp_dir().join(format!("hopper-crash-mismatch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dir = root.join("mods");
+        jar_with_classes(&dir.join("addon-2.0.jar"), "addon", "Addon", &["com.example.addon.Setup", "com.example.addon.AddonWidget"]);
+        jar_with_classes(&dir.join("corelib-3.0.jar"), "corelib", "Core Lib", &["com.example.corelib.api.Widget", "com.example.corelib.events.Bus"]);
+        let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let rp = root.join("crash-reports/crash-2026-10-31_12.00.00-client.txt");
+        let run = |error: &str, frames: &str| {
+            fs::write(&rp, format!("---- Minecraft Crash Report ----\nDescription: Ticking entity\n\n{error}\n{frames}\tat java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {{}}\n")).unwrap();
+            let c = from_report(&root, &rp, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+            c.suspects.iter().map(|s| (s.file_name.clone(), s.certainty, s.why.clone())).collect::<Vec<_>>()
+        };
+        let addon_frame = "\tat TRANSFORMER/addon@2.0/com.example.addon.Setup.tick(Setup.java:40) ~[addon-2.0.jar%23300!/:2.0] {}\n";
+        let lib_frame = "\tat TRANSFORMER/corelib@3.0/com.example.corelib.events.Bus.fire(Bus.java:12) ~[corelib-3.0.jar%23301!/:3.0] {}\n";
+
+        // A cast between the addon's type and the library's: the addon threw.
+        let got = run(
+            "java.lang.ClassCastException: class com.example.addon.AddonWidget cannot be cast to class com.example.corelib.api.Widget (com.example.addon.AddonWidget is in module addon@2.0 of loader 'TRANSFORMER' @1a2b; com.example.corelib.api.Widget is in module corelib@3.0 of loader 'TRANSFORMER' @1a2b)",
+            &format!("{addon_frame}{lib_frame}"),
+        );
+        assert_eq!((got[0].0.as_str(), got[0].1), ("addon-2.0.jar", Certainty::Likely), "{got:#?}");
+        assert!(got[0].2.contains("expected Widget but got AddonWidget") && got[0].2.contains("Corelib 3.0") && got[0].2.contains("Update it or Corelib"), "{}", got[0].2);
+        assert_eq!((got[1].0.as_str(), got[1].1), ("corelib-3.0.jar", Certainty::Possible));
+
+        // The library asks the addon's class for a method it doesn't have:
+        // the addon's class is named by its package; the caller only asked.
+        let got = run(
+            "java.lang.AbstractMethodError: Receiver class com.example.addon.AddonWidget does not define or inherit an implementation of the resolved method 'abstract void render(int)' of interface com.example.corelib.api.Widget.",
+            &format!("{lib_frame}{addon_frame}"),
+        );
+        assert_eq!((got[0].0.as_str(), got[0].1), ("addon-2.0.jar", Certainty::Likely), "{got:#?}");
+        assert!(got[0].2.contains("Its AddonWidget is missing render") && got[0].2.contains("Update it"), "{}", got[0].2);
+        assert_eq!((got[1].0.as_str(), got[1].1), ("corelib-3.0.jar", Certainty::Possible));
+
+        // The library's class changed from a class to an interface.
+        let got = run(
+            "java.lang.IncompatibleClassChangeError: Found interface com.example.corelib.api.Widget, but class was expected",
+            &format!("{addon_frame}{lib_frame}"),
+        );
+        assert_eq!((got[0].0.as_str(), got[0].1), ("addon-2.0.jar", Certainty::Likely), "{got:#?}");
+        assert!(got[0].2.contains("uses Widget from another mod, which has changed"), "{}", got[0].2);
+        assert_eq!((got[1].0.as_str(), got[1].1), ("corelib-3.0.jar", Certainty::Possible));
+
+        // A cast between Java's own types is the mod's own bug: no mismatch story.
+        let got = run("java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Integer (java.lang.String and java.lang.Integer are in module java.base of loader 'bootstrap')", addon_frame);
+        assert_eq!((got[0].0.as_str(), got[0].1), ("addon-2.0.jar", Certainty::Likely));
+        assert_eq!(got[0].2, "The error happened in its code.");
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// A library's frames above the mod that called it don't take "first";
     /// a lambda frame counts as its class.
     #[test]
@@ -2841,6 +2962,25 @@ java.lang.RuntimeException: Attempted to load class com/example/fancyhud/client/
         let m = PLAIN_FRAME.captures("\tat com.some.Mod$$Lambda/0x0000000801570218.accept(Unknown Source)").unwrap();
         assert_eq!(&m[1], "com.some.Mod");
         assert_eq!(&PLAIN_FRAME.captures("\tat com.some.Mod.run(Mod.java:3)").unwrap()[1], "com.some.Mod");
+    }
+
+    /// Prints what Hopper's crash card would name for the newest report in
+    /// a copy of an instance (`HOPPER_CRASH_ROOT`, with its crash-reports,
+    /// logs and mods). `cargo test copied_instance_crash -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn copied_instance_crash() {
+        let Ok(root) = std::env::var("HOPPER_CRASH_ROOT") else { return };
+        let root = PathBuf::from(root);
+        let dir = root.join("mods");
+        let report = crate::logs::crash_reports(&root).into_iter().next().unwrap();
+        let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let c = from_report(&root, &report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        println!("{}", c.headline);
+        for s in &c.suspects {
+            println!("   {:?} {} [{}] {}", s.certainty, s.mod_id, s.file_name, s.why);
+        }
+        println!("   advice: {}", c.advice);
     }
 
     /// Prints what the real crash reports of every instance name.
