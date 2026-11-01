@@ -77,9 +77,9 @@
   <button class="btn sm" onclick={toggleOpen} title="Switch which mods are on"><Layers size={13} />Profiles<ChevronDown size={12} /></button>
   {#if open}
     <div class="pop popover menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === 'Escape' && (open = false)}>
-      <div class="hd">Switch which mods are enabled</div>
+      <div class="menu-label">Switch which mods are enabled</div>
       {#if list === null}
-        <div class="hd row"><span class="spinner"></span>Loading…</div>
+        <div class="menu-label row"><span class="spinner"></span>Loading…</div>
       {:else}
         {#each list as p (p.name)}
           <div class="it row-hover">
@@ -90,12 +90,12 @@
             <button class="ib" title="Delete this profile" onclick={(e) => remove(p, e)}><Trash2 size={12} /></button>
           </div>
         {:else}
-          <div class="hd">No profiles yet.</div>
+          <div class="menu-label">No profiles yet.</div>
         {/each}
       {/if}
       <div class="menu-sep"></div>
       <button class="menu-item" onclick={save}><Plus size={13} />Save current as…</button>
-      {#if alive}<div class="hd">Switching while it runs: restart to load the change.</div>{/if}
+      {#if alive}<div class="menu-label">Switching while it runs: restart to load the change.</div>{/if}
     </div>
   {/if}
 </div>
@@ -103,7 +103,6 @@
 <style>
   .wrapp { position: relative; }
   .pop { position: absolute; z-index: 70; top: calc(100% + 4px); left: 0; width: 280px; display: flex; flex-direction: column; }
-  .hd { color: var(--muted); font-size: 11.5px; padding: 5px 10px; }
   .it { display: flex; align-items: center; gap: 2px; border-radius: var(--radius); }
   .use { flex: 1; min-width: 0; }
   .it .use:hover { background: none; }

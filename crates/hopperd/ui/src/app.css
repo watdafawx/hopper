@@ -141,6 +141,10 @@ a.btn { color: var(--text); }
 .menu-item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 10px; border-radius: var(--radius); text-align: left; color: var(--text); font-size: 12.5px; }
 .menu-item:hover { background: var(--hover); }
 .menu-sep { height: 1px; background: var(--line); margin: 4px 2px; }
+/* A menu's section name or note, and its tick column (desktop's menu label and checked item). */
+.menu-label { color: var(--muted); font-size: 11.5px; padding: 5px 10px; }
+.menu-ck { width: 13px; display: grid; flex: none; }
+.menu-dir { margin-left: auto; display: inline-flex; align-items: center; gap: 3px; color: var(--muted); font-weight: 400; }
 /* A modal's backdrop: dialogs open at the same height, under the title bar (widgets::DIALOG_TOP). */
 .dialog-back { position: fixed; inset: 0; background: var(--overlay); display: flex; justify-content: center; align-items: flex-start; padding: var(--dialog-top) 16px 16px; z-index: 60; overflow: auto; }
 /* A dialog never runs past the window (widgets::dialog_room): its own content scrolls. */

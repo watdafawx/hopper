@@ -14,13 +14,13 @@
   import ReviewUpdates from './ReviewUpdates.svelte';
   import ModBackups from './ModBackups.svelte';
   import ModProfiles from './ModProfiles.svelte';
-  import SortMenu from './SortMenu.svelte';
+  import SortMenu, { sortDir } from './SortMenu.svelte';
   import ModsConfigPick from './ModsConfigPick.svelte';
   import LoaderVersions from './LoaderVersions.svelte';
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
-    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check,
+    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw,
   } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -88,6 +88,19 @@
   $effect(() => keep('updates-first', updatesFirst));
   $effect(() => keep('sort', sort));
 
+  // The table's movable columns, as desktop's: drag a header onto another
+  // to move it, hide all but On from the columns menu.
+  const COLS = ['author', 'side', 'on', 'added'];
+  // Saved keys first, then any they lack (a newer panel's column).
+  const fixOrder = (v) => {
+    const o = (Array.isArray(v) ? v : []).filter((c, i, a) => COLS.includes(c) && a.indexOf(c) === i);
+    return [...o, ...COLS.filter((c) => !o.includes(c))];
+  };
+  let colOrder = $state(fixOrder(pref('col-order', COLS)));
+  let colHidden = $state(pref('col-hidden', []).filter((c) => c !== 'on'));
+  $effect(() => keep('col-order', colOrder));
+  $effect(() => keep('col-hidden', colHidden));
+
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
   const mods = $derived(data?.mods || []);
@@ -135,6 +148,21 @@
   });
   // No mod says where it runs: no Side column.
   const hasSide = $derived(mods.some((m) => m.side));
+  // The columns that fit, as desktop fits them to the room: Author goes
+  // first, then Added, then Side (its icon moves next to the name).
+  let listW = $state(0);
+  const narrow = $derived(listW > 0 && listW <= 640);
+  const fitsCol = (c) => {
+    const w = listW || 9999;
+    if (c === 'author') return w > 1050;
+    if (c === 'added') return w > 860;
+    if (c === 'side') return hasSide && w > 640;
+    return true;
+  };
+  const cols = $derived(colOrder.filter((c) => c === 'on' || (!colHidden.includes(c) && fitsCol(c))));
+  const COL_W = { author: '130px', side: '40px', on: '44px', added: '86px' };
+  // Check, icon, name, Update / Changelog, the movable columns, ⋯ and Remove.
+  const gridCols = $derived(`22px 30px minmax(0, 1fr) ${narrow ? 110 : 190}px ${cols.map((c) => COL_W[c]).join(' ')} 52px`);
   // The same mod in twice (an old jar left beside the new one): every
   // copy but the newest, as desktop's "Keep newest" finds them.
   const twice = $derived.by(() => {
@@ -464,6 +492,75 @@
     sort = sort.col === col ? { col, desc: !sort.desc } : { col, desc: col === 'added' };
   }
 
+  /** Moves column `c` to where `to` is, as desktop's move_col. */
+  function moveCol(c, to) {
+    if (c === to) return;
+    const o = colOrder.filter((k) => k !== c);
+    const from = colOrder.indexOf(c);
+    let at = o.indexOf(to);
+    // Dropped on a column to its right: after it; to its left: before it.
+    if (at >= from) at += 1;
+    o.splice(Math.min(at, o.length), 0, c);
+    colOrder = o;
+  }
+
+  function setColHidden(c, hide) {
+    colHidden = hide ? [...colHidden.filter((k) => k !== c), c] : colHidden.filter((k) => k !== c);
+  }
+
+  function resetCols() {
+    colOrder = [...COLS];
+    colHidden = [];
+  }
+
+  // Dragging a header: its name follows the pointer and the header it's
+  // over shows where it lands. A drag isn't also a click (a sort).
+  let colDrag = $state(null);
+  let dragClicked = false;
+  function headDown(e, c) {
+    if (e.button !== 0) return;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    let moving = false;
+    const move = (ev) => {
+      if (!moving && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 5) return;
+      moving = true;
+      const t = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('.th [data-col]');
+      const on = t && t.dataset.col !== c ? t.dataset.col : null;
+      colDrag = { col: c, x: ev.clientX, y: ev.clientY, on, after: !!on && colOrder.indexOf(on) > colOrder.indexOf(c) };
+    };
+    const end = (ev) => {
+      removeEventListener('pointermove', move);
+      removeEventListener('pointerup', end);
+      removeEventListener('pointercancel', end);
+      if (!moving) return;
+      if (ev.type === 'pointerup' && colDrag?.on) moveCol(c, colDrag.on);
+      colDrag = null;
+      dragClicked = true;
+      setTimeout(() => (dragClicked = false));
+    };
+    addEventListener('pointermove', move);
+    addEventListener('pointerup', end);
+    addEventListener('pointercancel', end);
+  }
+  function headClick(c) {
+    if (!dragClicked) setSort(c);
+  }
+
+  // The columns menu: under its button, or at the pointer on right-click.
+  let colMenu = $state(null);
+  function openColMenu(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    menu = null;
+    const w = 250;
+    const h = 380;
+    const r = e.type === 'click' ? e.currentTarget.getBoundingClientRect() : null;
+    const x = r ? r.right - w : e.clientX;
+    const y = r ? r.bottom + 4 : e.clientY;
+    colMenu = { x: Math.max(8, Math.min(x, innerWidth - w - 8)), y: Math.max(8, Math.min(y, innerHeight - h - 8)) };
+  }
+
   function clearFilters() {
     filter = '';
     chip = 'all';
@@ -474,6 +571,7 @@
   function openMenu(m, e) {
     e.preventDefault();
     e.stopPropagation();
+    colMenu = null;
     const w = 250;
     const h = 400;
     const r = e.type === 'click' ? e.currentTarget.getBoundingClientRect() : null;
@@ -485,8 +583,10 @@
   // Escape: a menu closes first; then the picks go (not while a dialog is up).
   function escape(e) {
     if (e.key !== 'Escape') return;
-    if (menu) menu = null;
-    else if (!versionsFor && !reviewing && !cfgPick && !loaderOpen && !document.querySelector('.dialog-back') && !e.target.closest?.('input, textarea')) selected = new Set();
+    if (menu || colMenu) {
+      menu = null;
+      colMenu = null;
+    } else if (!versionsFor && !reviewing && !cfgPick && !loaderOpen && !document.querySelector('.dialog-back') && !e.target.closest?.('input, textarea')) selected = new Set();
   }
 
   async function act(f) {
@@ -542,7 +642,9 @@
   const SIDE = { client: [Monitor, 'Client only: players need it, the server usually doesn\'t'], server: [ServerIcon, 'Server only'], both: [ArrowLeftRight, 'Client and server: both need it'] };
   // Desktop's tags: Client only (gold), Server only (blue), Client + server.
   const SIDE_TAG = { client: ['Client only', 'warnc'], server: ['Server only', 'info'], both: ['Client + server', ''] };
+  const ON_HEAD = "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.";
   const SIDE_HEAD = 'Where the mod runs:\nClient only: players need it\nServer only\nClient and server: both need it\nHover a row\'s icon for more. Click to sort.';
+  const HEADS = { author: ['Author', ''], side: ['Side', SIDE_HEAD], on: ['On', ON_HEAD], added: ['Added', ''] };
   const site = (m) => (m.source === 'modrinth' ? 'Modrinth' : 'CurseForge');
   const isNew = (m) => !!m.date_added && Date.now() - new Date(m.date_added).getTime() < 3 * 86400000;
   const browseOf = (m) => (m.source === 'modrinth' ? m.mr_project : m.source ? m.project_id : '');
@@ -551,10 +653,25 @@
   const nameTip = (m) => [m.author ? `by ${m.author}` : '', 'Details'].filter(Boolean).join('\n');
 </script>
 
-<svelte:window onclick={() => (menu = null)} oncontextmenu={() => (menu = null)} onkeydown={escape} />
+<svelte:window onclick={() => { menu = null; colMenu = null; }} oncontextmenu={() => { menu = null; colMenu = null; }} onkeydown={escape} />
 
 {#snippet sortHead(col, label, cls, tip)}
   <button class={cls} class:act={sort.col === col} title={tip} onclick={() => setSort(col)}>{label}{#if sort.col === col}{#if sort.desc}<ArrowDown size={11} />{:else}<ArrowUp size={11} />{/if}{/if}</button>
+{/snippet}
+
+<!-- A movable column's header: click sorts, drag moves it. -->
+{#snippet colHead(c)}
+  {@const [label, tip] = HEADS[c]}
+  <button class="c-{c} mv" class:act={sort.col === c} class:dragged={colDrag?.col === c} class:dropl={colDrag?.on === c && !colDrag.after} class:dropr={colDrag?.on === c && colDrag.after}
+    data-col={c} title={tip} onpointerdown={(e) => headDown(e, c)} onclick={() => headClick(c)}>{label}{#if sort.col === c}{#if sort.desc}<ArrowDown size={11} />{:else}<ArrowUp size={11} />{/if}{/if}</button>
+{/snippet}
+
+<!-- A row's cell in a movable column. -->
+{#snippet modCell(c, m, ix, swOn)}
+  {#if c === 'author'}<span class="c-author muted ell" title={m.author}>{m.author}</span>
+  {:else if c === 'side'}<span class="c-side muted" title={SIDE[m.side]?.[1] || 'Not known'}>{#if SIDE[m.side]}{@const I = SIDE[m.side][0]}<I size={13} />{/if}</span>
+  {:else if c === 'on'}<span class="c-on"><label class="switch" class:pend={swOn !== m.enabled} title={m.enabled ? 'Turn off' : 'Turn on'} onpointerdown={(e) => switchDown(e, m, ix)}><input type="checkbox" checked={swOn} onclick={(e) => toggle(m, e)} /><span></span></label></span>
+  {:else}<span class="c-added muted" title={dateOf(m.date_added)}>{ago(m.date_added)}</span>{/if}
 {/snippet}
 
 <div class="card">
@@ -605,17 +722,14 @@
     {#if clientOn}<div class="small warn">{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on: servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them. <button class="link" onclick={() => (chip = 'client')}>Show</button></div>{/if}
 
     <div class="split">
-      <div class="list" class:noside={!hasSide}>
-        <div class="tr th">
+      <div class="list" class:sidein={hasSide && !cols.includes('side')} class:narrow style:--cols={gridCols} bind:clientWidth={listW}>
+        <div class="tr th" oncontextmenu={openColMenu} role="row" tabindex="-1">
           <span class="c-ck"><input type="checkbox" checked={allShownPicked} onchange={checkAll} title="Select all shown" /></span>
           <span></span>
           {@render sortHead('name', 'Name', 'c-name', '')}
           <span class="c-act"></span>
-          {@render sortHead('author', 'Author', 'c-author', '')}
-          {#if hasSide}{@render sortHead('side', 'Side', 'c-side', SIDE_HEAD)}{/if}
-          {@render sortHead('on', 'On', 'c-on', "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.")}
-          {@render sortHead('added', 'Added', 'c-added', '')}
-          <span class="c-end"></span>
+          {#each cols as c (c)}{@render colHead(c)}{/each}
+          <span class="c-end row"><button class="ib" class:on={!!colMenu} title="Columns · or right-click a header" aria-haspopup="menu" aria-expanded={!!colMenu} onclick={(e) => (colMenu ? (e.stopPropagation(), (colMenu = null)) : openColMenu(e))}><Columns3 size={14} /></button></span>
         </div>
         <div class="rows" data-pick-list="mods" bind:this={rowsEl} style:height="{shown.length * ROW}px" role="grid" tabindex="0"
           onkeydown={tableKey} onfocus={() => (focused = true)} onblur={() => (focused = false)}
@@ -681,10 +795,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
                 <button class="btn sm ghostcl" onclick={() => (versionsFor = m)} title="Versions and changelogs"><ScrollText size={12} />Changelog</button>
               {/if}
             </div>
-            <span class="c-author muted ell" title={m.author}>{m.author}</span>
-            {#if hasSide}<span class="c-side muted" title={SIDE[m.side]?.[1] || 'Not known'}>{#if SIDE[m.side]}{@const I = SIDE[m.side][0]}<I size={13} />{/if}</span>{/if}
-            <span class="c-on"><label class="switch" class:pend={swOn !== m.enabled} title={m.enabled ? 'Turn off' : 'Turn on'} onpointerdown={(e) => switchDown(e, m, ix)}><input type="checkbox" checked={swOn} onclick={(e) => toggle(m, e)} /><span></span></label></span>
-            <span class="c-added muted" title={dateOf(m.date_added)}>{ago(m.date_added)}</span>
+            {#each cols as c (c)}{@render modCell(c, m, ix, swOn)}{/each}
             <span class="c-end row">
               <button class="ib more" title="More" onclick={(e) => openMenu(m, e)}><Ellipsis size={14} /></button>
               <button class="ib del" title="Remove (kept in .hopper-backups)" onclick={async (e) => { e.stopPropagation(); if (await drop([m])) changed(true); }}><Trash2 size={13} /></button>
@@ -748,6 +859,32 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   </div>
 {/if}
 
+{#if colMenu}
+  <div class="ctx popover menu" style:left="{colMenu.x}px" style:top="{colMenu.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+    <div class="menu-label">Sort by</div>
+    {#each SORTS as [col, label] (col)}
+      {@const on = sort.col === col}
+      <button class="menu-item" role="menuitemradio" aria-checked={on} onclick={() => { colMenu = null; setSort(col); }}>
+        <span class="menu-ck">{#if on}<Check size={13} />{/if}</span>{label}
+        {#if on}<span class="menu-dir">{sortDir(col, sort.desc)}{#if sort.desc}<ArrowDown size={12} />{:else}<ArrowUp size={12} />{/if}</span>{/if}
+      </button>
+    {/each}
+    <div class="menu-sep"></div>
+    <div class="menu-label">Columns</div>
+    {#each [['author', 'Author'], ...(hasSide ? [['side', 'Side']] : []), ['added', 'Added']] as [c, label] (c)}
+      {@const on = !colHidden.includes(c)}
+      <button class="menu-item" role="menuitemcheckbox" aria-checked={on} onclick={() => { colMenu = null; setColHidden(c, on); }}>
+        <span class="menu-ck">{#if on}<Check size={13} />{/if}</span>{label}
+      </button>
+    {/each}
+    <div class="menu-sep"></div>
+    <button class="menu-item" onclick={() => { colMenu = null; resetCols(); }}><RotateCcw size={13} />Reset columns</button>
+    <div class="menu-label">Drag a header to move its column</div>
+  </div>
+{/if}
+
+{#if colDrag}<div class="colghost popover" style:left="{colDrag.x + 12}px" style:top="{colDrag.y + 10}px">{HEADS[colDrag.col][0]}</div>{/if}
+
 {#if loaderOpen}<LoaderVersions {server} onClose={() => (loaderOpen = false)} onChanged={() => changed(true)} />{/if}
 {#if versionsFor}<ModVersions {server} mod={versionsFor} dialog onClose={() => (versionsFor = null)} onChanged={changed} />{/if}
 {#if cfgPick}<ModsConfigPick mod={cfgPick.mod} files={cfgPick.files} onPick={openEditor} onClose={() => (cfgPick = null)} />{/if}
@@ -784,13 +921,22 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .vr { width: 1px; height: 20px; background: var(--line2); margin: 0 2px; }
   .bad { color: var(--red); }
   .split { display: flex; gap: 12px; align-items: flex-start; }
-  .list { flex: 1; min-width: 0; container-type: inline-size; }
+  .list { flex: 1; min-width: 0; }
   /* Desktop's columns: check, icon, name, Update / Changelog, Author, Side, On, Added, menu. */
-  .tr { display: grid; grid-template-columns: 22px 30px minmax(0, 1fr) 190px 130px 40px 44px 86px 52px; gap: 10px; align-items: center; padding: 6px 8px; position: relative; border-radius: 8px; }
-  .noside .tr { grid-template-columns: 22px 30px minmax(0, 1fr) 190px 130px 44px 86px 52px; }
+  /* Check, icon, name, Update / Changelog, the movable columns in the user's order, menu (--cols, built in the script). */
+  .tr { display: grid; grid-template-columns: var(--cols); gap: 10px; align-items: center; padding: 6px 8px; position: relative; border-radius: 8px; }
   .th { color: var(--muted); font-size: 11px; padding-top: 2px; padding-bottom: 6px; border-bottom: 1px solid var(--line); border-radius: 0; }
   .th button { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); font-size: 11.5px; font-weight: 500; text-align: left; }
   .th button:hover, .th button.act { color: var(--text); }
+  .th { user-select: none; }
+  .th .mv { cursor: grab; align-self: stretch; }
+  .th .mv.dragged { opacity: 0.45; }
+  /* Where a dragged header lands: before or after this one. */
+  .th .mv.dropl { box-shadow: inset 2px 0 0 var(--acc); }
+  .th .mv.dropr { box-shadow: inset -2px 0 0 var(--acc); }
+  .th .c-end { justify-content: flex-end; }
+  .th .ib.on { color: var(--text); background: #ffffff10; }
+  .colghost { position: fixed; z-index: 90; pointer-events: none; padding: 4px 10px; font-size: 11.5px; font-weight: 500; }
   .mod { cursor: default; height: 52px; overflow: hidden; }
   .rows { position: relative; outline: none; }
   .rows:focus-visible { box-shadow: none; }
@@ -848,19 +994,11 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .splitb.warnb .lead { color: var(--gold); border-right-color: #eab30866; }
   .splitb.lockb .lead { opacity: 0.6; }
   .switch.pend span { outline: 2px dashed var(--acc); outline-offset: 2px; }
-  @container (max-width: 1050px) {
-    .tr { grid-template-columns: 22px 30px minmax(0, 1fr) 190px 40px 44px 86px 52px; } .tr .c-author { display: none; }
-    .noside .tr { grid-template-columns: 22px 30px minmax(0, 1fr) 190px 44px 86px 52px; }
-  }
-  @container (max-width: 860px) {
-    .tr { grid-template-columns: 22px 30px minmax(0, 1fr) 190px 40px 44px 52px; } .tr .c-added { display: none; }
-    .noside .tr { grid-template-columns: 22px 30px minmax(0, 1fr) 190px 44px 52px; }
-  }
-  /* Narrow: the Side icon moves next to the name, Update shrinks to its icon. */
-  @container (max-width: 640px) {
-    .tr, .noside .tr { grid-template-columns: 22px 30px minmax(0, 1fr) 110px 44px 52px; } .tr .c-side { display: none; } .side-in { display: grid; }
-    .splitb button:not(.lead) { display: none; } .ghostcl { font-size: 0; gap: 0; }
-  }
+  /* No Side column (hidden, or no room): its icon sits next to the name. */
+  .sidein .side-in { display: grid; }
+  /* Narrow: Update shrinks to its icon. */
+  .narrow .splitb button:not(.lead) { display: none; }
+  .narrow .ghostcl { font-size: 0; gap: 0; }
   .ph { width: 34px; height: 34px; border-radius: 6px; background: var(--raise); flex: none; display: block; }
   .ph.sm { width: 30px; height: 30px; }
   .icon { padding: 3px 5px; }
