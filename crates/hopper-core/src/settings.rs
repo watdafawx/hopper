@@ -100,6 +100,11 @@ pub struct Settings {
     pub sync_anyway: HashSet<u64>,
     /// Mod ids or file names hidden from the server comparison.
     pub sync_blacklist: HashSet<String>,
+    /// Server sync works while the server runs (the changes load on its
+    /// next restart). On unless turned off: older settings files, from
+    /// before it was saved, read as on.
+    #[serde(default = "yes")]
+    pub sync_while_online: bool,
     /// Which server panel: "crafty", "mcss" or "pterodactyl".
     pub panel_kind: String,
     /// The server panel's address (Crafty: https://rig:8443); empty is none.
@@ -476,6 +481,7 @@ impl Default for Settings {
             pairings: HashMap::new(),
             sync_anyway: HashSet::new(),
             sync_blacklist: HashSet::new(),
+            sync_while_online: true,
             panel_kind: "crafty".into(),
             panel_url: String::new(),
             panel_self_signed: true,
@@ -916,6 +922,17 @@ mod tests {
         assert_eq!(s.launcher_dir, r"X:\L");
         assert_eq!(s.servers_root, "");
         assert_eq!(s.server_host, "rig");
+    }
+
+    #[test]
+    fn server_sync_while_online_is_on_unless_turned_off() {
+        // Saved before the setting existed: on.
+        let old: Settings = serde_json::from_str(r#"{"instances_root":"X:\\I"}"#).unwrap();
+        assert!(old.sync_while_online);
+        assert!(Settings::default().sync_while_online);
+        let off = Settings { sync_while_online: false, ..Settings::default() };
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert!(!back.sync_while_online);
     }
 
     #[test]

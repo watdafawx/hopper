@@ -47,6 +47,9 @@ pub enum Msg {
     SiteServers(String, Result<(Vec<ServerInfo>, Option<String>), String>),
     /// An instance changed on disk; reload it.
     InstanceChanged(PathBuf),
+    /// A server's mods were synced while it ran (when it had started):
+    /// its pages offer a restart. Then as [`Msg::ServersChanged`].
+    SyncedLive(PathBuf, String),
     /// Folders changed outside Hopper (see [`hopper::disk_watch`]).
     Disk(Vec<hopper::disk_watch::Change>),
     /// An instance read again after a change outside Hopper, and which
@@ -229,6 +232,13 @@ fn anim_parts(key: &str) -> (&str, Option<u32>, crate::anim::Limits) {
     }
 }
 
+/// A running game's content when it started, and whether it changed since.
+struct StartedWith {
+    stamp: std::collections::BTreeSet<(String, u64)>,
+    changed: bool,
+    dismissed: bool,
+}
+
 pub struct Store {
     settings: Settings,
     instances: Vec<Instance>,
@@ -291,6 +301,13 @@ pub struct Store {
     local: Arc<hopper::hosting::LocalPanel>,
     /// Daily restarts, crash restarts and autostart for hosted servers.
     scheduler: Option<hopper::hosting::Scheduler>,
+    /// What each running game started with, to tell whether its content
+    /// changed since (see [`Store::changed_while_running`]).
+    started_with: HashMap<PathBuf, StartedWith>,
+    /// Servers synced while they ran, by folder: when the server had
+    /// started then (the panel's word; empty when unknown). Gone once it
+    /// stops or restarts.
+    live_syncs: HashMap<PathBuf, String>,
     /// Instances jobs are changing, with how many jobs.
     busy: Arc<std::sync::Mutex<HashMap<PathBuf, u32>>>,
     /// Instances whose game is being launched (the Play button says so).
@@ -455,6 +472,8 @@ impl Store {
             folder_servers: Vec::new(),
             panel_servers: HashMap::new(),
             site_servers: HashMap::new(),
+            started_with: HashMap::new(),
+            live_syncs: HashMap::new(),
             busy: Default::default(),
             launching: Default::default(),
             update_queue: Default::default(),
@@ -860,6 +879,7 @@ impl Store {
                     self.put_instance(new);
                 }
                 self.prune_fetches(&root);
+                self.note_content(&root);
             }
             Msg::Disk(changes) => self.disk_changed(changes, cx),
             Msg::DiskLoaded(root, new, area) => self.disk_loaded(root, new, area, cx),
@@ -872,7 +892,10 @@ impl Store {
                 }
                 for root in now.keys().filter(|k| !self.running.contains_key(*k)) {
                     self.warnings.remove(root);
+                    let stamp = hopper::disk_watch::content_stamp(root);
+                    self.started_with.insert(root.clone(), StartedWith { stamp, changed: false, dismissed: false });
                 }
+                self.started_with.retain(|k, _| now.contains_key(k));
                 if self.settings.record_sessions {
                     for (root, r) in now.iter().filter(|(k, _)| !self.running.contains_key(*k)) {
                         self.record_session(root, r);
@@ -1076,6 +1099,10 @@ impl Store {
             Msg::Reverts(root, cached) => {
                 self.reverts_pending.remove(&root);
                 self.reverts.insert(root, cached);
+            }
+            Msg::SyncedLive(root, started) => {
+                self.note_live_sync(&root, started);
+                self.handle(Msg::ServersChanged, cx);
             }
             Msg::Status { key, status } => {
                 self.pinging.remove(&key);
@@ -1548,6 +1575,48 @@ impl Store {
 
     pub fn running(&self, root: &Path) -> Option<&Running> {
         self.running.get(root)
+    }
+
+    /// Whether mods or packs changed while the game runs, so the content
+    /// tabs say they apply on its next start. Not shown just because the
+    /// game runs: players know that; only once something changed.
+    pub fn changed_while_running(&self, root: &Path) -> bool {
+        self.started_with.get(root).is_some_and(|s| s.changed && !s.dismissed)
+    }
+
+    /// The player closed that note: it stays closed until the content
+    /// changes again.
+    pub fn dismiss_changed_while_running(&mut self, root: &Path) {
+        if let Some(s) = self.started_with.get_mut(root) {
+            s.dismissed = true;
+        }
+    }
+
+    /// Mods or configs were synced to the server while it ran: it needs a
+    /// restart to load them. `started`: when it started, if known.
+    pub fn note_live_sync(&mut self, server: &Path, started: String) {
+        self.live_syncs.entry(server.to_path_buf()).or_insert(started);
+    }
+
+    /// Synced while running and not restarted since: when it had started.
+    pub fn live_sync(&self, server: &Path) -> Option<&str> {
+        self.live_syncs.get(server).map(String::as_str)
+    }
+
+    /// The server stopped or restarted: what was synced has loaded.
+    pub fn clear_live_sync(&mut self, server: &Path) {
+        self.live_syncs.remove(server);
+    }
+
+    /// Compares a running game's content with what it started with.
+    /// Changed back (a mod turned off and on again) counts as unchanged.
+    pub(crate) fn note_content(&mut self, root: &Path) {
+        let Some(s) = self.started_with.get_mut(root) else { return };
+        let changed = hopper::disk_watch::content_stamp(root) != s.stamp;
+        if changed != s.changed {
+            s.changed = changed;
+            s.dismissed = false;
+        }
     }
 
     pub fn jobs(&self) -> &Jobs {

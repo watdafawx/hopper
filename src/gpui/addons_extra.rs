@@ -1399,6 +1399,39 @@ impl AddonsView {
         Some(div().px_6().child(notice).into_any_element())
     }
 
+    /// "Restart the game to use them": only once mods or packs changed
+    /// while it runs, under the filter bar, until closed or the game
+    /// restarts.
+    pub(crate) fn restart_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.store.read(cx).changed_while_running(&inst.root) {
+            return None;
+        }
+        let theme = cx.theme();
+        let root = inst.root.clone();
+        let bar = widgets::notice_bar(theme.info, IconName::Info, cx)
+            .py_1()
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .child("Changed while the game runs: restart it to load the changes"),
+            )
+            .child(
+                Button::new("restart-note-close")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::X)
+                    .tooltip("Hide")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.store.update(cx, |s, cx| {
+                            s.dismiss_changed_while_running(&root);
+                            cx.notify();
+                        });
+                    })),
+            );
+        Some(div().px_6().child(bar).into_any_element())
+    }
+
     /// Named sets of disabled mods to switch between.
     pub(crate) fn profiles_button(&self, inst: &Instance, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let names: Vec<String> = inst.mod_profiles.iter().map(|p| p.name.clone()).collect();

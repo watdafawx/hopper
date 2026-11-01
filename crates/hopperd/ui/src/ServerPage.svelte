@@ -174,7 +174,8 @@
 {#if !s}
   <div class="pad muted">{live.servers.length ? 'No server with that id.' : 'Loading…'}</div>
 {:else}
-  <div class="head">
+  <!-- Past Console (the overview) the header folds to one line, as desktop's hero does: the tab gets the room. -->
+  <div class="head" class:fold={tab !== 'console'}>
     <HeroDrift src={s.icon ? `/api/v1/servers/${encodeURIComponent(s.id)}/icon?v=${s.icon}` : ''} />
     <Avatar server={s} cls="ic big" />
     <div class="ttl">
@@ -308,6 +309,11 @@
   .head { position: relative; display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; flex-wrap: wrap; }
   .head > :global(*:not(.drift)) { position: relative; z-index: 1; }
   .ttl { flex: 1; min-width: 220px; }
+  .head.fold { padding: 8px 18px 6px; }
+  .head.fold :global(.ic.big) { width: 30px; height: 30px; font-size: 13px; }
+  .head.fold .ttl { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 14px; }
+  .head.fold .ttl > .small { flex: 1 1 240px; min-width: 0; }
+  .head.fold .ttl > :global(:not(.row):not(.small)) { flex-basis: 100%; }
   .wrap { flex-wrap: wrap; }
   h2 { font-size: 17px; font-weight: 700; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

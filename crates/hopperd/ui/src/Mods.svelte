@@ -20,8 +20,9 @@
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
-    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw,
+    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info,
   } from '@lucide/svelte';
+  import { askPower } from './lib/consoleKit.js';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { ask } from './lib/dialog.svelte.js';
@@ -103,6 +104,12 @@
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
+  // "Restart to load": only once mods changed while it runs (the panel
+  // compares with what it started with). Closed until the next change.
+  let restartClosed = $state(false);
+  $effect(() => {
+    if (!server.changed_since_start) restartClosed = false;
+  });
   const mods = $derived(data?.mods || []);
   // "Added by you" only means something on a server made from a pack.
   const hasPack = $derived(!!data?.pack);
@@ -711,10 +718,10 @@
       </div>
       <SortMenu choices={SORTS} {sort} bind:updatesFirst onSort={setSort} />
       <span class="sp"></span>
-      {#if alive}<span class="tiny muted">The server is running: changes apply on its next start</span>{/if}
       {#if counts.unknown}<button class="btn sm ghost" disabled={!!identifying} onclick={() => identify(false)} title="Look jars up on CurseForge and Modrinth"><ScanSearch size={13} />Identify {counts.unknown}</button>{/if}
       <ModProfiles {base} {alive} onChanged={() => changed(false)} />
     </div>
+    {#if server.changed_since_start && !restartClosed}<div class="banner small restart-note"><Info size={14} /><span class="grow">Changed while the server runs: restart it to load the changes</span><button class="btn sm" disabled={server.state === 'stopping'} onclick={() => askPower(server, 'restart')}><RotateCcw size={13} />Restart</button><button class="btn sm ghost icon" title="Hide" onclick={() => (restartClosed = true)}><X size={13} /></button></div>{/if}
     {#if identifying}<div class="banner small"><span class="spinner blue"></span>{identifying}… names, icons and updates fill in when it's done.</div>{/if}
     {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
     {#if data && !data.curseforge}<CfKey inline onSaved={() => { load(); checkUpdates(true); }} />{/if}
@@ -911,6 +918,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .warn { color: var(--gold); }
   .okt { color: var(--green); gap: 5px; }
   .link { color: var(--acc); text-decoration: underline; font-size: 12px; }
+  .restart-note .grow { flex: 1; }
   .banner { display: flex; align-items: center; gap: 8px; border: 1px solid #60a5fa44; background: var(--blue-dim); border-radius: 8px; padding: 6px 10px; color: var(--subtle); }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   .spinner.blue { color: var(--blue); }

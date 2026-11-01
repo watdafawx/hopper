@@ -557,6 +557,7 @@ impl ConfigsPanel {
             })
             .collect();
         let (server, client) = (s.root.clone(), inst.root.clone());
+        let server_root = server.clone();
         let deep = self.diff.as_ref().is_some_and(|d| d.deep);
         let restart = self.online(cx) && act != Act::Pull;
         self.running = true;
@@ -598,6 +599,10 @@ impl ConfigsPanel {
                 })
                 .await;
             this.update(cx, |this, cx| {
+                // Sent while it runs: the Sync page offers a restart.
+                if restart && message.is_ok() {
+                    crate::rigsync::note_live_sync(&this.store, this.control.as_ref(), &server_root, cx);
+                }
                 this.message = Some(message);
                 this.compare(deep, cx);
             })
@@ -1687,7 +1692,6 @@ impl Render for ConfigsPanel {
             return div().into_any_element();
         };
         let folders = self.folders(cx);
-        let online = self.online(cx);
         let header = self.header(&folders, cx);
         if folders.is_empty() {
             return v_flex()
@@ -1723,16 +1727,6 @@ impl Render for ConfigsPanel {
             .min_h_0()
             .gap_3()
             .child(header)
-            .when(online, |c| {
-                c.child(
-                    h_flex()
-                        .gap_2()
-                        .text_sm()
-                        .text_color(theme.warning)
-                        .child(Icon::new(IconName::TriangleAlert).small())
-                        .child("Server is running: mods read configs at startup, so changes apply after a restart."),
-                )
-            })
             .children(message);
         // A folder that mirrors or links shows those controls instead.
         if let Some(c) = rule_controls {

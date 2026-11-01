@@ -876,6 +876,14 @@ impl ServerControl {
         }
     }
 
+    /// When the server started, as the panel says it (to notice a restart).
+    pub fn started(&self) -> Option<&str> {
+        match &self.stats {
+            Some(Ok(s)) if self.id.is_some() && !s.started.is_empty() => Some(&s.started),
+            _ => None,
+        }
+    }
+
     /// Asks the panel again after it couldn't be reached.
     fn retry(&mut self, cx: &mut Context<Self>) {
         self.listed = None;
