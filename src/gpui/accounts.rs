@@ -1471,7 +1471,7 @@ impl AccountsView {
                         .gap_2()
                         .px_2p5()
                         .py_1()
-                        .rounded(theme.radius)
+                        .rounded(crate::theme::radius_sm())
                         .bg(theme.muted)
                         .text_xs()
                         .child(Spinner::new().xsmall())

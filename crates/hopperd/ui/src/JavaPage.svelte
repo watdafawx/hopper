@@ -165,41 +165,41 @@
 <style>
   .hint { margin-bottom: 6px; }
   .fl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 10px 4px; border-bottom: 1px solid var(--line); }
-  .fl.dirty { background: var(--acc-dim); border-radius: 6px; }
+  .fl.dirty { background: var(--acc-dim); border-radius: var(--radius); }
   .lab > div:first-child { font-weight: 500; }
   .ctl { display: flex; align-items: center; gap: 8px; justify-content: flex-end; min-width: 0; }
   .memv { min-width: 96px; text-align: right; white-space: nowrap; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 380px; display: block; }
-  .gen { border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; }
+  .gen { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 0 12px; }
   .gen .fl:last-child { border-bottom: 0; }
   .sect { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 12px 4px 0; }
-  .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; flex-wrap: wrap; }
+  .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; flex-wrap: wrap; }
   .seg button { padding: 3px 9px; font-size: 12px; color: var(--subtle); border-left: 1px solid var(--line2); }
   .seg button:first-child { border-left: 0; }
   .seg button:hover { background: var(--hover, #ffffff0d); }
   .seg button.on { background: var(--acc-dim); color: var(--text); }
-  .chip { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 99px; font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .chip { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: var(--radius-sm); font-size: 11px; text-transform: none; letter-spacing: 0; font-weight: 500; }
   .chip.warn { background: #eab30822; color: #eab308; }
   .tools { gap: 10px; margin-top: 6px; }
   .toks { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-  .tok { font-size: 11px; padding: 2px 7px; border-radius: 5px; color: var(--muted); }
+  .tok { font-size: 11px; padding: 2px 7px; border-radius: var(--radius-sm); color: var(--muted); }
   .tok.known { border: 1px solid var(--line2); color: var(--text); }
   .tok.on { background: var(--acc-dim); }
   .explain { gap: 8px; align-items: flex-start; margin-top: 8px; color: var(--muted); }
   .explain .mono { color: var(--text); font-weight: 500; }
   .warnl { display: flex; gap: 6px; align-items: flex-start; color: #eab308; font-size: 13px; margin-top: 6px; }
   .warnl :global(svg) { flex: none; margin-top: 2px; }
-  .cmd { font-size: 11.5px; background: var(--term); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; color: var(--subtle); word-break: break-all; line-height: 1.5; }
-  .start { border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px 12px; }
+  .cmd { font-size: 11.5px; background: var(--term); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 12px; color: var(--subtle); word-break: break-all; line-height: 1.5; }
+  .start { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 4px 12px 12px; }
   .start .cmd { margin-top: 4px; }
-  .fhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0 0; border-radius: 6px; transition: background .3s; }
+  .fhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0 0; border-radius: var(--radius); transition: background .3s; }
   .fhead > .mono { font-weight: 500; color: var(--text); }
   .fhead .btn { margin-left: auto; }
   .fhead.flash { background: var(--acc-dim); }
   .start .fhead + .cmd + .fhead { margin-top: 10px; }
   .args { word-break: break-all; }
   .chip.new { background: #f9731622; color: #f97316; margin-left: 0; }
-  .argref { font: inherit; color: var(--acc); background: var(--acc-dim); border-radius: 4px; padding: 0 4px; cursor: pointer; }
+  .argref { font: inherit; color: var(--acc); background: var(--acc-dim); border-radius: var(--radius-sm); padding: 0 4px; cursor: pointer; }
   .argref:hover { text-decoration: underline; }
   @media (max-width: 900px) { .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; flex-wrap: wrap; } }
 </style>

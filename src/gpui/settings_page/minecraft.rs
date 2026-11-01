@@ -455,7 +455,7 @@ impl SettingsPage {
             .flex_none()
             .px_2()
             .py_0p5()
-            .rounded(theme.radius)
+            .rounded(crate::theme::radius_sm())
             .text_xs()
             .map(|d| {
                 if waiting {

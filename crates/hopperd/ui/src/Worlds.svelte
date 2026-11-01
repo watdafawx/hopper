@@ -365,14 +365,14 @@
   .world { padding: 12px 14px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
   .world.act { border-color: #f9731655; }
   .world > .row { gap: 8px; }
-  .wq { width: 48px; height: 48px; border-radius: 6px; flex: none; display: grid; place-items: center; background: var(--raise); color: var(--subtle); object-fit: cover; image-rendering: pixelated; }
+  .wq { width: 48px; height: 48px; border-radius: var(--radius); flex: none; display: grid; place-items: center; background: var(--raise); color: var(--subtle); object-fit: cover; image-rendering: pixelated; }
   .wq.act { background: var(--green-dim); color: var(--green); }
   .t { flex: 1; min-width: 0; max-width: 40rem; margin-left: 4px; }
   .t + * { margin-left: auto; }
   .nm { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .exp { display: flex; align-items: center; gap: 6px; color: var(--subtle); margin-left: 50px; padding: 2px 0; width: fit-content; }
   .exp:hover { color: var(--text); }
-  .pg { margin-left: 50px; background: var(--base); border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; display: flex; flex-direction: column; gap: 6px; }
+  .pg { margin-left: 50px; background: var(--base); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 9px 11px; display: flex; flex-direction: column; gap: 6px; }
   .pg .row { gap: 8px; }
   .pg .bar { flex: 1; height: 7px; background: var(--surface); }
   .grow { flex: 1; min-width: 0; }
@@ -382,12 +382,12 @@
   .skel { height: 74px; padding: 0 14px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: var(--radius-lg); }
   .skel::before { width: 48px; height: 48px; }
   .packs { margin-left: 50px; display: flex; flex-direction: column; gap: 4px; }
-  .dp { display: flex; align-items: center; gap: 10px; padding: 3px 8px; border-radius: 6px; font-size: 12.5px; }
+  .dp { display: flex; align-items: center; gap: 10px; padding: 3px 8px; border-radius: var(--radius); font-size: 12.5px; }
   .dpn { flex: 1; min-width: 0; max-width: 38.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   .box { width: min(500px, 100%); display: flex; flex-direction: column; gap: 8px; padding: 18px; }
   .box h3 { margin: 0 0 4px; display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }
-  .seg { display: flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; }
+  .seg { display: flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; }
   .seg button { padding: 5px 11px; font-size: 12.5px; color: var(--subtle); }
   .seg button + button { border-left: 1px solid var(--line2); }
   .seg button.on { background: var(--acc); color: #1a1a1f; font-weight: 600; }
@@ -399,7 +399,7 @@
   .rad input[type='radio'] { margin-top: 3px; accent-color: var(--acc); }
   .cb { display: flex; gap: 8px; align-items: center; }
   .cb input { accent-color: var(--acc); }
-  .note { border: 1px solid var(--line); background: var(--base); border-radius: 8px; padding: 8px 10px; color: var(--subtle); }
-  .warnbox { display: flex; gap: 8px; align-items: flex-start; border: 1px solid #eab30840; background: var(--gold-dim); border-radius: 8px; padding: 8px 10px; color: #e6d27a; }
+  .note { border: 1px solid var(--line); background: var(--base); border-radius: var(--radius-lg); padding: 8px 10px; color: var(--subtle); }
+  .warnbox { display: flex; gap: 8px; align-items: flex-start; border: 1px solid #eab30840; background: var(--gold-dim); border-radius: var(--radius-lg); padding: 8px 10px; color: #e6d27a; }
   .end { margin-top: 6px; gap: 8px; }
 </style>

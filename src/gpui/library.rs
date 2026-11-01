@@ -1212,7 +1212,7 @@ impl LibraryView {
                     .flex_1()
                     .p_0p5()
                     .gap_0p5()
-                    .rounded(radius * 1.5)
+                    .rounded(cx.theme().radius_lg)
                     .bg(track)
                     .child(button("name", "Name", IconName::ArrowDownAZ, false, cx))
                     .child(button("recent", "Recent", IconName::Clock, true, cx)),

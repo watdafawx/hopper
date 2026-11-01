@@ -120,7 +120,7 @@
   .ol { overflow: auto; min-height: 0; max-height: 240px; display: flex; flex-direction: column; }
   .orow { gap: 8px; padding: 4px 6px; border-radius: var(--radius); cursor: pointer; font-size: 12.5px; }
   .orow input { width: 15px; height: 15px; accent-color: var(--acc); flex: none; }
-  .orow img, .ph { width: 18px; height: 18px; border-radius: 4px; background: var(--raise); flex: none; }
+  .orow img, .ph { width: 18px; height: 18px; border-radius: var(--radius-sm); background: var(--raise); flex: none; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .end { justify-content: flex-end; }
   .grow { flex: 1; min-width: 0; }

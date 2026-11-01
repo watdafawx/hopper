@@ -7,7 +7,7 @@ use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::Field;
-use gpui_kit::component::switch::Switch;
+use crate::switch::Switch;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;

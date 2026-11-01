@@ -412,14 +412,14 @@
 {#if sharing}<ShareLog {server} {path} onClose={() => (sharing = false)} />{/if}
 <style>
   .outer { display: flex; gap: 12px; flex: 1; min-height: 0; align-items: flex-start; }
-  .wrap { display: flex; flex-direction: column; flex: 1; min-width: 0; align-self: stretch; min-height: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--term); }
+  .wrap { display: flex; flex-direction: column; flex: 1; min-width: 0; align-self: stretch; min-height: 0; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; background: var(--term); }
   .ftool { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--base); flex-wrap: wrap; }
   .crumbs { display: flex; align-items: center; gap: 4px; color: var(--subtle); font-size: 12.5px; min-width: 0; flex-wrap: wrap; }
   .cur { color: var(--text); font-weight: 600; }
-  .modl { display: inline-flex; align-items: center; gap: 7px; padding: 3px 6px; border-radius: 6px; min-width: 0; max-width: 260px; }
+  .modl { display: inline-flex; align-items: center; gap: 7px; padding: 3px 6px; border-radius: var(--radius); min-width: 0; max-width: 260px; }
   .modl:hover:not(:disabled) { background: var(--hover); }
   .modl:disabled { cursor: default; }
-  .modl img, .modl .ph { width: 18px; height: 18px; border-radius: 4px; flex: none; background: var(--raise); }
+  .modl img, .modl .ph { width: 18px; height: 18px; border-radius: var(--radius-sm); flex: none; background: var(--raise); }
   .fpick { padding: 3px 8px; max-width: 320px; font-size: 12.5px; }
   .subtle { color: var(--subtle); }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

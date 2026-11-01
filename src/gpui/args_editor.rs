@@ -254,7 +254,7 @@ impl ArgsEditor {
                     .justify_center()
                     .items_center()
                     .cursor_row_resize()
-                    .rounded_sm()
+                    .rounded(crate::theme::radius_sm())
                     .when(active, |d| d.bg(bar.opacity(0.5)))
                     .hover(move |s| s.bg(bar.opacity(0.35)))
                     .tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new("Drag to resize, double-click to fit").build(w, cx))

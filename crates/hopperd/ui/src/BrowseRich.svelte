@@ -48,9 +48,9 @@
   .mk { position: absolute; margin-left: -14px; color: var(--muted); }
   .b { font-weight: 650; color: var(--text); }
   .i { font-style: italic; }
-  code { font: 12px var(--mono); background: var(--raise); padding: 0 5px; border-radius: 4px; }
-  pre { font: 12px var(--mono); background: var(--term); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow: auto; margin: 0 0 8px; white-space: pre-wrap; }
-  img { max-width: 100%; height: auto; border-radius: 4px; vertical-align: middle; }
+  code { font: 12px var(--mono); background: var(--raise); padding: 0 5px; border-radius: var(--radius-sm); }
+  pre { font: 12px var(--mono); background: var(--term); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; overflow: auto; margin: 0 0 8px; white-space: pre-wrap; }
+  img { max-width: 100%; height: auto; border-radius: var(--radius-sm); vertical-align: middle; }
   hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
   .tr { display: grid; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
   .video { display: inline-flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; }

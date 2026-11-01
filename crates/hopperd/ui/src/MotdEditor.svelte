@@ -146,9 +146,9 @@
 <style>
   .motd { display: flex; flex-direction: column; gap: 8px; padding: 2px 0 4px; }
   .tools { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
-  .sw { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #ffffff26; padding: 0; }
+  .sw { width: 18px; height: 18px; border-radius: var(--radius-sm); border: 1px solid #ffffff26; padding: 0; }
   .sw:hover { outline: 2px solid #ffffff66; }
-  .fm { width: 24px; height: 24px; border: 1px solid var(--line2); border-radius: 5px; color: var(--text); font-size: 12px; font-weight: 600; }
+  .fm { width: 24px; height: 24px; border: 1px solid var(--line2); border-radius: var(--radius); color: var(--text); font-size: 12px; font-weight: 600; }
   .fm:hover { background: var(--hover); }
   .sep { width: 1px; height: 20px; background: var(--line2); margin: 0 3px; }
   .pick { position: relative; }
@@ -165,7 +165,7 @@
   /* The server list: dirt-dark background, 64 px icon, two lines. */
   /* At 1.5× the game's GUI scale 1: the message area is LIST_WIDTH (271)
      game pixels, and a 6 px letter is one monospace cell (0.55em). */
-  .mc { --s: 1.5; background: #1d150e; background-image: repeating-conic-gradient(#251b12 0 25%, #1d150e 0 50%); background-size: 32px 32px; padding: 10px; border-radius: 6px; overflow: hidden; }
+  .mc { --s: 1.5; background: #1d150e; background-image: repeating-conic-gradient(#251b12 0 25%, #1d150e 0 50%); background-size: 32px 32px; padding: 10px; border-radius: var(--radius); overflow: hidden; }
   .entry { display: flex; gap: 6px; }
   .entry :global(.mcic) { width: 64px; height: 64px; flex: none; border-radius: 0; display: grid; place-items: center; font-size: 26px; font-weight: 800; color: #1a1a1f; }
   .txt { flex: none; width: calc(271px * var(--s)); font: calc(6px * var(--s) / .55)/19px Consolas, 'Courier New', monospace; }

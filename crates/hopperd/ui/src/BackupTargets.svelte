@@ -261,15 +261,15 @@
   .f0 { margin-left: 94px; }
   .port { width: 80px; }
   .grow { flex: 1; min-width: 0; }
-  .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; }
+  .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; }
   .seg button { padding: 3px 10px; font-size: 12px; color: var(--subtle); }
   .seg button.on { background: var(--acc); color: #1a1a1f; }
   .hook { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .hook.off { opacity: 0.55; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .err { color: var(--red); display: flex; align-items: center; gap: 4px; }
-  .keybox { background: var(--acc-dim); border: 1px solid #f9731640; border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
-  .key { background: var(--base); padding: 4px 8px; border-radius: 5px; font-size: 11.5px; word-break: break-all; }
+  .keybox { background: var(--acc-dim); border: 1px solid #f9731640; border-radius: var(--radius-lg); padding: 10px; display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
+  .key { background: var(--base); padding: 4px 8px; border-radius: var(--radius-sm); font-size: 11.5px; word-break: break-all; }
   .end { justify-content: flex-end; }
   .sub { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
   .rcv { padding: 3px 0; }

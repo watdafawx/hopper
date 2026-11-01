@@ -11,7 +11,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::form::Field;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::switch::Switch;
+use crate::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex,
@@ -1068,7 +1068,7 @@ impl ServerControl {
                                 .children(players.into_iter().map(|p| {
                                     div()
                                         .px_1p5()
-                                        .rounded(theme.radius)
+                                        .rounded(crate::theme::radius_sm())
                                         .bg(theme.foreground.opacity(0.06))
                                         .text_xs()
                                         .text_color(theme.muted_foreground)

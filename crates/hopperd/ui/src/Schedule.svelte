@@ -124,7 +124,7 @@
   .w { width: 140px; padding: 4px 8px; }
   .n { width: 64px; padding: 4px 8px; }
   .n input:disabled { opacity: 0.5; }
-  .seg { display: flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; }
+  .seg { display: flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; }
   .seg button { padding: 4px 12px; font-size: 12.5px; color: var(--subtle); }
   .seg button.on { background: var(--acc); color: #1a1a1f; font-weight: 600; }
   .foot { margin-top: 14px; }

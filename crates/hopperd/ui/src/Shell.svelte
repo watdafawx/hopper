@@ -389,7 +389,7 @@
   .updated span { color: var(--text); }
   .tbar { height: var(--titlebar); flex: none; display: flex; align-items: center; gap: 14px; padding: 0 8px 0 14px; background: var(--side); border-bottom: 1px solid var(--side-line); }
   .brand { display: flex; align-items: center; gap: 8px; flex: none; }
-  .home { display: flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; border-radius: 6px; }  .logo { width: 20px; height: 20px; image-rendering: pixelated; flex: none; }
+  .home { display: flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; border-radius: var(--radius); }  .logo { width: 20px; height: 20px; image-rendering: pixelated; flex: none; }
   .bname { font-weight: 600; font-size: 13px; white-space: nowrap; }
   .host { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
   .arrows { display: flex; gap: 2px; }
@@ -397,14 +397,14 @@
   .tab { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: var(--radius); color: var(--subtle); font-size: 13px; }
   .tab:hover:not(.tab-sel) { background: var(--hover); color: var(--text); }
   .tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .track { display: flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 10px; }
+  .track { display: flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: var(--radius-lg); }
   .track .btn { position: relative; }
   .kl { color: var(--muted); font-size: 11.5px; }
   .pdot { position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--acc); }
   .account { position: relative; }
   .who { display: flex; align-items: center; gap: 8px; padding: 2px 4px 2px 8px; border-radius: var(--radius); }
   .who .nm { font-size: 11.5px; font-weight: 600; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .face { width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center; background: var(--raise); color: var(--subtle); font-size: 10.5px; font-weight: 700; }
+  .face { width: 20px; height: 20px; border-radius: var(--radius-sm); display: grid; place-items: center; background: var(--raise); color: var(--subtle); font-size: 10.5px; font-weight: 700; }
   .dd { position: absolute; right: 0; top: calc(100% + 6px); z-index: 66; min-width: 220px; }
   .mh { display: flex; flex-direction: column; padding: 6px 10px 4px; }
   .ver { padding: 4px 10px 6px; }

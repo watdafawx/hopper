@@ -132,11 +132,11 @@
   .grow { flex: 1; min-width: 0; }
   .end { justify-content: flex-end; }
   .lab { width: 36px; }
-  select { background: var(--base); border: 1px solid var(--line2); border-radius: 6px; padding: 5px 8px; color: var(--text); font: inherit; }
-  .hid { background: var(--base); border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+  select { background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 5px 8px; color: var(--text); font: inherit; }
+  .hid { background: var(--base); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px; display: flex; flex-direction: column; gap: 6px; }
   .txt { color: var(--text); }
   .lnk { color: var(--acc); font-size: inherit; padding: 0; }
-  .pre { max-height: 260px; overflow: auto; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: var(--term); padding: 8px; border-radius: 6px; margin: 0; }
+  .pre { max-height: 260px; overflow: auto; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: var(--term); padding: 8px; border-radius: var(--radius); margin: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .link { background: var(--base); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .link { background: var(--base); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 8px 10px; }
 </style>

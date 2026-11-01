@@ -153,7 +153,7 @@
     client: (m) => m.side === 'client', unknown: (m) => !m.source,
   };
   // The orders the list can take, named as their column headers are.
-  const SORTS = $derived([['name', 'Name'], ['author', 'Author'], ...(hasSide ? [['side', 'Side']] : []), ['on', 'On'], ['added', 'Added']]);
+  const SORTS = $derived([['name', 'Name'], ['author', 'Author'], ...(hasSide ? [['side', 'Side']] : []), ['on', 'Enabled'], ['added', 'Added']]);
   const by = {
     name: (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
     author: (a, b) => (a.author || '').toLowerCase().localeCompare((b.author || '').toLowerCase()),
@@ -189,7 +189,7 @@
     return true;
   };
   const cols = $derived(colOrder.filter((c) => c === 'on' || (!colHidden.includes(c) && fitsCol(c))));
-  const COL_W = { author: '130px', side: '40px', on: '44px', added: '86px' };
+  const COL_W = { author: '130px', side: '40px', on: '64px', added: '86px' };
   // Check, icon, name, Update / Changelog, the movable columns, ⋯ and Remove.
   const gridCols = $derived(`22px 30px minmax(0, 1fr) ${narrow ? 110 : 190}px ${cols.map((c) => COL_W[c]).join(' ')} 52px`);
   // The same mod in twice (an old jar left beside the new one): every
@@ -690,7 +690,7 @@
   const SIDE_TAG = { client: ['Client only', 'warnc'], server: ['Server only', 'info'], both: ['Client + server', ''] };
   const ON_HEAD = "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.";
   const SIDE_HEAD = 'Where the mod runs:\nClient only: players need it\nServer only\nClient and server: both need it\nHover a row\'s icon for more. Click to sort.';
-  const HEADS = { author: ['Author', ''], side: ['Side', SIDE_HEAD], on: ['On', ON_HEAD], added: ['Added', ''] };
+  const HEADS = { author: ['Author', ''], side: ['Side', SIDE_HEAD], on: ['Enabled', ON_HEAD], added: ['Added', ''] };
   const site = (m) => (m.source === 'modrinth' ? 'Modrinth' : m.source === 'link' ? m.src_label : 'CurseForge');
   // On CurseForge or Modrinth (a mod from GitHub or a link is neither).
   const onSite = (m) => m.source === 'curseforge' || m.source === 'modrinth';
@@ -981,12 +981,12 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .okt { color: var(--green); gap: 5px; }
   .link { color: var(--acc); text-decoration: underline; font-size: 12px; }
   .restart-note .grow { flex: 1; }
-  .banner { display: flex; align-items: center; gap: 8px; border: 1px solid #60a5fa44; background: var(--blue-dim); border-radius: 8px; padding: 6px 10px; color: var(--subtle); }
+  .banner { display: flex; align-items: center; gap: 8px; border: 1px solid #60a5fa44; background: var(--blue-dim); border-radius: var(--radius-lg); padding: 6px 10px; color: var(--subtle); }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   .spinner.blue { color: var(--blue); }
   .bulkw { position: sticky; bottom: 16px; display: flex; justify-content: center; z-index: 30; pointer-events: none; animation: rise 0.16s ease-out; }
   @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
-  .bulk { pointer-events: auto; gap: 4px; background: var(--raise); border: 1px solid var(--line2); border-radius: 10px; padding: 6px 8px; flex-wrap: wrap; box-shadow: 0 14px 40px #000c; max-width: 100%; }
+  .bulk { pointer-events: auto; gap: 4px; background: var(--raise); border: 1px solid var(--line2); border-radius: var(--radius-lg); padding: 6px 8px; flex-wrap: wrap; box-shadow: 0 14px 40px #000c; max-width: 100%; }
   .bulk b { padding: 0 8px; font-size: 12.5px; }
   .vr { width: 1px; height: 20px; background: var(--line2); margin: 0 2px; }
   .bad { color: var(--red); }
@@ -994,7 +994,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .list { flex: 1; min-width: 0; }
   /* Desktop's columns: check, icon, name, Update / Changelog, Author, Side, On, Added, menu. */
   /* Check, icon, name, Update / Changelog, the movable columns in the user's order, menu (--cols, built in the script). */
-  .tr { display: grid; grid-template-columns: var(--cols); gap: 10px; align-items: center; padding: 6px 8px; position: relative; border-radius: 8px; }
+  .tr { display: grid; grid-template-columns: var(--cols); gap: 10px; align-items: center; padding: 6px 8px; position: relative; border-radius: var(--radius); }
   .th { color: var(--muted); font-size: 11px; padding-top: 2px; padding-bottom: 6px; border-bottom: 1px solid var(--line); border-radius: 0; }
   .th button { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); font-size: 11.5px; font-weight: 500; text-align: left; }
   .th button:hover, .th button.act { color: var(--text); }
@@ -1017,8 +1017,8 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .mod.yours::before { content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--gold); }
   .mod.sel.yours::before { display: none; }
   .mod.off .c-name, .mod.off .thumb { opacity: 0.55; }
-  .thumb { display: grid; border-radius: 6px; }
-  .mod img { border-radius: 6px; background: var(--raise); flex: none; display: block; }
+  .thumb { display: grid; border-radius: var(--radius); }
+  .mod img { border-radius: var(--radius); background: var(--raise); flex: none; display: block; }
   .nm { font-weight: 500; display: flex; gap: 6px; align-items: center; min-width: 0; }
   .nmlink { text-align: left; font-weight: 500; cursor: pointer; }
   .nm .nmlink:hover { color: var(--acc); }
@@ -1032,10 +1032,10 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .tag.okc, .tag.mr { color: var(--green); background: var(--green-dim); }
   .lockt { gap: 3px; cursor: pointer; }
   .brk { gap: 4px; color: var(--red); background: var(--red-dim); max-width: 160px; min-width: 0; flex: 0 1 auto; }
-  .brk img { border-radius: 3px; flex: none; }
+  .brk img { border-radius: var(--radius-sm); flex: none; }
   .lockt:hover { color: var(--text); }
   /* The version chip: click to pick another version; with an update, installed → offered. */
-  .vchip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; max-width: 200px; min-width: 0; padding: 0 6px; border-radius: 6px; font-size: 10.5px; line-height: 17px; background: #ffffff0d; color: var(--muted); }
+  .vchip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; max-width: 200px; min-width: 0; padding: 0 6px; border-radius: var(--radius-sm); font-size: 10.5px; line-height: 17px; background: #ffffff0d; color: var(--muted); }
   .vchip .chev { visibility: hidden; display: grid; color: var(--acc); flex: none; }
   .vchip:not(.plain):hover { background: var(--acc-dim); color: var(--acc); }
   .vchip:hover .chev { visibility: visible; }
@@ -1047,14 +1047,14 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .c-act { display: flex; justify-content: flex-start; }
   .c-on { display: flex; }
   .c-end { gap: 2px; justify-content: flex-end; }
-  .ib { color: var(--muted); padding: 3px; border-radius: 5px; display: grid; }
+  .ib { color: var(--muted); padding: 3px; border-radius: var(--radius); display: grid; }
   .ib:hover { color: var(--text); background: #ffffff10; }
   .ib.del:hover { color: var(--red); }
   /* Hover-only controls stay shown on the picked row, the key row and the row whose menu is open. */
   .mod .more, .mod .ghostcl { visibility: hidden; }
   .mod:hover .more, .mod:hover .ghostcl, .mod.sel .more, .mod.sel .ghostcl, .mod.keys .more, .mod.keys .ghostcl, .mod.menu .more, .mod.menu .ghostcl, .mod.peeked .more, .mod.peeked .ghostcl { visibility: visible; }
   .ghostcl { color: var(--subtle); gap: 5px; }
-  .splitb { display: inline-flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; font-size: 12px; max-width: 100%; }
+  .splitb { display: inline-flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; font-size: 12px; max-width: 100%; }
   .splitb button { padding: 3px 8px; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; color: var(--subtle); }
   .splitb button:hover:not(:disabled) { background: #ffffff10; color: var(--text); }
   .splitb .lead { color: var(--text); border-right: 1px solid var(--line2); }
@@ -1069,7 +1069,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   /* Narrow: Update shrinks to its icon. */
   .narrow .splitb button:not(.lead) { display: none; }
   .narrow .ghostcl { font-size: 0; gap: 0; }
-  .ph { width: 34px; height: 34px; border-radius: 6px; background: var(--raise); flex: none; display: block; }
+  .ph { width: 34px; height: 34px; border-radius: var(--radius); background: var(--raise); flex: none; display: block; }
   .ph.sm { width: 30px; height: 30px; }
   .icon { padding: 3px 5px; }
   /* Loading rows: app.css .skel (desktop's skeleton_rows). */
@@ -1078,6 +1078,6 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .ctx .menu-item { min-width: 0; }
   .ctx .bad { color: var(--red); }
   .noi { width: 13px; flex: none; }
-  .srcp { font-size: 11px; color: var(--subtle); padding: 0 4px; border-radius: 4px; text-decoration: underline dotted; }
+  .srcp { font-size: 11px; color: var(--subtle); padding: 0 4px; border-radius: var(--radius-sm); text-decoration: underline dotted; }
   .srcp:hover { color: var(--text); background: var(--hover, rgba(255,255,255,.06)); }
 </style>

@@ -129,11 +129,11 @@
   .two { display: grid; grid-template-columns: 140px 1fr; gap: 12px; }
   .two > div { display: flex; flex-direction: column; gap: 6px; }
   .grow { flex: 1; min-width: 0; }
-  .seg { display: flex; border: 1px solid var(--line2); border-radius: 6px; overflow: hidden; }
+  .seg { display: flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; }
   .seg button { padding: 5px 11px; font-size: 12.5px; color: var(--subtle); }
   .seg button + button { border-left: 1px solid var(--line2); }
   .seg button.on { background: var(--acc); color: #1a1a1f; font-weight: 600; }
-  .note { border: 1px solid var(--line); background: var(--base); border-radius: 8px; padding: 8px 10px; color: var(--subtle); }
+  .note { border: 1px solid var(--line); background: var(--base); border-radius: var(--radius-lg); padding: 8px 10px; color: var(--subtle); }
   .end { margin-top: 6px; gap: 8px; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   @media (max-width: 900px) { .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; } .two { grid-template-columns: 1fr; } }

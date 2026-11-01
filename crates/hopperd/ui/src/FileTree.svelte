@@ -98,7 +98,7 @@
 
 <style>
   .tree { overflow: auto; padding: 6px 4px; font-size: 12.5px; }
-  .n { display: flex; align-items: center; gap: 2px; border-radius: 5px; white-space: nowrap; }
+  .n { display: flex; align-items: center; gap: 2px; border-radius: var(--radius-sm); white-space: nowrap; }
   .n.over { background: var(--sel); outline: 1px dashed var(--acc); outline-offset: -1px; }
   .tw { width: 16px; height: 22px; display: grid; place-items: center; color: var(--muted); flex: none; }
   .sp0 { width: 12px; }

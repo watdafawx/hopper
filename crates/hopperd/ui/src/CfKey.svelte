@@ -57,6 +57,6 @@
 
 <style>
   .cf { gap: 8px; }
-  .inline { background: var(--blue-dim); border: 1px solid #60a5fa44; border-radius: 8px; padding: 10px 12px; }
+  .inline { background: var(--blue-dim); border: 1px solid #60a5fa44; border-radius: var(--radius-lg); padding: 10px 12px; }
   .grow { flex: 1; padding: 5px 9px; }
 </style>

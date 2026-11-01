@@ -347,7 +347,7 @@
   .fw { font-weight: 400; }
   .pl { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin: 0 -6px; width: calc(100% + 12px); border-radius: var(--radius); text-align: left; color: var(--text); }
   .pl :global(svg) { color: var(--muted); flex: none; }
-  .pl img { border-radius: 4px; background: var(--raise); flex: none; }
+  .pl img { border-radius: var(--radius-sm); background: var(--raise); flex: none; }
   .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12.5px; }
   .kv span:nth-child(odd) { color: var(--muted); }

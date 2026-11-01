@@ -18,9 +18,23 @@ pub fn set_zoom(zoom: u16, cx: &mut App) {
     cx.refresh_windows();
 }
 
-/// The corner radius every theme sets ("radius" in theme.json), for
-/// helpers that have no `cx`.
+/// Hopper's corner scale, one set for every theme and for Hopper Server's
+/// web UI (`--radius-sm`, `--radius`, `--radius-lg` in its app.css):
+/// - `RADIUS_SM`: chips, pills, keys and small icons;
+/// - `RADIUS` ("radius" in theme.json, `theme.radius`): buttons, inputs,
+///   switches, rows and tiles;
+/// - `RADIUS_LG` ("radius.lg", `theme.radius_lg`): cards, panels, dialogs
+///   and popovers.
+///
+/// Only status dots, avatars and round icon badges are fully round.
+pub const RADIUS_SM: f32 = 4.0;
 pub const RADIUS: f32 = 6.0;
+pub const RADIUS_LG: f32 = 10.0;
+
+/// `RADIUS_SM` as pixels, for chips and other small tinted labels.
+pub fn radius_sm() -> gpui_kit::Pixels {
+    gpui_kit::px(RADIUS_SM)
+}
 
 /// Brand, site and loader colors, defined once.
 pub mod palette {
@@ -541,7 +555,7 @@ fn config(p: &Palette) -> Option<ThemeConfig> {
         "mode": if p.dark { "dark" } else { "light" },
         "font.size": 15,
         "radius": RADIUS as usize,
-        "radius.lg": 10,
+        "radius.lg": RADIUS_LG as usize,
         "colors": colors,
     });
     serde_json::from_value(v)

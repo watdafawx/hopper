@@ -78,14 +78,14 @@
   .box { width: min(600px, 100%); max-height: calc(100vh - var(--dialog-top) - 16px); gap: 12px; padding: 18px; }
   .box h3 { margin: 0; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
   .list { overflow: auto; display: flex; flex-direction: column; gap: 2px; min-height: 0; max-height: 360px; }
-  .it { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; font-size: 12.5px; }
+  .it { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--radius); font-size: 12.5px; }
   .dim { opacity: .6; }
   .grow { flex: 1; }
   .min0 { min-width: 0; }
   .repo { max-width: 220px; }
   .end { justify-content: flex-end; gap: 8px; }
   .err { color: var(--red, #f87171); }
-  .skel { height: 34px; border-radius: 6px; background: rgba(255,255,255,.05); }
+  .skel { height: 34px; border-radius: var(--radius); background: rgba(255,255,255,.05); }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .icon { padding: 3px 5px; }
 </style>

@@ -447,7 +447,7 @@
   .pack { display: flex; flex-direction: column; gap: 12px; padding: 18px; }
   .grow { flex: 1; min-width: 0; }
   .hd { display: flex; gap: 16px; align-items: flex-start; }
-  .ico { width: 72px; height: 72px; border-radius: 10px; object-fit: cover; background: var(--raise); flex: none; display: block; }
+  .ico { width: 72px; height: 72px; border-radius: var(--radius-lg); object-fit: cover; background: var(--raise); flex: none; display: block; }
   .info { gap: 4px; }
   .info h2 { font-size: 20px; font-weight: 700; }
   .by { align-self: flex-start; color: var(--muted); padding: 0; }
@@ -484,13 +484,13 @@
   .also .lbl { padding: 0 8px 4px; }
   .line { display: flex; gap: 6px; align-items: flex-start; padding: 0 8px; font-size: 11.5px; }
   .line :global(svg) { flex: none; margin-top: 2px; }
-  .prow { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; text-align: left; width: 100%; min-width: 0; }
-  .prow img, .pico { width: 28px; height: 28px; border-radius: 6px; object-fit: cover; background: var(--raise); flex: none; display: block; }
+  .prow { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--radius); text-align: left; width: 100%; min-width: 0; }
+  .prow img, .pico { width: 28px; height: 28px; border-radius: var(--radius); object-fit: cover; background: var(--raise); flex: none; display: block; }
   .prow .col { gap: 0; }
   .plist { display: flex; flex-direction: column; gap: 1px; max-width: 860px; }
   .ah { gap: 6px; }
   .strip { display: flex; gap: 8px; overflow: hidden; }
-  .shot { flex: none; width: 170px; height: 96px; border-radius: 6px; overflow: hidden; background: var(--raise); border: 1px solid var(--line); }
+  .shot { flex: none; width: 170px; height: 96px; border-radius: var(--radius); overflow: hidden; background: var(--raise); border: 1px solid var(--line); }
   .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .shot:hover { border-color: var(--line2); }
   .shot.more { width: 64px; color: var(--subtle); }
@@ -499,7 +499,7 @@
   .tabs button:hover { color: var(--text); }
   .desc { max-width: 860px; }
   .cbl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--subtle); cursor: pointer; }
-  .vt { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .vt { border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
   .vr { display: grid; grid-template-columns: minmax(0, 1fr) 170px 110px 150px auto; gap: 10px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--line); }
   .vr:last-child { border-bottom: 0; }
   .vr:hover:not(.vh):not(.row-sel) { background: var(--hover); }
@@ -511,17 +511,17 @@
   .pad { padding: 12px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
   .tile { display: flex; flex-direction: column; gap: 4px; text-align: left; color: var(--subtle); }
-  .tile img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--raise); border: 1px solid var(--line); }
+  .tile img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: var(--radius); background: var(--raise); border: 1px solid var(--line); }
   /* The page's loading shapes: the shared skeleton colour and pulse (app.css .skel). */
-  .sk { background: var(--skeleton); border-radius: 6px; animation: sk 1.4s ease-in-out infinite; }
+  .sk { background: var(--skeleton); border-radius: var(--radius); animation: sk 1.4s ease-in-out infinite; }
   .sk.line { height: 12px; display: block; margin: 4px 0; border-radius: 99px; }
   .sk.block { height: 220px; }
   @keyframes sk { 50% { opacity: .45; } }
   .viewer { position: fixed; inset: 0; background: #000d; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 40px 64px; }
   .viewer figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 100%; max-height: 100%; }
-  .viewer img { max-width: 100%; max-height: calc(100vh - 140px); border-radius: 6px; object-fit: contain; }
+  .viewer img { max-width: 100%; max-height: calc(100vh - 140px); border-radius: var(--radius); object-fit: contain; }
   .viewer figcaption { color: var(--text); }
-  .vbtn { position: absolute; color: var(--text); background: #ffffff14; border-radius: 99px; padding: 8px; display: grid; }
+  .vbtn { position: absolute; color: var(--text); background: #ffffff14; border-radius: var(--radius); padding: 8px; display: grid; }
   .vbtn:hover { background: #ffffff26; }
   .close { top: 16px; right: 16px; }
   .prev { left: 14px; top: 50%; }

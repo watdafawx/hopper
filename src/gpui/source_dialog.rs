@@ -240,7 +240,7 @@ impl SourceForm {
                     .gap_2()
                     .px_2()
                     .py_1p5()
-                    .rounded_md()
+                    .rounded(px(crate::theme::RADIUS))
                     .clickable(cx)
                     .child(Icon::new(if chosen { IconName::CircleCheck } else { IconName::Circle }).small())
                     .child(div().flex_1().min_w_0().text_sm().truncate().child(c.file_name.clone()))
@@ -272,7 +272,7 @@ fn trust_note(publisher: &str, kind: &str, author: Option<String>, theme: &gpui_
     v_flex()
         .gap_1()
         .p_3()
-        .rounded_lg()
+        .rounded(px(crate::theme::RADIUS_LG))
         .bg(theme.warning.opacity(widgets::alpha::TINT))
         .child(div().text_sm().font_semibold().child(format!("First file from {publisher}")))
         .child(div().text_sm().child(format!(
@@ -357,7 +357,7 @@ impl Render for SourceForm {
                     v_flex()
                         .gap_1()
                         .p_3()
-                        .rounded_lg()
+                        .rounded(px(crate::theme::RADIUS_LG))
                         .bg(theme.muted)
                         .child(
                             h_flex()
@@ -393,7 +393,7 @@ impl Render for SourceForm {
                         h_flex()
                             .gap_3()
                             .p_3()
-                            .rounded_lg()
+                            .rounded(px(crate::theme::RADIUS_LG))
                             .bg(theme.muted)
                             .child(Icon::new(IconName::Package))
                             .child(
@@ -671,7 +671,7 @@ impl Render for FindForm {
                     .gap_2()
                     .px_2()
                     .py_1p5()
-                    .rounded_md()
+                    .rounded(px(crate::theme::RADIUS))
                     .child(
                         Checkbox::new(("find-ck", i))
                             .small()

@@ -130,7 +130,7 @@
   h3 :global(svg) { color: var(--muted); }
   .fw { font-weight: 400; }
   .pl { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: var(--radius); min-height: 34px; }
-  .pl img { width: 24px; height: 24px; border-radius: 4px; background: var(--raise); flex: none; }
+  .pl img { width: 24px; height: 24px; border-radius: var(--radius-sm); background: var(--raise); flex: none; }
   .nm { font-weight: 500; font-size: 13px; }
   .empty { padding: 0 8px; }
   /* Ban is red, as desktop draws it (also on hover). */

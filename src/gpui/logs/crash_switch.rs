@@ -53,7 +53,7 @@ impl LogsView {
                             words("and turn off only the item that broke:"),
                             div()
                                 .px_1p5()
-                                .rounded(theme.radius)
+                                .rounded(crate::theme::radius_sm())
                                 .bg(theme.muted)
                                 .font_family("Consolas")
                                 .text_xs()

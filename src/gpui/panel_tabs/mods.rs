@@ -16,7 +16,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::switch::Switch;
+use crate::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
@@ -218,7 +218,7 @@ impl Filter {
     fn label(self) -> &'static str {
         match self {
             Filter::All => "All",
-            Filter::On => "On",
+            Filter::On => "Enabled",
             Filter::Off => "Disabled",
             Filter::Yours => "Added by you",
             Filter::Client => "Client-only",

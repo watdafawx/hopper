@@ -89,11 +89,11 @@
   .box { width: min(680px, 100%); max-height: calc(100dvh - var(--dialog-top) - 24px); gap: 10px; padding: 14px; }
   .box h3 { margin: 0; font-size: 15px; font-weight: 600; }
   .scroll { overflow: auto; min-height: 0; flex: 1; gap: 8px; padding-right: 4px; }
-  .card2 { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .card2 { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
   .card2.top { border-color: var(--acc); }
   .card2.installed { background: #ffffff08; }
   .txt { white-space: pre-wrap; color: var(--subtle); overflow-wrap: anywhere; }
-  .chip.xs { font-size: 10.5px; padding: 0 6px; gap: 3px; }
+  .chip.xs { font-size: 10.5px; height: 18px; padding: 0 6px 2px; gap: 3px; }
   .gold { color: var(--gold); }
   .icon { padding: 3px 5px; }
 </style>

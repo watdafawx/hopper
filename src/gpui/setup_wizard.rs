@@ -609,7 +609,7 @@ impl SetupWizard {
                     img(image)
                         .w(rems(W))
                         .h(rems(W / aspect))
-                        .rounded(px(6.))
+                        .rounded(px(crate::theme::RADIUS))
                         .border_1()
                         .border_color(border),
                 )

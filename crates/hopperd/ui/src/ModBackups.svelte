@@ -130,7 +130,7 @@
 
 <style>
   .bk { gap: 8px; }
-  .list { border: 1px solid var(--line); border-radius: 8px; }
+  .list { border: 1px solid var(--line); border-radius: var(--radius-lg); }
   .set { padding: 6px 10px; border-bottom: 1px solid var(--line); }
   .set:last-child { border: 0; }
   .nm { display: flex; align-items: center; gap: 8px; text-align: left; min-width: 0; padding: 3px 6px; margin-left: -6px; border-radius: var(--radius); }

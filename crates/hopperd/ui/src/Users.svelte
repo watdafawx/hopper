@@ -125,7 +125,7 @@
   .grow { flex: 1; min-width: 0; }
   .wrap { flex-wrap: wrap; }
   .roles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
-  .role { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 8px; border: 1px solid var(--line2); border-radius: 8px; }
+  .role { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 8px; border: 1px solid var(--line2); border-radius: var(--radius-lg); }
   .role.on { border-color: var(--acc); background: var(--acc-dim); }
   .u { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
   .u:last-child { border: 0; }
