@@ -109,6 +109,98 @@ pub fn trace_of<'a>(log: &'a str, error: &str) -> Option<Vec<&'a str>> {
     best
 }
 
+/// The frames right under `error` in `text` (the first copy of it), the
+/// ones without a jar too: a generated proxy prints none.
+pub fn frames_after<'a>(text: &'a str, error: &str) -> Vec<&'a str> {
+    let error = error.trim();
+    let mut lines = text.lines();
+    if error.is_empty() || !lines.any(|l| l.trim() == error) {
+        return Vec::new();
+    }
+    lines.take_while(|l| l.trim_start().starts_with("at ")).collect()
+}
+
+/// Frames that only hand a call on to whoever listens: the proxies Java
+/// generates for an event's listener interface
+/// (`jdk.proxy5/jdk.proxy5.$Proxy475.onOpenLootCrate`) and the event buses'
+/// own dispatchers. The mod frame below them is the one that fired the event.
+pub fn is_dispatch_frame(line: &str) -> bool {
+    line.contains("$Proxy")
+        || ["dev.architectury.event.", "net.neoforged.bus.", "net.minecraftforge.eventbus.", "net.fabricmc.fabric.impl.base.event.", "net.fabricmc.fabric.api.event."]
+            .iter()
+            .any(|p| line.contains(p))
+}
+
+/// The version in a frame's module: `ftbquests@2101.1.37/…` → `2101.1.37`.
+pub fn frame_version(line: &str) -> Option<String> {
+    static VER: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*at\s+(?:[\w-]+/)?[\w.-]+@([^/\s]+)/"));
+    VER.captures(line).map(|m| m[1].to_string()).filter(|v| v != "?")
+}
+
+/// What the player was doing when the game crashed, read from the game's
+/// own frames, with the item when a mod's item class is in the stack.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Action {
+    /// "using an item", "placing a block", …
+    pub doing: &'static str,
+    /// "Loot Crate" (from `LootCrateItem.use`).
+    pub item: Option<String>,
+}
+
+impl Action {
+    /// ", while you were using an item (Loot Crate)".
+    pub fn phrase(&self) -> String {
+        match &self.item {
+            Some(i) => format!(", while you were {} ({i})", self.doing),
+            None => format!(", while you were {}", self.doing),
+        }
+    }
+}
+
+/// The game's methods that say what the player did, closest to the throw
+/// first wins. Names are the game's own (Mojang's, as NeoForge and Fabric
+/// with Mojang names print them).
+const ACTIONS: [(&str, &str); 14] = [
+    ("BlockItem.place(", "placing a block"),
+    ("ItemStack.useOn(", "using an item on a block"),
+    ("GameMode.useItemOn(", "using an item on a block"),
+    ("ItemStack.use(", "using an item"),
+    ("GameMode.useItem(", "using an item"),
+    ("handleUseItem(", "using an item"),
+    ("GameMode.interact(", "using something on a creature"),
+    ("Player.interactOn(", "using something on a creature"),
+    ("GameMode.attack(", "attacking"),
+    ("Player.attack(", "attacking"),
+    ("GameMode.startDestroyBlock(", "breaking a block"),
+    ("GameMode.destroyBlock(", "breaking a block"),
+    ("PlayerList.placeNewPlayer(", "joining the world"),
+    ("ClientPacketListener.handleLogin(", "joining the world"),
+];
+
+/// What the player was doing, when the stack shows it.
+pub fn player_action(frames: &[&str]) -> Option<Action> {
+    static ITEM: LazyLock<Regex> = LazyLock::new(|| re(r"\.([A-Z][A-Za-z0-9]*?)Item\.(?:use|useOn|interactLivingEntity|finishUsingItem|releaseUsing)\("));
+    let doing = frames.iter().find_map(|l| ACTIONS.iter().find(|(m, _)| l.contains(m)).map(|(_, d)| *d))?;
+    // The item's own class, in a mod (the game's names its items in code).
+    let item = (doing.starts_with("using an item"))
+        .then(|| frames.iter().filter(|l| frame_mod(l).is_some()).find_map(|l| ITEM.captures(l).map(|m| spaced(&m[1]))))
+        .flatten()
+        .filter(|i| !i.is_empty());
+    Some(Action { doing, item })
+}
+
+/// `LootCrate` → `Loot Crate`.
+fn spaced(camel: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in camel.chars().enumerate() {
+        if i > 0 && c.is_ascii_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// `at TRANSFORMER/somemod@1.0/com.x.Y.z(Y.java:1)`, with or without the
 /// jar after it.
 static MODULE_FRAME: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*at\s+(?:[\w-]+/)?([\w.-]+)@[^/\s]+/\S+\("));
@@ -173,6 +265,25 @@ mod tests {
         ] {
             assert_eq!(frame_mod(game), None, "{game}");
         }
+    }
+
+    #[test]
+    fn what_the_player_was_doing() {
+        let frames = [
+            "\tat TRANSFORMER/jdk.proxy5/jdk.proxy5.$Proxy475.onOpenLootCrate(Unknown Source) ~[?:?] {}",
+            "\tat TRANSFORMER/ftbquests@2101.1.37/dev.ftb.mods.ftbquests.item.LootCrateItem.use(LootCrateItem.java:66) ~[ftb-quests-neoforge-2101.1.37.jar%231754!/:2101.1.37]",
+            "\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.ItemStack.use(ItemStack.java:391) ~[client-1.21.1-srg.jar%231297!/:?]",
+            "\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.multiplayer.MultiPlayerGameMode.useItem(MultiPlayerGameMode.java:371) ~[client-1.21.1-srg.jar%231297!/:?]",
+        ];
+        let a = player_action(&frames).unwrap();
+        assert_eq!(a.phrase(), ", while you were using an item (Loot Crate)");
+        assert!(is_dispatch_frame(frames[0]) && !is_dispatch_frame(frames[1]));
+        assert_eq!(frame_version(frames[1]).as_deref(), Some("2101.1.37"));
+        let place = ["\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.BlockItem.place(BlockItem.java:1)", frames[3]];
+        assert_eq!(player_action(&place).unwrap(), Action { doing: "placing a block", item: None });
+        assert_eq!(player_action(&["\tat java.base/java.lang.Thread.run(Thread.java:1583)"]), None);
+        let report = "Description: x\n\njava.lang.ClassCastException: boom\n\tat TRANSFORMER/jdk.proxy5/jdk.proxy5.$Proxy1.on(Unknown Source) ~[?:?] {}\n\tat a.B.c(B.java:1)\n\nlater\n";
+        assert_eq!(frames_after(report, "java.lang.ClassCastException: boom").len(), 2);
     }
 
     #[test]

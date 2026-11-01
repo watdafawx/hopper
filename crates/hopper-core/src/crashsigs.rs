@@ -184,6 +184,221 @@ pub fn missing_owner(error: &str) -> Option<Raw> {
     Some(Raw { mod_id: String::new(), jar: String::new(), certainty: Certainty::Possible, why, class, needs: Vec::new() })
 }
 
+/// `ClassCastException: class a.B cannot be cast to class c.D (… modules …)`.
+static CAST: LazyLock<Regex> =
+    LazyLock::new(|| re(r"ClassCastException: (?:class )?([\w.$]+) cannot be cast to (?:class )?([\w.$]+)(?: \((.*)\))?"));
+/// `a.B and c.D are in module architectury@13.0.11 of loader …`.
+static BOTH_IN: LazyLock<Regex> = LazyLock::new(|| re(r"are in module ([\w.-]+)@([\w.+-]+)"));
+/// `a.B is in module somemod@1.0 of loader …; c.D is in module …`.
+static ONE_IN: LazyLock<Regex> = LazyLock::new(|| re(r"([\w.$]+) is in module ([\w.-]+)(?:@([\w.+-]+))?"));
+/// `AbstractMethodError: Receiver class a.B does not define or inherit an
+/// implementation of the resolved method 'abstract void m()' of interface c.D.`
+static NO_IMPL: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"AbstractMethodError: Receiver class ([\w.$]+) does not define or inherit an implementation of the resolved method '[^']*?([\w$<>]+)\([^']*' of (?:interface|abstract class|class) ([\w.$]+)")
+});
+/// The shapes of `IncompatibleClassChangeError`: the class it is about.
+static CHANGED_SHAPE: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"IncompatibleClassChangeError: (?:Found (?:interface|class) ([\w.$]+), but|Class ([\w.$]+) does not implement the requested interface ([\w.$]+)|Expect(?:ed|ing) (?:a )?(?:non-)?static (?:method|field) '?(?:[\w.$\[\]<>]+ )?([\w.$]+)\.[\w$<>]+)")
+});
+
+/// A mod id in a module name: not Java's (`java.base`), not the game's.
+fn mod_module(id: &str) -> bool {
+    !id.contains('.') && !matches!(id, "minecraft" | "neoforge" | "forge" | "fml" | "fabricloader" | "java")
+}
+
+/// Java's, the JDK's or the game's own class.
+fn platform_class(class: &str) -> bool {
+    ["java.", "javax.", "jdk.", "sun.", "com.sun."].iter().any(|p| class.starts_with(p)) || game_class(class) || class.contains("$Proxy")
+}
+
+fn short(class: &str) -> &str {
+    class.rsplit('.').next().unwrap_or(class)
+}
+
+fn package(class: &str) -> &str {
+    class.rsplit_once('.').map_or("", |p| p.0)
+}
+
+/// A library's name for people, from its mod id.
+fn lib_name(id: &str) -> String {
+    match id {
+        "architectury" => "Architectury".into(),
+        "balm" => "Balm".into(),
+        "fabric_api" => "Fabric API".into(),
+        "puzzleslib" => "Puzzles Lib".into(),
+        "resourcefullib" => "Resourceful Lib".into(),
+        _ => {
+            let mut c = id.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+        }
+    }
+}
+
+/// The mods in a trace, top first: (mod id, jar, the frame).
+fn mod_frames<'a>(frames: &[&'a str]) -> Vec<(String, String, &'a str)> {
+    frames.iter().filter_map(|l| crate::crashtrace::frame_mod(l).map(|(id, jar)| (id, jar, *l))).collect()
+}
+
+fn set(out: &mut Vec<Raw>, id: &str, jar: &str, certainty: Certainty, why: String) {
+    match out.iter_mut().find(|r| (!id.is_empty() && r.mod_id.eq_ignore_ascii_case(id)) || (!jar.is_empty() && r.jar.eq_ignore_ascii_case(jar))) {
+        Some(r) => {
+            r.certainty = certainty;
+            r.why = why;
+            if r.jar.is_empty() {
+                r.jar = jar.into();
+            }
+        }
+        None => out.push(raw(id, jar, certainty, why)),
+    }
+}
+
+fn by_class(class: &str, certainty: Certainty, why: String) -> Raw {
+    Raw { mod_id: String::new(), jar: String::new(), certainty, why, class: class.into(), needs: Vec::new() }
+}
+
+/// Type mismatches between a mod and the code it works with, from the
+/// crash's own error and the frames under it, written into `out` (the
+/// report's findings so far): who fired or threw, who it doesn't fit, and
+/// what to do.
+///
+/// - A `ClassCastException` between two of one library's types, thrown at
+///   an event's proxy or dispatcher: the mod that fired the event (the first
+///   mod frame under the dispatch) is the cause, certain. The library only
+///   ran it.
+/// - A `ClassCastException` between a mod's types and another mod's: the
+///   mod whose frame threw, and the other side.
+/// - `AbstractMethodError`: the mod whose class lacks the method (found by
+///   its package), and the one that asked for it.
+/// - `IncompatibleClassChangeError`: the mod whose frame threw, and the
+///   mod whose class changed shape.
+pub fn mismatch_signals(error: &str, frames: &[&str], out: &mut Vec<Raw>) {
+    let action = crate::crashtrace::player_action(frames);
+    let mods = mod_frames(frames);
+    if let Some(m) = CAST.captures(error) {
+        let (from, to) = (m[1].to_string(), m[2].to_string());
+        if platform_class(&from) && platform_class(&to) {
+            return;
+        }
+        let modules = m.get(3).map_or("", |g| g.as_str());
+        let module_of = |class: &str| -> Option<(String, String)> {
+            if let Some(b) = BOTH_IN.captures(modules) {
+                return Some((b[1].to_string(), b[2].to_string()));
+            }
+            ONE_IN.captures_iter(modules).find(|c| &c[1] == class).map(|c| (c[2].to_string(), c.get(3).map_or(String::new(), |v| v.as_str().to_string())))
+        };
+        let (from_mod, to_mod) = (module_of(&from).filter(|m| mod_module(&m.0)), module_of(&to).filter(|m| mod_module(&m.0)));
+        // The game's class isn't the mod's type it was to have become: the
+        // mod's change to it (a mixin) isn't there.
+        if game_class(&from) && !platform_class(&to) {
+            let why = format!("It changes the game's {} (a mixin), but that change isn't there: it didn't apply, or the mod was made for another version of the game. Update it.", short(&from));
+            match &to_mod {
+                Some((id, _)) => set(out, id, "", Certainty::Likely, why),
+                None => out.push(by_class(&to, Certainty::Likely, why)),
+            }
+            return;
+        }
+        let one_library = package(&from) == package(&to) || (from_mod.is_some() && from_mod.as_ref().map(|m| &m.0) == to_mod.as_ref().map(|m| &m.0));
+        // Above the first mod's frame: a proxy or an event bus.
+        let fired = frames.iter().take_while(|l| crate::crashtrace::frame_mod(l).is_none()).any(|l| crate::crashtrace::is_dispatch_frame(l));
+        let culprit = mods.iter().find(|(id, _, _)| !crate::crashtrace::is_pass_through(id));
+        if one_library && fired {
+            let Some((id, jar, frame)) = culprit else { return };
+            let (lib, lib_ver) = from_mod.clone().unwrap_or_default();
+            if lib.eq_ignore_ascii_case(id) {
+                return;
+            }
+            let lib_said = if lib.is_empty() { "the event library".to_string() } else { lib_name(&lib) };
+            let this = match crate::crashtrace::frame_version(frame) {
+                Some(v) => format!("this version ({v})"),
+                None => "this version".into(),
+            };
+            let installed = if lib_ver.is_empty() { lib_said.clone() } else { format!("{lib_said} {lib_ver}") };
+            let doing = action.as_ref().map(|a| a.phrase()).unwrap_or_default();
+            let avoid = match action.as_ref().and_then(|a| a.item.as_ref()) {
+                Some(item) => format!(" Until then, don't use the {item}."),
+                None => String::new(),
+            };
+            let why = format!(
+                "It fired one of its own events in a way {}'s event system can't handle{doing}. It's a bug in {this}, or it doesn't match the installed {installed}. Update it: if it came with a modpack, update the pack, or get the mod author's newer version.{avoid}",
+                if lib.is_empty() { "its event library".to_string() } else { lib_said.clone() }
+            );
+            set(out, id, jar, Certainty::Certain, why);
+            let lib_why = format!("The event system {id} uses: the error showed up in it, but {id} fired the event wrong. Update it only if {id} asks for a newer version.");
+            if lib.is_empty() {
+                out.push(by_class(&from, Certainty::Possible, lib_why));
+            } else {
+                set(out, &lib, "", Certainty::Possible, lib_why);
+            }
+            return;
+        }
+        // A mod's type where another mod's was expected.
+        let Some((id, jar, _)) = culprit else { return };
+        let other = [&to_mod, &from_mod].into_iter().flatten().find(|m| !m.0.eq_ignore_ascii_case(id)).cloned();
+        let (to_s, from_s) = (short(&to), short(&from));
+        match other {
+            Some((lib, ver)) => {
+                let ver = if ver.is_empty() { String::new() } else { format!(" {ver}") };
+                let name = lib_name(&lib);
+                let why = format!(
+                    "Its code expected {to_s} but got {from_s}: it and {name}{ver} were built for different versions of each other. Update it or {name} so they match."
+                );
+                set(out, id, jar, Certainty::Likely, why);
+                if !out.iter().any(|r| r.mod_id.eq_ignore_ascii_case(&lib) && r.certainty < Certainty::Possible) {
+                    set(out, &lib, "", Certainty::Possible, format!("{id}'s code doesn't fit this version of it (it expected {to_s} but got {from_s}). Update one of the two so they match."));
+                }
+            }
+            None if to_mod.is_none() && from_mod.is_none() && !platform_class(&to) && package(&from) != package(&to) => {
+                // No module names (Fabric): the other side by the class's package.
+                let why = format!("Its code expected {to_s} but got {from_s}: it and the mod with {to_s} were built for different versions of each other. Update both so they match.");
+                set(out, id, jar, Certainty::Likely, why);
+                out.push(by_class(&to, Certainty::Possible, format!("Its {to_s} isn't what {id}'s code expected. Update one of the two so they match.")));
+            }
+            None => {}
+        }
+        return;
+    }
+    if let Some(m) = NO_IMPL.captures(error) {
+        let (receiver, method, iface) = (m[1].to_string(), m[2].to_string(), m[3].to_string());
+        if platform_class(&iface) {
+            return;
+        }
+        let i_s = short(&iface);
+        if game_class(&receiver) {
+            // The method was to be added to the game's class by a mod's change.
+            let why = format!("It adds {method} to the game's {}, but that change (a mixin) isn't there: it didn't apply, or the mod was made for another version of the game. Update it.", short(&receiver));
+            out.push(by_class(&iface, Certainty::Likely, why));
+            return;
+        }
+        if platform_class(&receiver) {
+            return;
+        }
+        let why = format!(
+            "Its {} is missing {method}, which the installed version of the mod with {i_s} asks for: the two were built for different versions of each other. Update it, or put back the version of the other mod it was made for.",
+            short(&receiver)
+        );
+        out.push(by_class(&receiver, Certainty::Likely, why));
+        if package(&receiver) != package(&iface) {
+            out.push(by_class(&iface, Certainty::Possible, format!("It has {i_s}, which asks for {method}: a mod built for another version of it lacks that. Update one of the two so they match.")));
+        }
+        // The frame that called it only asked: the mismatch is between the two.
+        if let Some((id, jar, _)) = mods.first().filter(|(_, _, f)| !f.contains(package(&receiver))) {
+            set(out, id, jar, Certainty::Possible, format!("Its code called {method} on the other mod's {}, which isn't there.", short(&receiver)));
+        }
+        return;
+    }
+    if let Some(m) = CHANGED_SHAPE.captures(error) {
+        let class = m.get(1).or(m.get(3)).or(m.get(4)).map(|g| g.as_str().to_string()).unwrap_or_default();
+        if class.is_empty() || platform_class(&class) {
+            return;
+        }
+        if let Some((id, jar, _)) = mods.iter().find(|(id, _, _)| !crate::crashtrace::is_pass_through(id)) {
+            let why = format!("Its code uses {} from another mod, which has changed since this mod was built. Update it, or that mod to the version it asks for.", short(&class));
+            set(out, id, jar, Certainty::Likely, why);
+        }
+        out.push(by_class(&class, Certainty::Possible, format!("Its {} isn't the shape another mod's code expects: the two were built for different versions. Update one of the two so they match.", short(&class))));
+    }
+}
+
 /// Findings only the crash report's own error can make (the log has many
 /// errors the game recovers from): a world entry whose mod is gone names
 /// that mod.
@@ -367,6 +582,20 @@ com.electronwill.nightconfig.core.io.ParsingException: Not enough data available
         assert!(other.contains("the class dev.lib.Api, which isn't there"), "{other}");
         assert_eq!(missing_owner("java.lang.NoSuchMethodError: 'void net.minecraft.X.y()'"), None);
         assert_eq!(missing_owner("java.lang.ClassNotFoundException: dev.lib.Api").unwrap().class, "dev.lib.Api");
+    }
+
+    #[test]
+    fn a_game_class_without_a_mod_s_mixin_interface() {
+        let error = "java.lang.ClassCastException: class net.minecraft.world.entity.player.Player cannot be cast to class com.example.fancy.mixin.PlayerAccess (net.minecraft.world.entity.player.Player is in module minecraft@1.21.1 of loader 'TRANSFORMER' @1; com.example.fancy.mixin.PlayerAccess is in module fancy@1.0 of loader 'TRANSFORMER' @1)";
+        let frames = ["\tat TRANSFORMER/other@2.0/com.other.Thing.tick(Thing.java:1) ~[other-2.0.jar%2310!/:?]"];
+        let mut out = Vec::new();
+        mismatch_signals(error, &frames, &mut out);
+        assert_eq!((out[0].mod_id.as_str(), out[0].certainty), ("fancy", Certainty::Likely));
+        assert!(out[0].why.contains("changes the game's Player (a mixin)"), "{}", out[0].why);
+        // Two of Java's own types: nothing to say.
+        let mut out = Vec::new();
+        mismatch_signals("java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Integer", &frames, &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]

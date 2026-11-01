@@ -1,0 +1,30 @@
+---- Minecraft Crash Report ----
+
+// Surprise! Haha. Well, this is awkward.
+
+Time: 2026-11-01 04:07:15
+Description: Unexpected error
+
+java.lang.ClassCastException: class dev.architectury.event.EventResult cannot be cast to class dev.architectury.event.CompoundEventResult (dev.architectury.event.EventResult and dev.architectury.event.CompoundEventResult are in module architectury@13.0.11 of loader 'TRANSFORMER' @38bbbb3c)
+	at TRANSFORMER/jdk.proxy5/jdk.proxy5.$Proxy475.onOpenLootCrate(Unknown Source) ~[?:?]
+	at TRANSFORMER/ftbquests@2101.1.37/dev.ftb.mods.ftbquests.item.LootCrateItem.use(LootCrateItem.java:66) ~[ftb-quests-neoforge-2101.1.37.jar%231754!/:2101.1.37]
+	at TRANSFORMER/ars_fusion@0.1.7/dev.arsfusion.crossbow.CrossbowCasting.use(CrossbowCasting.java:15) ~[ars-fusion-0.1.7-mc1.21.1-neoforge.jar%231401!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.ItemStack.redirect$bjoj000$ars_fusion$arsFusion$fire(ItemStack.java:32159) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.item.ItemStack.use(ItemStack.java:391) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.multiplayer.MultiPlayerGameMode.lambda$useItem$5(MultiPlayerGameMode.java:387) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.multiplayer.MultiPlayerGameMode.startPrediction(MultiPlayerGameMode.java:264) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.multiplayer.MultiPlayerGameMode.useItem(MultiPlayerGameMode.java:371) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.startUseItem(Minecraft.java:1766) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.redirect$bdlf000$betterthirdperson$onDoItemUse(Minecraft.java:1556) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.handleKeybinds(Minecraft.java:2023) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.tick$mixinextras$wrapped$585(Minecraft.java:1837) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.mixinextras$bridge$tick$mixinextras$wrapped$585$586(Minecraft.java) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.wrapMethod$baaa000$smoothloading$worldTransition(Minecraft.java:57497) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.tick(Minecraft.java) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1161) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.run(Minecraft.java:807) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?]
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?]
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
