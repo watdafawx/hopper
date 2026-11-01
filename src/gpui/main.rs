@@ -25,6 +25,7 @@ mod fetch_window;
 mod crash_help;
 mod crash_view;
 mod hero;
+mod hero_drift;
 mod host_dialog;
 mod hopper_versions;
 mod inst_settings;

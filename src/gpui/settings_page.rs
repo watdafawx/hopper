@@ -262,6 +262,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Content, "cf-key", "CurseForge API key", "Needed for CurseForge: browsing, installs and updates. Get one at console.curseforge.com.", "api key token console"),
     e(C::Content, "browse-source", "Browse searches", "Which site Browse opens on. Switch any time in Browse too.", "modrinth curseforge source search"),
     e(C::Appearance, "theme", "Theme", "Hopper's colors. Your own theme files go in the folder next to it.", "dark light color colour glass mica"),
+    e(C::Appearance, "still-header", "Still header", "Keep the header on instance and server pages still. Off, its colors drift slowly and react to what you do; they stop while Hopper isn't the focused window, after 20 seconds without input, and with reduced motion.", "animation animated motion gradient background drift header hero"),
     e(C::Appearance, "zoom", "Zoom", "Ctrl + and Ctrl - change it anywhere; Ctrl 0 resets it.", "scale size font bigger smaller"),
     e(C::Updates, "self-update", "Hopper updates", "Hopper checks for new releases at start and every 30 minutes, and updates itself from them.", "version upgrade release"),
     e(C::Updates, "update-repo", "Update source", "The GitHub repository (owner/name) Hopper's releases come from.", "github repo repository"),
@@ -2169,6 +2170,7 @@ impl SettingsPage {
             vec![
                 Row::new("theme").control(theme),
                 Row::new("zoom").control(div().w(rems(9.)).child(zoom_picker)),
+                Row::new("still-header").control(self.switch("still-header", s.still_header, |st, v| st.still_header = v, cx)),
             ],
         )]
     }

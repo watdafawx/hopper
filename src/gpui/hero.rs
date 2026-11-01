@@ -67,6 +67,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
     let glass = widgets::glass(cx);
     let dark = theme.mode.is_dark();
     let taller = h.summary.is_some();
+    let fx = crate::hero_drift::backdrop(h.art.as_deref(), h.title.as_ref(), cx);
 
     // The art: large, rounded, lifted off the backdrop.
     let art = div()
@@ -138,7 +139,7 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
         )
         .child(v_flex().flex_none().items_end().gap_3().children(stats).child(h.actions));
 
-    let backdrop = backdrop(h.blur, cx);
+    let backdrop = backdrop(h.blur, fx, cx);
 
     div()
         .relative()
@@ -165,7 +166,9 @@ pub fn render(h: Hero, cx: &App) -> AnyElement {
 
 /// The backdrop: the art blurred and stretched, faded into the page
 /// (or, on glass, into a tint that keeps text readable).
-fn backdrop(blur: Option<PathBuf>, cx: &App) -> Div {
+/// The art blurred (or the moving drift, `fx`, when it's on) faded into
+/// the page, or on glass into a tint that keeps text readable.
+fn backdrop(blur: Option<PathBuf>, fx: Option<AnyElement>, cx: &App) -> Div {
     let theme = cx.theme();
     let glass = widgets::glass(cx);
     let dark = theme.mode.is_dark();
@@ -174,13 +177,20 @@ fn backdrop(blur: Option<PathBuf>, cx: &App) -> Div {
     } else {
         theme.background
     };
-    let (top_a, bottom_a, side_a) = if glass { (0.05, 0.6, 0.5) } else { (0.15, 1.0, 0.85) };
+    let (top_a, bottom_a, side_a) = if glass {
+        (0.05, 0.6, 0.5)
+    } else if fx.is_some() {
+        (0.1, 0.9, 0.6)
+    } else {
+        (0.15, 1.0, 0.85)
+    };
     div()
         .absolute()
         .inset_0()
-        .map(|d| match blur {
-            Some(p) => d.child(img(p).size_full().object_fit(ObjectFit::Cover).opacity(if dark { 0.75 } else { 0.55 })),
-            None => d.bg(linear_gradient(
+        .map(|d| match (fx, blur) {
+            (Some(fx), _) => d.child(fx),
+            (None, Some(p)) => d.child(img(p).size_full().object_fit(ObjectFit::Cover).opacity(if dark { 0.75 } else { 0.55 })),
+            (None, None) => d.bg(linear_gradient(
                 135.,
                 linear_color_stop(theme.primary.opacity(0.22), 0.),
                 linear_color_stop(theme.primary.opacity(0.), 1.),
@@ -203,6 +213,7 @@ fn backdrop(blur: Option<PathBuf>, cx: &App) -> Div {
 /// summary line and all but the first pill (the state) are left out:
 /// Overview shows them.
 pub fn render_compact(h: Hero, cx: &App) -> AnyElement {
+    let fx = crate::hero_drift::backdrop(h.art.as_deref(), &format!("compact:{}", h.title), cx);
     let theme = cx.theme();
     let glass = widgets::glass(cx);
     let dark = theme.mode.is_dark();
@@ -268,7 +279,7 @@ pub fn render_compact(h: Hero, cx: &App) -> AnyElement {
                 d.border_b_1().border_color(theme.border)
             }
         })
-        .child(backdrop(h.blur, cx))
+        .child(backdrop(h.blur, fx, cx))
         .child(content)
         .h(rems(HERO_COMPACT))
         .into_any_element()

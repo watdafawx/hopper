@@ -176,6 +176,8 @@ impl AppView {
             cx.observe(&servers, |this, _, cx| this.track(cx)),
             cx.observe(&settings, |this, _, cx| this.track(cx)),
             cx.observe(&store, |_, _, cx| cx.notify()),
+            // The hero drift stops while unfocused; a redraw starts it again.
+            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             cx.observe(&tasks, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, |this, _, event, window, cx| match event {
                 StoreEvent::GameStarted => {
