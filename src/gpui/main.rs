@@ -57,6 +57,7 @@ mod setup_wizard;
 mod side_card;
 mod skin_viewer;
 mod skins;
+mod source_dialog;
 mod store;
 mod theme;
 mod tasks;

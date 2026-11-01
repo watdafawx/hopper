@@ -61,6 +61,7 @@ pub fn addon_from(m: &cf::Mod, f: &cf::File, from_pack: bool) -> Addon {
             .as_ref()
             .map(|m| m.sha1.clone())
             .unwrap_or_default(),
+        source: f.source.as_ref().map(|s| s.source.clone()),
     }
 }
 
@@ -167,6 +168,14 @@ fn put_file(
     }
 }
 
+/// Downloads a file from a mod's source (GitHub, Maven, a link) into the
+/// instance in place of the mod's old file. The download is checked
+/// against the stated checksum and the jar's own metadata first.
+pub(crate) fn put_source_file(inst: &mut Instance, m: &cf::Mod, f: &cf::File, job: &Job) -> anyhow::Result<()> {
+    let from_pack = inst.addons.iter().find(|a| a.project_id == m.id).is_some_and(|a| a.from_pack);
+    put_file(inst, m, f, from_pack, job)
+}
+
 /// What [`fetch_file`] got.
 enum Fetched {
     /// Downloaded to this path in the instance.
@@ -209,12 +218,24 @@ fn fetch_file(
     if bytes {
         job.detail(format!("Downloading {}", f.file_name));
     }
+    // A source file lands under a holding name first: a jar that turns out
+    // not to fit never sits in the folder under a name the game loads.
+    let dest = match &f.source {
+        Some(_) => root.join(folder).join(format!("{}.hopper-download", f.file_name)),
+        None => dest,
+    };
     cf::download_checked(&url, &dest, &f.expect(), Some(job), |n| {
         if bytes && total > 0 {
             job.progress(n as usize, total as usize);
         }
         tick(n);
     })?;
+    if let Some(s) = &f.source
+        && let Err(e) = crate::sources::verify_download(&dest, s)
+    {
+        let _ = fs::remove_file(&dest);
+        return Err(e.context(format!("{} wasn't added", f.file_name)));
+    }
     Ok(Fetched::File(dest))
 }
 
@@ -226,12 +247,20 @@ fn place_file(
     from_pack: bool,
     dest: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let new = addon_from(m, f, from_pack);
+    let mut new = addon_from(m, f, from_pack);
+    if let Some(s) = new.source.as_mut() {
+        s.sha256 = crate::sources::sha256_file(dest)?;
+    }
     let old = inst
         .addons
         .iter()
         .position(|a| a.project_id == m.id)
         .map(|i| inst.addons.remove(i));
+    if let (Some(s), Some(o)) = (new.source.as_mut(), old.as_ref().and_then(|o| o.source.as_ref())) {
+        // What it followed before stays known, and so does its name.
+        s.prev_project = o.prev_project;
+        s.prev_mr_project = o.prev_mr_project.clone();
+    }
     replace_addon(inst, old, new, dest)
 }
 
@@ -784,7 +813,7 @@ pub fn check_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
     let ids: Vec<u64> = if cf::api_key().is_some() {
         inst.addons
             .iter()
-            .filter(|a| a.project_id != 0 && !crate::modrinth::is_mr(a.project_id))
+            .filter(|a| a.project_id != 0 && !crate::modrinth::is_mr(a.project_id) && !crate::sources::is_src(a.project_id))
             .map(|a| a.project_id)
             .collect()
     } else {
@@ -826,6 +855,13 @@ pub fn check_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
     match modrinth_updates(inst) {
         Ok(mr) => out.extend(mr),
         Err(e) if !out.is_empty() => log::warn!("Modrinth updates for {}: {e:#}", inst.name),
+        Err(e) => return Err(e),
+    }
+    // Mods from GitHub and other links: their trouble (a rate limit, a
+    // host that's down) never hides the sites' updates.
+    match crate::sources::updates(inst) {
+        Ok(src) => out.extend(src),
+        Err(e) if !out.is_empty() => log::warn!("source updates for {}: {e:#}", inst.name),
         Err(e) => return Err(e),
     }
     Ok(out)
@@ -897,6 +933,18 @@ pub fn apply_updates_with(
 ) -> anyhow::Result<Vec<String>> {
     let todo: Vec<(cf::Mod, &Update, bool)> = updates
         .iter()
+        .filter(|u| {
+            // A file that changed under the same release isn't installed
+            // in a batch; the player installs it on purpose from Versions.
+            let changed = u.file.source.as_ref().is_some_and(|s| s.changed);
+            if changed {
+                job.note(format!(
+                    "{}: the file for this release changed at its source without a new release, so it wasn't installed",
+                    u.name
+                ));
+            }
+            !changed
+        })
         .filter_map(|u| {
             let a = inst.addons.iter().find(|a| a.project_id == u.project_id)?;
             Some((addon_as_mod(a), u, a.from_pack))

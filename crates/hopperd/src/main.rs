@@ -58,6 +58,7 @@ mod server_ops;
 mod servers_admin;
 mod service;
 mod sftp;
+mod sources_api;
 mod tls;
 
 #[cfg(windows)]
@@ -271,6 +272,10 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
     if !cfg.curseforge_key.trim().is_empty() {
         hopper_core::cf::set_session_key(&cfg.curseforge_key);
     }
+    // The panel keeps its GitHub token in its config, never the system's
+    // credential store.
+    hopper_core::sources::http::set_session_github_token(&cfg.github_token);
+    hopper_core::sources::set_enabled(cfg.allow_sources);
     let auth = auth::Auth::load(&data_dir)?;
     if let Some(code) = auth.setup_code() {
         let _ = std::fs::write(data_dir.join(SETUP_FILE), &code);

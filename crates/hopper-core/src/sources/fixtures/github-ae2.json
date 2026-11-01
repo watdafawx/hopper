@@ -1,0 +1,331 @@
+[
+ {
+  "tag_name": "forge/v15.4.12",
+  "name": "15.4.12 for Forge on Minecraft 1.20.1",
+  "body": "## What's Changed\n* Fix Simplified Chinese naming of light gray items by @JocuperDARY in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/9032\n* Copy the tag into AEItemKey's read-only stack instead of sharing it by @Savallator in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/9025\n\n## New Contributors\n* @JocuperDARY made their first contribution in https://github",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-10-28T22:38:15Z",
+  "html_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/tag/forge/v15.4.12",
+  "author": {
+   "login": "shartte"
+  },
+  "assets": [
+   {
+    "name": "appliedenergistics2-forge-15.4.12-api.jar",
+    "size": 628140,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/forge/v15.4.12/appliedenergistics2-forge-15.4.12-api.jar",
+    "updated_at": "2026-10-28T22:43:21Z",
+    "digest": "sha256:37c86dcca70a6d4a0c44456465488058a6deb12862bea52194d68a8f2b3c6fb9"
+   },
+   {
+    "name": "appliedenergistics2-forge-15.4.12-javadoc.jar",
+    "size": 1076172,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/forge/v15.4.12/appliedenergistics2-forge-15.4.12-javadoc.jar",
+    "updated_at": "2026-10-28T22:43:20Z",
+    "digest": "sha256:f44993eeb444a8ffed5af6ae4d073769a39b6d0695b1c20d86beaaf1d98d79a4"
+   },
+   {
+    "name": "appliedenergistics2-forge-15.4.12.jar",
+    "size": 8501298,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/forge/v15.4.12/appliedenergistics2-forge-15.4.12.jar",
+    "updated_at": "2026-10-28T22:43:19Z",
+    "digest": "sha256:b9c5928893a20d3feb0b4393e2c23d756a16d9abee24d9c14c98e6096d53844d"
+   },
+   {
+    "name": "guide-assets.zip",
+    "size": 11821559,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/forge/v15.4.12/guide-assets.zip",
+    "updated_at": "2026-10-28T22:44:43Z",
+    "digest": "sha256:df9358007d6920b896c96cd7cce0e7e433814cd13eebc8c7ae97c348412c9fb1"
+   }
+  ]
+ },
+ {
+  "tag_name": "fabric/v15.4.12",
+  "name": "15.4.12 for Fabric on Minecraft 1.20.1",
+  "body": "## What's Changed\n* Fix Simplified Chinese naming of light gray items by @JocuperDARY in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/9033\n\n## New Contributors\n* @JocuperDARY made their first contribution in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/9033\n\n**Full Changelog**: https://github.com/AppliedEnergistics/Applied-Energistics-2/compare/fabric/v15.4.",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-10-28T22:35:21Z",
+  "html_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/tag/fabric/v15.4.12",
+  "author": {
+   "login": "shartte"
+  },
+  "assets": [
+   {
+    "name": "appliedenergistics2-fabric-15.4.12-api.jar",
+    "size": 611441,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/fabric/v15.4.12/appliedenergistics2-fabric-15.4.12-api.jar",
+    "updated_at": "2026-10-28T22:39:17Z",
+    "digest": "sha256:20fcbfcbad4b55b89cd7ab90aa10f786c5e50642ff7c6a1da66a63122ca3f654"
+   },
+   {
+    "name": "appliedenergistics2-fabric-15.4.12-javadoc.jar",
+    "size": 1066650,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/fabric/v15.4.12/appliedenergistics2-fabric-15.4.12-javadoc.jar",
+    "updated_at": "2026-10-28T22:39:16Z",
+    "digest": "sha256:ec7396ce2ee4ae814c639de57468a60145b5646c6192ad89c2190b3d48e3e212"
+   },
+   {
+    "name": "appliedenergistics2-fabric-15.4.12.jar",
+    "size": 9828296,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/fabric/v15.4.12/appliedenergistics2-fabric-15.4.12.jar",
+    "updated_at": "2026-10-28T22:39:15Z",
+    "digest": "sha256:52e80515c615a604f18f60e4459c30963eef4f28641440351ffb662f6ace016e"
+   },
+   {
+    "name": "guide-assets.zip",
+    "size": 11514112,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/fabric/v15.4.12/guide-assets.zip",
+    "updated_at": "2026-10-28T22:40:06Z",
+    "digest": "sha256:0a7845443ceb0f349a1fb65ada9042d9a0169a2b519ca187b0484302733f30da"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.3.1-alpha",
+  "name": "26.3.1-alpha for Minecraft 26.3",
+  "body": "## What's Changed\r\n* Port to Minecraft 26.3 by @shartte in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/9016\r\n\r\n\r\n**Full Changelog**: https://github.com/AppliedEnergistics/Applied-Energistics-2/compare/v26.2.1-alpha...v26.3.1-alpha",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-10-03T21:22:39Z",
+  "html_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/tag/v26.3.1-alpha",
+  "author": {
+   "login": "shartte"
+  },
+  "assets": [
+   {
+    "name": "appliedenergistics2-26.3.1-alpha-api.jar",
+    "size": 696584,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.3.1-alpha/appliedenergistics2-26.3.1-alpha-api.jar",
+    "updated_at": "2026-10-03T21:25:07Z",
+    "digest": "sha256:c488896650ba5a498e0c07988311fd7836b29c43b13deb4c2e3f0ab5768c1460"
+   },
+   {
+    "name": "appliedenergistics2-26.3.1-alpha-javadoc.jar",
+    "size": 5337877,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.3.1-alpha/appliedenergistics2-26.3.1-alpha-javadoc.jar",
+    "updated_at": "2026-10-03T21:25:06Z",
+    "digest": "sha256:68cf56d8b2526eef2968a033232770fdd0d2059169084602725f3aaeb16164b5"
+   },
+   {
+    "name": "appliedenergistics2-26.3.1-alpha.jar",
+    "size": 8397266,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.3.1-alpha/appliedenergistics2-26.3.1-alpha.jar",
+    "updated_at": "2026-10-03T21:25:04Z",
+    "digest": "sha256:85da904d110e811f77fa5227f8d9fbc212028311badbceaead32bd4d275bc970"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.2.1-alpha",
+  "name": "26.2.1-alpha for Minecraft 26.2",
+  "body": "## What's Changed\r\n\r\n* Port to Minecraft 26.2 by @shartte in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/9012\r\n\r\n\r\n**Full Changelog**: https://github.com/AppliedEnergistics/Applied-Energistics-2/compare/v26.1.13-beta...v26.2.1-alpha",
+  "draft": false,
+  "prerelease": true,
+  "published_at": "2026-10-01T22:57:08Z",
+  "html_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/tag/v26.2.1-alpha",
+  "author": {
+   "login": "shartte"
+  },
+  "assets": [
+   {
+    "name": "appliedenergistics2-26.2.1-alpha-api.jar",
+    "size": 696584,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.2.1-alpha/appliedenergistics2-26.2.1-alpha-api.jar",
+    "updated_at": "2026-10-01T22:59:34Z",
+    "digest": "sha256:07af8788d4de1852679e5bbb3eaee38be780424e2a8d777b1a6b0145b7ee00cf"
+   },
+   {
+    "name": "appliedenergistics2-26.2.1-alpha-javadoc.jar",
+    "size": 5337848,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.2.1-alpha/appliedenergistics2-26.2.1-alpha-javadoc.jar",
+    "updated_at": "2026-10-01T22:59:34Z",
+    "digest": "sha256:a1c4fcc6eca9136c99dfc6f22f0ddb80b915dbd5af37b39b59a374596ae4d5ab"
+   },
+   {
+    "name": "appliedenergistics2-26.2.1-alpha.jar",
+    "size": 8396211,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.2.1-alpha/appliedenergistics2-26.2.1-alpha.jar",
+    "updated_at": "2026-10-01T22:59:33Z",
+    "digest": "sha256:2345ed127f4ffb8bbd4643c93de3443fe29d89f27a220576b31c858d54357689"
+   },
+   {
+    "name": "guide-assets.zip",
+    "size": 9319715,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.2.1-alpha/guide-assets.zip",
+    "updated_at": "2026-10-01T23:00:28Z",
+    "digest": "sha256:df75cbbdc7fffb322c27f467a45986e347a3e167011c994194c6045458fdfe92"
+   }
+  ]
+ },
+ {
+  "tag_name": "v26.1.13-beta",
+  "name": "26.1.13-beta for Minecraft 26.1.2",
+  "body": "## What's Changed\r\n* Fix bottom face rendering of partial faces (crafting CPU, cables, QN Bridge) by @andrewsf in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8980\r\n* Updated Crowdin Translations by @github-actions[bot] in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8446\r\n* (26.1.2) Use IBlockExtension#getCloneItemStack instead of new ItemStack(Block) by @F",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-30T21:30:32Z",
+  "html_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/tag/v26.1.13-beta",
+  "author": {
+   "login": "shartte"
+  },
+  "assets": [
+   {
+    "name": "appliedenergistics2-26.1.13-beta-api.jar",
+    "size": 696584,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.1.13-beta/appliedenergistics2-26.1.13-beta-api.jar",
+    "updated_at": "2026-09-30T21:32:32Z",
+    "digest": "sha256:07af8788d4de1852679e5bbb3eaee38be780424e2a8d777b1a6b0145b7ee00cf"
+   },
+   {
+    "name": "appliedenergistics2-26.1.13-beta-javadoc.jar",
+    "size": 5337642,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.1.13-beta/appliedenergistics2-26.1.13-beta-javadoc.jar",
+    "updated_at": "2026-09-30T21:32:31Z",
+    "digest": "sha256:6553891f549408d85a311e46ad1be6c4aeddeacb66c0d71212f6a0020bb8b791"
+   },
+   {
+    "name": "appliedenergistics2-26.1.13-beta.jar",
+    "size": 8397322,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.1.13-beta/appliedenergistics2-26.1.13-beta.jar",
+    "updated_at": "2026-09-30T21:32:30Z",
+    "digest": "sha256:6474119c645a21f509da518845ab42bff84d496f80a86ce5e551d7a4745b4893"
+   },
+   {
+    "name": "guide-assets.zip",
+    "size": 10399730,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/v26.1.13-beta/guide-assets.zip",
+    "updated_at": "2026-09-30T21:33:37Z",
+    "digest": "sha256:33f03611e52710939e4557bc697b76d47fd7fcc81ed530e7b61ba69d82a477a6"
+   }
+  ]
+ },
+ {
+  "tag_name": "neoforge/v19.2.18",
+  "name": "19.2.18 for Minecraft 1.21.1",
+  "body": "## What's Changed\r\n* Fix export bus texture (#8692) by @Mithi83 in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8702\r\n* Fix Korean translation by @Mithi83 in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8935\r\n* Fix: Re-check external container slot contents when splitting up a large extract operation to avoid duping by @Frostbite-time in https://github.com/A",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-27T17:38:22Z",
+  "html_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/tag/neoforge/v19.2.18",
+  "author": {
+   "login": "shartte"
+  },
+  "assets": [
+   {
+    "name": "appliedenergistics2-19.2.18-api.jar",
+    "size": 663363,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/neoforge/v19.2.18/appliedenergistics2-19.2.18-api.jar",
+    "updated_at": "2026-09-27T17:43:15Z",
+    "digest": "sha256:3a5f62dc4bb9fc19b1ca7e4303df7c909b1985e92cdc98048af2914b40ec05bf"
+   },
+   {
+    "name": "appliedenergistics2-19.2.18-javadoc.jar",
+    "size": 1142579,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/neoforge/v19.2.18/appliedenergistics2-19.2.18-javadoc.jar",
+    "updated_at": "2026-09-27T17:43:14Z",
+    "digest": "sha256:2573370327b34f531be01c3106a48f33d08c7e9eaa951dd059e693342ec3343f"
+   },
+   {
+    "name": "appliedenergistics2-19.2.18.jar",
+    "size": 8236552,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/neoforge/v19.2.18/appliedenergistics2-19.2.18.jar",
+    "updated_at": "2026-09-27T17:43:13Z",
+    "digest": "sha256:df15a07f86ca1ca93aa66373f9d5d84dd3d4586631fceb38f4fbc85dad591e39"
+   },
+   {
+    "name": "guide-assets.zip",
+    "size": 12022853,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/neoforge/v19.2.18/guide-assets.zip",
+    "updated_at": "2026-09-27T17:43:20Z",
+    "digest": "sha256:f476d08ee69378d2be07fb2d5bf6c746e5b0f7e2bf341396aa12ea5ee2be85c3"
+   }
+  ]
+ },
+ {
+  "tag_name": "forge/v15.4.11",
+  "name": "15.4.11 for Forge on Minecraft 1.20.1",
+  "body": "## What's Changed\r\n* Fix Tooltips crashing for extremely large byte amounts (#8991)\r\n* Fix Spatial Anchor overlay rendering in 1.20.1 by @paperky in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8630\r\n* Be more lenient about misplaced addon crafting storage units leading to permanent world crashes by @pedroksl in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-27T15:00:52Z",
+  "html_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/tag/forge/v15.4.11",
+  "author": {
+   "login": "shartte"
+  },
+  "assets": [
+   {
+    "name": "appliedenergistics2-forge-15.4.11-api.jar",
+    "size": 628054,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/forge/v15.4.11/appliedenergistics2-forge-15.4.11-api.jar",
+    "updated_at": "2026-09-27T15:05:01Z",
+    "digest": "sha256:7c763e8460add891220c94ac3ae0b5210102a07c4ee3611da094797fbd34b28a"
+   },
+   {
+    "name": "appliedenergistics2-forge-15.4.11-javadoc.jar",
+    "size": 1076137,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/forge/v15.4.11/appliedenergistics2-forge-15.4.11-javadoc.jar",
+    "updated_at": "2026-09-27T15:05:00Z",
+    "digest": "sha256:aee50e9e42c3d38c69b2d704b3e3a9f00e488c74045c6dffd3455fdc9d9c441a"
+   },
+   {
+    "name": "appliedenergistics2-forge-15.4.11.jar",
+    "size": 8501309,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/forge/v15.4.11/appliedenergistics2-forge-15.4.11.jar",
+    "updated_at": "2026-09-27T15:04:59Z",
+    "digest": "sha256:f2ff9ee5122b037d4e93537425ab9fbe49860fc9c3977db13b20a50ca7d30f9e"
+   },
+   {
+    "name": "guide-assets.zip",
+    "size": 11842682,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/forge/v15.4.11/guide-assets.zip",
+    "updated_at": "2026-09-27T15:06:39Z",
+    "digest": "sha256:c454035cf9343f8137cd781b42ea137846b414d65009d5d8a197832e850f879e"
+   }
+  ]
+ },
+ {
+  "tag_name": "fabric/v15.4.11",
+  "name": "15.4.11 for Fabric on Minecraft 1.20.1",
+  "body": "## What's Changed\r\n* Fix Tooltips crashing for extremely large byte amounts (#8991)\r\n* Fix Korean translation by @Mithi83 in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8937\r\n* Only prevent recursive use of network storage, but not multiple uses on the same subnetwork depth (#8095) by @tsbreuer in https://github.com/AppliedEnergistics/Applied-Energistics-2/pull/8653\r\n* Fix ing",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-27T15:12:39Z",
+  "html_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/tag/fabric/v15.4.11",
+  "author": {
+   "login": "shartte"
+  },
+  "assets": [
+   {
+    "name": "appliedenergistics2-fabric-15.4.11-api.jar",
+    "size": 611441,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/fabric/v15.4.11/appliedenergistics2-fabric-15.4.11-api.jar",
+    "updated_at": "2026-09-27T15:16:48Z",
+    "digest": "sha256:cee5d7f33dda0e4dcc515ddb333848896a68191caf85b934467cc92895ec826e"
+   },
+   {
+    "name": "appliedenergistics2-fabric-15.4.11-javadoc.jar",
+    "size": 1066616,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/fabric/v15.4.11/appliedenergistics2-fabric-15.4.11-javadoc.jar",
+    "updated_at": "2026-09-27T15:16:48Z",
+    "digest": "sha256:7ca53a3ed8e3309ace47044f0aac3fbcf846122f145013f2626430d26220b063"
+   },
+   {
+    "name": "appliedenergistics2-fabric-15.4.11.jar",
+    "size": 9828299,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/fabric/v15.4.11/appliedenergistics2-fabric-15.4.11.jar",
+    "updated_at": "2026-09-27T15:16:47Z",
+    "digest": "sha256:0720dd822952cd5c5c60593ed1ac5952454aa6137b9321b3f9d59557605ed7f5"
+   },
+   {
+    "name": "guide-assets.zip",
+    "size": 11508079,
+    "browser_download_url": "https://github.com/AppliedEnergistics/Applied-Energistics-2/releases/download/fabric/v15.4.11/guide-assets.zip",
+    "updated_at": "2026-09-27T15:16:41Z",
+    "digest": "sha256:a6152253f7585976d14cee2752964538ad6d69528ed9ac31be1456497927794f"
+   }
+  ]
+ }
+]

@@ -49,6 +49,11 @@ pub struct Config {
     /// CurseForge API key for mod search, identify and updates (Modrinth
     /// needs none).
     pub curseforge_key: String,
+    /// Mods may be added from GitHub, Maven, Jenkins and download links
+    /// (they skip CurseForge's and Modrinth's review). Off by default.
+    pub allow_sources: bool,
+    /// Optional GitHub token for those checks (raises GitHub's limit).
+    pub github_token: String,
     /// SFTP port; 0 turns SFTP off.
     pub sftp_port: u16,
     /// Server addresses: one Minecraft port for every server.
@@ -85,6 +90,8 @@ impl Default for Config {
             acme_email: String::new(),
             acme_staging: false,
             curseforge_key: String::new(),
+            allow_sources: false,
+            github_token: String::new(),
             sftp_port: 8022,
             router: Default::default(),
             trust_local_setup: true,

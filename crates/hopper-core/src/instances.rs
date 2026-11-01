@@ -123,6 +123,10 @@ pub struct Addon {
     pub mr_project: String,
     pub mr_version: String,
     pub mr_sha1: String,
+    /// Where the file comes from when that's not CurseForge or Modrinth
+    /// (a GitHub release, a Maven repo, a link): its updates come from there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::sources::ModSource>,
 }
 
 impl Addon {
@@ -589,6 +593,16 @@ fn merge_reimport(imported: &mut Instance, own: Instance, root: &Path) {
             if !o.date_added.is_empty() {
                 a.date_added = o.date_added.clone();
             }
+            // CurseForge doesn't know the jar follows a source.
+            if o.source.is_some() {
+                a.source = o.source.clone();
+                a.project_id = o.project_id;
+                a.file_id = o.file_id;
+                a.page = o.page.clone();
+                a.mr_project.clear();
+                a.mr_version.clear();
+                a.mr_sha1.clear();
+            }
         } else if a.project_id != 0
             && let Some(o) = own
                 .addons
@@ -730,6 +744,9 @@ pub fn load(root: &Path) -> Option<Instance> {
     for a in &inst.addons {
         crate::modrinth::num_id(&a.mr_project);
         crate::modrinth::num_id(&a.mr_version);
+        if let Some(s) = &a.source {
+            crate::sources::remember(a.project_id, s, &a.name);
+        }
     }
     if let Some(p) = &inst.pack {
         crate::modrinth::num_id(&p.mr_project);
@@ -1008,6 +1025,7 @@ fn import_curseforge(root: &Path) -> Option<Instance> {
                 mr_project: String::new(),
                 mr_version: String::new(),
                 mr_sha1: String::new(),
+                source: None,
                 requires: f
                     .map(|f| {
                         f.dependencies

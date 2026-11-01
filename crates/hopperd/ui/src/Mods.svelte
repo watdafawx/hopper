@@ -20,12 +20,14 @@
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
-    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info,
+    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info, Link, Unlink,
   } from '@lucide/svelte';
+  import SourceAdd from './SourceAdd.svelte';
+  import SourceFind from './SourceFind.svelte';
   import { askPower } from './lib/consoleKit.js';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
-  import { ask } from './lib/dialog.svelte.js';
+  import { ask, confirmIt } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
   import {
     setOn, removeMods, problems, setLocked, resetConfig, switchSource, setVersionLock, configFiles, versionLocked, wordsMatch, ago, dateOf,
@@ -58,6 +60,26 @@
   // The last row clicked (Shift+click picks from it to the next one).
   let anchor = null;
   let menu = $state(null);
+  // Add content's menu (Browse, or GitHub and other links), and the
+  // GitHub-or-a-link dialog: { follow: the mod to follow a source, or null }.
+  let addMenu = $state(null);
+  let sourceFor = $state(null);
+  let finding = $state(false);
+  // Mods from GitHub and other links are on for this panel.
+  let srcOn = $state(false);
+  api('/settings/sources').then((r) => (srcOn = r.allowed)).catch(() => {});
+
+  async function trustSource(m) {
+    if (!(await confirmIt(`Get updates from ${m.src_publisher}?`, { body: `This mod came with a sync or a pack, pinned to the file its sender had. Files from ${m.src_label} aren't checked by CurseForge or Modrinth; trust ${m.src_publisher} only if you know who publishes it. Hopper never runs anything from a download.`, ok: 'Trust and check for updates' }))) return;
+    try {
+      await post(`${base}/mods/source/trust`, { file: m.file });
+      say(`Updates for ${m.name} come from ${m.src_publisher} now.`);
+      checkUpdates(true);
+      load();
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
   let updating = $state(new Set());
   let done = $state(new Set());
   // The keys' row, shown with a ring while the table has focus.
@@ -596,6 +618,22 @@
     } else if (!versionsFor && !reviewing && !cfgPick && !loaderOpen && !document.querySelector('.dialog-back') && !e.target.closest?.('input, textarea')) selected = new Set();
   }
 
+  function openAdd(e) {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    addMenu = addMenu ? null : { x: r.left, y: r.bottom + 4 };
+  }
+
+  async function unfollow(m) {
+    try {
+      await post(`${base}/mods/source/unfollow`, { file: m.file });
+      say(`${m.name} no longer follows its source.`);
+      changed(true);
+    } catch (e) {
+      say(e.message, true);
+    }
+  }
+
   async function act(f) {
     const m = menu.m;
     menu = null;
@@ -652,15 +690,17 @@
   const ON_HEAD = "Disabled keeps the file but the server doesn't load it (renamed to .disabled). Click to sort.";
   const SIDE_HEAD = 'Where the mod runs:\nClient only: players need it\nServer only\nClient and server: both need it\nHover a row\'s icon for more. Click to sort.';
   const HEADS = { author: ['Author', ''], side: ['Side', SIDE_HEAD], on: ['On', ON_HEAD], added: ['Added', ''] };
-  const site = (m) => (m.source === 'modrinth' ? 'Modrinth' : 'CurseForge');
+  const site = (m) => (m.source === 'modrinth' ? 'Modrinth' : m.source === 'link' ? m.src_label : 'CurseForge');
+  // On CurseForge or Modrinth (a mod from GitHub or a link is neither).
+  const onSite = (m) => m.source === 'curseforge' || m.source === 'modrinth';
   const isNew = (m) => !!m.date_added && Date.now() - new Date(m.date_added).getTime() < 3 * 86400000;
-  const browseOf = (m) => (m.source === 'modrinth' ? m.mr_project : m.source ? m.project_id : '');
+  const browseOf = (m) => (m.source === 'modrinth' ? m.mr_project : onSite(m) ? m.project_id : '');
   // A mod named in an update's "breaks X", for its icon and side panel.
   const byName = (n) => mods.find((m) => m.name === n) || null;
   const nameTip = (m) => [m.author ? `by ${m.author}` : '', 'Details'].filter(Boolean).join('\n');
 </script>
 
-<svelte:window onclick={() => { menu = null; colMenu = null; }} oncontextmenu={() => { menu = null; colMenu = null; }} onkeydown={escape} />
+<svelte:window onclick={() => { menu = null; colMenu = null; addMenu = null; }} oncontextmenu={() => { menu = null; colMenu = null; addMenu = null; }} onkeydown={escape} />
 
 {#snippet sortHead(col, label, cls, tip)}
   <button class={cls} class:act={sort.col === col} title={tip} onclick={() => setSort(col)}>{label}{#if sort.col === col}{#if sort.desc}<ArrowDown size={11} />{:else}<ArrowUp size={11} />{/if}{/if}</button>
@@ -697,7 +737,7 @@
   {:else}
     <!-- Laid out as desktop's: actions, search, what's listed (Filter), in what order (Sort). -->
     <div class="row wrap toolbar">
-      <a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a>
+      <button class="btn sm" aria-haspopup="menu" aria-expanded={!!addMenu} onclick={openAdd}><Plus size={13} />Add content<ChevronDown size={12} /></button>
       <span class="row upd">
         <!-- The last check's results stay up while a new one runs; with results on screen the refresh button spins instead, so nothing moves. -->
         {#if pendingUpdates.length}<button class="btn sm pri" disabled={!!busy} title="Review {pendingUpdates.length === 1 ? '1 update' : `${pendingUpdates.length} updates`}, then update" onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Update all ({pendingUpdates.length})</button>
@@ -719,6 +759,7 @@
       <SortMenu choices={SORTS} {sort} bind:updatesFirst onSort={setSort} />
       <span class="sp"></span>
       {#if counts.unknown}<button class="btn sm ghost" disabled={!!identifying} onclick={() => identify(false)} title="Look jars up on CurseForge and Modrinth"><ScanSearch size={13} />Identify {counts.unknown}</button>{/if}
+      {#if srcOn && counts.unknown}<button class="btn sm ghost" onclick={() => (finding = true)} title="Jars that link to their GitHub repo can follow it for updates"><Link size={13} />Find sources for {counts.unknown} unknown mod{counts.unknown === 1 ? '' : 's'}</button>{/if}
       <ModProfiles {base} {alive} onChanged={() => changed(false)} />
     </div>
     {#if server.changed_since_start && !restartClosed}<div class="banner small restart-note"><Info size={14} /><span class="grow">Changed while the server runs: restart it to load the changes</span><button class="btn sm" disabled={server.state === 'stopping'} onclick={() => askPower(server, 'restart')}><RotateCcw size={13} />Restart</button><button class="btn sm ghost icon" title="Hide" onclick={() => (restartClosed = true)}><X size={13} /></button></div>{/if}
@@ -775,6 +816,10 @@
                   {#if cats.length > 2}<span class="tiny muted" title={cats.slice(2).join(', ')}>+{cats.length - 2}</span>{/if}
                 {/if}
                 {#if m.source === 'modrinth'}<span class="chip tag mr">Modrinth</span>{/if}
+                {#if m.src_label}<span class="chip tag info">{m.src_label}</span>{/if}
+                {#if srcOn && !m.source && !m.from_pack}<button class="srcp" onclick={(e) => { e.stopPropagation(); sourceFor = { follow: m }; }}>Add a source to get updates</button>{/if}
+                {#if srcOn && m.src_trusted === false}<button class="srcp" onclick={(e) => { e.stopPropagation(); trustSource(m); }}>Turn on updates from {m.src_publisher}</button>{/if}
+                {#if up?.changed}<span class="chip tag bad" title="The file of the installed release was replaced at its source without a new release. Hopper won't install it on its own; install it from Versions if you trust the change.">Changed at source</span>{/if}
                 {#if up}
                   <button class="vchip upc" class:warnv={breaking} class:lockv={vl} title={`${m.file}
 Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><span class="ell muted">{up.from}</span><ArrowRight size={10} /><b class="ell">{up.to}</b><span class="chev"><ChevronDown size={10} /></span></button>
@@ -856,8 +901,16 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
     <button class="menu-item" onclick={() => act(() => (location.hash = `/server/${encodeURIComponent(server.id)}/files/mods`))}><FolderOpen size={13} />Show in Files</button>
     {#if m.source}<button class="menu-item" onclick={() => act(editConfig)}><Pencil size={13} />Edit config…</button>{/if}
     {#if m.source}<button class="menu-item" onclick={() => act((m) => resetConfig(base, m))}><Settings2 size={13} />Reset config…</button>{/if}
-    {#if m.page}<a class="menu-item" href={m.page} target="_blank" rel="noreferrer" onclick={() => (menu = null)}><ExternalLink size={13} />Open on {site(m)}</a>{/if}
-    {#if m.source}<button class="menu-item" onclick={() => act(async (m) => (await switchSource(base, m, alive, (s) => (busy = s))) && changed(true))}><Shuffle size={13} />Switch to {m.source === 'modrinth' ? 'CurseForge' : 'Modrinth'}</button>{/if}
+    {#if m.page && m.source !== 'link'}<a class="menu-item" href={m.page} target="_blank" rel="noreferrer" onclick={() => (menu = null)}><ExternalLink size={13} />Open on {site(m)}</a>{/if}
+    {#if onSite(m)}<button class="menu-item" onclick={() => act(async (m) => (await switchSource(base, m, alive, (s) => (busy = s))) && changed(true))}><Shuffle size={13} />Switch to {m.source === 'modrinth' ? 'CurseForge' : 'Modrinth'}</button>{/if}
+    <div class="menu-sep"></div>
+    {#if m.source === 'link'}
+      {#if m.src_page}<a class="menu-item" href={m.src_page} target="_blank" rel="noreferrer" onclick={() => (menu = null)}><ExternalLink size={13} />Open on {m.src_label}</a>{/if}
+      <button class="menu-item" onclick={() => act((m) => (sourceFor = { follow: m }))}><Link size={13} />Change source…</button>
+      <button class="menu-item" onclick={() => act(unfollow)}><Unlink size={13} />Stop following</button>
+    {:else}
+      <button class="menu-item" onclick={() => act((m) => (sourceFor = { follow: m }))}><Link size={13} />Follow a source…</button>
+    {/if}
     {#if mup}<button class="menu-item" onclick={() => act((m) => lockVersion(m, !mvl))}>{#if mvl}<LockOpen size={13} /><span class="ell">Unlock {mup.to}</span>{:else}<Lock size={13} /><span class="ell">Lock {mup.to} (keep {mup.from})</span>{/if}</button>{/if}
     {#if m.source}<button class="menu-item" onclick={() => act(async (m) => (await setLocked(base, [m], !m.locked)) && changed(true))}>{#if m.locked}<LockOpen size={13} />Allow updates{:else}<Lock size={13} />Ignore updates{/if}</button>{/if}
     <button class="menu-item" onclick={() => act((m) => toggle(m))}><span class="noi"></span>{m.enabled ? 'Disable' : 'Enable'}</button>
@@ -893,6 +946,14 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
 {#if colDrag}<div class="colghost popover" style:left="{colDrag.x + 12}px" style:top="{colDrag.y + 10}px">{HEADS[colDrag.col][0]}</div>{/if}
 
 {#if loaderOpen}<LoaderVersions {server} onClose={() => (loaderOpen = false)} onChanged={() => changed(true)} />{/if}
+{#if addMenu}
+  <div class="ctx popover menu" style:left="{addMenu.x}px" style:top="{addMenu.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+    <a class="menu-item" href="#{browseHash('mods', server.id)}" onclick={() => (addMenu = null)}><Search size={13} />Browse CurseForge and Modrinth</a>
+    <button class="menu-item" onclick={() => { addMenu = null; sourceFor = { follow: null }; }}><Link size={13} />From GitHub or a link…</button>
+  </div>
+{/if}
+{#if finding}<SourceFind {server} onClose={() => (finding = false)} onChanged={changed} />{/if}
+{#if sourceFor}<SourceAdd {server} follow={sourceFor.follow} onClose={() => (sourceFor = null)} onChanged={changed} />{/if}
 {#if versionsFor}<ModVersions {server} mod={versionsFor} dialog onClose={() => (versionsFor = null)} onChanged={changed} />{/if}
 {#if cfgPick}<ModsConfigPick mod={cfgPick.mod} files={cfgPick.files} onPick={openEditor} onClose={() => (cfgPick = null)} />{/if}
 {#if reviewing?.length}<ReviewUpdates {server} updates={reviewing} {mods} {busy} onApply={applyUpdates} onClose={() => (reviewing = null)} />{/if}
@@ -1016,4 +1077,6 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .ctx .menu-item { min-width: 0; }
   .ctx .bad { color: var(--red); }
   .noi { width: 13px; flex: none; }
+  .srcp { font-size: 11px; color: var(--subtle); padding: 0 4px; border-radius: 4px; text-decoration: underline dotted; }
+  .srcp:hover { color: var(--text); background: var(--hover, rgba(255,255,255,.06)); }
 </style>

@@ -382,6 +382,9 @@ pub struct File {
     /// Set for a Modrinth version.
     #[serde(skip)]
     pub modrinth: Option<crate::modrinth::MrFile>,
+    /// Set for a file from GitHub, Maven, Jenkins or a link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Box<crate::sources::SrcFile>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

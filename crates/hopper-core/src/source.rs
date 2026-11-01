@@ -6,6 +6,9 @@ use crate::modrinth::{self, is_mr, real_id};
 use crate::richtext::{self, Block};
 
 pub fn get_mod(id: u64) -> anyhow::Result<cf::Mod> {
+    if crate::sources::is_src(id) {
+        return crate::sources::get_mod(id);
+    }
     if !is_mr(id) {
         return cf::get_mod(id);
     }
@@ -19,6 +22,7 @@ pub fn get_mod(id: u64) -> anyhow::Result<cf::Mod> {
 
 /// Everything else by the author of `m`, most downloaded first.
 pub fn author_projects(m: &cf::Mod) -> anyhow::Result<Vec<cf::Mod>> {
+    anyhow::ensure!(!crate::sources::is_src(m.id), "{} isn't on CurseForge or Modrinth", m.name);
     let a = m.authors.first().ok_or_else(|| anyhow::anyhow!("{} lists no author", m.name))?;
     if m.modrinth.is_some() {
         return modrinth::user_projects(&a.name);
@@ -34,6 +38,9 @@ pub fn author_projects(m: &cf::Mod) -> anyhow::Result<Vec<cf::Mod>> {
 
 /// Files of a project, newest first.
 pub fn files(id: u64, game_version: &str, loader: Loader) -> anyhow::Result<Vec<cf::File>> {
+    if crate::sources::is_src(id) {
+        return crate::sources::files(id, game_version, loader);
+    }
     if !is_mr(id) {
         return cf::files(id, game_version, loader);
     }
@@ -44,6 +51,9 @@ pub fn files(id: u64, game_version: &str, loader: Loader) -> anyhow::Result<Vec<
 }
 
 pub fn file(project: u64, file: u64) -> anyhow::Result<cf::File> {
+    if crate::sources::is_src(project) {
+        return crate::sources::file(project, file);
+    }
     if !is_mr(project) {
         return cf::file(project, file);
     }
@@ -55,6 +65,10 @@ pub fn file(project: u64, file: u64) -> anyhow::Result<cf::File> {
 /// A file's changelog, parsed. Modrinth's comes with the version. One
 /// that's only a GitHub link shows what it links to.
 pub fn changelog(f: &cf::File) -> anyhow::Result<Vec<Block>> {
+    if let Some(s) = &f.source {
+        let notes = if s.notes.trim().is_empty() { "No release notes." } else { s.notes.as_str() };
+        return Ok(richtext::parse_markdown(notes));
+    }
     let blocks = match &f.modrinth {
         Some(m) => richtext::parse_markdown(&m.changelog),
         None => richtext::parse(&cf::changelog(f.mod_id, f.id)?),

@@ -223,6 +223,10 @@ pub struct FileMeta {
     pub sha1: String,
     /// Mod name for jars the instance knows.
     pub name: String,
+    /// Where a jar from GitHub or another link comes from (pinned), so
+    /// the other PC sees it as that and not as an unknown jar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::sources::ModSource>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -282,6 +286,7 @@ fn save_hashes() {
 /// Every file in `folder` of an instance, with content hashes.
 pub fn manifest(inst: &SharedInst, folder: &str, names: &HashMap<String, String>) -> Manifest {
     let root = inst.root.join(folder);
+    let pins = if folder == "mods" { crate::sources::carry::pins_in(&inst.root) } else { HashMap::new() };
     let mut files = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(d) = stack.pop() {
@@ -308,6 +313,7 @@ pub fn manifest(inst: &SharedInst, folder: &str, names: &HashMap<String, String>
                 continue;
             };
             files.push(FileMeta {
+                source: pins.get(rel.to_lowercase().trim_end_matches(".disabled")).cloned(),
                 name: names.get(&rel.to_lowercase()).cloned().unwrap_or_default(),
                 rel,
                 size: md.len(),
@@ -869,7 +875,19 @@ impl Hub {
                         }
                     }
                 } else if *req.method() == tiny_http::Method::Put {
+                    // The pusher's source record for a mods jar, if any.
+                    let pin = req
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("X-Hopper-Source"))
+                        .and_then(|h| base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, h.value.as_str()).ok())
+                        .and_then(|b| serde_json::from_slice::<crate::sources::ModSource>(&b).ok())
+                        .filter(|_| folder == "mods");
                     let r = receive(req.as_reader(), &inst.root, &full);
+                    if let (Some(source), None) = (pin, &r.error) {
+                        let file = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+                        let _ = crate::sources::carry::apply(&inst.root, &[crate::sources::carry::Pin { file, source }]);
+                    }
                     crate::history::record(
                         &inst.root,
                         &format!("peer {}", peer.name),
@@ -954,6 +972,32 @@ impl Hub {
         local_root: &Path,
         rels: &[String],
     ) -> Vec<crate::model::SyncResult> {
+        let results = self.pull_files(peer_id, inst, folder, local_root, rels);
+        // Jars from GitHub and other links: their pins come along (checked
+        // against the received file's sha256 when attached).
+        if folder == "mods"
+            && results.iter().any(|r| r.ok)
+            && let Ok(m) = self.remote_manifest(peer_id, inst, folder)
+        {
+            let pins: Vec<crate::sources::carry::Pin> = m
+                .files
+                .into_iter()
+                .filter(|f| rels.contains(&f.rel))
+                .filter_map(|f| Some(crate::sources::carry::Pin { file: f.rel, source: f.source? }))
+                .collect();
+            let _ = crate::sources::carry::apply(local_root, &pins);
+        }
+        results
+    }
+
+    fn pull_files(
+        &self,
+        peer_id: &str,
+        inst: &str,
+        folder: &str,
+        local_root: &Path,
+        rels: &[String],
+    ) -> Vec<crate::model::SyncResult> {
         rels.iter()
             .map(|rel| {
                 let dst = local_root.join(folder).join(rel);
@@ -999,9 +1043,14 @@ impl Hub {
         local_root: &Path,
         rels: &[String],
     ) -> Vec<String> {
+        let pins = if folder == "mods" { crate::sources::carry::pins_in(local_root) } else { HashMap::new() };
         rels.iter()
             .filter_map(|rel| {
                 let src = local_root.join(folder).join(rel);
+                let pin = pins
+                    .get(rel.to_lowercase().trim_end_matches(".disabled"))
+                    .and_then(|s| serde_json::to_vec(s).ok())
+                    .map(|b| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, b));
                 let r = self
                     .request(
                         peer_id,
@@ -1010,10 +1059,11 @@ impl Hub {
                     )
                     .and_then(|(t, url)| {
                         let body = std::fs::read(&src)?;
-                        agent()
-                            .put(&url)
-                            .header("Authorization", format!("Bearer {}", t.token))
-                            .send(&body[..])?;
+                        let mut req = agent().put(&url).header("Authorization", format!("Bearer {}", t.token));
+                        if let Some(p) = &pin {
+                            req = req.header("X-Hopper-Source", p);
+                        }
+                        req.send(&body[..])?;
                         Ok(())
                     });
                 r.err().map(|e| format!("{rel}: {e:#}"))

@@ -169,6 +169,9 @@ pub struct Settings {
     /// Deleted instances, worlds and backups are removed outright instead
     /// of filling the Recycle Bin (on C:) with gigabytes.
     pub delete_permanently: bool,
+    /// Mods may be added from GitHub, Maven, Jenkins and download links
+    /// (they skip CurseForge's and Modrinth's review). Off by default.
+    pub allow_sources: bool,
     /// Other launchers' folders whose instances Hopper manages in place.
     pub launcher_dirs: Vec<LauncherDir>,
     /// The first-run setup was finished or skipped. A settings file from
@@ -510,6 +513,7 @@ impl Default for Settings {
             dependents: String::new(),
             pack_keep_days: 30,
             delete_permanently: true,
+            allow_sources: false,
             // A new user: Hopper shows its setup on the first start.
             setup_done: false,
             data_move_declined: false,

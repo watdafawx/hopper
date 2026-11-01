@@ -1,0 +1,382 @@
+//! Mods from GitHub and other links on a server, as on desktop: look a
+//! link up, add the file it gives (or make an installed mod follow it),
+//! stop following. The work is hopper-core's `sources`; updates come
+//! through the normal mod update check. Off until the owner turns it on.
+
+use crate::api::{ApiResult, bad, require, require_owner};
+use crate::mods_api::{entry, forget_updates, instance};
+use crate::App;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, Method};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use hopper_core::install;
+use hopper_core::sources::{self, Resolved};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::sync::Arc;
+
+pub fn routes() -> Router<Arc<App>> {
+    Router::new()
+        .route("/api/v1/settings/sources", get(settings).put(set_settings))
+        .route("/api/v1/servers/{id}/mods/source/resolve", post(resolve))
+        .route("/api/v1/servers/{id}/mods/source/add", post(add))
+        .route("/api/v1/servers/{id}/mods/source/unfollow", post(unfollow))
+        .route("/api/v1/servers/{id}/mods/source/suggest", get(suggest))
+        .route("/api/v1/servers/{id}/mods/source/plan", post(plan))
+        .route("/api/v1/servers/{id}/mods/source/adopt", post(adopt))
+        .route("/api/v1/servers/{id}/mods/source/unknown", get(unknown))
+        .route("/api/v1/servers/{id}/mods/source/adopt-many", post(adopt_many))
+        .route("/api/v1/servers/{id}/mods/source/trust", post(trust))
+        .route("/api/v1/servers/{id}/mods/sources", axum::routing::put(put_pins))
+}
+
+fn allowed(app: &App) -> ApiResult<()> {
+    if app.cfg.read().unwrap().allow_sources {
+        Ok(())
+    } else {
+        Err(bad("Mods from GitHub and other links are off. Turn them on in Settings › Mod sources first."))
+    }
+}
+
+/// Whether mods from links are on, and whether a GitHub token is saved
+/// (never the token itself).
+async fn settings(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let cfg = app.cfg.read().unwrap();
+    Ok(Json(json!({ "allowed": cfg.allow_sources, "github_token": !cfg.github_token.trim().is_empty() })))
+}
+
+#[derive(Deserialize)]
+struct SettingsBody {
+    allowed: Option<bool>,
+    /// "" removes it.
+    github_token: Option<String>,
+}
+
+async fn set_settings(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Json(b): Json<SettingsBody>,
+) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    let mut cfg = app.cfg.write().unwrap();
+    if let Some(on) = b.allowed {
+        cfg.allow_sources = on;
+        sources::set_enabled(on);
+    }
+    if let Some(t) = &b.github_token {
+        cfg.github_token = t.trim().to_string();
+        sources::http::set_session_github_token(&cfg.github_token);
+    }
+    cfg.save(&app.data_dir).map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ResolveBody {
+    link: String,
+    #[serde(default)]
+    prerelease: bool,
+}
+
+fn resolved_json(r: &Resolved) -> Value {
+    json!({
+        "name": r.name,
+        "kind": r.source.kind.label(),
+        "publisher": r.source.publisher,
+        "page": r.source.page(),
+        "trusted": sources::trusted(&r.source),
+        "pick": r.pick,
+        "ambiguous": r.ambiguous,
+        "candidates": r.candidates.iter().map(|c| json!({
+            "file": c.file_name,
+            "version": c.version,
+            "title": c.title,
+            "size": c.size,
+            "date": c.date,
+            "author": c.author,
+            "prerelease": c.prerelease,
+            "fits": c.fit.usable(),
+            "tag": c.fit.tag(),
+            "good": c.fit == sources::Fit::Good,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+async fn resolve(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<ResolveBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    allowed(&app)?;
+    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let inst = instance(&e)?;
+        let r = sources::resolve(&b.link, &inst.game_version, install::loader_of(&inst), b.prerelease)?;
+        Ok(resolved_json(&r))
+    })
+    .await
+    .map_err(bad)?
+    .map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct AddBody {
+    link: String,
+    #[serde(default)]
+    prerelease: bool,
+    /// The file picked from the lookup.
+    file: String,
+    /// An installed mod (its file name) to follow the source instead of
+    /// adding a new one.
+    #[serde(default)]
+    follow: Option<String>,
+}
+
+async fn add(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<AddBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    allowed(&app)?;
+    forget_updates(&id);
+    let title = match &b.follow {
+        Some(f) => format!("Following a source for {f} on {}", e.name),
+        None => format!("Adding {} to {}", b.file, e.name),
+    };
+    let job = crate::pack_api::spawn(&app, title, move |job| {
+        let mut inst = instance(&e)?;
+        // Looked up again: the file list may have moved on since the
+        // browser asked.
+        let r = sources::resolve(&b.link, &inst.game_version, install::loader_of(&inst), b.prerelease)?;
+        let i = r
+            .candidates
+            .iter()
+            .position(|c| c.file_name == b.file)
+            .ok_or_else(|| anyhow::anyhow!("{} is no longer offered there; look the link up again", b.file))?;
+        sources::trust(&r.source)?;
+        // A replaced jar goes to the server's .hopper-backups first.
+        let done = match &b.follow {
+            Some(f) => sources::follow(&mut inst, f, &r, i, job)?,
+            None => sources::install(&mut inst, &r, i, job)?,
+        };
+        log::info!("{}: {done} from {}", e.name, r.source.publisher);
+        Ok(json!({ "added": [done] }))
+    });
+    Ok(Json(json!({ "job": job })))
+}
+
+#[derive(Deserialize)]
+struct UnfollowBody {
+    file: String,
+}
+
+async fn unfollow(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<UnfollowBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    forget_updates(&id);
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut inst = instance(&e)?;
+        sources::unfollow(&mut inst, &b.file)
+    })
+    .await
+    .map_err(bad)?
+    .map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn run<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
+    tokio::task::spawn_blocking(f).await.map_err(bad)?.map_err(|e| bad(format!("{e:#}")))
+}
+
+#[derive(Deserialize)]
+struct FileQuery {
+    file: String,
+}
+
+/// The source a jar's own metadata points to, to pre-fill Follow a source.
+async fn suggest(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let link = run(move || Ok(sources::suggest(&instance(&e)?, &q.file))).await?;
+    Ok(Json(json!({ "link": link })))
+}
+
+#[derive(Deserialize)]
+struct AdoptBody {
+    file: String,
+    link: String,
+    #[serde(default)]
+    prerelease: bool,
+}
+
+fn adoption_json(a: &sources::Adoption) -> Value {
+    json!({
+        "name": a.name,
+        "kind": a.source.kind.label(),
+        "publisher": a.source.publisher,
+        "trusted": sources::trusted(&a.source),
+        "matched": a.matched,
+        "seen": a.source.seen,
+        "newest": a.newest.as_ref().map(|c| json!({ "file": c.file_name, "version": c.version, "title": c.title })),
+    })
+}
+
+/// How an installed jar would follow a source (nothing changes yet).
+async fn plan(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<AdoptBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    allowed(&app)?;
+    let v = run(move || Ok(adoption_json(&sources::plan_adopt(&instance(&e)?, &b.file, &b.link, b.prerelease)?))).await?;
+    Ok(Json(v))
+}
+
+/// Makes the installed jar follow the source, leaving the file as it is.
+async fn adopt(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<AdoptBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    allowed(&app)?;
+    forget_updates(&id);
+    let v = run(move || {
+        let mut inst = instance(&e)?;
+        let a = sources::plan_adopt(&inst, &b.file, &b.link, b.prerelease)?;
+        sources::trust(&a.source)?;
+        sources::adopt(&mut inst, &b.file, &a)?;
+        Ok(adoption_json(&a))
+    })
+    .await?;
+    Ok(Json(v))
+}
+
+/// Unknown mods and the source each jar suggests, for "Find sources".
+async fn unknown(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let list = run(move || Ok(sources::unknown_mods(&instance(&e)?))).await?;
+    Ok(Json(json!({ "mods": list })))
+}
+
+#[derive(Deserialize)]
+struct ManyItem {
+    file: String,
+    link: String,
+}
+
+#[derive(Deserialize)]
+struct ManyBody {
+    items: Vec<ManyItem>,
+    #[serde(default)]
+    prerelease: bool,
+}
+
+/// Follows sources for several unknown mods in one go. Each source is
+/// asked once (cached), so a batch stays inside GitHub's limits.
+async fn adopt_many(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<ManyBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    allowed(&app)?;
+    forget_updates(&id);
+    let n = b.items.len();
+    let job = crate::pack_api::spawn(&app, format!("Finding sources for {n} mods on {}", e.name), move |job| {
+        let mut inst = instance(&e)?;
+        let mut done = Vec::new();
+        for (i, it) in b.items.iter().enumerate() {
+            job.check_cancelled()?;
+            job.progress(i, n);
+            job.detail(format!("{}: {}", it.file, it.link));
+            match sources::plan_adopt(&inst, &it.file, &it.link, b.prerelease) {
+                Ok(a) => {
+                    sources::trust(&a.source)?;
+                    sources::adopt(&mut inst, &it.file, &a)?;
+                    done.push(it.file.clone());
+                }
+                Err(err) => job.note(format!("{}: {err:#}", it.file)),
+            }
+        }
+        Ok(json!({ "added": done }))
+    });
+    Ok(Json(json!({ "job": job })))
+}
+
+/// Confirms the source of a mod that came with a pack or a sync, so its
+/// updates are checked.
+async fn trust(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<FileQuery>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    allowed(&app)?;
+    forget_updates(&id);
+    run(move || {
+        let inst = instance(&e)?;
+        let a = inst
+            .addons
+            .iter()
+            .find(|a| a.file_name.eq_ignore_ascii_case(&b.file))
+            .and_then(|a| a.source.clone())
+            .ok_or_else(|| anyhow::anyhow!("{} doesn't follow a source", b.file))?;
+        sources::trust(&a)
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct PinsBody {
+    pins: Vec<sources::carry::Pin>,
+}
+
+/// Sources that came along with synced jars (Hopper desktop's sync). Each
+/// is attached only to a jar with its pinned sha256, and isn't trusted by
+/// this: the owner confirms it before its updates are checked.
+async fn put_pins(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<PinsBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    forget_updates(&id);
+    let n = run(move || {
+        instance(&e)?;
+        sources::carry::apply(&e.root, &b.pins)
+    })
+    .await?;
+    Ok(Json(json!({ "attached": n })))
+}

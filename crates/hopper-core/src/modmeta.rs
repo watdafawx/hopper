@@ -9,7 +9,9 @@ use std::path::PathBuf;
 /// The cache key for an addon's project: "cf:123" or "mr:AbCd". `None` for
 /// jars Hopper hasn't matched to a project.
 pub fn key(a: &Addon) -> Option<String> {
-    if !a.mr_project.is_empty() {
+    if crate::sources::is_src(a.project_id) {
+        None
+    } else if !a.mr_project.is_empty() {
         Some(format!("mr:{}", a.mr_project))
     } else if a.project_id != 0 {
         Some(format!("cf:{}", a.project_id))

@@ -1643,10 +1643,18 @@ impl Render for RedeemForm {
                     .as_ref()
                     .map(|n| format!(" as \u{201c}{n}\u{201d}"))
                     .unwrap_or_default();
-                div()
-                    .text_sm()
-                    .text_color(theme.success)
-                    .child(format!("{what}{name}: {}.", s.summary()))
+                // Mods from GitHub and other links: who publishes them, and
+                // that their updates wait for a yes on this PC.
+                let srcs = hopper::sharecode::sources_of(s);
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().text_color(theme.success).child(format!("{what}{name}: {}.", s.summary())))
+                    .when(!srcs.is_empty(), |d| {
+                        d.child(div().text_sm().child(format!(
+                            "Includes mods from {}. Hopper downloads the exact files the code names and checks them by their sha256. Their updates stay off until you turn them on for each source.",
+                            srcs.iter().map(|(k, p)| format!("{k}: {p}")).collect::<Vec<_>>().join(", ")
+                        )))
+                    })
                     .into_any_element()
             }
         };

@@ -27,6 +27,9 @@ use std::path::Path;
 
 pub const PREFIX: &str = "HOP-";
 const VERSION: u8 = 1;
+/// A code that also carries mods from GitHub and other links (pinned
+/// sources, after the groups). Older Hopper says it's from a newer one.
+const VERSION_SOURCES: u8 = 2;
 
 const PACK_NONE: u8 = 0;
 const PACK_CF: u8 = 1;
@@ -62,6 +65,8 @@ pub enum Entry {
     Remove(Target),
     /// A pack mod that's turned off.
     Off(Target),
+    /// A mod from GitHub or another link: its pinned release and sha256.
+    Source { pin: crate::sources::carry::Pin, enabled: bool },
 }
 
 /// What a code describes.
@@ -81,7 +86,7 @@ impl Share {
         let (mut files, mut removed, mut off) = (0, 0, 0);
         for e in &self.entries {
             match e {
-                Entry::CurseFile { .. } | Entry::ModrinthFile { .. } => files += 1,
+                Entry::CurseFile { .. } | Entry::ModrinthFile { .. } | Entry::Source { .. } => files += 1,
                 Entry::Remove(_) => removed += 1,
                 Entry::Off(_) => off += 1,
             }
@@ -163,8 +168,14 @@ pub fn encode(s: &Share) -> String {
     for v in strs.iter().filter(|v| !v.is_empty()) {
         put_strs(&mut b, v);
     }
+    let version = if g.sources.is_empty() {
+        VERSION
+    } else {
+        put_strs(&mut b, &g.sources);
+        VERSION_SOURCES
+    };
 
-    let mut out = vec![VERSION];
+    let mut out = vec![version];
     let packed = deflate(&b);
     if packed.len() < b.len() {
         out[0] |= DEFLATED;
@@ -191,6 +202,8 @@ struct Groups {
     remove_named: Vec<String>,
     off_cf: Vec<u64>,
     off_named: Vec<String>,
+    /// Pinned sources as compact JSON (`[pin, enabled]`).
+    sources: Vec<String>,
 }
 
 impl Groups {
@@ -206,6 +219,9 @@ impl Groups {
                 Entry::Remove(Target::Named(n)) => g.remove_named.push(n.clone()),
                 Entry::Off(Target::Curse(p)) => g.off_cf.push(*p),
                 Entry::Off(Target::Named(n)) => g.off_named.push(n.clone()),
+                Entry::Source { pin, enabled } => {
+                    g.sources.push(serde_json::to_string(&(pin, enabled)).unwrap_or_default())
+                }
             }
         }
         g
@@ -221,6 +237,9 @@ impl Groups {
         v.extend(self.remove_named.into_iter().map(|n| Entry::Remove(Target::Named(n))));
         v.extend(self.off_cf.into_iter().map(|p| Entry::Off(Target::Curse(p))));
         v.extend(self.off_named.into_iter().map(|n| Entry::Off(Target::Named(n))));
+        v.extend(self.sources.iter().filter_map(|s| {
+            serde_json::from_str::<(crate::sources::carry::Pin, bool)>(s).ok().map(|(pin, enabled)| Entry::Source { pin, enabled })
+        }));
         v
     }
 }
@@ -244,8 +263,9 @@ pub fn decode(text: &str) -> anyhow::Result<Share> {
         sha1_smol::Sha1::from(b).digest().bytes()[..2] == *check,
         "That share code is damaged or incomplete; copy it again"
     );
+    let version = b[0] & !DEFLATED;
     ensure!(
-        b[0] & !DEFLATED == VERSION,
+        version == VERSION || version == VERSION_SOURCES,
         "This share code is from a newer Hopper; update Hopper to use it"
     );
     let body = if b[0] & DEFLATED != 0 {
@@ -278,7 +298,8 @@ pub fn decode(text: &str) -> anyhow::Result<Share> {
     }
     let [cf_on, cf_off, remove_cf, off_cf] = nums;
     let [mr_on, mr_off, remove_named, off_named] = strs;
-    let g = Groups { cf_on, cf_off, mr_on, mr_off, remove_cf, remove_named, off_cf, off_named };
+    let sources = if version == VERSION_SOURCES { r.strs()? } else { Vec::new() };
+    let g = Groups { cf_on, cf_off, mr_on, mr_off, remove_cf, remove_named, off_cf, off_named, sources };
     ensure!(r.at == body.len(), "That share code is damaged");
     Ok(Share { base, name, loader, entries: g.entries() })
 }
@@ -481,6 +502,17 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
                 continue;
             }
         }
+        // From GitHub or a link: pinned to the exact release and file.
+        if let Some(s) = &a.source {
+            let mut source = s.clone();
+            source.prev_project = 0;
+            source.prev_mr_project.clear();
+            entries.push(Entry::Source {
+                pin: crate::sources::carry::Pin { file: a.file_name.clone(), source },
+                enabled: a.enabled,
+            });
+            continue;
+        }
         match file_entry(a) {
             Some(e) => entries.push(e),
             None => left_out.push(if a.name.is_empty() { a.file_name.clone() } else { a.name.clone() }),
@@ -521,6 +553,9 @@ pub fn make(inst: &Instance, job: &Job) -> anyhow::Result<Made> {
 
 /// The file entry for an addon, or `None` when it's on neither site.
 fn file_entry(a: &Addon) -> Option<Entry> {
+    if crate::sources::is_src(a.project_id) {
+        return None;
+    }
     if is_mr(a.project_id) || (!a.mr_version.is_empty() && a.project_id == 0) {
         let version = non_empty(&a.mr_version).or_else(|| modrinth::real_id(a.file_id).ok())?;
         return Some(Entry::ModrinthFile { version, enabled: a.enabled });
@@ -717,6 +752,18 @@ fn apply(inst: &mut Instance, share: &Share, job: &Job) -> anyhow::Result<()> {
             Ok(_) => {}
         }
     }
+    // Mods from GitHub and other links: the pinned file, checked against
+    // its sha256. The source isn't trusted by this; updates wait for the
+    // player to confirm it.
+    for e in &share.entries {
+        if let Entry::Source { pin, enabled } = e {
+            job.check_cancelled()?;
+            job.detail(format!("Getting {} from {}", pin.file, pin.source.publisher));
+            if let Err(e) = crate::sources::install_pinned(inst, pin, *enabled, job) {
+                job.note(format!("{}: {e:#}", pin.file));
+            }
+        }
+    }
     for e in &share.entries {
         if let Entry::Off(t) = e
             && let Some(i) = find(inst, t)
@@ -725,6 +772,21 @@ fn apply(inst: &mut Instance, share: &Share, job: &Job) -> anyhow::Result<()> {
         }
     }
     inst.save()
+}
+
+/// The sources a code's mods come from ("owner/repo" on GitHub…), for the
+/// confirm before installing it.
+pub fn sources_of(share: &Share) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for e in &share.entries {
+        if let Entry::Source { pin, .. } = e {
+            let item = (pin.source.kind.label().to_string(), pin.source.publisher.clone());
+            if !out.contains(&item) {
+                out.push(item);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

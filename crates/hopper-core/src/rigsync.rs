@@ -562,8 +562,11 @@ pub fn mod_ops(act: ModAct, d: &DiffEntry, inst: &Instance, server: &ServerInfo)
 pub fn run(ops: Ops, server_root: &Path, inst_root: &Path) -> Vec<SyncResult> {
     let mut results = crate::sync::execute(ops.up, server_root);
     crate::history::record(server_root, "server", server_root, &results);
+    // Mods from GitHub and other links keep their source on the other side.
+    crate::sources::carry::carry(inst_root, server_root, &crate::sources::carry::copied_jars(&results, server_root));
     let pulled = crate::sync::execute(ops.down, inst_root);
     crate::history::record(server_root, "client", inst_root, &pulled);
+    crate::sources::carry::carry(server_root, inst_root, &crate::sources::carry::copied_jars(&pulled, inst_root));
     results.extend(pulled);
     results
 }

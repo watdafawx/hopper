@@ -517,6 +517,7 @@ impl Store {
         // Note which instances have old backups to clean up (nothing goes
         // by itself at start).
         hopper::retention::set_policy(store.settings.backup_retention);
+        hopper::sources::set_enabled(store.settings.allow_sources);
         hopper::retention::check_all_later(store.instances.iter().map(|i| i.root.clone()).collect());
         store.reload_accounts();
         store._panel_poll = Some(Self::panel_poll(cx));
@@ -1339,6 +1340,7 @@ impl Store {
     pub fn update_settings(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         edit(&mut self.settings);
         hopper::retention::set_policy(self.settings.backup_retention);
+        hopper::sources::set_enabled(self.settings.allow_sources);
         crate::hero_drift::set_still(self.settings.still_header);
         let now = serde_json::to_string(&self.settings).unwrap_or_default();
         if now != self.saved_settings {

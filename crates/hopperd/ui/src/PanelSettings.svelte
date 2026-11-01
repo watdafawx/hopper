@@ -8,7 +8,7 @@
     { id: 'panel-folder', label: 'Panel folder', icon: FolderCog, owner: true, blurb: 'Where the servers and the panel’s own data live, servers deleted lately, and how long backups stay.', words: 'servers folder move data deleted restore backups undo hopper-backups clean up retention disk space' },
     { id: 'access', label: 'Access & devices', icon: Shield, owner: true, blurb: 'Pair Hopper desktop, how clients reach this panel, and the devices allowed in.', words: 'pair pairing devices tls certificate sftp https addresses' },
     { id: 'addresses', label: 'Server addresses', icon: Globe, owner: true, blurb: 'Players join by name on one shared Minecraft port.', words: 'domain port router proxy join' },
-    { id: 'content', label: 'CurseForge & Modrinth', icon: Compass, owner: true, blurb: 'The CurseForge API key.', words: 'curseforge api key modrinth' },
+    { id: 'content', label: 'Mod sources', icon: Compass, owner: true, blurb: 'The CurseForge API key, and mods from GitHub and other links.', words: 'curseforge api key modrinth github maven jenkins link source token' },
     { id: 'security', label: 'Security', icon: Lock, owner: true, blurb: 'Two-factor sign-in, your password, API tokens and the audit log.', words: '2fa two-factor password tokens audit log' },
     { id: 'users', label: 'Users', icon: UsersIcon, owner: true, blurb: 'Others sign in with their own name and password, limited to their role and servers.', words: 'people accounts roles permissions' },
     { id: 'webhooks', label: 'Webhooks', icon: Webhook, owner: true, blurb: 'Tell Discord or another app when servers start, stop, crash, back up or run low.', words: 'discord notify hooks' },
@@ -29,6 +29,7 @@
   import PanelUpdate from './PanelUpdate.svelte';
   import Addresses from './Addresses.svelte';
   import CfKey from './CfKey.svelte';
+  import SourcesSetting from './SourcesSetting.svelte';
   import Security from './Security.svelte';
   import Users from './Users.svelte';
   import { ownerLike } from './lib/me.svelte.js';
@@ -81,7 +82,7 @@
         {#if c.id === 'panel-folder'}<ServersFolder /><BackupRetention />
         {:else if c.id === 'access' || c.id === 'account'}<Access {hello} {me} bind:pending />
         {:else if c.id === 'addresses'}<Addresses />
-        {:else if c.id === 'content'}<CfKey />
+        {:else if c.id === 'content'}<CfKey /><SourcesSetting />
         {:else if c.id === 'security'}<Security />
         {:else if c.id === 'users'}<Users />
         {:else if c.id === 'webhooks'}<Webhooks />

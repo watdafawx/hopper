@@ -789,6 +789,9 @@ pub fn import_zip(instances_root: &Path, zip_path: &Path, job: &Job) -> anyhow::
         };
         apply_pack(&mut inst, None, zip_path, &manifest, None, job)?;
         fs::write(root.join("manifest.json"), pack_manifest_bytes(zip_path)?)?;
+        // Jars from GitHub and other links came as overrides: their pins
+        // (exported by Hopper) say where they're from.
+        crate::sources::carry::attach(&mut inst, &crate::sources::carry::read_pack(fs::File::open(zip_path)?));
         inst.save()?;
         Ok(inst)
     })
@@ -1204,7 +1207,9 @@ pub fn export(
     // Only CurseForge projects can go in a CurseForge manifest; Modrinth
     // files ride along as overrides.
     let curse =
-        |a: &&crate::instances::Addon| a.project_id != 0 && !crate::modrinth::is_mr(a.project_id);
+        |a: &&crate::instances::Addon| {
+            a.project_id != 0 && !crate::modrinth::is_mr(a.project_id) && !crate::sources::is_src(a.project_id)
+        };
     let tracked: HashSet<String> = inst
         .addons
         .iter()
@@ -1237,6 +1242,8 @@ pub fn export(
     let opts = zip::write::SimpleFileOptions::default();
     z.start_file("manifest.json", opts)?;
     z.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
+    // Mods from GitHub and other links keep their source (pinned).
+    crate::sources::carry::write_pack(&mut z, inst)?;
 
     let add = |path: &Path, rel: &str, z: &mut zip::ZipWriter<fs::File>| -> anyhow::Result<()> {
         z.start_file(format!("overrides/{rel}"), opts)?;
@@ -1564,6 +1571,8 @@ pub fn plan_mrpack(inst: &Instance, job: &Job) -> anyhow::Result<MrPlan> {
         let addon = inst.addon_by_file(file_name);
         let source = match addon.map(|a| a.project_id) {
             Some(id) if id != 0 && crate::modrinth::is_mr(id) => "modrinth",
+            // From GitHub or a link: the jar goes in the pack itself.
+            Some(id) if crate::sources::is_src(id) => "local",
             Some(id) if id != 0 => "curseforge",
             _ => "local",
         };
@@ -1686,6 +1695,7 @@ pub fn write_mrpack(
         let opts = zip::write::SimpleFileOptions::default();
         z.start_file("modrinth.index.json", opts)?;
         z.write_all(serde_json::to_string_pretty(&index)?.as_bytes())?;
+        crate::sources::carry::write_pack(&mut z, inst)?;
         let embedded: Vec<&MrEntry> =
             entries.iter().copied().filter(|e| e.fate == MrFate::Embedded).collect();
         for (i, e) in embedded.iter().enumerate() {
@@ -2274,6 +2284,9 @@ pub fn import_mrpack(instances_root: &Path, path: &Path, job: &Job) -> anyhow::R
             ..Default::default()
         };
         apply_mrpack(&mut inst, &pack, &file, path, &index, None, job)?;
+        if crate::sources::carry::attach(&mut inst, &crate::sources::carry::read_pack(fs::File::open(path)?)) > 0 {
+            inst.save()?;
+        }
         if published.is_none() {
             // Not on Modrinth: nothing to update from.
             inst.pack = None;
