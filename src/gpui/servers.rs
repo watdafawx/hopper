@@ -1490,7 +1490,7 @@ impl ServersView {
             .when(pingable, |r| r.child(ping_button(&self.store, &server, cx)))
             .children(self.control.update(cx, |c, cx| c.more_button(cx)));
         // Past Overview the hero folds to one row: the tab's content gets the room.
-        let render_hero = if self.tab == TAB_OVERVIEW { crate::hero::render } else { crate::hero::render_compact };
+        let render_hero = crate::hero::render; // one header on every tab, so it does not jump
         let header = render_hero(
             crate::hero::Hero {
                 art,

@@ -212,6 +212,7 @@ fn backdrop(blur: Option<PathBuf>, fx: Option<AnyElement>, cx: &App) -> Div {
 /// name, state, facts, figures and actions, without the height. The
 /// summary line and all but the first pill (the state) are left out:
 /// Overview shows them.
+#[allow(dead_code)] // unused since every server tab shows the full header
 pub fn render_compact(h: Hero, cx: &App) -> AnyElement {
     let fx = crate::hero_drift::backdrop(h.art.as_deref(), &format!("compact:{}", h.title), cx);
     let theme = cx.theme();
