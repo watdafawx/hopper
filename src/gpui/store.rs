@@ -2366,7 +2366,10 @@ impl Store {
             // No snapshot first: backups are the player's to make. The
             // old jars still go to .hopper-backups, so Undo works.
             let mut clear = ClearQueue(queue.clone(), Some(inst.root.clone()));
-            let mut done: Vec<u64> = Vec::new();
+            // Only mods whose new file is in place leave the update list. A
+            // website-only file is still on its way (the download window gets
+            // it) and a failed one never came, so those rows stay.
+            let done: Arc<Mutex<Vec<u64>>> = Default::default();
             let mut pages: Vec<String> = Vec::new();
             let mods = inst.mods_dir();
             // Version needs before and after: warn about what the
@@ -2398,7 +2401,7 @@ impl Store {
                 // Each mod's progress for its Update button, and the
                 // finished ones for the table to show as Updated.
                 let by_id: HashMap<u64, Update> = batch.iter().map(|u| (u.project_id, u.clone())).collect();
-                let (q2, r2, root2, wake2) = (queue.clone(), recent.clone(), inst.root.clone(), wake.clone());
+                let (q2, r2, root2, wake2, done2) = (queue.clone(), recent.clone(), inst.root.clone(), wake.clone(), done.clone());
                 let on = move |pid: u64, p: Option<f32>| match p {
                     Some(f) => {
                         if let Some(e) = q2.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&root2) {
@@ -2406,6 +2409,7 @@ impl Store {
                         }
                     }
                     None => {
+                        done2.lock().unwrap_or_else(|e| e.into_inner()).push(pid);
                         if let Some(u) = by_id.get(&pid) {
                             let mut r = r2.lock().unwrap_or_else(|e| e.into_inner());
                             let list = r.entry(root2.clone()).or_default();
@@ -2416,8 +2420,8 @@ impl Store {
                     }
                 };
                 pages.extend(install::apply_updates_with(&mut inst, &batch, job, &on).map_err(install::explain_locked)?);
-                done.extend(batch.iter().map(|u| u.project_id));
             }
+            let done = std::mem::take(&mut *done.lock().unwrap_or_else(|e| e.into_inner()));
             job.detail(format!("Updated {} file{}", done.len(), if done.len() == 1 { "" } else { "s" }));
             // Notes on a finished job still show in the task list.
             let job = job.clone();

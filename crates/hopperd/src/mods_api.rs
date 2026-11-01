@@ -726,17 +726,24 @@ async fn update(
                 unknown.contains(&u.project_id) && !u.same_file() && inst.addons.iter().any(|a| a.file_name == u.from && !pack_mod(&pack, a))
             }));
         }
-        let froms: Vec<String> = ups.iter().map(|u| u.from.clone()).collect();
         // Website-only files go to the download list (not here).
         let web = install::apply_updates(&mut inst, &ups, job)?;
-        drop_updates_for(&sid, &froms);
         // What changed, read back: an update that failed left its file.
-        let (mut updated, mut failed) = (Vec::new(), Vec::new());
+        let (mut updated, mut updated_ids, mut froms, mut failed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for u in &ups {
             let now = inst.addons.iter().any(|a| a.project_id == u.project_id && a.file_name == u.file.file_name);
-            if now { updated.push(u.name.clone()) } else { failed.push(u.name.clone()) }
+            if now {
+                updated.push(u.name.clone());
+                updated_ids.push(id_str(u.project_id));
+                froms.push(u.from.clone());
+            } else {
+                failed.push(u.name.clone());
+            }
         }
-        Ok(json!({ "updated": updated, "failed": failed, "web": web.len() }))
+        // Only updates whose new file is in place leave the list; a failed
+        // or website-only one is still waiting, so it stays offered.
+        drop_updates_for(&sid, &froms);
+        Ok(json!({ "updated": updated, "updated_ids": updated_ids, "failed": failed, "web": web.len() }))
     });
     Ok(Json(json!({ "job": job })))
 }

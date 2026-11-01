@@ -311,11 +311,12 @@
       // The quiet green "Updated" mark, on the rows that did (the job
       // names them as the server knows them).
       const names = new Set(r.updated);
-      const ok = ids.filter((i) => mods.some((m) => m.project_id === i && (names.has(m.name) || names.has(m.update?.name))));
+      const ok = r.updated_ids ?? ids.filter((i) => mods.some((m) => m.project_id === i && (names.has(m.name) || names.has(m.update?.name))));
       done = new Set([...done, ...ok]);
       reviewing = null;
-      // The rest stay listed while the check runs.
-      if (updates) updates = updates.filter((u) => !ids.includes(u.project_id));
+      // Only the ones now in place leave the list (a failed or website-only
+      // file is still to come); the rest stay listed while the check runs.
+      if (updates) updates = updates.filter((u) => !ok.includes(u.project_id));
       checkUpdates(false);
       loadBackupCount();
     }
