@@ -7,7 +7,7 @@
   import { tick as settled } from 'svelte';
   import { Braces } from '@lucide/svelte';
   import Avatar from './Avatar.svelte';
-  import { COLORS, FORMATS, LINE_CHARS, VARS, ampToSection, applyCode, expand, runs, visible } from './lib/motd.js';
+  import { COLORS, FORMATS, LIST_WIDTH, VARS, ampToSection, applyCode, expand, listLines, runs, visible } from './lib/motd.js';
 
   /** `value`: the template (lines split by "\n"); `vars`: name → value now. */
   let { server, value = $bindable(''), vars = {} } = $props();
@@ -16,7 +16,25 @@
     const p = String(value ?? '').split('\n');
     return [p[0] ?? '', p.slice(1).join(' ')];
   });
-  const shown = $derived(lines.map((l) => expand(ampToSection(l), vars)));
+  const filled = $derived(lines.map((l) => expand(ampToSection(l), vars)));
+  // As the game draws it: word-wrapped at the list's width, two rows.
+  const list = $derived(listLines(filled));
+  const shown = $derived(list.shown);
+  /** Characters typed against about how many fit (the list goes by
+   * width, so narrow letters fit more): over is cut off, near is close. */
+  const count = (i) => {
+    const n = visible(filled[i]);
+    const w = list.lines[i].width;
+    return { n, fit: n + Math.floor((LIST_WIDTH - w) / 6), over: w > LIST_WIDTH, near: w > LIST_WIDTH - 12 };
+  };
+  const hint = $derived.by(() => {
+    const [a, b] = list.lines;
+    if (a.wraps) {
+      if (filled[1]) return "Line 1 is too long for the server list: it wraps onto the second row, so line 2 doesn't show.";
+      return a.cut === undefined ? 'Line 1 is too long for one row: the server list wraps it onto the second.' : `Line 1 is cut off in the server list after ${a.cut} characters.`;
+    }
+    return b.cut ? `Line 2 is cut off in the server list after ${b.cut} characters.` : '';
+  });
   let inputs = $state([]);
   let last = $state(0);
   let menu = $state(false);
@@ -102,13 +120,14 @@
   </div>
 
   {#each [0, 1] as i (i)}
-    {@const n = visible(shown[i])}
+    {@const c = count(i)}
     <div class="ln">
       <span class="tiny muted n">Line {i + 1}</span>
       <div class="input grow"><input class="mono" bind:this={inputs[i]} value={lines[i]} oninput={(e) => setLine(i, e.currentTarget.value)} onfocus={() => (last = i)} spellcheck="false" aria-label="Message line {i + 1}" /></div>
-      <span class="tiny cnt" class:over={n > LINE_CHARS} title="Characters players see (the list cuts longer lines)">{n} / {LINE_CHARS}</span>
+      <span class="tiny cnt" class:near={c.near} class:over={c.over} title="Characters players see, against about how many fit (the list goes by width: narrow letters fit more)">{c.n} / {c.fit}</span>
     </div>
   {/each}
+  {#if hint}<div class="tiny warn" role="status">{hint}</div>{/if}
   <div class="tiny muted">&amp; codes like &amp;6 work as a shortcut for §6. Variables fill in when the server starts; players, day and world size refresh every minute while it runs, for players using its address.</div>
 
   <div class="mc" aria-label="Preview in the server list">
@@ -140,14 +159,18 @@
   .ln .input { padding: 5px 9px; }
   .grow { flex: 1; min-width: 0; }
   .cnt { width: 52px; text-align: right; color: var(--muted); flex: none; }
-  .cnt.over { color: #f59e0b; }
+  .cnt.near { color: #f59e0b; }
+  .cnt.over { color: #ef4444; }
+  .warn { color: #f59e0b; }
   /* The server list: dirt-dark background, 64 px icon, two lines. */
-  .mc { background: #1d150e; background-image: repeating-conic-gradient(#251b12 0 25%, #1d150e 0 50%); background-size: 32px 32px; padding: 10px; border-radius: 6px; overflow: hidden; }
-  .entry { display: flex; gap: 6px; max-width: 420px; }
+  /* At 1.5× the game's GUI scale 1: the message area is LIST_WIDTH (271)
+     game pixels, and a 6 px letter is one monospace cell (0.55em). */
+  .mc { --s: 1.5; background: #1d150e; background-image: repeating-conic-gradient(#251b12 0 25%, #1d150e 0 50%); background-size: 32px 32px; padding: 10px; border-radius: 6px; overflow: hidden; }
+  .entry { display: flex; gap: 6px; }
   .entry :global(.mcic) { width: 64px; height: 64px; flex: none; border-radius: 0; display: grid; place-items: center; font-size: 26px; font-weight: 800; color: #1a1a1f; }
-  .txt { flex: 1; min-width: 0; font: 15px/19px Consolas, 'Courier New', monospace; letter-spacing: .2px; }
+  .txt { flex: none; width: calc(271px * var(--s)); font: calc(6px * var(--s) / .55)/19px Consolas, 'Courier New', monospace; }
   .top { display: flex; justify-content: space-between; color: #fff; text-shadow: 2px 2px 0 #3f3f3f; }
   .top .pl { color: #aaa; text-shadow: 2px 2px 0 #2a2a2a; }
-  .mline { white-space: pre; overflow: hidden; height: 19px; }
-  @media (max-width: 900px) { .entry { max-width: 100%; } }
+  .mline { white-space: pre; height: 19px; }
+  @media (max-width: 560px) { .mc { --s: 1; } .mline { line-height: 14px; height: 14px; } }
 </style>

@@ -194,15 +194,15 @@ pub fn vars(root: &Path, live: &Live) -> BTreeMap<String, String> {
         .filter(|n| n.to_lowercase().ends_with(".jar"))
         .collect();
     put("mods", jars.len().to_string());
-    let extra = match inst.as_ref().filter(|i| i.pack.is_some()) {
-        Some(i) => {
-            let from_pack: std::collections::HashSet<String> =
-                i.addons.iter().filter(|a| a.from_pack).map(|a| a.file_name.to_lowercase()).collect();
-            jars.iter().filter(|j| !from_pack.contains(&j.to_lowercase())).count()
+    // Without a pack nothing is extra; with one whose mods can't be
+    // told apart, no number beats a wrong one.
+    let extra = match &inst {
+        Some(i) if i.pack.is_some() || marker.is_some() => {
+            crate::modpack::PackMods::of(i).map(|p| extra_mods(&i.addons, &jars, &p))
         }
-        None => 0,
+        _ => Some(0),
     };
-    put("extra_mods", extra.to_string());
+    put("extra_mods", extra.map(|n| n.to_string()).unwrap_or_default());
 
     put("difficulty", prop("difficulty", "easy"));
     put("gamemode", prop("gamemode", "survival"));
@@ -214,6 +214,14 @@ pub fn vars(root: &Path, live: &Live) -> BTreeMap<String, String> {
     put("day", day.unwrap_or(0).to_string());
     put("world_size", crate::instance_ops::human_bytes(super::worlds::world_size(&world)));
     v
+}
+
+/// Mods added on top of the pack, counted like the Mods tab's "Only
+/// yours": mods Hopper knows (jars it couldn't name aren't counted; packs
+/// ship some of those themselves) that are on and aren't the pack's.
+fn extra_mods(addons: &[crate::instances::Addon], jars: &[String], pack: &crate::modpack::PackMods) -> usize {
+    let on: std::collections::HashSet<String> = jars.iter().map(|j| j.to_lowercase()).collect();
+    addons.iter().filter(|a| a.folder() == "mods" && on.contains(&a.file_name.to_lowercase()) && !pack.has(a)).count()
 }
 
 fn load_saved(root: &Path) -> Option<Saved> {
@@ -330,9 +338,6 @@ pub const VARS: [(&str, &str); 14] = [
     ("name", "Server name"),
 ];
 
-/// The server list shows two lines of about this many characters.
-pub const LINE_CHARS: usize = 45;
-
 /// The colour text has with no code (the server list's gray).
 pub const DEFAULT_COLOR: u32 = 0xAAAAAA;
 
@@ -407,6 +412,146 @@ pub fn runs(text: &str) -> Vec<Run> {
 /// Characters a line shows (codes left out).
 pub fn visible(line: &str) -> usize {
     runs(line).iter().map(|r| r.text.chars().count()).sum()
+}
+
+/// How wide (in Minecraft's pixels, GUI scale 1) the server list's
+/// message area is: the 305 px row less the 32 px icon and 2 px gap. The
+/// game word-wraps the message at this width and shows two rows.
+pub const LIST_WIDTH: u32 = 271;
+
+/// How far a character moves the pen in Minecraft's default font: glyph
+/// width plus 1 px, and 1 more in bold. Mirrored in the web UI's motd.js.
+pub fn advance(c: char, bold: bool) -> u32 {
+    let w = match c {
+        ' ' => 4,
+        '!' | '\'' | ',' | '.' | ':' | ';' | '|' | 'i' => 2,
+        '`' | 'l' => 3,
+        '"' | 'I' | '[' | ']' | 't' => 4,
+        '(' | ')' | '*' | '<' | '>' | '{' | '}' | 'f' | 'k' => 5,
+        '@' | '~' => 7,
+        _ => 6,
+    };
+    w + bold as u32
+}
+
+/// How wide `line` (with § codes) is in the server list.
+pub fn line_width(line: &str) -> u32 {
+    runs(line).iter().map(|r| r.text.chars().map(|c| advance(c, r.bold)).sum::<u32>()).sum()
+}
+
+/// One message line as the server list breaks it: pieces that fit
+/// [`LIST_WIDTH`], broken at the last space like the game (the space
+/// goes), else mid-word. Each piece starts with the codes in force, so it
+/// draws on its own.
+pub fn wrap_line(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut piece = String::new();
+    let mut width = 0;
+    let mut codes = String::new();
+    let mut bold = false;
+    // The last space in this piece: byte index, and the codes in force there.
+    let mut space: Option<(usize, String)> = None;
+    let mut it = line.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '§'
+            && let Some(&n) = it.peek()
+        {
+            it.next();
+            let l = n.to_ascii_lowercase();
+            if l == 'r' || color_of(l).is_some() {
+                codes = if l == 'r' { String::new() } else { format!("§{l}") };
+                bold = false;
+            } else if "lonmk".contains(l) {
+                codes.push('§');
+                codes.push(l);
+                bold |= l == 'l';
+            }
+            piece.push(c);
+            piece.push(n);
+            continue;
+        }
+        let w = advance(c, bold);
+        if width + w > LIST_WIDTH && visible(&piece) > 0 {
+            let rest = space.as_ref().map(|(at, then)| format!("{then}{}", &piece[at + 1..]));
+            match (space.take(), rest) {
+                (Some((at, _)), Some(rest)) if line_width(&rest) + w <= LIST_WIDTH => {
+                    piece.truncate(at);
+                    out.push(std::mem::replace(&mut piece, rest));
+                    width = line_width(&piece);
+                }
+                _ => {
+                    out.push(std::mem::replace(&mut piece, codes.clone()));
+                    width = 0;
+                }
+            }
+        }
+        if c == ' ' {
+            space = Some((piece.len(), codes.clone()));
+        }
+        piece.push(c);
+        width += w;
+    }
+    out.push(piece);
+    out
+}
+
+/// How one message line fares in the server list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LineFit {
+    /// In Minecraft pixels.
+    pub width: u32,
+    /// Wider than the list: it wraps onto another row.
+    pub wraps: bool,
+    /// When its end doesn't show, how many of its characters do (0: none,
+    /// as line 2 is pushed out when line 1 wraps).
+    pub cut: Option<usize>,
+}
+
+/// The two rows players see for message lines 1 and 2 (filled in), and
+/// how each line fares.
+pub fn list_lines(l1: &str, l2: &str) -> (Vec<String>, [LineFit; 2]) {
+    let a = wrap_line(l1);
+    let b = if l2.is_empty() { Vec::new() } else { wrap_line(l2) };
+    let fit1 = LineFit {
+        width: line_width(l1),
+        wraps: a.len() > 1,
+        cut: (a.len() > 2).then(|| visible(&a[0]) + visible(&a[1])),
+    };
+    let fit2 = LineFit {
+        width: line_width(l2),
+        wraps: b.len() > 1,
+        cut: if b.is_empty() {
+            None
+        } else if a.len() > 1 {
+            Some(0)
+        } else {
+            (b.len() > 1).then(|| visible(&b[0]))
+        },
+    };
+    (a.into_iter().chain(b).take(2).collect(), [fit1, fit2])
+}
+
+/// What to tell the player about lines that don't fit, if anything.
+pub fn fit_hint(fits: &[LineFit; 2], has_line2: bool) -> Option<String> {
+    let [a, b] = fits;
+    if a.wraps {
+        return Some(if has_line2 {
+            "Line 1 is too long for the server list: it wraps onto the second row, so line 2 doesn't show.".into()
+        } else {
+            match a.cut {
+                Some(n) => format!("Line 1 is cut off in the server list after {n} characters."),
+                None => "Line 1 is too long for one row: the server list wraps it onto the second.".into(),
+            }
+        });
+    }
+    b.cut.filter(|n| *n > 0).map(|n| format!("Line 2 is cut off in the server list after {n} characters."))
+}
+
+/// Characters shown against about how many fit (the list goes by width,
+/// so narrow letters fit more).
+pub fn fit_count(line: &str, fit: &LineFit) -> (usize, usize) {
+    let n = visible(line);
+    (n, (n as i64 + (LIST_WIDTH as i64 - fit.width as i64).div_euclid(6)).max(0) as usize)
 }
 
 /// Drops codes that change nothing: in a row of codes with no text
@@ -602,5 +747,43 @@ mod tests {
         save(&dir, "just text").unwrap();
         assert!(!dir.join(FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extra_mods_counts_only_known_mods_the_pack_lacks() {
+        use crate::instances::Addon;
+        let a = |id: u64, f: &str, from_pack: bool| Addon { project_id: id, file_name: f.into(), from_pack, ..Default::default() };
+        let jars: Vec<String> = ["a.jar", "b.jar", "c.jar", "loose.jar"].map(String::from).to_vec();
+        use crate::modpack::PackMods;
+        // Marked by Hopper when it installed the pack.
+        let marked = [a(1, "a.jar", true), a(2, "b.jar", false), a(3, "c.jar", true), a(4, "off.jar", false)];
+        assert_eq!(extra_mods(&marked, &jars, &PackMods::Marked), 1);
+        // No marks (a server made from a server pack): the manifest says.
+        let unmarked = [a(1, "a.jar", false), a(2, "b.jar", false), a(3, "C.JAR", false)];
+        assert_eq!(extra_mods(&unmarked, &jars, &PackMods::Listed([1, 3].into_iter().collect())), 1);
+    }
+
+    #[test]
+    fn wraps_like_the_server_list() {
+        // The line from the report fits: Minecraft's letters are narrower
+        // than 45 monospace cells suggest.
+        let l2 = "mc 1.21.1 NeoForge 21.1.259 extra mods 981";
+        assert_eq!(line_width(l2), 222);
+        let (shown, fits) = list_lines("§6Hi", l2);
+        assert_eq!(shown, vec!["§6Hi".to_string(), l2.to_string()]);
+        assert_eq!(fit_hint(&fits, true), None);
+        assert_eq!(fit_count(l2, &fits[1]), (42, 50));
+        // Too long: broken at the last space that fits, the rest lost.
+        let long = format!("{l2} and some more words to push it past the edge");
+        let (shown, fits) = list_lines("x", &long);
+        assert_eq!(shown[1], "mc 1.21.1 NeoForge 21.1.259 extra mods 981 and");
+        assert_eq!(fits[1].cut, Some(46));
+        assert_eq!(fit_hint(&fits, true).unwrap(), "Line 2 is cut off in the server list after 46 characters.");
+        // A long line 1 takes both rows and keeps its codes on the second.
+        let (shown, fits) = list_lines(&format!("§l{long}"), "x");
+        assert!(shown[1].starts_with("§l"));
+        assert_eq!(fits[1].cut, Some(0));
+        // No space to break at: mid-word.
+        assert_eq!(wrap_line(&"a".repeat(60)).iter().map(|p| p.len()).collect::<Vec<_>>(), [45, 15]);
     }
 }
