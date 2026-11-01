@@ -61,7 +61,7 @@ fn body(c: &SideCard, _: &mut Window, cx: &mut App) -> AnyElement {
             .text_color(theme.muted_foreground)
             .child(text)
     };
-    let (icon, side) = side_of(&c.env).unwrap_or((IconName::CircleQuestionMark, "Side not declared"));
+    let (icon, side) = side_of(&c.env).unwrap_or((IconName::CircleQuestionMark, "Side unknown: the mod doesn't say"));
     let origin = if c.from_pack { "From the pack" } else { "Added by you" };
     let mut card = v_flex()
         .w(rems(21.))

@@ -18,7 +18,9 @@ pub mod github;
 pub mod http;
 pub mod jar;
 pub mod jenkins;
+pub mod looks;
 pub mod maven;
+pub mod page;
 pub mod url;
 
 use crate::cf::{self, Loader};
@@ -240,6 +242,23 @@ fn known(id: u64) -> Option<(ModSource, String)> {
     KNOWN.lock().unwrap_or_else(|e| e.into_inner()).as_ref()?.get(&id).cloned()
 }
 
+/// The source of a source-tracked mod Hopper has seen, with its name.
+pub fn known_source(id: u64) -> Option<(ModSource, String)> {
+    known(id)
+}
+
+/// Icon and authors by project id, as the lists show them ([`looks::fill`]).
+static LOOKS: Mutex<Option<HashMap<u64, (String, String)>>> = Mutex::new(None);
+
+/// Tells the peek a source-tracked mod's icon and authors.
+pub fn remember_looks(id: u64, icon: &str, authors: &str) {
+    LOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(id, (icon.to_string(), authors.to_string()));
+}
+
 /// The project as the peek and the install code see it.
 pub fn get_mod(id: u64) -> anyhow::Result<cf::Mod> {
     let (src, name) = known(id).context("unknown source")?;
@@ -247,13 +266,23 @@ pub fn get_mod(id: u64) -> anyhow::Result<cf::Mod> {
 }
 
 fn mod_for(id: u64, src: &ModSource, name: &str) -> cf::Mod {
+    let (icon, authors) = LOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(&id).cloned())
+        .unwrap_or_default();
+    // The jar's authors when it names them; the repo shows beside them.
+    let author = if authors.is_empty() { src.publisher.clone() } else { authors };
+    let icon = if icon.is_empty() && src.kind == Kind::GitHub { looks::avatar(&src.url).unwrap_or_default() } else { icon };
     cf::Mod {
         id,
         name: name.to_string(),
         summary: format!("From {}: {}", src.kind.label(), src.publisher),
         class_id: Some(cf::CLASS_MODS),
-        authors: vec![cf::Author { name: src.publisher.clone(), ..Default::default() }],
+        authors: vec![cf::Author { name: author, ..Default::default() }],
         links: cf::Links { website_url: src.page(), ..Default::default() },
+        logo: (!icon.is_empty()).then(|| cf::Logo { thumbnail_url: icon.clone(), url: icon }),
         ..Default::default()
     }
 }

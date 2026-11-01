@@ -131,6 +131,19 @@ fn known_version(inst: &Instance) -> anyhow::Result<()> {
 }
 
 /// The server as an instance (for the other mod routes).
+/// A mod icon the browser can show: web links as they are; a logo read
+/// from a jar (a file in Hopper's cache) inline, so it needs no route.
+pub(crate) fn icon_url(icon: &str) -> String {
+    use base64::Engine;
+    if icon.is_empty() || icon.starts_with("http") || !hopper_core::sources::looks::is_jar_logo(icon) {
+        return if icon.starts_with("http") { icon.to_string() } else { String::new() };
+    }
+    match std::fs::read(icon) {
+        Ok(b) => format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(b)),
+        Err(_) => String::new(),
+    }
+}
+
 pub(crate) fn instance_of(e: &Entry) -> anyhow::Result<Instance> {
     instance(e)
 }
@@ -338,7 +351,7 @@ async fn list(
             let s = scanned.get(&a.file_name.to_lowercase());
             rows.push(json!({
                 "file": a.file_name, "name": if a.name.is_empty() { s.map(|s| s.mod_name.clone()).unwrap_or_default() } else { a.name.clone() },
-                "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": a.icon, "enabled": a.enabled,
+                "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": icon_url(&a.icon), "enabled": a.enabled,
                 "side": if a.env.is_empty() { s.map(|s| s.side.clone()).unwrap_or_default() } else { side_label(&a.env).to_string() },
                 "project_id": id_str(a.project_id), "source": if a.source.is_some() { "link" } else if a.project_id == 0 { "" } else if modrinth::is_mr(a.project_id) { "modrinth" } else { "curseforge" },
                 // From GitHub or another link: its chip and page.
@@ -372,10 +385,12 @@ async fn list(
             // A jar there both on and off: one row (the table keys rows by file).
             known.insert(base.to_lowercase());
             let s = scanned.get(&base.to_lowercase());
+            // Its own logo and authors (else its GitHub owner's picture).
+            let looks = hopper_core::sources::looks::loose(&dir.join(&name));
             rows.push(json!({
                 "file": base, "name": s.map(|s| s.mod_name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| base.clone()),
-                "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": "", "enabled": enabled,
-                "side": s.map(|s| s.side.clone()).unwrap_or_default(), "project_id": "0", "source": "", "from_pack": false, "page": "", "author": "",
+                "version": s.map(|s| s.version.clone()).unwrap_or_default(), "icon": icon_url(&looks.icon), "enabled": enabled,
+                "side": s.map(|s| s.side.clone()).unwrap_or_default(), "project_id": "0", "source": "", "from_pack": false, "page": "", "author": looks.authors,
                 "short_version": hopper_core::scan::short_version(&base),
             }));
         }

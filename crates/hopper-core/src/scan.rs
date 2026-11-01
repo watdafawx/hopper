@@ -149,9 +149,13 @@ fn read_jar_metadata(path: &Path, m: &mut ModInfo) {
     let Ok(mut zip) = zip::ZipArchive::new(file) else {
         return;
     };
+    read_zip_metadata(&mut zip, m);
+}
 
+/// [`read_jar_metadata`] on an open jar (name, version, side).
+pub(crate) fn read_zip_metadata<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, m: &mut ModInfo) {
     for meta in METADATA_PRIORITY {
-        let Some(text) = read_entry(&mut zip, meta) else {
+        let Some(text) = read_entry(zip, meta) else {
             continue;
         };
         match meta {
@@ -163,10 +167,10 @@ fn read_jar_metadata(path: &Path, m: &mut ModInfo) {
             break;
         }
     }
-    resolve_version(&mut zip, m);
+    resolve_version(zip, m);
 }
 
-fn read_entry(zip: &mut zip::ZipArchive<fs::File>, name: &str) -> Option<String> {
+fn read_entry<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
     let mut f = zip.by_name(name).ok()?;
     let mut s = String::new();
     f.by_ref().take(256 * 1024).read_to_string(&mut s).ok()?;
@@ -205,7 +209,11 @@ fn read_mods_toml(text: &str, m: &mut ModInfo) {
     let Some(first) = data.mods.into_iter().next() else {
         return;
     };
-    if client_only || first.display_test.eq_ignore_ascii_case("IGNORE_ALL_VERSION") {
+    // Either "ignore" setting: a server without it still lets players in.
+    if client_only
+        || first.display_test.eq_ignore_ascii_case("IGNORE_ALL_VERSION")
+        || first.display_test.eq_ignore_ascii_case("IGNORE_SERVER_VERSION")
+    {
         m.side = "client".into();
     }
     m.mod_id = first.mod_id;
@@ -255,7 +263,7 @@ fn read_manifest(text: &str, m: &mut ModInfo) {
 /// mods.toml often says `version="${file.jarVersion}"`; the loader fills that
 /// from the manifest at runtime, so we do the same, then fall back to the
 /// version in the file name.
-fn resolve_version(zip: &mut zip::ZipArchive<fs::File>, m: &mut ModInfo) {
+fn resolve_version<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, m: &mut ModInfo) {
     if !m.version.is_empty() && !m.version.contains("${") {
         return;
     }

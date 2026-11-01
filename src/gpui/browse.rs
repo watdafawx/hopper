@@ -2701,12 +2701,14 @@ impl BrowseView {
         let store = self.store.read(cx);
         let theme = cx.theme();
         let icon = m.icon().and_then(|u| store.image(u)).map(Path::to_path_buf);
-        let page = m.page();
-        let site = if m.modrinth.is_some() {
-            "Modrinth"
-        } else {
-            "CurseForge"
+        // A mod from GitHub, Maven or a link: its own page and facts.
+        let origin = if hopper::sources::is_src(m.id) { hopper::sources::page::origin(m.id) } else { None };
+        let page = origin.as_ref().map_or_else(|| m.page(), |o| o.page.clone());
+        let site_label = match &origin {
+            Some(o) => o.open_label().to_string(),
+            None => format!("Open on {}", if m.modrinth.is_some() { "Modrinth" } else { "CurseForge" }),
         };
+        let site_fg = if origin.is_some() { theme.foreground } else { site_color(m.modrinth.is_some()) };
         let gallery: Vec<(String, String)> =
             m.screenshots.iter().map(|s| (s.url.clone(), s.title.clone())).collect();
         let store_e = self.store.clone();
@@ -2745,8 +2747,14 @@ impl BrowseView {
                     .min_w_0()
                     .gap_1()
                     .child(div().text_xl().font_semibold().child(m.name.clone()))
-                    .child(self.author_link(m, "detail-author".into(), cx))
-                    .child(stats(m, true, self.on_category(m, cx), cx).flex_wrap().pt_0p5())
+                    .child(match &origin {
+                        Some(o) => source_byline(m, o, cx),
+                        None => self.author_link(m, "detail-author".into(), cx),
+                    })
+                    .child(match &origin {
+                        Some(o) => source_stats(o, cx).flex_wrap().pt_0p5(),
+                        None => stats(m, true, self.on_category(m, cx), cx).flex_wrap().pt_0p5(),
+                    })
                     .children(facts(m, target, cx))
                     .child(
                         h_flex()
@@ -2757,9 +2765,9 @@ impl BrowseView {
                                 Button::new("site")
                                     .small()
                                     .outline()
-                                    .text_color(site_color(m.modrinth.is_some()))
+                                    .text_color(site_fg)
                                     .icon(IconName::ExternalLink)
-                                    .label(format!("Open on {site}"))
+                                    .label(site_label)
                                     .on_click(move |_, _, cx| cx.open_url(&page)),
                             )
                             .children(self.server_badge(m, "detail-server".into(), true, cx))
@@ -3515,6 +3523,34 @@ type OnCategory = Rc<dyn Fn(u64, &mut Window, &mut App)>;
 
 /// Downloads, last update and categories; `full` adds when it came out
 /// and words for each. With `on_cat`, each category is a link.
+/// Who made a mod from GitHub or a link, and where it comes from. Not a
+/// link to an author page: those sites have none to list.
+fn source_byline(m: &cf::Mod, o: &hopper::sources::page::Origin, cx: &App) -> AnyElement {
+    let author = m.author();
+    let line = if author.is_empty() || author == o.name {
+        o.name.clone()
+    } else {
+        format!("by {author} · {}", o.name)
+    };
+    widgets::caption(line, cx).text_sm().into_any_element()
+}
+
+/// The peek's facts for a mod from GitHub or a link: stars, the last
+/// release and the license where the source says.
+fn source_stats(o: &hopper::sources::page::Origin, cx: &App) -> Div {
+    let released = hopper::time::relative(&o.released);
+    h_flex()
+        .gap_3()
+        .text_xs()
+        .min_w_0()
+        .child(stat(if o.kind == hopper::sources::Kind::GitHub { IconName::Code } else { IconName::Link }, o.kind.label(), cx))
+        .when_some(o.stars, |r, n| r.child(stat(IconName::Star, format!("{} stars", human_count(n as f64)), cx)))
+        .when(!released.is_empty(), |r| {
+            r.child(stat(IconName::RefreshCw, format!("Released {}", released.to_lowercase()), cx))
+        })
+        .when(!o.license.is_empty(), |r| r.child(stat(IconName::BookOpen, o.license.clone(), cx)))
+}
+
 fn stats(m: &cf::Mod, full: bool, on_cat: Option<OnCategory>, cx: &App) -> Div {
     let updated = hopper::time::relative(&m.date_modified);
     let created = hopper::time::relative(&m.date_created);

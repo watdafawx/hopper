@@ -748,6 +748,8 @@ pub fn load(root: &Path) -> Option<Instance> {
             crate::sources::remember(a.project_id, s, &a.name);
         }
     }
+    // Logos, authors and sides for mods no site describes, from their jars.
+    crate::sources::looks::fill(&mut inst);
     if let Some(p) = &inst.pack {
         crate::modrinth::num_id(&p.mr_project);
         crate::modrinth::num_id(&p.mr_version);

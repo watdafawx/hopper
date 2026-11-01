@@ -157,7 +157,7 @@ async fn changelogs(
                     .map(|f| (f.id, hopper_core::scan::short_version(&f.file_name)))
             });
         Ok(json!({
-            "project_id": a.project_id.to_string(), "name": a.name, "icon": a.icon, "page": a.page,
+            "project_id": a.project_id.to_string(), "name": a.name, "icon": crate::mods_api::icon_url(&a.icon), "page": a.page,
             "locked": a.locked, "from": a.file_name,
             "to": update.as_ref().map(|f| f.file_name.clone()),
             "behind": behind,
