@@ -35,9 +35,27 @@ const DATA_TOOLS: &[&str] = &[
     "missing_dependencies",
     "search_projects",
     "project_info",
+    "list_packs",
+    "download_status",
+    "unknown_mods",
+    "look_up_source",
+    "crash_analysis",
+    "list_servers",
+    "server_status",
+    "server_sync",
+    "server_motd",
+    "read_settings",
 ];
-/// Data tools that change an instance.
-const CHANGE_TOOLS: &[&str] = &["install_project", "set_mods_enabled", "update_mods"];
+/// Data tools that change an instance (or run a server).
+const CHANGE_TOOLS: &[&str] = &[
+    "install_project",
+    "set_mods_enabled",
+    "update_mods",
+    "add_from_source",
+    "follow_source",
+    "unfollow_source",
+    "server_action",
+];
 
 pub const DEFAULT_PORT: u16 = 47801;
 const PROTOCOL: &str = "2025-06-18";
@@ -112,13 +130,15 @@ fn data_tools() -> Value {
         },
         {
             "name": "list_mods",
-            "description": "An instance's mods (or resource packs or shaders): name, file, version, on or off, side, project id and site, author, whether an update waits and to which file.",
+            "description": "An instance's mods (or resource packs or shaders) as Hopper tracks them: name, file, version, on or off, side, project id and site (curseforge, modrinth, source or none), author, whether the modpack or the player added it, the update waiting and to which file, and for a mod that follows a source (GitHub, Maven, Jenkins, a link) where from, its pinned release and sha256 and whether that source is trusted on this PC. For data packs and pack folders (Paxi, Global Packs, worlds) use list_packs.",
             "inputSchema": { "type": "object", "required": ["instance"], "properties": {
                 "instance": instance_arg(),
                 "kind": { "type": "string", "enum": ["mods", "resourcepacks", "shaders"], "description": "Default mods" },
                 "filter": { "type": "string", "description": "Only those whose name or file contains this" },
                 "only_updates": { "type": "boolean" },
-                "only_disabled": { "type": "boolean" }
+                "only_disabled": { "type": "boolean" },
+                "only_added": { "type": "boolean", "description": "Only those the player added, not the modpack (the Mods tab's \"Added by you\")" },
+                "only_sources": { "type": "boolean", "description": "Only mods that follow a GitHub, Maven, Jenkins or link source" }
             } }
         },
         {
@@ -160,6 +180,78 @@ fn data_tools() -> Value {
                 "id": { "type": "integer" },
                 "instance": instance_arg()
             } }
+        },
+        {
+            "name": "list_packs",
+            "description": "An instance's resource packs, shaders or data packs in every place they load from (this instance, Paxi, Paxi optional, Global Packs, Open Loader, each world's datapacks), each with its file, Enabled (not switched off) and Active (in the game's resource pack list, or the shader Iris/Oculus uses), and the project and update Hopper knows for it.",
+            "inputSchema": { "type": "object", "required": ["instance", "kind"], "properties": {
+                "instance": instance_arg(),
+                "kind": { "type": "string", "enum": ["resourcepacks", "shaders", "datapacks"] }
+            } }
+        },
+        {
+            "name": "download_status",
+            "description": "Files Hopper gets from the CurseForge website because their authors allow no other download (website-only files in installs and updates): each file's step (waiting, opening, downloading, done, didn't come) and its page to open by hand.",
+            "inputSchema": { "type": "object", "properties": { "instance": instance_arg() } }
+        },
+        {
+            "name": "unknown_mods",
+            "description": "An instance's jars that CurseForge and Modrinth don't know and that follow no source, each with the GitHub repo its own metadata links to (if any): candidates for follow_source.",
+            "inputSchema": { "type": "object", "required": ["instance"], "properties": { "instance": instance_arg() } }
+        },
+        {
+            "name": "look_up_source",
+            "description": "Looks a GitHub, Maven, Jenkins or download link up for an instance without changing anything. With file (an installed jar): how that jar matches the source (exact: byte for byte a release's asset; baseline: the release at or before the jar's version; unknown) and the newer release that would show as its update. Without file: the files the newest release offers and which one Hopper would pick. Says whether the source is trusted on this PC.",
+            "inputSchema": { "type": "object", "required": ["instance", "link"], "properties": {
+                "instance": instance_arg(),
+                "link": { "type": "string", "description": "A whole https:// link: a GitHub repo, release or asset, a Maven folder, a Jenkins job, or a .jar download" },
+                "file": { "type": "string", "description": "An installed jar's file name (from list_mods or unknown_mods)" },
+                "prerelease": { "type": "boolean", "description": "Offer pre-releases too" }
+            } }
+        },
+        {
+            "name": "crash_analysis",
+            "description": "Hopper's reading of the last crash or join failure, as its crash and join cards show it, not the raw report. For an instance: the crash (headline, kind, suspects with jar, mod id, certainty and why, what they need, the mod that stopped loading, config switches, advice) and the last join problem (server or world, what happened, what to do, the mods named). For a server: its last start's crash. read_log has the raw report.",
+            "inputSchema": { "type": "object", "properties": {
+                "instance": instance_arg(),
+                "server": { "type": "string", "description": "A server's name or part of it (see list_servers), instead of instance" },
+                "report": { "type": "string", "description": "Read this crash report (file name from list_crash_reports) with today's rules instead of the saved finding" }
+            } }
+        },
+        {
+            "name": "list_servers",
+            "description": "The Minecraft servers Hopper knows (rig folders, Hopper Server, hosted on this PC): name, folder, panel, loader, port, Java memory, the instance (pack) it's paired with, and the last ping (online, players, version).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "server_status",
+            "description": "A server's live state from its panel: running, starting, stopping or crashed, players, CPU and memory, TPS, addresses, and a start, stop or restart under way (percent, step, time left) or just finished.",
+            "inputSchema": { "type": "object", "required": ["server"], "properties": {
+                "server": { "type": "string", "description": "A server's name or part of it" }
+            } }
+        },
+        {
+            "name": "server_sync",
+            "description": "Compares a server's mods with its paired pack, as the Sync tab does: counts per state, and each mod that differs (not on server, not in pack, old on server, update, downgrade) with both versions and what syncing would do. 'updates' lists the server's mods the pack has newer. Reads only.",
+            "inputSchema": { "type": "object", "required": ["server"], "properties": {
+                "server": { "type": "string", "description": "A server's name or part of it" },
+                "include_same": { "type": "boolean", "description": "Also list mods in sync" }
+            } }
+        },
+        {
+            "name": "server_motd",
+            "description": "A server's list message (MOTD): the template as the player edits it (with {pack_version}, {players} and the like), the message it fills in to now, what server.properties holds, and every variable's value.",
+            "inputSchema": { "type": "object", "required": ["server"], "properties": {
+                "server": { "type": "string", "description": "A server's name or part of it" },
+                "template": { "type": "string", "description": "Fill in this template instead of the saved one (a preview; nothing is saved)" }
+            } }
+        },
+        {
+            "name": "read_settings",
+            "description": "Hopper's settings as JSON (certificates hidden; keys and passwords live in Windows' credential store, not here). Pass keys to get only some, e.g. [\"allow_sources\", \"mcp_changes\"].",
+            "inputSchema": { "type": "object", "properties": {
+                "keys": { "type": "array", "items": { "type": "string" } }
+            } }
         }
     ])
 }
@@ -189,6 +281,43 @@ fn change_tools() -> Value {
             "inputSchema": { "type": "object", "required": ["instance"], "properties": {
                 "instance": instance_arg(),
                 "ids": { "type": "array", "items": { "type": "integer" }, "description": "Leave out for every update" }
+            } }
+        },
+        {
+            "name": "add_from_source",
+            "description": "Adds a mod from a GitHub release, Maven repository, Jenkins job or download link to an instance, as Add from GitHub or a link does; its updates then come from there. Needs Settings > Mod sources on, and the source already trusted on this PC: a new source needs the player to confirm it once in Hopper. Runs as a task.",
+            "inputSchema": { "type": "object", "required": ["instance", "link"], "properties": {
+                "instance": instance_arg(),
+                "link": { "type": "string" },
+                "asset": { "type": "string", "description": "The file to take when the release has several (from look_up_source); default Hopper's pick" },
+                "prerelease": { "type": "boolean" }
+            } }
+        },
+        {
+            "name": "follow_source",
+            "description": "Makes an installed jar follow a GitHub, Maven, Jenkins or link source, as Follow a source does: the jar stays as it is (nothing downloads or is replaced); it's matched to a release by its sha256, else by its version, and later releases show as its updates. Needs Settings > Mod sources on and the source already trusted on this PC (else the player confirms it in Hopper).",
+            "inputSchema": { "type": "object", "required": ["instance", "file", "link"], "properties": {
+                "instance": instance_arg(),
+                "file": { "type": "string", "description": "The jar's file name" },
+                "link": { "type": "string" },
+                "prerelease": { "type": "boolean" }
+            } }
+        },
+        {
+            "name": "unfollow_source",
+            "description": "Stops a mod following its source: it goes back to the CurseForge or Modrinth project it was, or to a plain jar. The file stays.",
+            "inputSchema": { "type": "object", "required": ["instance", "file"], "properties": {
+                "instance": instance_arg(),
+                "file": { "type": "string" }
+            } }
+        },
+        {
+            "name": "server_action",
+            "description": "Starts, stops or restarts a server through its panel. Players on it are cut off, so it needs confirm: true, given only after the player said yes to this exact action. Follow it with server_status.",
+            "inputSchema": { "type": "object", "required": ["server", "action", "confirm"], "properties": {
+                "server": { "type": "string", "description": "A server's name or part of it" },
+                "action": { "type": "string", "enum": ["start", "stop", "restart"] },
+                "confirm": { "type": "boolean", "description": "Must be true" }
             } }
         }
     ])
@@ -280,6 +409,9 @@ fn command_for(name: &str, args: &Value) -> Result<Command, String> {
         if !CHANGES.load(Ordering::Relaxed) {
             return Err("Changing instances is off: switch on \"Let assistants change instances\" in Hopper's Settings > Advanced.".into());
         }
+        if name == "server_action" {
+            server_action_of(args)?;
+        }
         return Ok(Command::Data(name.to_string(), args.clone()));
     }
     if !WINDOW.load(Ordering::Relaxed) {
@@ -319,6 +451,65 @@ fn command_for(name: &str, args: &Value) -> Result<Command, String> {
         },
         other => return Err(format!("unknown tool {other}")),
     })
+}
+
+/// The panel action a `server_action` call asks for, once it carries
+/// `confirm: true`. Kill isn't offered: it loses the world since the last
+/// save, so it stays a click in Hopper.
+pub fn server_action_of(args: &Value) -> Result<crate::panel::PanelAction, String> {
+    use crate::panel::PanelAction;
+    let action = match args["action"].as_str().unwrap_or("") {
+        "start" => PanelAction::Start,
+        "stop" => PanelAction::Stop,
+        "restart" => PanelAction::Restart,
+        other => return Err(format!("action must be start, stop or restart, not \"{other}\"")),
+    };
+    if args["confirm"].as_bool() != Some(true) {
+        return Err(format!(
+            "{} cuts off anyone playing: ask the player first, then call again with confirm: true.",
+            action.label()
+        ));
+    }
+    Ok(action)
+}
+
+/// The trust rule for sources added over MCP: Mod sources must be on, and
+/// an assistant can't trust a new source by itself; the player confirms
+/// each one once in Hopper.
+pub fn source_gate(allowed: bool, trusted: bool, publisher: &str) -> Result<(), String> {
+    if !allowed {
+        return Err("Mods from GitHub and other links are off: the player turns them on in Hopper's Settings > Mod sources.".into());
+    }
+    if !trusted {
+        return Err(format!(
+            "Needs user confirmation in Hopper: {publisher} isn't a trusted source on this PC yet. Ask the player to add or follow it once in Hopper (Add from GitHub or a link, or Follow a source) and confirm it; after that this works."
+        ));
+    }
+    Ok(())
+}
+
+/// Settings as an assistant may read them: certificates (long PEM text)
+/// hidden. Keys, tokens and passwords aren't in settings at all.
+pub fn redact_settings(mut v: Value) -> Value {
+    fn walk(v: &mut Value) {
+        match v {
+            Value::Object(m) => {
+                for (k, x) in m.iter_mut() {
+                    let k = k.to_ascii_lowercase();
+                    let hide = k == "ca" || k.ends_with("_ca") || k.contains("token") || k.contains("password") || k.contains("secret");
+                    if hide && x.as_str().is_some_and(|s| !s.is_empty()) {
+                        *x = Value::String("(hidden)".into());
+                    } else {
+                        walk(x);
+                    }
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    walk(&mut v);
+    v
 }
 
 /// Starts the server thread. Requests come out of the returned receiver; the
@@ -391,7 +582,7 @@ fn handle(body: &str, tx: &Sender<Request>, wake: &dyn Fn()) -> (u16, String) {
             "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or(PROTOCOL),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": "hopper", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Hopper is a Minecraft launcher and mod manager. Start with list_instances, then list_mods, read_log or missing_dependencies for an instance; search_projects and project_info look things up on CurseForge and Modrinth. Tools that change things or drive the window appear only when the user allows them in Hopper's Settings."
+            "instructions": "Hopper is a Minecraft launcher and mod manager. Start with list_instances, then list_mods, list_packs, read_log, crash_analysis or missing_dependencies for an instance; search_projects and project_info look things up on CurseForge and Modrinth; look_up_source and unknown_mods cover mods from GitHub and other links; list_servers, server_status and server_sync cover servers. Tools that change things or drive the window appear only when the user allows them in Hopper's Settings."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
@@ -466,4 +657,31 @@ mod tests {
         assert_eq!(s, 202);
     }
 
+    #[test]
+    fn server_actions_need_confirm() {
+        use crate::panel::PanelAction;
+        assert!(server_action_of(&json!({ "action": "stop" })).is_err());
+        assert!(server_action_of(&json!({ "action": "stop", "confirm": false })).is_err());
+        assert!(server_action_of(&json!({ "action": "kill", "confirm": true })).is_err());
+        assert_eq!(server_action_of(&json!({ "action": "restart", "confirm": true })), Ok(PanelAction::Restart));
+    }
+
+    #[test]
+    fn sources_need_the_setting_and_trust() {
+        assert!(source_gate(false, true, "a/b").is_err());
+        let e = source_gate(true, false, "a/b").unwrap_err();
+        assert!(e.contains("Needs user confirmation in Hopper"));
+        assert!(source_gate(true, true, "a/b").is_ok());
+    }
+
+    #[test]
+    fn settings_hide_certificates() {
+        let v = redact_settings(json!({
+            "panel_ca": "-----BEGIN", "hopper_panels": [{ "ca": "PEM", "name": "rig" }], "zoom": 1.0, "ca": ""
+        }));
+        assert_eq!(v["panel_ca"], "(hidden)");
+        assert_eq!(v["hopper_panels"][0]["ca"], "(hidden)");
+        assert_eq!(v["hopper_panels"][0]["name"], "rig");
+        assert_eq!(v["ca"], "");
+    }
 }

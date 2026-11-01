@@ -19,6 +19,16 @@ use std::sync::mpsc::Sender;
 /// Answers data tool `name` with `args`, now or from the background.
 pub fn answer(app: &mut AppView, name: &str, args: Value, reply: Sender<Reply>, cx: &mut Context<AppView>) {
     let store = app.store.clone();
+    match name {
+        "list_packs" | "download_status" | "unknown_mods" | "look_up_source" | "crash_analysis" | "read_settings"
+        | "add_from_source" | "follow_source" | "unfollow_source" => {
+            return crate::mcp_content::answer(&store, name, args, reply, cx);
+        }
+        "list_servers" | "server_status" | "server_sync" | "server_motd" | "server_action" => {
+            return crate::mcp_servers::answer(&store, name, args, reply, cx);
+        }
+        _ => {}
+    }
     let r = match name {
         "list_instances" => Some(list_instances(store.read(cx))),
         "list_mods" => Some(list_mods(store.read(cx), &args)),
@@ -54,16 +64,16 @@ pub fn answer(app: &mut AppView, name: &str, args: Value, reply: Sender<Reply>, 
 }
 
 /// Data as one JSON text block.
-fn json_reply(v: Value) -> Reply {
+pub(crate) fn json_reply(v: Value) -> Reply {
     Ok(vec![text(serde_json::to_string_pretty(&v).unwrap_or_default())])
 }
 
-fn no_instance(q: &str) -> String {
+pub(crate) fn no_instance(q: &str) -> String {
     format!("No instance matches \"{q}\". list_instances shows their names.")
 }
 
 /// The instance whose name is `q`, or contains it (one match).
-fn find<'a>(store: &'a Store, q: &str) -> Result<&'a Instance, String> {
+pub(crate) fn find<'a>(store: &'a Store, q: &str) -> Result<&'a Instance, String> {
     let q = q.trim().to_lowercase();
     let all = store.instances();
     if let Some(i) = all.iter().find(|i| i.name.to_lowercase() == q) {
@@ -91,11 +101,11 @@ fn class_of(kind: Option<&str>) -> u32 {
     }
 }
 
-fn site_of(id: u64) -> &'static str {
+pub(crate) fn site_of(id: u64) -> &'static str {
     if hopper::modrinth::is_mr(id) { "modrinth" } else { "curseforge" }
 }
 
-fn updates_of(store: &Store, root: &Path) -> Vec<hopper::install::Update> {
+pub(crate) fn updates_of(store: &Store, root: &Path) -> Vec<hopper::install::Update> {
     store.updates(root).and_then(|u| u.ready()).cloned().unwrap_or_default()
 }
 
@@ -125,6 +135,7 @@ fn list_mods(store: &Store, args: &Value) -> Reply {
     let class = class_of(args["kind"].as_str());
     let filter = args["filter"].as_str().map(str::to_lowercase);
     let updates = updates_of(store, &inst.root);
+    let (_, fetching) = store.fetch_files(&inst.root);
     let v: Vec<Value> = inst
         .addons
         .iter()
@@ -142,6 +153,18 @@ fn list_mods(store: &Store, args: &Value) -> Reply {
             if args["only_disabled"].as_bool() == Some(true) && a.enabled {
                 return None;
             }
+            // As the Mods tab's "Added by you": without a modpack, all of them.
+            let added = inst.pack.is_none() || !a.from_pack;
+            if args["only_added"].as_bool() == Some(true) && !added {
+                return None;
+            }
+            if args["only_sources"].as_bool() == Some(true) && a.source.is_none() {
+                return None;
+            }
+            let fetch = fetching
+                .iter()
+                .find(|f| f.project_id == a.project_id && a.project_id != 0)
+                .map(|f| crate::mcp_content::fetch_step(f.shown_step(), f.size));
             Some(json!({
                 "name": a.name,
                 "file": a.file_name,
@@ -149,10 +172,14 @@ fn list_mods(store: &Store, args: &Value) -> Reply {
                 "enabled": a.enabled,
                 "side": a.env,
                 "id": a.project_id,
-                "site": if a.project_id == 0 { "none" } else if a.mr_project.is_empty() { "curseforge" } else { "modrinth" },
+                "site": if a.source.is_some() { "source" } else if a.project_id == 0 { "none" } else if a.mr_project.is_empty() { "curseforge" } else { "modrinth" },
                 "author": a.author,
                 "from_modpack": a.from_pack,
+                "added_by_you": added,
+                "locked": a.locked,
                 "update_to": upd.map(|u| u.file.file_name.clone()),
+                "update_from_website": fetch,
+                "source": a.source.as_ref().map(crate::mcp_content::source_json),
             }))
         })
         .collect();
