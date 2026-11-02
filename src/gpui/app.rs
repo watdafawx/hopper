@@ -636,10 +636,19 @@ impl AppView {
         });
     }
 
-    fn dropped(&mut self, paths: &ExternalPaths, _: &mut Window, cx: &mut Context<Self>) {
+    fn dropped(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         let (target, folder) = self.library.read(cx).drop_target(cx);
         let paths = paths.paths().to_vec();
-        self.store.read(cx).add_dropped(paths, target, folder);
+        // Packs bringing mods from GitHub and other links: ask first.
+        let pins: Vec<_> = paths
+            .iter()
+            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip") || x.eq_ignore_ascii_case("mrpack")))
+            .flat_map(|p| hopper::modpack::source_pins(p))
+            .collect();
+        let store = self.store.clone();
+        crate::incoming_sources::gate(store.clone(), pins, window, cx, move |skip, _, cx| {
+            store.read(cx).add_dropped(paths.clone(), target.clone(), folder.clone(), skip);
+        });
         self.go(Page::Library, cx);
     }
 

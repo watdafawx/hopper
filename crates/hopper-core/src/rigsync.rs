@@ -527,7 +527,7 @@ impl<T> JoinWatch<T> {
 // ---- operations --------------------------------------------------------
 
 /// File operations for rows: (to the server, to the client).
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Ops {
     pub up: Vec<SyncOp>,
     pub down: Vec<SyncOp>,
@@ -536,6 +536,37 @@ pub struct Ops {
 impl Ops {
     pub fn is_empty(&self) -> bool {
         self.up.is_empty() && self.down.is_empty()
+    }
+
+    /// The mods from GitHub and other links these operations copy (their
+    /// pins on the side they come from), for the ask before a sync.
+    pub fn source_pins(&self, server_root: &Path, inst_root: &Path) -> Vec<crate::sources::carry::Pin> {
+        let jars = |ops: &[SyncOp]| -> Vec<String> {
+            ops.iter()
+                .filter_map(|o| match o {
+                    SyncOp::Copy { src, .. } => Some(src.file_name()?.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut pins = crate::sources::carry::pins_for(inst_root, &jars(&self.up));
+        pins.extend(crate::sources::carry::pins_for(server_root, &jars(&self.down)));
+        pins
+    }
+
+    /// The operations without the copies of the jars in `skip` (the player
+    /// skipped mods from other sources).
+    pub fn without(mut self, skip: &[crate::sources::carry::Pin]) -> Ops {
+        let keep = |o: &SyncOp| match o {
+            SyncOp::Copy { src, .. } => {
+                let name = src.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+                !skip.iter().any(|p| p.file.to_lowercase() == name.trim_end_matches(".disabled"))
+            }
+            _ => true,
+        };
+        self.up.retain(keep);
+        self.down.retain(keep);
+        self
     }
 }
 

@@ -748,7 +748,8 @@
   {:else}
     <!-- Laid out as desktop's: actions, search, what's listed (Filter), in what order (Sort). -->
     <div class="row wrap toolbar">
-      <span class="addsplit"><a class="btn sm" href="#{browseHash('mods', server.id)}" oncontextmenu={openAdd}><Plus size={13} />Add content</a><button class="btn sm" title="Other ways to add" aria-label="Other ways to add" aria-haspopup="menu" aria-expanded={!!addMenu} onclick={openAdd}><ChevronDown size={12} /></button></span>
+      <!-- The arrow only shows with mods from links on: Browse is then the only way to add. -->
+      {#if srcOn}<span class="addsplit"><a class="btn sm" href="#{browseHash('mods', server.id)}" oncontextmenu={openAdd}><Plus size={13} />Add content</a><button class="btn sm" title="Other ways to add" aria-label="Other ways to add" aria-haspopup="menu" aria-expanded={!!addMenu} onclick={openAdd}><ChevronDown size={12} /></button></span>{:else}<a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a>{/if}
       <span class="row upd">
         <!-- The last check's results stay up while a new one runs; with results on screen the refresh button spins instead, so nothing moves. -->
         {#if pendingUpdates.length}<button class="btn sm pri" disabled={!!busy} title="Review {pendingUpdates.length === 1 ? '1 update' : `${pendingUpdates.length} updates`}, then update" onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Update all ({pendingUpdates.length})</button>
@@ -957,12 +958,10 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
 {#if colDrag}<div class="colghost popover" style:left="{colDrag.x + 12}px" style:top="{colDrag.y + 10}px">{HEADS[colDrag.col][0]}</div>{/if}
 
 {#if loaderOpen}<LoaderVersions {server} onClose={() => (loaderOpen = false)} onChanged={() => changed(true)} />{/if}
-{#if addMenu}
+{#if addMenu && srcOn}
   <div class="ctx popover menu" style:left="{addMenu.x}px" style:top="{addMenu.y}px" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
     <a class="menu-item" href="#{browseHash('mods', server.id)}" onclick={() => (addMenu = null)}><Search size={13} />Browse CurseForge and Modrinth</a>
     <button class="menu-item" onclick={() => { addMenu = null; sourceFor = { follow: null }; }}><Link size={13} />From GitHub or a link…</button>
-    <div class="menu-sep"></div>
-    <a class="menu-item" href="#/server/{encodeURIComponent(server.id)}/files/mods" onclick={() => (addMenu = null)}><FolderOpen size={13} />Open the folder</a>
   </div>
 {/if}
 {#if finding}<SourceFind {server} onClose={() => (finding = false)} onChanged={changed} />{/if}

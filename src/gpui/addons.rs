@@ -2380,20 +2380,33 @@ impl AddonsView {
             .gap_3()
             .flex_wrap()
             .child({
-                // A click browses, as it always did; the arrow and a
-                // right-click offer the other ways to add.
-                let menu = self.add_menu(cx);
-                let m2 = menu.clone();
-                widgets::split_menu(
-                    div().id("add-content-wrap").flex_none().context_menu(move |m, w, cx| m2(m, w, cx)).child(
-                        widgets::split_lead(Button::new("add-content").small().outline().icon(IconName::Plus).label("Add content"))
-                            .on_click(cx.listener(|this, _, _, cx| this.add_content(cx))),
-                    ),
-                    "add-content-more",
-                    gpui_kit::component::Size::Small,
-                    "Other ways to add",
-                    move |m, w, cx| menu(m, w, cx),
-                )
+                // A click browses, as it always did. With mods from links on,
+                // the arrow and a right-click offer the other way to add;
+                // otherwise Browse is the only way, so there's no arrow.
+                let links = self.class == cf::CLASS_MODS && self.global_dir().is_none() && self.store.read(cx).settings().allow_sources;
+                if links {
+                    let menu = self.add_menu(cx);
+                    let m2 = menu.clone();
+                    widgets::split_menu(
+                        div().id("add-content-wrap").flex_none().context_menu(move |m, w, cx| m2(m, w, cx)).child(
+                            widgets::split_lead(Button::new("add-content").small().outline().icon(IconName::Plus).label("Add content"))
+                                .on_click(cx.listener(|this, _, _, cx| this.add_content(cx))),
+                        ),
+                        "add-content-more",
+                        gpui_kit::component::Size::Small,
+                        "Other ways to add",
+                        move |m, w, cx| menu(m, w, cx),
+                    )
+                    .into_any_element()
+                } else {
+                    Button::new("add-content")
+                        .small()
+                        .outline()
+                        .icon(IconName::Plus)
+                        .label("Add content")
+                        .on_click(cx.listener(|this, _, _, cx| this.add_content(cx)))
+                        .into_any_element()
+                }
             })
             // Jars nobody knows: follow their sources in one go.
             .when_some(
@@ -4047,16 +4060,11 @@ Change version", a.file_name).into()
         }
     }
 
-    /// Add content's menu (its arrow, or a right-click): Browse, mods from
-    /// GitHub and other links, and the folder to drop files in yourself.
+    /// Add content's menu (its arrow, or a right-click), shown only with
+    /// mods from links on: Browse, or a mod from GitHub or another link.
+    /// The instance header's Folder button covers dropping files in.
     fn add_menu(&self, cx: &mut Context<Self>) -> Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu> {
         let view = cx.entity();
-        let links = self.class == cf::CLASS_MODS && self.global_dir().is_none();
-        // Data packs live in each world: only a picked folder has one place.
-        let folder = self.global_dir().or_else(|| {
-            let r = self.root.as_ref().filter(|_| self.class != cf::CLASS_DATAPACKS)?;
-            Some(r.join(hopper::instances::folder_for_class(self.class)))
-        });
         Rc::new(move |menu, _, _| {
             let (v1, v2) = (view.clone(), view.clone());
             menu.item(
@@ -4064,27 +4072,15 @@ Change version", a.file_name).into()
                     .icon(IconName::Search)
                     .on_click(move |_, _, cx| v1.update(cx, |this, cx| this.add_content(cx))),
             )
-            .when(links, |m| {
-                m.item(PopupMenuItem::new("From GitHub or a link…").icon(IconName::Link).on_click(move |_, window, cx| {
-                    let (store, root) = {
-                        let this = v2.read(cx);
-                        (this.store.clone(), this.root.clone())
-                    };
-                    if let Some(root) = root {
-                        crate::source_dialog::open_add(store, root, window, cx);
-                    }
-                }))
-            })
-            .when_some(folder.clone(), |m, dir| {
-                m.separator().item(
-                    PopupMenuItem::new("Open the folder")
-                        .icon(IconName::FolderOpen)
-                        .on_click(move |_, _, _| {
-                            let _ = std::fs::create_dir_all(&dir);
-                            crate::store::open_path(&dir);
-                        }),
-                )
-            })
+            .item(PopupMenuItem::new("From GitHub or a link…").icon(IconName::Link).on_click(move |_, window, cx| {
+                let (store, root) = {
+                    let this = v2.read(cx);
+                    (this.store.clone(), this.root.clone())
+                };
+                if let Some(root) = root {
+                    crate::source_dialog::open_add(store, root, window, cx);
+                }
+            }))
         })
     }
 

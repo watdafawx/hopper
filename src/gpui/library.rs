@@ -1133,8 +1133,8 @@ impl LibraryView {
                                             .small()
                                             .ghost()
                                             .tooltip("Import a modpack zip or .mrpack")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                crate::dialogs::import_pack(this.store.clone(), cx)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                crate::dialogs::import_pack(this.store.clone(), window, cx)
                                             })),
                                     )
                                     .child(

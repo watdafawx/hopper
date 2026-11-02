@@ -394,30 +394,33 @@ pub fn open_create(store: Entity<Store>, window: &mut Window, cx: &mut App) {
 // ---- Import --------------------------------------------------------------
 
 /// Asks for a CurseForge zip or Modrinth .mrpack and installs it.
-pub fn import_pack(store: Entity<Store>, cx: &mut App) {
+pub fn import_pack(store: Entity<Store>, window: &mut Window, cx: &mut App) {
     let paths = cx.prompt_for_paths(PathPromptOptions {
         files: true,
         directories: false,
         multiple: false,
         prompt: Some("Import modpack".into()),
     });
+    let handle = window.window_handle();
     cx.spawn(async move |cx| {
         let Ok(Ok(Some(paths))) = paths.await else { return };
         let Some(path) = paths.into_iter().next() else { return };
-        store.update(cx, |s, _| {
-            let root = PathBuf::from(&s.settings().instances_root);
-            s.spawn_job(format!("Importing {}", path.display()), move |job| {
-                let mr = path
-                    .extension()
-                    .is_some_and(|x| x.eq_ignore_ascii_case("mrpack"));
-                let inst = if mr {
-                    hopper::modpack::import_mrpack(&root, &path, job)?
-                } else {
-                    hopper::modpack::import_zip(&root, &path, job)?
-                };
-                Ok(Msg::InstanceChanged(inst.root))
-            });
-        });
+        // Mods from GitHub and other links in it: ask before importing.
+        let pins = hopper::modpack::source_pins(&path);
+        handle
+            .update(cx, |_, window, cx| {
+                crate::incoming_sources::gate(store.clone(), pins, window, cx, move |skip, _, cx| {
+                    let path = path.clone();
+                    store.update(cx, |s, _| {
+                        let root = PathBuf::from(&s.settings().instances_root);
+                        s.spawn_job(format!("Importing {}", path.display()), move |job| {
+                            let inst = hopper::modpack::import_file(&root, &path, &skip, job)?;
+                            Ok(Msg::InstanceChanged(inst.root))
+                        });
+                    });
+                })
+            })
+            .ok();
     })
     .detach();
 }
@@ -1598,19 +1601,30 @@ impl RedeemForm {
         matches!(self.parsed, Some(Ok(_)))
     }
 
-    fn install(form: &Entity<Self>, store: &Entity<Store>, cx: &mut App) -> bool {
+    fn install(form: &Entity<Self>, store: &Entity<Store>, window: &mut Window, cx: &mut App) -> bool {
         let this = form.read(cx);
-        if !this.ready() {
+        let Some(Ok(share)) = this.parsed.clone() else {
             return false;
-        }
-        let code = this.input.read(cx).value().to_string();
-        let s = store.read(cx);
-        let root = PathBuf::from(&s.settings().instances_root);
-        s.spawn_job("Setting up a shared pack", move |job| {
-            job.announce();
-            let inst = hopper::sharecode::install(&root, &code, job)?;
-            job.detail(format!("Installed {}", inst.name));
-            Ok(Msg::InstanceChanged(inst.root))
+        };
+        // Mods from GitHub and other links: ask (once this dialog closes)
+        // before anything installs.
+        let pins = hopper::sharecode::pins(&share);
+        let store = store.clone();
+        window.defer(cx, move |window, cx| {
+            crate::incoming_sources::gate(store.clone(), pins, window, cx, move |skip, _, cx| {
+                let (share, note) = hopper::sharecode::without(&share, &skip);
+                let s = store.read(cx);
+                let root = PathBuf::from(&s.settings().instances_root);
+                s.spawn_job("Setting up a shared pack", move |job| {
+                    job.announce();
+                    let inst = hopper::sharecode::install_share(&root, &share, job)?;
+                    job.detail(format!("Installed {}", inst.name));
+                    if let Some(n) = note {
+                        job.note(n);
+                    }
+                    Ok(Msg::InstanceChanged(inst.root))
+                });
+            });
         });
         true
     }
@@ -1672,6 +1686,6 @@ pub fn open_redeem(store: Entity<Store>, window: &mut Window, cx: &mut App) {
             .w(rems(36.).to_pixels(window.rem_size()))
             .child(form.clone())
             .footer(footer("Install", ready))
-            .on_ok(move |_, _, cx| RedeemForm::install(&f2, &store, cx))
+            .on_ok(move |_, window, cx| RedeemForm::install(&f2, &store, window, cx))
     });
 }

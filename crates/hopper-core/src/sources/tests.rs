@@ -677,3 +677,71 @@ fn source_mods_never_ask_curseforge() {
     let m = get_mod(gid).unwrap();
     assert_eq!((m.icon(), m.author()), (Some(r"C:\cache\logo.png"), "watdafawx"));
 }
+
+/// Importing with Mod sources off and "Skip these mods": the pinned jar is
+/// left out (and only the pinned file), the code loses its source entry,
+/// and the result names what wasn't installed.
+#[test]
+fn import_with_sources_off_skips_and_lists_them() {
+    let a = scratch("skip-a");
+    let (inst, _) = pinned_instance(&a);
+    let pins = carry::pins(&inst);
+    assert_eq!(pins.len(), 1);
+
+    // A pack's overrides brought the pinned jar and another mod.
+    let b = scratch("skip-b");
+    std::fs::write(b.join("mods/modmenu-11.0.3.jar"), b"jar bytes").unwrap();
+    std::fs::write(b.join("mods/other.jar"), b"other").unwrap();
+    let mut got = Instance { root: b.clone(), ..Default::default() };
+    carry::attach(&mut got, &pins);
+    assert_eq!(carry::skip(&mut got, &pins), vec!["modmenu-11.0.3.jar".to_string()]);
+    assert!(!b.join("mods/modmenu-11.0.3.jar").exists());
+    assert!(b.join("mods/other.jar").exists(), "everything else stays");
+    assert!(got.addons.iter().all(|a| a.file_name != "modmenu-11.0.3.jar"));
+
+    // A jar with other bytes under that name isn't the pinned file: it stays.
+    let c = scratch("skip-c");
+    std::fs::write(c.join("mods/modmenu-11.0.3.jar"), b"other bytes").unwrap();
+    let mut other = Instance { root: c.clone(), ..Default::default() };
+    assert!(carry::skip(&mut other, &pins).is_empty());
+    assert!(c.join("mods/modmenu-11.0.3.jar").exists());
+
+    // The list the player sees.
+    let note = carry::skipped_note(&pins).unwrap();
+    assert!(note.contains("won't be installed"), "{note}");
+    assert!(note.contains("ModMenu (GitHub: TerraformersMC/ModMenu)"), "{note}");
+    let jar = carry::Pin { file: "ezactions-neoforge-1.21.1-2.0.3.5.jar".into(), source: ModSource { kind: Kind::Url, ..Default::default() } };
+    assert_eq!(carry::display_name(&jar), "ezactions");
+    assert!(carry::skipped_note(&[]).is_none());
+
+    // A share code: the source entry goes, the rest of the code stays.
+    let share = crate::sharecode::Share {
+        base: crate::sharecode::Base::Plain { game_version: "1.21.1".into(), loader: "fabric".into() },
+        name: None,
+        loader: None,
+        entries: vec![
+            crate::sharecode::Entry::CurseFile { file: 1, enabled: true },
+            crate::sharecode::Entry::Source { pin: pins[0].clone(), enabled: true },
+        ],
+    };
+    assert_eq!(crate::sharecode::pins(&share), pins);
+    let (left, note) = crate::sharecode::without(&share, &pins);
+    assert_eq!(left.entries, vec![crate::sharecode::Entry::CurseFile { file: 1, enabled: true }]);
+    assert!(note.is_some());
+    assert!(crate::sharecode::pins(&left).is_empty());
+
+    // A sync: the copy of the pinned jar is dropped, other copies stay.
+    let ops = crate::rigsync::Ops {
+        up: vec![
+            crate::model::SyncOp::Copy { src: a.join("mods/modmenu-11.0.3.jar"), dst: c.join("mods/modmenu-11.0.3.jar") },
+            crate::model::SyncOp::Copy { src: a.join("mods/x.jar"), dst: c.join("mods/x.jar") },
+        ],
+        down: Vec::new(),
+    };
+    assert_eq!(ops.source_pins(&c, &a).len(), 1);
+    let left = ops.without(&pins);
+    assert_eq!(left.up.len(), 1);
+    for d in [a, b, c] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

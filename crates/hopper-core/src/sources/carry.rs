@@ -199,3 +199,74 @@ pub fn copied_jars(results: &[crate::model::SyncResult], root: &Path) -> Vec<Str
         })
         .collect()
 }
+
+/// The sources among `pins` this PC hasn't trusted yet, each once, for
+/// the confirm before an import installs their mods.
+pub fn new_sources(pins: &[Pin]) -> Vec<ModSource> {
+    let mut out: Vec<ModSource> = Vec::new();
+    for p in pins {
+        if !super::trusted(&p.source) && !out.iter().any(|s| s.key() == p.source.key()) {
+            out.push(p.source.clone());
+        }
+    }
+    out
+}
+
+/// A pinned mod's name for people: the repo's name for GitHub ("EZActions"),
+/// else the jar's name without its version and loader ("modmenu").
+pub fn display_name(p: &Pin) -> String {
+    if p.source.kind == super::Kind::GitHub
+        && let Some(repo) = p.source.publisher.rsplit('/').next().filter(|r| !r.is_empty() && p.source.publisher.contains('/'))
+    {
+        return repo.to_string();
+    }
+    let mut n = crate::scan::strip_version_suffix(&p.file);
+    for l in ["-neoforge", "-forge", "-fabric", "-quilt"] {
+        if n.to_lowercase().ends_with(l) && n.len() > l.len() {
+            n.truncate(n.len() - l.len());
+            break;
+        }
+    }
+    n
+}
+
+/// "These 3 mods won't be installed: A (GitHub: owner/repo), …", for
+/// the import's result when the player skipped mods from other sources.
+pub fn skipped_note(pins: &[Pin]) -> Option<String> {
+    if pins.is_empty() {
+        return None;
+    }
+    let names = pins
+        .iter()
+        .map(|p| format!("{} ({}: {})", display_name(p), p.source.kind.label(), p.source.publisher))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(if pins.len() == 1 {
+        format!("This mod from other sources won't be installed: {names}")
+    } else {
+        format!("These {} mods from other sources won't be installed: {names}", pins.len())
+    })
+}
+
+/// Leaves the pinned jars out of an imported instance (the player skipped
+/// mods from other sources): deletes each jar that is the pinned file
+/// (same sha256) and its row. Returns the file names taken out.
+pub fn skip(inst: &mut Instance, pins: &[Pin]) -> Vec<String> {
+    let mods = inst.mods_dir();
+    let mut out = Vec::new();
+    for p in pins {
+        let file = p.file.rsplit(['/', '\\']).next().unwrap_or(&p.file).trim_end_matches(".disabled").to_string();
+        let Some(path) = [mods.join(&file), mods.join(format!("{file}.disabled"))].into_iter().find(|f| f.is_file()) else { continue };
+        if !p.source.sha256.is_empty() {
+            match super::sha256_file(&path) {
+                Ok(h) if h.eq_ignore_ascii_case(&p.source.sha256) => {}
+                _ => continue,
+            }
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            inst.addons.retain(|a| !a.file_name.eq_ignore_ascii_case(&file));
+            out.push(file);
+        }
+    }
+    out
+}

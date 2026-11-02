@@ -883,6 +883,12 @@ impl Hub {
                         .and_then(|h| base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, h.value.as_str()).ok())
                         .and_then(|b| serde_json::from_slice::<crate::sources::ModSource>(&b).ok())
                         .filter(|_| folder == "mods");
+                    // Mods from GitHub and other links are off on this PC:
+                    // nobody here was asked, so the jar stays out.
+                    if pin.is_some() && !crate::sources::enabled() {
+                        let _ = req.respond(status(409, &format!("{}: mods from GitHub and other links are off on their PC", rel.rsplit('/').next().unwrap_or(&rel))));
+                        return;
+                    }
                     let r = receive(req.as_reader(), &inst.root, &full);
                     if let (Some(source), None) = (pin, &r.error) {
                         let file = rel.rsplit('/').next().unwrap_or(&rel).to_string();

@@ -723,7 +723,41 @@ impl SyncPanel {
         )
     }
 
+    /// Before a sync copies mods from GitHub and other links: with Mod
+    /// sources off, or a source not trusted yet, asks first
+    /// ([`crate::incoming_sources::gate`]) and runs `go` with what's left
+    /// afterwards. Returns the ops when there's nothing to ask.
+    fn ask_sources(&self, ops: Ops, cx: &mut Context<Self>, go: impl Fn(&mut Self, Ops, &mut Context<Self>) + 'static) -> Option<Ops> {
+        let Some((server, inst)) = self.pair(cx) else { return Some(ops) };
+        let pins = ops.source_pins(&server.root, &inst.root);
+        let on = self.store.read(cx).settings().allow_sources;
+        if pins.is_empty() || (on && hopper::sources::carry::new_sources(&pins).is_empty()) {
+            return Some(ops);
+        }
+        let (store, view) = (self.store.clone(), cx.entity());
+        let handle = cx.active_window()?;
+        let go = std::rc::Rc::new(go);
+        cx.defer(move |cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    crate::incoming_sources::gate(store, pins, window, cx, move |skip, _, cx| {
+                        let ops = ops.clone().without(&skip);
+                        let go = go.clone();
+                        view.update(cx, |this, cx| go(this, ops, cx));
+                    });
+                })
+                .ok();
+        });
+        None
+    }
+
     fn run(&mut self, ops: Ops, cx: &mut Context<Self>) {
+        if let Some(ops) = self.ask_sources(ops, cx, |this, ops, cx| this.run_now(ops, cx)) {
+            self.run_now(ops, cx);
+        }
+    }
+
+    fn run_now(&mut self, ops: Ops, cx: &mut Context<Self>) {
         let Some((server, inst)) = self.pair(cx) else {
             return;
         };
@@ -771,6 +805,13 @@ impl SyncPanel {
     /// marks the row done and compares again. The new comparison shows once
     /// the user stops clicking.
     fn act_row(&mut self, key: String, words: (&'static str, &'static str), ops: Ops, cx: &mut Context<Self>) {
+        let k = key.clone();
+        if let Some(ops) = self.ask_sources(ops, cx, move |this, ops, cx| this.act_row_now(k.clone(), words, ops, cx)) {
+            self.act_row_now(key, words, ops, cx);
+        }
+    }
+
+    fn act_row_now(&mut self, key: String, words: (&'static str, &'static str), ops: Ops, cx: &mut Context<Self>) {
         let Some((server, inst)) = self.pair(cx) else { return };
         if ops.is_empty() || self.acting.contains_key(&key) {
             return;

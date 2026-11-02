@@ -3583,7 +3583,8 @@ impl Store {
 
     /// Adds dropped files: pack zips and .mrpacks become instances; jars go
     /// to `target`'s mods, anything else to its `folder`.
-    pub fn add_dropped(&self, paths: Vec<PathBuf>, target: Option<PathBuf>, folder: String) {
+    /// `skip`: pinned mods from other sources the player left out of packs.
+    pub fn add_dropped(&self, paths: Vec<PathBuf>, target: Option<PathBuf>, folder: String, skip: Vec<hopper::sources::carry::Pin>) {
         let instances_root = PathBuf::from(&self.settings.instances_root);
         let target = target.and_then(|r| self.instance(&r).cloned());
         self.spawn_job(format!("Adding {} dropped files", paths.len()), move |job| {
@@ -3602,11 +3603,7 @@ impl Store {
                         && zip::ZipArchive::new(std::fs::File::open(p)?)
                             .is_ok_and(|mut z| z.by_name("manifest.json").is_ok());
                     if is_pack || lower.ends_with(".mrpack") {
-                        let inst = if is_pack {
-                            hopper::modpack::import_zip(&instances_root, p, job)?
-                        } else {
-                            hopper::modpack::import_mrpack(&instances_root, p, job)?
-                        };
+                        let inst = hopper::modpack::import_file(&instances_root, p, &skip, job)?;
                         job.note(format!("Imported {} as a new instance", inst.name));
                         last = Some(inst.root);
                         return Ok(());
