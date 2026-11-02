@@ -14,12 +14,13 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::joinfail::{JoinKind, JoinProblem};
-use hopper::rigsync::JoinCheck;
-use std::collections::{HashMap, HashSet};
+use hopper::rigsync::{JoinCheck, JoinWatch};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-/// How long a comparison with the server counts as current.
+/// How long a comparison counts as current when nothing says it changed
+/// (servers over a share or SFTP send no mods fingerprint).
 const FRESH: Duration = Duration::from_secs(90);
 
 /// The paired server, compared with the pack before it plays.
@@ -33,8 +34,10 @@ pub struct PreJoin {
 #[derive(Default)]
 pub struct Joins {
     problems: HashMap<PathBuf, Option<JoinProblem>>,
-    checks: HashMap<PathBuf, (Instant, Option<PreJoin>)>,
-    pending: HashSet<PathBuf>,
+    /// Each shown pack's comparison, kept current by [`Store::refresh_pre_joins`].
+    checks: HashMap<PathBuf, JoinWatch<Option<PreJoin>>>,
+    /// Bumped when Hopper changed a server's files (by server root).
+    server_files: HashMap<PathBuf, u64>,
 }
 
 impl Store {
@@ -59,36 +62,71 @@ impl Store {
             }
             None => hopper::joinfail::clear(&root),
         }
-        self.joins.problems.insert(root.clone(), p);
-        // The server may have changed too: compare again when next shown.
-        self.joins.checks.remove(&root);
+        self.joins.problems.insert(root, p);
         cx.notify();
     }
 
-    /// The pack compared with its paired server, when it was compared
-    /// lately and something differs.
+    /// The pack compared with its paired server, when something differs.
+    /// The last answer stays while a new comparison runs (see
+    /// [`Self::pre_join_checking`]).
     pub fn pre_join(&self, root: &Path) -> Option<&PreJoin> {
-        self.joins.checks.get(root)?.1.as_ref().filter(|p| !p.check.is_empty())
+        self.joins.checks.get(root)?.value()?.as_ref().filter(|p| !p.check.is_empty())
     }
 
-    /// Forgets the comparison, so the next look compares again (after a
-    /// sync or a loader change).
-    pub fn forget_pre_join(&mut self, root: &Path) {
-        self.joins.checks.remove(root);
+    /// The pack or its server changed since the answer shown: a new
+    /// comparison is on its way.
+    pub fn pre_join_checking(&self, root: &Path) -> bool {
+        match (self.joins.checks.get(root), self.pre_join_key(root)) {
+            (Some(w), Some(key)) => w.stale(key),
+            _ => false,
+        }
+    }
+
+    /// Hopper changed this server's files (a sync, an update, a pushed
+    /// config): every pack paired with it is compared again now.
+    pub fn server_files_changed(&mut self, server_root: &Path) {
+        *self.joins.server_files.entry(server_root.to_path_buf()).or_default() += 1;
+        self.refresh_pre_joins();
+    }
+
+    /// What a pack's comparison depends on, as one number: the pack's mods
+    /// and loader, the server's revision, its mods fingerprint and whether
+    /// it runs. `None`: not paired.
+    fn pre_join_key(&self, root: &Path) -> Option<u64> {
+        let server = self.server_of(root)?;
+        let inst = self.instance(root)?;
+        let stats = self.panel_stats(&server.root);
+        let running = match stats {
+            Some(p) => (p.running, p.starting),
+            None => (matches!(self.status(&server.root), Some(hopper::server::Status::Online { .. })), false),
+        };
+        let ours = self.joins.server_files.get(&server.root).copied().unwrap_or(0);
+        let s = self.settings();
+        Some(
+            hopper::rigsync::JoinInputs {
+                inst: Some(inst),
+                server_root: Some(&server.root),
+                server_rev: self.server_rev().wrapping_mul(1 << 20).wrapping_add(ours),
+                mods_stamp: stats.and_then(|p| p.mods_stamp),
+                running,
+                blacklist: Some(&s.sync_blacklist),
+                sync_anyway: Some(&s.sync_anyway),
+            }
+            .key(),
+        )
     }
 
     /// Compares the pack with its paired server in the background, unless
-    /// that was done lately.
+    /// the last answer is still current.
     pub fn want_pre_join(&mut self, root: &Path) {
-        if !self.server_tools() || self.joins.pending.contains(root) {
+        if !self.server_tools() {
             return;
         }
-        if self.joins.checks.get(root).is_some_and(|(t, _)| t.elapsed() < FRESH) {
+        let Some(key) = self.pre_join_key(root) else { return };
+        if !self.joins.checks.entry(root.to_path_buf()).or_default().want(key, FRESH) {
             return;
         }
-        let Some(server) = self.server_of(root).cloned() else { return };
-        let Some(inst) = self.instance(root).cloned() else { return };
-        self.joins.pending.insert(root.to_path_buf());
+        let (Some(server), Some(inst)) = (self.server_of(root).cloned(), self.instance(root).cloned()) else { return };
         let anyway = self.settings().sync_anyway.clone();
         let hidden = self.settings().sync_blacklist.clone();
         let root = root.to_path_buf();
@@ -100,13 +138,30 @@ impl Store {
                 let check = hopper::rigsync::join_check(&diff, &hidden, pack_nf, server_nf.as_deref());
                 PreJoin { server_root: server.root.clone(), server: server.name.clone(), check }
             });
-            Msg::PreJoin(root, found)
+            Msg::PreJoin(root, key, found)
         });
     }
 
-    pub fn pre_join_done(&mut self, root: PathBuf, p: Option<PreJoin>, cx: &mut Context<Self>) {
-        self.joins.pending.remove(&root);
-        self.joins.checks.insert(root, (Instant::now(), p));
+    /// Compares again every pack shown so far whose pack or server changed
+    /// (after each batch of store messages and each panel poll), so the
+    /// banner follows syncs, mod changes and restarts without waiting.
+    pub fn refresh_pre_joins(&mut self) {
+        let roots: Vec<PathBuf> = self.joins.checks.keys().cloned().collect();
+        for r in roots {
+            if self.instance(&r).is_none() {
+                self.joins.checks.remove(&r);
+                continue;
+            }
+            self.want_pre_join(&r);
+        }
+    }
+
+    pub fn pre_join_done(&mut self, root: PathBuf, key: u64, p: Option<PreJoin>, cx: &mut Context<Self>) {
+        if let Some(w) = self.joins.checks.get_mut(&root) {
+            w.finish(key, p);
+        }
+        // The pack or server changed while it ran: once more.
+        self.want_pre_join(&root);
         cx.notify();
     }
 }
@@ -116,14 +171,11 @@ fn update_server(store: &Entity<Store>, root: &Path, server_root: &Path, window:
     let s = store.read(cx);
     let (Some(server), Some(inst)) = (s.server(server_root).cloned(), s.instance(root).cloned()) else { return };
     crate::rigsync::confirm_update_server(store, server, inst, window, cx);
-    store.update(cx, |s, _| s.forget_pre_join(root));
 }
 
 /// Switches the pack to the server's NeoForge build.
 fn match_server(store: &Entity<Store>, root: &Path, nf: &str, window: &mut Window, cx: &mut App) {
-    if crate::inst_settings::switch_loader(store, root, format!("neoforge-{nf}"), window, cx) {
-        store.update(cx, |s, _| s.forget_pre_join(root));
-    }
+    crate::inst_settings::switch_loader(store, root, format!("neoforge-{nf}"), window, cx);
 }
 
 /// Whether the address the game tried (`host` or `host:port`) is this
@@ -351,6 +403,8 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
     store.update(cx, |s, _| s.want_pre_join(root));
     let s = store.read(cx);
     let p = s.pre_join(root)?.clone();
+    // The pack or server changed since: its old numbers would mislead.
+    let checking = s.pre_join_checking(root);
     let pack_nf = s.instance(root).and_then(|i| i.loader.strip_prefix("neoforge-").map(str::to_string));
     let theme = cx.theme().clone();
     let color = theme.warning;
@@ -380,6 +434,9 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
         if !c.versions.is_empty() {
             let names: Vec<String> = c.versions.iter().map(|(n, a, b)| format!("{n} ({a} here, {b} there)")).collect();
             lines.push(format!("Other versions: {}", list(&names)));
+        }
+        if checking {
+            lines = vec![format!("Checking {} again…", p.server)];
         }
         lines
     };

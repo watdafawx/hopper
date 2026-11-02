@@ -241,6 +241,10 @@ impl SyncPanel {
         });
         // The Configs tab shows how many files need syncing.
         subs.push(cx.subscribe(&configs, |_, _, _: &crate::configs::NeedsChanged, cx| cx.notify()));
+        subs.push(cx.subscribe(&history, |this, _, _: &crate::configs::HistoryApplied, cx| {
+            this.files_changed(cx);
+            this.rescan(cx);
+        }));
         subs.push(cx.observe(&control, |this, _, cx| {
             this.check_restarted(cx);
             cx.notify()
@@ -489,6 +493,9 @@ impl SyncPanel {
         let store = self.store.read(cx);
         let mut h = std::collections::hash_map::DefaultHasher::new();
         store.server_rev().hash(&mut h);
+        // Mods changed on the server's own page (Hopper Server sends a
+        // fingerprint of its mods folder with each poll).
+        self.server.as_ref().and_then(|r| store.panel_stats(r)).and_then(|p| p.mods_stamp).hash(&mut h);
         let inst = self
             .server
             .as_ref()
@@ -735,11 +742,24 @@ impl SyncPanel {
                 if matches!(this.result, Some(Ok(_))) {
                     this.mark_live_sync(cx);
                 }
+                this.files_changed(cx);
                 this.rescan(cx);
             })
             .ok();
         }));
         cx.notify();
+    }
+
+    /// This tab changed the server's files: the pack's pre-join banner
+    /// compares again now. The tab rescans by itself, so its own key
+    /// leaves this out.
+    fn files_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.server.clone() else { return };
+        self.store.update(cx, |s, cx| {
+            s.server_files_changed(&root);
+            cx.notify();
+        });
+        self.seen_rev = self.compare_key(cx);
     }
 
     /// Rows are acting, done, or leaving: a new comparison waits.
@@ -777,6 +797,7 @@ impl SyncPanel {
                     }
                     Err(e) => this.result = Some(Err(e)),
                 }
+                this.files_changed(cx);
                 this.rescan(cx);
             })
             .ok();
@@ -1593,6 +1614,7 @@ impl SyncPanel {
             this.update(cx, |this, cx| {
                 this.running = false;
                 this.result = Some(r.map_err(|e| vec![format!("{e:#}")]));
+                this.files_changed(cx);
                 this.rescan(cx);
             })
             .ok();

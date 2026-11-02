@@ -603,6 +603,7 @@ impl ConfigsPanel {
                 if restart && message.is_ok() {
                     crate::rigsync::note_live_sync(&this.store, this.control.as_ref(), &server_root, cx);
                 }
+                this.store.update(cx, |s, _| s.server_files_changed(&server_root));
                 this.message = Some(message);
                 this.compare(deep, cx);
             })
@@ -675,6 +676,7 @@ impl ConfigsPanel {
         let Some((s, inst)) = self.pair(cx) else { return };
         let Some(plan) = self.mirror.take() else { return };
         let rule = self.rule(cx);
+        let server_root = s.root.clone();
         self.running = true;
         cx.spawn(async move |this, cx| {
             let message = cx
@@ -700,6 +702,7 @@ impl ConfigsPanel {
                 .await;
             this.update(cx, |this, cx| {
                 this.running = false;
+                this.store.update(cx, |s, _| s.server_files_changed(&server_root));
                 this.message = Some(message);
                 cx.notify();
             })
@@ -1827,6 +1830,11 @@ impl Render for ConfigsPanel {
 
 // ---- History -------------------------------------------------------------
 
+/// A History change was applied or undone: the server's files changed.
+pub struct HistoryApplied;
+
+impl EventEmitter<HistoryApplied> for HistoryPanel {}
+
 pub struct HistoryPanel {
     server: Option<PathBuf>,
     running: bool,
@@ -1859,6 +1867,8 @@ impl HistoryPanel {
             this.update(cx, |this, cx| {
                 this.running = false;
                 this.errors = errors;
+                // Undoing a sync changes the server's files too.
+                cx.emit(HistoryApplied);
                 cx.notify();
             })
             .ok();

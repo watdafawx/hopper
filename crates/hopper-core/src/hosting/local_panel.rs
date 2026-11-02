@@ -186,6 +186,7 @@ impl ServerPanel for LocalPanel {
             stopping: state == ServerState::Stopping,
             progress: s.progress(),
             finished: s.finished(),
+            mods_stamp: crate::server::mods_stamp(&s.root()),
             ..Default::default()
         })
     }

@@ -427,6 +427,103 @@ pub fn join_check(diff: &[DiffEntry], blacklist: &HashSet<String>, pack_nf: Opti
     c
 }
 
+/// Everything a [`join_check`] is worked out from, short of reading the
+/// mods: when any of it changes, the last answer may be wrong.
+#[derive(Clone, Debug, Default)]
+pub struct JoinInputs<'a> {
+    pub inst: Option<&'a Instance>,
+    pub server_root: Option<&'a Path>,
+    /// Bumped by the app whenever it changed the server's files (a sync, an
+    /// update, a pushed config) or read its server list again.
+    pub server_rev: u64,
+    /// The server's mods folder fingerprint, from panels that send one
+    /// ([`crate::server::mods_stamp`]): changes made elsewhere, like Hopper
+    /// Server's web page.
+    pub mods_stamp: Option<u64>,
+    /// Running and starting: a restart can change what the server loads.
+    pub running: (bool, bool),
+    pub blacklist: Option<&'a HashSet<String>>,
+    pub sync_anyway: Option<&'a HashSet<u64>>,
+}
+
+impl JoinInputs<'_> {
+    pub fn key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.server_root.hash(&mut h);
+        (self.server_rev, self.mods_stamp, self.running).hash(&mut h);
+        if let Some(i) = self.inst {
+            i.root.hash(&mut h);
+            i.loader.hash(&mut h);
+            for a in &i.addons {
+                (&a.file_name, a.enabled, a.file_id).hash(&mut h);
+            }
+        }
+        let mut hidden: Vec<&String> = self.blacklist.into_iter().flatten().collect();
+        hidden.sort();
+        hidden.hash(&mut h);
+        let mut anyway: Vec<&u64> = self.sync_anyway.into_iter().flatten().collect();
+        anyway.sort();
+        anyway.hash(&mut h);
+        h.finish()
+    }
+}
+
+/// One pack's comparison with its server, kept current: the last answer
+/// stays until a new one lands, and a new one is asked for as soon as what
+/// it depends on ([`JoinInputs::key`]) changes, not on a timer. Only one
+/// runs at a time; one that ends after its inputs moved on is followed by
+/// another.
+#[derive(Clone, Debug)]
+pub struct JoinWatch<T> {
+    /// The last answer and the key it was worked out for.
+    done: Option<(u64, std::time::Instant, T)>,
+    /// The key of the comparison running now.
+    running: Option<u64>,
+}
+
+impl<T> Default for JoinWatch<T> {
+    fn default() -> Self {
+        JoinWatch { done: None, running: None }
+    }
+}
+
+impl<T> JoinWatch<T> {
+    /// Whether to start a comparison for `key` now (it is then counted as
+    /// running). Also when the last answer is older than `max_age`: a server
+    /// read over a share or SFTP sends no fingerprint.
+    pub fn want(&mut self, key: u64, max_age: std::time::Duration) -> bool {
+        if self.running.is_some() {
+            return false;
+        }
+        if let Some((k, at, _)) = &self.done
+            && *k == key
+            && at.elapsed() < max_age
+        {
+            return false;
+        }
+        self.running = Some(key);
+        true
+    }
+
+    /// A comparison for `key` ended. The caller asks [`Self::want`] again
+    /// with today's key, in case it changed while this one ran.
+    pub fn finish(&mut self, key: u64, value: T) {
+        self.running = None;
+        self.done = Some((key, std::time::Instant::now(), value));
+    }
+
+    pub fn value(&self) -> Option<&T> {
+        self.done.as_ref().map(|d| &d.2)
+    }
+
+    /// The answer shown is for other inputs than `key`: a new one is on its
+    /// way, so its numbers shouldn't be trusted.
+    pub fn stale(&self, key: u64) -> bool {
+        self.done.as_ref().is_some_and(|d| d.0 != key)
+    }
+}
+
 // ---- operations --------------------------------------------------------
 
 /// File operations for rows: (to the server, to the client).
@@ -689,6 +786,61 @@ mod tests {
         // Same NeoForge and the same mods: nothing to say.
         let same = crate::diff::compute_diff(&server, &server);
         assert!(join_check(&same, &HashSet::new(), Some("21.1.77"), Some("21.1.77")).is_empty());
+    }
+
+    #[test]
+    fn join_check_is_asked_again_after_a_sync() {
+        use std::time::Duration;
+        let long = Duration::from_secs(3600);
+        let mut pack = inst("TNP");
+        pack.addons.push(crate::instances::Addon { file_name: "ae2wcwt-1.3.11.jar".into(), enabled: true, ..Default::default() });
+        let root = Path::new("srv");
+        let inputs = |pack: &Instance, rev: u64, stamp: Option<u64>, running: (bool, bool)| {
+            JoinInputs { inst: Some(pack), server_root: Some(root), server_rev: rev, mods_stamp: stamp, running, ..Default::default() }.key()
+        };
+        let mut w: JoinWatch<&str> = JoinWatch::default();
+        let k1 = inputs(&pack, 1, Some(7), (true, false));
+        assert!(w.want(k1, long));
+        // One at a time.
+        assert!(!w.want(k1, long));
+        w.finish(k1, "AE2 WCWT differs");
+        assert!(!w.want(k1, long), "nothing changed: no new comparison");
+        assert!(!w.stale(k1));
+
+        // A sync to the server bumps its revision: compare again at once,
+        // and the old answer counts as stale until the new one lands.
+        let k2 = inputs(&pack, 2, Some(7), (true, false));
+        assert_ne!(k1, k2);
+        assert!(w.stale(k2));
+        assert!(w.want(k2, long));
+        w.finish(k2, "");
+        assert!(!w.stale(k2));
+        assert_eq!(w.value(), Some(&""));
+
+        // Changes made elsewhere (the server's own page), a restart, and the
+        // pack's mods (a toggle) each count too.
+        assert_ne!(inputs(&pack, 2, Some(8), (true, false)), k2);
+        assert_ne!(inputs(&pack, 2, Some(7), (true, true)), k2);
+        pack.addons[0].enabled = false;
+        assert_ne!(inputs(&pack, 2, Some(7), (true, false)), k2);
+    }
+
+    #[test]
+    fn join_check_started_before_a_sync_is_followed_by_another() {
+        use std::time::Duration;
+        let long = Duration::from_secs(3600);
+        let mut w: JoinWatch<u32> = JoinWatch::default();
+        assert!(w.want(1, long));
+        // The sync ends while the first comparison still runs.
+        assert!(!w.want(2, long));
+        w.finish(1, 5);
+        // Its answer is for the old server: stale, and asked again.
+        assert!(w.stale(2));
+        assert!(w.want(2, long));
+        w.finish(2, 0);
+        assert!(!w.stale(2));
+        // An old answer is refreshed even when nothing says it changed.
+        assert!(w.want(2, Duration::ZERO));
     }
 
     fn inst(n: &str) -> Instance {

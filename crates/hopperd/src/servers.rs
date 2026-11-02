@@ -67,6 +67,9 @@ pub struct Summary {
     /// `server-icon.png`'s modified time (Unix seconds), when it has one;
     /// part of the icon's URL so a new icon shows at once.
     pub icon: Option<u64>,
+    /// The mods folder's fingerprint (`hopper_core::server::mods_stamp`):
+    /// Hopper desktop compares the pack again when it changes.
+    pub mods_stamp: Option<u64>,
 }
 
 pub struct Servers {
@@ -257,6 +260,7 @@ impl Servers {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs()),
+            mods_stamp: hopper_core::server::mods_stamp(&e.root),
         }
     }
 

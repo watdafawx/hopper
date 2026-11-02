@@ -114,8 +114,9 @@ pub enum Msg {
     /// Why the game that just ended couldn't join a server or open a
     /// world (`None`: it could). See `join_help`.
     JoinChecked(PathBuf, Option<hopper::joinfail::JoinProblem>),
-    /// The pack compared with its paired server, before it plays.
-    PreJoin(PathBuf, Option<crate::join_help::PreJoin>),
+    /// The pack compared with its paired server, before it plays (and the
+    /// inputs' key it was compared for).
+    PreJoin(PathBuf, u64, Option<crate::join_help::PreJoin>),
     /// A translation finished (see `crate::translation`).
     Translated,
     /// A translation model finished downloading (by language code).
@@ -807,6 +808,9 @@ impl Store {
                         for x in &moved {
                             s.ping(x);
                         }
+                        // Mods changed on the server's own page, or it
+                        // restarted: compare the packs paired with it again.
+                        s.refresh_pre_joins();
                         cx.notify();
                     }
                 });
@@ -844,6 +848,9 @@ impl Store {
                     }
                     store.retry_disk(cx);
                     store.peer_tick(cx);
+                    // A sync, a mod change or a new server list may have
+                    // changed what the pre-join banner says.
+                    store.refresh_pre_joins();
                     cx.notify();
                 });
                 if alive.is_err() {
@@ -963,7 +970,7 @@ impl Store {
                 cx.notify();
             }
             Msg::JoinChecked(root, j) => self.join_checked(root, j, cx),
-            Msg::PreJoin(root, p) => self.pre_join_done(root, p, cx),
+            Msg::PreJoin(root, key, p) => self.pre_join_done(root, key, p, cx),
             Msg::LiveWarnings(root, w) => {
                 let list = self.warnings.entry(root).or_default();
                 list.extend(w);
