@@ -14,6 +14,7 @@ pub mod local_panel;
 pub mod logparse;
 pub mod logshare;
 pub mod motd;
+pub mod motd_edit;
 pub mod process;
 pub mod progress;
 pub mod properties;
