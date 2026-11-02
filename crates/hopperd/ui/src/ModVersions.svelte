@@ -6,7 +6,7 @@
   import { untrack } from 'svelte';
   import { X, Download, RotateCcw, Settings2, Lock, LockOpen, ChevronRight, ChevronDown } from '@lucide/svelte';
   import { api } from './lib/api.js';
-  import { md } from './lib/md.js';
+  import Changelog from './lib/Changelog.svelte';
   import { dialog as question } from './lib/dialog.svelte.js';
   import { installVersion, resetConfig, setLocked } from './lib/modops.js';
 
@@ -103,7 +103,7 @@
             <button class="btn sm ghost" title="Move this mod's config files to backups so it writes fresh defaults" onclick={() => resetConfig(base, mod)}><Settings2 size={13} />Reset config</button>{/if}
         </div>
         {#if e.same_as}<div class="small muted"><i>Same notes as {e.same_as}</i></div>
-        {:else if e.markdown.trim()}<div class="notes small">{@html md(e.markdown)}</div>
+        {:else if e.markdown.trim()}<div class="notes"><Changelog markdown={e.markdown} /></div>
         {:else}<div class="small muted">No changelog for this version.</div>{/if}
       </div>
     {/each}
@@ -118,7 +118,7 @@
         {#if open[o.file_id] === null}<div class="small muted row"><span class="spinner blue"></span>Loading the changelog</div>
         {:else if typeof open[o.file_id] === 'string'}
           {#if open[o.file_id].startsWith('!')}<div class="err small">{open[o.file_id].slice(1)}</div>
-          {:else if open[o.file_id].trim()}<div class="notes small">{@html md(open[o.file_id])}</div>
+          {:else if open[o.file_id].trim()}<div class="notes"><Changelog markdown={open[o.file_id]} /></div>
           {:else}<div class="small muted">No changelog for this version.</div>{/if}
         {/if}
       </div>
@@ -161,10 +161,6 @@
   .lbl { padding-top: 4px; }
   .locknote { gap: 8px; background: var(--raise); border-radius: var(--radius-lg); padding: 8px 10px; }
   .notes { background: var(--base); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; max-height: 320px; overflow: auto; overflow-wrap: anywhere; }
-  .notes :global(ul) { margin: 4px 0 4px 18px; }
-  .notes :global(h1), .notes :global(h2), .notes :global(h3) { font-size: 13px; margin: 6px 0 2px; }
-  .notes :global(a) { color: var(--blue); }
-  .notes :global(img) { max-width: 100%; }
   .icon { padding: 3px 5px; }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   .spinner.blue { color: var(--blue); }

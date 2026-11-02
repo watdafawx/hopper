@@ -171,12 +171,13 @@ pub fn after<'a>(releases: &'a [Release], target: &str) -> Vec<&'a Release> {
 /// A release's notes as shown in Hopper: GitHub's "Full Changelog" link
 /// line dropped, the rest kept as Markdown.
 pub fn clean_notes(body: &str) -> String {
-    body.lines()
+    let md = body
+        .lines()
         .filter(|l| !l.trim_start().starts_with("**Full Changelog**"))
         .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
+        .join("\n");
+    // `:sparkles:` and friends as emoji, as GitHub shows them.
+    crate::emoji::shortcodes_markdown(md.trim()).into_owned()
 }
 
 /// The running exe and where the old one waits to be removed.

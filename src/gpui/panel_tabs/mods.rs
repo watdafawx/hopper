@@ -18,7 +18,6 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use crate::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -1588,9 +1587,7 @@ impl ModsTab {
         if md.trim().is_empty() {
             return widgets::caption("No changelog for this version.", cx).italic().into_any_element();
         }
-        TextView::markdown(id, SharedString::from(md.to_string()))
-            .selectable(true)
-            .scrollable(false)
+        crate::widgets::changelog_text(id, md, cx)
             .on_link_click(|url, _, _, cx| cx.open_url(url))
             .into_any_element()
     }

@@ -6,7 +6,7 @@
   import { X, ChevronDown, ChevronRight, Download, ArrowRight, TriangleAlert, Lock } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import { api } from './lib/api.js';
-  import { md } from './lib/md.js';
+  import Changelog from './lib/Changelog.svelte';
   import { dialog } from './lib/dialog.svelte.js';
   import { problems } from './lib/modops.js';
   import { paintDown, paintOver, paintClick } from './lib/dragpick.svelte.js';
@@ -94,7 +94,7 @@
             </div>
             {#if keptOut(u)}<div class="kept tiny muted" title="Keep this version: the update stays listed, but only installs when ticked here or with Shift+click"><Lock size={11} />{u.to} is locked: you keep {u.from}</div>{/if}
             {#if problems(u).length}<div class="prob tiny" title="{problems(u).join('; ')}. Hopper doesn't add or turn on mods with an update."><TriangleAlert size={11} /><span class="ell">{problems(u).join('; ')}</span></div>{/if}
-            {#if open === u.project_id}<div class="notes small">{#if notes[u.project_id] === '…'}<span class="muted">Loading…</span>{:else if notes[u.project_id]}{@html md(notes[u.project_id])}{:else}<span class="muted">No changelog.</span>{/if}</div>{/if}
+            {#if open === u.project_id}<div class="notes">{#if notes[u.project_id] === '…'}<span class="small muted">Loading…</span>{:else}<Changelog markdown={notes[u.project_id]} empty="No changelog." />{/if}</div>{/if}
           </div>
         {/each}
       {/each}
@@ -127,8 +127,6 @@
   .redt { color: var(--red); gap: 6px; }
   .wrap { flex-wrap: wrap; }
   .notes { margin: 6px 0 2px 52px; background: var(--base); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 10px; max-height: 240px; overflow: auto; overflow-wrap: anywhere; }
-  .notes :global(ul) { margin: 2px 0 2px 18px; }
-  .notes :global(h3), .notes :global(h4) { font-size: 12.5px; margin: 4px 0 2px; }
   .end { justify-content: flex-end; }
   .icon { padding: 3px 5px; }
   .gold { color: var(--gold); }

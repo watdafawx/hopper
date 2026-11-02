@@ -2,7 +2,8 @@
   // A description or changelog as hopperd sends it: hopper-core's parsed
   // blocks (text runs, http(s) links and images), never HTML. Everything
   // is set as text, so a pack page can't inject markup.
-  let { blocks = [], empty = 'Nothing written.' } = $props();
+  // `compact`: a changelog, headings a step above the text (lib/Changelog).
+  let { blocks = [], empty = 'Nothing written.', compact = false } = $props();
 </script>
 
 {#snippet spans(list)}
@@ -17,7 +18,7 @@
   {/each}
 {/snippet}
 
-<div class="rich">
+<div class="rich" class:compact>
   {#each blocks as b, i (i)}
     {#if b.k === 'h'}
       <div class="h h{Math.min(b.l || 2, 4)}">{@render spans(b.s)}</div>
@@ -44,6 +45,9 @@
   .rich p { margin: 0 0 8px; }
   .h { color: var(--text); font-weight: 650; margin: 14px 0 6px; }
   .h1 { font-size: 18px; } .h2 { font-size: 16px; } .h3 { font-size: 14.5px; } .h4 { font-size: 13.5px; }
+  .compact .h { font-size: 13px; margin: 10px 0 4px; }
+  .compact .h1, .compact .h2 { font-size: 14px; }
+  .compact .h:first-child { margin-top: 0; }
   .li { position: relative; margin: 2px 0; }
   .mk { position: absolute; margin-left: -14px; color: var(--muted); }
   .b { font-weight: 650; color: var(--text); }

@@ -274,7 +274,9 @@ impl Parser {
             return;
         }
         // Collapse whitespace like a browser, but keep it inside <code>.
-        let mut t = if self.code > 0 { t } else { collapse_ws(&t) };
+        // GitHub `:sparkles:` shortcodes show as the emoji, as they do on
+        // GitHub; code keeps them as written.
+        let mut t = if self.code > 0 { t } else { crate::emoji::shortcodes(&collapse_ws(&t)).into_owned() };
         // Whitespace between <tr> and its first <td> is not a cell.
         let row_without_cells =
             matches!(&self.cur, Some(Block { kind: Kind::Row(c), .. }) if c.is_empty());
@@ -1745,5 +1747,14 @@ let x = 1;
             [("see (", false), ("https://x.io/a_(b)", true), ("), ok.", false)]
         );
         assert_eq!(bare_urls("just https:// text"), [("just https://", false), (" text", false)]);
+    }
+
+    #[test]
+    fn shortcodes_become_emoji_outside_code() {
+        let b = parse("<h2>:sparkles: New Features</h2><p><code>:bug:</code> :bug: fixed</p>");
+        assert_eq!(b[0].spans[0].text, "✨ New Features");
+        let p: Vec<&str> = b[1].spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(p, [":bug:", " 🐛 fixed"]);
+        assert!(to_markdown(&parse_markdown("## :wrench: Chores")).contains("🔧 Chores"));
     }
 }

@@ -12,6 +12,7 @@
   import { session } from './lib/me.svelte.js';
   import { SITE, TYPES, SIDE, LOADER_NAME, count, ago, date, preset, size, andList, browseHash } from './lib/browse.js';
   import BrowseRich from './BrowseRich.svelte';
+  import Changelog from './lib/Changelog.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
 
   // `target`: the server mods and data packs install into (Browse's
@@ -46,6 +47,23 @@
   const have = $derived(p?.installed || null);
   const sameFile = (v) => !!have && have.same_project && have.file_id === v.id;
   const newest = $derived(versions?.find((v) => v.type === 'release') || versions?.[0] || null);
+  // Same words as Versions and changelogs: a newer file than the installed
+  // one updates, an older one rolls back; another loader's or Minecraft
+  // version's file switches. CurseForge ids grow with each upload;
+  // Modrinth's are hashes, so its files go by date.
+  const fitsTarget = (v) =>
+    (!mc || v.mc_version === mc) && (!isMods || !loader || !v.loaders.length || v.loaders.some((l) => l.toLowerCase() === loader));
+  const age = (v) => {
+    if (!have?.same_project || !fitsTarget(v)) return 0;
+    if (cur.source !== 'modrinth') return Math.sign(Number(v.id) - Number(have.file_id));
+    return v.date > have.date ? 1 : v.date < have.date ? -1 : 0;
+  };
+  const upTo = $derived(versions?.find((v) => age(v) > 0) || null);
+  const fileVerb = (v) => {
+    if (!have) return 'Install';
+    const a = age(v);
+    return a > 0 ? `Update to ${v.version || v.name}` : a < 0 ? `Roll back to ${v.version || v.name}` : 'Switch';
+  };
   const isMods = $derived(kind === 'mods');
   const canInstall = $derived(!!target && (!isMods || !!target.loader));
   const otherSite = $derived(cur.source === 'modrinth' ? 'CurseForge' : 'Modrinth');
@@ -390,7 +408,7 @@
                   {:else if v.server_files}<span class="chip running"><Server size={11} />Server files</span>{:else}<span class="chip starting"><Hammer size={11} />From client pack</span>{/if}</span>
                 <span class="row end">
                   <button class="btn sm ghost" onclick={() => toggleLog(v)}>{#if openLog[v.id]}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}Changelog</button>
-                  {#if !packs}{#if target && !sameFile(v)}<button class="btn sm" disabled={!!busy || !canInstall || have?.locked || p.distribution === false} title={busy ? 'Another version of it is installing' : have?.locked ? 'Locked: unlock it in the Mods tab to switch versions' : ''} onclick={() => install(v)}>{have ? 'Switch' : 'Install'}</button>{/if}
+                  {#if !packs}{#if target && !sameFile(v)}<button class="btn sm {v === upTo ? `pri ${p.source}` : ''}" disabled={!!busy || !canInstall || have?.locked || p.distribution === false} title={busy ? 'Another version of it is installing' : have?.locked ? 'Locked: unlock it in the Mods tab to switch versions' : ''} onclick={() => install(v)}>{#if v === upTo}<Download size={13} />{/if}{fileVerb(v)}</button>{/if}
                   {:else if session.owner}<button class="btn sm" onclick={() => make(v)}>Make a server</button>{/if}
                 </span>
               </div>
@@ -399,7 +417,7 @@
                 <div class="cl">
                   {#if log === 'loading' || !log}<span class="small muted">Loading the changelog…</span>
                   {:else if log.error}<span class="err">{log.error}</span>
-                  {:else}<BrowseRich blocks={log} empty="No changelog for this version." />{/if}
+                  {:else}<Changelog blocks={log} />{/if}
                 </div>
               {/if}
             {:else}

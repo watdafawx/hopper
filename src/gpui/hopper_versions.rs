@@ -8,7 +8,6 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -73,9 +72,7 @@ impl HopperVersions {
             return widgets::caption("No notes for this release.", cx).italic().into_any_element();
         }
         // The column around it scrolls; the text must not catch the wheel.
-        TextView::markdown(ElementId::Name(id.into()), md)
-            .selectable(true)
-            .scrollable(false)
+        widgets::changelog_text(ElementId::Name(id.into()), &md, cx)
             .on_link_click(|url, _, _, cx| cx.open_url(url))
             .into_any_element()
     }

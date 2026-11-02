@@ -211,7 +211,7 @@ impl Have {
                         .is_some_and(|b| b > a.file_id)));
         let from = if a.project_id == 0 { "" } else if a.mr_project.is_empty() { "curseforge" } else { "modrinth" };
         json!({
-            "file": a.file_name, "file_id": a.file_id.to_string(), "same_project": same, "from": from,
+            "file": a.file_name, "file_id": a.file_id.to_string(), "date": a.file_date, "same_project": same, "from": from,
             "enabled": a.enabled, "locked": a.locked, "update": newer,
         })
     }
@@ -470,6 +470,7 @@ async fn versions(State(app): State<Arc<App>>, headers: HeaderMap, method: Metho
                     let log = v.changelog.clone().unwrap_or_default();
                     json!({
                         "id": f.id.to_string(), "name": if v.version_number.is_empty() { &v.name } else { &v.version_number },
+                        "version": if v.version_number.is_empty() { &v.name } else { &v.version_number },
                         "title": v.name, "date": v.date_published, "mc_version": mc_of(&v.game_versions),
                         "loaders": loaders_of(&f.game_versions), "type": v.version_type,
                         "server_files": packs && browse::modrinth_server_files(v).is_some(),
@@ -486,6 +487,7 @@ async fn versions(State(app): State<Arc<App>>, headers: HeaderMap, method: Metho
                 .map(|f| {
                     json!({
                         "id": f.id.to_string(), "name": f.display_name, "title": f.display_name, "date": f.file_date,
+                        "version": Some(hopper_core::scan::short_version(&f.file_name)).filter(|v| !v.is_empty()).unwrap_or_else(|| f.display_name.clone()),
                         "mc_version": mc_of(&f.game_versions), "loaders": loaders_of(&f.game_versions),
                         "type": f.release_name().to_lowercase(),
                         "server_files": f.server_pack_file_id.is_some_and(|i| i != 0),
