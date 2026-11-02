@@ -449,6 +449,7 @@ mod tests {
             address_default: false,
             sleep_after_minutes: 0,
             icon: None,
+            mods_stamp: None,
         }
     }
 

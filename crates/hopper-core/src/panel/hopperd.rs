@@ -90,6 +90,7 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
         via: None,
         icon: v["icon"].as_u64(),
         stopping: state == "stopping",
+        mods_stamp: v["mods_stamp"].as_u64(),
         // Older Hopper Servers send only `boot`: their starts still show.
         progress: serde_json::from_value(v["progress"].clone()).ok().or_else(|| old_boot(&v["boot"])),
         finished: serde_json::from_value(v["finished"].clone()).ok(),

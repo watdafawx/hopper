@@ -62,6 +62,27 @@ impl ServerInfo {
     }
 }
 
+/// A fingerprint of a server's mods folder: each jar's name, size and
+/// modified time. It changes whenever a jar is added, removed, replaced or
+/// turned off, so an app can tell the mods changed without listing them.
+/// `None`: no mods folder.
+pub fn mods_stamp(root: &Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut jars: Vec<(String, u64, u64)> = fs::read_dir(root.join("mods"))
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok().filter(|m| m.is_file())?;
+            let at = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
+            Some((e.file_name().to_string_lossy().into_owned(), m.len(), at))
+        })
+        .collect();
+    jars.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    jars.hash(&mut h);
+    Some(h.finish())
+}
+
 /// Every folder under `root` with a `server.properties` is a server.
 pub fn discover(root: &Path) -> Vec<ServerInfo> {
     let Ok(entries) = fs::read_dir(root) else {

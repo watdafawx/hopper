@@ -149,6 +149,10 @@ pub struct PanelStats {
     pub icon: Option<u64>,
     /// Stopping (asked to, waiting for Java to end).
     pub stopping: bool,
+    /// The mods folder's fingerprint ([`crate::server::mods_stamp`]), from
+    /// panels that send it (Hopper Server, Hopper's own servers): mods
+    /// changed there show up without a manual refresh.
+    pub mods_stamp: Option<u64>,
     /// A start or stop under way, from panels that read the console
     /// (Hopper's own servers, Hopper Server).
     pub progress: Option<crate::hosting::progress::Progress>,
