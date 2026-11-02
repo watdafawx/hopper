@@ -665,7 +665,10 @@ impl PackMods {
     pub fn has(&self, a: &crate::instances::Addon) -> bool {
         match self {
             PackMods::Marked => a.from_pack,
-            PackMods::Listed(ids) => ids.contains(&a.project_id),
+            // A followed mod keeps the project it had before following.
+            PackMods::Listed(ids) => {
+                ids.contains(&a.project_id) || a.source.as_ref().is_some_and(|s| ids.contains(&s.prev_project))
+            }
         }
     }
 }

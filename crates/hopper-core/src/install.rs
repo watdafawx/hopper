@@ -75,6 +75,10 @@ pub fn keep_history(new: &mut Addon, old: &Addon) {
     new.locked = old.locked;
     new.cf_locked = old.cf_locked;
     new.enabled = old.enabled;
+    // Another file of a pack mod (a version picked from Files, a roll
+    // back, an update, a website download) is still the pack's mod, just
+    // at another version; only a pack update decides it isn't.
+    new.from_pack |= old.from_pack;
 }
 
 /// Same file, ignoring case (Windows paths).
@@ -1938,5 +1942,135 @@ mod identified_tests {
         assert!(super::is_curseforge_pack(&inst));
         inst.pack = Some(PackRef { project_id: crate::modrinth::num_id("abcdEFGH"), mr_project: "abcdEFGH".into(), ..Default::default() });
         assert!(!super::is_curseforge_pack(&inst));
+    }
+}
+
+#[cfg(test)]
+mod pack_mark_tests {
+    //! Another version of a pack mod stays the pack's (never "Added by
+    //! you"), whichever way the new file arrives.
+    use crate::instances::{Addon, Instance, PackRef};
+    use crate::modpack::PackMods;
+
+    fn setup(tag: &str) -> Instance {
+        let root = std::env::temp_dir().join(format!("hopper-pack-mark-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::write(root.join("mods/jade-1.0.jar"), b"old").unwrap();
+        Instance {
+            root,
+            pack: Some(PackRef { project_id: 1, file_id: 2, ..Default::default() }),
+            addons: vec![Addon {
+                project_id: 324717,
+                file_id: 100,
+                file_name: "jade-1.0.jar".into(),
+                name: "Jade".into(),
+                enabled: true,
+                from_pack: true,
+                class_id: crate::cf::CLASS_MODS,
+                date_added: "2026-10-01".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn jade() -> crate::cf::Mod {
+        crate::cf::Mod { id: 324717, name: "Jade".into(), class_id: Some(crate::cf::CLASS_MODS), ..Default::default() }
+    }
+
+    fn file(id: u64, name: &str) -> crate::cf::File {
+        crate::cf::File { id, file_name: name.into(), ..Default::default() }
+    }
+
+    /// Nothing in the instance counts as added by you.
+    fn none_added(inst: &Instance) {
+        assert_eq!(inst.addons.len(), 1);
+        let a = &inst.addons[0];
+        assert!(a.from_pack, "{} lost its pack mark", a.file_name);
+        assert!(PackMods::of(inst).is_some_and(|p| p.has(a)));
+        assert_eq!(inst.addons.iter().filter(|a| !a.from_pack).count(), 0);
+        let _ = std::fs::remove_dir_all(&inst.root);
+    }
+
+    /// Placed as a new file the way `install` (the peek's Files tab and
+    /// Browse) and `install_file` (Hopper Server's version picker) do,
+    /// which don't know about the pack.
+    #[test]
+    fn files_tab_version_switch() {
+        let mut inst = setup("files");
+        let dest = inst.root.join("mods/jade-1.2.jar");
+        std::fs::write(&dest, b"new").unwrap();
+        super::place_file(&mut inst, &jade(), &file(200, "jade-1.2.jar"), false, &dest).unwrap();
+        assert_eq!(inst.addons[0].file_id, 200);
+        none_added(&inst);
+    }
+
+    /// A roll back, a single update and Update all: older or newer file,
+    /// same placing.
+    #[test]
+    fn rollback_and_updates() {
+        for (tag, id, name) in [("rollback", 50, "jade-0.9.jar"), ("update", 300, "jade-1.5.jar")] {
+            let mut inst = setup(tag);
+            let dest = inst.root.join("mods").join(name);
+            std::fs::write(&dest, b"new").unwrap();
+            let from_pack = inst.addons[0].from_pack;
+            super::place_file(&mut inst, &jade(), &file(id, name), from_pack, &dest).unwrap();
+            assert_eq!(inst.addons[0].file_name, name);
+            none_added(&inst);
+        }
+    }
+
+    /// A website-only file: its pending entry says nothing about the pack,
+    /// and it lands when the user's download turns up.
+    #[test]
+    fn website_only_fetch() {
+        let mut inst = setup("fetch");
+        let downloads = inst.root.join("dl");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(downloads.join("jade-1.3.jar"), b"web").unwrap();
+        let p = crate::modpack::Pending {
+            name: "Jade".into(),
+            file_name: "jade-1.3.jar".into(),
+            folder: "mods".into(),
+            project_id: 324717,
+            file_id: 250,
+            addon: Some(super::addon_from(&jade(), &file(250, "jade-1.3.jar"), false)),
+            ..Default::default()
+        };
+        crate::modpack::add_pending(&inst.root, &[p]).unwrap();
+        let placed = crate::modpack::place_downloads(&mut inst, &downloads).unwrap();
+        assert_eq!(placed.len(), 1);
+        assert_eq!(inst.addons[0].file_name, "jade-1.3.jar");
+        none_added(&inst);
+    }
+
+    /// Following a source keeps the record (and its mark) in place; a
+    /// server with no marks still knows it by the project it had.
+    #[test]
+    fn followed_source_stays_the_packs() {
+        let mut inst = setup("follow");
+        let _ = std::fs::remove_dir_all(&inst.root);
+        let mut a = inst.addons.remove(0);
+        a.project_id = 1 << 62;
+        a.source = Some(crate::sources::ModSource { prev_project: 324717, ..Default::default() });
+        assert!(PackMods::Listed([324717].into_iter().collect()).has(&a));
+        assert!(PackMods::Marked.has(&a));
+        a.source = None;
+        assert!(!PackMods::Listed([324717].into_iter().collect()).has(&a));
+    }
+
+    /// A pack update can still hand a mod over to the user (a dropped mod
+    /// they keep): the carried mark only ever adds.
+    #[test]
+    fn mark_only_carries_over() {
+        let old = Addon { from_pack: false, ..Default::default() };
+        let mut new = Addon { from_pack: true, ..Default::default() };
+        super::keep_history(&mut new, &old);
+        assert!(new.from_pack);
+        let old = Addon { from_pack: true, ..Default::default() };
+        let mut new = Addon::default();
+        super::keep_history(&mut new, &old);
+        assert!(new.from_pack);
     }
 }
