@@ -651,7 +651,33 @@ fn modrinth_pack_ids(inst: &Instance, job: &Job) -> anyhow::Result<(String, Stri
 
 /// Installs what `code` describes as a new instance under `instances_root`.
 pub fn install(instances_root: &Path, code: &str, job: &Job) -> anyhow::Result<Instance> {
-    let share = decode(code)?;
+    install_share(instances_root, &decode(code)?, job)
+}
+
+/// The mods from GitHub and other links a code brings (their pins), for
+/// the ask before installing it.
+pub fn pins(share: &Share) -> Vec<crate::sources::carry::Pin> {
+    share
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Source { pin, .. } => Some(pin.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The code without the mods in `skip` (the player left mods from other
+/// sources out), and a note listing them for the result.
+pub fn without(share: &Share, skip: &[crate::sources::carry::Pin]) -> (Share, Option<String>) {
+    let mut s = share.clone();
+    s.entries.retain(|e| !matches!(e, Entry::Source { pin, .. } if skip.contains(pin)));
+    (s, crate::sources::carry::skipped_note(skip))
+}
+
+/// [`install`] for a decoded code.
+pub fn install_share(instances_root: &Path, share: &Share, job: &Job) -> anyhow::Result<Instance> {
+    let share = share.clone();
     let mut inst = match &share.base {
         Base::Plain { game_version, loader } => {
             let name = share.name.clone().unwrap_or_else(|| format!("Shared {game_version}"));

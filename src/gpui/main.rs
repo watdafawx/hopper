@@ -9,6 +9,7 @@ mod args_editor;
 mod backups_view;
 mod data_move;
 mod image_viewer;
+mod incoming_sources;
 mod anim;
 mod app;
 mod brand;

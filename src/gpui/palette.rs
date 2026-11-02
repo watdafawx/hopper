@@ -897,7 +897,7 @@ fn run(app: &mut AppView, target: Target, window: &mut Window, cx: &mut Context<
         },
         Target::Act(act) => match act {
             Act::Create => crate::dialogs::open_create(store, window, cx),
-            Act::Import => crate::dialogs::import_pack(store, cx),
+            Act::Import => crate::dialogs::import_pack(store, window, cx),
             Act::Redeem => crate::dialogs::open_redeem(store, window, cx),
             Act::ToggleTheme => {
                 let name = if cx.theme().is_dark() {

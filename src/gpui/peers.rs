@@ -26,6 +26,8 @@ pub struct PeersView {
     root: Option<PathBuf>,
     address: Entity<InputState>,
     message: Option<Result<String, String>>,
+    /// Mods from other sources the last pull left out, said after its result.
+    skipped: Option<String>,
     /// Codes to compare after pairing, by peer.
     codes: HashMap<String, String>,
     selected: Option<String>,
@@ -56,6 +58,7 @@ impl PeersView {
             root: None,
             address,
             message: None,
+            skipped: None,
             codes: HashMap::new(),
             selected: None,
             remote: None,
@@ -209,7 +212,45 @@ impl PeersView {
         cx.notify();
     }
 
+    /// Pulls bringing mods from GitHub and other links ask first (Mod
+    /// sources off, or a source not trusted yet); skipped ones stay there.
     fn transfer(&mut self, pull: bool, files: Vec<String>, cx: &mut Context<Self>) {
+        let pins: Vec<hopper::sources::carry::Pin> = match (&self.diff, pull) {
+            (Some(Ok(d)), true) => d
+                .iter()
+                .filter(|e| files.contains(&e.rel))
+                .filter_map(|e| {
+                    let source = e.remote.as_ref()?.source.clone()?;
+                    // Already following that source here: nothing new.
+                    (e.local.as_ref().and_then(|l| l.source.as_ref()).map(|s| s.key()) != Some(source.key()))
+                        .then(|| hopper::sources::carry::Pin { file: e.rel.clone(), source })
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let on = self.store.read(cx).settings().allow_sources;
+        if pins.is_empty() || (on && hopper::sources::carry::new_sources(&pins).is_empty()) {
+            self.transfer_now(pull, files, cx);
+            return;
+        }
+        let (store, view) = (self.store.clone(), cx.entity());
+        let Some(handle) = cx.active_window() else { return };
+        cx.defer(move |cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    crate::incoming_sources::gate(store, pins, window, cx, move |skip, _, cx| {
+                        let files: Vec<String> = files.iter().filter(|f| !skip.iter().any(|p| &p.file == *f)).cloned().collect();
+                        if let Some(n) = hopper::sources::carry::skipped_note(&skip) {
+                            view.update(cx, |this, _| this.skipped = Some(n));
+                        }
+                        view.update(cx, |this, cx| this.transfer_now(pull, files, cx));
+                    });
+                })
+                .ok();
+        });
+    }
+
+    fn transfer_now(&mut self, pull: bool, files: Vec<String>, cx: &mut Context<Self>) {
         let (Some(hub), Some(id), Some(root)) = (self.hub(cx), self.selected.clone(), self.root.clone())
         else {
             return;
@@ -251,7 +292,11 @@ impl PeersView {
                 .await;
             this.update(cx, |this, cx| {
                 this.running = false;
-                this.message = Some(r);
+                let skipped = this.skipped.take();
+                this.message = Some(r.map(|m| match skipped {
+                    Some(n) => format!("{m} {n}."),
+                    None => m,
+                }));
                 this.compare(cx);
             })
             .ok();

@@ -402,6 +402,11 @@ async fn put_pins(
     Json(b): Json<PinsBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
+    // Mods from links are off on this panel: the jars stay plain jars
+    // (nobody here said yes to their sources).
+    if !app.cfg.read().unwrap().allow_sources {
+        return Ok(Json(json!({ "attached": 0, "off": true })));
+    }
     forget_updates(&id);
     let n = run(move || {
         instance(&e)?;

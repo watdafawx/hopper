@@ -784,6 +784,29 @@ pub fn install(
 }
 
 /// Installs a CurseForge pack zip from disk as a new instance.
+/// The mods from GitHub and other links a pack file brings (Hopper's
+/// pins beside its manifest), for the ask before importing it.
+pub fn source_pins(path: &Path) -> Vec<crate::sources::carry::Pin> {
+    fs::File::open(path).map(crate::sources::carry::read_pack).unwrap_or_default()
+}
+
+/// Imports a CurseForge zip or a Modrinth .mrpack as a new instance,
+/// leaving out the pinned jars in `skip` (the player skipped mods from
+/// other sources): the job's notes list what wasn't installed.
+pub fn import_file(instances_root: &Path, path: &Path, skip: &[crate::sources::carry::Pin], job: &Job) -> anyhow::Result<Instance> {
+    let mr = path.extension().is_some_and(|x| x.eq_ignore_ascii_case("mrpack"));
+    let mut inst = if mr { import_mrpack(instances_root, path, job)? } else { import_zip(instances_root, path, job)? };
+    if !skip.is_empty() {
+        let gone = crate::sources::carry::skip(&mut inst, skip);
+        inst.save()?;
+        let left: Vec<_> = skip.iter().filter(|p| gone.iter().any(|g| p.file.ends_with(g.as_str()))).cloned().collect();
+        if let Some(n) = crate::sources::carry::skipped_note(&left) {
+            job.note(n);
+        }
+    }
+    Ok(inst)
+}
+
 pub fn import_zip(instances_root: &Path, zip_path: &Path, job: &Job) -> anyhow::Result<Instance> {
     let manifest = read_manifest(zip_path)?;
     let name = if manifest.name.is_empty() {
