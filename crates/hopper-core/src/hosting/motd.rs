@@ -317,7 +317,7 @@ pub const FORMATS: [(char, &str, &str); 6] = [
     ('n', "Underline", "U"),
     ('m', "Strikethrough", "S"),
     ('k', "Obfuscated (scrambled letters)", "?"),
-    ('r', "Reset: back to plain gray", "R"),
+    ('r', "Clear formatting", "R"),
 ];
 
 /// The variables, with what each means.
