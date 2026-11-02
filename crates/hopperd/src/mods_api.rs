@@ -212,6 +212,61 @@ pub(crate) fn drop_updates_for(id: &str, files: &[String]) {
     }
 }
 
+/// A mod went to another file (rolled back, or switched to some other
+/// version): its offer from the last check follows it while the new file
+/// is still older than the offered one, so the update stays listed without
+/// a new check. Updated to the offer or past it, the offer goes. A mod
+/// rolled back from its newest file has an update no offer names yet, so
+/// the last check is dropped and the next one asks the sites.
+pub(crate) fn follow_switch(id: &str, old_file: &str, before: &[Addon], inst: &Instance) {
+    let key = |f: &str| f.trim_end_matches(".disabled").to_lowercase();
+    let mut g = checks();
+    let Some(m) = g.as_mut() else { return };
+    let Some((_, v)) = m.get_mut(id) else { return };
+    let old = v.clone();
+    v.retain_mut(|u| {
+        if key(u["from_file"].as_str().unwrap_or("")) != key(old_file) {
+            return true;
+        }
+        let pid = u["project_id"].as_str().and_then(|p| p.parse::<u64>().ok()).unwrap_or(0);
+        let Some(a) = inst.addons.iter().find(|a| a.project_id == pid && !a.locked) else { return false };
+        let file_id = u["file_id"].as_str().and_then(|f| f.parse::<u64>().ok()).unwrap_or(0);
+        let to_file = u["file"].as_str().unwrap_or("").to_string();
+        if a.file_name == to_file || !hopper_core::update_list::older_than(a, file_id, u["date"].as_str().unwrap_or("")) {
+            return false;
+        }
+        // The version labels, read as the check reads them.
+        let offer = install::Update {
+            project_id: pid,
+            name: a.name.clone(),
+            from: a.file_name.clone(),
+            file: cf::File { id: file_id, file_name: to_file, file_date: u["date"].as_str().unwrap_or("").to_string(), ..Default::default() },
+        };
+        let (from, to) = offer.versions();
+        u["from_file"] = json!(a.file_name);
+        u["from"] = json!(from);
+        u["to"] = json!(to);
+        true
+    });
+    let offers: Vec<install::Update> = v
+        .iter()
+        .filter_map(|u| {
+            Some(install::Update {
+                project_id: u["project_id"].as_str()?.parse().ok()?,
+                name: String::new(),
+                from: u["from_file"].as_str()?.to_string(),
+                file: cf::File::default(),
+            })
+        })
+        .collect();
+    if hopper_core::update_list::rolled_back_unlisted(before, &inst.addons, Some(&offers)) {
+        m.remove(id);
+        save_checks(m);
+    } else if *v != old {
+        save_checks(m);
+    }
+}
+
 fn keep_updates(id: &str, v: Vec<Value>) {
     let mut g = checks();
     let m = g.get_or_insert_with(HashMap::new);
