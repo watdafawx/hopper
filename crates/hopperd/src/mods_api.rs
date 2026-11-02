@@ -916,6 +916,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(ids(super::offered(&inst, &Some(PackMods::Listed([1, 2].into_iter().collect())), &ups)), [3]);
+        // A pack mod switched to another version is still the pack's.
+        let switched = Instance { addons: vec![a(1, "pack-0.9.jar", false)], ..Default::default() };
+        let ups_sw = [up(1, "pack-0.9.jar", "pack-1.1.jar")];
+        assert!(super::offered(&switched, &Some(PackMods::Listed([1].into_iter().collect())), &ups_sw).is_empty());
         // Marked when Hopper installed the pack.
         inst.addons[0].from_pack = true;
         inst.addons[1].from_pack = true;
