@@ -5,7 +5,9 @@
 //! mod went back a version. So the last finished check stays listed while a
 //! new one runs (and after one fails) and is swapped out only when the new
 //! answer arrives. Offers whose file changed on disk meanwhile (updated,
-//! removed, put back, locked) go at once, since they no longer apply.
+//! removed, locked) go at once, since they no longer apply. A mod switched
+//! to another file that's still older than the offer (rolled back, say)
+//! keeps its offer, now from the new file: the newest file didn't change.
 //!
 //! The last list is also saved, so a fresh start shows the last known
 //! updates instead of none until the first check finishes.
@@ -57,13 +59,19 @@ impl UpdateList {
     }
 
     /// Drops offers that no longer apply to the files on disk: the mod is
-    /// gone, its file changed (updated or put back), or it's locked. True
-    /// when something went.
+    /// gone, updated to the offered file or past it, or locked. A mod moved
+    /// to an older file keeps its offer, from that file. True when
+    /// something changed.
     pub fn keep_current(&mut self, addons: &[Addon]) -> bool {
         let Some(list) = self.list.as_mut() else { return false };
-        let before = list.len();
-        list.retain(|u| still_applies(u, addons));
-        list.len() != before
+        let mut changed = false;
+        list.retain_mut(|u| {
+            let before = u.from.clone();
+            let keep = still_applies(u, addons);
+            changed |= !keep || u.from != before;
+            keep
+        });
+        changed
     }
 
     /// Takes projects off the list (installed, or locked by the user).
@@ -75,11 +83,48 @@ impl UpdateList {
     }
 }
 
-/// The offer is still for the file that's installed now.
-fn still_applies(u: &Update, addons: &[Addon]) -> bool {
-    addons
-        .iter()
-        .any(|a| a.project_id == u.project_id && a.file_name == u.from && !a.locked)
+/// The offer still applies to what's installed now. When the mod went to
+/// another file that's older than the offered one (a rollback or a switch
+/// to some other old version), the offer moves to that file, so the
+/// update stays listed without asking the sites again.
+fn still_applies(u: &mut Update, addons: &[Addon]) -> bool {
+    let Some(a) = addons.iter().find(|a| a.project_id == u.project_id && !a.locked) else { return false };
+    if a.file_name == u.from {
+        return true;
+    }
+    if a.file_name == u.file.file_name || !older_than(a, u.file.id, &u.file.file_date) {
+        return false;
+    }
+    u.from = a.file_name.clone();
+    true
+}
+
+/// The installed file is older than an offered file (its id and release
+/// date). CurseForge's file ids grow over time; elsewhere the release dates
+/// tell. Unknown counts as not older, so the offer goes until the next
+/// check, as before.
+pub fn older_than(a: &Addon, file_id: u64, file_date: &str) -> bool {
+    let cf = !crate::modrinth::is_mr(a.project_id) && !crate::sources::is_src(a.project_id);
+    if cf && a.file_id != 0 && file_id != 0 {
+        return a.file_id < file_id;
+    }
+    match (crate::time::parse_iso(&a.file_date), crate::time::parse_iso(file_date)) {
+        (Some(have), Some(new)) => have < new,
+        _ => false,
+    }
+}
+
+/// A mod went back to an older file that no offer covers (it was up to
+/// date): it has an update now, which only a check can name. Mods that
+/// kept an offer, or moved forward, need none.
+pub fn rolled_back_unlisted(old: &[Addon], new: &[Addon], offers: Option<&[Update]>) -> bool {
+    new.iter().filter(|a| a.project_id != 0 && !a.locked).any(|a| {
+        let listed = offers.is_some_and(|l| l.iter().any(|u| u.project_id == a.project_id && u.from == a.file_name));
+        !listed
+            && old
+                .iter()
+                .any(|o| o.project_id == a.project_id && o.file_name != a.file_name && older_than(a, o.file_id, &o.file_date))
+    })
 }
 
 // ---- saved lists -----------------------------------------------------------
@@ -100,7 +145,7 @@ fn read_all(path: &Path) -> HashMap<String, Vec<Update>> {
 pub fn load(root: &Path, addons: &[Addon]) -> Option<Vec<Update>> {
     let mut all = read_all(&saved_path()?);
     let mut list = all.remove(&root.to_string_lossy().to_string())?;
-    list.retain(|u| still_applies(u, addons));
+    list.retain_mut(|u| still_applies(u, addons));
     Some(list)
 }
 
@@ -208,6 +253,64 @@ mod tests {
         assert_eq!(ids(&l), vec![1]);
         assert!(l.checking);
         assert!(!l.keep_current(&disk));
+    }
+
+    #[test]
+    fn rolled_back_mod_keeps_its_update() {
+        let mut l = UpdateList::default();
+        // Installed 1.1 (file 10); 1.3 (file 30) is offered.
+        l.finish(Ok(vec![offer(1, "a-1.1.jar", 30)]));
+        let mut old = addon(1, "a-1.0.jar");
+        old.file_id = 5;
+        assert!(l.keep_current(&[old]));
+        let u = &l.ready().unwrap()[0];
+        assert_eq!((u.project_id, u.from.as_str(), u.file.id), (1, "a-1.0.jar", 30));
+        // Switched up to 1.2: still older than the offer, still listed.
+        let mut mid = addon(1, "a-1.2.jar");
+        mid.file_id = 20;
+        assert!(l.keep_current(&[mid.clone()]));
+        assert_eq!(l.ready().unwrap()[0].from, "a-1.2.jar");
+        assert!(!l.keep_current(&[mid]));
+        // Updated to the offered file, or past it: the offer goes.
+        let mut same = addon(1, "new-1.jar");
+        same.file_id = 30;
+        assert!(l.clone().keep_current(&[same]));
+        let mut past = addon(1, "a-1.4.jar");
+        past.file_id = 40;
+        assert!(l.keep_current(&[past]));
+        assert_eq!(ids(&l), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn rollback_without_ids_goes_by_date() {
+        let mr = 1u64 << 63 | 7;
+        let mut o = offer(mr, "b-2.jar", 0);
+        o.file.file_date = "2026-05-01T10:00:00Z".into();
+        let mut l = UpdateList::saved(vec![o]);
+        let mut old = addon(mr, "b-1.jar");
+        old.file_date = "2026-01-01T10:00:00Z".into();
+        assert!(l.keep_current(&[old]));
+        assert_eq!(l.ready().unwrap()[0].from, "b-1.jar");
+        // No date known: dropped until the next check, as before.
+        assert!(l.keep_current(&[addon(mr, "b-0.jar")]));
+        assert_eq!(ids(&l), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn rollback_of_an_up_to_date_mod_asks_for_a_check() {
+        let mut now = addon(1, "a-1.3.jar");
+        now.file_id = 30;
+        let mut back = addon(1, "a-1.1.jar");
+        back.file_id = 10;
+        assert!(rolled_back_unlisted(&[now.clone()], &[back.clone()], Some(&[])));
+        assert!(rolled_back_unlisted(&[now.clone()], &[back.clone()], None));
+        // Its offer already followed it: nothing to fetch.
+        assert!(!rolled_back_unlisted(&[now.clone()], &[back.clone()], Some(&[offer(1, "a-1.1.jar", 30)])));
+        // Moved forward, unchanged, or locked: no check.
+        assert!(!rolled_back_unlisted(&[back.clone()], &[now.clone()], Some(&[])));
+        assert!(!rolled_back_unlisted(&[now.clone()], &[now.clone()], Some(&[])));
+        back.locked = true;
+        assert!(!rolled_back_unlisted(&[now], &[back], Some(&[])));
     }
 
     #[test]

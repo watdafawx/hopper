@@ -131,8 +131,10 @@ async fn set_version(
     let file_id: u64 = b.file_id.trim().parse().map_err(|_| bad("Which version?"))?;
     let job = crate::pack_api::spawn(&app, format!("Changing a mod on {}", e.name), move |job| {
         let mut inst = crate::mods_api::instance_of(&e)?;
+        let before = inst.addons.clone();
         let a = inst.addons[addon_index(&inst, &b.file)?].clone();
         let name = install::install_file(&mut inst, a.project_id, file_id, job)?;
+        crate::mods_api::follow_switch(&e.id, &a.file_name, &before, &inst);
         log::info!("{}: {} is now {name}", e.name, a.name);
         Ok(json!({ "file": name }))
     });

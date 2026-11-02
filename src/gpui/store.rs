@@ -1206,6 +1206,12 @@ impl Store {
         // there (also while a check runs); asking CurseForge
         // again would blank the list.
         let dropped = self.updates.get_mut(&root).is_some_and(|u| u.keep_current(&new.addons));
+        // A mod rolled back from its newest file has an update now; only a
+        // check can say which, so ask at once rather than on a refresh.
+        let recheck = self.instances.iter().find(|i| i.root == root).is_some_and(|old| {
+            let offers = self.updates.get(&root).and_then(|u| u.ready()).map(Vec::as_slice);
+            hopper::update_list::rolled_back_unlisted(&old.addons, &new.addons, offers)
+        });
         let icon = new.icon.clone();
         match self.instances.iter_mut().find(|i| i.root == root) {
             Some(slot) => *slot = new,
@@ -1216,6 +1222,9 @@ impl Store {
         }
         if dropped {
             self.save_updates(&root);
+        }
+        if recheck {
+            self.check_updates(&root, true);
         }
         if let Some(url) = icon {
             self.want_image(&url);
