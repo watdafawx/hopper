@@ -1077,6 +1077,25 @@ impl BrowseView {
                             images.iter().for_each(|u| s.want_anim(u));
                         });
                         this.deps.insert(id, deps);
+                        // A newer file here that the update check missed
+                        // (CurseForge's project index can lag a fresh file)
+                        // joins the target's updates, as Versions does.
+                        let cf_project = !hopper::modrinth::is_mr(id) && !hopper::sources::is_src(id);
+                        if let Some(t) = this
+                            .target(cx)
+                            .filter(|t| cf_project && t.addons.iter().any(|a| a.project_id == id))
+                        {
+                            let fit: Vec<cf::File> = files
+                                .iter()
+                                .filter(|f| f.fits(&t.game_version, hopper::install::loader_of(&t)))
+                                .cloned()
+                                .collect();
+                            this.store.update(cx, |s, cx| {
+                                if s.note_update(&t.root, &fit, id) {
+                                    cx.notify();
+                                }
+                            });
+                        }
                         this.detail.insert(
                             id,
                             Load::Ready(Detail {
@@ -2839,16 +2858,39 @@ impl BrowseView {
                     .as_ref()
                     .and_then(|t| t.addons.iter().find(|a| a.project_id == m.id));
                 let installed_file = installed.map(|a| a.file_id);
+                // Newer or older than the installed file: CurseForge ids
+                // grow with each upload; Modrinth's are hashes, so its files
+                // go by date.
+                let age = |f: &hopper::cf::File| {
+                    installed.map(|a| {
+                        if hopper::modrinth::is_mr(f.id) || hopper::modrinth::is_mr(a.file_id) {
+                            f.file_date.as_str().cmp(a.file_date.as_str())
+                        } else {
+                            f.id.cmp(&a.file_id)
+                        }
+                    })
+                };
                 let locked = installed.is_some_and(|a| a.locked);
                 let is_pack = hopper::browse::is_modpack(m, self.class);
                 let can = is_pack || target.is_some();
                 let (pending, hold, progress, fetch) = self.install_state(m.id, is_pack, cx);
+                let fits_target = |f: &hopper::cf::File| {
+                    target
+                        .as_ref()
+                        .is_none_or(|t| f.fits(&t.game_version, hopper::install::loader_of(t)))
+                };
+                // The newest file that would update the installed one gets
+                // the filled button; other newer ones say Update outlined.
+                let newest = d
+                    .files
+                    .iter()
+                    .filter(|f| f.id != installed_file.unwrap_or(0) && age(f) == Some(std::cmp::Ordering::Greater) && fits_target(f))
+                    .max_by(|a, b| a.file_date.cmp(&b.file_date).then(a.id.cmp(&b.id)))
+                    .map(|f| f.id);
                 let files = v_flex()
                     .gap_0p5()
                     .children(d.files.iter().take(40).map(|f| {
-                        let fits = target
-                            .as_ref()
-                            .is_none_or(|t| f.fits(&t.game_version, hopper::install::loader_of(t)));
+                        let fits = fits_target(f);
                         let versions = f
                             .game_versions
                             .iter()
@@ -2880,13 +2922,25 @@ impl BrowseView {
                             // others wait for it.
                             let (this_file, other_file) =
                                 if pending { self.file_pending(m.id, is_pack, f.id) } else { (false, false) };
+                            // Same words as Versions and changelogs: newer
+                            // files update, older ones roll back; another
+                            // loader's or Minecraft version's file switches.
+                            let label = match age(f) {
+                                None => "Install".to_string(),
+                                Some(std::cmp::Ordering::Greater) if fits => {
+                                    format!("Update to {}", crate::versions::version_label(f))
+                                }
+                                Some(std::cmp::Ordering::Less) if fits => {
+                                    format!("Roll back to {}", crate::versions::version_label(f))
+                                }
+                                Some(_) => "Switch".to_string(),
+                            };
+                            let filled = newest == Some(f.id);
+                            let tint = if filled { widgets::Tint::Primary } else { widgets::Tint::Outline };
+                            let b = Button::new(ElementId::Name(format!("file:{}", f.id).into())).xsmall();
                             let lead = install_button(
-                                widgets::split_lead(
-                                    Button::new(ElementId::Name(format!("file:{}", f.id).into()))
-                                        .xsmall()
-                                        .outline(),
-                                ),
-                                if installed_file.is_some() { "Switch" } else { "Install" },
+                                widgets::split_lead(if filled { b.primary().icon(IconName::Download) } else { b.outline() }),
+                                &label,
                                 this_file,
                                 progress.filter(|_| this_file),
                                 hold,
@@ -2899,7 +2953,7 @@ impl BrowseView {
                                 .on_click(cx.listener(move |this, _, w, cx| {
                                     this.install(m1.clone(), Some(f1.clone()), w, cx)
                                 }));
-                            widgets::split(lead, log_id, widgets::Tint::Outline, gpui_kit::component::Size::XSmall, "Changelog", open_log, cx)
+                            widgets::split(lead, log_id, tint, gpui_kit::component::Size::XSmall, "Changelog", open_log, cx)
                                 .into_any_element()
                         };
                         // A pack version's own server zip.
@@ -3478,7 +3532,7 @@ impl BrowseView {
 /// shows that instead (`fetch_progress::button`).
 fn install_button(
     b: Button,
-    label: &'static str,
+    label: &str,
     pending: bool,
     progress: Option<f32>,
     hold: Option<&'static str>,

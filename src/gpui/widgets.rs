@@ -232,6 +232,29 @@ pub fn caption(text: impl Into<SharedString>, cx: &App) -> Div {
         .child(text.into())
 }
 
+/// A changelog or release notes (markdown), drawn the same way everywhere:
+/// headings stay close to the body size (changelogs from CurseForge come as
+/// `<h2>`, from GitHub as `##`, and the default scale made them shout), and
+/// `:sparkles:` shortcodes show as emoji. Selectable; it doesn't scroll by
+/// itself, since the list around it does. The caller adds `on_link_click`.
+pub fn changelog_text(id: impl Into<ElementId>, md: &str, cx: &App) -> gpui_kit::component::text::TextView {
+    use gpui_kit::component::text::{TextView, TextViewStyle};
+    let body = cx.theme().font_size;
+    let style = TextViewStyle {
+        heading_base_font_size: body,
+        heading_font_size: Some(Arc::new(|level, base| match level {
+            1 => base * 1.15,
+            2 => base * 1.08,
+            _ => base,
+        })),
+        ..TextViewStyle::default()
+    };
+    TextView::markdown(id, SharedString::from(hopper::emoji::shortcodes_markdown(md).into_owned()))
+        .style(style)
+        .selectable(true)
+        .scrollable(false)
+}
+
 /// Small muted text that wraps (a [`caption`] stays on one line).
 pub fn fine_print(text: impl Into<SharedString>, cx: &App) -> Div {
     div().text_xs().text_color(cx.theme().muted_foreground).child(text.into())

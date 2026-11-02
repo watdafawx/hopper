@@ -488,7 +488,7 @@ async fn get_status(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
     require(&app, &headers, &method)?;
     let s = status();
     Ok(Json(json!({
-        "current": current(), "latest": s.latest, "notes": s.notes, "page": s.page, "checked": s.checked,
+        "current": current(), "latest": s.latest, "notes": hopper_core::selfupdate::clean_notes(&s.notes), "page": s.page, "checked": s.checked,
         "state": s.state, "error": s.error, "target": s.target,
         "auto": app.cfg.read().unwrap().auto_update,
         "skip": app.cfg.read().unwrap().skip_auto_up_to,

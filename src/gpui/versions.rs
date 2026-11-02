@@ -8,7 +8,6 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex,
 };
@@ -151,9 +150,7 @@ pub(crate) fn changelog_view(
         None => (id, md),
     };
     // The list around it scrolls; the text must not catch the wheel.
-    TextView::markdown(id, md)
-        .selectable(true)
-        .scrollable(false)
+    widgets::changelog_text(id, &md, cx)
         .on_link_click(move |url, _, window, cx| on_link(url, window, cx))
         .into_any_element()
 }
@@ -520,7 +517,7 @@ fn open_link(store: &Entity<Store>, root: &Path, url: &str, window: &mut Window,
 }
 
 /// A file's version for a button: from its file name, else its title.
-fn version_label(f: &cf::File) -> String {
+pub(crate) fn version_label(f: &cf::File) -> String {
     let v = hopper::scan::short_version(&f.file_name);
     let v = if v.is_empty() { f.display_name.clone() } else { v };
     // A long title would push the other buttons off the line.
@@ -623,9 +620,7 @@ impl Render for FileLog {
                     Some(en) => ("file-log-en", en),
                     None => ("file-log", md.clone()),
                 };
-                TextView::markdown(id, md)
-                    .selectable(true)
-                    .scrollable(false)
+                widgets::changelog_text(id, &md, cx)
                     .on_link_click(move |url, _, window, cx| match &root {
                         Some(root) => open_link(&store, root, url, window, cx),
                         None => cx.open_url(url),

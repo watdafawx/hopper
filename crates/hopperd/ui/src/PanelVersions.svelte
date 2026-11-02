@@ -12,7 +12,7 @@
   import { say } from './lib/toast.svelte.js';
   import { session } from './lib/me.svelte.js';
   import { confirmIt, dialog } from './lib/dialog.svelte.js';
-  import { md } from './lib/md.js';
+  import Changelog from './lib/Changelog.svelte';
   import { upd, loadUpdate, isNewer } from './lib/panelupdate.svelte.js';
 
   const PAGE = 10;
@@ -117,7 +117,7 @@
       <span class="sp"></span>
       {#if r.page}<a class="btn sm ghost icon" href={r.page} target="_blank" rel="noreferrer noopener" title="This release on GitHub"><ExternalLink size={13} /></a>{/if}
     </div>
-    {#if r.notes?.trim()}<div class="md small">{@html md(r.notes)}</div>
+    {#if r.notes?.trim()}<Changelog markdown={r.notes} />
     {:else}<span class="small muted"><i>No notes for this release.</i></span>{/if}
   </div>
 {/snippet}
@@ -232,10 +232,6 @@
   .card { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
   .card.you { border-color: var(--acc); }
   .ch { gap: 8px; }
-  .md { color: var(--subtle); overflow-wrap: anywhere; }
-  .md :global(ul) { margin: 4px 0; padding-left: 18px; }
-  .md :global(h1), .md :global(h2), .md :global(h3), .md :global(h4) { font-size: 13px; margin: 8px 0 2px; color: var(--text); }
-  .md :global(p) { margin: 4px 0; }
   .chip.xs { font-size: 10.5px; height: 18px; padding: 0 6px 2px; }
   .icon { padding: 3px 5px; }
   @media (max-width: 640px) {
