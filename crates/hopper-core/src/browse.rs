@@ -168,24 +168,15 @@ pub fn installed_as(inst: &Instance, m: &cf::Mod) -> Option<&'static str> {
 /// The entry that has `m` in `inst`: the same project, or the same mod from
 /// the other site (matched by slug or name).
 pub fn installed_addon<'a>(inst: &'a Instance, m: &cf::Mod) -> Option<&'a crate::instances::Addon> {
-    let norm = |s: &str| {
-        s.chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect::<String>()
-            .to_lowercase()
-    };
-    let slug = |page: &str| {
-        page.trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .to_lowercase()
-    };
-    let (name, mslug) = (norm(&m.name), m.slug.to_lowercase());
+    // Compared without building strings: Browse asks this for every
+    // result in view against every mod of the instance, each frame.
+    let norm = |s: &'a str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase);
+    let slug = |page: &'a str| page.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let name: String = m.name.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect();
     inst.addons.iter().find(|a| a.project_id == m.id).or_else(|| {
-        inst.addons
-            .iter()
-            .find(|a| (!mslug.is_empty() && slug(&a.page) == mslug) || norm(&a.name) == name)
+        inst.addons.iter().find(|a| {
+            (!m.slug.is_empty() && slug(&a.page).eq_ignore_ascii_case(&m.slug)) || norm(&a.name).eq(name.chars())
+        })
     })
 }
 
@@ -354,6 +345,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(installed_as(&inst, &other), None);
+        // The same name, spaced and cased differently, matches too.
+        let by_name = cf::Mod {
+            id: 98,
+            name: "just enough items jei".into(),
+            ..Default::default()
+        };
+        assert_eq!(installed_as(&inst, &by_name), Some("CurseForge"));
+        let near = cf::Mod {
+            id: 97,
+            name: "Just Enough Items".into(),
+            ..Default::default()
+        };
+        assert_eq!(installed_as(&inst, &near), None);
     }
 
     #[test]
