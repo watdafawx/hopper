@@ -3,16 +3,31 @@
   // blocks (text runs, http(s) links and images), never HTML. Everything
   // is set as text, so a pack page can't inject markup.
   // `compact`: a changelog, headings a step above the text (lib/Changelog).
-  let { blocks = [], empty = 'Nothing written.', compact = false } = $props();
+  // `onProject(url)`: a link to a CurseForge or Modrinth project opens it
+  // in the panel instead of a new tab.
+  let { blocks = [], empty = 'Nothing written.', compact = false, onProject = null } = $props();
+
+  const PROJECT = /^https?:\/\/(www\.)?(curseforge\.com\/(minecraft\/(mc-mods|modpacks|texture-packs|shaders|data-packs|worlds)|projects)|modrinth\.com\/(mod|modpack|resourcepack|shader|datapack|plugin|project))\/[^/?#]+/i;
+
+  function click(e, href) {
+    if (!onProject || !PROJECT.test(href) || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    onProject(href);
+  }
+
+  // A size the page gave: its width, else its height (badges set only
+  // that), never wider than the column.
+  const imgW = (s) => (s.w ? `min(${s.w}px, 100%)` : null);
+  const imgH = (s) => (!s.w && s.h ? `${s.h}px` : null);
 </script>
 
 {#snippet spans(list)}
   {#each list as s, i (i)}
     {#if s.img}
-      {#if s.href}<a href={s.href} target="_blank" rel="noreferrer noopener"><img src={s.img} alt={s.t} loading="lazy" style:max-width={s.w ? `min(${s.w}px, 100%)` : null} /></a>
-      {:else}<img src={s.img} alt={s.t} loading="lazy" style:max-width={s.w ? `min(${s.w}px, 100%)` : null} />{/if}
+      {#if s.href}<a href={s.href} target="_blank" rel="noreferrer noopener" onclick={(e) => click(e, s.href)}><img src={s.img} alt={s.t} loading="lazy" style:max-width={imgW(s)} style:height={imgH(s)} /></a>
+      {:else}<img src={s.img} alt={s.t} loading="lazy" style:max-width={imgW(s)} style:height={imgH(s)} />{/if}
     {:else if s.href}
-      <a href={s.href} target="_blank" rel="noreferrer noopener" class:b={s.b} class:i={s.i}>{s.t}</a>
+      <a href={s.href} target="_blank" rel="noreferrer noopener" class:b={s.b} class:i={s.i} onclick={(e) => click(e, s.href)}>{s.t}</a>
     {:else if s.c}<code>{s.t}</code>
     {:else}<span class:b={s.b} class:i={s.i}>{s.t}</span>{/if}
   {/each}

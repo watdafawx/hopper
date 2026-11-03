@@ -285,7 +285,9 @@ fn add_pending_note(root: &std::path::Path, p: crate::modpack::Pending, job: &Jo
 #[derive(Clone, Debug, Default)]
 pub struct Plan {
     pub steps: Vec<(cf::Mod, cf::File)>,
-    /// Mods a resource or shader pack asks for, only suggested.
+    /// Mods a pack needs that aren't installed with it: a shader pack's
+    /// (its shader loader is the player's pick), or any pack's in an
+    /// instance without a mod loader.
     pub suggest: Vec<String>,
     /// Dependencies with no file for this version, and incompatibilities.
     pub notes: Vec<String>,
@@ -315,6 +317,7 @@ pub fn plan(inst: &Instance, m: &cf::Mod, file: &cf::File, job: Option<&Job>) ->
     let mut queue: VecDeque<(cf::Mod, cf::File)> = VecDeque::from([(m.clone(), file.clone())]);
     let mut seen: HashSet<u64> = HashSet::from([m.id]);
     let is_mod = |m: &cf::Mod| m.class_id.unwrap_or(cf::CLASS_MODS) == cf::CLASS_MODS;
+    let has_loader = loader_of(inst) != Loader::Any;
     while let Some((pm, pf)) = queue.pop_front() {
         let required: Vec<u64> = match &pf.modrinth {
             Some(mr) => mr
@@ -334,8 +337,8 @@ pub fn plan(inst: &Instance, m: &cf::Mod, file: &cf::File, job: Option<&Job>) ->
                 continue;
             }
             if have.contains(&dep) {
-                if is_mod(&pm)
-                    && let Some(a) = inst.addons.iter().find(|a| a.project_id == dep)
+                if let Some(a) = inst.addons.iter().find(|a| a.project_id == dep)
+                    && (is_mod(&pm) || a.class_id == cf::CLASS_MODS)
                 {
                     out.kept.push((a.name.clone(), a.enabled));
                 }
@@ -348,14 +351,22 @@ pub fn plan(inst: &Instance, m: &cf::Mod, file: &cf::File, job: Option<&Job>) ->
             // Already here from the other site: installing it again would
             // swap the entry (and its history) for a new one.
             if let Some(a) = crate::browse::installed_addon(inst, &dm) {
-                if is_mod(&pm) {
+                if is_mod(&pm) || is_mod(&dm) {
                     out.kept.push((a.name.clone(), a.enabled));
                     out.same.push(a.project_id);
                 }
                 continue;
             }
-            if !is_mod(&pm) && is_mod(&dm) {
-                out.suggest.push(format!("{} suggests the mod {}", pm.name, dm.name));
+            // A resource pack that needs a mod (an item model backport, a
+            // texture feature) gets it in the mods folder. A shader pack's
+            // "needs Iris" is left to the player: the instance may run
+            // Oculus or another shader loader under a different name.
+            if !is_mod(&pm) && is_mod(&dm) && (!has_loader || pm.class_id == Some(cf::CLASS_SHADERS)) {
+                out.suggest.push(if has_loader {
+                    format!("{} needs the mod {}", pm.name, dm.name)
+                } else {
+                    format!("{} needs the mod {}, which needs an instance with a mod loader", pm.name, dm.name)
+                });
                 continue;
             }
             match best_file(dep, dm.class_id, inst)? {
@@ -387,8 +398,8 @@ pub fn plan(inst: &Instance, m: &cf::Mod, file: &cf::File, job: Option<&Job>) ->
 }
 
 /// Installs `file` of project `m` and every required dependency the instance
-/// lacks. Returns the names of what was added. Mods a resource or shader
-/// pack asks for are only suggested (a note), never downloaded.
+/// lacks. Returns the names of what was added. Mods a shader pack asks for
+/// are only named (a note), never downloaded; see [`plan`].
 pub fn install(
     inst: &mut Instance,
     m: &cf::Mod,
@@ -410,11 +421,11 @@ pub fn install(
     for n in suggest {
         job.note(n);
     }
-    // Dependencies that are installed but turned off go back on (mods
-    // only ask for this; packs just suggest).
+    // Dependencies that are installed but turned off go back on: what a
+    // mod needs, and the mods a resource pack needs.
     let need: HashSet<u64> = plan
         .iter()
-        .filter(|(pm, _)| is_mod(pm))
+        .filter(|(pm, _)| is_mod(pm) || pm.class_id == Some(cf::CLASS_RESOURCE_PACKS))
         .flat_map(|(_, pf)| match &pf.modrinth {
             Some(mr) => mr.requires.iter().map(|p| crate::modrinth::num_id(p)).collect::<Vec<_>>(),
             None => pf

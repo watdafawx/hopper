@@ -115,16 +115,18 @@ pub fn install_project(
 
 /// A file's required, optional and incompatible projects, required first.
 pub fn dependencies(f: &cf::File) -> Vec<(cf::Mod, u32)> {
+    // Modrinth files carry every relation in `dependencies` too; the
+    // required list alone stands in for a file read before they did.
     let wanted: Vec<(u64, u32)> = match &f.modrinth {
-        Some(mr) => mr
+        Some(mr) if f.dependencies.is_empty() => mr
             .requires
             .iter()
             .map(|p| (crate::modrinth::num_id(p), cf::DEP_REQUIRED))
             .collect(),
-        None => f
+        _ => f
             .dependencies
             .iter()
-            .filter(|d| matches!(d.relation_type, 2 | cf::DEP_REQUIRED | cf::DEP_INCOMPATIBLE))
+            .filter(|d| matches!(d.relation_type, cf::DEP_OPTIONAL | cf::DEP_REQUIRED | cf::DEP_INCOMPATIBLE))
             .map(|d| (d.mod_id, d.relation_type))
             .collect(),
     };

@@ -12,6 +12,7 @@
   import { session } from './lib/me.svelte.js';
   import { SITE, TYPES, SIDE, LOADER_NAME, count, ago, date, preset, size, andList, browseHash } from './lib/browse.js';
   import BrowseRich from './BrowseRich.svelte';
+  import FeaturedTag from './lib/FeaturedTag.svelte';
   import Changelog from './lib/Changelog.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
 
@@ -213,6 +214,18 @@
     location.hash = `${browseHash(k, into)}/${r.source}/${encodeURIComponent(r.id)}`;
   }
 
+  /** A description's link to a project: opens it like a dependency; a
+   * link the panel can't place opens in a new tab. */
+  async function openLink(url) {
+    try {
+      const { project } = await api(`/browse/link?url=${encodeURIComponent(url)}`);
+      if (project) return openProject(project);
+    } catch {
+      // Not found: the site's page instead.
+    }
+    window.open(url, '_blank', 'noopener');
+  }
+
   /** Installs the newest fitting file, or `v`; then shows what's there now. */
   async function install(v = null) {
     const r = await onInstall?.(p, v);
@@ -261,6 +274,7 @@
       {#if p.icon}<img class="ico" src={p.icon} alt="" width="72" height="72" />{:else}<span class="ico"></span>{/if}
       <div class="col grow info">
         <h2>{p.name}</h2>
+        {#if p.featured}<div><FeaturedTag tag={p.featured} /></div>{/if}
         {#if p.author}<button class="by small" title="Everything {p.author} made" onclick={showAuthor}>by {p.author}</button>{/if}
         <div class="meta">
           <span class="dl"><Download size={12} />{count(p.downloads)} downloads</span>
@@ -386,7 +400,7 @@
       </div>
 
       {#if tab === 'description'}
-        <div class="desc"><BrowseRich blocks={p.description} empty={p.summary || 'No description.'} /></div>
+        <div class="desc"><BrowseRich blocks={p.description} empty={p.summary || 'No description.'} onProject={openLink} /></div>
       {:else if tab === 'versions'}
         <div class="row wrap">
           {#if mc || loader}<label class="cbl"><span class="switch"><input type="checkbox" checked={onlyMatching} onchange={(e) => setOnly(e.currentTarget.checked)} /><span></span></span>Only {filterText}</label>{/if}

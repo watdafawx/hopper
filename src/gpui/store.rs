@@ -147,6 +147,8 @@ pub enum StoreEvent {
     SessionSaved(PathBuf),
     /// Show a project's page beside an instance (a link in a changelog).
     Peek { root: PathBuf, project: u64 },
+    /// Show a project's page in Browse (a link in a description).
+    Project(u64),
     /// Open a server's page (`compare`: on its Sync tab), from a menu
     /// that isn't on that page.
     ShowServer { root: PathBuf, compare: bool },

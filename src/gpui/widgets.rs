@@ -705,6 +705,23 @@ pub fn chip_lift<E: Styled>(el: E) -> E {
     el.h(rems(1.2)).pb(px(2.))
 }
 
+/// CurseForge's pick for a project ("Hidden gem", "Popular", "Sponsored",
+/// see `cf::Mod::featured`), as a chip beside its name.
+pub fn featured_chip(m: &hopper::cf::Mod, cx: &App) -> Option<AnyElement> {
+    let label = m.featured()?;
+    let theme = cx.theme();
+    let (icon, color) = match label {
+        "Hidden gem" => (IconName::Gem, theme.info),
+        "Popular" => (IconName::Flame, theme.warning),
+        _ => (IconName::Megaphone, theme.muted_foreground),
+    };
+    Some(
+        chip(color)
+            .child(h_flex().gap_1().child(Icon::new(icon).xsmall()).child(label))
+            .into_any_element(),
+    )
+}
+
 /// A tinted bar across a page with an icon at its start, for a notice or
 /// an offer (`color`: info blue, warning…); add its text and buttons.
 pub fn notice_bar(color: Hsla, icon: IconName, cx: &App) -> Div {
@@ -1308,18 +1325,58 @@ pub fn description_wait(images: &[String], store: &crate::store::Store) -> Optio
     images.iter().filter_map(|k| store.anim(k)).map(|c| c.wait_now()).min()
 }
 
+/// Opens a project's page by id, where a description link to it was clicked.
+pub type OnProject = Arc<dyn Fn(u64, &mut Window, &mut App) + Send + Sync>;
+
+/// A link in a description: a CurseForge or Modrinth project page opens
+/// that project in Hopper (`on_project`, else Browse); anything else, or a
+/// project that can't be found, opens in the browser.
+pub fn open_desc_link(
+    url: &str,
+    on_project: Option<OnProject>,
+    store: &Entity<crate::store::Store>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(link) = hopper::source::project_link(url) else {
+        cx.open_url(url);
+        return;
+    };
+    let (store, url) = (store.clone(), url.to_string());
+    window
+        .spawn(cx, async move |cx| {
+            let r = cx
+                .background_spawn(async move { hopper::source::project_from_link(&link) })
+                .await;
+            cx.update(|window, cx| match r {
+                Ok(project) => match &on_project {
+                    Some(f) => f(project, window, cx),
+                    None => store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Project(project))),
+                },
+                Err(e) => {
+                    log::warn!("description link {url}: {e:#}");
+                    cx.open_url(&url);
+                }
+            })
+            .ok();
+        })
+        .detach();
+}
+
 /// A project description (from `richtext::to_segments`) with its images
 /// served from the store's cache (stills of animated ones, unless the store
 /// decoded them to play, scaled to the width the page gave them) and opened in Hopper's image viewer on click;
-/// other links open in the browser. Rows of badges sit side by side,
-/// wrapping. `images` are the description's image keys, as
-/// `richtext::images` lists them. It does not scroll by itself, so it can
-/// sit in a scrolling column.
+/// links to CurseForge or Modrinth projects open them in Hopper (see
+/// [`open_desc_link`]), other links open in the browser. Rows of badges
+/// sit side by side, wrapping. `images` are the description's image keys,
+/// as `richtext::images` lists them. It does not scroll by itself, so it
+/// can sit in a scrolling column.
 pub fn description_view(
     id: ElementId,
     segments: &[hopper::richtext::Segment],
     images: &[String],
     store: &Entity<crate::store::Store>,
+    on_project: Option<OnProject>,
     cx: &App,
 ) -> AnyElement {
     use hopper::richtext::Segment;
@@ -1361,7 +1418,7 @@ pub fn description_view(
                 Some(i) => {
                     crate::image_viewer::open(store.clone(), (*gallery).clone(), i, window, cx)
                 }
-                None => cx.open_url(url),
+                None => open_desc_link(url, on_project.clone(), &store, window, cx),
             }
         }
     };
@@ -1408,21 +1465,32 @@ pub fn description_view(
                 .py_2()
                 .children(badges.iter().enumerate().map(|(j, b)| {
                     let path = cached.get(&b.key).cloned();
-                    let natural = path.as_deref().and_then(image_size);
-                    let w = b.width.or(natural.map(|n| n.0)).unwrap_or(88).max(1) as f32;
-                    let h = match natural {
-                        Some((nw, nh)) if nw > 0 => w * nh as f32 / nw as f32,
+                    let natural = path.as_deref().and_then(image_size).filter(|(nw, nh)| *nw > 0 && *nh > 0);
+                    // The page's width, else its height at the image's
+                    // shape (`<img height="48">` badges), else its own size.
+                    let ratio = natural.map(|(nw, nh)| nw as f32 / nh as f32);
+                    let w = match (b.width, b.height, ratio) {
+                        (Some(w), _, _) => w as f32,
+                        (None, Some(h), Some(r)) => h as f32 * r,
+                        (None, Some(h), None) => h as f32,
+                        (None, None, _) => natural.map_or(88., |n| n.0 as f32),
+                    }
+                    .max(1.);
+                    let h = match (b.width, b.height, ratio) {
+                        (None, Some(h), _) => h as f32,
+                        (_, _, Some(r)) => w / r,
                         _ => 20.,
                     };
                     let target = b.link.clone().unwrap_or_else(|| b.url.clone());
                     let frame = clips.get(&b.key).map(|c| c.frame_now());
                     let open = open.clone();
+                    // A badge wider than the panel shrinks, keeping its shape.
                     div()
                         .id(ElementId::NamedInteger(format!("{id}:{i}").into(), j as u64))
                         .flex_none()
                         .w(px(w))
-                        .h(px(h))
                         .max_w_full()
+                        .aspect_ratio(w / h)
                         .clickable(cx)
                         .hover(|s| s.opacity(0.85))
                         .on_click(move |_, window, cx| open(&target, window, cx))
@@ -1749,6 +1817,8 @@ enum Shown {
 pub struct DescView {
     store: Entity<crate::store::Store>,
     shown: Option<Shown>,
+    /// Where a link to a project opens it; Browse when unset.
+    pub on_project: Option<OnProject>,
     /// A redraw is set for the next GIF frame.
     anim_due: bool,
     _focus: Subscription,
@@ -1762,6 +1832,7 @@ impl DescView {
         Self {
             store,
             shown: None,
+            on_project: None,
             anim_due: false,
             // Paused GIFs pick up again when the window is focused.
             _focus: cx.observe_window_activation(window, |_, _, cx| cx.notify()),
@@ -1826,6 +1897,7 @@ impl Render for DescView {
                 segments,
                 images,
                 &self.store,
+                self.on_project.clone(),
                 cx,
             ),
             Some(Shown::Pack(id)) => match self.store.read(cx).pack_page(*id) {
@@ -1834,6 +1906,7 @@ impl Render for DescView {
                     md,
                     images,
                     &self.store,
+                    self.on_project.clone(),
                     cx,
                 ),
                 _ => div().into_any_element(),

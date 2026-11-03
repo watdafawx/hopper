@@ -296,6 +296,13 @@ impl BrowseView {
         let modrinth = store.read(cx).settings().browse_modrinth;
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder(modrinth)));
         let desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
+        // A description's link to another project opens it here.
+        let me = cx.entity().downgrade();
+        desc.update(cx, |d, _| {
+            d.on_project = Some(std::sync::Arc::new(move |p, _, cx| {
+                me.update(cx, |b, cx| b.show_project(p, cx)).ok();
+            }))
+        });
         let subs = vec![
             cx.observe(&store, |this, _, cx| {
                 this.check_pending(cx);
@@ -556,6 +563,12 @@ impl BrowseView {
     /// Opens a project's page, installing into `root`.
     pub fn open_project(&mut self, root: PathBuf, project: u64, cx: &mut Context<Self>) {
         self.set_target(root, cx);
+        self.show_project(project, cx);
+    }
+
+    /// Opens a project's page by id, where Browse installs now (a link in a
+    /// description).
+    pub fn show_project(&mut self, project: u64, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move { hopper::source::get_mod(project) })
@@ -2188,6 +2201,7 @@ impl BrowseView {
                             .gap_2()
                             .child(div().font_semibold().truncate().child(m.name.clone()))
                             .child(self.author_link(m, id("author"), cx))
+                            .children(widgets::featured_chip(m, cx))
                             // The saved list mixes both sites.
                             .when(self.bookmarked, |r| {
                                 r.child(widgets::site_tag(m.modrinth.is_some()))
@@ -2837,6 +2851,7 @@ impl BrowseView {
                     .min_w_0()
                     .gap_1()
                     .child(div().text_xl().font_semibold().child(m.name.clone()))
+                    .children(widgets::featured_chip(m, cx).map(|c| h_flex().child(c)))
                     .child(match &origin {
                         Some(o) => source_byline(m, o, cx),
                         None => self.author_link(m, "detail-author".into(), cx),
@@ -3472,9 +3487,10 @@ impl BrowseView {
                                 .child(div().text_sm().truncate().child(d.name.clone()))
                                 .child(
                                     widgets::caption(
-                                        match by {
-                                            Some(b) => format!("Needed by {b}"),
-                                            None => "Required".to_string(),
+                                        match (by, mod_for_pack(m, d)) {
+                                            (Some(b), _) => format!("Needed by {b}"),
+                                            (None, true) => "Required mod, goes in the mods folder".to_string(),
+                                            (None, false) => "Required".to_string(),
                                         },
                                         cx,
                                     )
@@ -3591,6 +3607,13 @@ impl BrowseView {
                 });
         widgets::closable_notice(body, key, widgets::Closed::Gone, "", primary, &self.store, cx)
     }
+}
+
+/// Whether `dep` is a mod that pack `m` (a resource pack, say) needs: it
+/// installs into the mods folder, not beside the pack.
+fn mod_for_pack(m: &cf::Mod, dep: &cf::Mod) -> bool {
+    let is_mod = |m: &cf::Mod| m.class_id.unwrap_or(cf::CLASS_MODS) == cf::CLASS_MODS;
+    !is_mod(m) && is_mod(dep)
 }
 
 /// An install button: "Installing 42%" with an hourglass while its install
