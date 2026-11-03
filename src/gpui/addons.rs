@@ -82,9 +82,7 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-pub fn in_class(a: &Addon, class: u32) -> bool {
-    a.class_id == class || (class == cf::CLASS_MODS && a.class_id == 0)
-}
+pub use hopper::update_list::in_class;
 
 // Column widths, shared by the header and every row so they line up.
 pub(crate) fn col_check() -> Div {
@@ -1093,13 +1091,8 @@ impl AddonsView {
 
     fn pending_updates(&self, inst: &Instance, cx: &App) -> HashMap<u64, Update> {
         match self.store.read(cx).updates(&inst.root).and_then(|u| u.ready()) {
-            Some(u) => u
-                .iter()
-                .filter(|u| {
-                    inst.addons
-                        .iter()
-                        .any(|a| a.project_id == u.project_id && in_class(a, self.class))
-                })
+            // Same filter as the instance header's count.
+            Some(u) => hopper::update_list::pending_in(&inst.addons, u, self.class)
                 .map(|u| (u.project_id, u.clone()))
                 .collect(),
             None => HashMap::new(),

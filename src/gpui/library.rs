@@ -158,6 +158,47 @@ enum ServerPlace {
 /// The sub-tabs of "Packs".
 const PACKS: [InstTab; 3] = [InstTab::ResourcePacks, InstTab::Shaders, InstTab::Datapacks];
 
+/// The tabs of `hopper::update_list::KINDS`, in the same order.
+const KIND_TABS: [InstTab; 4] = [InstTab::Mods, InstTab::ResourcePacks, InstTab::Shaders, InstTab::Datapacks];
+
+/// An instance's pending updates by kind, as its content tabs count them.
+fn update_counts(store: &Store, inst: &Instance) -> [usize; 4] {
+    store
+        .updates(&inst.root)
+        .and_then(|u| u.ready())
+        .map_or([0; 4], |u| hopper::update_list::counts(&inst.addons, u))
+}
+
+/// "5 mod updates" when they're all mods, else "9 updates".
+fn updates_label(c: &[usize; 4]) -> String {
+    let n: usize = c.iter().sum();
+    let s = if n == 1 { "" } else { "s" };
+    if n == c[0] { format!("{n} mod update{s}") } else { format!("{n} update{s}") }
+}
+
+/// "5 mods · 2 resource packs · 2 shaders": the kinds that have updates.
+fn updates_breakdown(c: &[usize; 4]) -> String {
+    const NAMES: [(&str, &str); 4] =
+        [("mod", "mods"), ("resource pack", "resource packs"), ("shader", "shaders"), ("data pack", "data packs")];
+    c.iter()
+        .zip(NAMES)
+        .filter(|(n, _)| **n > 0)
+        .map(|(n, (one, many))| format!("{n} {}", if *n == 1 { one } else { many }))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Several kinds have updates.
+fn updates_mixed(c: &[usize; 4]) -> bool {
+    c.iter().filter(|n| **n > 0).count() > 1
+}
+
+/// The tab an update count opens: Mods when it has any, else the first
+/// kind that does.
+fn updates_tab(c: &[usize; 4]) -> Option<InstTab> {
+    c.iter().position(|n| *n > 0).map(|i| KIND_TABS[i])
+}
+
 /// A tab's view, cached: it re-renders when it changes, not on every frame
 /// of the header's and underline's motion.
 fn cached(view: impl Into<AnyView>) -> AnyElement {
@@ -650,6 +691,12 @@ impl LibraryView {
                 p.peek_project(root, peek, cx);
             }
         });
+    }
+
+    /// Opens a content tab with its Updates filter on.
+    fn open_updates(&mut self, tab: InstTab, cx: &mut Context<Self>) {
+        self.set_tab(tab, cx);
+        self.addons.update(cx, |a, cx| a.show_updates(cx));
     }
 
     fn set_tab(&mut self, tab: InstTab, cx: &mut Context<Self>) {
@@ -1316,7 +1363,8 @@ impl LibraryView {
         let picked = self.selected.as_deref() == Some(root);
         let playing = store.running(root).is_some();
         let pack_update = store.pack_update(inst).is_some();
-        let mod_updates = store.updates(root).and_then(|u| u.ready()).map_or(0, Vec::len);
+        let counts = update_counts(store, inst);
+        let mod_updates: usize = counts.iter().sum();
         let icon = inst
             .icon
             .as_deref()
@@ -1336,18 +1384,24 @@ impl LibraryView {
         let theme = cx.theme();
         let group: SharedString = format!("row:{}", root.display()).into();
         // One update signal: a pack update covers the mods too.
-        let mods_word = if mod_updates == 1 { "mod update" } else { "mod updates" };
+        let what = updates_label(&counts);
+        let breakdown = if updates_mixed(&counts) { format!(" ({})", updates_breakdown(&counts)) } else { String::new() };
         let signal = if pack_update {
             Some((
                 widgets::chip(cx.theme().primary).xsmall().child("Update"),
                 if mod_updates > 0 {
-                    format!("Pack update available, and {mod_updates} {mods_word}")
+                    format!("Pack update available, and {what}{breakdown}")
                 } else {
                     "Pack update available".to_string()
                 },
+                None,
             ))
         } else if mod_updates > 0 {
-            Some((widgets::chip(cx.theme().info).xsmall().child(format!("{mod_updates}")), format!("{mod_updates} {mods_word}")))
+            Some((
+                widgets::chip(cx.theme().info).xsmall().child(format!("{mod_updates}")),
+                format!("{what}{breakdown}"),
+                updates_tab(&counts),
+            ))
         } else {
             None
         };
@@ -1425,15 +1479,26 @@ impl LibraryView {
                             .when(playing, |r| {
                                 r.child(widgets::chip(cx.theme().success).xsmall().child("Playing"))
                             })
-                            .when_some(signal, |r, (tag, tip)| {
+                            .when_some(signal, |r, (tag, tip, open)| {
                                 let tip = SharedString::from(tip);
+                                let root = root.to_path_buf();
                                 r.child(
                                     div()
-                                        .id(id("row-update", root))
+                                        .id(id("row-update", &root))
                                         .flex_none()
                                         .child(tag)
                                         .tooltip(move |window, cx| {
                                             gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                                        })
+                                        // The count opens the updates, as the header's does.
+                                        .when_some(open, |d, tab| {
+                                            d.on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                if this.selected.as_ref() != Some(&root) {
+                                                    this.select(root.clone(), cx);
+                                                }
+                                                this.open_updates(tab, cx);
+                                            }))
                                         }),
                                 )
                             }),
@@ -1965,23 +2030,25 @@ impl LibraryView {
                     .into_any_element(),
             );
         }
-        if let Some(u) = store.updates(&inst.root).and_then(|u| u.ready())
-            && !u.is_empty()
-        {
-            let n = u.len();
+        let counts = update_counts(store, inst);
+        if let Some(tab) = updates_tab(&counts) {
             let hover = theme.info.opacity(0.2);
+            // The breakdown when several kinds have updates, else where
+            // clicking goes.
+            let tip = SharedString::from(if updates_mixed(&counts) {
+                updates_breakdown(&counts)
+            } else {
+                format!("Show them in {}", tab.label())
+            });
             pills.push(
-                widgets::pill(format!("{n} mod update{}", if n == 1 { "" } else { "s" }), theme.info, false)
+                widgets::pill(updates_label(&counts), theme.info, false)
                     .id("pill-mod-updates")
                     .clickable(cx)
                     .hover(move |s| s.bg(hover))
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Show them in Mods").build(window, cx)
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                     })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_tab(InstTab::Mods, cx);
-                        this.addons.update(cx, |a, cx| a.show_updates(cx));
-                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_updates(tab, cx)))
                     .into_any_element(),
             );
         }
@@ -2281,6 +2348,18 @@ impl LibraryView {
                 format!(" ({n})")
             }
             None => String::new(),
+        };
+        // And how many have updates, so a shader update isn't only in the
+        // header.
+        let ups = update_counts(self.store.read(cx), inst);
+        let count = |t: InstTab| {
+            let n = KIND_TABS.iter().position(|k| *k == t).map_or(0, |i| ups[i]);
+            let more = match n {
+                0 => String::new(),
+                1 => " · 1 update".to_string(),
+                n => format!(" · {n} updates"),
+            };
+            count(t) + &more
         };
         let ix = PACKS.iter().position(|t| *t == self.tab).unwrap_or(0);
         Some(
