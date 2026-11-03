@@ -465,6 +465,16 @@ pub fn advice(text: &str, log: &str, native: &str, server: bool) -> String {
     if !server && (REGISTRY_SYNC.is_match(text) || REGISTRY_SYNC.is_match(log)) {
         return "The server has content this game doesn't: your mods don't match the server's. Install the server's mod list (same mods, same versions).".into();
     }
+    // A loop no report frame explains, and no mod in the log either: say
+    // what happened and where to look.
+    if let Some(l) = crate::crashloop::truncated(text)
+        && crate::crashloop::initiator(&l, log).is_none()
+    {
+        return format!(
+            "{} The game log doesn't name one either. If it happens again, turn off the mods you added or updated last.",
+            l.sentence()
+        );
+    }
     String::new()
 }
 

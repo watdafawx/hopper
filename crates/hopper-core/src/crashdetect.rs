@@ -604,7 +604,7 @@ static PLAIN_FRAME: LazyLock<Regex> = LazyLock::new(|| {
     re(r"^\s*at\s+(?:[\w.@-]+/)*([\w$]+(?:\.[\w$]+)+?)(?:\$\$Lambda[\w$]*(?:/0x[0-9a-fA-F]+)?)?\.[\w$<>]+\(")
 });
 /// A mixin's injected method: `handler$zza000$sodium$onRender`.
-static MIXIN_METHOD: LazyLock<Regex> = LazyLock::new(|| {
+pub(crate) static MIXIN_METHOD: LazyLock<Regex> = LazyLock::new(|| {
     re(r"\.(?:handler|redirect|modify\w*|wrapOperation|wrapWithCondition|wrapMethod|localvar|constant)\$\w+\$([a-z][\w-]*)\$")
 });
 
@@ -929,7 +929,9 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
 /// report, or nothing changed.
 pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) -> Vec<String>) -> Option<Crash> {
     let is_report = saved.source.extension().is_some_and(|e| e == "txt") && saved.source.is_file();
-    if !is_report || saved.kind != CrashKind::Mods {
+    // A card that named nothing is read again too: today's rules may name a
+    // mod (a loop the report couldn't show).
+    if !is_report || !matches!(saved.kind, CrashKind::Mods | CrashKind::Unknown) {
         return None;
     }
     // The game log still from the same run (written within minutes of the
@@ -968,7 +970,7 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
         return None;
     }
     let advice = if advice.is_empty() { saved.advice.clone() } else { advice };
-    Some(Crash { suspects, stopped, switches, switched_off, advice, ..saved.clone() })
+    Some(Crash { kind: CrashKind::Mods, suspects, stopped, switches, switched_off, advice, ..saved.clone() })
 }
 
 /// What a crash report names, for a report Hopper didn't see the game
@@ -1110,7 +1112,11 @@ pub fn server(root: &Path) -> Option<Crash> {
     let (mut suspects, stopped) = analyze(root, &text, log, &loading, when, &mods, &ids);
     client_only(root, &text, log, &mut suspects, &mods, &ids);
     for s in &mut suspects {
-        s.why = s.why.replace("while the game was loading", "while the server was loading").replace("the game ran its", "the server ran its");
+        s.why = s
+            .why
+            .replace("while the game was loading", "while the server was loading")
+            .replace("the game ran its", "the server ran its")
+            .replace("The game got stuck in a loop", "The server got stuck in a loop");
     }
     let kind = if !suspects.is_empty() {
         CrashKind::Mods
@@ -1332,18 +1338,34 @@ fn analyze(
             .first()
             .is_some_and(|(f, _)| raws.iter().any(|r| r.certainty == Certainty::Certain && same(r, &f.mod_id, &f.jar)));
     let loading = if direct { "" } else { loading };
-    for r in signals(log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
-        add(&mut raws, r);
+    // A loop's report names no mod, and the log's first trace is just some
+    // earlier error: the loop's own reading below takes the log instead.
+    let looped = crate::crashloop::truncated(text).filter(|_| !log.is_empty());
+    if looped.is_none() {
+        for r in signals(log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
+            add(&mut raws, r);
+        }
     }
     // The full trace, when the report's is thin: latest.log, then debug.log
     // (only when latest.log is from the same run: `log` is empty otherwise).
+    let debug = || {
+        let p = root.join("logs").join("debug.log");
+        let same_run = modified_secs(&p).is_some_and(|t| (t - before).abs() < 300);
+        same_run.then(|| before_crash(&tail(&p, 8 << 20)).to_string())
+    };
     if !log.is_empty() {
-        let debug = || {
-            let p = root.join("logs").join("debug.log");
-            let same_run = modified_secs(&p).is_some_and(|t| (t - before).abs() < 300);
-            same_run.then(|| before_crash(&tail(&p, 8 << 20)).to_string())
-        };
         blame_inside(&mut raws, text, log, &debug);
+    }
+    // The game looped in a library until it ran out of stack: the report
+    // can't name a mod, but the errors just before it on the same thread can.
+    let mut loop_mods: Vec<String> = Vec::new();
+    if let Some(l) = &looped
+        && let Some(f) = crate::crashloop::initiator(l, log).or_else(|| debug().and_then(|d| crate::crashloop::initiator(l, &d)))
+    {
+        for r in crate::crashloop::raws(l, &f) {
+            loop_mods.push(r.mod_id.clone());
+            add(&mut raws, r);
+        }
     }
     // The mod whose code threw a known error is told what it means.
     if let Some(known) = crate::crashtrace::report_error(text).and_then(|e| crate::crashtrace::explain(&e)) {
@@ -1381,6 +1403,16 @@ fn analyze(
         suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs, changed: None, client_only: false });
     }
     demote_libraries(&mut suspects, &crate::deps::dependents(&root.join("mods")), ids);
+    // A loop's mods added lately: the change that likely brought it.
+    if !loop_mods.is_empty() {
+        let added = crate::instances::added_dates(root);
+        let now = crate::time::now();
+        for s in suspects.iter_mut().filter(|s| loop_mods.iter().any(|m| m.eq_ignore_ascii_case(&s.mod_id))) {
+            if let Some(note) = added.get(s.file_name.trim_end_matches(".disabled")).and_then(|t| crate::crashloop::added_note(*t, now)) {
+                s.why = format!("{} {note}", s.why);
+            }
+        }
+    }
     // What the loader names may say which other mod it wanted: if that one
     // changed lately, the change is the likely trigger.
     let sets: Vec<crate::backups::Set> = crate::backups::list(root).into_iter().filter(|s| s.when <= before).collect();
@@ -2348,6 +2380,73 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         fs::write(root.join("crash-reports").join(report.0), report.1).unwrap();
         fs::write(root.join("logs/latest.log"), log).unwrap();
         root
+    }
+
+    const LOOP_REPORT: &str = include_str!("crashdetect_fixtures/emi-loop-crash.txt");
+    const LOOP_LOG: &str = include_str!("crashdetect_fixtures/emi-loop-latest.log");
+
+    /// TNP Limitless 8's client, 2026-11-03, cut down: a StackOverflowError
+    /// whose report is DataResult$Error.lambda$ap$2 a thousand times. Just
+    /// before it, Collapsible Groups (a beta added that day) had EMI
+    /// serialize every item without the game's registries; each failure
+    /// chained another error, and Silent Gear's nested gear data made the
+    /// chain deep enough to overflow.
+    #[test]
+    fn a_loop_the_report_cannot_name_is_read_from_the_log() {
+        let mods = [
+            ("collapsible_groups-neoforge-2.0.0-beta6.jar", "collapsible_groups", "Collapsible Groups"),
+            ("emi-1.1.24+1.21.1+neoforge.jar", "emi", "EMI"),
+            ("silent-gear-1.21.1-neoforge-4.0.20.jar", "silentgear", "Silent Gear"),
+            ("cc-tweaked-1.21.1-forge-1.120.2.jar", "computercraft", "CC: Tweaked"),
+            ("MysticalAgriculturePlus-2.0.1.jar", "mysticalagricultureplus", "Mystical Agriculture Plus"),
+            // Wraps every tick of the game (a mixin): in every trace, never the cause.
+            ("smoothloading-neoforge-1.21.1-0.1.6-alpha.1.jar", "smoothloading", "Smooth Loading"),
+        ];
+        let root = server_root("emi-loop", &mods, ("crash-2026-11-03_06.15.27-client.txt", LOOP_REPORT), LOOP_LOG);
+        // Hopper's list says when each mod went in: Collapsible Groups today.
+        let today = crate::time::now_iso();
+        let hopper = serde_json::json!({ "addons": [
+            { "file_name": mods[0].0, "date_added": today },
+            { "file_name": mods[2].0, "date_added": "2026-01-01T00:00:00Z" },
+        ] });
+        fs::write(root.join(crate::instances::HOPPER_FILE), hopper.to_string()).unwrap();
+        let jars: Vec<String> = mods.iter().map(|m| m.0.to_string()).collect();
+        let dir = root.join("mods");
+        let report = root.join("crash-reports/crash-2026-11-03_06.15.27-client.txt");
+        let c = from_report(&root, &report, &jars, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        assert_eq!(c.kind, CrashKind::Mods);
+        let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.mod_id.as_str(), s.certainty)).collect();
+        assert_eq!(
+            got,
+            [
+                ("collapsible_groups", Certainty::Likely),
+                ("mysticalagricultureplus", Certainty::Possible),
+                ("silentgear", Certainty::Possible),
+            ],
+            "EMI and DataFixerUpper only passed the work on; the report's blamed frame names no mod"
+        );
+        let why = &c.suspects[0].why;
+        assert!(why.contains("stuck in a loop inside DataFixerUpper"), "{why}");
+        assert!(why.contains("test version (2.0.0-beta6)"), "{why}");
+        assert!(why.ends_with("You added it today."), "{why}");
+        assert!(c.suspects[2].why.contains("trigger, not the cause") && !c.suspects[2].why.contains("added"), "{}", c.suspects[2].why);
+        assert!(c.advice.is_empty(), "the suspects say it: {}", c.advice);
+        // A card saved by an older Hopper that named nothing is read again.
+        let old = Crash { source: report.clone(), headline: c.headline.clone(), kind: CrashKind::Unknown, ..Default::default() };
+        let again = reread(&root, &old, &jars, |f| crate::deps::own_ids(&dir.join(f)).0).expect("today's rules name a mod");
+        assert_eq!(again.kind, CrashKind::Mods);
+        assert_eq!(again.suspects, c.suspects);
+        // Hopper Server reads a server's crash the same way.
+        let s = server(&root).expect("this run's report");
+        assert_eq!(s.suspects.iter().map(|s| s.mod_id.as_str()).collect::<Vec<_>>(), ["collapsible_groups", "mysticalagricultureplus", "silentgear"]);
+        assert!(s.suspects[0].why.starts_with("The server got stuck in a loop"), "{}", s.suspects[0].why);
+
+        // Without the log's errors: no mod, but the card says what happened.
+        fs::write(root.join("logs/latest.log"), "[03Nov2026 06:15:20.000] [Render thread/INFO] [x/]: nothing\n").unwrap();
+        let c = from_report(&root, &report, &jars, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        assert!(c.suspects.is_empty(), "{:?}", c.suspects);
+        assert!(c.advice.contains("loop inside DataFixerUpper") && c.advice.contains("added or updated last"), "{}", c.advice);
+        let _ = fs::remove_dir_all(&root);
     }
 
     const TNP_REPORT: &str = include_str!("crashdetect_fixtures/tnp-server-crash.txt");

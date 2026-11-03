@@ -473,6 +473,16 @@ fn read_own(root: &Path) -> Result<Option<Instance>, String> {
     }
 }
 
+/// When each mod went into the instance (seconds since the epoch), by file
+/// name without `.disabled`, from `hopper.json` as saved. Only reads.
+pub fn added_dates(root: &Path) -> std::collections::HashMap<String, i64> {
+    let Ok(Some(inst)) = read_own(root) else { return Default::default() };
+    inst.addons
+        .iter()
+        .filter_map(|a| Some((a.file_name.clone(), crate::time::parse_iso(&a.date_added)?)))
+        .collect()
+}
+
 /// Renames an unreadable `hopper.json` to `hopper.json.bad-<unix time>`, so
 /// the next [`load`] starts over (re-importing from CurseForge when it can).
 /// Only for when the user chooses to; Hopper never does it on its own.
