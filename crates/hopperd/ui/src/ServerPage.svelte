@@ -4,11 +4,12 @@
   import { session, outside } from './lib/me.svelte.js';
   import Avatar from './Avatar.svelte';
   import { onMount, onDestroy } from 'svelte';
-  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown } from '@lucide/svelte';
+  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder } from '@lucide/svelte';
   import { live, history, follow, unfollow } from './lib/live.svelte.js';
   import { api, post } from './lib/api.js';
   import { bytes, uptime, xmx, stateText, bootLeft, memTitle, loaderText } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
+  import { copyText } from './lib/browse.js';
   import { ask } from './lib/dialog.svelte.js';
   import { followJob } from './lib/jobs.js';
   import { askPower, askKickOrBan, playerAct, head } from './lib/consoleKit.js';
@@ -56,6 +57,9 @@
   /** The header's "…" menu, and a player's menu in the Players card. */
   let more = $state(false);
   let playerMenu = $state(null);
+  async function copyOf(text, what) {
+    say((await copyText(text)) ? `Copied ${what}` : `Couldn't copy ${what}`, false);
+  }
 
   // The tabs, in desktop's order for a Hopper Server's servers.
   const TABS = [
@@ -180,12 +184,22 @@
     <Avatar server={s} cls="ic big" />
     <div class="ttl">
       <div class="row wrap">
-        <h2>{s.name}</h2>
+        <h2 title={s.path}>{s.name}</h2>
         <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateText(s)}{s.boot && !s.progress ? ` · ${s.boot.label}` : ''}{alive && !s.progress ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
         {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />
         {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => openUpdate()}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
       </div>
-      <div class="small muted ell">{#if packCheck?.pack}<button class="vlink" title="{packCheck.pack.name}: versions and changelogs" onclick={openVersions}>{packCheck.pack.current.name}</button>{' · '}{/if}{#if s.version}<button class="vlink" title="Change Minecraft version (Settings › Version)" onclick={() => nav('settings', 'version')}>Minecraft {s.version}</button>{:else}Minecraft{/if}{#if s.loader}{' · '}{#if hasLoader}<button class="vlink" title="Loader versions and changelog" onclick={() => (loaderOpen = true)}>{loaderText(s.loader)}</button>{:else}{loaderText(s.loader)}{/if}{/if} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{/if}<span class="mono" class:gl={s.addresses?.length}>:{s.port}</span>{#if s.sleep_after_minutes && s.state === 'stopped'}<span class="sleep gl">· Sleeping, joining wakes it</span>{/if} · <span class="mono">{s.path}</span></div>
+      <!-- Facts as in desktop's header: icon, then the value; the folder is in the "…" menu. -->
+      <div class="facts small">
+        {#if s.version}<button class="fact vlink" title="Change Minecraft version (Settings › Version)" onclick={() => nav('settings', 'version')}><span class="fi g"><Box size={13} /></span>Minecraft {s.version}</button>{/if}
+        {#if s.loader}<svelte:element this={hasLoader ? 'button' : 'span'} class="fact" class:vlink={hasLoader} title={hasLoader ? 'Loader versions and changelog' : undefined} onclick={hasLoader ? () => (loaderOpen = true) : undefined}><span class="fi o"><Blocks size={13} /></span>{loaderText(s.loader)}</svelte:element>{/if}
+        {#if packCheck?.pack}<button class="fact vlink" title="{packCheck.pack.name}: versions and changelogs" onclick={openVersions}><span class="fi b"><Tag size={13} /></span>{packCheck.pack.current.name}</button>{/if}
+        <span class="fact muted">
+          <span class="fi"><Globe size={13} /></span>
+          {#if s.addresses?.length}<span class="mono" title={s.addresses.join(', ')}>{s.addresses[0]}{s.addresses.length > 1 ? ` +${s.addresses.length - 1}` : ''}</span><button class="cpi" title="Copy the address" aria-label="Copy the address" onclick={() => copyOf(s.addresses[0], s.addresses[0])}><Copy size={12} /></button>{/if}<span class="mono">:{s.port}</span>
+        </span>
+        {#if s.sleep_after_minutes && s.state === 'stopped'}<span class="fact sleep">Sleeping, joining wakes it</span>{/if}
+      </div>
       {#if s.progress}
         <!-- How far a start or stop has got; the server list shows players the same. -->
         <Progress server={s} />
@@ -208,6 +222,7 @@
         {#if more}
           <div class="popover menu drop" role="menu">
             <button class="menu-item" role="menuitem" onclick={backUpNow}><Archive size={13} />Back up now</button>
+            <button class="menu-item" role="menuitem" title={s.path} onclick={() => copyOf(s.path, 'the folder path')}><Folder size={13} />Copy folder path</button>
             <div class="menu-sep"></div>
             <button class="menu-item bad" role="menuitem" disabled={!alive} onclick={kill}><Skull size={13} />Kill (no save)</button>
           </div>
@@ -318,9 +333,13 @@
   .boot .bar.slow i { background: var(--gold); }
   .packup { cursor: pointer; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
   .packup:hover { filter: brightness(1.2); }
-  .gl { margin-left: 6px; }
-  .vlink { color: inherit; border-bottom: 1px dashed #ffffff30; padding: 0; }
-  .vlink:hover { color: var(--acc); border-color: var(--acc); }
+  .facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; color: var(--subtle); margin-top: 2px; }
+  .fact { display: inline-flex; align-items: center; gap: 6px; padding: 0; color: inherit; }
+  .fi { display: inline-flex; color: var(--muted); }
+  .fi.g { color: var(--green); } .fi.o { color: var(--gold); } .fi.b { color: var(--blue); }
+  .cpi { display: inline-flex; align-items: center; padding: 3px 4px; margin-left: -2px; border-radius: var(--radius-sm); color: var(--muted); }
+  .cpi:hover { background: var(--raise); color: var(--text); }
+  .vlink:hover { color: var(--acc); }
   .tabs { display: flex; gap: 20px; padding: 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 14px; overflow-x: auto; }
   .tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 9px 0; color: var(--subtle); font-weight: 500; white-space: nowrap; }
   .tabs button:hover { color: var(--text); }

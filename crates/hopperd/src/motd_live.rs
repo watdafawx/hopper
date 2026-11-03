@@ -86,6 +86,13 @@ pub async fn message(e: &Arc<Entry>) -> Option<String> {
 fn refill(e: Arc<Entry>) {
     tokio::task::spawn_blocking(move || {
         let text = fill(&e, true);
+        // Only for a server that's up: a stopped one fills it in at its start.
+        if let Some(t) = &text
+            && e.server.state().is_alive()
+            && let Err(err) = motd::remember(&e.root, t)
+        {
+            log::debug!("{}: couldn't keep the live message for the next start: {err:#}", e.name);
+        }
         cache().lock().unwrap().insert(e.id.clone(), Slot { at: Instant::now(), text, busy: false });
     });
 }
