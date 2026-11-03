@@ -1,7 +1,7 @@
 //! An instance's Worlds and Screenshots tabs.
 
 use crate::widgets::Clickable as _;
-use crate::store::{Msg, Store, open_path};
+use crate::store::{Msg, Store, open_folder, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -180,10 +180,7 @@ impl WorldsView {
                     .ghost()
                     .icon(IconName::FolderOpen)
                     .label("Open folder")
-                    .on_click(move |_, _, _| {
-                        let _ = std::fs::create_dir_all(&dir);
-                        open_path(&dir);
-                    }),
+                    .on_click(move |_, _, _| open_folder(&dir)),
             )
     }
 
@@ -703,10 +700,7 @@ impl Render for ScreenshotsView {
                             .small()
                             .icon(IconName::FolderOpen)
                             .label("Screenshots folder")
-                            .on_click(move |_, _, _| {
-                                let _ = std::fs::create_dir_all(&dir);
-                                open_path(&dir)
-                            }),
+                            .on_click(move |_, _, _| open_folder(&dir)),
                     ),
             )
             .child(h_flex().flex_wrap().gap_3().children(tiles))

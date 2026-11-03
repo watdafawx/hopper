@@ -3956,7 +3956,28 @@ pub fn open_path(path: &Path) {
         open_with_system(std::ffi::OsStr::new(&url));
         return;
     }
-    open_with_system(path.as_os_str());
+    open_with_system(clean_path(path).as_os_str());
+}
+
+/// Opens a folder, making it first when it isn't there yet (a Paxi folder
+/// the mod hasn't created), so the button never lands somewhere else.
+pub fn open_folder(dir: &Path) {
+    let _ = std::fs::create_dir_all(dir);
+    open_path(dir);
+}
+
+/// The path with one kind of separator. Joining "config/paxi/resourcepacks"
+/// onto an instance folder leaves both, and Explorer answers a mixed path by
+/// opening Documents instead.
+fn clean_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(path.to_string_lossy().replace('/', "\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
 }
 
 /// Opens a folder, file or URL in the app the system picks for it.
@@ -3972,7 +3993,7 @@ fn open_with_system(target: &std::ffi::OsStr) {
 /// Opens the folder holding `path` with `path` selected ("Show in folder").
 pub fn reveal_path(path: &Path) {
     #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", clean_path(path).display())).spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
     // xdg-open can't select a file, so open the folder it's in.

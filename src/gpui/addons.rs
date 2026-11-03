@@ -12,7 +12,6 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::spinner::Spinner;
 use crate::switch::Switch;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex,
@@ -2370,7 +2369,7 @@ impl AddonsView {
             Some(
                 h_flex()
                     .gap_2()
-                    .child(Spinner::new().small())
+                    // The refresh button beside it already spins.
                     .child(widgets::caption("Checking for updates", cx))
                     .into_any_element(),
             )
