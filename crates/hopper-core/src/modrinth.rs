@@ -142,7 +142,46 @@ pub struct VersionFile {
 #[serde(default)]
 pub struct VersionDependency {
     pub project_id: Option<String>,
+    /// Set instead of `project_id` when the author pinned a version; the
+    /// project is then looked up (see [`fill_dep_projects`]).
+    pub version_id: Option<String>,
     pub dependency_type: String,
+}
+
+/// CurseForge's relation number for a Modrinth dependency type: required
+/// 3, optional 2, incompatible 5, embedded 1.
+pub fn relation_of(dependency_type: &str) -> u32 {
+    match dependency_type {
+        "required" => cf::DEP_REQUIRED,
+        "incompatible" => cf::DEP_INCOMPATIBLE,
+        "embedded" => cf::DEP_EMBEDDED,
+        _ => cf::DEP_OPTIONAL,
+    }
+}
+
+/// Fills in the project of dependencies that name only a version, with one
+/// request for all of them. Left as they are when it fails.
+pub fn fill_dep_projects(versions: &mut [Version]) {
+    let ids: Vec<String> = versions
+        .iter()
+        .flat_map(|v| &v.dependencies)
+        .filter(|d| d.project_id.is_none())
+        .filter_map(|d| d.version_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let Ok(found) = versions_by_id(&ids) else { return };
+    let project: HashMap<&str, &str> = found.iter().map(|v| (v.id.as_str(), v.project_id.as_str())).collect();
+    for d in versions.iter_mut().flat_map(|v| &mut v.dependencies) {
+        if d.project_id.is_none()
+            && let Some(p) = d.version_id.as_deref().and_then(|id| project.get(id))
+        {
+            d.project_id = Some(p.to_string());
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -438,6 +477,18 @@ pub fn version_to_file(v: &Version) -> cf::File {
                 .collect(),
             changelog: v.changelog.clone().unwrap_or_default(),
         }),
+        // Every relation, as CurseForge lists them: the Dependencies tab
+        // and incompatibility checks read these.
+        dependencies: v
+            .dependencies
+            .iter()
+            .filter_map(|d| {
+                Some(cf::Dependency {
+                    mod_id: num_id(d.project_id.as_deref().filter(|p| *p != v.project_id)?),
+                    relation_type: relation_of(&d.dependency_type),
+                })
+            })
+            .collect(),
         ..Default::default()
     }
 }
@@ -596,7 +647,9 @@ pub fn versions(project: &str, game_version: &str, loader: Loader) -> anyhow::Re
     if !game_version.is_empty() {
         q.push(("game_versions", serde_json::to_string(&[game_version])?));
     }
-    get(&format!("/project/{project}/version"), &q)
+    let mut out: Vec<Version> = get(&format!("/project/{project}/version"), &q)?;
+    fill_dep_projects(&mut out);
+    Ok(out)
 }
 
 /// Versions by id, in one request.
@@ -662,7 +715,9 @@ pub fn latest_by_sha1(
 }
 
 pub fn version(id: &str) -> anyhow::Result<Version> {
-    get(&format!("/version/{id}"), &[])
+    let mut v: Version = get(&format!("/version/{id}"), &[])?;
+    fill_dep_projects(std::slice::from_mut(&mut v));
+    Ok(v)
 }
 
 /// "client" | "server" | "both" from Modrinth's declared sides, for jars
@@ -828,6 +883,41 @@ pub fn sha1(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_dependencies_keep_every_relation() {
+        let dep = |p: Option<&str>, t: &str| VersionDependency {
+            project_id: p.map(str::to_string),
+            version_id: None,
+            dependency_type: t.into(),
+        };
+        let v = Version {
+            id: "v1".into(),
+            project_id: "self".into(),
+            dependencies: vec![
+                dep(Some("lib"), "required"),
+                dep(Some("extra"), "optional"),
+                dep(Some("bad"), "incompatible"),
+                dep(Some("inside"), "embedded"),
+                // A pinned version not looked up yet, and the project itself.
+                dep(None, "required"),
+                dep(Some("self"), "optional"),
+            ],
+            ..Default::default()
+        };
+        let f = version_to_file(&v);
+        let rel: Vec<(u64, u32)> = f.dependencies.iter().map(|d| (d.mod_id, d.relation_type)).collect();
+        assert_eq!(
+            rel,
+            [
+                (num_id("lib"), cf::DEP_REQUIRED),
+                (num_id("extra"), cf::DEP_OPTIONAL),
+                (num_id("bad"), cf::DEP_INCOMPATIBLE),
+                (num_id("inside"), cf::DEP_EMBEDDED),
+            ]
+        );
+        assert_eq!(f.modrinth.unwrap().requires, ["lib"]);
+    }
 
     #[test]
     fn env_from_sides() {

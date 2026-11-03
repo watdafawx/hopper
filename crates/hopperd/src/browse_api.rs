@@ -162,6 +162,8 @@ pub(crate) fn card_of(m: &cf::Mod, server_files: Option<bool>, class: u32) -> Va
         "kind": kind_of(m.class_id.unwrap_or(class)),
         // CurseForge: the author only allows downloads from its website.
         "distribution": m.allow_mod_distribution != Some(false),
+        // CurseForge's pick: "Hidden gem", "Popular" or "Sponsored".
+        "featured": m.featured(),
         "url": if mr && class == cf::CLASS_MODPACKS { format!("https://modrinth.com/modpack/{}", m.slug) } else { m.page() },
     })
 }
@@ -666,6 +668,9 @@ fn spans_json(spans: &[Span]) -> Value {
                 o["img"] = json!(img);
                 if let Some(w) = s.width {
                     o["w"] = json!(w);
+                }
+                if let Some(h) = s.height {
+                    o["h"] = json!(h);
                 }
             }
             o

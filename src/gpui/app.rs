@@ -270,6 +270,11 @@ impl AppView {
                     this.library.update(cx, |l, cx| l.peek(root, project, cx));
                     this.go(Page::Library, cx);
                 }
+                StoreEvent::Project(project) => {
+                    let project = *project;
+                    this.browse.update(cx, |b, cx| b.show_project(project, cx));
+                    this.go(Page::Browse, cx);
+                }
                 StoreEvent::Link(url) => {
                     window.activate_window();
                     let url = url.clone();

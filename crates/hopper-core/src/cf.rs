@@ -35,6 +35,9 @@ pub fn class_path(class_id: Option<u32>) -> &'static str {
 }
 
 /// Dependency `relationType` values.
+/// A library bundled inside the file.
+pub const DEP_EMBEDDED: u32 = 1;
+pub const DEP_OPTIONAL: u32 = 2;
 pub const DEP_REQUIRED: u32 = 3;
 pub const DEP_INCOMPATIBLE: u32 = 5;
 
@@ -167,6 +170,10 @@ pub struct Mod {
     pub screenshots: Vec<Screenshot>,
     /// "MIT License", "All Rights Reserved"...; Modrinth's SPDX name.
     pub license_type: Option<String>,
+    /// CurseForge's pick for its Browse tab (not in its API docs): 1
+    /// sponsored, 2 hidden gem, 3 popular; 0 when not picked. See
+    /// [`Self::featured`].
+    pub featured_project_tag: u32,
     /// Set for a Modrinth project (its id); CurseForge fields stay empty.
     #[serde(skip)]
     pub modrinth: Option<String>,
@@ -197,6 +204,18 @@ impl Screenshot {
 }
 
 impl Mod {
+    /// CurseForge's label for picking it in its Browse tab: "Hidden gem"
+    /// (a small or new project), "Popular" or "Sponsored". Its featured
+    /// list carries these numbers; picks rotate, so a project loses its tag.
+    pub fn featured(&self) -> Option<&'static str> {
+        match self.featured_project_tag {
+            1 => Some("Sponsored"),
+            2 => Some("Hidden gem"),
+            3 => Some("Popular"),
+            _ => None,
+        }
+    }
+
     pub fn icon(&self) -> Option<&str> {
         self.logo.as_ref().and_then(Logo::icon)
     }

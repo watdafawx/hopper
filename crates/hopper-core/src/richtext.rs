@@ -16,6 +16,9 @@ pub struct Span {
     pub image: Option<String>,
     /// The width the page gave the image, in pixels.
     pub width: Option<u32>,
+    /// The height the page gave the image, in pixels (badges often set
+    /// only this: `<img height="48">`).
+    pub height: Option<u32>,
 }
 
 impl Span {
@@ -195,6 +198,10 @@ struct Parser {
     skip: u32,
     /// Inside `<video>`: its poster, and whether a source was taken yet.
     video: Option<(Option<String>, bool)>,
+    /// Open `<span>`s, and the depth of a CurseForge "Embed Removed" one
+    /// being read: its text is dropped and its link becomes the video.
+    spans: u32,
+    embed_removed: Option<u32>,
 }
 
 impl Parser {
@@ -255,7 +262,7 @@ impl Parser {
     }
 
     fn text(&mut self, raw: &str) {
-        if self.skip > 0 {
+        if self.skip > 0 || self.embed_removed.is_some() {
             return;
         }
         let t = decode_entities(raw);
@@ -298,12 +305,13 @@ impl Parser {
             link: self.link.clone(),
             image: None,
             width: None,
+            height: None,
         };
         self.push(span);
     }
 
-    fn image(&mut self, url: String, alt: String, width: Option<u32>) {
-        if self.skip > 0 {
+    fn image(&mut self, url: String, alt: String, width: Option<u32>, height: Option<u32>) {
+        if self.skip > 0 || self.embed_removed.is_some() {
             return;
         }
         let alt = collapse_ws(&alt).trim().to_string();
@@ -312,6 +320,7 @@ impl Parser {
             link: self.link.clone(),
             image: Some(url),
             width,
+            height,
             ..Default::default()
         });
     }
@@ -443,10 +452,10 @@ impl Parser {
             ("img", _) => {
                 if let Some(src) = attr(body, "src").and_then(|s| abs_url(&s)) {
                     let alt = attr(body, "alt").unwrap_or_default();
-                    let width = attr(body, "width")
-                        .and_then(|w| w.trim().trim_end_matches("px").parse::<u32>().ok())
-                        .filter(|w| *w > 0);
-                    self.image(src, alt, width);
+                    let style = attr(body, "style").unwrap_or_default();
+                    let width = attr(body, "width").and_then(|w| px_size(&w)).or_else(|| style_px(&style, "width"));
+                    let height = attr(body, "height").and_then(|h| px_size(&h)).or_else(|| style_px(&style, "height"));
+                    self.image(src, alt, width, height);
                 }
             }
             ("strong" | "b", false) => self.bold += 1,
@@ -463,7 +472,20 @@ impl Parser {
                 self.pre = self.pre.saturating_sub(1);
                 self.flush();
             }
+            ("span", true) => {
+                if self.embed_removed == Some(self.spans) {
+                    self.embed_removed = None;
+                }
+                self.spans = self.spans.saturating_sub(1);
+            }
+            ("span", false) if attr(body, "class").is_some_and(|c| c.split_whitespace().any(|c| c == "embed-removed")) => {
+                // CurseForge swaps an embedded video for "Embed Removed:
+                // <link>"; the link is the video.
+                self.spans += 1;
+                self.embed_removed = Some(self.spans);
+            }
             ("span", false) => {
+                self.spans += 1;
                 // Big text at the start of a paragraph is a heading in
                 // disguise (Create's description, among others).
                 let px = attr(body, "style").and_then(|s| font_px(&s));
@@ -479,7 +501,16 @@ impl Parser {
                     self.start(Kind::Heading(if px >= 24 { 2 } else { 3 }));
                 }
             }
-            ("a", false) => self.link = attr(body, "href").and_then(|h| abs_url(&h)),
+            ("a", false) => {
+                self.link = attr(body, "href").and_then(|h| abs_url(&h));
+                if self.embed_removed.is_some()
+                    && let Some(v) = self.link.as_deref().and_then(video_of)
+                {
+                    let depth = self.embed_removed.take();
+                    self.video(v);
+                    self.embed_removed = depth;
+                }
+            }
             ("a", true) => self.link = None,
             _ => {}
         }
@@ -503,15 +534,116 @@ fn font_px(style: &str) -> Option<u32> {
     })
 }
 
+/// A size attribute as whole pixels: "48", "48px", "150.775" and the
+/// "750/" a self-closing tag leaves behind all read; percentages don't.
+fn px_size(v: &str) -> Option<u32> {
+    let v = v.trim();
+    let num: String = v.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let rest = v[num.len()..].trim_start();
+    if rest.starts_with('%') || rest.starts_with("em") || rest.starts_with("rem") || rest.starts_with("vw") {
+        return None;
+    }
+    let n: f32 = num.parse().ok()?;
+    (n >= 1.).then(|| n.round() as u32)
+}
+
+/// `width: 120px` (or another property) in a style attribute, in pixels.
+fn style_px(style: &str, prop: &str) -> Option<u32> {
+    style.split(';').find_map(|d| {
+        let (k, v) = d.split_once(':')?;
+        (k.trim().eq_ignore_ascii_case(prop)).then(|| px_size(v))?
+    })
+}
+
+/// Tags an author's HTML may hold that CurseForge's Markdown editor shows
+/// escaped (`&lt;center&gt;`), read back as tags. Code keeps its text.
+const ESCAPED_TAGS: [&str; 30] = [
+    "center", "p", "div", "img", "a", "br", "details", "summary", "table", "thead", "tbody", "tr", "td", "th", "h1",
+    "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "b", "strong", "i", "em", "span", "hr", "u",
+];
+
+/// `html` with escaped tags of [`ESCAPED_TAGS`] turned back into tags (not
+/// inside `<pre>` or `<code>`), and Markdown links CurseForge left as text
+/// around its own link (`[Name](<a href=u>u</a>)`) made the link.
+fn unescape_tags(html: &str) -> std::borrow::Cow<'_, str> {
+    if !html.contains("&lt;") && !html.contains("](<a ") {
+        return std::borrow::Cow::Borrowed(html);
+    }
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let mut code = 0u32;
+    let mut i = 0;
+    while i < html.len() {
+        let rest = &html[i..];
+        let lrest = &lower[i..];
+        if rest.starts_with('<') {
+            let end = rest.find('>').map_or(rest.len(), |e| e + 1);
+            let tag = &lrest[..end];
+            if tag.starts_with("<pre") || tag.starts_with("<code") {
+                code += 1;
+            } else if tag.starts_with("</pre") || tag.starts_with("</code") {
+                code = code.saturating_sub(1);
+            }
+            out.push_str(&rest[..end]);
+            i += end;
+            continue;
+        }
+        if code == 0
+            && let Some(after) = lrest.strip_prefix("&lt;")
+        {
+            let name_start = usize::from(after.starts_with('/'));
+            let name: String = after[name_start..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+            let next = after[name_start + name.len()..].chars().next();
+            // The tag ends at the next "&gt;", before any other tag starts.
+            let close = after
+                .find("&gt;")
+                .filter(|&c| c < 600 && !after[..c].contains('<') && !after[..c].contains("&lt;"));
+            if ESCAPED_TAGS.contains(&name.as_str())
+                && matches!(next, Some(' ' | '/' | '&' | '\n'))
+                && let Some(c) = close
+            {
+                out.push('<');
+                out.push_str(&decode_entities(&rest[4..4 + c]));
+                out.push('>');
+                i += 4 + c + 4;
+                continue;
+            }
+        }
+        if code == 0
+            && rest.starts_with('[')
+            && let Some(mid) = rest.find("](<a ")
+            && mid < 300
+            && !rest[1..mid].contains(['[', ']', '<', '>'])
+            && let Some(tag_end) = rest[mid..].find('>')
+            && let Some(close) = rest[mid..].find("</a>)")
+        {
+            let tag = &rest[mid + 3..mid + tag_end];
+            if let Some(href) = attr(tag, "href") {
+                out.push_str(&format!("<a href=\"{}\">{}</a>", href.replace('"', "&quot;"), &rest[1..mid]));
+                i += mid + close + 5;
+                continue;
+            }
+        }
+        let c = rest.chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// An href or src as an absolute URL: CurseForge's `/linkout?remoteUrl=`
 /// redirects unwrapped, site-relative paths completed, anchors and
 /// javascript dropped.
 fn abs_url(h: &str) -> Option<String> {
     let h = h.trim();
-    if let Some(enc) = h
-        .strip_prefix("/linkout?remoteUrl=")
-        .or_else(|| h.strip_prefix("https://www.curseforge.com/linkout?remoteUrl="))
-    {
+    // Any CurseForge host's linkout (www., elerium.) wraps the real one.
+    let linkout = || {
+        let rest = h.strip_prefix("https://")?;
+        let (host, path) = rest.split_once('/')?;
+        (host == "curseforge.com" || host.ends_with(".curseforge.com")).then_some(())?;
+        path.strip_prefix("linkout?remoteUrl=")
+    };
+    if let Some(enc) = h.strip_prefix("/linkout?remoteUrl=").or_else(linkout) {
         let once = percent_decode(enc);
         let twice = percent_decode(&once);
         return Some(twice).filter(|u| u.starts_with("http"));
@@ -586,7 +718,8 @@ fn attr(tag: &str, name: &str) -> Option<String> {
 
 pub fn parse(html: &str) -> Vec<Block> {
     let mut p = Parser::default();
-    let mut rest = html;
+    let html = unescape_tags(html);
+    let mut rest = html.as_ref();
     while !rest.is_empty() {
         match rest.find('<') {
             Some(0) => {
@@ -656,7 +789,9 @@ fn split_images(b: Block) -> Vec<Block> {
     if !matches!(b.kind, Kind::Para | Kind::Heading(_)) {
         return vec![b];
     }
-    let big = |s: &Span| s.image.is_some() && s.width.is_none_or(|w| w > INLINE_IMAGE_MAX);
+    let big = |s: &Span| {
+        s.image.is_some() && s.width.or(s.height).is_none_or(|w| w > INLINE_IMAGE_MAX)
+    };
     let has_text = b.spans.iter().any(|s| s.image.is_none() && !s.text.trim().is_empty());
     if !has_text || !b.spans.iter().any(big) {
         return vec![b];
@@ -967,6 +1102,16 @@ fn inline_md(s: &str) -> String {
     let mut italic = false;
     while i < b.len() {
         let rest = &s[i..];
+        // Raw HTML passes through whole: a `*` or `_` in an address is not
+        // emphasis.
+        if rest.starts_with('<')
+            && rest[1..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '/')
+            && let Some(end) = rest.find('>')
+        {
+            out.push_str(&rest[..=end]);
+            i += end + 1;
+            continue;
+        }
         if let Some(after) = rest.strip_prefix('`')
             && let Some(end) = after.find('`')
         {
@@ -1114,6 +1259,8 @@ pub struct Badge {
     pub alt: String,
     /// The width the page gave it, in pixels.
     pub width: Option<u32>,
+    /// The height the page gave it, in pixels.
+    pub height: Option<u32>,
 }
 
 /// A piece of a description: Markdown, a paragraph made only of images
@@ -1126,7 +1273,8 @@ pub enum Segment {
 }
 
 /// The badges of a paragraph holding two or more images and nothing else
-/// but whitespace.
+/// but whitespace, or one image the page sized by its height only (a
+/// Markdown view can't size it that way).
 fn badge_row(b: &Block) -> Option<Vec<Badge>> {
     if b.kind != Kind::Para {
         return None;
@@ -1140,12 +1288,14 @@ fn badge_row(b: &Block) -> Option<Vec<Badge>> {
                 link: s.link.clone(),
                 alt: s.text.clone(),
                 width: s.width,
+                height: s.height,
             }),
             None if s.text.trim().is_empty() => {}
             None => return None,
         }
     }
-    (out.len() >= 2).then_some(out)
+    let by_height = matches!(out.as_slice(), [b] if b.width.is_none() && b.height.is_some());
+    (out.len() >= 2 || by_height).then_some(out)
 }
 
 /// Blocks as [`Segment`]s: rows of badges and videos on their own,
@@ -1756,5 +1906,77 @@ let x = 1;
         let p: Vec<&str> = b[1].spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(p, [":bug:", " 🐛 fixed"]);
         assert!(to_markdown(&parse_markdown("## :wrench: Chores")).contains("🔧 Chores"));
+    }
+
+    /// Enchantment Outlines on CurseForge: the author's HTML shows escaped
+    /// in its Markdown, with badge widths like "150.775" and "750/".
+    #[test]
+    fn escaped_html_reads_as_tags() {
+        let html = concat!(
+            "&lt;center&gt;<a href=\"https://www.curseforge.com/minecraft/texture-packs/x\"> <img src=\"https://a/1.png\" width=\"150.775\"> </a>",
+            " <a href=\"/linkout?remoteUrl=https%253a%252f%252fmodrinth.com%252fmod%252fsodium\"> <img src=\"https://a/2.png\" width=\"207.2\"> </a>&lt;/center&gt;\n",
+            "<p><img src=\"https://a/3.png\" width=\"750/\"></p>\n",
+            "<p>&lt;details&gt; &lt;summary&gt;Accessibility&lt;/summary&gt; [Sodium Compatible](<a href=\"/linkout?remoteUrl=https%253a%252f%252fmodrinth.com%252fmod%252fsodium\" rel=\"nofollow\">https://modrinth.com/mod/sodium</a>) more</p>",
+            "<p><code>&lt;center&gt;</code> stays</p>",
+        );
+        let b = parse(html);
+        // All but the code line at the end.
+        let all = to_markdown(&b[..b.len() - 1]);
+        assert!(!all.contains("center"), "{all}");
+        assert!(!all.contains("details"), "{all}");
+        let badges = match &to_segments(&b)[0] {
+            Segment::Badges(b) => b.clone(),
+            s => panic!("{s:?}"),
+        };
+        assert_eq!(badges.iter().map(|b| b.width).collect::<Vec<_>>(), [Some(151), Some(207)]);
+        assert_eq!(badges[1].link.as_deref(), Some("https://modrinth.com/mod/sodium"));
+        assert!(b.iter().any(|b| b.spans.iter().any(|s| s.width == Some(750))));
+        // The leftover Markdown link is the link, named as the author wrote.
+        let link = b.iter().flat_map(|b| &b.spans).find(|s| s.text == "Sodium Compatible").unwrap();
+        assert_eq!(link.link.as_deref(), Some("https://modrinth.com/mod/sodium"));
+        assert!(all.contains("Accessibility"));
+        // Code keeps what it says.
+        assert!(b.iter().flat_map(|b| &b.spans).any(|s| s.code && s.text == "<center>"));
+    }
+
+    #[test]
+    fn sizes_read_from_attributes() {
+        assert_eq!(px_size("48"), Some(48));
+        assert_eq!(px_size("48px"), Some(48));
+        assert_eq!(px_size("150.775"), Some(151));
+        assert_eq!(px_size("750/"), Some(750));
+        assert_eq!(px_size("50%"), None);
+        assert_eq!(px_size("0"), None);
+        assert_eq!(style_px("border:0; width: 120px", "width"), Some(120));
+    }
+
+    /// Glowing Glints on Modrinth: badges sized by height only, in HTML
+    /// inside Markdown.
+    #[test]
+    fn height_only_badges() {
+        let md = "<p align=\"center\">\n  <a href=\"https://modrinth.com/mod/sodium\">\n    <img src=\"https://a/s_b*c.png\" height=\"48\">\n  </a>\n  <a href=\"https://modrinth.com/resourcepack/x\">\n    <img src=\"https://a/m.png\" height=\"48\">\n  </a>\n</p>\n\n<p align=\"center\">\n  <img src=\"https://a/one.png\" height=\"64\"/>\n</p>\n\n<details>\n<summary>Credits</summary>\n\n- Vanilla Tweaks: https://vanillatweaks.net/\n\n</details>";
+        let b = parse_markdown(md);
+        let segs = to_segments(&b);
+        let Segment::Badges(row) = &segs[0] else { panic!("{segs:?}") };
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0].height, Some(48));
+        // An address's `*` or `_` isn't emphasis.
+        assert_eq!(row[0].url, "https://a/s_b*c.png");
+        assert_eq!(row[0].link.as_deref(), Some("https://modrinth.com/mod/sodium"));
+        let Segment::Badges(one) = &segs[1] else { panic!("{segs:?}") };
+        assert_eq!(one[0].height, Some(64));
+        let rest = to_markdown(&b);
+        assert!(rest.contains("**Credits**") && !rest.contains("details"), "{rest}");
+    }
+
+    #[test]
+    fn removed_embed_is_its_video() {
+        let b = parse(concat!(
+            "<p><span><span class=\"embed-removed\"> Embed Removed: <a href=\"https://elerium.curseforge.com/linkout?remoteUrl=",
+            "https%3a%2f%2fwww.youtube-nocookie.com%2fembed%2fgEnrM4tDtmM\">https://www.youtube-nocookie.com/embed/gEnrM4tDtmM</a> </span></span> after</p>"
+        ));
+        assert!(matches!(&b[0].kind, Kind::Video(v) if v.url == "https://www.youtube.com/watch?v=gEnrM4tDtmM"), "{b:?}");
+        assert!(!to_markdown(&b).contains("Embed Removed"));
+        assert!(to_markdown(&b).contains("after"));
     }
 }

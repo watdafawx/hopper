@@ -23,6 +23,7 @@
   import { SITE, TYPES, count, ago, preset, store, browseHash, andList } from './lib/browse.js';
   import { rightClear } from './lib/rightclear.js';
   import BrowsePack from './BrowsePack.svelte';
+  import FeaturedTag from './lib/FeaturedTag.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
   import NewServer from './NewServer.svelte';
 
@@ -429,7 +430,7 @@
           <div class="rc" role="button" tabindex="0" onclick={() => open(r)} onmouseenter={() => wantPlan(r)} oncontextmenu={(e) => openMenu(e, r)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), open(r))}>
             {#if r.icon}<img class="ico" src={r.icon} alt="" width="48" height="48" loading="lazy" decoding="async" />{:else}<span class="ico ph"></span>{/if}
             <div class="body">
-              <div class="t"><b>{r.name}</b>{#if r.author}<span class="muted">{` by ${r.author}`}</span>{/if}</div>
+              <div class="t"><b>{r.name}</b>{#if r.author}<span class="muted">{` by ${r.author}`}</span>{/if}{#if r.featured} <FeaturedTag tag={r.featured} />{/if}</div>
               <div class="s ell">{r.summary}</div>
               <div class="meta">
                 <span class="dl"><Download size={11} />{count(r.downloads)}</span>

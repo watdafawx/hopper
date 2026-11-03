@@ -1,7 +1,8 @@
 //! Routes added to bring the panel's browse area closer to Hopper desktop:
 //! what installing a mod would also download (desktop's install card and
 //! "+N deps"), a project's dependencies (its Dependencies tab) and
-//! everything its author made (the "by …" link).
+//! everything its author made (the "by …" link), and the project a
+//! description's link points at.
 
 use crate::App;
 use crate::api::{ApiResult, bad, require};
@@ -20,6 +21,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/browse/plan", get(plan))
         .route("/api/v1/browse/deps", get(deps))
         .route("/api/v1/browse/author", get(author))
+        .route("/api/v1/browse/link", get(link))
 }
 
 fn project_of(q: &std::collections::HashMap<String, String>) -> ApiResult<u64> {
@@ -122,6 +124,24 @@ async fn author(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
             "url": m.authors.first().map(|a| a.url.clone()).unwrap_or_default(),
             "projects": list.iter().map(mini).collect::<Vec<_>>(),
         }))
+    })
+    .await?;
+    Ok(Json(v))
+}
+
+/// The project a CurseForge or Modrinth page link points at, as a card, so
+/// a description's link opens it in the panel; `null` for any other link.
+async fn link(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Q) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let Some(l) = source::project_link(&arg(&q, "url")) else {
+        return Ok(Json(json!({ "project": null })));
+    };
+    if !matches!(l, source::ProjectLink::Mr(_)) && !has_cf_key() {
+        return Ok(Json(json!({ "project": null })));
+    }
+    let v = blocking(move || {
+        let m = source::get_mod(source::project_from_link(&l)?)?;
+        Ok(json!({ "project": mini(&m) }))
     })
     .await?;
     Ok(Json(v))
