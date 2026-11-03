@@ -223,13 +223,18 @@ fn input(cmd: Command, window: &mut Window, cx: &mut App) -> Reply {
             );
             done()
         }
-        Command::Scroll { x, y, dy } => {
+        Command::Scroll { x, y, dy, notches } => {
             let position = at(x, y);
             move_to(position, window, cx);
             window.dispatch_event(
                 PlatformInput::ScrollWheel(ScrollWheelEvent {
                     position,
-                    delta: ScrollDelta::Pixels(point(px(0.), px(-dy / scale))),
+                    // A notch moves three lines, Windows' default.
+                    delta: if notches {
+                        ScrollDelta::Lines(point(0., -dy * 3.))
+                    } else {
+                        ScrollDelta::Pixels(point(px(0.), px(-dy / scale)))
+                    },
                     ..Default::default()
                 }),
                 cx,

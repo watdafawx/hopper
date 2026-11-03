@@ -1251,6 +1251,7 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::frame_log::start();
         // Cached: a page re-renders only when it (or what it reads) changes,
         // not on every frame of a dialog or spinner animating above it.
         // Browse and the Library cache their own columns instead (`part.rs`):
@@ -1332,6 +1333,9 @@ impl Render for AppView {
                 .absolute()
                 .size_0()
             })
+            // Mouse-wheel notches glide (Settings > Appearance).
+            .child(crate::smooth_scroll::catcher())
+            .children(crate::frame_log::end())
     }
 }
 

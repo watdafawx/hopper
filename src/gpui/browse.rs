@@ -131,6 +131,23 @@ pub fn bind_keys(cx: &mut App) {
 /// How far PageUp / PageDown move the selection.
 const PAGE_STEP: isize = 5;
 
+/// The results list's last row (the end that loads the next page).
+const LIST_END: u64 = u64::MAX;
+
+/// What every row of one render of the results list draws from, worked
+/// out once for the rows in view.
+struct RowsFor {
+    target: Option<Instance>,
+    global: HashMap<u64, &'static str>,
+    /// The bookmarks, when they're shown instead of the search results.
+    saved: Option<Vec<cf::Mod>>,
+}
+
+/// How long the mouse rests on a result before Browse works out what
+/// installing it would add, so rows sliding under a still mouse while
+/// the list scrolls don't each start a lookup.
+const PLAN_DWELL: Duration = Duration::from_millis(250);
+
 /// The row a key move lands on: `step` from `cur` (nothing picked counts
 /// as just above the first row), kept inside a list of `len`.
 fn step_row(cur: Option<usize>, step: isize, len: usize) -> Option<usize> {
@@ -170,8 +187,15 @@ pub struct BrowseView {
     /// Bumped per new query (not per page), so a check for new entries
     /// is dropped once the query changed.
     query_gen: u64,
-    /// The results list's scroll position, kept while Browse is hidden.
-    scroll: ScrollHandle,
+    /// The results list (only the rows in view are built), and so its
+    /// scroll position, kept while Browse is hidden.
+    list: ListState,
+    /// The project ids the list was last laid out for, then [`LIST_END`],
+    /// so a change splices just what changed and keeps the scroll spot.
+    list_ids: std::cell::RefCell<Vec<u64>>,
+    /// The result the mouse rests on, waiting [`PLAN_DWELL`] before its
+    /// plan is worked out.
+    hover_plan: Option<(u64, Task<()>)>,
     /// When Browse was last left for another page.
     left: Option<Instant>,
     /// Entries that turned up on page one since the list was loaded,
@@ -304,7 +328,9 @@ impl BrowseView {
             error: None,
             generation: 0,
             query_gen: 0,
-            scroll: ScrollHandle::new(),
+            list: ListState::new(1, ListAlignment::Top, px(600.)),
+            list_ids: std::cell::RefCell::new(vec![LIST_END]),
+            hover_plan: None,
             left: None,
             fresh: Vec::new(),
             _check: None,
@@ -468,7 +494,8 @@ impl BrowseView {
                 this.store
                     .update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
                 this.fresh = new;
-                if this.scroll.offset().y >= px(-1.) {
+                let top = this.list.logical_scroll_top();
+                if top.item_ix == 0 && top.offset_in_item <= px(1.) {
                     this.show_fresh();
                 }
                 cx.notify();
@@ -482,7 +509,7 @@ impl BrowseView {
         let fresh = std::mem::take(&mut self.fresh);
         self.results.retain(|r| !fresh.iter().any(|m| m.id == r.id));
         self.results.splice(0..0, fresh);
-        self.scroll.set_offset(point(px(0.), px(0.)));
+        self.list.scroll_to(ListOffset::default());
     }
 
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -766,7 +793,7 @@ impl BrowseView {
             self.query_gen += 1;
             self.fresh.clear();
             self._check = None;
-            self.scroll.set_offset(point(px(0.), px(0.)));
+            self.list.scroll_to(ListOffset::default());
         }
         let s = cf::Search {
             index: if append { self.results.len() as u32 } else { 0 },
@@ -2124,7 +2151,18 @@ impl BrowseView {
             .group(BROWSE_ROW)
             .on_hover(cx.listener(move |this, over: &bool, _, cx| {
                 if *over {
-                    this.want_plan(&hovered, cx);
+                    let m = hovered.clone();
+                    let wait = cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(PLAN_DWELL).await;
+                        this.update(cx, |this, cx| {
+                            this.hover_plan = None;
+                            this.want_plan(&m, cx);
+                        })
+                        .ok();
+                    });
+                    this.hover_plan = Some((hovered.id, wait));
+                } else if this.hover_plan.as_ref().is_some_and(|(id, _)| *id == hovered.id) {
+                    this.hover_plan = None;
                 }
             }))
             .gap_4()
@@ -2311,8 +2349,9 @@ impl BrowseView {
         })
     }
 
-    fn results(&self, target: Option<&Instance>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn results(&self, target: Option<Instance>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let global = target
+            .as_ref()
             .and_then(|t| self.global.get(&t.root))
             .cloned()
             .unwrap_or_default();
@@ -2337,6 +2376,7 @@ impl BrowseView {
         // Browsing the other site than the target's pack: what's installed
         // from here doesn't come from where the pack's mods do.
         let off_site = target
+            .as_ref()
             .filter(|_| !self.bookmarked && !is_pack)
             .and_then(|t| t.pack.as_ref().map(|p| ((t.name.clone(), t.root.to_string_lossy().into_owned()), hopper::modrinth::is_mr(p.project_id))))
             .filter(|(_, pack_mr)| *pack_mr != self.modrinth);
@@ -2347,16 +2387,7 @@ impl BrowseView {
         if some_need_target && target.is_none() {
             tail.push_str(" · pick an instance on the left to install");
         }
-        let cards: Vec<AnyElement> = saved
-            .as_ref()
-            .unwrap_or(&self.results)
-            .iter()
-            .map(|m| self.result_card(m, target, &global, cx))
-            .collect();
-        let more = saved.is_none()
-            && !self.loading
-            && !self.results.is_empty()
-            && (self.results.len() as u32) < self.total.min(10_000);
+        self.sync_list(saved.as_deref().unwrap_or(&self.results));
         let sort_bar = saved.is_none().then(|| self.sort_bar(cx));
         let did_you_mean = self.did_you_mean_row(saved.is_none(), cx);
         let theme = cx.theme();
@@ -2484,8 +2515,8 @@ impl BrowseView {
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .child(self.result_list(cards, more, saved.is_none(), cx))
-                    .vertical_scrollbar(&self.scroll)
+                    .child(self.result_list(Rc::new(RowsFor { target, global, saved: saved.clone() }), cx))
+                    .vertical_scrollbar(&self.list)
                     .when(!self.fresh.is_empty() && saved.is_none(), |r| {
                         let n = self.fresh.len();
                         r.child(
@@ -2554,7 +2585,7 @@ impl BrowseView {
         if self.selected.as_ref().is_none_or(|s| s.id != m.id) {
             self.open_detail(m, cx);
         }
-        self.scroll.scroll_to_item(ix);
+        self.list.scroll_to_reveal_item(ix);
         cx.notify();
     }
 
@@ -2588,9 +2619,27 @@ impl BrowseView {
         !installed && !pending && hold.is_none() && (is_pack || target.is_some())
     }
 
-    /// The result cards, scrolled by [`Self::scroll`] so the place is kept
-    /// while Browse is hidden.
-    fn result_list(&self, cards: Vec<AnyElement>, more: bool, searching: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// Splices the list's rows to match `shown`, so only rows that changed
+    /// are measured again and the scroll spot stays (a new query scrolls
+    /// to the top itself).
+    fn sync_list(&self, shown: &[cf::Mod]) {
+        let ids: Vec<u64> = shown.iter().map(|m| m.id).chain([LIST_END]).collect();
+        let mut old = self.list_ids.borrow_mut();
+        if *old == ids {
+            return;
+        }
+        let pre = old.iter().zip(&ids).take_while(|(a, b)| a == b).count();
+        let max_suf = old.len().min(ids.len()) - pre;
+        let suf = old.iter().rev().zip(ids.iter().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
+        self.list.splice(pre..old.len() - suf, ids.len() - pre - suf);
+        *old = ids;
+    }
+
+    /// The result cards. Only the rows in view (and a screen's worth
+    /// around them) are built, so a scroll frame costs the same with a
+    /// hundred results loaded as with ten.
+    fn result_list(&self, rows: Rc<RowsFor>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let view = cx.entity().downgrade();
         v_flex()
             .id("browse-results")
             .track_focus(&self.list_focus)
@@ -2608,13 +2657,34 @@ impl BrowseView {
                 cx.notify();
             }))
             .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
+            .child(
+                list(self.list.clone(), move |ix, _, cx| {
+                    view.update(cx, |this, cx| this.result_row(ix, &rows, cx))
+                        .unwrap_or_else(|_| div().into_any_element())
+                })
+                .size_full(),
+            )
+    }
+
+    /// Row `ix` of the list: a card, or after the last one the end, which
+    /// asks for the next page once it nears the view.
+    fn result_row(&self, ix: usize, rows: &RowsFor, cx: &mut Context<Self>) -> AnyElement {
+        let shown = rows.saved.as_deref().unwrap_or(&self.results);
+        if let Some(m) = shown.get(ix) {
+            return div()
+                .px_6()
+                .pb_2()
+                .child(self.result_card(m, rows.target.as_ref(), &rows.global, cx))
+                .into_any_element();
+        }
+        let searching = rows.saved.is_none();
+        let more = searching
+            && !self.loading
+            && !self.results.is_empty()
+            && (self.results.len() as u32) < self.total.min(10_000);
+        v_flex()
             .px_6()
-            .pb_6()
-            .gap_2()
-            .children(cards)
-            // The next page loads once the list's end nears the view.
+            .pb_4()
             .when(more, |r| {
                 let view = cx.entity().downgrade();
                 r.child(
@@ -2647,6 +2717,7 @@ impl BrowseView {
                         .child(widgets::caption("Loading more", cx)),
                 )
             })
+            .into_any_element()
     }
 
     /// The sorts as a row of icons right of the results count: the picked
@@ -3875,7 +3946,7 @@ impl Render for BrowseView {
                         |b, me, _, cx| {
                             b.logos.clear(me);
                             let t = b.target(cx);
-                            b.results(t.as_ref(), cx).into_any_element()
+                            b.results(t, cx).into_any_element()
                         },
                         cx,
                     ),

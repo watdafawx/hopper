@@ -269,6 +269,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Content, "github-token", "GitHub token", "Optional. Without one GitHub allows 60 checks an hour; Hopper asks only when something may have changed. A token (no scopes needed) raises that to 5,000. Kept in Windows Credential Manager.", "github token api rate limit"),
     e(C::Appearance, "theme", "Theme", "Hopper's colors. Your own theme files go in the folder next to it.", "dark light color colour glass mica"),
     e(C::Appearance, "still-header", "Still header", "Keep the header on instance and server pages still. Off, its colors drift slowly and react to what you do; they stop while Hopper isn't the focused window, after 20 seconds without input, and with reduced motion.", "animation animated motion gradient background drift header hero"),
+    e(C::Appearance, "smooth-scroll", "Smooth scrolling", "The mouse wheel glides lists and pages instead of jumping a few lines at a time. Touchpads scroll the same either way. Off with reduced motion.", "scroll scrolling wheel mouse smooth animation motion"),
     e(C::Appearance, "zoom", "Zoom", "Ctrl + and Ctrl - change it anywhere; Ctrl 0 resets it.", "scale size font bigger smaller"),
     e(C::Updates, "self-update", "Hopper updates", "Hopper checks for new releases at start and every 30 minutes, and updates itself from them.", "version upgrade release"),
     e(C::Updates, "update-repo", "Update source", "The GitHub repository (owner/name) Hopper's releases come from.", "github repo repository"),
@@ -2249,6 +2250,7 @@ impl SettingsPage {
                 Row::new("theme").control(theme),
                 Row::new("zoom").control(div().w(rems(9.)).child(zoom_picker)),
                 Row::new("still-header").control(self.switch("still-header", s.still_header, |st, v| st.still_header = v, cx)),
+                Row::new("smooth-scroll").control(self.switch("smooth-scroll", s.smooth_scroll, |st, v| st.smooth_scroll = v, cx)),
             ],
         )]
     }

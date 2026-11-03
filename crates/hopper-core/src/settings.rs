@@ -205,6 +205,9 @@ pub struct Settings {
     /// Keep the instance and server header still (the blurred art) instead
     /// of the slow color drift.
     pub still_header: bool,
+    /// Mouse-wheel scrolling glides instead of jumping a few lines at a
+    /// time (touchpads scroll smoothly either way).
+    pub smooth_scroll: bool,
     /// Languages (`translate::Lang::code`) translated without asking.
     pub translate_always: Vec<String>,
     /// How long `.hopper-backups` keeps the files behind Undo.
@@ -524,6 +527,7 @@ impl Default for Settings {
             update_holds: Vec::new(),
             translate: false,
             still_header: false,
+            smooth_scroll: true,
             translate_always: Vec::new(),
             backup_retention: Default::default(),
             mc_options: Default::default(),

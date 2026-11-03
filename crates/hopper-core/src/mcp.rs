@@ -86,6 +86,9 @@ pub enum Command {
         x: f32,
         y: f32,
         dy: f32,
+        /// Mouse-wheel notches instead of pixels (smooth scrolling animates
+        /// these; pixel scrolls stay direct, like a touchpad).
+        notches: bool,
     },
     Type(String),
     Key(String),
@@ -372,9 +375,10 @@ fn window_tools() -> Value {
         },
         {
             "name": "scroll",
-            "description": "Scroll at screenshot pixel coordinates. Positive dy scrolls down.",
+            "description": "Scroll at screenshot pixel coordinates. Positive dy scrolls down. With notches true, dy counts mouse-wheel notches instead of pixels.",
             "inputSchema": { "type": "object", "required": ["x", "y", "dy"], "properties": {
-                "x": { "type": "number" }, "y": { "type": "number" }, "dy": { "type": "number" }
+                "x": { "type": "number" }, "y": { "type": "number" }, "dy": { "type": "number" },
+                "notches": { "type": "boolean" }
             } }
         },
         {
@@ -441,6 +445,7 @@ fn command_for(name: &str, args: &Value) -> Result<Command, String> {
             x: num("x")?,
             y: num("y")?,
             dy: num("dy")?,
+            notches: args["notches"].as_bool().unwrap_or(false),
         },
         "type" => Command::Type(args["text"].as_str().ok_or("missing 'text'")?.to_string()),
         "key" => Command::Key(args["name"].as_str().ok_or("missing 'name'")?.to_string()),

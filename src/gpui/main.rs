@@ -47,6 +47,8 @@ mod pack_update;
 mod palette;
 mod peers;
 mod perf_view;
+mod frame_log;
+mod smooth_scroll;
 mod revert_ui;
 mod rigsync;
 mod server_control;
