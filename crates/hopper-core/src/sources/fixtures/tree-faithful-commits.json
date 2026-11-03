@@ -1,0 +1,84 @@
+[
+  {
+    "sha": "989f3bfcc77c024e0b25594222a1fe0dcffe8637",
+    "node_id": "C_kwDOKVrou9oAKDk4OWYzYmZjYzc3YzAyNGUwYjI1NTk0MjIyYTFmZTBkY2ZmZTg2Mzc",
+    "commit": {
+      "author": {
+        "name": "Evorp",
+        "email": "75297863+3vorp@users.noreply.github.com",
+        "date": "2026-08-01T04:44:17Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2026-08-01T04:44:17Z"
+      },
+      "message": "Faithful License v4",
+      "tree": {
+        "sha": "9fcd4f95ab88d61c4a516928f84c9669b68cd8fa",
+        "url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/trees/9fcd4f95ab88d61c4a516928f84c9669b68cd8fa"
+      },
+      "url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/commits/989f3bfcc77c024e0b25594222a1fe0dcffe8637",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJqbXmhCRC1aQ7uu5UhlAAAosMQAG1OpM+NzaZ9MSlCSqxSLA6k\nPCniH+KOSlnFVevNKecrhBbPr9q1r1AKFLFFn/bWvVAoPj8RgxNZon4h8g+Mz0uu\nEI00iBHRj052xKDvmG27GiicfxVuXc8Ey0CPqN72mNu9n30g+RCQejEtm9zjdDOy\nbJvvkAM1kjBy35hZcSeexMSh/GMMtWpE56Wz9GYVKQz5mvRiDXUP3Orgg8VVy0f1\n6/5WeR37H74t8HOm8MgTpkqFpkV0nsIA/+gGC1X3Yllzk7Z0I6eUDD69xtOOrZp+\ne1XCg3fgHTahcZyLBtG4mVI8K7D+uSfRucqUF79hrm0HLFm72TqNejRntlccaBbB\n7NW7Ih3U7MGXvuEEHGdN6x+Whrsc9+4IYhDH/RfPB/U/+hqcH78Q07usFVuOGYi7\nMd0X3mLshAFCooMWLH98VicjsFB5TZ4o3GtxdjiUmQd2TQphpfRW4eIsJQKEHSeL\ns3jiLvil+wpmzn0vUsabF/ZCRKBrhMa9VXvrXw+uI3nfrBgqBzomosJeDZ65kDKW\nS6G5ClgMYqzD1jk09985PeD1i/u0yd+5K29ycWQkkOZ/Vu5SOZXKtLiIPFct6bUQ\nTPnSPmfY2gP8U7bLVZrF/vHQ1oA4VKP5WVoTPReLTH5xjEwUl9iHcQZKg+Gbu15F\nZbfG2qCym5I5aUKa/djC\n=f5t/\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree 9fcd4f95ab88d61c4a516928f84c9669b68cd8fa\nparent 96fd81c38aba9f395bc6f7650c7480d6ea946437\nauthor Evorp <75297863+3vorp@users.noreply.github.com> 1785559457 -0700\ncommitter GitHub <noreply@github.com> 1785559457 -0700\n\nFaithful License v4",
+        "verified_at": "2026-08-01T04:44:18Z"
+      }
+    },
+    "url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/commits/989f3bfcc77c024e0b25594222a1fe0dcffe8637",
+    "html_url": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/commit/989f3bfcc77c024e0b25594222a1fe0dcffe8637",
+    "comments_url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/commits/989f3bfcc77c024e0b25594222a1fe0dcffe8637/comments",
+    "author": {
+      "login": "3vorp",
+      "id": 75297863,
+      "node_id": "MDQ6VXNlcjc1Mjk3ODYz",
+      "avatar_url": "https://avatars.githubusercontent.com/u/75297863?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/3vorp",
+      "html_url": "https://github.com/3vorp",
+      "followers_url": "https://api.github.com/users/3vorp/followers",
+      "following_url": "https://api.github.com/users/3vorp/following{/other_user}",
+      "gists_url": "https://api.github.com/users/3vorp/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/3vorp/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/3vorp/subscriptions",
+      "organizations_url": "https://api.github.com/users/3vorp/orgs",
+      "repos_url": "https://api.github.com/users/3vorp/repos",
+      "events_url": "https://api.github.com/users/3vorp/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/3vorp/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "96fd81c38aba9f395bc6f7650c7480d6ea946437",
+        "url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/commits/96fd81c38aba9f395bc6f7650c7480d6ea946437",
+        "html_url": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/commit/96fd81c38aba9f395bc6f7650c7480d6ea946437"
+      }
+    ]
+  }
+]

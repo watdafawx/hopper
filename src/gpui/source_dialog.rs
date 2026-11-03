@@ -3,6 +3,10 @@
 //! Hopper finds the file for the instance (or lists the files when it
 //! can't tell), says who publishes it the first time, then adds it.
 //! The work is in `hopper::sources`.
+//!
+//! The Resource packs and Shaders tabs open it for a pack ([`open_add_pack`]):
+//! a GitHub folder on a branch, a release's zip or a link, put into the
+//! location picked (This instance, Paxi, Global Packs).
 
 use crate::dialogs::footer;
 use crate::store::{Msg, Store};
@@ -12,7 +16,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::sources::{self, Fit, Resolved};
@@ -28,9 +32,21 @@ enum Stage {
     Failed(String),
 }
 
+/// Adding a pack: its kind and where it can go.
+struct PackTarget {
+    class: u32,
+    /// (label, folder) of each location, from the Packs tab's list.
+    places: Vec<(String, PathBuf)>,
+    picked: usize,
+}
+
+/// Downloads bigger than this get a word before they start.
+const BIG: u64 = 50 << 20;
+
 pub struct SourceForm {
     store: Entity<Store>,
     root: PathBuf,
+    pack: Option<PackTarget>,
     /// Following a source for this installed mod (file name, mod name).
     follow: Option<(String, String)>,
     link: Entity<InputState>,
@@ -44,10 +60,17 @@ pub struct SourceForm {
 }
 
 impl SourceForm {
-    fn new(store: Entity<Store>, root: PathBuf, follow: Option<(String, String)>, link: &str, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let link_in = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("https://github.com/owner/repo")
-        });
+    fn new(
+        store: Entity<Store>,
+        root: PathBuf,
+        follow: Option<(String, String)>,
+        pack: Option<PackTarget>,
+        link: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let hint = if pack.is_some() { "https://github.com/owner/repo/tree/branch" } else { "https://github.com/owner/repo" };
+        let link_in = cx.new(|cx| InputState::new(window, cx).placeholder(hint));
         if !link.is_empty() {
             link_in.update(cx, |s, cx| s.set_value(link.to_string(), window, cx));
         }
@@ -68,6 +91,7 @@ impl SourceForm {
         let mut this = SourceForm {
             store,
             root,
+            pack,
             follow,
             link: link_in,
             pre: false,
@@ -111,9 +135,16 @@ impl SourceForm {
             .detach();
             return;
         }
+        let class = self.pack.as_ref().map(|p| p.class);
         cx.spawn(async move |this, cx| {
             let r = cx
-                .background_spawn(async move { sources::resolve(&link, &mc, loader, pre).map_err(|e| format!("{e:#}")) })
+                .background_spawn(async move {
+                    match class {
+                        Some(class) => sources::packs::resolve(&link, &mc, class, pre),
+                        None => sources::resolve(&link, &mc, loader, pre),
+                    }
+                    .map_err(|e| format!("{e:#}"))
+                })
                 .await;
             this.update(cx, |this, cx| {
                 match r {
@@ -146,6 +177,9 @@ impl SourceForm {
     }
 
     fn title(&self) -> String {
+        if let Some(p) = &self.pack {
+            return format!("Add a {} from GitHub or a link", what(p.class));
+        }
         match &self.follow {
             Some((_, name)) => format!("Follow a source for {name}"),
             None => "Add from GitHub or a link".into(),
@@ -197,6 +231,23 @@ impl SourceForm {
             return true;
         }
         let (Some(r), Some(i)) = (this.resolved().cloned(), this.chosen) else { return false };
+        if let Some(p) = &this.pack {
+            let Some((place, dir)) = p.places.get(p.picked).cloned() else { return false };
+            let (store, root) = (this.store.clone(), this.root.clone());
+            if let Err(e) = sources::trust(&r.source) {
+                window.push_notification(gpui_kit::component::notification::Notification::error(format!("{e:#}")), cx);
+            }
+            let name = r.candidates.get(i).map(|c| c.file_name.clone()).unwrap_or_default();
+            store.update(cx, |s, _| {
+                s.spawn_instance_job(&root.clone(), format!("Adding {name}"), move |job| {
+                    let new = sources::packs::install(&root, &dir, &r, i, job)?;
+                    let file = new.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    job.detail(format!("{file} is in {place}. Updates come from {}.", r.source.publisher));
+                    Ok(Msg::InstanceChanged(root))
+                });
+            });
+            return true;
+        }
         let Some(inst) = this.store.read(cx).instance(&this.root).cloned() else { return true };
         let follow = this.follow.clone();
         let store = this.store.clone();
@@ -225,6 +276,8 @@ impl SourceForm {
 
     fn picker(&self, r: &Resolved, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
+        // A branch folder's choices are the folders in it.
+        let folders = sources::tree::of_url(&r.source.url).is_some();
         v_flex()
             .gap_0p5()
             .children(r.candidates.iter().enumerate().map(|(i, c)| {
@@ -243,8 +296,8 @@ impl SourceForm {
                     .rounded(px(crate::theme::RADIUS))
                     .clickable(cx)
                     .child(Icon::new(if chosen { IconName::CircleCheck } else { IconName::Circle }).small())
-                    .child(div().flex_1().min_w_0().text_sm().truncate().child(c.file_name.clone()))
-                    .child(widgets::chip(tag_color).xsmall().child(c.fit.tag()))
+                    .child(div().flex_1().min_w_0().text_sm().truncate().child(if folders { c.title.clone() } else { c.file_name.clone() }))
+                    .when(!folders, |d| d.child(widgets::chip(tag_color).xsmall().child(c.fit.tag())))
                     .child(
                         div()
                             .w(rems(4.5))
@@ -309,7 +362,14 @@ impl Render for SourceForm {
         body = body.child(
             v_flex()
                 .gap_1()
-                .child(widgets::caption("A GitHub repo or release, a Maven repo, a Jenkins job, or a link to a .jar", cx))
+                .child(widgets::caption(
+                    if self.pack.is_some() {
+                        "A folder on a GitHub branch, a GitHub repo or release with .zip files, or a link to a .zip"
+                    } else {
+                        "A GitHub repo or release, a Maven repo, a Jenkins job, or a link to a .jar"
+                    },
+                    cx,
+                ))
                 .child(
                     h_flex()
                         .gap_2()
@@ -324,6 +384,25 @@ impl Render for SourceForm {
                         ),
                 ),
         );
+        if let Some(p) = self.pack.as_ref().filter(|p| p.places.len() > 1) {
+            body = body.child(
+                v_flex().gap_1().child(widgets::caption("Goes to", cx)).child(h_flex().gap_1().flex_wrap().children(
+                    p.places.iter().enumerate().map(|(i, (label, _))| {
+                        Button::new(("src-place", i))
+                            .small()
+                            .outline()
+                            .selected(i == p.picked)
+                            .label(label.clone())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(p) = this.pack.as_mut() {
+                                    p.picked = i;
+                                }
+                                cx.notify();
+                            }))
+                    }),
+                )),
+            );
+        }
         body = body.child(
             Checkbox::new("src-pre")
                 .small()
@@ -392,10 +471,14 @@ impl Render for SourceForm {
             Stage::Found(r) => {
                 let r = (**r).clone();
                 let chosen = self.chosen.and_then(|i| r.candidates.get(i)).cloned();
+                let folders = sources::tree::of_url(&r.source.url).is_some();
                 if r.candidates.is_empty() {
-                    body = body.child(widgets::caption("This source has no jar files for Hopper to add.", cx));
+                    let none = if self.pack.is_some() { "This source has no .zip files for Hopper to add." } else { "This source has no jar files for Hopper to add." };
+                    body = body.child(widgets::caption(none, cx));
                 } else if self.picking {
-                    let why = if r.pick.is_none() {
+                    let why = if folders {
+                        "This folder isn't a pack itself. Pick the folder that is; Hopper checks it has a pack.mcmeta after download."
+                    } else if r.pick.is_none() {
                         "None of these say they fit this instance. Pick one only if you know it does; Hopper reads the jar after download and stops if it doesn't."
                     } else {
                         "Several files fit. Pick the one you want; updates keep to the same kind of file."
@@ -423,9 +506,11 @@ impl Render for SourceForm {
                                     .child(widgets::caption(
                                         [
                                             c.title.clone(),
-                                            size(c.size),
-                                            match c.fit {
-                                                Fit::Good => "fits this instance".into(),
+                                            if folders && c.size > 0 { format!("download up to {}", size(c.size)) } else { size(c.size) },
+                                            match (&self.pack, &c.fit) {
+                                                (_, Fit::Good) => "fits this instance".into(),
+                                                (Some(_), _) if folders => format!("updates come from new commits on {}", branch_of(&r.source.url)),
+                                                (Some(_), _) => "Hopper checks it's a pack after download".into(),
                                                 _ => "Hopper checks the jar after download".into(),
                                             },
                                         ]
@@ -450,6 +535,15 @@ impl Render for SourceForm {
                             }),
                     );
                 }
+                // A branch is downloaded whole to build the pack.
+                if let Some(c) = chosen.as_ref().filter(|c| folders && c.size > BIG) {
+                    body = body.child(
+                        widgets::notice_bar(theme.warning, IconName::TriangleAlert, cx).child(div().flex_1().min_w_0().text_sm().child(format!(
+                            "This repo is big (up to {}). Hopper downloads it once to build the pack, and again for each update.",
+                            size(c.size)
+                        ))),
+                    );
+                }
                 if !sources::trusted(&r.source) && chosen.is_some() {
                     let by = chosen.as_ref().map(|c| c.author.clone()).filter(|a| !a.is_empty());
                     body = body.child(trust_note(&r.source.publisher, r.source.kind.label(), by, &theme));
@@ -462,7 +556,19 @@ impl Render for SourceForm {
 }
 
 fn open(store: Entity<Store>, root: PathBuf, follow: Option<(String, String)>, link: String, window: &mut Window, cx: &mut App) {
-    let form = cx.new(|cx| SourceForm::new(store, root, follow, &link, window, cx));
+    open_with(store, root, follow, None, link, window, cx)
+}
+
+fn open_with(
+    store: Entity<Store>,
+    root: PathBuf,
+    follow: Option<(String, String)>,
+    pack: Option<PackTarget>,
+    link: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let form = cx.new(|cx| SourceForm::new(store, root, follow, pack, &link, window, cx));
     window.open_dialog(cx, move |dialog, window, cx| {
         let f2 = form.clone();
         let (title, foot) = {
@@ -483,6 +589,36 @@ fn open(store: Entity<Store>, root: PathBuf, follow: Option<(String, String)>, l
 /// first when it's off.
 pub fn open_add(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut App) {
     with_opt_in(store, window, cx, move |store, window, cx| open(store, root.clone(), None, String::new(), window, cx));
+}
+
+/// The Resource packs or Shaders tab's "From GitHub or a link…": a pack
+/// of `class` into one of the instance's pack locations, `dest` (a folder
+/// inside the instance, such as Paxi's) picked first when given.
+pub fn open_add_pack(store: Entity<Store>, root: PathBuf, class: u32, dest: Option<String>, window: &mut Window, cx: &mut App) {
+    let Some(inst) = store.read(cx).instance(&root).cloned() else { return };
+    let places: Vec<(String, PathBuf)> =
+        hopper::packs::locations(&inst, class).into_iter().filter(|l| l.world.is_none()).map(|l| (l.label, l.dir)).collect();
+    let picked = dest
+        .map(|d| root.join(d))
+        .and_then(|d| places.iter().position(|(_, p)| *p == d))
+        .unwrap_or(0);
+    with_opt_in(store, window, cx, move |store, window, cx| {
+        let pack = PackTarget { class, places: places.clone(), picked };
+        open_with(store, root.clone(), None, Some(pack), String::new(), window, cx)
+    });
+}
+
+fn what(class: u32) -> &'static str {
+    match class {
+        hopper::cf::CLASS_SHADERS => "shader pack",
+        hopper::cf::CLASS_DATAPACKS => "data pack",
+        _ => "resource pack",
+    }
+}
+
+/// "1.20.x" of "owner/repo/tree/1.20.x/folder".
+fn branch_of(url: &str) -> String {
+    sources::tree::of_url(url).map(|t| t.branch).unwrap_or_default()
 }
 
 /// A mod's "Follow a source…" (also "Change source…").

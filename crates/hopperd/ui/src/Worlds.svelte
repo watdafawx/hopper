@@ -4,7 +4,8 @@
   // Active. New world, Make active, Reset and delete (a backup first only
   // when ticked), upload,
   // download, and pre-generation with Chunky on the active world.
-  import { Globe, FolderOpen, Download, Archive, RotateCcw, Trash2, Plus, Upload, ChevronRight, ChevronDown, Pause, Play, X, AlertTriangle, Package } from '@lucide/svelte';
+  import { Globe, FolderOpen, Download, Archive, RotateCcw, Trash2, Plus, Upload, ChevronRight, ChevronDown, Pause, Play, X, AlertTriangle, Package, Link } from '@lucide/svelte';
+  import SourceAdd from './SourceAdd.svelte';
   import { relative, fullDate, plural } from './lib/worlds.js';
   import { api, post, del } from './lib/api.js';
   import { bytes } from './lib/format.js';
@@ -27,6 +28,11 @@
   let dlg = $state(null); // { kind: 'new' | 'reset' | 'pregen', ... }
   let error = $state('');
   let fileInput = $state();
+  // Adding a data pack from GitHub or a link: { dest }.
+  let sourcePack = $state(null);
+  // Shown only with mods from links on (Settings › Mod sources), as on desktop.
+  let linksOn = $state(false);
+  api('/settings/sources').then((r) => (linksOn = !!r.allowed)).catch(() => {});
 
   async function load() {
     try {
@@ -247,6 +253,7 @@
           {/each}
           <div class="row">
             <a class="btn sm" href="#/browse/datapacks/{enc(sid)}"><Plus size={13} />Add data packs</a>
+            {#if linksOn}<button class="btn sm" onclick={() => (sourcePack = { dest: `${w.name}/datapacks` })}><Link size={13} />From GitHub or a link…</button>{/if}
             <button class="btn sm ghost" onclick={() => openFiles(`${w.name}/datapacks`)}><FolderOpen size={13} />Open folder</button>
           </div>
         </div>
@@ -359,6 +366,8 @@
     </div>
   </div>
 {/if}
+
+{#if sourcePack}<SourceAdd {server} pack={sourcePack} onClose={() => (sourcePack = null)} onChanged={load} />{/if}
 
 <style>
   .top { margin-bottom: 10px; gap: 8px; flex-wrap: wrap; }

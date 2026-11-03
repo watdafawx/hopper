@@ -71,7 +71,7 @@ pub fn asset_in_link(link: &str) -> Option<String> {
     (!name.is_empty()).then(|| percent_decode(name))
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -98,7 +98,7 @@ fn releases_url(repo: &str) -> String {
 pub fn candidates(src: &ModSource) -> anyhow::Result<Vec<Candidate>> {
     let body = super::http::get_text(&releases_url(&src.url), true)?;
     let releases = parse_releases(&body)?;
-    Ok(from_releases(&releases))
+    Ok(from_releases_for(&releases, src.class))
 }
 
 /// One release by its tag, for a link to a release older than the recent
@@ -107,7 +107,7 @@ pub fn release_by_tag(src: &ModSource, tag: &str) -> anyhow::Result<Vec<Candidat
     let tag_path: String = tag.split('/').map(|p| p.to_string()).collect::<Vec<_>>().join("%2F");
     let url = format!("https://api.github.com/repos/{}/releases/tags/{tag_path}", src.url);
     let r: Release = serde_json::from_str(&super::http::get_text(&url, true)?)?;
-    Ok(from_releases(std::slice::from_ref(&r)))
+    Ok(from_releases_for(std::slice::from_ref(&r), src.class))
 }
 
 pub fn parse_releases(json: &str) -> anyhow::Result<Vec<Release>> {
@@ -116,9 +116,16 @@ pub fn parse_releases(json: &str) -> anyhow::Result<Vec<Release>> {
 
 /// The candidates in a releases list: drafts skipped, jars only.
 pub fn from_releases(releases: &[Release]) -> Vec<Candidate> {
+    from_releases_for(releases, 0)
+}
+
+/// [`from_releases`] for a source of `class`: zips for packs, jars for
+/// mods (0).
+pub fn from_releases_for(releases: &[Release], class: u32) -> Vec<Candidate> {
+    let ext = if class == 0 { ".jar" } else { ".zip" };
     let mut out = Vec::new();
     for r in releases.iter().filter(|r| !r.draft) {
-        for a in r.assets.iter().filter(|a| a.name.to_ascii_lowercase().ends_with(".jar")) {
+        for a in r.assets.iter().filter(|a| a.name.to_ascii_lowercase().ends_with(ext)) {
             out.push(Candidate {
                 file_name: a.name.clone(),
                 url: a.browser_download_url.clone(),

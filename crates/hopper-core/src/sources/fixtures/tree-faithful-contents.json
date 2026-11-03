@@ -1,0 +1,82 @@
+[
+  {
+    "name": ".gitignore",
+    "path": ".gitignore",
+    "sha": "1a0016a5381465a17bded69299276e0018046b7d",
+    "size": 16,
+    "url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/.gitignore?ref=1.20.x",
+    "html_url": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/blob/1.20.x/.gitignore",
+    "git_url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/blobs/1a0016a5381465a17bded69299276e0018046b7d",
+    "download_url": "https://raw.githubusercontent.com/Faithful-Resource-Pack/Faithful-32x-Mods/1.20.x/.gitignore",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/.gitignore?ref=1.20.x",
+      "git": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/blobs/1a0016a5381465a17bded69299276e0018046b7d",
+      "html": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/blob/1.20.x/.gitignore"
+    }
+  },
+  {
+    "name": "LICENSE.txt",
+    "path": "LICENSE.txt",
+    "sha": "0ae9cfa101e1cf438027adf8714f8a14441fe61f",
+    "size": 4189,
+    "url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/LICENSE.txt?ref=1.20.x",
+    "html_url": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/blob/1.20.x/LICENSE.txt",
+    "git_url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/blobs/0ae9cfa101e1cf438027adf8714f8a14441fe61f",
+    "download_url": "https://raw.githubusercontent.com/Faithful-Resource-Pack/Faithful-32x-Mods/1.20.x/LICENSE.txt",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/LICENSE.txt?ref=1.20.x",
+      "git": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/blobs/0ae9cfa101e1cf438027adf8714f8a14441fe61f",
+      "html": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/blob/1.20.x/LICENSE.txt"
+    }
+  },
+  {
+    "name": "assets",
+    "path": "assets",
+    "sha": "50c04ec43e95919b8d011d9d16766b47cdc0e591",
+    "size": 0,
+    "url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/assets?ref=1.20.x",
+    "html_url": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x/assets",
+    "git_url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/trees/50c04ec43e95919b8d011d9d16766b47cdc0e591",
+    "download_url": null,
+    "type": "dir",
+    "_links": {
+      "self": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/assets?ref=1.20.x",
+      "git": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/trees/50c04ec43e95919b8d011d9d16766b47cdc0e591",
+      "html": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x/assets"
+    }
+  },
+  {
+    "name": "pack.mcmeta",
+    "path": "pack.mcmeta",
+    "sha": "c778f8c78d9b36e7b5eb14ddcc479a701ca42014",
+    "size": 168,
+    "url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/pack.mcmeta?ref=1.20.x",
+    "html_url": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/blob/1.20.x/pack.mcmeta",
+    "git_url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/blobs/c778f8c78d9b36e7b5eb14ddcc479a701ca42014",
+    "download_url": "https://raw.githubusercontent.com/Faithful-Resource-Pack/Faithful-32x-Mods/1.20.x/pack.mcmeta",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/pack.mcmeta?ref=1.20.x",
+      "git": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/blobs/c778f8c78d9b36e7b5eb14ddcc479a701ca42014",
+      "html": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/blob/1.20.x/pack.mcmeta"
+    }
+  },
+  {
+    "name": "pack.png",
+    "path": "pack.png",
+    "sha": "bad67b006e0e2ae3d7323231755c0ffa73c6428f",
+    "size": 67726,
+    "url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/pack.png?ref=1.20.x",
+    "html_url": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/blob/1.20.x/pack.png",
+    "git_url": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/blobs/bad67b006e0e2ae3d7323231755c0ffa73c6428f",
+    "download_url": "https://raw.githubusercontent.com/Faithful-Resource-Pack/Faithful-32x-Mods/1.20.x/pack.png",
+    "type": "file",
+    "_links": {
+      "self": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/contents/pack.png?ref=1.20.x",
+      "git": "https://api.github.com/repos/Faithful-Resource-Pack/Faithful-32x-Mods/git/blobs/bad67b006e0e2ae3d7323231755c0ffa73c6428f",
+      "html": "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/blob/1.20.x/pack.png"
+    }
+  }
+]

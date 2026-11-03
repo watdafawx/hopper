@@ -292,8 +292,10 @@ fn change_tools() -> Value {
             "inputSchema": { "type": "object", "required": ["instance", "link"], "properties": {
                 "instance": instance_arg(),
                 "link": { "type": "string" },
-                "asset": { "type": "string", "description": "The file to take when the release has several (from look_up_source); default Hopper's pick" },
-                "prerelease": { "type": "boolean" }
+                "asset": { "type": "string", "description": "The file to take when the release has several (from look_up_source); default Hopper's pick. For a branch folder that holds several packs, the folder's name" },
+                "prerelease": { "type": "boolean" },
+                "kind": { "type": "string", "enum": ["resourcepacks", "shaders"], "description": "Add a pack instead of a mod: a folder on a GitHub branch (github.com/owner/repo/tree/branch[/folder]), a release's .zip or a link to a .zip" },
+                "location": { "type": "string", "description": "Packs: where it goes, a location key or name from list_packs (default this instance)" }
             } }
         },
         {

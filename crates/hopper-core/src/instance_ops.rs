@@ -311,6 +311,10 @@ pub fn download_server_pack(
 
 /// Downloads a file to a temp path, or explains how to get it by hand.
 fn fetch(m: &cf::Mod, f: &cf::File, job: &Job) -> anyhow::Result<PathBuf> {
+    // A pack from GitHub or a link: built or downloaded, then checked.
+    if let Some(s) = &f.source {
+        return crate::sources::packs::fetch(f, s, job);
+    }
     let url = cf::download_url(f).map_err(|_| {
         anyhow::anyhow!(
             "The author blocks downloads from other apps; get it from {}",
@@ -517,6 +521,10 @@ pub fn put_pack(
     }
     if let Some(old) = replaces.filter(|o| *o != dest && o.exists()) {
         crate::sync::backup_into(root, old)?;
+    }
+    // Remembered by name and hash, so it's known wherever it's moved.
+    if let Some(s) = &f.source {
+        crate::sources::packs::record(&dest, &s.source, &m.name, &f.file_date)?;
     }
     Ok(Placed::File(dest))
 }
@@ -1262,7 +1270,9 @@ pub fn identify_packs(paths: &[PathBuf], class: u32) -> (std::collections::HashM
     use std::collections::HashMap;
     let mut by_fp: HashMap<u32, Vec<PathBuf>> = HashMap::new();
     let mut by_sha: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    for p in paths.iter().filter(|p| p.is_file()) {
+    // Packs added from GitHub or a link are known on this PC already.
+    let from_sources = crate::sources::packs::identify(paths);
+    for p in paths.iter().filter(|p| p.is_file() && !from_sources.contains_key(*p)) {
         let Ok(bytes) = fs::read(p) else { continue };
         by_fp.entry(cf::fingerprint(&bytes)).or_default().push(p.clone());
         by_sha.entry(crate::modrinth::sha1(&bytes)).or_default().push(p.clone());
@@ -1296,7 +1306,10 @@ pub fn identify_packs(paths: &[PathBuf], class: u32) -> (std::collections::HashM
             }
         }
     }
-    let mut out: HashMap<PathBuf, PackMatch> = HashMap::new();
+    let mut out: HashMap<PathBuf, PackMatch> = from_sources
+        .into_iter()
+        .map(|(p, (project, file))| (p, PackMatch { project, file: Some(file) }))
+        .collect();
     let mut ids: Vec<u64> = cf_ids.values().map(|(id, _)| *id).collect();
     ids.sort_unstable();
     ids.dedup();
