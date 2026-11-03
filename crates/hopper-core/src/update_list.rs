@@ -14,8 +14,39 @@
 
 use crate::install::Update;
 use crate::instances::Addon;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// The content kinds an instance lists in its own tab, in tab order: mods,
+/// resource packs, shaders, data packs.
+pub const KINDS: [u32; 4] = [
+    crate::cf::CLASS_MODS,
+    crate::cf::CLASS_RESOURCE_PACKS,
+    crate::cf::CLASS_SHADERS,
+    crate::cf::CLASS_DATAPACKS,
+];
+
+/// Whether an addon is listed in a kind's tab. Mods saved before Hopper
+/// noted a class have none, and count as mods.
+pub fn in_class(a: &Addon, class: u32) -> bool {
+    a.class_id == class || (class == crate::cf::CLASS_MODS && a.class_id == 0)
+}
+
+/// The offers for one kind, one per project, and only for projects still
+/// installed as that kind. A saved list can name a project that was removed
+/// since; counting it would show an update nobody can find.
+pub fn pending_in<'a>(addons: &'a [Addon], list: &'a [Update], class: u32) -> impl Iterator<Item = &'a Update> + 'a {
+    let mut seen = HashSet::new();
+    list.iter().filter(move |u| {
+        addons.iter().any(|a| a.project_id == u.project_id && in_class(a, class)) && seen.insert(u.project_id)
+    })
+}
+
+/// How many offers each kind has, in [`KINDS`] order. The header and the
+/// content tabs count from the same filter, so their numbers agree.
+pub fn counts(addons: &[Addon], list: &[Update]) -> [usize; 4] {
+    KINDS.map(|c| pending_in(addons, list, c).count())
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct UpdateList {
@@ -188,6 +219,31 @@ mod tests {
 
     fn addon(pid: u64, file: &str) -> Addon {
         Addon { project_id: pid, file_name: file.into(), ..Addon::default() }
+    }
+
+    #[test]
+    fn counts_by_kind_skip_removed_and_doubles() {
+        let mut rp = addon(2, "geo.zip");
+        rp.class_id = crate::cf::CLASS_RESOURCE_PACKS;
+        let mut sh = addon(3, "solas.zip");
+        sh.class_id = crate::cf::CLASS_SHADERS;
+        let mut m = addon(1, "a.jar");
+        m.class_id = crate::cf::CLASS_MODS;
+        // An old entry with no class is a mod.
+        let old = addon(4, "b.jar");
+        let addons = vec![m, rp, sh, old];
+        let list = vec![
+            offer(1, "a.jar", 10),
+            offer(1, "a.jar", 11),
+            offer(2, "geo.zip", 20),
+            offer(3, "solas.zip", 30),
+            offer(4, "b.jar", 40),
+            // Removed from the instance since the list was saved.
+            offer(9, "gone.jar", 90),
+        ];
+        assert_eq!(counts(&addons, &list), [2, 1, 1, 0]);
+        let ids: Vec<u64> = pending_in(&addons, &list, crate::cf::CLASS_MODS).map(|u| u.project_id).collect();
+        assert_eq!(ids, vec![1, 4]);
     }
 
     fn offer(pid: u64, from: &str, to_id: u64) -> Update {
