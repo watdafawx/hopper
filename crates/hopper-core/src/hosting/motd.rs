@@ -288,6 +288,24 @@ pub fn apply(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// While the server runs: records the message the router just filled in as
+/// server.properties' message, so the next start opens with the same day
+/// and size the router showed (the running server keeps the one it read
+/// at its start; Minecraft has no command to change it). Does nothing
+/// without a template, or when the file's message was changed by hand.
+pub fn remember(root: &Path, out: &str) -> anyhow::Result<()> {
+    let Some(s) = load_saved(root) else { return Ok(()) };
+    if s.written != props_motd(root) || s.written == out {
+        return Ok(());
+    }
+    let path = root.join("server.properties");
+    let mut p = Properties::load(&path)?;
+    p.set("motd", out);
+    p.save(&path)?;
+    std::fs::write(root.join(FILE), serde_json::to_string_pretty(&Saved { template: s.template, written: out.to_string() })?)?;
+    Ok(())
+}
+
 // ---- editing and drawing it (the panel's web UI has the same in lib/motd.js) ----
 
 /// Minecraft's 16 colours: code, name, RGB.
@@ -735,6 +753,10 @@ mod tests {
         apply(&dir).unwrap();
         assert_eq!(props_motd(&dir), "§6Hi easy 1 mods\n{nope}");
         assert_eq!(current(&dir, &Live::default()).as_deref(), Some("§6Hi easy 1 mods\n{nope}"));
+        // The router's live message is kept for the next start.
+        remember(&dir, "§6Hi easy 2 mods\n{nope}").unwrap();
+        assert_eq!(props_motd(&dir), "§6Hi easy 2 mods\n{nope}");
+        assert_eq!(template(&dir), "§6Hi {difficulty} {mods} mods\n{nope}");
         // Changed in server.properties by hand: that message is kept.
         let mut p = Properties::load(&dir.join("server.properties")).unwrap();
         p.set("motd", "typed by hand");
