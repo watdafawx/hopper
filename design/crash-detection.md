@@ -138,6 +138,45 @@ that isn't in the game. MineColonies only rebuilt the tabs.
 Test: `a_mod_inside_a_library_s_event_is_the_cause`, with a cut-down,
 anonymized copy of the report and log (`litematicatool-tab-*`).
 
+## A loop the report can't show (2026-11-03: built; `crashloop.rs`)
+
+Case: a NeoForge 1.21.1 client crashed with `StackOverflowError` on the
+Render thread. The report's trace was `DataResult$Error.lambda$ap$2`
+(DataFixerUpper) 1,024 times: Java keeps only the last 1,024 frames, so no
+mod frame survives. Hopper named nothing. In `latest.log`, the fraction of a
+second before, the Render thread logged hundreds of EMI "Exception
+serializing stack …: Can't access registry …" errors, each one longer: Collapsible
+Groups (a beta) had EMI serialize every item without the game's registries,
+and each failure chained another error. The last ones were Silent Gear
+swords, whose nested gear data made the chain deep enough to overflow.
+
+- **Spot the loop** (`crashloop::truncated`): a `StackOverflowError` or a
+  trace at the 1,024-frame cap, mostly one repeating frame, with no mod's
+  frame (game libraries, recipe viewers and `is_pass_through` don't count).
+  Said plainly: the game got stuck in a loop inside <library> and ran out of
+  stack, so the report can't show which mod started it.
+- **Read the seconds before** (`crashloop::initiator`): ERROR/WARN entries
+  with traces in `latest.log` (then `debug.log`), on the report's thread,
+  up to 20 s before the report's time. Each is grouped by its first mod
+  that isn't a library (EMI, DataFixerUpper and Mixin pass the work on);
+  the biggest group is the mod that started it: likely with 3 or more
+  errors, else possible. Mods with their own frames under it are possible
+  callers; mixins that only wrap a game step (every tick runs through
+  them) aren't.
+- **The trigger isn't the cause.** When most of the last 5 errors are about
+  one mod's items (`silentgear:sword`), that mod is possible: "the trigger,
+  not the cause".
+- **What to do:** a beta/alpha version (from the frame's version) is said
+  so, with "update it, or turn it off". A mod added in the last two weeks
+  (Hopper's `date_added`) gets "You added it today / 2 days ago".
+- With no such errors in the log, no mod is named; the advice line says
+  what happened and to turn off the mods added or updated last.
+- The log's generic first-trace reading is skipped for a loop: it is just
+  some earlier error. Old cards that named nothing are read again.
+
+Tests: `crashloop::tests`, `a_loop_the_report_cannot_name_is_read_from_the_log`
+(`emi-loop-*`).
+
 ## Goal
 
 When a game started from Hopper crashes, Hopper tells the player which mods

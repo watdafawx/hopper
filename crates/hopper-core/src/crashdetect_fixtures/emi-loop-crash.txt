@@ -1,0 +1,46 @@
+---- Minecraft Crash Report ----
+
+// someone please advice devs that pancakes are serve
+Please make sure this issue is not caused by Sable before reporting it to other mod authors.
+If you cannot reproduce it without Sable, file a report on the issue tracker
+https://github.com/ryanhcode/sable/issues
+
+// Why did you do that?
+
+Time: 2026-11-03 06:15:31
+Description: Unexpected error
+
+java.lang.StackOverflowError: Unexpected error
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Render thread
+Stacktrace:
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+	at MC-BOOTSTRAP/datafixerupper@8.0.16/com.mojang.serialization.DataResult$Error.lambda$ap$2(DataResult.java:354) ~[datafixerupper-8.0.16.jar%23150!/:?] {re:mixin}
+
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Java Version: 21.0.8, Microsoft
