@@ -34,6 +34,10 @@ enum Show {
     All,
     Updates,
     Disabled,
+    /// Packs: In game (resource packs) or In worlds (data packs).
+    InGame,
+    /// Packs a loader (Paxi…) puts in every world.
+    AlwaysOn,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,6 +64,9 @@ pub(crate) enum Row {
     /// Resource packs a global folder (Paxi…) also has and loads itself,
     /// folded away: how many, whether shown, and where.
     Copies(usize, bool, String),
+    /// Packs' group heading (In game, Always on · Paxi, Off…) and how
+    /// many rows it has.
+    Group(hopper::pack_where::Group, usize),
 }
 
 gpui_kit::actions!(
@@ -106,6 +113,13 @@ pub(crate) fn col_env() -> Div {
 pub(crate) fn col_active() -> Div {
     // Room for "Enabled" and the sort arrow.
     div().w(rems(4.75)).flex_none()
+}
+
+impl AddonsView {
+    /// The On column, wide enough for the Where pill on packs.
+    pub(crate) fn col_on(&self) -> Div {
+        if self.where_mode() { div().w(rems(crate::pack_where::PILL_W)).flex_none() } else { col_active() }
+    }
 }
 pub(crate) fn col_date() -> Div {
     div().w_24().flex_none()
@@ -638,6 +652,8 @@ pub struct AddonsView {
     pub(crate) loose_packs: Option<(PathBuf, Option<std::time::SystemTime>, Vec<hopper::instance_ops::PackFile>)>,
     /// Lower-case names of those listed now.
     pub(crate) loose_set: HashSet<String>,
+    /// Resource and data packs as one list: each pack's places and group.
+    pub(crate) wh: crate::pack_where::WhereState,
     /// The optional columns that fit; set each frame from `room`.
     pub(crate) cols: Cols,
     /// The movable columns in the user's order, read each frame.
@@ -744,6 +760,7 @@ impl AddonsView {
             rp_order: Rc::default(),
             loose_packs: None,
             loose_set: HashSet::new(),
+            wh: Default::default(),
             marks: None,
             missing: Default::default(),
             search,
@@ -994,7 +1011,7 @@ impl AddonsView {
             Some(inst) => self.rows(inst, &self.table.updates),
             None => Vec::new(),
         };
-        self.table.rank = Rc::new(self.order_ranks());
+        self.table.rank = Rc::new(if self.where_mode() { self.where_ranks() } else { self.order_ranks() });
         self.table.has_side = self.class == cf::CLASS_MODS
             || self.table.inst.as_ref().is_some_and(|inst| {
                 rows.iter().any(|r| match r {
@@ -1309,6 +1326,11 @@ impl AddonsView {
             .filter(|(_, a)| match self.show {
                 Show::Updates => updates.contains_key(&a.project_id),
                 Show::Disabled => !self.row_on(a),
+                Show::InGame => matches!(
+                    self.where_group(&a.file_name),
+                    hopper::pack_where::Group::InGame | hopper::pack_where::Group::InWorlds
+                ),
+                Show::AlwaysOn => matches!(self.where_group(&a.file_name), hopper::pack_where::Group::Global(_)),
                 Show::All => true,
             })
             .filter(|(_, a)| {
@@ -1341,7 +1363,7 @@ impl AddonsView {
         // use here.
         let mut copies = 0usize;
         let mut where_: Vec<String> = Vec::new();
-        if self.order_mode() && q.is_empty() && self.show == Show::All {
+        if self.order_mode() && !self.where_mode() && q.is_empty() && self.show == Show::All {
             rows.retain(|(i, _)| {
                 let a = &inst.addons[*i];
                 let key = a.file_name.trim_end_matches(".disabled").to_lowercase();
@@ -1359,7 +1381,10 @@ impl AddonsView {
                 }
             });
         }
-        let mut out: Vec<Row> = if self.order_mode() {
+        let mut out: Vec<Row> = if self.where_mode() {
+            let all = q.is_empty() && self.show == Show::All && !self.added_only;
+            self.where_rows(inst, rows.into_iter().map(|(i, _)| i).collect(), all)
+        } else if self.order_mode() {
             self.order_rows(inst, rows.into_iter().map(|(i, _)| i).collect())
         } else {
             rows.into_iter().map(|(i, _)| Row::Addon(i)).collect()
@@ -1447,6 +1472,10 @@ impl AddonsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Packs: off, or back to where they count.
+        if self.where_mode() {
+            return self.where_toggle(files, on, window, cx);
+        }
         // Resource packs of the instance: on means used in game.
         if self.order_mode() {
             return self.set_in_use(files, on, window, cx);
@@ -1620,6 +1649,12 @@ impl AddonsView {
     }
 
     fn ask_remove(&mut self, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // Packs: the copies in Paxi, worlds... go to backups here; the
+        // instance's own copy goes the usual way.
+        let files = if self.where_mode() { self.where_remove(files, window, cx) } else { files };
+        if files.is_empty() {
+            return;
+        }
         if let Some(dir) = self.global_dir() {
             return self.remove_global(dir, files, window, cx);
         }
@@ -1992,6 +2027,11 @@ impl AddonsView {
         if let Some(dir) = self.global_dir() {
             return self.update_global(dir, updates, cx);
         }
+        // Packs whose file is in Paxi or a world update there.
+        let updates = if self.where_mode() { self.where_updates(updates, cx) } else { updates };
+        if updates.is_empty() {
+            return;
+        }
         // Untracked packs update in place, like a global folder's.
         let (loose, updates): (Vec<Update>, Vec<Update>) =
             updates.into_iter().partition(|u| self.loose_pid(u.project_id));
@@ -2195,6 +2235,8 @@ impl AddonsView {
     fn on_label(&self) -> &'static str {
         if self.class == cf::CLASS_SHADERS {
             "Use"
+        } else if self.where_mode() {
+            "Where"
         } else if self.order_mode() {
             "On"
         } else {
@@ -2298,10 +2340,29 @@ impl AddonsView {
             .count();
         let n_off = of_class().filter(|a| !self.row_on(a)).count();
         let n_added = of_class().filter(|a| !a.from_pack).count();
-        let show_ix = match self.show {
-            Show::All => 0,
-            Show::Updates => 1,
-            Show::Disabled => 2,
+        // Packs filter by where they count; the rest by Updates / Disabled.
+        let packs = self.where_mode();
+        let show_order: Vec<Show> = if packs {
+            vec![Show::All, Show::InGame, Show::AlwaysOn, Show::Disabled, Show::Updates]
+        } else {
+            vec![Show::All, Show::Updates, Show::Disabled]
+        };
+        let show_ix = show_order.iter().position(|s| *s == self.show).unwrap_or(0);
+        let n_group = |f: &dyn Fn(&hopper::pack_where::Group) -> bool| {
+            of_class().filter(|a| f(&self.where_group(&a.file_name))).count()
+        };
+        use hopper::pack_where::Group as G;
+        let show_tabs: Vec<(SharedString, Option<usize>)> = if packs {
+            let dp = self.class == cf::CLASS_DATAPACKS;
+            vec![
+                ("All".into(), None),
+                (if dp { "In worlds" } else { "In game" }.into(), Some(n_group(&|g| matches!(g, G::InGame | G::InWorlds)))),
+                ("Always on".into(), Some(n_group(&|g| matches!(g, G::Global(_))))),
+                ("Off".into(), Some(n_off)),
+                ("Updates".into(), Some(n_up)),
+            ]
+        } else {
+            vec![("All".into(), None), ("Updates".into(), Some(n_up)), ("Disabled".into(), Some(n_off))]
         };
         // The last check's results stay up while a new check runs or after
         // one fails; the spinner or the error sits beside them.
@@ -2478,10 +2539,10 @@ impl AddonsView {
                     )
                     .child(widgets::underline_tabs(
                         "show",
-                        vec![("All".into(), None), ("Updates".into(), Some(n_up)), ("Disabled".into(), Some(n_off))],
+                        show_tabs,
                         show_ix,
-                        cx.listener(|this, ix: &usize, _, cx| {
-                            this.show = [Show::All, Show::Updates, Show::Disabled][*ix];
+                        cx.listener(move |this, ix: &usize, _, cx| {
+                            this.show = show_order.get(*ix).copied().unwrap_or(Show::All);
                             cx.notify();
                         }),
                         cx,
@@ -2741,7 +2802,7 @@ impl AddonsView {
                         })),
                 ),
             )
-            .when(self.order_mode(), |r| r.child(crate::datapacks::col_order()))
+            .when(self.order_mode() || self.where_mode(), |r| r.child(crate::datapacks::col_order()))
             .child(div().w_10().flex_none())
             .child(head(SortCol::Name, "Name", self.name_cell()))
             .when(self.action_fits(), |r| r.child(col_action(self.compact)))
@@ -2778,7 +2839,12 @@ impl AddonsView {
             } else {
                 "Off keeps the file but the game doesn't load it (renamed to .disabled). Click to sort."
             };
-            cells.push((Col::On, movable(Col::On, on, head(SortCol::Active, on, col_active()).tooltip(move |w, cx| {
+            let tip = if self.where_mode() {
+                "Where each pack is loaded: in game, always on through a loader, in worlds, or off. Click to sort."
+            } else {
+                tip
+            };
+            cells.push((Col::On, movable(Col::On, on, head(SortCol::Active, on, self.col_on()).tooltip(move |w, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx)
             }))));
             if self.cols.date {
@@ -2964,6 +3030,7 @@ impl AddonsView {
                     self.addon_row(a, updates.get(&a.project_id), flags, cx)
                 }
                 Row::Section(title, hint) => self.section_row(title, hint, cx),
+                Row::Group(g, n) => self.group_row(g, *n, cx),
                 Row::ShaderOff => self.shader_off_row(cx),
                 Row::Copies(n, shown, at) => h_flex()
                     .h(rems(ROW_H))
@@ -3142,7 +3209,7 @@ impl AddonsView {
         match self.table.rows.get(ix)? {
             Row::Addon(i) => Some(inst.addons.get(*i)?.file_name.clone()),
             Row::Loose(name) => Some(name.clone()),
-            Row::LooseHeader(_) | Row::Section(..) | Row::ShaderOff | Row::Copies(..) => None,
+            Row::LooseHeader(_) | Row::Section(..) | Row::ShaderOff | Row::Copies(..) | Row::Group(..) => None,
         }
     }
 
@@ -3297,7 +3364,14 @@ impl AddonsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Resource packs in game order: grip, place and ↑↓ (or Use).
-        let order_cell = self.order_mode().then(|| self.order_cell(&a.file_name, &a.name, flags.rank, cx));
+        let order_cell = if self.where_mode() {
+            Some(self.where_order_cell(&a.file_name, &a.name, cx))
+        } else {
+            self.order_mode().then(|| self.order_cell(&a.file_name, &a.name, flags.rank, cx))
+        };
+        // Packs: copies, the modpack's own, its worlds.
+        let where_chips = if self.where_mode() { self.where_chips(&a.file_name, cx) } else { Vec::new() };
+        let pill = self.where_mode().then(|| self.where_pill(&a.file_name, cx));
         let shader_on = self.class == cf::CLASS_SHADERS && self.is_active_shader(&a.file_name);
         // Iris and Oculus run one pack: a choice, not switches.
         let shader_radio = (self.class == cf::CLASS_SHADERS).then(|| {
@@ -3319,7 +3393,7 @@ impl AddonsView {
             && self.root.as_ref().is_some_and(|r| store.pending(r).iter().any(|p| p.project_id == a.project_id));
         // A Paxi pack no site knows shows its own pack.png.
         // A global folder's pack, or one the instance doesn't track.
-        let global = self.global_dir().is_some() || self.is_loose(&a.file_name);
+        let global = self.global_dir().is_some() || self.is_loose(&a.file_name) || self.rep_dir(&a.file_name).is_some();
         let icon = store.image(&a.icon).map(Path::to_path_buf).or_else(|| {
             (global && !a.icon.starts_with("http")).then(|| PathBuf::from(&a.icon)).filter(|p| p.is_file())
         });
@@ -3449,6 +3523,7 @@ Details").into()),
             })
             .children(side_inline)
             .when(shader_on, |r| r.child(widgets::chip(theme.success).child("Active")))
+            .children(where_chips)
             .when_some(also, |r, also| {
                 r.child(
                     div()
@@ -3925,8 +4000,10 @@ Change version", a.file_name).into()
             if let Some(el) = side_col {
                 cells.push((Col::Side, col_env().child(el).into_any_element()));
             }
-            cells.push((Col::On, col_active().child(if let Some(radio) = shader_radio {
+            cells.push((Col::On, self.col_on().child(if let Some(radio) = shader_radio {
                 radio
+            } else if let Some(pill) = pill {
+                pill
             } else {
                 let order = self.order_mode();
                 let f_sweep = f_on.clone();
@@ -4007,7 +4084,7 @@ Change version", a.file_name).into()
                             })),
                     ),
             )
-            .map(|r| self.order_drop(r, &file, flags.rank, cx))
+            .map(|r| if self.where_mode() { self.where_drop(r, &file, cx) } else { self.order_drop(r, &file, flags.rank, cx) })
             .context_menu(move |menu, w, cx| menu_fn(menu, w, cx))
             .into_any_element()
     }
@@ -4093,7 +4170,14 @@ Change version", a.file_name).into()
             .folder
             .clone()
             .filter(|_| self.class == cf::CLASS_DATAPACKS)
-            .or_else(|| self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS).map(str::to_string));
+            .or_else(|| self.globals.picked.filter(|_| self.class == cf::CLASS_RESOURCE_PACKS).map(str::to_string))
+            // Data packs in one list: into Paxi (every world) when it's
+            // there, else the world played last.
+            .or_else(|| {
+                let l = self.locs.iter().find(|l| l.key == hopper::pack_where::PAXI).or(self.locs.first())?;
+                (self.class == cf::CLASS_DATAPACKS)
+                    .then(|| l.dir.strip_prefix(&root).unwrap_or(&l.dir).to_string_lossy().replace('\\', "/"))
+            });
         match rel {
             Some(rel) => cx.emit(AddonsEvent::AddTo { root, class: self.class, dest: rel }),
             None => cx.emit(AddonsEvent::AddContent { root, class: self.class }),
@@ -4432,7 +4516,8 @@ Change version", a.file_name).into()
         // In-flow cells, the name included.
         let mut cells = 5;
         for (on, w) in [
-            (self.order_mode(), 5.75),
+            (self.order_mode() || self.where_mode(), 5.75),
+            (self.where_mode(), crate::pack_where::PILL_W - 4.75),
             (self.action_fits(), if compact { widgets::SPLIT_W_COMPACT + 0.25 } else { 9.5 }),
             (c.author, 10.0),
             (c.side, 3.0),
@@ -4474,7 +4559,7 @@ Change version", a.file_name).into()
         // A global or Paxi folder isn't the instance's own content, so its
         // packs get the one changelog (the update's, else the installed
         // file's) instead of the versions to switch between.
-        if self.global_dir().is_some() || self.loose_pid(pid) {
+        if self.global_dir().is_some() || self.loose_pid(pid) || self.rep_pid(pid) {
             let root = self.root.clone();
             if let Some(f) = update {
                 return crate::versions::open_file(self.store.clone(), root, f, window, cx);
@@ -4499,7 +4584,11 @@ Change version", a.file_name).into()
     }
 
     fn show_in_folder(&self, file: &str, cx: &App) {
-        if let Some(dir) = self.global_dir().or_else(|| self.own_dir().filter(|_| self.is_loose(file))) {
+        if let Some(dir) = self
+            .global_dir()
+            .or_else(|| self.rep_dir(file))
+            .or_else(|| self.own_dir().filter(|_| self.is_loose(file)))
+        {
             let path = Self::global_path(&dir, file);
             crate::store::reveal_path(&path);
             return;
@@ -5096,8 +5185,12 @@ impl Render for AddonsView {
             return div().into_any_element();
         };
         // Data packs with no folder to show: what to do instead.
-        if self.class == cf::CLASS_DATAPACKS && self.folder.is_none() {
+        if self.class == cf::CLASS_DATAPACKS && self.locs.is_empty() {
             return self.no_datapack_folders(cx);
+        }
+        // A drag that ended anywhere: the headings stop saying "Drop here".
+        if self.wh.dragging.is_some() && !cx.has_active_drag() {
+            self.wh.dragging = None;
         }
         let tabs = self.location_row(cx);
         let global_head = self.location_caption(cx);

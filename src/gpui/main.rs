@@ -43,6 +43,7 @@ mod mcp_data;
 mod mcp_servers;
 mod nav;
 mod pack_lookup;
+mod pack_where;
 mod pack_update;
 mod palette;
 mod peers;

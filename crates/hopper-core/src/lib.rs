@@ -62,6 +62,7 @@ pub mod modpack;
 pub mod modrinth;
 pub mod packdiff;
 pub mod packs;
+pub mod pack_where;
 pub mod panel;
 pub mod paths;
 pub mod msauth;

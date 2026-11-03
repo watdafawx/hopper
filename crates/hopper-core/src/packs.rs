@@ -102,7 +102,7 @@ fn unix_secs() -> u64 {
 }
 
 /// A free name in `dir` for `name` ("x (2).zip", "x (3).zip", ...).
-fn free_name(dir: &Path, name: &str) -> String {
+pub(crate) fn free_name(dir: &Path, name: &str) -> String {
     if !dir.join(name).exists() {
         return name.into();
     }
@@ -138,7 +138,7 @@ fn copy_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
 
 /// Copies `path` into `<root>/.hopper-backups/<secs>/`, noting its origin.
 /// Does nothing when it doesn't exist.
-fn backup_copy(root: &Path, path: &Path) -> anyhow::Result<()> {
+pub(crate) fn backup_copy(root: &Path, path: &Path) -> anyhow::Result<()> {
     if !path.exists() {
         return Ok(());
     }

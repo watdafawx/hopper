@@ -1,7 +1,7 @@
-//! The Packs sub-tabs on the addon table: where packs live (the location
-//! row, the World picker, + Location), data pack folders, resource packs in
-//! game order, the one shader choice, and copy or move between places.
-//! Data packs used to have their own page; they use the Mods format now.
+//! Packs on the addon table: where packs live, resource packs in game
+//! order, the one shader choice, untracked packs, and copy or move between
+//! places. Resource and data packs show as one list with a Where per pack
+//! (`pack_where.rs`); the location row here is what they had before.
 
 use crate::addons::{
     AddonsEvent, AddonsView, ROW_GROUP, ROW_H, Removed, Row, col_action, col_active, col_author, col_check, col_date,
@@ -158,6 +158,17 @@ impl AddonsView {
             self.rp_order = Rc::new(packs::resourcepack_order(inst));
         }
         if class != cf::CLASS_DATAPACKS {
+            if self.where_mode() {
+                self.load_where(inst, cx);
+            }
+            return;
+        }
+        // One list: every folder is read, none is "shown".
+        if self.where_mode() {
+            self.folder = None;
+            self.folder_packs = None;
+            self.folder_stamp = (None, mtime(&inst.root.join("saves")));
+            self.load_where(inst, cx);
             return;
         }
         let ok = self.folder.as_ref().is_some_and(|f| self.locs.iter().any(|l| l.dir == inst.root.join(f)));
@@ -175,6 +186,10 @@ impl AddonsView {
     /// Whether the data pack folder shown, or the worlds, changed on disk
     /// since they were read (files dropped, installs from Browse).
     pub(crate) fn folder_moved(&mut self, root: &Path) -> bool {
+        // Paxi's, a world's or the instance's folder changed.
+        if self.where_moved() {
+            return true;
+        }
         // The instance's own folder: packs added by hand or copied in.
         if let Some(dir) = self.own_dir() {
             return self.loose_packs.as_ref().is_none_or(|(d, t, _)| *d != dir || *t != mtime(&dir));
@@ -196,6 +211,10 @@ impl AddonsView {
 
     /// The other places a pack of this kind can go: (menu label, folder).
     pub(crate) fn other_places(&self) -> Vec<(String, PathBuf)> {
+        // The Where pill moves packs in the one list.
+        if self.where_mode() {
+            return Vec::new();
+        }
         if !matches!(self.class, cf::CLASS_RESOURCE_PACKS | cf::CLASS_DATAPACKS) {
             return Vec::new();
         }
@@ -240,6 +259,11 @@ impl AddonsView {
     /// "Also in: …" for each pack whose file is in other places too, as
     /// `packs::also_in` says, but each folder read once (on or off alike).
     pub(crate) fn fill_also(&mut self) {
+        // The one list folds copies into one row instead.
+        if self.where_mode() {
+            self.table.also = Rc::default();
+            return;
+        }
         let mut out: HashMap<String, Vec<String>> = HashMap::new();
         let class = self.class;
         if matches!(class, cf::CLASS_RESOURCE_PACKS | cf::CLASS_DATAPACKS)
@@ -267,6 +291,9 @@ impl AddonsView {
     /// Paxi optional · Global Packs … as one segmented control, worlds in
     /// a picker, and + Location for the empty ones.
     pub(crate) fn location_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.where_mode() {
+            return None;
+        }
         let dp = self.class == cf::CLASS_DATAPACKS;
         if !(dp || self.class == cf::CLASS_RESOURCE_PACKS) || self.locs.len() < if dp { 1 } else { 2 } {
             return None;
@@ -369,6 +396,13 @@ impl AddonsView {
     /// for data packs without a loader, Paxi's pitch.
     pub(crate) fn location_caption(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dp = self.class == cf::CLASS_DATAPACKS;
+        // One list: each group has its own Open folder; data packs with no
+        // loader get Paxi's pitch.
+        if self.where_mode() {
+            let root = self.root.clone()?;
+            let no_loader = dp && !self.locs.iter().any(|l| l.every_world);
+            return no_loader.then(|| self.paxi_callout(&root, cx)).flatten().map(|n| div().px_6().child(n).into_any_element());
+        }
         if !(dp || self.class == cf::CLASS_RESOURCE_PACKS && self.locs.len() > 1) {
             return None;
         }
@@ -601,6 +635,9 @@ impl AddonsView {
     /// Whether a row counts as on: in game order for the instance's
     /// resource packs, else not switched off.
     pub(crate) fn row_on(&self, a: &Addon) -> bool {
+        if self.where_mode() {
+            return self.where_group(&a.file_name) != hopper::pack_where::Group::Off;
+        }
         if !self.order_mode() {
             return a.enabled;
         }
@@ -737,7 +774,7 @@ impl AddonsView {
 
     /// Writes options.txt's resource pack list and shows it.
     /// With `msg`, a toast whose Undo writes the order before back.
-    fn write_order(&mut self, order: Vec<String>, msg: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn write_order(&mut self, order: Vec<String>, msg: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
         let before: Vec<String> = (*self.rp_order).clone();
         let r = self.store.read(cx).instance(&root).map(|inst| packs::set_resourcepack_order(inst, &order));
@@ -1021,7 +1058,7 @@ impl AddonsView {
     // ---- undo and untracked packs --------------------------------------
 
     /// A pack's name, or "N packs".
-    fn describe_packs(&self, files: &[String]) -> String {
+    pub(crate) fn describe_packs(&self, files: &[String]) -> String {
         match files {
             [one] => self.table.inst.as_ref().and_then(|i| i.addon_by_file(one)).map_or(one.clone(), |a| a.name.clone()),
             many => format!("{} packs", many.len()),
@@ -1029,7 +1066,7 @@ impl AddonsView {
     }
 
     /// A success toast with Undo, like the others (it hides by itself).
-    fn undo_toast(
+    pub(crate) fn undo_toast(
         &self,
         text: String,
         undo: Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>)>,
@@ -1150,6 +1187,10 @@ impl AddonsView {
 
     /// The table: the instance's packs plus the untracked ones read.
     fn merge_loose(&mut self, cx: &mut Context<Self>) {
+        // The one list adds them with the other places' packs.
+        if self.where_mode() {
+            return self.apply_where(cx);
+        }
         let (Some(dir), Some((d, _, packs))) = (self.own_dir(), self.loose_packs.as_ref()) else { return };
         if *d != dir {
             return;
