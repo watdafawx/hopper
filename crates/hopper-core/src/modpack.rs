@@ -1141,6 +1141,8 @@ fn apply_pack(
     // the new version go to backups; mods you added stay.
     inst.game_version = manifest.minecraft.version.clone();
     inst.loader = manifest.loader();
+    // A fresh install settles any disagreement with the CurseForge app.
+    inst.cf_change = None;
     adopt_kept(inst, overrides);
     commit(inst, staged, |a| {
         a.from_pack && !wanted.contains_key(&a.project_id)
@@ -2695,6 +2697,7 @@ fn apply_mrpack_with(
         inst.game_version = mc.clone();
     }
     inst.loader = index.loader();
+    inst.cf_change = None;
     adopt_kept(inst, overrides);
     commit(inst, staged, |a| {
         a.from_pack && !keep.contains(&a.file_name.to_lowercase())

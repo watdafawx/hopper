@@ -1,0 +1,200 @@
+{
+ "baseModLoader": {
+  "forgeVersion": "21.1.259",
+  "name": "neoforge-21.1.259",
+  "type": 6,
+  "filename": "neoforge-21.1.259.jar",
+  "minecraftVersion": "1.21.1"
+ },
+ "isUnlocked": true,
+ "lastPlayed": "2026-10-10T14:46:57.513Z",
+ "playedCount": 651,
+ "timePlayed": 2558705564,
+ "manifest": {
+  "minecraft": {
+   "version": "1.21.1",
+   "modLoaders": [
+    {
+     "id": "neoforge-21.1.259",
+     "primary": true
+    }
+   ],
+   "recommendedRam": 12288
+  },
+  "manifestType": "minecraftModpack",
+  "manifestVersion": 1,
+  "name": "TNP Limitless 8 - 1.21.1",
+  "version": "1.78.1",
+  "author": "Gbergz",
+  "overrides": "overrides",
+  "projectID": 1027782,
+  "image": "profileImage/LL8-Icon.png",
+  "files": [
+   {
+    "projectID": 59613,
+    "fileID": 6913812,
+    "required": true,
+    "isLocked": false
+   },
+   {
+    "projectID": 225738,
+    "fileID": 8903254,
+    "required": true,
+    "isLocked": false
+   },
+   {
+    "projectID": 223794,
+    "fileID": 8992605,
+    "required": true,
+    "isLocked": false
+   },
+   {
+    "projectID": 64578,
+    "fileID": 8832691,
+    "required": true,
+    "isLocked": false
+   },
+   {
+    "projectID": 60028,
+    "fileID": 7901588,
+    "required": true,
+    "isLocked": false
+   }
+  ]
+ },
+ "fileDate": "2026-10-27T09:14:30.147Z",
+ "installedModpack": {
+  "addonID": 1027782,
+  "gameID": 432,
+  "categoryClassID": 4471,
+  "name": "TNP Limitless 8 - LL8",
+  "fileNameOnDisk": "Limitless-8-1.78.1.zip",
+  "primaryAuthor": "Gbergz",
+  "webSiteURL": "https://www.curseforge.com/minecraft/modpacks/tnp-limitless-8",
+  "thumbnailUrl": "https://media.forgecdn.net/avatars/thumbnails/1008/255/256/256/638531005833690782.png",
+  "dateInstalled": "2026-03-27T06:31:14.3273701Z",
+  "dateUpdated": "2026-10-27T21:59:48.000Z",
+  "status": 3,
+  "isLocked": false,
+  "instanceID": "00000000-0000-0000-0000-000000000001",
+  "gameInstanceID": "00000000-0000-0000-0000-000000000002",
+  "installedFile": {
+   "id": 9341561,
+   "fileName": "Limitless-8-1.78.1.zip",
+   "fileDate": "2026-10-27T09:14:30.147Z",
+   "releaseType": 1,
+   "serverPackFileId": 9341667
+  },
+  "latestFile": {
+   "id": 9109389,
+   "fileName": "Limitless-8-1.76.0.zip",
+   "fileDate": "2026-10-09T16:06:53.08Z"
+  }
+ },
+ "projectID": 1027782,
+ "fileID": 9341561,
+ "isMemoryOverride": false,
+ "allocatedMemory": 12288,
+ "guid": "00000000-0000-0000-0000-000000000002",
+ "gameTypeID": 432,
+ "installPath": "C:\\Instances\\Pack\\",
+ "name": "TNP Limitless 8 - LL8",
+ "isValid": true,
+ "lastPreviousMatchUpdate": "2026-10-15T16:50:23.3731323Z",
+ "isEnabled": true,
+ "gameVersion": "1.21.1",
+ "installDate": "2026-09-07T08:52:04.1157705Z",
+ "installedAddons": [
+  {
+   "addonID": 59613,
+   "name": "EnderTanks",
+   "fileNameOnDisk": "endertanks-neoforge-1.21.1-1.0.jar",
+   "isEnabled": true,
+   "categoryClassID": 6,
+   "dateInstalled": "2026-09-07T08:52:31.6715993Z",
+   "isLocked": false,
+   "webSiteURL": "https://www.curseforge.com/minecraft/mc-mods/endertanks",
+   "primaryAuthor": "ShetiPhian",
+   "installedFile": {
+    "id": 6913812,
+    "fileName": "endertanks-neoforge-1.21.1-1.0.jar",
+    "fileDate": "2025-08-22T04:57:44.027Z",
+    "releaseType": 1,
+    "serverPackFileId": 0
+   }
+  },
+  {
+   "addonID": 60028,
+   "name": "Aquaculture 2",
+   "fileNameOnDisk": "Aquaculture-1.21.1-2.7.21.jar",
+   "isEnabled": true,
+   "categoryClassID": 6,
+   "dateInstalled": "2026-09-07T08:52:31.9615205Z",
+   "isLocked": false,
+   "webSiteURL": "https://www.curseforge.com/minecraft/mc-mods/aquaculture",
+   "primaryAuthor": "Shadow",
+   "installedFile": {
+    "id": 7901588,
+    "fileName": "Aquaculture-1.21.1-2.7.21.jar",
+    "fileDate": "2026-04-09T21:20:09.987Z",
+    "releaseType": 1,
+    "serverPackFileId": 0
+   }
+  },
+  {
+   "addonID": 64578,
+   "name": "Ender IO",
+   "fileNameOnDisk": "enderio-8.2.12-beta.jar",
+   "isEnabled": true,
+   "categoryClassID": 6,
+   "dateInstalled": "2026-09-07T08:52:31.7783761Z",
+   "isLocked": false,
+   "webSiteURL": "https://www.curseforge.com/minecraft/mc-mods/ender-io",
+   "primaryAuthor": "crazypants_mc_the_second",
+   "installedFile": {
+    "id": 8832691,
+    "fileName": "enderio-8.2.12-beta.jar",
+    "fileDate": "2026-09-07T19:54:28.503Z",
+    "releaseType": 2,
+    "serverPackFileId": 0
+   }
+  },
+  {
+   "addonID": 223794,
+   "name": "Applied Energistics 2",
+   "fileNameOnDisk": "appliedenergistics2-19.2.18.jar",
+   "isEnabled": true,
+   "categoryClassID": 6,
+   "dateInstalled": "2026-09-28T00:54:15.8465238Z",
+   "isLocked": false,
+   "webSiteURL": "https://www.curseforge.com/minecraft/mc-mods/applied-energistics-2",
+   "primaryAuthor": "thetechnici4n",
+   "installedFile": {
+    "id": 8992605,
+    "fileName": "appliedenergistics2-19.2.18.jar",
+    "fileDate": "2026-09-27T17:43:18.077Z",
+    "releaseType": 1,
+    "serverPackFileId": 0
+   }
+  },
+  {
+   "addonID": 225738,
+   "name": "MmmMmmMmmMmm (Target Dummy)",
+   "fileNameOnDisk": "dummmmmmy-1.21-2.1.2-neoforge.jar",
+   "isEnabled": true,
+   "categoryClassID": 6,
+   "dateInstalled": "2026-09-07T08:52:31.9676126Z",
+   "isLocked": false,
+   "webSiteURL": "https://www.curseforge.com/minecraft/mc-mods/mmmmmmmmmmmm",
+   "primaryAuthor": "MehVahdJukaar",
+   "installedFile": {
+    "id": 8903254,
+    "fileName": "dummmmmmy-1.21-2.1.2-neoforge.jar",
+    "fileDate": "2026-09-17T12:05:49.663Z",
+    "releaseType": 1,
+    "serverPackFileId": 0
+   }
+  }
+ ],
+ "installedGamePrerequisites": []
+}
