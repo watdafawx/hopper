@@ -146,7 +146,8 @@ impl AddonsView {
             counts,
             root: Some(inst.root.clone()),
         };
-        if dirs.is_empty() || self.class != cf::CLASS_RESOURCE_PACKS {
+        // The one list reads every place itself (`pack_where`).
+        if dirs.is_empty() || self.class != cf::CLASS_RESOURCE_PACKS || self.where_mode() {
             return;
         }
         let root = inst.root.clone();
@@ -306,6 +307,9 @@ impl AddonsView {
     /// the instance's: each as a row like an installed pack, from what
     /// the lookup found (project, author, version, update).
     pub(crate) fn apply_global(&mut self, cx: &mut Context<Self>) {
+        if self.where_mode() {
+            return self.apply_where(cx);
+        }
         let class = self.class;
         let packs: Vec<PackFile> = if class == cf::CLASS_DATAPACKS && self.folder.is_some() {
             self.folder_packs.clone().unwrap_or_default()
