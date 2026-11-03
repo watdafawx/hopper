@@ -745,3 +745,206 @@ fn import_with_sources_off_skips_and_lists_them() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+// Packs from a folder on a branch (Faithful 32x Mods, recorded 2026-11-03).
+const TREE_COMMITS: &str = include_str!("fixtures/tree-faithful-commits.json");
+const TREE_CONTENTS: &str = include_str!("fixtures/tree-faithful-contents.json");
+const TREE_COMPARE: &str = include_str!("fixtures/tree-faithful-compare.json");
+
+#[test]
+fn tree_links() {
+    let t = tree::parse_link("https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x").unwrap();
+    assert_eq!(
+        (t.owner.as_str(), t.repo.as_str(), t.branch.as_str(), t.path.as_str()),
+        ("Faithful-Resource-Pack", "Faithful-32x-Mods", "1.20.x", "")
+    );
+    assert_eq!(t.url(), "Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x");
+    assert_eq!(t.file_name(), "Faithful-32x-Mods-1.20.x.zip");
+    let sub = tree::parse_link("github.com/o/r/tree/main/packs/Dark%20UI/?tab=x").unwrap();
+    assert_eq!((sub.branch.as_str(), sub.path.as_str()), ("main", "packs/Dark UI"));
+    assert_eq!(sub.file_name(), "r-Dark-UI-main.zip");
+    assert_eq!(tree::of_url(&sub.url()), Some(sub.clone()));
+    assert_eq!(sub.child("x").path, "packs/Dark UI/x");
+    // Not a folder: the repo, a release, a file.
+    assert!(tree::parse_link("https://github.com/o/r").is_none());
+    assert!(tree::parse_link("https://github.com/o/r/releases/tag/v1").is_none());
+    assert!(tree::parse_link("https://github.com/o/r/blob/main/pack.mcmeta").is_none());
+    // As a source: GitHub, keyed by the folder, published by the repo.
+    let s = parse_link("https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x/").unwrap();
+    assert_eq!(s.kind, Kind::GitHub);
+    assert_eq!(s.url, "Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x");
+    assert_eq!(s.publisher, "Faithful-Resource-Pack/Faithful-32x-Mods");
+    assert_eq!(s.page(), "https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x");
+    assert_eq!(s.key(), "github:faithful-resource-pack/faithful-32x-mods/tree/1.20.x");
+    // A mod can't come from a folder; nothing is asked of GitHub.
+    let e = resolve("https://github.com/o/r/tree/main", "1.21.1", Loader::NeoForge, false).unwrap_err();
+    assert!(format!("{e}").contains("folder on a branch"));
+}
+
+#[test]
+fn tree_commits_and_listing() {
+    let c = tree::parse_commits(TREE_COMMITS).unwrap();
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0].sha, "989f3bfcc77c024e0b25594222a1fe0dcffe8637");
+    assert_eq!(c[0].date, "2026-08-01T04:44:17Z");
+    assert_eq!(c[0].label(), "989f3bf · 2026-08-01");
+    let t = tree::parse_link("https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x").unwrap();
+    let cand = tree::candidate(&t, &c[0], 0);
+    assert_eq!(
+        cand.url,
+        "https://codeload.github.com/Faithful-Resource-Pack/Faithful-32x-Mods/zip/989f3bfcc77c024e0b25594222a1fe0dcffe8637"
+    );
+    assert_eq!(cand.file_name, "Faithful-32x-Mods-1.20.x.zip");
+    assert_eq!(cand.version, c[0].sha);
+    let l = tree::parse_listing(TREE_CONTENTS).unwrap();
+    assert!(l.iter().any(|e| e.name == "assets" && e.kind == "dir"));
+    assert!(tree::is_pack_root(&l, cf::CLASS_RESOURCE_PACKS));
+    assert!(!tree::is_pack_root(&l, cf::CLASS_SHADERS));
+    // What changed: the commits since the installed one, newest first.
+    let mut ch = tree::parse_compare(TREE_COMPARE).unwrap();
+    ch.reverse();
+    assert_eq!(ch[0].sha, c[0].sha);
+    let notes = tree::notes(&ch);
+    assert!(notes.starts_with("- Faithful License v4 (989f3bf)"), "{notes}");
+    assert!(notes.contains("add thermal start"));
+}
+
+/// The same commit's file twice has the same id and date, so the update
+/// check doesn't offer what's installed; a later commit is offered.
+#[test]
+fn tree_installed_file_matches_listing() {
+    let c = tree::parse_commits(TREE_COMMITS).unwrap().remove(0);
+    let t = tree::parse_link("https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x").unwrap();
+    let mut src = parse_link(&t.page()).unwrap();
+    src.class = cf::CLASS_RESOURCE_PACKS;
+    src.pattern = pattern_of(&t.file_name());
+    src.seen = c.sha.clone();
+    let id = packs::id_of(&src);
+    let rec = packs::Record {
+        file_name: t.file_name(),
+        sha256: "x".into(),
+        name: "Faithful".into(),
+        source: src.clone(),
+        date: c.date.clone(),
+    };
+    let installed = packs::installed_file(id, &rec);
+    let listed = to_file(id, &src, &tree::candidate(&t, &c, 0), "", Loader::Any, false);
+    assert_eq!(installed.id, listed.id);
+    assert_eq!(installed.file_date, listed.file_date);
+    assert_eq!(installed.display_name, "989f3bf · 2026-08-01");
+    let later = tree::Commit { sha: "0123456789abcdef".into(), date: "2026-09-01T00:00:00Z".into(), ..Default::default() };
+    let next = to_file(id, &src, &tree::candidate(&t, &later, 0), "", Loader::Any, false);
+    assert_ne!(next.id, installed.id);
+    assert!(next.file_date > installed.file_date);
+    assert_eq!(mod_for(id, &src, "Faithful").class_id, Some(cf::CLASS_RESOURCE_PACKS));
+}
+
+fn archive(path: &std::path::Path, files: &[(&str, &str)]) {
+    let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    for (n, body) in files {
+        if n.ends_with('/') {
+            z.add_directory(n.trim_end_matches('/'), zip::write::SimpleFileOptions::default()).unwrap();
+        } else {
+            z.start_file(*n, zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut z, body.as_bytes()).unwrap();
+        }
+    }
+    z.finish().unwrap();
+}
+
+fn zip_names(path: &std::path::Path) -> Vec<String> {
+    let z = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut v: Vec<String> = z.file_names().map(str::to_string).collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn tree_repack() {
+    let dir = std::env::temp_dir().join(format!("hopper-tree-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = dir.join("a.zip");
+    archive(
+        &a,
+        &[
+            ("Repo-abc/", ""),
+            ("Repo-abc/pack.mcmeta", "{}"),
+            ("Repo-abc/.gitignore", "x"),
+            ("Repo-abc/.github/workflows/ci.yml", "x"),
+            ("Repo-abc/assets/minecraft/textures/a.png", "png"),
+            ("Repo-abc/packs/dark/pack.mcmeta", "{}"),
+            ("Repo-abc/packs/dark/assets/b.png", "png"),
+            ("Repo-abc/packs/plain/readme.txt", "no pack"),
+            ("Repo-abc/shaderpack/shaders/final.fsh", "x"),
+            ("Repo-abc/../evil.txt", "x"),
+        ],
+    );
+    // The repo's root: pack.mcmeta at the top, repo housekeeping left out.
+    let out = dir.join("root.zip");
+    tree::repack(&a, "", cf::CLASS_RESOURCE_PACKS, &out).unwrap();
+    let n = zip_names(&out);
+    assert!(n.contains(&"pack.mcmeta".to_string()));
+    assert!(n.contains(&"assets/minecraft/textures/a.png".to_string()));
+    assert!(!n.iter().any(|x| x.starts_with(".git") || x.contains("..")), "{n:?}");
+    // Same commit, same bytes.
+    let again = dir.join("again.zip");
+    tree::repack(&a, "", cf::CLASS_RESOURCE_PACKS, &again).unwrap();
+    assert_eq!(sha256_file(&out).unwrap(), sha256_file(&again).unwrap());
+    // A folder further down.
+    let sub = dir.join("sub.zip");
+    tree::repack(&a, "packs/dark", cf::CLASS_RESOURCE_PACKS, &sub).unwrap();
+    assert_eq!(zip_names(&sub), vec!["assets/b.png".to_string(), "pack.mcmeta".to_string()]);
+    let s = SrcFile::default();
+    assert!(packs::check(&sub, &s, cf::CLASS_RESOURCE_PACKS).is_ok());
+    // Not a pack: stops, writes nothing.
+    let bad = dir.join("bad.zip");
+    let e = tree::repack(&a, "packs/plain", cf::CLASS_RESOURCE_PACKS, &bad).unwrap_err();
+    assert!(format!("{e}").contains("pack.mcmeta"));
+    assert!(!bad.exists());
+    // Shader packs go by their shaders folder.
+    let sh = dir.join("sh.zip");
+    tree::repack(&a, "shaderpack", cf::CLASS_SHADERS, &sh).unwrap();
+    assert!(packs::check(&sh, &s, cf::CLASS_SHADERS).is_ok());
+    assert!(packs::check(&sh, &s, cf::CLASS_RESOURCE_PACKS).is_err());
+    // A stated checksum must match.
+    let wrong = SrcFile { digest: "00".into(), ..Default::default() };
+    assert!(packs::check(&sub, &wrong, cf::CLASS_RESOURCE_PACKS).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Release assets that are zips: packs take them, mods don't.
+#[test]
+fn pack_release_zips() {
+    let rel = github::Release {
+        tag_name: "v2.0".into(),
+        assets: vec![
+            github::Asset { name: "Dark-UI-1.21.zip".into(), ..Default::default() },
+            github::Asset { name: "Dark-UI-1.20.zip".into(), ..Default::default() },
+            github::Asset { name: "Dark-UI-sources.zip".into(), ..Default::default() },
+            github::Asset { name: "darkui-fabric.jar".into(), ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    let mods = github::from_releases(std::slice::from_ref(&rel));
+    assert_eq!(mods.len(), 1);
+    let zips = github::from_releases_for(std::slice::from_ref(&rel), cf::CLASS_RESOURCE_PACKS);
+    assert_eq!(zips.len(), 3);
+    let f = |n: &str| fit_class(n, "v2.0", "1.21.1", Loader::NeoForge, cf::CLASS_RESOURCE_PACKS);
+    assert_eq!(f("Dark-UI-1.21.zip"), Fit::Good);
+    assert_eq!(f("Dark-UI-1.20.zip"), Fit::Minecraft("1.20".into()));
+    assert_eq!(f("Dark-UI.zip"), Fit::Unknown);
+    assert!(matches!(f("Dark-UI-sources.zip"), Fit::Extra(_)));
+    assert!(matches!(f("darkui.jar"), Fit::Extra(_)));
+    let mut all = zips;
+    for c in &mut all {
+        c.fit = f(&c.file_name);
+    }
+    let src = ModSource { class: cf::CLASS_RESOURCE_PACKS, url: "o/r".into(), ..Default::default() };
+    let r = pick(src, all, None);
+    assert_eq!(r.pick.map(|i| r.candidates[i].file_name.clone()).as_deref(), Some("Dark-UI-1.21.zip"));
+    // Old records (no class) read as mods; a mod's record doesn't gain one.
+    let m: ModSource = serde_json::from_str(r#"{"kind":"github","url":"o/r"}"#).unwrap();
+    assert_eq!(m.class, 0);
+    assert!(!serde_json::to_string(&m).unwrap().contains("class"));
+}

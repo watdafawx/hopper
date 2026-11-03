@@ -30,6 +30,8 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mods/source/trust", post(trust))
         .route("/api/v1/servers/{id}/mods/sources", axum::routing::put(put_pins))
         .route("/api/v1/servers/{id}/mods/source/page", get(page))
+        .route("/api/v1/servers/{id}/packs/source/resolve", post(pack_resolve))
+        .route("/api/v1/servers/{id}/packs/source/add", post(pack_add))
 }
 
 /// The peek's page for a mod from GitHub or a link: the README (or what's
@@ -414,4 +416,89 @@ async fn put_pins(
     })
     .await?;
     Ok(Json(json!({ "attached": n })))
+}
+
+// ---- data packs from GitHub or a link ----------------------------------------------------
+
+/// A data pack link looked up for a server: a folder on a GitHub branch,
+/// a release's zip or a link to a zip. Also lists where it can go.
+async fn pack_resolve(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<ResolveBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    allowed(&app)?;
+    let v = run(move || {
+        let inst = instance(&e)?;
+        let r = sources::packs::resolve(&b.link, &inst.game_version, hopper_core::cf::CLASS_DATAPACKS, b.prerelease)?;
+        let mut v = resolved_json(&r);
+        v["branch"] = json!(sources::tree::of_url(&r.source.url).map(|t| t.branch));
+        v["folders"] = json!(r.candidates.iter().map(|c| sources::tree::parse_link(&c.page).map(|t| t.path)).collect::<Vec<_>>());
+        v["dirs"] = json!(crate::browse_api::datapack_dirs(&inst)
+            .into_iter()
+            .map(|(l, d)| json!({ "label": l, "path": d }))
+            .collect::<Vec<_>>());
+        Ok(v)
+    })
+    .await?;
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct PackAddBody {
+    link: String,
+    #[serde(default)]
+    prerelease: bool,
+    /// The candidate picked: its index in the lookup.
+    pick: usize,
+    /// One of the lookup's `dirs` (relative to the server).
+    dest: String,
+}
+
+/// Adds a data pack from a link into one of the server's data pack
+/// folders, as a job. A pack of the same name there goes to the server's
+/// .hopper-backups first.
+async fn pack_add(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<PackAddBody>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    allowed(&app)?;
+    let running = e.server.state().is_alive();
+    let job = crate::pack_api::spawn(&app, format!("Adding a data pack to {}", e.name), move |job| {
+        let inst = instance(&e)?;
+        // Only the server's own data pack folders, never a path from the browser.
+        let dirs = crate::browse_api::datapack_dirs(&inst);
+        let rel = dirs
+            .iter()
+            .find(|d| d.1 == b.dest)
+            .map(|d| d.1.clone())
+            .ok_or_else(|| anyhow::anyhow!("That isn't one of this server's data pack folders."))?;
+        let dir = inst.root.join(&rel);
+        let r = sources::packs::resolve(&b.link, &inst.game_version, hopper_core::cf::CLASS_DATAPACKS, b.prerelease)?;
+        anyhow::ensure!(b.pick < r.candidates.len(), "That file is no longer offered there; look the link up again.");
+        sources::trust(&r.source)?;
+        let same = dir.join(sources::tree::of_url(&r.source.url).map_or_else(
+            || r.candidates[b.pick].file_name.clone(),
+            |t| sources::tree::parse_link(&r.candidates[b.pick].page).unwrap_or(t).file_name(),
+        ));
+        let mut saved = None;
+        if same.is_file() {
+            saved = hopper_core::sync::backup_into(&inst.root, &same)?;
+        }
+        let new = sources::packs::install(&inst.root, &dir, &r, b.pick, job)?;
+        let file = new.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        log::info!("{}: {file} into {rel} from {}", e.name, r.source.publisher);
+        Ok(json!({
+            "added": [file], "dest": rel, "restart_needed": running,
+            "backup": saved.map(|p| p.to_string_lossy().into_owned()),
+        }))
+    });
+    Ok(Json(json!({ "job": job })))
 }

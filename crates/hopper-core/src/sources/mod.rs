@@ -20,7 +20,9 @@ pub mod jar;
 pub mod jenkins;
 pub mod looks;
 pub mod maven;
+pub mod packs;
 pub mod page;
+pub mod tree;
 pub mod url;
 
 use crate::cf::{self, Loader};
@@ -83,6 +85,14 @@ pub struct ModSource {
     pub prev_project: u64,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub prev_mr_project: String,
+    /// What it is when not a mod: resource packs, shaders or data packs
+    /// (CurseForge's class ids). 0 for mods.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    pub class: u32,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -265,7 +275,7 @@ pub fn get_mod(id: u64) -> anyhow::Result<cf::Mod> {
     Ok(mod_for(id, &src, &name))
 }
 
-fn mod_for(id: u64, src: &ModSource, name: &str) -> cf::Mod {
+pub(crate) fn mod_for(id: u64, src: &ModSource, name: &str) -> cf::Mod {
     let (icon, authors) = LOOKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -279,7 +289,7 @@ fn mod_for(id: u64, src: &ModSource, name: &str) -> cf::Mod {
         id,
         name: name.to_string(),
         summary: format!("From {}: {}", src.kind.label(), src.publisher),
-        class_id: Some(cf::CLASS_MODS),
+        class_id: Some(if src.class == 0 { cf::CLASS_MODS } else { src.class }),
         authors: vec![cf::Author { name: author, ..Default::default() }],
         links: cf::Links { website_url: src.page(), ..Default::default() },
         logo: (!icon.is_empty()).then(|| cf::Logo { thumbnail_url: icon.clone(), url: icon }),
@@ -291,6 +301,11 @@ fn mod_for(id: u64, src: &ModSource, name: &str) -> cf::Mod {
 /// (for the Versions list).
 pub fn files(id: u64, game_version: &str, loader: Loader) -> anyhow::Result<Vec<cf::File>> {
     let (src, _) = known(id).context("unknown source")?;
+    if let Some(t) = tree::of_url(&src.url) {
+        let list = vec![to_file(id, &src, &tree_newest(&t, &src)?, game_version, loader, false)];
+        FILES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(id, list.clone());
+        return Ok(list);
+    }
     let list: Vec<cf::File> = list_all(&src, game_version, loader)?
         .into_iter()
         .filter(|c| c.fit.usable() && matches_pattern(&src.pattern, &c.file_name))
@@ -331,7 +346,7 @@ pub struct SrcFile {
     pub want_loader: String,
 }
 
-fn to_file(id: u64, src: &ModSource, c: &Candidate, mc: &str, loader: Loader, changed: bool) -> cf::File {
+pub(crate) fn to_file(id: u64, src: &ModSource, c: &Candidate, mc: &str, loader: Loader, changed: bool) -> cf::File {
     let mut next = src.clone();
     next.seen = c.version.clone();
     next.sha256 = c.digest.clone();
@@ -372,6 +387,9 @@ pub fn parse_link(link: &str) -> anyhow::Result<ModSource> {
     if lower.contains("modrinth.com/") || lower.contains("curseforge.com/") {
         bail!("That's a Modrinth or CurseForge page. Find the mod in Browse instead; Hopper updates those already.");
     }
+    if let Some(t) = tree::parse_link(link) {
+        return Ok(ModSource { kind: Kind::GitHub, url: t.url(), publisher: t.repo_key(), ..Default::default() });
+    }
     if let Some(s) = github::parse_link(link) {
         return Ok(s);
     }
@@ -389,6 +407,9 @@ pub fn parse_link(link: &str) -> anyhow::Result<ModSource> {
 
 /// Every file the source offers, newest release first, each with its fit.
 fn list_all(src: &ModSource, mc: &str, loader: Loader) -> anyhow::Result<Vec<Candidate>> {
+    if let Some(t) = tree::of_url(&src.url) {
+        return Ok(vec![tree_newest(&t, src)?]);
+    }
     let mut all = match src.kind {
         Kind::GitHub => github::candidates(src)?,
         Kind::Maven => maven::candidates(src)?,
@@ -397,9 +418,25 @@ fn list_all(src: &ModSource, mc: &str, loader: Loader) -> anyhow::Result<Vec<Can
     };
     all.retain(|c| src.prerelease || !c.prerelease || src.kind == Kind::Url);
     for c in &mut all {
-        c.fit = fit(&c.file_name, &c.version, mc, loader);
+        c.fit = fit_class(&c.file_name, &c.version, mc, loader, src.class);
     }
     Ok(all)
+}
+
+/// A branch folder's newest commit as the file it gives. When it isn't
+/// the installed one, its notes are the commit messages since (one more
+/// call, made only then).
+fn tree_newest(t: &tree::Tree, src: &ModSource) -> anyhow::Result<Candidate> {
+    let head = tree::head(t)?;
+    let mut c = tree::candidate(t, &head, 0);
+    if !src.seen.is_empty() && src.seen != head.sha {
+        match tree::changes(t, &src.seen, &head.sha) {
+            Ok(list) if !list.is_empty() => c.notes = tree::notes(&list),
+            Ok(_) => {}
+            Err(e) => log::warn!("changes in {}: {e:#}", t.page()),
+        }
+    }
+    Ok(c)
 }
 
 /// Most jars to download per lookup just to read what they're for.
@@ -449,6 +486,15 @@ pub fn settle(all: &mut [Candidate], pattern: &str, mc: &str, loader: Loader) {
 pub fn resolve(link: &str, mc: &str, loader: Loader, prerelease: bool) -> anyhow::Result<Resolved> {
     let mut src = parse_link(link)?;
     src.prerelease = prerelease;
+    if tree::of_url(&src.url).is_some() {
+        bail!("That's a folder on a branch. Add it from the Resource packs or Shaders tab; mods come from release files only.");
+    }
+    resolve_class(link, src, mc, loader)
+}
+
+/// [`resolve`] for a source already read from the link (`src.class` says
+/// what kind of file it wants).
+pub(crate) fn resolve_class(link: &str, src: ModSource, mc: &str, loader: Loader) -> anyhow::Result<Resolved> {
     let tag = github::tag_in_link(link);
     let all = list_all(&src, mc, loader)?;
     // A link to one release starts there; otherwise the newest that fits.
@@ -460,14 +506,15 @@ pub fn resolve(link: &str, mc: &str, loader: Loader, prerelease: bool) -> anyhow
         Some(t) if src.kind == Kind::GitHub => {
             let mut one = github::release_by_tag(&src, &t)?;
             for c in &mut one {
-                c.fit = fit(&c.file_name, &c.version, mc, loader);
+                c.fit = fit_class(&c.file_name, &c.version, mc, loader, src.class);
             }
             one
         }
         _ => all,
     };
     let asset = github::asset_in_link(link);
-    if asset.is_none() {
+    // Jars are read to see what they're for; packs aren't jars.
+    if asset.is_none() && src.class == 0 {
         settle(&mut all, "", mc, loader);
     }
     let mut r = pick(src, all, asset.as_deref());
@@ -497,7 +544,10 @@ pub fn pick(src: ModSource, all: Vec<Candidate>, want: Option<&str>) -> Resolved
     // The newest release (version) that has a usable file.
     let release = match want {
         Some(w) => all.iter().find(|c| c.file_name == w).map(|c| c.version.clone()),
-        None => all.iter().find(|c| c.fit.usable() && c.file_name.ends_with(".jar")).map(|c| c.version.clone()),
+        None => {
+            let ext = if src.class == 0 { ".jar" } else { ".zip" };
+            all.iter().find(|c| c.fit.usable() && c.file_name.to_ascii_lowercase().ends_with(ext)).map(|c| c.version.clone())
+        }
     };
     let Some(release) = release else {
         // Nothing fits: list the newest release's files for the picker.
@@ -542,6 +592,28 @@ fn score(c: &Candidate) -> u32 {
     };
     // A plain jar beats a zip; shorter names (no "-all", "-shadow") a bit.
     base + u32::from(c.file_name.ends_with(".jar")) * 5
+}
+
+/// [`fit`] for a source of `class`: packs are zips, and name no loader.
+pub fn fit_class(file_name: &str, version: &str, mc: &str, loader: Loader, class: u32) -> Fit {
+    if class == 0 {
+        return fit(file_name, version, mc, loader);
+    }
+    let name = file_name.to_ascii_lowercase();
+    if !name.ends_with(".zip") {
+        return Fit::Extra("Not a zip".into());
+    }
+    if name.ends_with("-sources.zip") || name.ends_with("-src.zip") {
+        return Fit::Extra("Source code".into());
+    }
+    let mcs = mc_versions(&format!("{} {}", name, version.to_ascii_lowercase()));
+    if !mcs.is_empty() && !mc.is_empty() {
+        return match mcs.iter().any(|v| mc_matches(v, mc)) {
+            true => Fit::Good,
+            false => Fit::Minecraft(mcs[0].clone()),
+        };
+    }
+    Fit::Unknown
 }
 
 /// Judges a file from its name and release tag.
@@ -780,7 +852,9 @@ fn offer(inst: &Instance, a: &Addon, src: &ModSource, all: &[Candidate], loader:
     let same_release = c.version == src.seen;
     // Only strictly newer releases are updates: a jar adopted at 1.4.2
     // isn't offered 1.4.1 because that's what the list has for it.
-    if !same_release && src.kind != Kind::Url && !src.seen.is_empty() && !newer(&c.version, &src.seen) {
+    // A branch's newest commit is newer than the one installed.
+    let branch = tree::of_url(&src.url).is_some();
+    if !same_release && src.kind != Kind::Url && !branch && !src.seen.is_empty() && !newer(&c.version, &src.seen) {
         return None;
     }
     let changed = same_release
@@ -1217,6 +1291,13 @@ pub fn unfollow(inst: &mut Instance, file_name: &str) -> anyhow::Result<()> {
 
 /// The pinned file of a source (its release `seen`, named `file_name`).
 pub fn pinned_candidate(src: &ModSource, file_name: &str) -> anyhow::Result<Candidate> {
+    // A branch folder: the pin's commit, built the same way everywhere.
+    if let Some(t) = tree::of_url(&src.url) {
+        // The commit pins the contents; the zip Hopper builds from it may
+        // differ by a byte between versions, so its hash isn't checked.
+        let commit = tree::Commit { sha: src.seen.clone(), ..Default::default() };
+        return Ok(tree::candidate(&t, &commit, 0));
+    }
     let mut list = match src.kind {
         Kind::GitHub => github::release_by_tag(src, &src.seen)?,
         Kind::Maven => vec![Candidate {
@@ -1249,6 +1330,15 @@ pub fn install_pinned(inst: &mut Instance, pin: &carry::Pin, enabled_on: bool, j
     let c = pinned_candidate(&pin.source, &pin.file)?;
     let id = src_id(&format!("{}|{}", pin.source.key(), pin.source.pattern));
     let name = crate::scan::strip_version_suffix(&pin.file);
+    // A pack goes in the instance's own pack folder, the pack way.
+    if packs::is_pack(pin.source.class) {
+        anyhow::ensure!(pin.source.class != cf::CLASS_DATAPACKS, "{} is a data pack; add it to a world from the Data packs tab", pin.file);
+        remember(id, &pin.source, &name);
+        let f = to_file(id, &pin.source, &c, "", Loader::Any, false);
+        let dir = inst.root.join(crate::instances::folder_for_class(pin.source.class));
+        crate::instance_ops::put_pack(&inst.root, &dir, &mod_for(id, &pin.source, &name), &f, None, job)?;
+        return Ok(f.file_name);
+    }
     remember(id, &pin.source, &name);
     let loader = crate::install::loader_of(inst);
     let f = to_file(id, &pin.source, &c, &inst.game_version, loader, false);

@@ -2376,7 +2376,7 @@ impl AddonsView {
                 // A click browses, as it always did. With mods from links on,
                 // the arrow and a right-click offer the other way to add;
                 // otherwise Browse is the only way, so there's no arrow.
-                let links = self.class == cf::CLASS_MODS && self.global_dir().is_none() && self.store.read(cx).settings().allow_sources;
+                let links = self.links_menu(cx);
                 if links {
                     let menu = self.add_menu(cx);
                     let m2 = menu.clone();
@@ -2403,7 +2403,7 @@ impl AddonsView {
             })
             // Jars nobody knows: follow their sources in one go.
             .when_some(
-                (self.class == cf::CLASS_MODS && self.global_dir().is_none() && self.store.read(cx).settings().allow_sources)
+                (self.class == cf::CLASS_MODS && self.links_menu(cx))
                     .then(|| {
                         let inst = self.store.read(cx).instance(&inst.root)?;
                         let n = inst.addons.iter().filter(|a| a.project_id == 0 && a.source.is_none() && a.folder() == "mods").count()
@@ -4066,15 +4066,30 @@ Change version", a.file_name).into()
                     .on_click(move |_, _, cx| v1.update(cx, |this, cx| this.add_content(cx))),
             )
             .item(PopupMenuItem::new("From GitHub or a link…").icon(IconName::Link).on_click(move |_, window, cx| {
-                let (store, root) = {
+                let (store, root, class, dest) = {
                     let this = v2.read(cx);
-                    (this.store.clone(), this.root.clone())
+                    let dest = this.globals.picked.filter(|_| this.class == cf::CLASS_RESOURCE_PACKS).map(str::to_string);
+                    (this.store.clone(), this.root.clone(), this.class, dest)
                 };
-                if let Some(root) = root {
-                    crate::source_dialog::open_add(store, root, window, cx);
+                match root {
+                    Some(root) if class == cf::CLASS_MODS => crate::source_dialog::open_add(store, root, window, cx),
+                    Some(root) => crate::source_dialog::open_add_pack(store, root, class, dest, window, cx),
+                    None => {}
                 }
             }))
         })
+    }
+
+    /// Add content gets its menu (Browse, or from GitHub or a link) with
+    /// mods from links on: for mods in the instance's own folder, and for
+    /// resource packs and shaders wherever they go.
+    fn links_menu(&self, cx: &App) -> bool {
+        let kind = match self.class {
+            cf::CLASS_MODS => self.global_dir().is_none(),
+            cf::CLASS_RESOURCE_PACKS | cf::CLASS_SHADERS => true,
+            _ => false,
+        };
+        kind && self.store.read(cx).settings().allow_sources
     }
 
     /// Add content: Browse for this kind of content (into Paxi's folder

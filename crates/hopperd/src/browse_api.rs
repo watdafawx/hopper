@@ -518,7 +518,7 @@ async fn changelog(State(app): State<Arc<App>>, headers: HeaderMap, method: Meth
 /// Where data packs can go on a server: each world's `datapacks/` (the
 /// active one first), then global loader folders (Paxi…) the server has.
 /// (label, folder relative to the server)
-fn datapack_dirs(inst: &Instance) -> Vec<(String, String)> {
+pub(crate) fn datapack_dirs(inst: &Instance) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut worlds = hopper_core::hosting::worlds::list(&inst.root);
     worlds.sort_by_key(|w| !w.active);

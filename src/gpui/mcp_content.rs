@@ -199,6 +199,21 @@ fn list_packs(inst: &Instance, updates: &[hopper::install::Update], args: &Value
                     };
                     let addon = inst.addons.iter().find(|a| a.class_id == class && a.file_name.eq_ignore_ascii_case(&file));
                     let upd = addon.and_then(|a| updates.iter().find(|u| u.project_id == a.project_id && a.project_id != 0));
+                    // A pack added from GitHub or a link: its source and newer version.
+                    if let Some((r, installed, newer)) = sources::packs::update_of(&p) {
+                        return json!({
+                            "file": file,
+                            "folder": false,
+                            "enabled": enabled,
+                            "active": active.unwrap_or(json!(false)),
+                            "name": r.name,
+                            "id": installed.mod_id,
+                            "source": source_json(&r.source),
+                            "version": installed.display_name,
+                            "update_to": newer.as_ref().map(|f| f.display_name.clone()),
+                            "what_changed": newer.as_ref().and_then(|f| f.source.as_ref()).map(|s| s.notes.clone()),
+                        });
+                    }
                     json!({
                         "file": file,
                         "folder": p.is_dir(),
@@ -353,6 +368,10 @@ fn change_source(store: &Entity<Store>, name: &str, inst: Instance, args: Value,
         .detach();
         return;
     }
+    if let Some(kind) = args["kind"].as_str() {
+        add_pack(store, inst, kind, &link, pre, &args, reply, cx);
+        return;
+    }
     // add_from_source
     let asset = args["asset"].as_str().map(str::to_string);
     let (mc, loader) = (inst.game_version.clone(), hopper::install::loader_of(&inst));
@@ -390,6 +409,66 @@ fn change_source(store: &Entity<Store>, name: &str, inst: Instance, args: Value,
                     });
                     Ok(vec![text(format!("Adding {file} in Hopper (a task). list_mods shows it once done."))])
                 }),
+        };
+        let _ = reply.send(r);
+    })
+    .detach();
+}
+
+/// add_from_source with `kind`: a pack into one of the instance's pack
+/// locations, as the Packs tab's From GitHub or a link does.
+#[allow(clippy::too_many_arguments)]
+fn add_pack(store: Entity<Store>, inst: Instance, kind: &str, link: &str, pre: bool, args: &Value, reply: Sender<Reply>, cx: &mut App) {
+    let class = match class_of(kind) {
+        Ok(c) if c != cf::CLASS_DATAPACKS => c,
+        Ok(_) => {
+            let _ = reply.send(Err("Data packs from links are added per world in Hopper Server; here use resourcepacks or shaders.".into()));
+            return;
+        }
+        Err(e) => {
+            let _ = reply.send(Err(e));
+            return;
+        }
+    };
+    let want = args["location"].as_str().unwrap_or("instance").to_ascii_lowercase();
+    let Some(loc) = hopper::packs::locations(&inst, class)
+        .into_iter()
+        .find(|l| l.world.is_none() && (l.key.eq_ignore_ascii_case(&want) || l.label.to_ascii_lowercase() == want))
+    else {
+        let _ = reply.send(Err(format!("No pack location \"{want}\" here (list_packs lists them).")));
+        return;
+    };
+    let asset = args["asset"].as_str().map(str::to_string);
+    let (mc, l2) = (inst.game_version.clone(), link.to_string());
+    let found = cx.background_spawn(async move { sources::packs::resolve(&l2, &mc, class, pre).map_err(|e| format!("{e:#}")) });
+    cx.spawn(async move |cx| {
+        let r = match found.await {
+            Err(e) => Err(e),
+            Ok(r) => cx.update(|cx| {
+                source_gate(true, sources::trusted(&r.source), &r.source.publisher)?;
+                let names: Vec<String> = r.candidates.iter().map(|c| if c.title.is_empty() { c.file_name.clone() } else { c.title.clone() }).collect();
+                let idx = match &asset {
+                    Some(a) => r
+                        .candidates
+                        .iter()
+                        .position(|c| c.file_name.eq_ignore_ascii_case(a) || c.title.eq_ignore_ascii_case(a))
+                        .ok_or(format!("{a} isn't offered there: {}", names.join(", ")))?,
+                    None if r.ambiguous || r.pick.is_none() => return Err(format!("Pick one with asset: {}", names.join(", "))),
+                    None => r.pick.unwrap_or(0),
+                };
+                let (root, dir, place) = (inst.root.clone(), loc.dir.clone(), loc.label.clone());
+                let file = r.candidates[idx].file_name.clone();
+                let publisher = r.source.publisher.clone();
+                store.update(cx, |s, _| {
+                    s.spawn_instance_job(&root.clone(), format!("Adding {file}"), move |job| {
+                        let new = sources::packs::install(&root, &dir, &r, idx, job)?;
+                        let f = new.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        job.detail(format!("{f} is in {place}. Updates come from {publisher}."));
+                        Ok(Msg::InstanceChanged(root))
+                    });
+                });
+                Ok(vec![text(format!("Adding {file} to {} in Hopper (a task). list_packs shows it once done.", loc.label))])
+            }),
         };
         let _ = reply.send(r);
     })

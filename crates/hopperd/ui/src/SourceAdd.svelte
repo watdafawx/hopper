@@ -3,6 +3,9 @@
   // as on desktop: paste a link, Hopper finds the file for this server (or
   // lists them when it can't tell), says who publishes it the first time,
   // then adds it. Updates come through the normal update check.
+  // With `pack` it adds a data pack instead (Worlds › Data packs): a folder
+  // on a GitHub branch, a release's zip or a link, into a world's
+  // datapacks/ or a global folder.
   import { X, Package, CircleCheck, Circle, CircleX, Info } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -10,7 +13,10 @@
   import { dialog } from './lib/dialog.svelte.js';
 
   // follow: the installed mod to follow a source (null adds a new one).
-  let { server, follow = null, onClose, onChanged = () => {} } = $props();
+  // pack: { dest } adds a data pack, `dest` the folder picked first.
+  let { server, follow = null, pack = null, onClose, onChanged = () => {} } = $props();
+  const what = $derived(pack ? '/packs' : '/mods');
+  let dest = $state(pack?.dest || '');
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
 
@@ -29,6 +35,11 @@
   const size = (n) => (!n ? '' : n < 1 << 20 ? `${Math.ceil(n / 1024)} KB` : `${(n / (1 << 20)).toFixed(1)} MB`);
   const tagClass = (c) => (c.good ? 'okc' : c.fits ? 'info' : c.tag === 'Source code' || c.tag === 'Docs' || c.tag === 'API only' || c.tag === 'Dev build' || c.tag === 'Not a jar' ? '' : 'bad');
   const pick = $derived(found && chosen != null ? found.candidates[chosen] : null);
+  const title = $derived(pack ? 'Add a data pack from GitHub or a link' : follow ? `Follow a source for ${follow.name}` : 'Add from GitHub or a link');
+  // A branch folder: its choices are folders, updates come from commits.
+  const branch = $derived(found?.branch || '');
+  const label = (c, i) => (branch && found.folders?.[i] ? c.title : c.file);
+  const BIG = 50 << 20;
 
   async function loadAllowed() {
     try {
@@ -61,7 +72,8 @@
         plan = await post(`${base}/mods/source/plan`, { file: follow.file, link: link.trim(), prerelease: pre });
         return;
       }
-      const r = await post(`${base}/mods/source/resolve`, { link: link.trim(), prerelease: pre });
+      const r = await post(`${base}${what}/source/resolve`, { link: link.trim(), prerelease: pre });
+      if (pack && !(r.dirs || []).some((d) => d.path === dest)) dest = r.dirs?.[0]?.path || '';
       found = r;
       chosen = r.pick;
       picking = r.ambiguous || r.pick == null;
@@ -104,6 +116,15 @@
     if (!pick) return;
     busy = follow ? `Following ${found.publisher}` : `Adding ${pick.file}`;
     try {
+      if (pack) {
+        const { job } = await post(`${base}/packs/source/add`, { link: link.trim(), prerelease: pre, pick: chosen, dest });
+        const r = (await followJob(job, (st) => (busy = st.detail || busy))) || {};
+        const saved = r.backup ? ` The old copy is in ${r.backup}.` : '';
+        say(`${(r.added || [pick.file])[0]} is in ${dest}.${saved}${alive ? ' Run /reload or restart the server to load it.' : ''}`);
+        onChanged(true);
+        onClose();
+        return;
+      }
       const { job } = await post(`${base}/mods/source/add`, { link: link.trim(), prerelease: pre, file: pick.file, follow: follow?.file || null });
       await followJob(job, (st) => (busy = st.detail || busy));
       say(`${pick.file} is in. Updates come from ${found.publisher}.${alive ? ' Restart the server to apply.' : ''}`);
@@ -123,8 +144,8 @@
 <svelte:window onkeydown={(e) => e.key === 'Escape' && !dialog.open && onClose()} />
 
 <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && onClose()}>
-  <div class="box popover col" role="dialog" aria-label={follow ? `Follow a source for ${follow.name}` : 'Add from GitHub or a link'}>
-    <h3 class="row">{follow ? `Follow a source for ${follow.name}` : 'Add from GitHub or a link'}<span class="sp"></span><button class="btn sm ghost icon" title="Close" onclick={onClose}><X size={14} /></button></h3>
+  <div class="box popover col" role="dialog" aria-label={title}>
+    <h3 class="row">{title}<span class="sp"></span><button class="btn sm ghost icon" title="Close" onclick={onClose}><X size={14} /></button></h3>
     {#if allowed === false}
       <div class="col gap small">
         <p>Hopper Server can add mods from a GitHub release, a Maven repo, a Jenkins job or a download link, and keep them updated from there.</p>
@@ -137,9 +158,9 @@
         {@const site = follow.source === 'modrinth' ? 'Modrinth' : 'CurseForge'}
         <div class="row small note"><Info size={14} /><span>This mod comes from {site} now. Once it follows a source, its updates come from there instead of {site}. Stop following puts it back.</span></div>
       {/if}
-      <label class="col lbl small subtle">A GitHub repo or release, a Maven repo, a Jenkins job, or a link to a .jar
+      <label class="col lbl small subtle">{pack ? 'A folder on a GitHub branch, a GitHub repo or release with .zip files, or a link to a .zip' : 'A GitHub repo or release, a Maven repo, a Jenkins job, or a link to a .jar'}
         <form class="row" onsubmit={(e) => { e.preventDefault(); lookUp(); }}>
-          <div class="input grow"><input bind:value={link} placeholder="https://github.com/owner/repo" autocomplete="off" spellcheck="false" oninput={() => { found = null; plan = null; error = ''; }} /></div>
+          <div class="input grow"><input bind:value={link} placeholder={pack ? 'https://github.com/owner/repo/tree/branch' : 'https://github.com/owner/repo'} autocomplete="off" spellcheck="false" oninput={() => { found = null; plan = null; error = ''; }} /></div>
           <button class="btn sm" disabled={!link.trim() || looking}>{looking ? 'Looking…' : 'Look up'}</button>
         </form>
       </label>
@@ -157,17 +178,22 @@
         {/if}
         <div class="tiny muted">Your jar stays as it is. Stop following puts the mod back to where it came from.</div>
       {/if}
+      {#if found && pack && found.dirs?.length}
+        <label class="col lbl small subtle">Goes to
+          <select bind:value={dest}>{#each found.dirs as d (d.path)}<option value={d.path}>{d.label}</option>{/each}</select>
+        </label>
+      {/if}
       {#if found}
         {#if !found.candidates.length}
-          <div class="small subtle">This source has no jar files for Hopper to add.</div>
+          <div class="small subtle">This source has no {pack ? '.zip' : 'jar'} files for Hopper to add.</div>
         {:else if picking}
-          <div class="small subtle">{found.pick == null ? "None of these say they fit this server. Pick one only if you know it does; Hopper reads the jar after download and stops if it doesn't." : 'Several files fit. Pick the one you want; updates keep to the same kind of file.'}</div>
+          <div class="small subtle">{branch ? "This folder isn't a pack itself. Pick the folder that is; Hopper checks it has a pack.mcmeta after download." : found.pick == null ? "None of these say they fit this server. Pick one only if you know it does; Hopper reads the jar after download and stops if it doesn't." : 'Several files fit. Pick the one you want; updates keep to the same kind of file.'}</div>
           <div class="list">
             {#each found.candidates as c, i (c.file)}
               <button class="it row-hover" class:row-sel={chosen === i} onclick={() => (chosen = i)}>
                 {#if chosen === i}<CircleCheck size={14} />{:else}<Circle size={14} />{/if}
-                <span class="ell grow">{c.file}</span>
-                <span class="chip tag {tagClass(c)}">{c.tag}</span>
+                <span class="ell grow">{label(c, i)}</span>
+                {#if !branch}<span class="chip tag {tagClass(c)}">{c.tag}</span>{/if}
                 <span class="tiny muted sz">{size(c.size)}</span>
               </button>
             {/each}
@@ -177,10 +203,13 @@
             <Package size={18} />
             <div class="col grow min0">
               <div class="row"><b class="ell">{pick.file}</b><span class="chip tag info">{found.kind}</span></div>
-              <div class="tiny muted">{[pick.title, size(pick.size), pick.good ? 'fits this server' : 'Hopper checks the jar after download'].filter(Boolean).join(' · ')}</div>
+              <div class="tiny muted">{[pick.title, branch && pick.size ? `download up to ${size(pick.size)}` : size(pick.size), pick.good ? 'fits this server' : branch ? `updates come from new commits on ${branch}` : pack ? "Hopper checks it's a pack after download" : 'Hopper checks the jar after download'].filter(Boolean).join(' · ')}</div>
             </div>
             {#if found.candidates.length > 1}<button class="btn sm ghost" onclick={() => (picking = true)}>Other file…</button>{/if}
           </div>
+        {/if}
+        {#if pick && branch && pick.size > BIG}
+          <div class="warn small">This repo is big (up to {size(pick.size)}). Hopper downloads it once to build the pack, and again for each update.</div>
         {/if}
         {#if pick && !found.trusted}
           <div class="warn small">

@@ -78,6 +78,37 @@ lookup, then cached), but that is slower, so name your files.
 - Publishing on Modrinth or CurseForge too is fine. Hopper treats each
   source separately; players without Hopper find you there.
 
+## Resource packs, shader packs and data packs
+
+The Resource packs and Shaders tabs (Add content ▾ › From GitHub or a link)
+and Hopper Server's Worlds › Data packs take packs from the same sources,
+into the location the player picks (This instance, Paxi, Global Packs, or a
+server world's `datapacks/`).
+
+- **A folder on a branch.** Paste the folder's link:
+  `https://github.com/<owner>/<repo>/tree/<branch>[/<folder>]`, for example
+  `https://github.com/Faithful-Resource-Pack/Faithful-32x-Mods/tree/1.20.x`.
+  The folder needs `pack.mcmeta` at its top (a `shaders` folder for shader
+  packs). If it doesn't have one, Hopper lists the folders one level down
+  and the player picks one, so a repo can hold several packs side by side.
+  Hopper downloads the branch at that commit (GitHub's zip archive of the
+  whole repo, so keep big unrelated files out of it), repacks the folder as
+  `<repo>[-<folder>]-<branch>.zip`, and leaves out `.github/`, `.gitignore`
+  and `.gitattributes`. The file name stays the same across updates, so the
+  pack keeps its place in the game's pack order.
+- **Versions are commits.** The installed version is the newest commit that
+  touched the folder (shown as `989f3bf · 2026-08-01`). Each check is one
+  commits call for that folder, cached like the rest; a newer commit is an
+  update, and its "What changed" lists the commit messages since the
+  installed one. Write commit messages for players. Shared packs pin the
+  commit.
+- **One branch per Minecraft version** (`1.20.x`, `1.21.x`) works well: the
+  player follows the branch for their version.
+- **Release zips** work too: attach the pack as a `.zip` asset of a GitHub
+  release, tagged as for mods. Put the Minecraft version in the file name
+  (`MyPack-1.21.zip`) if you ship several. A direct link to a `.zip` works
+  the same way as a link to a jar.
+
 ## Rate limits
 
 Without a token, GitHub allows 60 API calls an hour. Hopper caches the
