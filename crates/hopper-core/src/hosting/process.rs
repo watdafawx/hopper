@@ -1390,10 +1390,11 @@ mod tests {
         let (s, dir) = stoppable("slow", "STOPPING 1..6 | % { SAVING Start-Sleep -Seconds 1 }; SAVED exit 0");
         s.stop().unwrap();
         assert!(wait_dead(&s, Duration::from_secs(25)), "{:?}", s.console());
+        // The last lines can reach the console a moment after the exit on a slow CI box.
+        assert!(wait_for(&s, SAVED), "{:?}", s.console());
         std::thread::sleep(Duration::from_millis(400));
         let console = s.console();
         assert_eq!(s.state(), ServerState::Stopped);
-        assert!(console.iter().any(|l| l == SAVED), "{console:?}");
         assert!(console.iter().any(|l| l == SAVING_NOTE), "{console:?}");
         assert!(!console.iter().any(|l| l.contains("ended it")), "{console:?}");
         let _ = std::fs::remove_dir_all(&dir);
