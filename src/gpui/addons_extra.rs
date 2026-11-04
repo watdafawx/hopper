@@ -517,7 +517,7 @@ impl AddonsView {
                                 cx,
                             ))
                         })
-                        .child(self.folded_rows("dup-rows", rows.collect(), cx));
+                        .child(self.folded_rows("dup-rows", dups.iter().map(|d| d.name.clone()).collect(), rows.collect(), cx));
         let notice = widgets::closable_notice(body, dup_key, widgets::Closed::Chip, title, warning, &self.store, cx)?;
         Some(div().px_6().child(notice).into_any_element())
     }
@@ -786,7 +786,7 @@ impl AddonsView {
                                 }),
                         )
                         .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx)))
-                        .child(self.folded_rows("missing-rows", rows, cx));
+                        .child(self.folded_rows("missing-rows", self.missing.list.iter().map(|m| m.mod_name.clone()).collect(), rows, cx));
         let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
         Some(div().id("missing-banner").on_hover(hover).px_6().child(notice).into_any_element())
     }
@@ -969,38 +969,48 @@ impl AddonsView {
         .detach();
     }
 
-    /// A notice's rows: the first two, the rest behind "Show N more" (open,
-    /// past six they scroll), so a long list never pushes the mods table off
-    /// the screen.
-    fn folded_rows(&self, id: &'static str, rows: Vec<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        const FOLD: usize = 2;
+    /// A notice's rows behind one line: the mods' names and "Show details".
+    /// Open, the rows show (past four they scroll inside the notice), so a
+    /// long list never pushes the mods table off the screen.
+    fn folded_rows(&self, id: &'static str, names: Vec<String>, rows: Vec<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         let n = rows.len();
         let open = self.rows_open.contains(id);
-        let shown: Vec<AnyElement> = if open { rows } else { rows.into_iter().take(FOLD).collect() };
+        let mut seen = std::collections::HashSet::new();
+        let names: Vec<String> = names.into_iter().filter(|n| !n.is_empty() && seen.insert(n.clone())).collect();
+        let brief = match names.len() {
+            0 => String::new(),
+            1..=3 => names.join(", "),
+            k => format!("{}, {} and {} more", names[0], names[1], k - 2),
+        };
+        let toggle = cx.listener(move |this, _, _, cx| {
+            if !this.rows_open.remove(id) {
+                this.rows_open.insert(id);
+            }
+            cx.notify();
+        });
         v_flex()
-            .gap_1()
+            .gap_2()
             .child(
-                div()
-                    .id(id)
-                    .when(open && n > 6, |d| d.h(rems(10.5)))
-                    .overflow_y_scrollbar()
-                    .child(v_flex().gap_2().children(shown)),
-            )
-            .when(n > FOLD, |c| {
-                c.child(
-                    h_flex().child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(brief))
+                    .child(
                         Button::new(SharedString::from(format!("{id}-more")))
                             .ghost()
                             .small()
                             .icon(if open { IconName::ChevronUp } else { IconName::ChevronDown })
-                            .label(if open { "Show fewer".to_string() } else { format!("Show {} more", n - FOLD) })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.rows_open.remove(id) {
-                                    this.rows_open.insert(id);
-                                }
-                                cx.notify();
-                            })),
+                            .label(if open { "Hide details" } else { "Show details" })
+                            .on_click(toggle),
                     ),
+            )
+            .when(open, |c| {
+                c.child(
+                    div()
+                        .id(id)
+                        .when(n > 4, |d| d.h(rems(10.5)))
+                        .overflow_y_scrollbar()
+                        .child(v_flex().gap_2().children(rows)),
                 )
             })
             .into_any_element()
@@ -1241,7 +1251,7 @@ impl AddonsView {
                                 cx,
                             ))
                         })
-                        .child(self.folded_rows("blocker-rows", rows, cx));
+                        .child(self.folded_rows("blocker-rows", blockers.iter().map(|b| b.mod_name.clone()).collect(), rows, cx));
         let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
         Some(div().px_6().child(notice).into_any_element())
     }
