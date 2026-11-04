@@ -16,6 +16,7 @@ mod brand;
 mod browse;
 mod config_editor;
 mod config_compare;
+mod config_pushes;
 mod config_view;
 mod configs_tab;
 mod configs;

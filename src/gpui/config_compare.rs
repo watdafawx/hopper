@@ -82,11 +82,31 @@ pub struct CompareView {
     all: bool,
     picks: BTreeMap<(String, Vec<String>, String), Dir>,
     applying: bool,
+    /// Files paired by hand (Sync › Configs: the same path on both sides),
+    /// instead of looking for the server's live copy.
+    fixed: HashMap<String, String>,
+    /// Drawn inside another list (Sync): no server chip, a set height.
+    embedded: bool,
 }
+
+/// Settings were applied (Sync compares its files again).
+pub struct CompareApplied;
+
+impl EventEmitter<CompareApplied> for CompareView {}
 
 impl CompareView {
     pub fn new(store: Entity<Store>, root: PathBuf, server: ServerInfo, _cx: &mut Context<Self>) -> Self {
-        Self { store, root, server, only: None, files: HashMap::new(), loading: false, all: false, picks: BTreeMap::new(), applying: false }
+        Self { store, root, server, only: None, files: HashMap::new(), loading: false, all: false, picks: BTreeMap::new(), applying: false, fixed: HashMap::new(), embedded: false }
+    }
+
+    /// One file of Sync › Configs: `rel` on this PC beside `srel` on the
+    /// server, its differing settings with → / ← and Apply.
+    pub fn for_file(store: Entity<Store>, root: PathBuf, server: ServerInfo, rel: String, srel: String, cx: &mut Context<Self>) -> Self {
+        let mut v = Self::new(store, root, server, cx);
+        v.fixed.insert(rel.clone(), srel);
+        v.embedded = true;
+        v.set_files(Some(vec![rel]), cx);
+        v
     }
 
     /// Shows these files (the picked mod's); reads the ones not read yet.
@@ -109,15 +129,19 @@ impl CompareView {
             return;
         }
         self.loading = true;
-        let (root, server, level) = (self.root.clone(), self.server.clone(), self.level());
+        let (root, server, level, fixed) = (self.root.clone(), self.server.clone(), self.level(), self.fixed.clone());
         cx.spawn(async move |this, cx| {
             let read = cx
                 .background_spawn(async move {
                     want.into_iter()
                         .map(|rel| {
                             let client = std::fs::read_to_string(root.join(&rel)).unwrap_or_default();
-                            let found = configcompare::server_tries(&rel, &level).into_iter().find_map(|r| read_server(&server, &r).map(|t| (r, t)));
-                            let cmp = match (configcompare::compared(&rel), found, Format::of(&rel)) {
+                            let tries = match fixed.get(&rel) {
+                                Some(s) => vec![s.clone()],
+                                None => configcompare::server_tries(&rel, &level),
+                            };
+                            let found = tries.into_iter().find_map(|r| read_server(&server, &r).map(|t| (r, t)));
+                            let cmp = match (fixed.contains_key(&rel) || configcompare::compared(&rel), found, Format::of(&rel)) {
                                 (false, _, _) => Cmp { srel: None, client, server: String::new(), pairs: Err("client".into()) },
                                 (true, None, _) => Cmp { srel: None, client, server: String::new(), pairs: Err("The server has no copy yet.".into()) },
                                 (true, Some((srel, text)), Some(f)) => {
@@ -192,6 +216,7 @@ impl CompareView {
                 this.only = None;
                 this.set_files(shown, cx);
                 config_view::invalidate(&this.root, cx);
+                cx.emit(CompareApplied);
                 if done > 0 {
                     window.push_notification(
                         Notification::success(format!("Applied {done} setting{}. The old copies are in Backups here and on {name}; the server uses them on its next start.", if done == 1 { "" } else { "s" })),
@@ -335,7 +360,7 @@ impl Render for CompareView {
             .gap_2()
             .px_3()
             .py_2()
-            .child(widgets::chip(theme.success).child(format!("{} · server", self.server.name)))
+            .when(!self.embedded, |d| d.child(widgets::chip(theme.success).child(format!("{} · server", self.server.name))))
             .child(div().flex_1())
             .child(widgets::toggle_chip("cmp-differs", format!("Differs {differ}"), !self.all, cx).on_click(cx.listener(|this, _, _, cx| {
                 this.all = false;

@@ -6,7 +6,7 @@
   // kind gets (switch, slider + field, field with − / +, choice, list,
   // colour, text, or "Edit as text" for what can't be a setting).
   import { RotateCcw, X, Plus, Minus, FileText } from '@lucide/svelte';
-  import { valueOf, edited, errorOf, setEdit, same, limits, check, listText, listItems, swatchOf, colorText } from './configs.svelte.js';
+  import { valueOf, edited, errorOf, setEdit, same, playersOf, limits, check, listText, listItems, swatchOf, colorText } from './configs.svelte.js';
 
   let { rel, e, stacked = false, onEditText } = $props();
 
@@ -17,6 +17,8 @@
   const changed = $derived(e.default_value != null ? !same(value, e.default_value) : e.is_default === false && !dirty);
   const canReset = $derived(e.default_value != null && !same(value, e.default_value));
   const key = $derived([...(e.path || []), e.key].join('.'));
+  // The players' copy, when a paired Hopper sent one that differs here.
+  const players = $derived(playersOf(rel, e));
 
   /** What's typed in a field before it's taken, and why it isn't. */
   let draft = $state(null);
@@ -97,6 +99,7 @@
     <div class="raw mono" title={key}>{key}</div>
     {#if e.comment}<div class="d">{e.comment}</div>{/if}
     {#if lim}<div class="cap">{lim}</div>{/if}
+    {#if players}<div class="cap pc" title="From {players.client_rel} on a paired Hopper">Players' copy: <span class="mono">{players.client === '' ? '(empty)' : players.client}</span></div>{/if}
     {#if error}<div class="cap err">{error}{localError ? ' Not kept.' : ''}</div>{/if}
   </div>
   <div class="ctl">
@@ -168,6 +171,7 @@
   .d { color: var(--subtle); font-size: 12px; white-space: pre-line; }
   .cap { color: var(--muted); font-size: 11.5px; }
   .cap.err { color: var(--red); }
+  .cap.pc { color: var(--blue); }
   .ctl { display: flex; align-items: flex-start; gap: 6px; justify-content: flex-end; min-width: 0; }
   .sl { display: flex; align-items: center; gap: 8px; }
   .sl input[type='range'] { width: 150px; accent-color: var(--acc); }

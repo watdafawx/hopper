@@ -702,6 +702,50 @@ impl Client {
         Ok(crate::configedit::Saved { text: v["text"].as_str().unwrap_or("").to_string(), reapplied: v["reapplied"].as_bool().unwrap_or(false) })
     }
 
+    /// Sends this PC's copy of the settings files both sides read (paths as
+    /// here, `config/x-common.toml` -> text) so the panel can show players'
+    /// copies beside the server's. The latest replaces the one before.
+    pub fn configs_snapshot(&self, id: &str, files: &BTreeMap<String, String>) -> anyhow::Result<()> {
+        self.put(&Self::server_path(id, "/configs/client-snapshot"), json!({ "files": files }))?;
+        Ok(())
+    }
+
+    /// The settings the server's owner pushed to this Hopper and it hasn't
+    /// applied or dismissed yet.
+    pub fn configs_pushes(&self, id: &str) -> anyhow::Result<Vec<ConfigPush>> {
+        let v = self.get(&Self::server_path(id, "/configs/pushes"))?;
+        Ok(v["pushes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["state"].as_str().is_none_or(|s| s == "pending"))
+            .map(|p| ConfigPush {
+                id: p["id"].as_str().unwrap_or("").to_string(),
+                rel: p["rel"].as_str().unwrap_or("").to_string(),
+                edits: p["edits"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|e| crate::configedit::Edit {
+                        path: serde_json::from_value(e["path"].clone()).unwrap_or_default(),
+                        key: e["key"].as_str().unwrap_or("").to_string(),
+                        value: crate::configedit::Value::Str(e["value"].as_str().unwrap_or("").to_string()),
+                    })
+                    .collect(),
+                from: p["from"].as_str().unwrap_or("").to_string(),
+                at: p["at"].as_u64().unwrap_or(0),
+            })
+            .filter(|p| !p.id.is_empty() && !p.edits.is_empty())
+            .collect())
+    }
+
+    /// Tells the panel a push was applied or dismissed (`state`), with a
+    /// note the owner sees ("Applied", "Create isn't installed here").
+    pub fn configs_push_done(&self, id: &str, pid: &str, state: &str, note: &str) -> anyhow::Result<()> {
+        self.post(&Self::server_path(id, &format!("/configs/pushes/{}", enc(pid))), json!({ "state": state, "note": note }))?;
+        Ok(())
+    }
+
     // ---- jobs on the panel ---------------------------------------------------------
 
     /// Follows a job the panel runs until it ends, showing its detail and
@@ -852,6 +896,64 @@ fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
 }
 
 /// `s` percent-encoded for a URL path segment or query value.
+/// Settings a server's owner pushed to this Hopper ([`Client::configs_pushes`]).
+#[derive(Clone, Debug)]
+pub struct ConfigPush {
+    pub id: String,
+    /// The file as on this PC (`config/x-common.toml`).
+    pub rel: String,
+    /// Values as the panel typed them (each a [`crate::configedit::Value::Str`]
+    /// of the value's text): [`ConfigPush::typed`] reads them as each
+    /// setting's kind in this PC's file.
+    pub edits: Vec<crate::configedit::Edit>,
+    /// Who pushed them.
+    pub from: String,
+    /// Unix seconds.
+    pub at: u64,
+}
+
+impl ConfigPush {
+    /// The edits read as the settings in `text` (this PC's copy of the file)
+    /// take them; a setting the file doesn't have, or a value it can't take,
+    /// says which.
+    pub fn typed(&self, text: &str) -> Result<Vec<crate::configedit::Edit>, String> {
+        let f = crate::configedit::Format::of(&self.rel).ok_or("Hopper can't read this kind of file as settings.")?;
+        let sections = crate::configedit::parse_as(f, text)?;
+        self.edits
+            .iter()
+            .map(|e| {
+                let entry = sections
+                    .iter()
+                    .flat_map(|s| &s.entries)
+                    .find(|x| x.path == e.path && x.key == e.key)
+                    .ok_or_else(|| format!("{} isn't in this copy of the file.", e.key))?;
+                let value = entry.value.parse_like(&e.value.text()).map_err(|m| format!("{}: {m}", e.key))?;
+                Ok(crate::configedit::Edit { path: e.path.clone(), key: e.key.clone(), value })
+            })
+            .collect()
+    }
+}
+
+/// This PC's settings files the server reads too (common and server
+/// side), for [`Client::configs_snapshot`]: path -> text, the big and
+/// unreadable ones left out, at most what the panel keeps.
+pub fn snapshot_files(root: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut total = 0usize;
+    for (rel, size) in crate::configindex::list(root) {
+        if !crate::configcompare::compared(&rel) || size > crate::configindex::MAX_BYTES {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(root.join(&rel)) else { continue };
+        total += text.len();
+        if out.len() >= 500 || total > 10 * 1024 * 1024 {
+            break;
+        }
+        out.insert(rel, text);
+    }
+    out
+}
+
 pub fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {

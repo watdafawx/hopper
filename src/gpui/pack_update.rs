@@ -153,6 +153,11 @@ pub struct UpdatePreview {
     plan: Option<Result<UpdatePlan, String>>,
     /// Conflicting files where the pack's copy wins.
     take: HashSet<String>,
+    /// Conflicting settings files taking the pack's file with the settings
+    /// you changed put back in.
+    both: HashSet<String>,
+    /// Settings files whose differing settings are listed.
+    settings_open: HashSet<String>,
     /// How the conflicting files were picked, all at once or per file.
     bulk: Bulk,
     /// Server mode: mods on your versions go to the pack's too.
@@ -239,6 +244,8 @@ impl UpdatePreview {
             from,
             plan: None,
             take: HashSet::new(),
+            both: HashSet::new(),
+            settings_open: HashSet::new(),
             bulk: Bulk::Pack,
             reset_versions: false,
             turn_on: HashSet::new(),
@@ -869,6 +876,7 @@ impl UpdatePreview {
     /// starts folded behind the bulk choice.
     fn set_defaults(&mut self, p: &UpdatePlan) {
         self.take = p.default_take();
+        self.both = p.default_both();
         let n = p.count(FileAction::Conflict);
         // A quick update: the pack's copy, like the CurseForge app.
         self.bulk = if !p.base_known {
@@ -880,6 +888,11 @@ impl UpdatePreview {
         } else {
             Bulk::Suggested
         };
+        // Settings you changed that the pack changes too: asked, file by file.
+        if p.settings.values().any(|d| d.iter().any(|x| x.changed_by_you)) || (!p.base_known && !p.settings.is_empty()) {
+            self.bulk = Bulk::Review;
+            self.open.insert(Group::Files(FileAction::Conflict));
+        }
     }
 
     /// Picks every conflicting file at once, or unfolds the list to pick
@@ -893,15 +906,24 @@ impl UpdatePreview {
             .map(|f| f.rel.clone())
             .collect();
         match b {
-            Bulk::Suggested => self.take = plan.default_take(),
+            Bulk::Suggested => {
+                self.take = plan.default_take();
+                self.both = plan.default_both();
+            }
             Bulk::Mine => {
                 for r in &all {
                     self.take.remove(r);
+                    self.both.remove(r);
                 }
             }
             // Without a base, your own settings (options.txt…) stay.
             Bulk::Pack if !plan.base_known => self.take = plan.default_take(),
-            Bulk::Pack => self.take.extend(all),
+            Bulk::Pack => {
+                for r in &all {
+                    self.both.remove(r);
+                }
+                self.take.extend(all)
+            }
             Bulk::Review => {
                 self.open.insert(Group::Files(FileAction::Conflict));
             }
@@ -1219,6 +1241,7 @@ impl UpdatePreview {
             return false;
         };
         let mut overrides = plan.decisions_with(&v.take, &v.turn_on);
+        plan.apply_both(&mut overrides, &v.both);
         overrides.keep_dropped = v.keep_needed.clone();
         let (store, root, file) = (v.store.clone(), v.root.clone(), plan.file.clone());
         let backup = v.backup_worlds;
@@ -2105,13 +2128,19 @@ impl UpdatePreview {
     }
 
     fn conflicts(&self, rows: Vec<String>, cx: &mut Context<Self>) -> AnyElement {
+        let plan = match &self.plan {
+            Some(Ok(p)) => Some(p.clone()),
+            _ => None,
+        };
         v_flex()
             .pl(rems(1.25))
             .gap_1()
             .children(rows.into_iter().map(|rel| {
-                let theirs = self.take.contains(&rel);
+                let can_both = plan.as_ref().is_some_and(|p| p.can_both(&rel));
+                let settings = plan.as_ref().and_then(|p| p.settings.get(&rel).cloned()).unwrap_or_default();
+                let pick = if self.both.contains(&rel) { 2 } else { usize::from(self.take.contains(&rel)) };
                 let diff = self.diffs.get(&rel).cloned();
-                let (r1, r2) = (rel.clone(), rel.clone());
+                let (r1, r2, r3) = (rel.clone(), rel.clone(), rel.clone());
                 // Pressed and dragged down the list: the same side on each file.
                 let view = cx.entity();
                 let set = {
@@ -2119,8 +2148,8 @@ impl UpdatePreview {
                     std::rc::Rc::new(move |v: usize, _: &mut Window, cx: &mut App| {
                         let rel = rel.clone();
                         view.update(cx, |this, cx| {
-                            let changed = if v == 1 { this.take.insert(rel) } else { this.take.remove(&rel) };
-                            if changed {
+                            let ok = v != 2 || matches!(&this.plan, Some(Ok(p)) if p.can_both(&rel));
+                            if ok && this.set_pick(&rel, v) {
                                 this.bulk = Bulk::Review;
                                 cx.notify();
                             }
@@ -2133,6 +2162,10 @@ impl UpdatePreview {
                     crate::drag_pick::paint_option(Tab::new().label(label), paint, "conflicts", ix, move |v, w, cx| set(v, w, cx))
                 };
                 let row_set = set.clone();
+                let n_set = settings.len();
+                let mine_n = settings.iter().filter(|d| d.changed_by_you).count();
+                let open_set = self.settings_open.contains(&rel);
+                let theme = cx.theme().clone();
                 v_flex()
                     .child(
                         crate::drag_pick::paint_row(h_flex(), paint, "conflicts", move |v, w, cx| row_set(v, w, cx))
@@ -2146,6 +2179,21 @@ impl UpdatePreview {
                                     .truncate()
                                     .child(rel.clone()),
                             )
+                            .when(n_set > 0, |d| {
+                                d.child(
+                                    Button::new(SharedString::from(format!("sets:{rel}")))
+                                        .xsmall()
+                                        .ghost()
+                                        .label(if mine_n > 0 { format!("{mine_n} of yours · {n_set} differ") } else { format!("{n_set} settings differ") })
+                                        .tooltip("The settings where yours and the pack's differ")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if !this.settings_open.remove(&r3) {
+                                                this.settings_open.insert(r3.clone());
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new(SharedString::from(format!("diff:{rel}")))
                                     .xsmall()
@@ -2159,23 +2207,59 @@ impl UpdatePreview {
                                 TabBar::new(SharedString::from(format!("pick:{rel}")))
                                     .segmented()
                                     .xsmall()
-                                    .selected_index(usize::from(theirs))
+                                    .selected_index(pick)
                                     .child(opt(0, "Mine"))
                                     .child(opt(1, "Pack's"))
+                                    .when(can_both, |t| t.child(opt(2, "Both")))
                                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
-                                        if *ix == 1 {
-                                            this.take.insert(r2.clone());
-                                        } else {
-                                            this.take.remove(&r2);
-                                        }
+                                        this.set_pick(&r2, *ix);
                                         this.bulk = Bulk::Review;
                                         cx.notify();
                                     })),
                             ),
                     )
+                    .when(open_set, |c| {
+                        c.child(
+                            v_flex()
+                                .pl_3()
+                                .pb_1()
+                                .gap_0p5()
+                                .when(can_both, |d| d.child(widgets::caption("Both: the pack's new file, with the settings you changed put back in.", cx).text_xs()))
+                                .children(settings.iter().take(200).map(|s| {
+                                    h_flex()
+                                        .gap_2()
+                                        .text_xs()
+                                        .child(div().w(rems(14.)).flex_none().truncate().child(s.label.clone()))
+                                        .child(div().font_family("Consolas").text_color(theme.muted_foreground).truncate().max_w(rems(12.)).child(format!("yours {}", s.yours)))
+                                        .child(Icon::new(IconName::ArrowRight).xsmall().text_color(theme.muted_foreground))
+                                        .child(div().font_family("Consolas").truncate().max_w(rems(12.)).child(format!("pack's {}", s.pack)))
+                                        .when(s.changed_by_you, |d| d.child(widgets::chip(theme.primary).child("you changed it")))
+                                })),
+                        )
+                    })
                     .when_some(diff, |c, d| c.child(Self::diff_block(d, cx)))
             }))
             .into_any_element()
+    }
+
+    /// Mine (0), the pack's (1) or both (2) for a conflicting file. Whether it changed.
+    fn set_pick(&mut self, rel: &str, v: usize) -> bool {
+        let before = (self.take.contains(rel), self.both.contains(rel));
+        match v {
+            1 => {
+                self.take.insert(rel.to_string());
+                self.both.remove(rel);
+            }
+            2 => {
+                self.take.remove(rel);
+                self.both.insert(rel.to_string());
+            }
+            _ => {
+                self.take.remove(rel);
+                self.both.remove(rel);
+            }
+        }
+        before != (self.take.contains(rel), self.both.contains(rel))
     }
 }
 

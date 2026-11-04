@@ -271,12 +271,14 @@ impl ConfigsTab {
         // A search hit opens the file it's in.
         let first = self.hits.as_ref().and_then(|h| h.get(p)).and_then(|(_, f)| f.first().cloned());
         let (q, desc, changed, side) = (self.query.trim().to_string(), self.desc, self.filter == Filter::Changed, self.side);
+        let all_files: Vec<String> = self.index.as_ref().map(|i| i.files.iter().map(|f| f.rel.clone()).collect()).unwrap_or_default();
         let view = cx.new(|cx| {
             let mut v = ConfigView::new(self.store.clone(), root, Host::Tab, title, icon, files, first, None, window, cx);
             v.set_query(&q, cx);
             v.desc = desc;
             v.changed_only = changed;
             v.side = side;
+            v.all_files = all_files;
             v
         });
         let sub = cx.subscribe(&view, |this, _, e: &ConfigViewEvent, cx| {

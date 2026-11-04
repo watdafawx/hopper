@@ -221,6 +221,9 @@ pub struct ConfigsPanel {
     show: Option<Show>,
     rules_open: bool,
     preview: Option<Preview>,
+    /// The open settings file's settings, each with → / ← (the Configs
+    /// tab's compare, on this file).
+    settings_cmp: Option<(String, Entity<crate::config_compare::CompareView>, Subscription)>,
     preview_scroll: UniformListScrollHandle,
     values: bool,
     show_all: bool,
@@ -276,6 +279,7 @@ impl ConfigsPanel {
             show: None,
             rules_open: false,
             preview: None,
+            settings_cmp: None,
             preview_scroll: UniformListScrollHandle::new(),
             values: true,
             show_all: false,
@@ -1030,6 +1034,22 @@ impl ConfigsPanel {
         })
     }
 
+    /// A settings file both sides have opens as its settings: the ones that
+    /// differ, each with → / ←, and Apply for only the picked ones.
+    fn open_settings(&mut self, rel: &str, status: FileStatus, cx: &mut Context<Self>) {
+        self.settings_cmp = None;
+        if status != FileStatus::Modified || hopper::configedit::Format::of(rel).is_none() {
+            return;
+        }
+        let Some((server, inst)) = self.pair(cx) else { return };
+        let full = format!("{}/{rel}", self.folder);
+        let store = self.store.clone();
+        let view = cx.new(|cx| crate::config_compare::CompareView::for_file(store, inst.root.clone(), server, full.clone(), full, cx));
+        // Applied: the file list compares again.
+        let sub = cx.subscribe(&view, |this, _, _: &crate::config_compare::CompareApplied, cx| this.compare(false, cx));
+        self.settings_cmp = Some((rel.to_string(), view, sub));
+    }
+
     fn preview_el(&self, p: &Preview, c_dir: &Path, s_dir: &Path, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let rows = match &p.rows {
@@ -1066,6 +1086,20 @@ impl ConfigsPanel {
                     .label("Open server")
                     .on_click(move |_, _, _| open_path(&s_file)),
             );
+        if self.values
+            && let Some((_, view, _)) = self.settings_cmp.as_ref().filter(|(r, _, _)| *r == p.rel)
+        {
+            let n = p.fields.iter().filter(|f| self.show_all || f.changed()).count();
+            return v_flex()
+                .gap_1()
+                .p_3()
+                .ml_8()
+                .rounded(theme.radius)
+                .bg(theme.muted)
+                .child(h_flex().gap_2().pb_1().child(toggle).child(widgets::caption("Pick → or ← per setting, then Apply: only those settings change.", cx).text_xs()).child(div().flex_1()).child(open_btns))
+                .child(div().h(rems((8. + 2.6 * n.clamp(2, 10) as f32).min(34.))).child(view.clone()))
+                .into_any_element();
+        }
         if self.values {
             let changed = p.fields.iter().filter(|f| f.changed()).count();
             let shown: Vec<&MergedField> =
@@ -1672,8 +1706,10 @@ impl ConfigsPanel {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.preview.as_ref().is_some_and(|p| p.rel == r2) {
                             this.preview = None;
+                            this.settings_cmp = None;
                         } else {
                             let p = load_preview(&r2, st, &c_dir, &s_dir);
+                            this.open_settings(&r2, st, cx);
                             // Values for settings files, else the diff.
                             this.values = !p.fields.is_empty();
                             this.show_all = st != FileStatus::Modified;

@@ -5,12 +5,14 @@
   // top, and the picked mod's files as settings on the right. Edits wait in
   // the unsaved bar until Save.
   import { onMount } from 'svelte';
-  import { Search, X, Funnel, ArrowLeft, SlidersHorizontal, FileQuestion } from '@lucide/svelte';
+  import { Search, X, Funnel, ArrowLeft, SlidersHorizontal, FileQuestion, Users, Send } from '@lucide/svelte';
   import ConfigView from './lib/ConfigView.svelte';
   import ConfigRow from './lib/ConfigRow.svelte';
   import ConfigBar from './lib/ConfigBar.svelte';
+  import PushPlayers from './lib/PushPlayers.svelte';
+  import { ago } from './lib/browse.js';
   import { api } from './lib/api.js';
-  import { cfg, loadIndex, pendingList, eid, SIDES, sideChip, shortRel, fileRow } from './lib/configs.svelte.js';
+  import { cfg, loadIndex, loadPlayers, playersDiffer, pendingList, eid, SIDES, sideChip, shortRel, fileRow } from './lib/configs.svelte.js';
   import { configOwners } from './lib/files-config.js';
   import { jump } from './lib/files.svelte.js';
   import { rightClear } from './lib/rightclear.js';
@@ -32,6 +34,7 @@
 
   onMount(() => {
     loadIndex(server.id).catch((e) => (error = e.message));
+    loadPlayers(server.id);
     configOwners(server.id).then((o) => (mods = o.mods));
   });
 
@@ -49,8 +52,12 @@
   );
   const changedRows = $derived(modRows.filter((m) => m.changed || m.unsaved));
   const loose = $derived((index?.unmatched || []).filter((r) => sideOk([r])));
-  const shownAll = $derived(filter === 'all' ? modRows : modRows.filter((m) => (filter === 'unsaved' ? m.unsaved : m.changed || m.unsaved)));
-  const shownLoose = $derived(filter === 'all' ? loose : loose.filter((r) => (filter === 'unsaved' ? unsavedRels.has(r) : fileRow(r)?.changed || unsavedRels.has(r))));
+  const keepRel = (r) => (filter === 'unsaved' ? unsavedRels.has(r) : filter === 'players' ? playersDiffer(r) > 0 : fileRow(r)?.changed || unsavedRels.has(r));
+  const shownAll = $derived(filter === 'all' ? modRows : modRows.filter((m) => m.files.some(keepRel)));
+  const shownLoose = $derived(filter === 'all' ? loose : loose.filter(keepRel));
+  const players = $derived(cfg.sid === server.id ? cfg.players : null);
+  let pushing = $state(false);
+  const sentAgo = (at) => ago(new Date(at * 1000).toISOString());
   const counts = $derived({ changed: changedRows.length, unsaved: pendingList().length });
 
   const selMod = $derived(index?.mods.find((m) => m.key === sel) || null);
@@ -120,6 +127,7 @@
         <button role="tab" aria-selected={filter === 'all'} class:tab-sel={filter === 'all'} onclick={() => (filter = 'all')}>All</button>
         <button role="tab" aria-selected={filter === 'changed'} class:tab-sel={filter === 'changed'} onclick={() => (filter = 'changed')}>Changed {counts.changed}</button>
         <button role="tab" aria-selected={filter === 'unsaved'} class:tab-sel={filter === 'unsaved'} onclick={() => (filter = 'unsaved')}>Unsaved {counts.unsaved}</button>
+        {#if players?.snapshot}<button role="tab" aria-selected={filter === 'players'} class:tab-sel={filter === 'players'} title="Settings where players' copy differs from the server's" onclick={() => (filter = 'players')}>Differs from players {players.differs}</button>{/if}
       </div>
     </div>
     <label class="row small sidepick"><span class="glabel">Side</span>
@@ -129,6 +137,14 @@
     </label>
   </div>
 
+  {#if players?.differs}
+    <div class="pnote small">
+      <Users size={14} />
+      <span class="grow"><b>Players' copies differ in {players.differs} setting{players.differs === 1 ? '' : 's'}</b> <span class="muted">· from {players.snapshot.name}'s Hopper, sent {sentAgo(players.snapshot.at)}</span></span>
+      <button class="btn sm ghost" onclick={() => (filter = 'players')}>Show them</button>
+      <button class="btn sm" onclick={() => (pushing = true)}><Send size={13} />Push {players.differs} to paired Hopper clients</button>
+    </div>
+  {/if}
   {#if error}
     <div class="empty-state"><span class="es-ic"><SlidersHorizontal size={18} /></span><b>Can't read the configs</b><p class="err">{error}</p></div>
   {:else}
@@ -141,7 +157,7 @@
             <div class="grp">Changed · {changedRows.length}</div>
             {#each changedRows as m (m.key)}{@render modRow(m)}{/each}
           {/if}
-          <div class="grp">{filter === 'all' ? 'All mods' : filter === 'changed' ? 'Changed' : 'Unsaved'} · {shownAll.length}</div>
+          <div class="grp">{filter === 'all' ? 'All mods' : filter === 'changed' ? 'Changed' : filter === 'players' ? 'Differs from players' : 'Unsaved'} · {shownAll.length}</div>
           {#each shownAll as m (m.key)}{@render modRow(m)}{:else}<div class="small muted pad">None here.</div>{/each}
           {#if shownLoose.length}
             <div class="grp">Not matched to a mod · {shownLoose.length}</div>
@@ -193,6 +209,7 @@
     <ConfigBar {server} />
   {/if}
 </div>
+{#if pushing}<PushPlayers {server} onClose={() => (pushing = false)} />{/if}
 
 {#snippet modRow(m)}
   <button class="mrow row-hover" class:row-sel={sel === m.key && !hits} onclick={() => pick(m.key)} title={m.name}>
@@ -234,6 +251,8 @@
   .sc { height: 18px; font-size: 11px; padding: 0 6px 1px; }
   .skels { display: flex; flex-direction: column; padding-top: 4px; }
   .phone-back { display: none; }
+  .pnote { flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; background: var(--blue-dim); border-bottom: 1px solid var(--line); color: var(--text); }
+  .pnote :global(svg) { color: var(--blue); flex: none; }
   @media (max-width: 700px) {
     /* The page scrolls as a whole on a phone; the unsaved bar sticks to the bottom. */
     :global(.full:has(> .cfgp)) { display: block; overflow: auto; }
