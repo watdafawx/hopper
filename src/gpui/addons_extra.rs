@@ -517,13 +517,7 @@ impl AddonsView {
                                 cx,
                             ))
                         })
-                        .child(
-                            div()
-                                .id("dup-rows")
-                                .when(n > 6, |d| d.h(rems(10.5)))
-                                .overflow_y_scrollbar()
-                                .child(v_flex().gap_2().children(rows)),
-                        );
+                        .child(self.folded_rows("dup-rows", dups.iter().map(|d| d.name.clone()).collect(), rows.collect(), cx));
         let notice = widgets::closable_notice(body, dup_key, widgets::Closed::Chip, title, warning, &self.store, cx)?;
         Some(div().px_6().child(notice).into_any_element())
     }
@@ -749,7 +743,6 @@ impl AddonsView {
                     .into_any_element()
             })
             .collect();
-        let n_rows = rows.len();
         let color = if loaded_fine.is_some() { theme.info } else { theme.warning };
         let title = match loaded_fine {
             Some(_) => format!(
@@ -793,14 +786,7 @@ impl AddonsView {
                                 }),
                         )
                         .when_some(loaded_fine, |c, at| c.child(widgets::caption(loaded_fine_note(at), cx)))
-                        // Past six, the rows scroll so the mods table stays in view.
-                        .child(
-                            div()
-                                .id("missing-rows")
-                                .when(n_rows > 6, |d| d.h(rems(10.5)))
-                                .overflow_y_scrollbar()
-                                .child(v_flex().gap_2().children(rows)),
-                        );
+                        .child(self.folded_rows("missing-rows", self.missing.list.iter().map(|m| m.mod_name.clone()).collect(), rows, cx));
         let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
         Some(div().id("missing-banner").on_hover(hover).px_6().child(notice).into_any_element())
     }
@@ -981,6 +967,62 @@ impl AddonsView {
             .ok();
         })
         .detach();
+    }
+
+    /// A notice's rows behind one line: the mods' names and "Show details".
+    /// Open, the rows show (past four they scroll inside the notice), so a
+    /// long list never pushes the mods table off the screen.
+    fn folded_rows(&self, id: &'static str, names: Vec<String>, rows: Vec<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
+        let n = rows.len();
+        let open = self.rows_open.contains(id);
+        let mut seen = std::collections::HashSet::new();
+        let names: Vec<String> = names.into_iter().filter(|n| !n.is_empty() && seen.insert(n.clone())).collect();
+        let brief = match names.len() {
+            0 => String::new(),
+            1..=3 => names.join(", "),
+            k => format!("{}, {} and {} more", names[0], names[1], k - 2),
+        };
+        let toggle = cx.listener(move |this, _, _, cx| {
+            if !this.rows_open.remove(id) {
+                this.rows_open.insert(id);
+            }
+            cx.notify();
+        });
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(brief))
+                    .child(
+                        Button::new(SharedString::from(format!("{id}-more")))
+                            .ghost()
+                            .small()
+                            .icon(if open { IconName::ChevronUp } else { IconName::ChevronDown })
+                            .label(if open { "Hide details" } else { "Show details" })
+                            .on_click(toggle),
+                    ),
+            )
+            .when(open, |c| {
+                c.child(
+                    div()
+                        .id(id)
+                        .when(n > 4, |d| d.h(rems(10.5)))
+                        .overflow_y_scrollbar()
+                        .child(v_flex().gap_2().children(rows)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Problems the loader will hit (missing or doubled mods, blockers):
+    /// the Logs & crashes tab's amber dot.
+    pub(crate) fn load_problems(&self, root: &std::path::Path) -> usize {
+        if self.missing.root.as_deref() != Some(root) {
+            return 0;
+        }
+        self.missing.list.len() + self.missing.dups.len() + self.missing.blockers.len()
     }
 
     /// "N problems will stop the game at loading": what the loader refuses
@@ -1190,7 +1232,6 @@ impl AddonsView {
         let loader_note = blockers
             .iter()
             .any(|b| matches!(&b.kind, BlockerKind::Loader { id, .. } if id != "minecraft"));
-        let n_rows = rows.len();
         let color = if loaded_fine.is_some() { theme.info } else { theme.danger };
         let title = match loaded_fine {
             Some(_) => format!("{n} possible problem{} in the mods' own files", if n == 1 { "" } else { "s" }),
@@ -1210,13 +1251,7 @@ impl AddonsView {
                                 cx,
                             ))
                         })
-                        .child(
-                            div()
-                                .id("blocker-rows")
-                                .when(n_rows > 6, |d| d.h(rems(10.5)))
-                                .overflow_y_scrollbar()
-                                .child(v_flex().gap_2().children(rows)),
-                        );
+                        .child(self.folded_rows("blocker-rows", blockers.iter().map(|b| b.mod_name.clone()).collect(), rows, cx));
         let notice = widgets::closable_notice(body, key, widgets::Closed::Chip, title, color, &self.store, cx)?;
         Some(div().px_6().child(notice).into_any_element())
     }

@@ -59,6 +59,7 @@ mod revert_ui;
 mod rigsync;
 mod server_control;
 mod server_delete;
+mod server_crash;
 mod server_logs;
 mod server_progress;
 mod server_settings;

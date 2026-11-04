@@ -756,6 +756,8 @@ pub struct ServersView {
     sync: Entity<SyncPanel>,
     /// The Logs & crashes tab.
     logs: Entity<crate::server_logs::ServerLogsView>,
+    /// The one-line crash notice above every tab but Logs & crashes.
+    strip: Entity<crate::server_crash::CrashStrip>,
     /// The tabs only a Hopper Server's servers have.
     p_files: Entity<panel_tabs::files::FilesTab>,
     p_mods: Entity<panel_tabs::mods::ModsTab>,
@@ -861,9 +863,19 @@ impl ServersView {
             p.set_in_server_page(true);
             p
         });
+        let strip = cx.new(|_| crate::server_crash::CrashStrip::new(store.clone()));
         let subs = vec![
             cx.observe(&control, |_, _, cx| cx.notify()),
             cx.observe(&sync, |_, _, cx| cx.notify()),
+            cx.observe(&strip, |_, _, cx| cx.notify()),
+            cx.subscribe(&strip, |this, _, e: &crate::server_crash::StripEvent, cx| match e {
+                crate::server_crash::StripEvent::SeeWhy(rel) => this.see_crash(rel.clone(), cx),
+                crate::server_crash::StripEvent::Fixed => {
+                    if let Some(r) = this.picked.clone() {
+                        this.scan(r, true, cx);
+                    }
+                }
+            }),
             cx.subscribe(&control, |this, _, e: &ControlEvent, cx| match e {
                 ControlEvent::SetUp => cx.emit(ServersEvent::OpenSettings("panel-url")),
                 // This page has a Console tab of its own.
@@ -908,6 +920,7 @@ impl ServersView {
             settings_view,
             sync,
             logs,
+            strip,
             p_files,
             p_mods,
             p_players,
@@ -986,11 +999,31 @@ impl ServersView {
         } else if was == TAB_SYNC {
             self.sync.update(cx, |p, cx| p.hidden(cx));
         }
+        if let Some(r) = self.picked.clone() {
+            self.strip.update(cx, |s, cx| s.refresh(r, cx));
+        }
+        // Looked at: the Logs & crashes tab's dot goes.
+        if tab == TAB_LOGS
+            && let Some(k) = self.strip.read(cx).unseen_key()
+        {
+            self.store.update(cx, |s, cx| s.hide_notice(&k, cx));
+        }
         // Logs & crashes polls the server only while it's open.
         if was == TAB_LOGS && tab != TAB_LOGS {
             self.logs.update(cx, |v, cx| v.hidden(cx));
         }
         cx.notify();
+    }
+
+    /// "See why" on the crash notice: Logs & crashes, on that report.
+    fn see_crash(&mut self, rel: Option<String>, cx: &mut Context<Self>) {
+        self.set_tab(TAB_LOGS, cx);
+        if let Some(root) = self.picked.clone() {
+            self.logs.update(cx, |v, cx| {
+                v.show(root, cx);
+                v.open_report(rel, cx);
+            });
+        }
     }
 
     /// A server's Sync tab (the picked one's when `root` is None).
@@ -1557,6 +1590,8 @@ impl ServersView {
             .map(|c| if self.tab == TAB_OVERVIEW { c.gap_5() } else { c.gap_3() })
             .child({
                 let codes = tabs_for(remote);
+                let danger = cx.theme().danger;
+                let logs_dot = self.strip.read(cx).unseen_key().is_some_and(|k| !self.store.read(cx).notice_hidden(&k));
                 let online = pstats.as_ref().filter(|p| p.running).map(|p| p.online);
                 TabBar::new("server-tabs")
                     .underline()
@@ -1567,13 +1602,20 @@ impl ServersView {
                             TAB_PLAYERS => online.map_or("Players".to_string(), |n| format!("Players {n}")),
                             _ => tab_name(code).to_string(),
                         };
-                        Tab::new().prefix(Icon::new(tab_icon(code)).small()).label(label)
+                        Tab::new()
+                            .prefix(Icon::new(tab_icon(code)).small())
+                            .label(label)
+                            .when(code == TAB_LOGS && logs_dot && self.tab != TAB_LOGS, |t| t.suffix(widgets::tab_dot(danger)))
                     }))
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                         if let Some(code) = codes.get(*ix) {
                             this.set_tab(*code, cx)
                         }
                     }))
+            })
+            .when(self.tab != TAB_LOGS, |c| {
+                self.strip.update(cx, |st, cx| st.show(s.root.clone(), cx));
+                if self.strip.read(cx).crash().is_some() { c.child(self.strip.clone()) } else { c }
             })
             .when(remote && matches!(self.tab, TAB_FILES | TAB_MODS | TAB_PLAYERS | TAB_BACKUPS | TAB_SCHEDULE | TAB_SETTINGS), |c| {
                 let body: AnyElement = match &self.target {

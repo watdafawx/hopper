@@ -17,7 +17,14 @@
   import { whenLabel } from './lib/worlds.js';
   import CrashTurnOff from './CrashTurnOff.svelte';
 
-  let { server, onPeek, onShare, openFile, given = null } = $props();
+  let { server, onPeek, onShare, openFile, given = null, fixes = false } = $props();
+  // Fixes (put back, turn off) are for the crash the server last had: a
+  // picked report shows them only when it is that one (`fixes`).
+  const canFix = $derived(!given || fixes);
+  // The mods the crash names: the first two, the rest a click away.
+  const FOLD = 2;
+  let more = $state(false);
+  const fold = (list) => (more ? list : list.slice(0, FOLD));
 
   const sid = $derived(server.id);
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -232,10 +239,16 @@
         {/if}
       {/if}
     </div>
-    {#if !given && s.client_only && modOf(s.file_name)}
+    {#if canFix && s.client_only && modOf(s.file_name)}
       <button class="btn sm" disabled={busy || alive} title={alive ? 'Stop the server first' : `Moves ${s.file_name} to .hopper-backups`} onclick={() => remove(s)}><Trash2 size={13} />Remove from server</button>
     {/if}
   </div>
+{/snippet}
+
+{#snippet moreBtn(total)}
+  {#if total > FOLD}
+    <button class="btn ghost sm morebtn" aria-expanded={more} onclick={() => (more = !more)}>{#if more}<ChevronDown size={13} />Show fewer{:else}<ChevronRight size={13} />Show {total - FOLD} more{/if}</button>
+  {/if}
 {/snippet}
 
 {#snippet picker()}
@@ -281,7 +294,7 @@
 
     {#if st}
       <div class="line">{@render mod(st.file_name)}<span>stopped the server from starting</span>{@render tag('Certain')}</div>
-      {#if !given && (changed || toTurnOff.length || offAlready.length || switches.length || switchedOff.length)}
+      {#if canFix && (changed || toTurnOff.length || offAlready.length || switches.length || switchedOff.length)}
         <div class="fix">
           {#if changed}
             {@const isBack = back && back.name === changed.name}
@@ -332,7 +345,8 @@
       </ol>
       {#if others.length}
         <b class="what">Other mods in this crash</b>
-        <div class="rows">{#each others as s (s.file_name)}{@render susRow(s)}{/each}</div>
+        <div class="rows">{#each fold(others) as s (s.file_name)}{@render susRow(s)}{/each}</div>
+        {@render moreBtn(others.length)}
       {/if}
     {:else}
       {#if crash.headline}<div class="headline">{crash.headline}</div>{/if}
@@ -342,13 +356,14 @@
       {#if suspects.length}
         <div class="tiny muted">Mods in this crash, most likely first:</div>
         <div class="rows">
-          {#each suspects as s (s.file_name)}{@render susRow(s)}
+          {#each fold(suspects) as s (s.file_name)}{@render susRow(s)}
           {/each}
         </div>
+        {@render moreBtn(suspects.length)}
       {/if}
       {#if note}<div class="note">{note}</div>{/if}
-      {#if !given && (toTurnOff.length || offAlready.length)}<div class="row acts">{@render actions()}</div>{@render picker()}{/if}
-      {#if !given && (switches.length || switchedOff.length)}<div class="switches">{@render switchRows()}</div>{/if}
+      {#if canFix && (toTurnOff.length || offAlready.length)}<div class="row acts">{@render actions()}</div>{@render picker()}{/if}
+      {#if canFix && (switches.length || switchedOff.length)}<div class="switches">{@render switchRows()}</div>{/if}
     {/if}
 
     {#if lingered}<div class="tiny muted">{lingered}</div>{/if}
@@ -387,6 +402,7 @@
   .why { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
   .why .tiny, .quote, .steps .tiny { white-space: normal; overflow-wrap: anywhere; }
   .need { color: var(--gold); font-family: var(--mono, monospace); }
+  .morebtn { align-self: flex-start; gap: 4px; padding: 0 6px; }
   .whybtn { align-self: flex-start; gap: 4px; padding: 0 4px; margin-left: -4px; }
   .facts { list-style: none; margin: 2px 0 0; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; border-radius: var(--radius); background: var(--raise); }
   .facts li { display: flex; gap: 8px; align-items: flex-start; }

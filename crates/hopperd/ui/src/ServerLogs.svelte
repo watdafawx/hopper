@@ -1,7 +1,7 @@
 <script>
   // A server's Logs & crashes tab, as desktop's: its crash reports, newest
   // first with Hopper's one-line verdict, and the picked one read like the
-  // crash card (ServerCrash with `given`); then latest.log and debug.log,
+  // crash card (ServerCrash with `given`, with its fixes for the newest); then latest.log and debug.log,
   // followed while the server runs (LogText).
   import { FileWarning, RefreshCw, FileText, Share2 } from '@lucide/svelte';
   import { api } from './lib/api.js';
@@ -105,7 +105,7 @@
         {:else if picked && !read}
           <div class="muted small row"><span class="spinner"></span>Reading the report…</div>
         {:else if read?.crash}
-          <ServerCrash {server} given={read} onPeek={(m) => (peek = m)} {onShare} {openFile} />
+          <ServerCrash {server} given={read} fixes={picked === list?.[0]?.path && settled} onPeek={(m) => (peek = m)} {onShare} {openFile} />
         {:else if read}
           <div class="card col">
             <b class="small">Hopper couldn't read this report</b>

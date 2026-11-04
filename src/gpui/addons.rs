@@ -696,6 +696,8 @@ pub struct AddonsView {
     /// The last crash's mod that stopped the game loading, and the update
     /// its error names (with the older copy), for the top notice. None
     /// once that mod is off or the older copy is back.
+    /// Notices whose whole row list shows (else the first two).
+    pub(crate) rows_open: std::collections::HashSet<&'static str>,
     pub(crate) crash_stop: Option<(hopper::crashdetect::Stopped, Option<hopper::crashdetect::Changed>)>,
     /// Clicks and pointer, for when Updated rows may go.
     pub(crate) settle: widgets::Settle,
@@ -813,6 +815,7 @@ impl AddonsView {
             recent: HashMap::new(),
             settle: Default::default(),
             crashed: HashMap::new(),
+            rows_open: Default::default(),
             crash_stop: None,
             dep_jobs: HashMap::new(),
             dep_done: HashSet::new(),

@@ -3,7 +3,7 @@
 //! debug.log followed while the server runs, each with search, an
 //! errors-only filter and sharing on mclo.gs. The same for a server in a
 //! folder on this PC and one on a Hopper Server (read through its API).
-//! Read-only: the fixes live on the server's Sync card.
+//! The card carries the fixes (put the older mod back, turn mods off).
 
 use crate::crash_help::callout;
 use crate::line_select::{LineSelect, Lines};
@@ -17,7 +17,7 @@ use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::crashdetect::Crash;
@@ -128,6 +128,14 @@ pub struct ServerLogsView {
     cards: HashMap<String, Option<Result<Card, String>>>,
     /// The card's mods (jars) whose "Why?" list is open.
     why_open: HashSet<String>,
+    /// Reports whose whole list of mods shows (else the first two).
+    more_open: HashSet<String>,
+    /// Reports whose older mod was put back from the card.
+    fixed: HashSet<String>,
+    /// The jars ticked in the open "Turn off these mods?" list.
+    turn_off_pick: Option<HashSet<String>>,
+    /// A fix is running on the server.
+    fix_busy: bool,
     log: Option<LogFile>,
     errors_only: bool,
     query: Entity<InputState>,
@@ -160,6 +168,10 @@ impl ServerLogsView {
             picked: None,
             cards: HashMap::new(),
             why_open: HashSet::new(),
+            more_open: HashSet::new(),
+            fixed: HashSet::new(),
+            turn_off_pick: None,
+            fix_busy: false,
             log: None,
             errors_only: false,
             query,
@@ -186,6 +198,9 @@ impl ServerLogsView {
             self.picked = None;
             self.cards.clear();
             self.why_open.clear();
+            self.more_open.clear();
+            self.fixed.clear();
+            self.turn_off_pick = None;
             self.shared.clear();
             self.verdicts.clear();
         }
@@ -194,6 +209,51 @@ impl ServerLogsView {
         let pane = self.pane;
         self.log = None;
         self.select(pane, cx);
+    }
+
+    /// Opens the crash reports on `rel` (the newest when none): where the
+    /// crash notice's "See why" lands.
+    pub fn open_report(&mut self, rel: Option<String>, cx: &mut Context<Self>) {
+        self.select(Pane::Crashes, cx);
+        if let Some(rel) = rel {
+            self.pick(rel, cx);
+        }
+    }
+
+    /// Runs a fix on the server off the UI thread and says how it went.
+    /// `rel` is the report it was run from.
+    fn run_fix(
+        &mut self,
+        rel: String,
+        mark_fixed: bool,
+        f: impl FnOnce(&Path) -> anyhow::Result<String> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.root.clone() else { return };
+        self.fix_busy = true;
+        cx.notify();
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let done = cx.background_spawn(async move { f(&r) }).await;
+            this.update(cx, |this, cx| {
+                use gpui_kit::component::WindowExt as _;
+                use gpui_kit::component::notification::Notification;
+                this.fix_busy = false;
+                let note = match &done {
+                    Ok(m) => Notification::success(m.clone()),
+                    Err(e) => Notification::warning(format!("{e:#}")),
+                };
+                if done.is_ok() && mark_fixed {
+                    this.fixed.insert(rel);
+                }
+                let _ = handle.update(cx, |_, window, cx| window.push_notification(note, cx));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The tab went out of view: stop polling the server.
@@ -551,6 +611,7 @@ impl ServerLogsView {
     fn report_card(&mut self, root: &Path, r: &Report, cx: &mut Context<Self>) -> AnyElement {
         use crate::crash_view;
         let theme = cx.theme().clone();
+        let running_now = crate::rigsync::server_online(self.store.read(cx), None, root);
         let path = root.join(&r.rel);
         let head = |title: &'static str, cx: &mut Context<Self>| {
             let p = path.clone();
@@ -654,10 +715,107 @@ impl ServerLogsView {
                 }
             }
         }
+        // The fixes: put the older mod back, turn the ones at fault off.
+        let blocked = running_now || self.fix_busy;
+        let changed = st.as_ref().and_then(|st| c.suspects.iter().find(|s| s.file_name == st.file_name)).and_then(|s| s.changed.clone());
+        let mods_dir = (!hopper::hopperd::is_remote_root(root)).then(|| root.join("mods"));
+        let off_mods: Vec<&hopper::crashdetect::Suspect> = hopper::crashdetect::to_turn_off(&c)
+            .into_iter()
+            .filter(|s| mods_dir.as_ref().is_none_or(|d| d.join(s.file_name.trim_end_matches(".disabled")).exists()))
+            .collect();
+        let is_back = self.fixed.contains(&r.rel);
+        if changed.is_some() || !off_mods.is_empty() {
+            let mut fix = crash_view::fix_box(cx);
+            if let (Some(ch), true) = (&changed, is_back) {
+                fix = fix.child(widgets::done_mark(
+                    "srv-log-put-back-done",
+                    format!("{} is back", if ch.from.is_empty() { "The older version".to_string() } else { ch.from.clone() }),
+                    true,
+                    cx,
+                ));
+                fix = fix.child(widgets::caption("Start the server to try again. Backups has the newer one.", cx).text_xs());
+            } else {
+                let mut buttons = h_flex().gap_2().flex_wrap();
+                if let Some(ch) = changed.clone() {
+                    let rel = r.rel.clone();
+                    buttons = buttons.child(
+                        Button::new("srv-log-put-back")
+                            .small()
+                            .primary()
+                            .icon(IconName::Undo2)
+                            .label(if ch.from.is_empty() { "Put the older version back".to_string() } else { format!("Put {} back", ch.from) })
+                            .tooltip("Swaps in the older copy. The newer one goes to backups.")
+                            .disabled(blocked)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let ch = ch.clone();
+                                this.run_fix(rel.clone(), true, move |root| crate::server_crash::put_back(root, &ch), window, cx);
+                            })),
+                    );
+                }
+                if !off_mods.is_empty() {
+                    let label = match off_mods.len() {
+                        1 => format!("Turn off {}…", display(&off_mods[0].file_name)),
+                        n => format!("Turn off {n} mods…"),
+                    };
+                    let files: Vec<String> = off_mods.iter().map(|s| s.file_name.clone()).collect();
+                    buttons = buttons.child(
+                        Button::new("srv-log-turn-off")
+                            .small()
+                            .outline()
+                            .icon(IconName::PowerOff)
+                            .label(label)
+                            .tooltip("Shows the mods first. Turn them back on in the server's Mods.")
+                            .disabled(blocked || self.turn_off_pick.is_some())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.turn_off_pick = Some(files.iter().cloned().collect());
+                                cx.notify();
+                            })),
+                    );
+                }
+                fix = fix.child(buttons);
+            }
+            body.insert(1.min(body.len()), fix.into_any_element());
+            if let Some(picked) = self.turn_off_pick.clone().filter(|_| !off_mods.is_empty()) {
+                let view = cx.entity().downgrade();
+                let toggle: std::rc::Rc<dyn Fn(String, bool, &mut Window, &mut App)> = std::rc::Rc::new(move |file, on, _, cx| {
+                    view.update(cx, |this, cx| {
+                        if let Some(p) = this.turn_off_pick.as_mut() {
+                            if on {
+                                p.insert(file);
+                            } else {
+                                p.remove(&file);
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                let rel = r.rel.clone();
+                let confirm = cx.listener(move |this, _, window, cx| {
+                    let Some(picked) = this.turn_off_pick.take() else { return };
+                    let files: Vec<String> = picked.into_iter().collect();
+                    this.run_fix(rel.clone(), false, move |root| crate::server_crash::turn_off(root, files), window, cx);
+                });
+                let cancel = cx.listener(|this, _, _, cx| {
+                    this.turn_off_pick = None;
+                    cx.notify();
+                });
+                body.insert(
+                    2.min(body.len()),
+                    crash_view::turn_off_picker("srv-log", &off_mods, &picked, &link, &readable, toggle, confirm, cancel, blocked, "server", cx),
+                );
+            }
+        }
+        // The mods: the first two, the rest a click away, so a long list
+        // doesn't push the story off the screen.
+        let fold = 2;
+        let all_open = self.more_open.contains(&r.rel);
+        let total = c.suspects.len();
         let rows: Vec<AnyElement> = c
             .suspects
             .iter()
             .enumerate()
+            .filter(|(i, _)| all_open || *i < fold)
             .map(|(i, s)| {
                 let mut below: Vec<AnyElement> = Vec::new();
                 below.extend(crash_view::partner_line(s, &link, cx));
@@ -677,6 +835,26 @@ impl ServerLogsView {
         if !rows.is_empty() {
             body.push(widgets::caption("Mods in this crash, most likely first:", cx).text_xs().pt_1().into_any_element());
             body.push(v_flex().children(rows).into_any_element());
+            if total > fold {
+                let rel = r.rel.clone();
+                body.push(
+                    h_flex()
+                        .child(
+                            Button::new("srv-log-more")
+                                .ghost()
+                                .small()
+                                .icon(if all_open { IconName::ChevronUp } else { IconName::ChevronDown })
+                                .label(if all_open { "Show fewer".to_string() } else { format!("Show {} more", total - fold) })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.more_open.remove(&rel) {
+                                        this.more_open.insert(rel.clone());
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
         }
         if let Some(n) = crash_view::note(&c) {
             body.push(
@@ -693,10 +871,6 @@ impl ServerLogsView {
         }
         if let Some(n) = c.lingered_note() {
             body.push(crate::crash_view::note_text(n, cx).into_any_element());
-        }
-        // Turning mods off is on the Sync card; say where.
-        if !hopper::crashdetect::to_turn_off(&c).is_empty() {
-            body.push(widgets::caption("To turn these mods off on the server, use the crash card on the Sync tab.", cx).text_xs().into_any_element());
         }
         callout(theme.danger, cx)
             .child(head("The server crashed", cx))
