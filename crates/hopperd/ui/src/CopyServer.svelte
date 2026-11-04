@@ -90,6 +90,8 @@
 </div>
 {#if alive}<div class="tiny warn">Stop the server first to copy it.</div>{/if}
 
+<svelte:window onkeydown={(e) => e.key === 'Escape' && open && !busy && !e.defaultPrevented && (e.preventDefault(), (open = false))} />
+
 {#if open}
   <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && (open = false)}>
     <div class="box popover" role="dialog" aria-modal="true" aria-label="Clone {server.name}">

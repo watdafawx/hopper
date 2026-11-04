@@ -127,6 +127,8 @@ struct Snap {
 /// A place in Browse's own history: what back and forward step through.
 #[derive(Clone)]
 struct Place {
+    /// Names the place in the app's history (see `nav::Loc::Browse`).
+    id: u64,
     class: u32,
     text: String,
     category: Option<u64>,
@@ -311,6 +313,8 @@ pub struct BrowseView {
     /// Back and forward inside Browse.
     hist: Vec<Place>,
     hist_at: usize,
+    /// The id the next new place gets.
+    next_place: u64,
     /// Set while stepping through history (a step shouldn't re-stash).
     stepping: bool,
     /// The project panel's scroll, kept per history place.
@@ -471,6 +475,7 @@ impl BrowseView {
             scroll_after: Default::default(),
             hist: Vec::new(),
             hist_at: 0,
+            next_place: 1,
             stepping: false,
             detail_scroll: ScrollHandle::new(),
             peek_scroll_after: None,
@@ -1397,6 +1402,7 @@ impl BrowseView {
 
     fn place(&self) -> Place {
         Place {
+            id: 0,
             class: self.class,
             text: self.searched_text.clone(),
             category: self.category,
@@ -1455,21 +1461,21 @@ impl BrowseView {
     }
 
     /// Notes where Browse is, when it's a new place (a search, a type,
-    /// a category, a sort, a filter, the open project).
-    fn note_place(&mut self) {
+    /// a category, a sort, a filter, the open project). The app's history
+    /// holds the order; Browse keeps what each place showed.
+    pub(crate) fn note_place(&mut self) {
         if self.peek || !self.searched {
             return;
         }
-        let here = self.place();
+        let mut here = self.place();
         if self.hist.get(self.hist_at) == Some(&here) {
             return;
         }
         if let Some(m) = &self.selected {
             self.hist_projects.entry(m.id).or_insert_with(|| m.clone());
         }
-        if !self.hist.is_empty() {
-            self.hist.truncate(self.hist_at + 1);
-        }
+        here.id = self.next_place;
+        self.next_place += 1;
         self.hist.push(here);
         if self.hist.len() > HISTORY_KEEP {
             self.hist.remove(0);
@@ -1477,22 +1483,18 @@ impl BrowseView {
         self.hist_at = self.hist.len() - 1;
     }
 
-    /// The place one step back (or forward) from here. A place from the
-    /// other source switches back to that source.
-    fn step_target(&self, back: bool) -> Option<usize> {
-        let at = if back { self.hist_at.checked_sub(1)? } else { self.hist_at + 1 };
-        self.hist.get(at).map(|_| at)
+    /// The place Browse is at, for the app's history (0 before a search).
+    pub(crate) fn place_id(&self) -> u64 {
+        self.hist.get(self.hist_at).map_or(0, |p| p.id)
     }
 
-    /// Whether Browse has a place of its own to go back (or forward) to.
-    pub fn can_step(&self, back: bool) -> bool {
-        !self.peek && self.step_target(back).is_some()
-    }
-
-    /// One step back (or forward) through Browse's own history. False when
-    /// there's none, and the app steps its pages instead.
-    pub fn step(&mut self, back: bool, cx: &mut Context<Self>) -> bool {
-        let Some(at) = self.step_target(back) else { return false };
+    /// Goes back (or forward) to a place `place_id` gave. False when it's
+    /// gone (too old).
+    pub(crate) fn goto_place(&mut self, id: u64, cx: &mut Context<Self>) -> bool {
+        let Some(at) = self.hist.iter().position(|p| p.id == id) else { return false };
+        if at == self.hist_at && self.hist[at] == self.place() {
+            return true;
+        }
         // The place left keeps its list and scroll spots for the way back.
         self.stash_list();
         self.stash_peek();

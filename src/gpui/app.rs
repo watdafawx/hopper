@@ -83,6 +83,21 @@ pub fn bind_keys(cx: &mut App) {
         // Inputs, dialogs and the palette take Esc first.
         KeyBinding::new("escape", ClosePanel, None),
     ]);
+    // A dialog sits outside the app's own tree, so Alt+Left / Alt+Right
+    // there end up here: they close it, as the mouse buttons do.
+    cx.on_action(|_: &GoBack, cx| close_dialog_now(cx));
+    cx.on_action(|_: &GoForward, cx| close_dialog_now(cx));
+}
+
+fn close_dialog_now(cx: &mut App) {
+    if let Some(w) = cx.active_window() {
+        w.update(cx, |_, window, cx| {
+            if window.has_active_dialog(cx) {
+                window.close_dialog(cx);
+            }
+        })
+        .ok();
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -739,10 +754,10 @@ impl AppView {
                 let (i, t, p) = self.library.read(cx).nav_loc(cx);
                 Loc::Library(i, t, p)
             }
-            Page::Browse => {
-                // Browse steps through its own history first (see `step`).
-                Loc::Browse(0, None)
-            }
+            Page::Browse => Loc::Browse(self.browse.update(cx, |b, _| {
+                b.note_place();
+                b.place_id()
+            })),
             Page::Servers => {
                 let (r, t) = self.servers.read(cx).nav_loc();
                 Loc::Servers(r, t)
@@ -772,20 +787,34 @@ impl AppView {
         cx.propagate();
     }
 
-    /// Whether back (or forward) has somewhere to go: a place in Browse, or
-    /// another page.
-    fn can_step(&self, back: bool, cx: &App) -> bool {
-        self.history.can_step(back) || (self.page == Page::Browse && self.browse.read(cx).can_step(back))
+    /// Whether back (or forward) has somewhere to go.
+    fn can_step(&self, back: bool, _cx: &App) -> bool {
+        self.history.can_step(back)
+    }
+
+    /// Back or forward from the mouse, the keys or the title bar: what's
+    /// open on top (the palette, a dialog, the image viewer, a sheet)
+    /// closes first; then it steps.
+    fn nav_step(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(open) = self.palette.take() {
+            open.close(window, cx);
+            cx.notify();
+            return;
+        }
+        if window.has_active_dialog(cx) {
+            window.close_dialog(cx);
+            return;
+        }
+        if window.has_active_sheet(cx) {
+            window.close_sheet(cx);
+            return;
+        }
+        self.step(back, cx);
     }
 
     /// One step back (or forward) through the places visited.
     fn step(&mut self, back: bool, cx: &mut Context<Self>) {
         use crate::nav::Loc;
-        // In Browse, its own places first; then the pages.
-        if self.page == Page::Browse && self.browse.update(cx, |b, cx| b.step(back, cx)) {
-            cx.notify();
-            return;
-        }
         let Some(loc) = self.history.step(back) else { return };
         if self.page != loc.page() {
             self.leaving(loc.page(), cx);
@@ -798,7 +827,9 @@ impl AppView {
         }
         match loc {
             Loc::Library(i, t, p) => self.library.update(cx, |l, cx| l.nav_restore(i, t, p, cx)),
-            Loc::Browse(..) => {}
+            Loc::Browse(id) => {
+                self.browse.update(cx, |b, cx| b.goto_place(id, cx));
+            }
             Loc::Servers(r, t) => self.servers.update(cx, |s, cx| s.nav_restore(r, t, cx)),
             Loc::Settings(c) => self.settings.update(cx, |s, cx| s.show(c, cx)),
         }
@@ -1157,7 +1188,7 @@ impl AppView {
                                 .icon(IconName::ChevronLeft)
                                 .when(!dialog, |b| b.tooltip("Back (Alt+Left)"))
                                 .disabled(!self.can_step(true, cx))
-                                .on_click(cx.listener(|this, _, _, cx| this.step(true, cx))),
+                                .on_click(cx.listener(|this, _, window, cx| this.nav_step(true, window, cx))),
                         )
                         .child(
                             Button::new("nav-forward")
@@ -1166,7 +1197,7 @@ impl AppView {
                                 .icon(IconName::ChevronRight)
                                 .when(!dialog, |b| b.tooltip("Forward (Alt+Right)"))
                                 .disabled(!self.can_step(false, cx))
-                                .on_click(cx.listener(|this, _, _, cx| this.step(false, cx))),
+                                .on_click(cx.listener(|this, _, window, cx| this.nav_step(false, window, cx))),
                         ),
                 )
                 .child(
@@ -1315,18 +1346,28 @@ impl Render for AppView {
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(|this, _: &OpenCfKey, _, cx| this.open_settings_at("cf-key", cx)))
             .on_action(cx.listener(|this, _: &GoLibrary, _, cx| this.go(Page::Library, cx)))
-            .on_action(cx.listener(|this, _: &GoBack, _, cx| this.step(true, cx)))
+            .on_action(cx.listener(|this, _: &GoBack, window, cx| this.nav_step(true, window, cx)))
             .on_action(cx.listener(|this, _: &ClosePanel, _, cx| this.close_panel(cx)))
-            .on_action(cx.listener(|this, _: &GoForward, _, cx| this.step(false, cx)))
-            // The mouse's back and forward buttons.
-            .on_mouse_down(
-                MouseButton::Navigate(NavigationDirection::Back),
-                cx.listener(|this, _, _, cx| this.step(true, cx)),
-            )
-            .on_mouse_down(
-                MouseButton::Navigate(NavigationDirection::Forward),
-                cx.listener(|this, _, _, cx| this.step(false, cx)),
-            )
+            .on_action(cx.listener(|this, _: &GoForward, window, cx| this.nav_step(false, window, cx)))
+            // The mouse's back and forward buttons, anywhere in the window:
+            // over the palette or a dialog too, which they close first.
+            .child({
+                let view = cx.entity().downgrade();
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                            let MouseButton::Navigate(dir) = e.button else { return };
+                            if phase == DispatchPhase::Bubble {
+                                let back = dir == NavigationDirection::Back;
+                                view.update(cx, |this, cx| this.nav_step(back, window, cx)).ok();
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_0()
+            })
             .on_action(cx.listener(|this, _: &GoBrowse, window, cx| {
                 this.nav(Page::Browse, window, cx)
             }))

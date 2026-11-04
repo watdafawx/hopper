@@ -28,6 +28,7 @@
   import { session, ownerLike, roleLabel } from './lib/me.svelte.js';
   import { dialog } from './lib/dialog.svelte.js';
   import { leave } from './lib/leave.js';
+  import { NAV_EVENT, closeTopOverlay } from './lib/nav.js';
   import Dialog from './Dialog.svelte';
   import Transfers from './Transfers.svelte';
   import StatusBar from './StatusBar.svelte';
@@ -93,6 +94,44 @@
       navTop = navPos;
       history.replaceState(navState(navPos), '');
       saveTop();
+    }
+  }
+
+  // A page added an entry of its own (Browse's filters): it's the newest.
+  function navAdded() {
+    const at = history.state?.hopperNav;
+    if (typeof at !== 'number') return;
+    navPos = at;
+    navTop = at;
+    saveTop();
+  }
+  // Back or forward between entries at the same address (no hashchange).
+  function navPopped() {
+    const at = history.state?.hopperNav;
+    if (typeof at === 'number') navPos = at;
+  }
+  /** The arrows: what's open on top closes first, like desktop. */
+  function navBack() {
+    if (closeTopOverlay()) return;
+    history.back();
+  }
+  function navForward() {
+    if (closeTopOverlay()) return;
+    history.forward();
+  }
+  // The mouse's back button and Alt+Left close a dialog before the browser
+  // goes back (it would leave the dialog open over another page).
+  function navMouse(e) {
+    if ((e.button === 3 || e.button === 4) && document.querySelector('[role="dialog"]')) {
+      e.preventDefault();
+      if (e.type === 'mouseup') closeTopOverlay();
+    }
+  }
+  function navKeys(e) {
+    if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && document.querySelector('[role="dialog"]')) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeTopOverlay();
     }
   }
 
@@ -263,6 +302,11 @@
       fix();
     };
     addEventListener('hashchange', onHash);
+    addEventListener(NAV_EVENT, navAdded);
+    addEventListener('popstate', navPopped);
+    addEventListener('mousedown', navMouse, true);
+    addEventListener('mouseup', navMouse, true);
+    addEventListener('keydown', navKeys, true);
     addEventListener('keydown', keys);
     addEventListener('pointerdown', outside);
     connect();
@@ -278,6 +322,11 @@
     }
     return () => {
       removeEventListener('hashchange', onHash);
+      removeEventListener(NAV_EVENT, navAdded);
+      removeEventListener('popstate', navPopped);
+      removeEventListener('mousedown', navMouse, true);
+      removeEventListener('mouseup', navMouse, true);
+      removeEventListener('keydown', navKeys, true);
       removeEventListener('keydown', keys);
       removeEventListener('pointerdown', outside);
     };
@@ -299,8 +348,8 @@
       <span class="chip tiny host" title="This panel's PC">{hello.name}</span>
     </div>
     <div class="arrows">
-      <button class="btn ghost icon" title="Back (Alt+Left)" disabled={navPos <= 0} onclick={() => history.back()}><ChevronLeft size={15} /></button>
-      <button class="btn ghost icon" title="Forward (Alt+Right)" disabled={navPos >= navTop} onclick={() => history.forward()}><ChevronRight size={15} /></button>
+      <button class="btn ghost icon" title="Back (Alt+Left)" disabled={navPos <= 0} onclick={navBack}><ChevronLeft size={15} /></button>
+      <button class="btn ghost icon" title="Forward (Alt+Right)" disabled={navPos >= navTop} onclick={navForward}><ChevronRight size={15} /></button>
     </div>
     <nav class="tabs">
       {#each NAV as n (n.id)}
