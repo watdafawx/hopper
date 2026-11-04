@@ -1269,7 +1269,39 @@ pub struct Badge {
 pub enum Segment {
     Markdown(String),
     Badges(Vec<Badge>),
+    /// A table whose cells hold only images (a screenshot grid): rows of
+    /// cells of images. The view shares the width between the cells and
+    /// scales each image to its cell, wrapping when they would get tiny.
+    Grid(Vec<Vec<Vec<Badge>>>),
     Video(Video),
+}
+
+/// The images of one table cell when it holds nothing else but whitespace.
+fn image_cell(spans: &[Span]) -> Option<Vec<Badge>> {
+    let mut out = Vec::new();
+    for s in spans {
+        match &s.image {
+            Some(url) => out.push(Badge {
+                key: s.image_key()?,
+                url: url.clone(),
+                link: s.link.clone(),
+                alt: s.text.clone(),
+                width: s.width,
+                height: s.height,
+            }),
+            None if s.text.trim().is_empty() => {}
+            None => return None,
+        }
+    }
+    Some(out)
+}
+
+/// The cells of a table row made only of images (empty cells allowed, at
+/// least one image).
+fn image_row(b: &Block) -> Option<Vec<Vec<Badge>>> {
+    let Kind::Row(cells) = &b.kind else { return None };
+    let row: Vec<Vec<Badge>> = cells.iter().map(|c| image_cell(c)).collect::<Option<_>>()?;
+    row.iter().any(|c| !c.is_empty()).then_some(row)
 }
 
 /// The badges of a paragraph holding two or more images and nothing else
@@ -1309,16 +1341,25 @@ pub fn to_segments(blocks: &[Block]) -> Vec<Segment> {
             out.push(Segment::Markdown(md));
         }
     };
-    for (i, b) in blocks.iter().enumerate() {
-        let seg = match &b.kind {
-            Kind::Video(v) => Some(Segment::Video(v.clone())),
-            _ => badge_row(b).map(Segment::Badges),
+    let mut i = 0;
+    while i < blocks.len() {
+        let b = &blocks[i];
+        let (seg, used) = match &b.kind {
+            Kind::Video(v) => (Some(Segment::Video(v.clone())), 1),
+            Kind::Row(_) => {
+                // Consecutive rows of images are one grid.
+                let rows: Vec<Vec<Vec<Badge>>> = blocks[i..].iter().map_while(image_row).collect();
+                let n = rows.len();
+                (Some(Segment::Grid(rows)).filter(|_| n > 0), n.max(1))
+            }
+            _ => (badge_row(b).map(Segment::Badges), 1),
         };
         if let Some(seg) = seg {
             flush(&mut out, &blocks[start..i]);
             out.push(seg);
-            start = i + 1;
+            start = i + used;
         }
+        i += used;
     }
     flush(&mut out, &blocks[start..]);
     out
@@ -1586,6 +1627,28 @@ mod tests {
         assert_eq!(b[1].link, None);
         // A lone image stays in the Markdown.
         assert!(matches!(&segs[2], super::Segment::Markdown(m) if m.contains("3.png") && m.contains("End")));
+    }
+
+    /// Trimmed from Snappy Blocks' description: a 2x2 table of screenshots.
+    #[test]
+    fn image_table_is_one_grid() {
+        let html = r#"<p>Intro</p><table><tbody>
+<tr><td><img src="https://media.forgecdn.net/a.png" alt="a"></td><td><img src="https://media.forgecdn.net/b.png" alt="b"></td></tr>
+<tr><td><img src="https://media.forgecdn.net/c.png" alt="c"></td><td><img src="https://media.forgecdn.net/d.png" alt="d"></td></tr>
+</tbody></table><p>End</p>"#;
+        let segs = to_segments(&parse(html));
+        assert_eq!(segs.len(), 3, "{segs:?}");
+        let Segment::Grid(rows) = &segs[1] else { panic!("{segs:?}") };
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.len() == 2 && r.iter().all(|c| c.len() == 1)));
+        assert_eq!(rows[1][0][0].url, "https://media.forgecdn.net/c.png");
+    }
+
+    #[test]
+    fn table_with_text_stays_markdown() {
+        let html = "<table><tr><td>Name</td><td><img src=\"https://x/a.png\"></td></tr></table>";
+        let segs = to_segments(&parse(html));
+        assert!(matches!(segs.as_slice(), [Segment::Markdown(_)]), "{segs:?}");
     }
 
     #[test]

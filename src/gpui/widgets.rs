@@ -1503,6 +1503,75 @@ pub fn description_view(
                         })
                 }))
                 .into_any_element(),
+            // A table of screenshots: cells share the width evenly, each
+            // image fills its cell (at its shape, never past a width the
+            // page gave it) and cells wrap onto their own lines rather
+            // than shrink to icons. Small images keep their size.
+            Segment::Grid(rows) => {
+                const MIN_CELL: f32 = 160.;
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .py_2()
+                    .children(rows.iter().enumerate().map(|(r, row)| {
+                        gpui_kit::component::h_flex()
+                            .w_full()
+                            .flex_wrap()
+                            .gap_2()
+                            .items_start()
+                            .children(row.iter().enumerate().filter(|(_, c)| !c.is_empty()).map(|(c, cell)| {
+                                let tiles: Vec<(AnyElement, f32)> = cell
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(j, b)| {
+                                        let path = cached.get(&b.key).cloned();
+                                        let natural =
+                                            path.as_deref().and_then(image_size).filter(|(nw, nh)| *nw > 0 && *nh > 0);
+                                        let ratio = match (natural, b.width, b.height) {
+                                            (Some((nw, nh)), _, _) => nw as f32 / nh as f32,
+                                            (None, Some(w), Some(h)) => w as f32 / h as f32,
+                                            _ => 16. / 9.,
+                                        };
+                                        // The widest it may get: the page's width,
+                                        // or its height at its shape; else the cell.
+                                        let cap = match (b.width, b.height) {
+                                            (Some(w), _) => Some(w as f32),
+                                            (None, Some(h)) => Some(h as f32 * ratio),
+                                            _ => natural.map(|n| n.0 as f32).filter(|w| *w <= 48.),
+                                        };
+                                        let target = b.link.clone().unwrap_or_else(|| b.url.clone());
+                                        let frame = clips.get(&b.key).map(|c| c.frame_now());
+                                        let open = open.clone();
+                                        let tile = div()
+                                            .id(ElementId::NamedInteger(format!("{id}:{i}:{r}:{c}").into(), j as u64))
+                                            .w_full()
+                                            .when_some(cap, |d, w| d.max_w(px(w.max(1.))))
+                                            .aspect_ratio(ratio)
+                                            .clickable(cx)
+                                            .hover(|s| s.opacity(0.85))
+                                            .on_click(move |_, window, cx| open(&target, window, cx))
+                                            .when_some(path, |d, p| {
+                                                let src = match frame {
+                                                    Some(f) => ImageSource::Render(f),
+                                                    None => ImageSource::Resource(Resource::Path(p)),
+                                                };
+                                                d.child(img(src).size_full().object_fit(ObjectFit::Contain))
+                                            })
+                                            .into_any_element();
+                                        (tile, cap.map_or(MIN_CELL, |w| w.min(MIN_CELL)))
+                                    })
+                                    .collect();
+                                // A cell of small images doesn't hold out for a wide column.
+                                let min = tiles.iter().map(|t| t.1).fold(MIN_CELL, f32::min);
+                                v_flex()
+                                    .flex_1()
+                                    .min_w(px(min))
+                                    .gap_2()
+                                    .children(tiles.into_iter().map(|t| t.0))
+                            }))
+                    }))
+                    .into_any_element()
+            }
             Segment::Video(v) => video_tile(
                 ElementId::NamedInteger(format!("{id}:video").into(), i as u64),
                 v,
