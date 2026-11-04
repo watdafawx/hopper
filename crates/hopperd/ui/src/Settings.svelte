@@ -184,6 +184,18 @@
     queueUploads(server.id, [{ file: f, path: 'server-icon.png' }], true);
   }
 
+  // A new port another server here uses (or something listens on): say so
+  // and offer a free one, as the New server form does.
+  let portCheck = $state(null);
+  let portTimer;
+  $effect(() => {
+    const p = Number(values['server-port']);
+    const id = sid;
+    clearTimeout(portTimer);
+    if (!props || !p || p === Number(orig['server-port'])) { portCheck = null; return; }
+    portTimer = setTimeout(() => api(`/servers/port-check?port=${p}&skip=${encodeURIComponent(id)}`).then((r) => { if (Number(values['server-port']) === p) portCheck = r; }, () => (portCheck = null)), 300);
+  });
+
   const gb = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(mb % 1024 ? 1 : 0)} GB` : `${mb} MB`);
   const dirty = (k) => str(values[k]) !== str(orig[k]);
 
@@ -222,6 +234,7 @@
           <select class="sel" bind:value={values[k]} aria-label={s.label}>{#each s.options as o (o)}<option value={o}>{o}</option>{/each}</select>
         {:else if s.kind === 'int'}
           <div class="row"><div class="input w"><input type="number" min={s.min} max={s.max} bind:value={values[k]} /></div>{#if UNITS[k]}<span class="tiny muted">{UNITS[k]}</span>{/if}</div>
+          {#if k === 'server-port' && portCheck?.message}<div class="tiny port-warn row"><span>{portCheck.message}</span>{#if portCheck.suggest}<button class="btn sm" onclick={() => (values[k] = String(portCheck.suggest))}>Use {portCheck.suggest}</button>{/if}</div>{/if}
         {:else}
           {@render text(k)}
         {/if}
@@ -327,4 +340,5 @@
   .savebar .ell { max-width: none; }
   .savebar { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 30; gap: 10px; padding: 8px 12px; box-shadow: 0 12px 40px #000c; border-color: #f9731677; width: min(620px, calc(100vw - 32px)); }
   @media (max-width: 900px) { .layout { flex-direction: column; } .secs { width: 100%; position: static; } .fl { grid-template-columns: 1fr; } .ctl { justify-content: flex-start; } .wide { width: 100%; } }
+  .port-warn { color: var(--gold); gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
 </style>

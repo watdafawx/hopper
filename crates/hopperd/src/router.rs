@@ -177,7 +177,7 @@ pub fn start(app: Arc<App>) {
     });
 }
 
-fn port_of(e: &Entry) -> u16 {
+pub(crate) fn port_of(e: &Entry) -> u16 {
     Properties::load(&e.root.join("server.properties")).unwrap_or_default().port()
 }
 

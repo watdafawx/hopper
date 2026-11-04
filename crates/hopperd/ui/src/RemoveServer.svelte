@@ -7,7 +7,7 @@
   import { Trash2, EyeOff } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
-  import { ask, confirmIt } from './lib/dialog.svelte.js';
+  import { confirmIt, confirmTick } from './lib/dialog.svelte.js';
 
   let { server } = $props();
   let root = $state(null);
@@ -33,17 +33,20 @@
     }
   }
 
+  // One click: a deleted server waits 30 days in .hopper-deleted, so no
+  // typing its name. Its worlds can move to Kept worlds first.
   async function del() {
-    const typed = await ask(`Delete ${server.name}?`, '', {
-      body: `Its folder moves to .hopper-deleted in the servers folder and stays there 30 days: restore it from Settings › Panel folder. Type ${server.name} to delete it.`,
+    const r0 = await confirmTick(`Delete ${server.name}?`, {
+      body: 'Its folder moves to .hopper-deleted in the servers folder for 30 days: restore it from Settings › Panel folder.',
       ok: 'Delete server',
-      placeholder: server.name,
+      check: 'Keep the world (moved to Kept worlds in the servers folder)',
+      ticked: true,
       danger: true,
     });
-    if (typed == null) return;
+    if (!r0) return;
     try {
-      await post(`/servers/${encodeURIComponent(server.id)}/remove`, { mode: 'delete', confirm: typed.trim() });
-      say(`${server.name} deleted. Restore it within 30 days from Settings › Panel folder.`);
+      const r = await post(`/servers/${encodeURIComponent(server.id)}/remove`, { mode: 'delete', keep_world: !!r0.ticked });
+      say(`${server.name} deleted. ${r?.kept_world ? `Its world is kept in ${r.kept_world}. ` : ''}Restore the server within 30 days from Settings › Panel folder.`);
       location.hash = '/';
     } catch (e) {
       say(e.message, true);

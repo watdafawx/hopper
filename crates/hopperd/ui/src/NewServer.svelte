@@ -87,6 +87,15 @@
   let pack = $state(null);
   let packVersions = $state([]);
   let packFile = $state('');
+  // Which versions to offer (see hosting::pack_versions): server files only
+  // when the pack has any, the client-only rest behind a toggle, and a
+  // warning when the newest version has none yet.
+  let versionView = $state(null);
+  let showClient = $state(false);
+  const offered = $derived(
+    showClient || !versionView?.shown ? packVersions : packVersions.filter((v) => versionView.shown.includes(v.id) || v.id === packFile),
+  );
+  const newestClient = $derived(packVersions.find((v) => v.id === versionView?.newest_client));
   let cfKey = $state(true);
   // A pack from Browse shows as picked; Change opens the search.
   let showSearch = $state(true);
@@ -138,6 +147,21 @@
     if (!name.trim()) return 'Name the server.';
     if (!eula) return 'Agree to the Minecraft EULA to make a server.';
     return '';
+  });
+  // A port another server here uses (or something listens on): say so and
+  // offer a free one, as desktop's New server does. Empty port: the panel picks.
+  let portCheck = $state(null);
+  // The port an empty Port box gets, and this machine's LAN address, so the
+  // form can say where players will join.
+  let autoInfo = $state(null);
+  api('/servers/port-check').then((r) => (autoInfo = r), () => {});
+  const joinAt = $derived(address || (autoInfo?.lan && (port || autoInfo.auto) ? `${autoInfo.lan}:${port || autoInfo.auto}` : ''));
+  let portTimer;
+  $effect(() => {
+    const p = Number(port);
+    clearTimeout(portTimer);
+    if (!port || !Number.isInteger(p) || p < 1 || p > 65535) { portCheck = null; return; }
+    portTimer = setTimeout(() => api(`/servers/port-check?port=${p}`).then((r) => { if (Number(port) === p) portCheck = r; }, () => (portCheck = null)), 300);
   });
   api('/router').then((r) => (router = r), () => {});
   api('/templates').then((r) => (templates = r.templates || []), () => {});
@@ -305,17 +329,24 @@
     pack = r;
     packVersions = version ? [version] : [];
     packFile = version?.id || '';
+    versionView = null;
+    showClient = false;
     error = '';
     // Picked: the search folds away (Change opens it again), like a pack from Browse.
     showSearch = false;
     loadingVersions = true;
     try {
-      let list = (await api(`/packs/versions?${new URLSearchParams({ project: r.id, source: r.source })}`)).versions || [];
+      const res = await api(`/packs/versions?${new URLSearchParams({ project: r.id, source: r.source })}`);
+      let list = res.versions || [];
       if (my !== packSeq) return;
       // An older version picked in Browse may be past the newest 50.
       if (version && !list.some((v) => v.id === version.id)) list = [version, ...list];
       packVersions = list;
-      packFile = (file && list.some((v) => v.id === file) ? file : '') || (list.find((v) => /release/i.test(v.type)) || list[0])?.id || '';
+      versionView = res.shown ? res : null;
+      const pickable = versionView ? list.filter((v) => versionView.shown.includes(v.id)) : list;
+      packFile = (file && list.some((v) => v.id === file) ? file : '') || (pickable.find((v) => /release/i.test(v.type)) || pickable[0])?.id || '';
+      // A version from Browse without server files: show the client ones.
+      if (packFile && versionView && !versionView.shown.includes(packFile)) showClient = true;
     } catch (err) {
       if (my === packSeq) error = err.message;
     } finally {
@@ -528,8 +559,10 @@
               <label class="lbl" for="ns-pv">Version</label>
               <select id="ns-pv" class="sel" bind:value={packFile} disabled={!!busy || (loadingVersions && !packVersions.length)}>
                 {#if !packVersions.length}<option value="">{loadingVersions ? 'Loading versions…' : 'No versions'}</option>{/if}
-                {#each packVersions as v (v.id)}<option value={v.id}>{v.name}{v.mc_version ? ` · ${v.mc_version}` : ''}{v.server_files ? ' · server files' : ''}</option>{/each}
+                {#each offered as v (v.id)}<option value={v.id}>{v.name}{v.mc_version ? ` · ${v.mc_version}` : ''}{showClient && versionView && !v.server_files ? ' · client pack' : ''}</option>{/each}
               </select>
+              {#if versionView?.hidden_text}<div class="tiny muted row vv">{versionView.hidden_text}<button class="linkish" onclick={() => { showClient = !showClient; if (!showClient && !versionView.shown.includes(packFile)) packFile = versionView.shown[0] || packFile; }}>{showClient ? 'Server files only' : 'Show client versions'}</button></div>{/if}
+              {#if versionView?.warning && newestClient && packFile !== newestClient.id}<div class="tiny warn row vv"><span>{versionView.warning}</span><button class="btn sm" disabled={!!busy} onclick={() => { showClient = true; packFile = newestClient.id; }}>Build {newestClient.name} from the client pack</button></div>{/if}
               {#if pickedVersion}<div class="tiny muted">{pickedVersion.server_files && check?.choice !== 'client_pack' ? `The pack author's server mods and configs, on ${runsOn(pickedVersion)}. Often a big download.` : `Built from the client pack on ${runsOn(pickedVersion)}, client-only mods left out.`}</div>{/if}
               {#if check?.choice === 'needs_zip' && check.pack}
                 <div class="notice small">
@@ -556,8 +589,9 @@
           </div>
           <div class="f">
             <label class="lbl" for="ns-port">Port</label>
-            <div class="input"><input id="ns-port" type="number" min="1" max="65535" bind:value={port} placeholder="Auto" disabled={!!busy} /></div>
-            <div class="tiny muted">Empty: the panel picks a free one.</div>
+            <div class="input"><input id="ns-port" type="number" min="1" max="65535" bind:value={port} placeholder={autoInfo?.auto ? `Auto: ${autoInfo.auto}` : 'Auto'} disabled={!!busy} /></div>
+            {#if portCheck?.message}<div class="tiny warn row port-warn"><span>{portCheck.message}</span>{#if portCheck.suggest}<button class="btn sm" disabled={!!busy} onclick={() => (port = portCheck.suggest)}>Use {portCheck.suggest}</button>{/if}</div>{/if}
+            <div class="tiny muted">{autoInfo?.auto ? `Empty: the panel uses ${autoInfo.auto}.` : 'Empty: the panel picks a free one.'}{joinAt ? ` Players join at ${joinAt}.` : ''}</div>
           </div>
           <div class="f span">
             <div class="row"><label class="lbl" for="ns-mem">Memory</label><span class="sp"></span><span class="small"><b>{Number(memory).toFixed(1)} GB</b>{#if hostGb}<span class="muted"> of {Math.round(hostGb)} GB on {hostInfo.hostname || host}</span>{/if}</span></div>
@@ -608,6 +642,9 @@
   .sel.ghost { border-style: dashed; }
   .range { width: 100%; accent-color: var(--acc); }
   .eula { display: flex; gap: 8px; align-items: center; }
+  .vv { gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+  .linkish { background: none; border: 0; padding: 0; color: var(--acc); cursor: pointer; font: inherit; }
+  .port-warn { gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
   .eula label { gap: 8px; cursor: pointer; }
   .pi { border-radius: var(--radius); flex: none; }
   .curseforge { color: var(--acc); }

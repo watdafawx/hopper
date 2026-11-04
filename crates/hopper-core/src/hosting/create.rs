@@ -65,6 +65,20 @@ impl ServerLoader {
         })
     }
 
+    /// Hopper Server's `loader` and `loader_version` for `/servers/create`
+    /// (an empty version: the newest).
+    pub fn panel_kind(&self) -> (&'static str, String) {
+        match self.clone() {
+            ServerLoader::Vanilla => ("vanilla", String::new()),
+            ServerLoader::Fabric(v) => ("fabric", v.unwrap_or_default()),
+            ServerLoader::Quilt(v) => ("quilt", v.unwrap_or_default()),
+            ServerLoader::NeoForge(v) => ("neoforge", v),
+            ServerLoader::Forge(v) => ("forge", v),
+            ServerLoader::Paper(v) => ("paper", v.unwrap_or_default()),
+            ServerLoader::Purpur(v) => ("purpur", v.unwrap_or_default()),
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             ServerLoader::Vanilla => "Vanilla",
@@ -663,21 +677,23 @@ pub(crate) fn write_missing(root: &Path, missing: &[crate::modpack::Pending]) {
     if missing.is_empty() {
         return;
     }
+    let _ = fs::write(root.join("missing-mods.txt"), missing_text(missing));
+}
+
+/// The text of `missing-mods.txt`.
+fn missing_text(missing: &[crate::modpack::Pending]) -> String {
     let lines: Vec<String> = missing
         .iter()
         .map(|p| format!("{} ({}): {}", if p.name.is_empty() { &p.file_name } else { &p.name }, p.file_name, p.url))
         .collect();
-    let _ = fs::write(
-        root.join("missing-mods.txt"),
-        format!(
-            "These mods can only be downloaded from the CurseForge website, so Hopper couldn't put them on the server. Download each one and put it in the mods folder.
+    format!(
+        "These mods can only be downloaded from the CurseForge website, so Hopper couldn't put them on the server. Download each one and put it in the mods folder.
 
 {}
 ",
-            lines.join("
+        lines.join("
 ")
-        ),
-    );
+    )
 }
 
 /// A server for `inst`: makes the folder with `opts` (see
@@ -800,25 +816,120 @@ fn copy_instance_files(inst: &Instance, root: &Path, mods: &[String], job: &Job)
 /// Copies instance folder `rel` to the server, leaving client-only content
 /// out ([`crate::configdiff::client_only`]); returns the number of files.
 fn copy_server_tree(src: &Path, dst: &Path, rel: &str) -> anyhow::Result<usize> {
-    if crate::configdiff::client_only(&format!("{rel}/x")) {
-        return Ok(0);
+    let files = server_tree_files(src, rel)?;
+    for (from, sub) in &files {
+        let to = dst.join(sub.strip_prefix(rel).unwrap_or(sub).trim_start_matches('/'));
+        if let Some(p) = to.parent() {
+            fs::create_dir_all(p)?;
+        }
+        fs::copy(from, &to).with_context(|| format!("copying {}", from.display()))?;
     }
-    fs::create_dir_all(dst)?;
-    let mut n = 0;
+    Ok(files.len())
+}
+
+/// The files of instance folder `src` (at `rel` in the instance) that belong
+/// on a server, as (file, path in the server folder with `/`).
+fn server_tree_files(src: &Path, rel: &str) -> anyhow::Result<Vec<(PathBuf, String)>> {
+    let mut out = Vec::new();
+    if crate::configdiff::client_only(&format!("{rel}/x")) {
+        return Ok(out);
+    }
     for e in fs::read_dir(src)? {
         let e = e?;
         let t = e.file_type()?;
-        let name = e.file_name();
-        let sub = format!("{rel}/{}", name.to_string_lossy());
-        let to = dst.join(&name);
+        let sub = format!("{rel}/{}", e.file_name().to_string_lossy());
         if t.is_dir() {
-            n += copy_server_tree(&e.path(), &to, &sub)?;
+            out.extend(server_tree_files(&e.path(), &sub)?);
         } else if t.is_file() && !crate::configdiff::client_only(&sub) {
-            fs::copy(e.path(), &to).with_context(|| format!("copying {}", e.path().display()))?;
-            n += 1;
+            out.push((e.path(), sub));
         }
     }
-    Ok(n)
+    Ok(out)
+}
+
+/// The text of `left-out-client-mods.txt` (Hopper Server writes the same).
+fn left_out_text(skipped: &[(String, String)]) -> String {
+    let lines: Vec<String> = skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
+    format!(
+        "Hopper left these mods out of the server as client-only. If the server needs one, copy it from the pack into mods.\n\n{}\n",
+        lines.join("\n")
+    )
+}
+
+/// What a server made from `inst` gets, packed into the zip `out` for a
+/// Hopper Server to build from (its zip import lays it over the loader): the
+/// mods that belong on a server (the same choice as [`create_from_instance`])
+/// under `mods/`, the pack's config folders without client-only files, and
+/// the lists of mods left out or missing. The report's `root` is `out`.
+pub fn server_content_zip(
+    inst: &Instance,
+    sync_anyway: &HashSet<u64>,
+    hidden: &HashSet<String>,
+    out: &Path,
+    job: &Job,
+) -> anyhow::Result<CreateReport> {
+    use std::io::Write as _;
+    job.detail("Reading the pack's mods");
+    let mut client = crate::scan::scan_folder(&inst.mods_dir()).unwrap_or_default();
+    client.retain(|m| !crate::rigsync::mod_hidden(m, hidden));
+    let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
+    let (keep, skipped) = server_mods(&client);
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
+    for d in SERVER_DIRS {
+        let src = inst.root.join(d);
+        if src.is_dir() {
+            files.extend(server_tree_files(&src, d)?);
+        }
+    }
+    let missing = missing_mods(inst);
+
+    let r = (|| -> anyhow::Result<()> {
+        let mut w = zip::ZipWriter::new(std::io::BufWriter::new(fs::File::create(out)?));
+        // Jars are zips already: storing them is as small and much faster.
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
+        let deflated = zip::write::SimpleFileOptions::default();
+        let total = keep.len() + files.len();
+        for (i, m) in keep.iter().enumerate() {
+            job.check_cancelled()?;
+            job.detail(format!("Packing mods ({}/{})", i + 1, keep.len()));
+            job.progress(i, total);
+            w.start_file(format!("mods/{m}"), stored)?;
+            let mut f = fs::File::open(inst.mods_dir().join(m)).with_context(|| format!("reading {m}"))?;
+            std::io::copy(&mut f, &mut w)?;
+        }
+        job.detail("Packing the pack's config");
+        for (i, (from, rel)) in files.iter().enumerate() {
+            job.check_cancelled()?;
+            job.progress(keep.len() + i, total);
+            w.start_file(rel.as_str(), deflated)?;
+            let mut f = fs::File::open(from).with_context(|| format!("reading {}", from.display()))?;
+            std::io::copy(&mut f, &mut w)?;
+        }
+        if !skipped.is_empty() {
+            w.start_file("left-out-client-mods.txt", deflated)?;
+            w.write_all(left_out_text(&skipped).as_bytes())?;
+        }
+        if !missing.is_empty() {
+            w.start_file("missing-mods.txt", deflated)?;
+            w.write_all(missing_text(&missing).as_bytes())?;
+        }
+        w.finish()?.flush()?;
+        Ok(())
+    })();
+    if let Err(e) = r {
+        let _ = fs::remove_file(out);
+        return Err(e);
+    }
+    Ok(CreateReport {
+        root: out.to_path_buf(),
+        mods_copied: keep.len(),
+        skipped,
+        files_copied: files.len(),
+        note: note.note,
+        missing,
+    })
 }
 
 /// Copies a folder recursively; returns the number of files.
@@ -871,6 +982,55 @@ mod tests {
         assert!(reason("fancyclouds-2.0.jar").unwrap().contains("server pack"));
         assert!(reason("somehud-1.0.jar").unwrap().contains("Client-only"));
         assert!(reason("sodium-neoforge-0.6.jar").unwrap().contains("Known client-only"));
+    }
+
+    /// A jar with nothing but a manifest.
+    fn jar(p: &Path) {
+        let mut w = zip::ZipWriter::new(fs::File::create(p).unwrap());
+        w.start_file("META-INF/MANIFEST.MF", zip::write::SimpleFileOptions::default()).unwrap();
+        std::io::Write::write_all(&mut w, b"Manifest-Version: 1.0\n").unwrap();
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn server_content_zip_holds_what_a_server_gets() {
+        let dir = std::env::temp_dir().join(format!("hopper-content-zip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("inst");
+        fs::create_dir_all(root.join("mods")).unwrap();
+        fs::create_dir_all(root.join("config/sub")).unwrap();
+        fs::create_dir_all(root.join("kubejs/server_scripts")).unwrap();
+        fs::create_dir_all(root.join("resourcepacks")).unwrap();
+        jar(&root.join("mods/create-1.21.1-6.0.jar"));
+        jar(&root.join("mods/sodium-neoforge-0.6.jar"));
+        fs::write(root.join("config/a-common.toml"), "x = 1\n").unwrap();
+        fs::write(root.join("config/sub/b.json"), "{}").unwrap();
+        fs::write(root.join("kubejs/server_scripts/c.js"), "//").unwrap();
+        fs::write(root.join("resourcepacks/pack.zip"), "x").unwrap();
+        let inst = Instance { name: "T".into(), root: root.clone(), game_version: "1.21.1".into(), loader: "neoforge-21.1.234".into(), ..Default::default() };
+        let out = dir.join("t.zip");
+        let jobs = crate::jobs::Jobs::default();
+        let r = server_content_zip(&inst, &HashSet::new(), &HashSet::new(), &out, &jobs.start("t")).unwrap();
+        assert_eq!(r.mods_copied, 1);
+        assert_eq!(r.skipped.len(), 1);
+        assert_eq!(r.files_copied, 3);
+        let mut names = super::super::server_pack::zip_names(&out).unwrap();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "config/a-common.toml",
+                "config/sub/b.json",
+                "kubejs/server_scripts/c.js",
+                "left-out-client-mods.txt",
+                "mods/create-1.21.1-6.0.jar",
+            ]
+        );
+        // Hopper Server's zip import reads it as a server pack with its mods.
+        let info = super::super::zip_import::inspect(&out).unwrap();
+        assert_eq!(info.kind, super::super::zip_import::ZipKind::ServerPack);
+        assert!(matches!(super::super::server_pack::plan(&names).mods, super::super::server_pack::ModSource::Included(1)));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

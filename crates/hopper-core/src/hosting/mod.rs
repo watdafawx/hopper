@@ -15,6 +15,9 @@ pub mod logparse;
 pub mod logshare;
 pub mod motd;
 pub mod motd_edit;
+pub mod pack_versions;
+pub mod panel_create;
+pub mod ports;
 pub mod process;
 pub mod progress;
 pub mod properties;
@@ -29,7 +32,7 @@ pub mod zip_import;
 
 pub use create::{
     CreateOptions, CreateReport, ServerLoader, create_from_client_pack, create_from_instance,
-    create_server, java_check,
+    create_server, java_check, server_content_zip,
 };
 pub use jvm::{JvmArgs, JvmPreset};
 pub use local_panel::LocalPanel;
