@@ -161,6 +161,9 @@ pub struct LogsView {
     crash: Option<Crash>,
     /// The crash card's mods (jars) whose "Why?" list is open.
     why_open: std::collections::HashSet<String>,
+    /// "Turn off…" asked: the jars ticked in its list (nothing is turned
+    /// off until its confirm).
+    turn_off_pick: Option<std::collections::HashSet<String>>,
     /// Every crash report, newest first.
     crashes: Vec<PathBuf>,
     tab: LogTab,
@@ -199,6 +202,7 @@ impl LogsView {
             shared: HashMap::new(),
             crash: None,
             why_open: Default::default(),
+            turn_off_pick: None,
             crashes: Vec::new(),
             tab: LogTab::Game,
             tab_picked: false,
@@ -870,6 +874,10 @@ impl LogsView {
                     }
                     cx.notify();
                 });
+                let store3 = self.store.clone();
+                let link_of = |file: &str, key: &str, cx: &App| crash_story::mod_ref(&store3, root, file, key, cx);
+                below.extend(crate::crash_view::partner_line(s, &link_of, cx));
+                below.extend(crate::crash_view::steps_list(s, &readable, cx));
                 below.extend(crate::crash_view::why_fold(ElementId::Name(format!("crash-why:{i}").into()), s, open, &readable, toggle, cx));
                 crate::crash_view::suspect_row(link, s, why, below, cx).into_any_element()
             })
@@ -1055,8 +1063,9 @@ impl LogsView {
                 .iter()
                 .any(|a| a.enabled && a.file_name.eq_ignore_ascii_case(f.trim_end_matches(".disabled")))
         };
-        let to_turn_off: Vec<&str> =
-            c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && on(&s.file_name)).map(|s| s.file_name.as_str()).collect();
+        let turn_off_mods: Vec<&hopper::crashdetect::Suspect> =
+            hopper::crashdetect::to_turn_off(c).into_iter().filter(|s| on(&s.file_name)).collect();
+        let to_turn_off: Vec<&str> = turn_off_mods.iter().map(|s| s.file_name.as_str()).collect();
         let can_turn_off = to_turn_off.len();
         // One mod: its own name on the button.
         let only = (can_turn_off == 1)
@@ -1078,6 +1087,54 @@ impl LogsView {
             return None;
         }
         let (r1, r2, r3) = (root.to_path_buf(), root.to_path_buf(), root.to_path_buf());
+        let all_files: Vec<String> = to_turn_off.iter().map(|f| f.to_string()).collect();
+        // The list "Turn off…" opened: each mod ticked, with why; its confirm
+        // turns off only the ticked ones.
+        let picker = self.turn_off_pick.as_ref().filter(|_| can_turn_off > 0).map(|picked| {
+            let named: Vec<(String, String)> = c
+                .suspects
+                .iter()
+                .filter(|s| !s.mod_id.is_empty())
+                .map(|s| (s.mod_id.clone(), hopper::crashdetect::jar_name(&root.join("mods"), &s.file_name)))
+                .collect();
+            let readable = move |t: &str| {
+                named.iter().fold(t.to_string(), |w, (id, n)| w.replace(&format!(" {id},"), &format!(" {n},")).replace(&format!(" {id} "), &format!(" {n} ")))
+            };
+            let store3 = self.store.clone();
+            let root3 = root.to_path_buf();
+            let link_of = move |file: &str, key: &str, cx: &App| crash_story::mod_ref(&store3, &root3, file, key, cx);
+            let view = cx.entity().downgrade();
+            let toggle: std::rc::Rc<dyn Fn(String, bool, &mut Window, &mut App)> = std::rc::Rc::new(move |file, on, _, cx| {
+                view.update(cx, |this, cx| {
+                    if let Some(p) = this.turn_off_pick.as_mut() {
+                        if on {
+                            p.insert(file);
+                        } else {
+                            p.remove(&file);
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            });
+            let confirm = cx.listener(move |this, _, window, cx| {
+                let Some(picked) = this.turn_off_pick.take() else { return };
+                let files: Vec<String> = picked.into_iter().collect();
+                let r = this.store.update(cx, |s, cx| {
+                    let r = s.crash_turn_off(&r1, &files);
+                    cx.notify();
+                    r
+                });
+                if let Err(e) = r {
+                    window.push_notification(gpui_kit::component::notification::Notification::warning(e), cx);
+                }
+            });
+            let cancel = cx.listener(|this, _, _, cx| {
+                this.turn_off_pick = None;
+                cx.notify();
+            });
+            crate::crash_view::turn_off_picker("crash", &turn_off_mods, picked, &link_of, &readable, toggle, confirm, cancel, playing, "instance", cx)
+        });
         let revert_buttons: Vec<AnyElement> = reverts
             .into_iter()
             .enumerate()
@@ -1111,22 +1168,17 @@ impl LogsView {
                             .outline()
                             .icon(IconName::PowerOff)
                             .label(if let Some(n) = &only {
-                                format!("Turn off {n}")
+                                format!("Turn off {n}…")
                             } else if can_turn_off == 1 {
-                                "Turn off the likely one".to_string()
+                                "Turn off 1 mod…".to_string()
                             } else {
-                                format!("Turn off the {can_turn_off} likely ones")
+                                format!("Turn off {can_turn_off} mods…")
                             })
-                            .tooltip("Certain and Likely mods. You can turn them back on here.")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let r = this.store.update(cx, |s, cx| {
-                                    let r = s.crash_turn_off(&r1);
-                                    cx.notify();
-                                    r
-                                });
-                                if let Err(e) = r {
-                                    window.push_notification(gpui_kit::component::notification::Notification::warning(e), cx);
-                                }
+                            .tooltip("Shows the mods first. You can turn them back on here.")
+                            .disabled(self.turn_off_pick.is_some())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.turn_off_pick = Some(all_files.iter().cloned().collect());
+                                cx.notify();
                             })),
                     )
                 })
@@ -1169,6 +1221,7 @@ impl LogsView {
                 })
                 .into_any_element(),
         )
+        .map(|row| v_flex().gap_2().child(row).children(picker).into_any_element())
     }
 
     /// Installs a mod the crash says is missing (as the Mods tab's banner

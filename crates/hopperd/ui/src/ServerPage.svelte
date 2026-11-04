@@ -4,7 +4,7 @@
   import { session, outside } from './lib/me.svelte.js';
   import Avatar from './Avatar.svelte';
   import { onMount, onDestroy } from 'svelte';
-  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder, SlidersHorizontal } from '@lucide/svelte';
+  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder, SlidersHorizontal, ScrollText } from '@lucide/svelte';
   import { live, history, follow, unfollow } from './lib/live.svelte.js';
   import { api, post } from './lib/api.js';
   import { bytes, uptime, xmx, stateText, bootLeft, memTitle, loaderText } from './lib/format.js';
@@ -15,6 +15,7 @@
   import { askPower, askKickOrBan, playerAct, head } from './lib/consoleKit.js';
   import ConsoleView from './ConsoleView.svelte';
   import ServerCrash from './ServerCrash.svelte';
+  import ServerLogs from './ServerLogs.svelte';
   import ModPeek from './ModPeek.svelte';
   import Spark from './Spark.svelte';
   import Files from './Files.svelte';
@@ -65,6 +66,7 @@
   // The tabs, in desktop's order for a Hopper Server's servers.
   const TABS = [
     ['console', 'Console', SquareTerminal],
+    ['logs', 'Crashes & logs', ScrollText],
     ['files', 'Files', FolderOpen],
     ['mods', 'Mods', Puzzle],
     ['configs', 'Configs', SlidersHorizontal],
@@ -247,6 +249,8 @@
     <div class="full">{#key path}<Editor server={s} {path} close={() => nav('files', path.split('/').slice(0, -1).join('/'))} />{/key}</div>
   {:else if tab === 'trash'}
     <div class="full"><Trash server={s} close={() => nav('files')} /></div>
+  {:else if tab === 'logs'}
+    <div class="full"><ServerLogs server={s} sub={path} go={(k) => nav('logs', k === 'crashes' ? '' : k)} onShare={(p) => (sharing = { path: p })} openFile={(p) => nav('edit', p)} openMods={() => nav('mods')} /></div>
   {:else if tab === 'mods'}
     <div class="full scroll"><Mods server={s} openConfigs={(key) => nav('configs', key)} /></div>
   {:else if tab === 'configs'}

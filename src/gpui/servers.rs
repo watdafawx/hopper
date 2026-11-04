@@ -754,6 +754,8 @@ pub struct ServersView {
     settings_view: Entity<ServerSettings>,
     /// The Sync tab: the server against its pack.
     sync: Entity<SyncPanel>,
+    /// The Crashes & logs tab.
+    logs: Entity<crate::server_logs::ServerLogsView>,
     /// The tabs only a Hopper Server's servers have.
     p_files: Entity<panel_tabs::files::FilesTab>,
     p_mods: Entity<panel_tabs::mods::ModsTab>,
@@ -791,14 +793,15 @@ const TAB_MODS: usize = 4;
 const TAB_FILES: usize = 6;
 const TAB_PLAYERS: usize = 7;
 const TAB_SCHEDULE: usize = 8;
+const TAB_LOGS: usize = 9;
 
 /// A server's tabs, in order, as codes: a Hopper Server's servers have the
 /// panel's tabs (in the panel's order), others the ones Hopper reads itself.
 fn tabs_for(remote: bool) -> &'static [usize] {
     if remote {
-        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_FILES, TAB_MODS, TAB_PLAYERS, TAB_BACKUPS, TAB_SCHEDULE, TAB_SETTINGS, TAB_SYNC]
+        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_FILES, TAB_MODS, TAB_PLAYERS, TAB_BACKUPS, TAB_SCHEDULE, TAB_SETTINGS, TAB_SYNC]
     } else {
-        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_BACKUPS, TAB_SETTINGS, TAB_MODS, TAB_SYNC]
+        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_BACKUPS, TAB_SETTINGS, TAB_MODS, TAB_SYNC]
     }
 }
 
@@ -812,6 +815,7 @@ fn tab_icon(code: usize) -> IconName {
         TAB_FILES => IconName::FolderOpen,
         TAB_PLAYERS => IconName::Users,
         TAB_SCHEDULE => IconName::Clock,
+        TAB_LOGS => IconName::ScrollText,
         _ => IconName::ArrowLeftRight,
     }
 }
@@ -826,6 +830,7 @@ fn tab_name(code: usize) -> &'static str {
         TAB_FILES => "Files",
         TAB_PLAYERS => "Players",
         TAB_SCHEDULE => "Schedule",
+        TAB_LOGS => "Crashes & logs",
         _ => "Sync",
     }
 }
@@ -878,6 +883,7 @@ impl ServersView {
             }),
         ];
         let pack_desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
+        let logs = cx.new(|cx| crate::server_logs::ServerLogsView::new(store.clone(), window, cx));
         let p_files = cx.new(|cx| panel_tabs::files::FilesTab::new(store.clone(), window, cx));
         let p_mods = cx.new(|cx| panel_tabs::mods::ModsTab::new(store.clone(), window, cx));
         let p_players = cx.new(|cx| panel_tabs::players::PlayersTab::new(store.clone(), window, cx));
@@ -896,6 +902,7 @@ impl ServersView {
             control,
             settings_view,
             sync,
+            logs,
             p_files,
             p_mods,
             p_players,
@@ -974,6 +981,10 @@ impl ServersView {
         } else if was == TAB_SYNC {
             self.sync.update(cx, |p, cx| p.hidden(cx));
         }
+        // Crashes & logs polls the server only while it's open.
+        if was == TAB_LOGS && tab != TAB_LOGS {
+            self.logs.update(cx, |v, cx| v.hidden(cx));
+        }
         cx.notify();
     }
 
@@ -995,6 +1006,10 @@ impl ServersView {
         if self.tab == TAB_SYNC {
             self.sync.update(cx, |p, cx| p.hidden(cx));
             self.sync_away = true;
+        }
+        // Back in view, drawing the tab starts it again.
+        if self.tab == TAB_LOGS {
+            self.logs.update(cx, |v, cx| v.hidden(cx));
         }
     }
 
@@ -1610,6 +1625,11 @@ impl ServersView {
             })
             .when(self.tab == TAB_CONSOLE, |c| {
                 c.child(self.control.update(cx, |ctl, cx| ctl.console_view(window, cx)))
+            })
+            .when(self.tab == TAB_LOGS, |c| {
+                let root = s.root.clone();
+                self.logs.update(cx, |v, cx| v.show(root, cx));
+                c.child(div().flex_1().min_h_0().child(self.logs.clone()))
             })
             .when(self.tab == TAB_BACKUPS && !remote, |c| {
                 c.child(

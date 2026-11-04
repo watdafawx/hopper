@@ -33,6 +33,12 @@ pub enum Certainty {
     Possible,
 }
 
+impl Default for Certainty {
+    fn default() -> Self {
+        Certainty::Possible
+    }
+}
+
 impl Certainty {
     pub fn label(self) -> &'static str {
         match self {
@@ -55,7 +61,7 @@ pub enum CrashKind {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Suspect {
     /// The jar in the instance's mods folder (as named on disk).
     pub file_name: String,
@@ -77,6 +83,26 @@ pub struct Suspect {
     /// (see [`crate::crashengine`]). Empty on cards saved before it.
     #[serde(default)]
     pub facts: Vec<Fact>,
+    /// The error only followed from another mod's failure (the report's
+    /// own error after loading had failed): shown as "knock-on", never
+    /// turned off.
+    #[serde(default)]
+    pub knock_on: bool,
+    /// What to do about it, in order, one plain sentence each.
+    #[serde(default)]
+    pub steps: Vec<String>,
+    /// The other mod its error is about (the one whose code it called and
+    /// didn't find), to name beside it.
+    #[serde(default)]
+    pub partner: Option<Partner>,
+}
+
+/// A second mod a suspect's error names: its jar, name and version.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Partner {
+    pub file_name: String,
+    pub name: String,
+    pub version: String,
 }
 
 /// One thing a crash says about a mod, and how much it counted for or
@@ -1075,6 +1101,7 @@ fn shaders_as_a_factor(suspects: &mut Vec<Suspect>, mods: &[String], ids: &impl 
             changed: None,
             client_only: false,
             facts: Vec::new(),
+            ..Default::default()
         });
     }
 }
@@ -1182,6 +1209,76 @@ pub fn server(root: &Path) -> Option<Crash> {
     let advice = crate::crashsigs::advice(&text, log, &native.as_deref().map(|n| tail(n, 64 << 10)).unwrap_or_default(), true);
     let source = report.or(native).unwrap_or_default();
     Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true, lingered, advice })
+}
+
+/// Any crash report of a dedicated server, read like [`server`] reads the
+/// last one: the newest one of the current run gets the full reading (with
+/// its log); an older one is read from the report alone (its log is gone).
+pub fn server_report(root: &Path, report: &Path) -> Option<Crash> {
+    // Only the newest report can be the last start's (the full reading
+    // costs more: it reads the whole log).
+    let newest = crate::logs::crash_reports(root).into_iter().find(|p| p.extension().is_some_and(|e| e == "txt"));
+    if newest.as_deref() == Some(report)
+        && let Some(c) = server(root)
+        && c.source == report
+    {
+        return Some(c);
+    }
+    let dir = root.join("mods");
+    let mods: Vec<String> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+        .collect();
+    let mut c = from_report(root, report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0)?;
+    c.server = true;
+    for s in &mut c.suspects {
+        s.why = s.why.replace("while the game was loading", "while the server was loading").replace("the game ran its", "the server ran its");
+    }
+    c.advice = crate::crashsigs::advice(&tail(report, 2 << 20), "", "", true);
+    Some(c)
+}
+
+/// The mods a crash card offers to turn off: the Certain and Likely ones,
+/// never one that only followed from another (knock-on) or a client-only
+/// mod (that one goes, it isn't turned off).
+pub fn to_turn_off(c: &Crash) -> Vec<&Suspect> {
+    c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.client_only && !s.knock_on).collect()
+}
+
+/// One line for a crash, naming every mod it's sure of: "Mystical
+/// Agriculture Plus failed to load", "A, B and C failed to load", "likely
+/// X", else the report's headline. `name` gives a jar's name for people.
+pub fn verdict(c: &Crash, name: &dyn Fn(&Suspect) -> String) -> String {
+    let certain: Vec<&Suspect> = c.suspects.iter().filter(|s| s.certainty == Certainty::Certain && !s.knock_on).collect();
+    let list = |v: &[&Suspect]| -> String {
+        let names: Vec<String> = v.iter().map(|s| name(s)).collect();
+        match names.as_slice() {
+            [] => String::new(),
+            [a] => a.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        }
+    };
+    match certain.as_slice() {
+        [s] if s.client_only => format!("{} is client-only", name(s)),
+        [] => {
+            let likely: Vec<&Suspect> = c.suspects.iter().filter(|s| s.certainty == Certainty::Likely && !s.knock_on).collect();
+            if !likely.is_empty() {
+                format!("likely {}", list(&likely))
+            } else if !c.advice.is_empty() {
+                c.advice.split_inclusive(['.', ':']).next().unwrap_or(&c.advice).trim_end_matches([':', ' ']).to_string()
+            } else {
+                c.headline.clone()
+            }
+        }
+        v if v.iter().all(|s| s.partner.is_some()) && v.len() == 1 => {
+            let p = v[0].partner.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+            format!("{} doesn't match {p}", name(v[0]))
+        }
+        v => format!("{} failed to load", list(v)),
+    }
 }
 
 /// Whether a crash report is Minecraft's watchdog firing after the server
@@ -1346,6 +1443,7 @@ fn client_only(root: &Path, text: &str, log: &str, suspects: &mut Vec<Suspect>, 
                 changed: None,
                 client_only: true,
                 facts: Vec::new(),
+                ..Default::default()
             }),
         }
     }
@@ -1447,7 +1545,7 @@ fn analyze(
         if suspects.iter().any(|s| s.file_name == file) {
             continue;
         }
-        suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs, changed: None, client_only: false, facts: Vec::new() });
+        suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs, changed: None, client_only: false, facts: Vec::new(), ..Default::default() });
     }
     demote_libraries(&mut suspects, &crate::deps::dependents(&root.join("mods")), ids);
     // A loop's mods added lately: the change that likely brought it.
@@ -1463,11 +1561,69 @@ fn analyze(
     // The general rules weigh what was found and what the crash names.
     // (`HOPPER_CRASH_ENGINE=off` keeps the older rules' answer alone, to
     // compare.)
-    if std::env::var("HOPPER_CRASH_ENGINE").map_or(true, |v| v != "off") {
-        let mut index: Option<std::rc::Rc<crate::modindex::ModIndex>> = None;
-        let mut get = || index.get_or_insert_with(|| std::rc::Rc::new(crate::modindex::ModIndex::load(root, mods))).clone();
+    let engine = std::env::var("HOPPER_CRASH_ENGINE").map_or(true, |v| v != "off");
+    let mut index: Option<std::rc::Rc<crate::modindex::ModIndex>> = None;
+    let mut get = || index.get_or_insert_with(|| std::rc::Rc::new(crate::modindex::ModIndex::load(root, mods))).clone();
+    if engine {
         let input = crate::crashengine::Input { text, log, root, mods };
         crate::crashengine::weigh(&input, &mut suspects, ids, &mut get);
+    }
+    // Once loading had failed, or the report's error came while the loader
+    // undid the registries, what the report alone names only followed.
+    // (A load failure the rules put down to the computer, a file another
+    // program held, isn't a cause the rest follows from.)
+    let (_, all_failed, _) = loading_failures_all(loading);
+    let failed: Vec<&(Raw, String)> = all_failed
+        .iter()
+        .filter(|(f, _)| suspects.iter().any(|s| s.mod_id.eq_ignore_ascii_case(&f.mod_id) && s.certainty <= Certainty::Likely))
+        .collect();
+    if engine && (!failed.is_empty() || text.contains(UNDO_FRAME)) {
+        let first = failed.first().map(|(r, _)| r.mod_id.clone());
+        for s in suspects.iter_mut().filter(|s| !s.client_only && !all_failed.iter().any(|(f, _)| f.mod_id.eq_ignore_ascii_case(&s.mod_id))) {
+            // The report's own loader list or a known error can still be
+            // sure of a mod; and a side note (Possible) stays one.
+            if s.certainty == Certainty::Certain || (s.certainty == Certainty::Possible && !is_knock_on_why(&s.why) && first.is_none()) {
+                continue;
+            }
+            s.certainty = Certainty::Possible;
+            s.knock_on = true;
+            s.steps.clear();
+            let text = match &first {
+                Some(f) => format!("Knock-on: the report's error came after {f} had already failed to load. Ignore it; fix {f} first."),
+                None => "Knock-on: the report's error came while the loader was undoing the registries after an earlier error. Ignore it; the first error in the log is the cause.".to_string(),
+            };
+            if !is_knock_on_why(&s.why) {
+                s.why = text.clone();
+            }
+            s.facts.insert(0, Fact { rule: crate::crashengine::KNOCK_ON.into(), weight: -50, text });
+        }
+    }
+    for s in suspects.iter_mut() {
+        s.knock_on |= is_knock_on_why(&s.why);
+    }
+    // One mod calling a part of another that isn't there: name both, with
+    // their versions and what to change.
+    if engine {
+        let dir = root.join("mods");
+        let found: Vec<(crate::crashengine::MissingPart, String)> = [loading, text, log]
+            .iter()
+            .flat_map(|t| crate::crashengine::mismatches(t))
+            .fold(Vec::new(), |mut v, x| {
+                if !v.iter().any(|(p, c): &(crate::crashengine::MissingPart, String)| p.class == x.0.class && *c == x.1) {
+                    v.push(x);
+                }
+                v
+            });
+        for (part, caller) in found {
+            let Some(s) = suspects.iter_mut().find(|s| s.mod_id.eq_ignore_ascii_case(&caller) && s.partner.is_none() && !s.knock_on) else { continue };
+            let idx = get();
+            let owner = idx.jar_of_class(&part.class).map(str::to_string);
+            let Some((why, steps, partner)) = crate::crashengine::explain_mismatch(&dir, &part, &s.file_name, owner.as_deref()) else { continue };
+            s.facts.insert(0, Fact { rule: crate::crashengine::MISMATCH.into(), weight: 0, text: why.clone() });
+            s.why = why;
+            s.steps = steps;
+            s.partner = partner;
+        }
     }
     // What the loader names may say which other mod it wanted: if that one
     // changed lately, the change is the likely trigger.
@@ -1476,7 +1632,32 @@ fn analyze(
         s.changed = what_changed(root, s, mods, &sets);
     }
     let stopped = stopped(root, loading, &suspects, mods, ids);
+    let dir = root.join("mods");
+    for s in suspects.iter_mut().filter(|s| s.steps.is_empty()) {
+        s.steps = default_steps(s, &jar_name(&dir, &s.file_name));
+    }
     (suspects, stopped)
+}
+
+/// What to do about a suspect when no rule said something more exact.
+fn default_steps(s: &Suspect, name: &str) -> Vec<String> {
+    if s.knock_on {
+        return vec!["Nothing to do for this one: it only followed from the failure above. Fix that first.".into()];
+    }
+    if s.client_only {
+        return Vec::new();
+    }
+    if !s.needs.is_empty() {
+        let list: Vec<String> = s.needs.iter().map(|(id, v)| if v.is_empty() { id.clone() } else { format!("{id} {v}") }).collect();
+        return vec![format!("Add what {name} needs: {}.", list.join(", ")), format!("Or turn off {name}.")];
+    }
+    match s.certainty {
+        Certainty::Certain | Certainty::Likely => vec![
+            format!("Update {name}: a newer version may fix this."),
+            format!("Or turn off {name} and start again (mods that need it go too)."),
+        ],
+        Certainty::Possible => Vec::new(),
+    }
 }
 
 /// A jar's name for people when the instance's list has none: the name the
@@ -1649,9 +1830,30 @@ pub fn loading_lines(p: &Path) -> String {
 /// Whether loading had already failed, and the mods the loader says
 /// failed, each with its error as the reason.
 fn loading_failures(text: &str) -> (bool, Vec<(Raw, String)>) {
+    let (broken, out, _) = loading_failures_all(text);
+    (broken, out)
+}
+
+/// What the loader does once registering has failed: it puts the game's
+/// registries back as they were before mods added to them. Errors thrown
+/// while it does that (a mod's block or item not there any more) only
+/// follow from the first failure.
+pub(crate) const UNDO_FRAME: &str = "RegistryManager.revertToVanilla";
+
+/// Errors that say something wasn't registered: after another mod failed
+/// in the same step, these are what that failure leaves behind.
+static NOT_REGISTERED: LazyLock<Regex> =
+    LazyLock::new(|| re(r"(?i)unbound value|has no item|not (?:yet )?registered|called too early|not bound|Registry Object not present"));
+
+/// The same, with the failures that only followed from an earlier one:
+/// thrown while the loader undid the registries ([`UNDO_FRAME`]). Those
+/// are (mod, its error) and never the cause. A later failure whose error
+/// only says something wasn't registered drops to likely.
+fn loading_failures_all(text: &str) -> (bool, Vec<(Raw, String)>, Vec<(Raw, String)>) {
     let lines: Vec<&str> = text.lines().collect();
     let broken = lines.iter().any(|l| BROKEN.is_match(l));
-    let mut out = Vec::new();
+    let mut out: Vec<(Raw, String)> = Vec::new();
+    let mut undo: Vec<(Raw, String)> = Vec::new();
     for (i, l) in lines.iter().enumerate() {
         let Some(c) = LOAD_FAILED.captures(l) else { continue };
         if after_loading_event(l) {
@@ -1663,26 +1865,37 @@ fn loading_failures(text: &str) -> (bool, Vec<(Raw, String)>) {
         }
         // The error under it; the deepest "Caused by" is nearest the cause.
         let mut msg = String::new();
+        let mut undoing = false;
         for (k, n) in lines.iter().enumerate().skip(i + 1).take(60) {
             if n.starts_with('[') {
                 break;
             }
+            undoing |= n.contains(UNDO_FRAME);
             if let Some(m) = EXCEPTION.captures(n)
                 && (k == i + 1 || n.trim_start().starts_with("Caused by:"))
             {
                 msg = m[1].trim().to_string();
             }
         }
-        let why = if msg.is_empty() {
-            "It failed while the game was loading, so the rest couldn't finish loading.".to_string()
-        } else {
-            format!("It failed while the game was loading: \"{}\"", cut(&msg, 300))
-        };
-        if !out.iter().any(|(r, _): &(Raw, String)| r.mod_id == id) {
-            out.push((Raw { mod_id: id, jar: String::new(), certainty: Certainty::Certain, why, class: String::new(), needs: Vec::new() }, msg));
+        if out.iter().any(|(r, _)| r.mod_id == id) || undo.iter().any(|(r, _)| r.mod_id == id) {
+            continue;
         }
+        if undoing {
+            undo.push((Raw { mod_id: id, jar: String::new(), certainty: Certainty::Possible, why: String::new(), class: String::new(), needs: Vec::new() }, msg));
+            continue;
+        }
+        let after = out.first().map(|(r, _)| r.mod_id.clone());
+        let (certainty, why) = match &after {
+            Some(first) if NOT_REGISTERED.is_match(&msg) => (
+                Certainty::Likely,
+                format!("It failed while the game was loading, after {first} had already failed in the same step, and its error only says something wasn't there: \"{}\". That can follow from {first} failing first.", cut(&msg, 300)),
+            ),
+            _ if msg.is_empty() => (Certainty::Certain, "It failed while the game was loading, so the rest couldn't finish loading.".to_string()),
+            _ => (Certainty::Certain, format!("It failed while the game was loading: \"{}\"", cut(&msg, 300))),
+        };
+        out.push((Raw { mod_id: id, jar: String::new(), certainty, why, class: String::new(), needs: Vec::new() }, msg));
     }
-    (broken, out)
+    (broken, out, undo)
 }
 
 /// When a mod had already failed to load, the game can go on a little and
@@ -1691,23 +1904,56 @@ fn loading_failures(text: &str) -> (bool, Vec<(Raw, String)>) {
 /// drops to possible. If the log only says loading was broken, the trace
 /// still drops to possible (the cause is earlier in the log).
 fn knock_on(raws: &mut Vec<Raw>, loading: &str) {
-    let (broken, failed) = loading_failures(loading);
+    let (broken, failed, undo) = loading_failures_all(loading);
     let failed: Vec<Raw> = failed.into_iter().map(|(r, _)| r).collect();
     if failed.is_empty() && !broken {
         return;
     }
     let why = match failed.first() {
-        Some(f) => format!("It crashed after {} had already failed to load, so this error most likely follows from that one.", f.mod_id),
-        None => "Loading had already failed before this crash, so this error most likely follows from an earlier one in the game log.".to_string(),
+        Some(f) => format!("{KNOCK_ON_WHY} {} had already failed to load, so this error most likely follows from that one.", f.mod_id),
+        None => format!("{KNOCK_ON_EARLIER} so this error most likely follows from an earlier one in the game log."),
     };
     for r in raws.iter_mut().filter(|r| r.certainty != Certainty::Certain && !failed.iter().any(|f| same(f, &r.mod_id, &r.jar))) {
         r.certainty = Certainty::Possible;
         r.why = why.clone();
     }
+    // Failures while the loader undid the registries: knock-on too, even
+    // when the loader called them failures of their own.
+    if let Some(first) = failed.first() {
+        for (mut u, msg) in undo {
+            raws.retain(|r| !same(r, &u.mod_id, &u.jar));
+            u.why = if msg.is_empty() {
+                format!("{KNOCK_ON_UNDO} {} had failed, so this follows from that one.", first.mod_id)
+            } else {
+                format!("{KNOCK_ON_UNDO} {} had failed, so this follows from that one: \"{}\"", first.mod_id, cut(&msg, 200))
+            };
+            add(raws, u);
+        }
+    }
     for f in failed {
+        // A later failure that only says something wasn't there is less
+        // sure than the log's own line for it says.
+        if f.certainty == Certainty::Likely
+            && let Some(e) = raws.iter_mut().find(|e| same(e, &f.mod_id, &f.jar))
+        {
+            e.certainty = Certainty::Likely;
+            e.why = f.why;
+            continue;
+        }
         add(raws, f);
     }
     raws.sort_by_key(|r| r.certainty);
+}
+
+/// How the knock-on reasons start ([`knock_on`]), so a suspect can say it
+/// is one.
+const KNOCK_ON_WHY: &str = "It crashed after";
+const KNOCK_ON_EARLIER: &str = "Loading had already failed before this crash,";
+const KNOCK_ON_UNDO: &str = "It failed while the loader was putting the registries back after";
+
+/// Whether a reason says the error only followed from another failure.
+fn is_knock_on_why(why: &str) -> bool {
+    [KNOCK_ON_WHY, KNOCK_ON_EARLIER, KNOCK_ON_UNDO].iter().any(|p| why.starts_with(p))
 }
 
 /// Text as plain words, to match names however a mod writes them:
@@ -1888,6 +2134,7 @@ impl LiveWatch {
                     changed: None,
                     client_only: false,
                     facts: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -1932,8 +2179,35 @@ pub fn clear(root: &Path) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn verdict_names_every_sure_mod_and_skips_knock_ons() {
+        let name = |s: &Suspect| s.mod_id.to_uppercase();
+        let mut c = Crash { suspects: vec![sus("a.jar", "a", Certainty::Certain), sus("b.jar", "b", Certainty::Certain), sus("c.jar", "c", Certainty::Certain)], ..Default::default() };
+        assert_eq!(verdict(&c, &name), "A, B and C failed to load");
+        c.suspects[1].knock_on = true;
+        c.suspects[2].certainty = Certainty::Likely;
+        assert_eq!(verdict(&c, &name), "A failed to load");
+        assert_eq!(to_turn_off(&c).iter().map(|s| s.mod_id.as_str()).collect::<Vec<_>>(), ["a", "c"]);
+        c.suspects[0].partner = Some(Partner { file_name: "l.jar".into(), name: "Lib".into(), version: "1.0".into() });
+        assert_eq!(verdict(&c, &name), "A doesn't match Lib");
+    }
+
+    #[test]
+    fn later_failures_that_only_miss_something_are_likely_and_undo_ones_knock_on() {
+        let log = "[x] [ERROR]: Caught exception during event RegisterEvent@1 dispatch for modid first\njava.lang.NoSuchMethodError: 'void a.B.<init>()'\n\tat TRANSFORMER/first@1/f.X.y(X.java:1)\n\
+[x] [ERROR]: Caught exception during event RegisterEvent@2 dispatch for modid second\njava.lang.IllegalStateException: Block x has no item\n\tat TRANSFORMER/second@1/s.X.y(X.java:1)\n\
+[x] [ERROR]: Caught exception during event RegisterEvent@3 dispatch for modid third\njava.lang.NullPointerException: Trying to access unbound value: ResourceKey[minecraft:item / third:x]\n\tat TRANSFORMER/neoforge@21/net.neoforged.neoforge.registries.RegistryManager.revertToVanilla(RegistryManager.java:116)\n";
+        let (_, failed, undo) = loading_failures_all(log);
+        assert_eq!(failed.iter().map(|(r, _)| (r.mod_id.as_str(), r.certainty)).collect::<Vec<_>>(), [("first", Certainty::Certain), ("second", Certainty::Likely)]);
+        assert_eq!(undo.iter().map(|(r, _)| r.mod_id.as_str()).collect::<Vec<_>>(), ["third"]);
+        let mut raws = Vec::new();
+        knock_on(&mut raws, log);
+        let third = raws.iter().find(|r| r.mod_id == "third").unwrap();
+        assert!(is_knock_on_why(&third.why) && third.certainty == Certainty::Possible, "{third:?}");
+    }
+
     fn sus(file: &str, id: &str, c: Certainty) -> Suspect {
-        Suspect { file_name: file.into(), mod_id: id.into(), certainty: c, why: String::new(), needs: Vec::new(), changed: None, client_only: false, facts: Vec::new() }
+        Suspect { file_name: file.into(), mod_id: id.into(), certainty: c, why: String::new(), needs: Vec::new(), changed: None, client_only: false, facts: Vec::new(), ..Default::default() }
     }
 
     #[test]
@@ -2390,6 +2664,7 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
             changed: None,
             client_only: false,
             facts: Vec::new(),
+            ..Default::default()
         };
         let c = what_changed(&root, &s, &list, &crate::backups::list(&root)).expect("a change");
         assert_eq!(
@@ -2928,8 +3203,9 @@ java.lang.NoSuchMethodError: 'void com.example.corelib.api.Registry.add(java.lan
         let c = from_report(&root, &rp, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
         let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.file_name.as_str(), s.certainty)).collect();
         assert_eq!(got, [("addon-2.0.jar", Certainty::Likely), ("corelib-3.0.jar", Certainty::Possible)]);
-        assert!(c.suspects[0].why.contains("the method com.example.corelib.api.Registry.add, which isn't there"), "{}", c.suspects[0].why);
-        assert!(c.suspects[0].why.contains("Update this mod and the mod it needs"), "{}", c.suspects[0].why);
+        assert_eq!(c.suspects[0].why, "Addon 2.0 was made for a different version of Core Lib (you have 3.0): it calls the method Registry.add, which Core Lib 3.0 doesn't have.");
+        assert!(c.suspects[0].steps[0].contains("Update Addon to a version made for Core Lib 3.0"), "{:?}", c.suspects[0].steps);
+        assert_eq!(c.suspects[0].partner.as_ref().map(|p| p.file_name.as_str()), Some("corelib-3.0.jar"));
 
         // A class built for a newer Java: its jar, and the advice to switch Java.
         let report = "---- Minecraft Crash Report ----\nDescription: Mod loading error has occurred\n\n\

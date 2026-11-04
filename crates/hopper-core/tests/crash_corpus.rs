@@ -102,8 +102,10 @@ fn fake_jar(dir: &Path, j: &Jar) {
         toml.push_str(&format!("[[mods]]\nmodId=\"{id}\"\nversion=\"{}\"\ndisplayName=\"{}\"\n", j.version, name.replace('"', "'")));
     }
     if let Some(owner) = j.ids.first() {
+        // `id` or `id=range` (the range the jar declares, when it limits).
         for d in &j.deps {
-            toml.push_str(&format!("[[dependencies.{owner}]]\nmodId=\"{d}\"\ntype=\"required\"\nversionRange=\"[0,)\"\nside=\"BOTH\"\n"));
+            let (d, range) = d.split_once('=').unwrap_or((d.as_str(), "[0,)"));
+            toml.push_str(&format!("[[dependencies.{owner}]]\nmodId=\"{d}\"\ntype=\"required\"\nversionRange=\"{range}\"\nside=\"BOTH\"\n"));
         }
     }
     for m in &j.mixins {

@@ -1515,14 +1515,13 @@ impl Store {
 
     /// Turns off the crash's Certain and Likely suspects that are on, and
     /// remembers them on the crash to turn back on. The files turned off.
-    pub fn crash_turn_off(&mut self, root: &Path) -> Result<Vec<String>, String> {
-        use hopper::crashdetect::Certainty;
+    pub fn crash_turn_off(&mut self, root: &Path, only: &[String]) -> Result<Vec<String>, String> {
         let Some(mut c) = self.crash(root).cloned() else { return Ok(Vec::new()) };
         let inst = self.instance(root).ok_or("That instance is gone.")?;
-        let files: Vec<String> = c
-            .suspects
-            .iter()
-            .filter(|s| s.certainty <= Certainty::Likely)
+        // Only the mods the player ticked in the card's list.
+        let files: Vec<String> = hopper::crashdetect::to_turn_off(&c)
+            .into_iter()
+            .filter(|s| only.iter().any(|f| f.eq_ignore_ascii_case(&s.file_name)))
             .filter_map(|s| {
                 inst.addons
                     .iter()

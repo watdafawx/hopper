@@ -621,6 +621,40 @@ impl Client {
 
     /// Puts back the older copy of the mod the server's last crash names
     /// (`file`: the jar there now), as [`crate::crashdetect::put_back`].
+    /// The server's crash reports, newest first: (path in the server
+    /// folder, modified unix seconds, Hopper's one-line verdict when it read
+    /// that one).
+    pub fn crashes(&self, id: &str) -> anyhow::Result<Vec<(String, u64, Option<String>)>> {
+        let v = self.get(&format!("/servers/{}/crashes", enc(id)))?;
+        Ok(v["crashes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|c| {
+                        let verdict = c["verdict"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+                        (c["path"].as_str().unwrap_or_default().to_string(), c["modified"].as_u64().unwrap_or(0), verdict)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// One crash report read like the crash card reads the last one, with
+    /// each named jar's name for people.
+    pub fn crash_read(&self, id: &str, path: &str) -> anyhow::Result<(Option<crate::crashdetect::Crash>, std::collections::HashMap<String, String>)> {
+        let v = self.get(&format!("/servers/{}/crashes/read?path={}", enc(id), enc(path)))?;
+        let c = serde_json::from_value(v["crash"].clone())?;
+        let names = serde_json::from_value(v["names"].clone()).unwrap_or_default();
+        Ok((c, names))
+    }
+
+    /// A log's text: its end (`from` 0), or what was written since `from`.
+    /// (text, the offset to read from next, whether it started over).
+    pub fn log_text(&self, id: &str, path: &str, from: u64) -> anyhow::Result<(String, u64, bool)> {
+        let v = self.get(&format!("/servers/{}/logs/text?path={}&from={from}", enc(id), enc(path)))?;
+        Ok((v["text"].as_str().unwrap_or_default().to_string(), v["to"].as_u64().unwrap_or(0), v["reset"].as_bool().unwrap_or(true)))
+    }
+
     pub fn crash_put_back(&self, id: &str, file: &str) -> anyhow::Result<()> {
         self.post(&format!("/servers/{}/crash/put-back", enc(id)), serde_json::json!({ "file": file }))?;
         Ok(())

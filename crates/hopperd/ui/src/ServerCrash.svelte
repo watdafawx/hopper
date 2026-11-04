@@ -5,14 +5,19 @@
   // the fix first, then "What happened" in order; otherwise the headline
   // and each mod it names, most certain first, with Certain / Likely /
   // Possible and why. Mod names carry their icon and open the mod peek.
+  // With `given` (a report picked in Crashes & logs: {crash, report, names,
+  // lingered}) it shows that one instead, read-only: no fixes from an old
+  // report.
   import { AlertTriangle, FileText, Share2, RefreshCw, Undo2, PowerOff, Trash2, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { removeMods, setOn } from './lib/modops.js';
   import { relative } from './lib/worlds.js';
   import { say } from './lib/toast.svelte.js';
   import { confirmIt } from './lib/dialog.svelte.js';
+  import { whenLabel } from './lib/worlds.js';
+  import CrashTurnOff from './CrashTurnOff.svelte';
 
-  let { server, onPeek, onShare, openFile } = $props();
+  let { server, onPeek, onShare, openFile, given = null } = $props();
 
   const sid = $derived(server.id);
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -33,6 +38,8 @@
   let back = $state(null);
   // Only the newest look counts (the state can flip while one is out).
   let seq = 0;
+  // "Turn off…" open: the mods it would turn off, to tick first.
+  let picking = $state(false);
 
   async function load() {
     const n = ++seq;
@@ -42,6 +49,7 @@
       const m = r.crash ? (await api(`${base}/mods/list`)).mods || [] : [];
       if (n !== seq) return;
       if (crash?.when !== r.crash?.when) back = null;
+      picking = false;
       crash = r.crash;
       report = r.report;
       lingered = r.lingered || null;
@@ -53,9 +61,26 @@
     }
   }
 
+  // A picked report: only the mods list is fetched (icons, on or off).
+  async function loadGiven(g) {
+    const n = ++seq;
+    crash = g.crash;
+    report = g.report;
+    lingered = g.lingered || null;
+    back = null;
+    picking = false;
+    try {
+      const m = g.crash ? (await api(`${base}/mods/list`)).mods || [] : [];
+      if (n === seq) mods = m;
+    } catch {
+      // names come from the report then, without icons
+    }
+  }
+
   $effect(() => {
     sid;
-    if (settled) load();
+    if (given) loadGiven(given);
+    else if (settled) load();
     else {
       seq++;
       crash = null;
@@ -65,7 +90,7 @@
 
   const bare = (f) => (f || '').toLowerCase().replace(/\.disabled$/, '');
   const modOf = (file) => mods.find((m) => bare(m.file) === bare(file));
-  const nameOf = (file) => modOf(file)?.name || (file || '').replace(/\.disabled$/, '').replace(/\.jar$/, '');
+  const nameOf = (file, fallback = '') => modOf(file)?.name || given?.names?.[file] || fallback || (file || '').replace(/\.disabled$/, '').replace(/\.jar$/, '');
   const isOn = (file) => modOf(file)?.enabled !== false;
 
   const suspects = $derived(crash?.suspects || []);
@@ -75,11 +100,16 @@
   // The change the error names; once put back from here the crash no
   // longer names it, so the card keeps it to say so.
   const changed = $derived(rootSuspect?.changed || (st && back ? back.ch : null));
-  const likely = $derived(suspects.filter((s) => s.certainty !== 'Possible'));
+  // Certain and Likely, apart from errors that only followed from another mod's failure (knock-on: never turned off).
+  const likely = $derived(suspects.filter((s) => s.certainty !== 'Possible' && !s.knock_on));
   // Turned off, or removed: Certain and Likely mods still on and here, apart from client-only ones (they go).
   const toTurnOff = $derived(likely.filter((s) => !s.client_only && modOf(s.file_name) && isOn(s.file_name)));
   const offAlready = $derived(likely.filter((s) => !s.client_only && modOf(s.file_name) && !isOn(s.file_name)));
-  const knock = $derived(suspects.filter((s) => s.certainty === 'Possible'));
+  // The report's own error, after the mod that stopped loading.
+  const knock = $derived(suspects.filter((s) => (s.knock_on || s.certainty === 'Possible') && s.file_name !== crash?.stopped?.file_name));
+  const knockOn = $derived(knock.some((s) => s.knock_on));
+  // The rest of the mods the crash names, beside the one that stopped it.
+  const others = $derived(st ? suspects.filter((s) => s.file_name !== st.file_name) : []);
   const knockError = $derived((crash?.headline || '').split(' · ').slice(1).join(' · ') || crash?.headline || '');
   // A cause that isn't one mod, said by the crash itself, comes first.
   const note = $derived(
@@ -92,11 +122,16 @@
   );
   const versions = (ch) => (ch.from && ch.to ? ` (${ch.from} → ${ch.to})` : '');
   // Mod ids in a reason read as names.
-  const named = (why) => suspects.reduce((w, s) => (s.mod_id && modOf(s.file_name) ? w.replaceAll(` ${s.mod_id} `, ` ${nameOf(s.file_name)} `).replaceAll(` ${s.mod_id},`, ` ${nameOf(s.file_name)},`) : w), why || '');
+  const named = (why) => suspects.reduce((w, s) => (s.mod_id && (modOf(s.file_name) || given?.names?.[s.file_name]) ? w.replaceAll(` ${s.mod_id} `, ` ${nameOf(s.file_name)} `).replaceAll(` ${s.mod_id},`, ` ${nameOf(s.file_name)},`).replaceAll(` ${s.mod_id}.`, ` ${nameOf(s.file_name)}.`) : w), why || '');
 
-  async function turnOff() {
+  // Only the mods ticked in the list "Turn off…" opened.
+  async function turnOff(files) {
     busy = true;
-    if (await setOn(base, toTurnOff.map((s) => modOf(s.file_name)), false, alive)) await load();
+    const ms = files.map(modOf).filter(Boolean);
+    if (ms.length && (await setOn(base, ms, false, alive))) {
+      picking = false;
+      await load();
+    }
     busy = false;
   }
 
@@ -145,12 +180,12 @@
   }
 </script>
 
-{#snippet mod(file)}
+{#snippet mod(file, fallback = '')}
   {@const m = modOf(file)}
   {#if m}
     <button class="mod" title="Open {m.name}" onclick={() => onPeek(m)}>{#if m.icon}<img src={m.icon} alt="" width="18" height="18" loading="lazy" />{:else}<span class="ph"></span>{/if}<b>{m.name}</b></button>
   {:else}
-    <span class="mod"><span class="ph"></span><b>{nameOf(file)}</b></span>
+    <span class="mod" title={file}><span class="ph"></span><b>{nameOf(file, fallback)}</b></span>
   {/if}
 {/snippet}
 
@@ -158,9 +193,60 @@
   <span class="chip tag {c.toLowerCase()}">{c}</span>
 {/snippet}
 
+<!-- How sure, or "Knock-on" for an error that only followed from another mod's failure. -->
+{#snippet sTag(s)}
+  {#if s.knock_on}<span class="chip tag knockon" title="This error only followed from another mod's failure. Ignore it.">Knock-on</span>{:else}{@render tag(s.certainty)}{/if}
+{/snippet}
+
+<!-- The other mod a suspect's error is about, and what to do, in order. -->
+{#snippet help(s)}
+  {#if s.partner}
+    <div class="line tiny partner"><span class="muted">Doesn't match</span>{@render mod(s.partner.file_name, s.partner.name)}{#if s.partner.version}<span class="muted">{s.partner.version} (installed)</span>{/if}</div>
+  {/if}
+  {#if s.steps?.length}
+    <div class="todo">
+      <span class="tiny muted b">What to do</span>
+      <ol>{#each s.steps as t, k (k)}<li class="tiny"><span class="muted">{k + 1}.</span><span>{named(t)}</span></li>{/each}</ol>
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet susRow(s)}
+  <div class="sus" class:dim={s.knock_on}>
+    <div class="who">{@render mod(s.file_name)}</div>
+    <div class="grade">{@render sTag(s)}</div>
+    <div class="why">
+      <div class="tiny muted">{named(s.why)}</div>
+      {#each s.needs || [] as [id, ver] (id)}<div class="tiny need">Needs {id}{ver ? ` ${ver}` : ''}</div>{/each}
+      {@render help(s)}
+      {#if (s.facts || []).length > 1 && moreFacts(s).length}
+        <button class="btn ghost sm whybtn" aria-expanded={!!whyOpen[s.file_name]} onclick={() => (whyOpen[s.file_name] = !whyOpen[s.file_name])}>
+          {#if whyOpen[s.file_name]}<ChevronDown size={12} />Hide why{:else}<ChevronRight size={12} />Why?{/if}
+        </button>
+        {#if whyOpen[s.file_name]}
+          <ul class="facts">
+            {#each moreFacts(s) as f, k (k)}
+              <li><span class="mark" class:up={f.weight > 0} class:down={f.weight < 0}>{f.weight > 0 ? '+' : f.weight < 0 ? '−' : '·'}</span><span class="tiny muted">{named(f.text)}</span></li>
+            {/each}
+          </ul>
+        {/if}
+      {/if}
+    </div>
+    {#if !given && s.client_only && modOf(s.file_name)}
+      <button class="btn sm" disabled={busy || alive} title={alive ? 'Stop the server first' : `Moves ${s.file_name} to .hopper-backups`} onclick={() => remove(s)}><Trash2 size={13} />Remove from server</button>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet picker()}
+  {#if picking && toTurnOff.length}
+    <CrashTurnOff suspects={toTurnOff} {mod} tag={sTag} {named} {nameOf} {busy} onConfirm={turnOff} onCancel={() => (picking = false)} />
+  {/if}
+{/snippet}
+
 {#snippet actions()}
   {#if toTurnOff.length}
-    <button class="btn sm" disabled={busy} title="Certain and Likely mods. Turn them back on in Mods." onclick={turnOff}><PowerOff size={13} />{toTurnOff.length === 1 ? `Turn off ${nameOf(toTurnOff[0].file_name)}` : `Turn off the ${toTurnOff.length} likely ones`}</button>
+    {#if !picking}<button class="btn sm" disabled={busy} title="Shows which mods first, and why. Turn them back on in Mods." onclick={() => (picking = true)}><PowerOff size={13} />{toTurnOff.length === 1 ? `Turn off ${nameOf(toTurnOff[0].file_name)}…` : `Turn off ${toTurnOff.length} mods…`}</button>{/if}
   {:else if offAlready.length}
     <span class="done"><Check size={13} />{offAlready.length === 1 ? `${nameOf(offAlready[0].file_name)} is off` : `${offAlready.length} mods are off`}</span>
     <span class="tiny muted">Start the server to try again.</span>
@@ -184,18 +270,18 @@
   {/each}
 {/snippet}
 
-{#if crash && settled}
+{#if crash && (settled || given)}
   <div class="crash">
     <div class="row head">
-      <AlertTriangle size={15} /><b>The server crashed</b><span class="muted when">{relative(crash.when)}</span>
+      <AlertTriangle size={15} /><b>The server crashed</b><span class="muted when">{given ? whenLabel(crash.when) : relative(crash.when)}</span>
       <span class="grow"></span>
       {#if report}<button class="btn sm" title="Opens the crash report file" onclick={() => openFile(report)}><FileText size={13} />Open report</button>{/if}
-      <button class="btn sm ghost icon" title="Look again" disabled={checking} onclick={load}><RefreshCw size={13} /></button>
+      {#if !given}<button class="btn sm ghost icon" title="Look again" disabled={checking} onclick={load}><RefreshCw size={13} /></button>{/if}
     </div>
 
     {#if st}
       <div class="line">{@render mod(st.file_name)}<span>stopped the server from starting</span>{@render tag('Certain')}</div>
-      {#if changed || toTurnOff.length || offAlready.length || switches.length || switchedOff.length}
+      {#if !given && (changed || toTurnOff.length || offAlready.length || switches.length || switchedOff.length)}
         <div class="fix">
           {#if changed}
             {@const isBack = back && back.name === changed.name}
@@ -210,8 +296,10 @@
                 <span class="tiny muted">{changed.to ? `${changed.to} goes to Backups.` : 'The newer one goes to Backups.'}</span>
               {/if}
             </div>
+            {@render picker()}
           {:else if toTurnOff.length || offAlready.length}
             <div class="row acts">{@render actions()}</div>
+            {@render picker()}
           {/if}
           {@render switchRows()}
         </div>
@@ -226,6 +314,7 @@
           <div>
             <div class="line">{@render mod(st.file_name)}{@render tag('Certain')}<span>{st.error ? 'stopped loading with this error:' : 'failed while the server was loading.'}</span></div>
             {#if st.error}<div class="tiny muted quote">"{st.error}"</div>{/if}
+            {#if rootSuspect}{@render help(rootSuspect)}{/if}
           </div>
         </li>
         {#if st.skipped?.length}
@@ -235,50 +324,31 @@
           <li class="knock">
             <span class="n">{1 + (changed ? 1 : 0) + 1 + (st.skipped?.length ? 1 : 0)}</span>
             <div>
-              <div class="line"><span>Then the server crashed in</span>{#each knock as s (s.file_name)}{@render mod(s.file_name)}{/each}<span>(Possible). That's the report's own error, a knock-on effect:</span></div>
+              <div class="line"><span>Then the server crashed in</span>{#each knock as s (s.file_name)}{@render mod(s.file_name)}{/each}<span>{knockOn ? `(knock-on, ignore). That's the report's own error, which only followed from step ${changed ? 2 : 1}:` : "(Possible). That's the report's own error, a knock-on effect:"}</span></div>
               {#if knockError}<div class="tiny muted">{knockError}</div>{/if}
             </div>
           </li>
         {/if}
       </ol>
+      {#if others.length}
+        <b class="what">Other mods in this crash</b>
+        <div class="rows">{#each others as s (s.file_name)}{@render susRow(s)}{/each}</div>
+      {/if}
     {:else}
       {#if crash.headline}<div class="headline">{crash.headline}</div>{/if}
       {#if likely.length}
-        <div class="line"><span class="muted">{likely.length === 1 ? 'Likely cause:' : 'Likely causes:'}</span><b>{likely.slice(0, 3).map((s) => nameOf(s.file_name)).join(', ')}</b></div>
+        <div class="line"><span class="muted">{likely.length === 1 ? 'Likely cause:' : 'Likely causes:'}</span><b>{likely.map((s) => nameOf(s.file_name)).join(', ')}</b></div>
       {/if}
       {#if suspects.length}
         <div class="tiny muted">Mods in this crash, most likely first:</div>
         <div class="rows">
-          {#each suspects as s (s.file_name)}
-            <div class="sus">
-              <div class="who">{@render mod(s.file_name)}</div>
-              <div class="grade">{@render tag(s.certainty)}</div>
-              <div class="why">
-                <div class="tiny muted">{named(s.why)}</div>
-                {#each s.needs || [] as [id, ver] (id)}<div class="tiny need">Needs {id}{ver ? ` ${ver}` : ''}</div>{/each}
-                {#if (s.facts || []).length > 1 && moreFacts(s).length}
-                  <button class="btn ghost sm whybtn" aria-expanded={!!whyOpen[s.file_name]} onclick={() => (whyOpen[s.file_name] = !whyOpen[s.file_name])}>
-                    {#if whyOpen[s.file_name]}<ChevronDown size={12} />Hide why{:else}<ChevronRight size={12} />Why?{/if}
-                  </button>
-                  {#if whyOpen[s.file_name]}
-                    <ul class="facts">
-                      {#each moreFacts(s) as f, k (k)}
-                        <li><span class="mark" class:up={f.weight > 0} class:down={f.weight < 0}>{f.weight > 0 ? '+' : f.weight < 0 ? '−' : '·'}</span><span class="tiny muted">{named(f.text)}</span></li>
-                      {/each}
-                    </ul>
-                  {/if}
-                {/if}
-              </div>
-              {#if s.client_only && modOf(s.file_name)}
-                <button class="btn sm" disabled={busy || alive} title={alive ? 'Stop the server first' : `Moves ${s.file_name} to .hopper-backups`} onclick={() => remove(s)}><Trash2 size={13} />Remove from server</button>
-              {/if}
-            </div>
+          {#each suspects as s (s.file_name)}{@render susRow(s)}
           {/each}
         </div>
       {/if}
       {#if note}<div class="note">{note}</div>{/if}
-      {#if toTurnOff.length || offAlready.length}<div class="row acts">{@render actions()}</div>{/if}
-      {#if switches.length || switchedOff.length}<div class="switches">{@render switchRows()}</div>{/if}
+      {#if !given && (toTurnOff.length || offAlready.length)}<div class="row acts">{@render actions()}</div>{@render picker()}{/if}
+      {#if !given && (switches.length || switchedOff.length)}<div class="switches">{@render switchRows()}</div>{/if}
     {/if}
 
     {#if lingered}<div class="tiny muted">{lingered}</div>{/if}
@@ -334,6 +404,15 @@
   .tag.certain { color: var(--red); background: var(--red-dim); }
   .tag.likely { color: var(--gold); background: var(--gold-dim); }
   .tag.possible { color: var(--subtle); }
+  .tag.knockon { color: var(--muted); }
+  .dim { opacity: .7; }
+  .partner { line-height: 20px; }
+  .partner .mod b { font-size: 12px; }
+  .todo { display: flex; flex-direction: column; gap: 1px; margin-top: 3px; }
+  .todo .b { font-weight: 600; }
+  .todo ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+  .todo li { display: flex; gap: 6px; white-space: normal; overflow-wrap: anywhere; }
+  .todo li > :first-child { flex: none; width: 1rem; }
   .done { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--green); border: 1px solid #22c55e55; border-radius: var(--radius); padding: 2px 8px; }
   /* A narrow card (beside the console): the reason goes under the name. */
   @container (max-width: 620px) {

@@ -1,0 +1,127 @@
+---- Minecraft Crash Report ----
+
+// What did you do
+Please make sure this issue is not caused by Sable before reporting it to other mod authors.
+If you cannot reproduce it without Sable, file a report on the issue tracker
+https://github.com/ryanhcode/sable/issues
+
+// Don't be sad, have a hug! <3
+
+Time: 2026-11-04 14:54:48
+Description: Mod loading failures have occurred; consult the issue messages for more details
+
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: main
+Stacktrace:
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.DeferredHolder.value(DeferredHolder.java:103) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:mixin,re:computing_frames,re:classloading,pl:mixin:APP:sparkweave.neoforge.mixins.json:DeferredHolderMixin from mod sparkweave,pl:mixin:A,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+-- Mod loading issue --
+Details:
+	Mod file: <No mod information provided>
+	Failure message: An uncaught parallel processing error has occurred.
+		java.lang.NullPointerException: Trying to access unbound value: ResourceKey[minecraft:block / chipped:spruce_torch]
+	Mod version: <No mod information provided>
+	Mod issues URL: <No issues URL found>
+	Exception message: java.lang.NullPointerException: Trying to access unbound value: ResourceKey[minecraft:block / chipped:spruce_torch]
+Stacktrace:
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.DeferredHolder.value(DeferredHolder.java:103) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:mixin,re:computing_frames,re:classloading,pl:mixin:APP:sparkweave.neoforge.mixins.json:DeferredHolderMixin from mod sparkweave,pl:mixin:A,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.DeferredHolder.get(DeferredHolder.java:117) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:mixin,re:computing_frames,re:classloading,pl:mixin:APP:sparkweave.neoforge.mixins.json:DeferredHolderMixin from mod sparkweave,pl:mixin:A,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.level.block.state.BlockBehaviour$Properties.lambda$lootFrom$11(BlockBehaviour.java:1145) ~[server-1.21.1-20240808.144430-srg.jar%231110!/:?] {re:mixin,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:supermartijn642corelib.mixins.json:BlockPropertiesAccessor from mod supermartijn642corelib,pl:mixin:A,re:mixin,pl:accesstransformer:B,re:mixin,pl:accesstransformer:B}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.level.block.state.BlockBehaviour.getLootTable(BlockBehaviour.java:372) ~[server-1.21.1-20240808.144430-srg.jar%231110!/:?] {re:mixin,pl:accesstransformer:B,re:mixin,pl:accesstransformer:B,re:computing_frames,pl:accesstransformer:B,re:classloading,pl:accesstransformer:B,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.reduce_blockstate_cache_rebuilds.BlockBehaviourInvoker from mod modernfix,pl:mixin:APP:databank.mixins.json:BlockBehaviourMixin from mod databank,pl:mixin:APP:bettermineshafts.mixins.json:BlockBehaviourAccessor from mod bettermineshafts,pl:mixin:APP:simulated.mixins.json:accessor.BlockBehaviourAccessor from mod simulated,pl:mixin:APP:snowyspirit-common.mixins.json:DoorBlockMixin from mod snowyspirit,pl:mixin:APP:mixins.fish_of_thieves.json:level.block.state.MixinBlockBehaviour from mod fishofthieves,pl:mixin:APP:malum.mixins.json:BlockBehaviorMixin from mod malum,pl:mixin:APP:horseman-common.mixins.json:ride_though_leaves.BlockBehaviourMixin from mod horseman,pl:mixin:APP:kubejs.mixins.json:BlockBehaviourMixin from mod kubejs,pl:mixin:APP:lithium.mixins.json:block.hopper.BlockBehaviourMixin from mod lithium,pl:mixin:APP:dungeonsdelight.mixin.json:BlockBehaviourMixin from mod dungeonsdelight,pl:mixin:APP:chipped-common.mixins.json:BlockBehaviourMixin from mod chipped,pl:mixin:APP:create_hypertube.mixins.json:KineticBlockMixin from mod create_hypertube,pl:mixin:APP:shetiphiancore.mixins.json:SPC_CarpetPassthrough from mod shetiphiancore,pl:mixin:APP:deep_aether.mixins.json:block.BlockBehaviourMixin from mod deep_aether,pl:mixin:APP:moresnifferflowers.mixins.json:BlockBehaviourMixin from mod moresnifferflowers,pl:mixin:APP:zeta.mixins.json:InvokerBlockBehavior from mod zeta,pl:mixin:APP:ars_nouveau.mixins.json:BlockBehaviourAccessor from mod ars_nouveau,pl:mixin:APP:animal_pen.mixins.json:AquariumBlockCollisionPrevention from mod animal_pen,pl:mixin:APP:create.mixins.json:accessor.BlockBehaviourAccessor from mod create,pl:mixin:APP:nautec.mixins.json:BlockBehaviourMixin from mod nautec,pl:mixin:APP:data_energistics.mixins.json:minecraft.world.BlockRedstonePulseMixin from mod data_energistics,pl:mixin:APP:quark.mixins.json:BlockBehaviourMixin from mod quark,pl:mixin:APP:quark.mixins.json:accessor.AccessorBlockBehavior from mod quark,pl:mixin:APP:friendsandfoes-common.mixins.json:LightningRodAbstractBlockMixin from mod friendsandfoes,pl:mixin:A,pl:jasione:A}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.NeoForgeRegistryCallbacks$BlockCallbacks.onBake(NeoForgeRegistryCallbacks.java:56) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:mixin,re:classloading,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.reduce_blockstate_cache_rebuilds.BlockCallbacksMixin from mod modernfix,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.lambda$freeze$7(MappedRegistry.java:372) ~[server-1.21.1-20240808.144430-srg.jar%231110!/:?] {re:mixin,re:classloading,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.compact_mojang_registries.MappedRegistryMixin from mod modernfix,pl:mixin:APP:supermartijn642corelib.mixins.json:MappedRegistryMixin from mod supermartijn642corelib,pl:mixin:APP:neoforge.mixins.json:MappedRegistryAccessor from mod neoforge,pl:mixin:APP:lithostitched.mixins.json:common.MappedRegistryAccessor from mod lithostitched,pl:mixin:APP:goety_nouveau.mixins.json:NativeFocusRegistrationMixin from mod goety_nouveau,pl:mixin:APP:owo.mixins.json:registry.SimpleRegistryMixin from mod owo,pl:mixin:APP:create.mixins.json:accessor.MappedRegistryAccessor from mod create,pl:mixin:APP:structureessentials.mixins.json:MappedRegistryMixin from mod structureessentials,pl:mixin:A,re:mixin}
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596) ~[?:?] {re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.freeze(MappedRegistry.java:372) ~[server-1.21.1-20240808.144430-srg.jar%231110!/:?] {re:mixin,re:classloading,pl:mixin:APP:modernfix-modernfix.mixins.json:perf.compact_mojang_registries.MappedRegistryMixin from mod modernfix,pl:mixin:APP:supermartijn642corelib.mixins.json:MappedRegistryMixin from mod supermartijn642corelib,pl:mixin:APP:neoforge.mixins.json:MappedRegistryAccessor from mod neoforge,pl:mixin:APP:lithostitched.mixins.json:common.MappedRegistryAccessor from mod lithostitched,pl:mixin:APP:goety_nouveau.mixins.json:NativeFocusRegistrationMixin from mod goety_nouveau,pl:mixin:APP:owo.mixins.json:registry.SimpleRegistryMixin from mod owo,pl:mixin:APP:create.mixins.json:accessor.MappedRegistryAccessor from mod create,pl:mixin:APP:structureessentials.mixins.json:MappedRegistryMixin from mod structureessentials,pl:mixin:A,re:mixin}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.RegistryManager.applySnapshot(RegistryManager.java:201) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:classloading}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.RegistryManager.lambda$applySnapshot$1(RegistryManager.java:144) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:classloading}
+	at java.base/java.util.HashMap.forEach(HashMap.java:1429) ~[?:?] {re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.RegistryManager.applySnapshot(RegistryManager.java:133) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:classloading}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.RegistryManager.revertToVanilla(RegistryManager.java:116) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:classloading}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.postRegisterEvents(GameData.java:100) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:mixin,re:classloading,pl:mixin:APP:modernfix-modernfix.mixins.json:core.GameDataMixin from mod modernfix,pl:mixin:APP:supermartijn642corelib.mixins.json:GameDataMixin from mod supermartijn642corelib,pl:mixin:APP:relics.mixins.json:GameDataMixin from mod relics,pl:mixin:A}
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.internal.CommonModLoader.lambda$begin$0(CommonModLoader.java:54) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:mixin,re:classloading,re:mixin}
+	at java.base/java.util.concurrent.CompletableFuture$AsyncRun.run(CompletableFuture.java:1804) ~[?:?] {}
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144) ~[?:?] {re:mixin}
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642) ~[?:?] {}
+	at java.base/java.lang.Thread.run(Thread.java:1583) ~[?:?] {re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin,re:mixin}
+
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Minecraft Version ID: 1.21.1
+	Operating System: Windows 11 (amd64) version 10.0
+	Java Version: 21.0.11, Oracle Corporation
+	Java VM Version: Java HotSpot(TM) 64-Bit Server VM (mixed mode, sharing), Oracle Corporation
+	Memory: 6249499248 bytes (5959 MiB) / 12884901888 bytes (12288 MiB) up to 17179869184 bytes (16384 MiB)
+	CPUs: 24
+	Processor Vendor: AuthenticAMD
+	Processor Name: AMD Ryzen 9 5900X 12-Core Processor            
+	Identifier: AuthenticAMD Family 25 Model 33 Stepping 2
+	Microarchitecture: Zen 3
+	Frequency (GHz): 3.69
+	Number of physical packages: 1
+	Number of physical CPUs: 12
+	Number of logical CPUs: 24
+	Graphics card #0 name: NVIDIA GeForce RTX 3080
+	Graphics card #0 vendor: NVIDIA
+	Graphics card #0 VRAM (MiB): 10240.00
+	Graphics card #0 deviceId: VideoController1
+	Graphics card #0 versionInfo: 32.0.16.1714
+	Graphics card #1 name: NVIDIA GeForce RTX 3080
+	Graphics card #1 vendor: NVIDIA
+	Graphics card #1 VRAM (MiB): 10240.00
+	Graphics card #1 deviceId: VideoController2
+	Graphics card #1 versionInfo: 32.0.16.1714
+	Memory slot #0 capacity (MiB): 16384.00
+	Memory slot #0 clockSpeed (GHz): 3.60
+	Memory slot #0 type: DDR4
+	Memory slot #1 capacity (MiB): 16384.00
+	Memory slot #1 clockSpeed (GHz): 3.60
+	Memory slot #1 type: DDR4
+	Memory slot #2 capacity (MiB): 16384.00
+	Memory slot #2 clockSpeed (GHz): 3.60
+	Memory slot #2 type: DDR4
+	Memory slot #3 capacity (MiB): 16384.00
+	Memory slot #3 clockSpeed (GHz): 3.60
+	Memory slot #3 type: DDR4
+	Virtual memory max (MiB): 84380.02
+	Virtual memory used (MiB): 38486.00
+	Swap memory total (MiB): 18944.00
+	Swap memory used (MiB): 181.72
+	Space in storage for jna.tmpdir (MiB): <path not set>
+	Space in storage for org.lwjgl.system.SharedLibraryExtractPath (MiB): <path not set>
+	Space in storage for io.netty.native.workdir (MiB): <path not set>
+	Space in storage for java.io.tmpdir (MiB): available: 56845.13, total: 238458.00
+	Space in storage for workdir (MiB): available: 573419.19, total: 976745.00
+	JVM Flags: 23 total; -XX:ThreadPriorityPolicy=1 -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCIProduct -XX:-UnlockExperimentalVMOptions -Xms12G -Xmx16G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+UnlockDiagnosticVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:+UseNUMA -XX:G1HeapRegionSize=16M -XX:G1ReservePercent=15 -XX:InitiatingHeapOccupancyPercent=45 -XX:G1MixedGCCountTarget=8 -XX:G1MixedGCLiveThresholdPercent=85 -XX:G1HeapWastePercent=5 -XX:+PerfDisableSharedMem -XX:+UseStringDeduplication -XX:ReservedCodeCacheSize=512M -XX:+SegmentedCodeCache
+	ModLauncher: 11.0.5+main.901c6ea8
+	ModLauncher launch target: forgeserver
+	ModLauncher services: 
+		sponge-mixin-0.16.4+mixin.0.8.7.jar mixin PLUGINSERVICE 
+		loader-4.0.45.jar slf4jfixer PLUGINSERVICE 
+		loader-4.0.45.jar runtime_enum_extender PLUGINSERVICE 
+		at-modlauncher-10.0.1.jar accesstransformer PLUGINSERVICE 
+		loader-4.0.45.jar runtimedistcleaner PLUGINSERVICE 
+		modlauncher-11.0.5.jar micsable_loader TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar jcplugin TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar mixin TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar logfilterbootstrap TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar fml TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar jasione TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar asynclogger TRANSFORMATIONSERVICE 
+	FML Language Providers: 
+		kotlinforforge@5.12.0
+		gml@7.0.3
+		kotori_scala@3.7.1-build-11
+		javafml@4.0
+		lowcodefml@4.0
+		minecraft@4.0
+	Mod List: 
+	Crash Report UUID: 2e97a46a-c49c-4892-8ad1-76151aa547be
+	FML: 4.0.45
+	NeoForge: 21.1.265
