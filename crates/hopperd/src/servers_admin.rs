@@ -648,7 +648,20 @@ async fn pack_versions(State(app): State<Arc<App>>, headers: HeaderMap, method: 
         Ok(rows)
     })
     .await?;
-    Ok(Json(json!({ "versions": v })))
+    // Server files only when the pack has any; the client-only rest is
+    // counted, and a newest version without server files is warned about.
+    let names: Vec<(String, bool)> = v.iter().map(|r| (r["name"].as_str().unwrap_or("").to_string(), r["server_files"].as_bool().unwrap_or(false))).collect();
+    let refs: Vec<(&str, bool)> = names.iter().map(|(n, s)| (n.as_str(), *s)).collect();
+    let view = hopper_core::hosting::pack_versions::view(&refs);
+    let shown: Vec<&str> = view.shown.iter().filter_map(|i| v.get(*i)?["id"].as_str()).collect();
+    let newest_client = view.newest_client.and_then(|i| v.get(i)?["id"].as_str().map(str::to_string));
+    Ok(Json(json!({
+        "versions": v,
+        "shown": shown,
+        "hidden_text": view.hidden_text,
+        "warning": view.warning,
+        "newest_client": newest_client,
+    })))
 }
 
 /// Which of a CurseForge pack version and its server files Hopper may
@@ -777,7 +790,14 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
 /// for a server's own port while editing it.
 async fn port_check(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Query<HashMap<String, String>>) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
-    let port: u16 = q.get("port").and_then(|p| p.trim().parse().ok()).filter(|p| *p > 0).ok_or_else(|| bad("Which port?"))?;
+    let lan = crate::discovery::lan_addresses().first().map(|a| a.to_string());
+    let Some(port) = q.get("port").and_then(|p| p.trim().parse::<u16>().ok()).filter(|p| *p > 0) else {
+        // No port: the one a new server gets when the port is left empty.
+        let root = servers_root(&app)?;
+        let c = common(&app, "", None, true)?;
+        let auto = blocking(move || Ok(c.auto_port.unwrap_or_else(|| hopper_core::hosting::suggest_port(&root)))).await?;
+        return Ok(Json(json!({ "auto": auto, "lan": lan })));
+    };
     let skip = q.get("skip").filter(|s| !s.is_empty());
     let list = app.servers.list();
     let mut used: Vec<(String, u16)> = list.iter().filter(|e| Some(&e.id) != skip).map(|e| (e.name.clone(), crate::router::port_of(e))).collect();
@@ -795,7 +815,7 @@ async fn port_check(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
         c.suggest = None;
     }
     let host = crate::config::hostname();
-    Ok(Json(json!({ "taken_by": c.taken_by, "in_use": c.in_use, "suggest": c.suggest, "message": c.message(port, &host) })))
+    Ok(Json(json!({ "taken_by": c.taken_by, "in_use": c.in_use, "suggest": c.suggest, "message": c.message(port, &host), "lan": lan })))
 }
 
 // ---- removing and deleting -------------------------------------------------------------------
@@ -804,8 +824,10 @@ async fn port_check(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
 struct RemoveBody {
     /// "remove" (the panel forgets it, the folder stays) or "delete".
     mode: String,
-    /// Delete only: the server's name, typed to confirm.
+    /// Old clients send the server's name typed to confirm; not needed
+    /// (a deleted server can be restored for 30 days).
     #[serde(default)]
+    #[allow(dead_code)]
     confirm: String,
     /// Delete only: move its worlds to `Kept worlds` first.
     #[serde(default)]
@@ -840,9 +862,6 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
                     e.name,
                     e.root.display()
                 )));
-            }
-            if b.confirm.trim() != e.name {
-                return Err(bad(format!("Type {} to delete it.", e.name)));
             }
             let root = root_dir.expect("in_root");
             let folder = e.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

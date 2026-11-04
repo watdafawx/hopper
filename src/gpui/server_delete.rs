@@ -7,7 +7,6 @@ use crate::store::Store;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -35,13 +34,14 @@ struct DeleteForm {
     may: Option<bool>,
     /// The server's Settings › General page in the panel, where its owner deletes it.
     web: Option<String>,
-    confirm: Entity<InputState>,
-    _sub: Subscription,
 }
 
 impl DeleteForm {
     fn ready(&self, cx: &App) -> bool {
-        self.may != Some(false) && self.confirm.read(cx).value().trim() == self.name.trim()
+        let _ = cx;
+        // No typing the name: a deleted server can be restored (panel: 30
+        // days in its deleted servers; this PC: the Recycle Bin).
+        self.may != Some(false)
     }
 }
 
@@ -126,15 +126,9 @@ impl Render for DeleteForm {
                 )
             })
             .child(div().text_xs().text_color(theme.muted_foreground).child(match &self.panel {
-                Some(p) => format!("{p} keeps deleted servers for 30 days: restore one from the panel's servers folder settings."),
-                None => "The rest of the folder goes to the Recycle Bin.".into(),
+                Some(p) => format!("{p} keeps deleted servers for 30 days: restore one from the panel's Settings › Panel folder."),
+                None => "The rest of the folder goes to the Recycle Bin, where you can restore it.".into(),
             }))
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().text_sm().child(format!("Type {} to delete it", self.name)))
-                    .child(Input::new(&self.confirm).small()),
-            )
             .into_any_element()
     }
 }
@@ -171,8 +165,6 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
     });
     let web = srv.remote.as_ref().map(|r| format!("{}/#/server/{}/settings/general", r.base, hopper::hopperd::enc(&r.id)));
     let form = cx.new(|cx| {
-        let confirm = cx.new(|cx| InputState::new(window, cx).placeholder(srv.name.clone()));
-        let _sub = cx.subscribe(&confirm, |_: &mut DeleteForm, _, _: &InputEvent, cx| cx.notify());
         // Ask the panel who this PC is there before offering to delete.
         if let Some(c) = client {
             cx.spawn(async move |this: WeakEntity<DeleteForm>, cx: &mut AsyncApp| {
@@ -188,7 +180,7 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
             .detach();
         }
         let may = if panel.is_some() { None } else { Some(true) };
-        DeleteForm { store: store.clone(), root: root.clone(), name: srv.name.clone(), panel, worlds, backups, keep_world: true, may, web, confirm, _sub }
+        DeleteForm { store: store.clone(), root: root.clone(), name: srv.name.clone(), panel, worlds, backups, keep_world: true, may, web }
     });
     window.open_dialog(cx, move |dialog, window, cx| {
         let ready = form.read(cx).ready(cx);
@@ -238,6 +230,7 @@ fn delete(form: &Entity<DeleteForm>, window: &mut Window, cx: &mut App) -> bool 
                             job.detail("Asking the panel to delete it");
                             let v = c.post(
                                 &hopper::hopperd::Client::server_path(&rm.id, "/remove"),
+                                // Older panels still want the name typed to confirm.
                                 serde_json::json!({ "mode": "delete", "confirm": name, "keep_world": keep }),
                             )?;
                             Ok(v["kept_world"].as_str().map(str::to_string))

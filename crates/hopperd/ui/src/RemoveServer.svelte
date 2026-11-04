@@ -7,12 +7,10 @@
   import { Trash2, EyeOff } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
-  import { ask, confirmIt } from './lib/dialog.svelte.js';
+  import { confirmIt, confirmTick } from './lib/dialog.svelte.js';
 
   let { server } = $props();
   let root = $state(null);
-  // Delete can move the worlds aside first, to Kept worlds in the servers folder.
-  let keepWorld = $state(true);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
   const norm = (p) => (p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   const inRoot = $derived(!!root && norm(server.path).slice(0, norm(server.path).lastIndexOf('/')) === norm(root));
@@ -35,16 +33,19 @@
     }
   }
 
+  // One click: a deleted server waits 30 days in .hopper-deleted, so no
+  // typing its name. Its worlds can move to Kept worlds first.
   async function del() {
-    const typed = await ask(`Delete ${server.name}?`, '', {
-      body: `${keepWorld ? 'Its worlds move to Kept worlds in the servers folder. The rest of its' : 'Its'} folder moves to .hopper-deleted in the servers folder and stays there 30 days: restore it from Settings › Panel folder. Type ${server.name} to delete it.`,
+    const r0 = await confirmTick(`Delete ${server.name}?`, {
+      body: 'Its folder moves to .hopper-deleted in the servers folder for 30 days: restore it from Settings › Panel folder.',
       ok: 'Delete server',
-      placeholder: server.name,
+      check: 'Keep the world (moved to Kept worlds in the servers folder)',
+      ticked: true,
       danger: true,
     });
-    if (typed == null) return;
+    if (!r0) return;
     try {
-      const r = await post(`/servers/${encodeURIComponent(server.id)}/remove`, { mode: 'delete', confirm: typed.trim(), keep_world: keepWorld });
+      const r = await post(`/servers/${encodeURIComponent(server.id)}/remove`, { mode: 'delete', keep_world: !!r0.ticked });
       say(`${server.name} deleted. ${r?.kept_world ? `Its world is kept in ${r.kept_world}. ` : ''}Restore the server within 30 days from Settings › Panel folder.`);
       location.hash = '/';
     } catch (e) {
@@ -62,7 +63,7 @@
       {:else}It runs where it is{server.managed_by ? `, and ${server.managed_by} knows it too` : ''}: the panel can take it off its list, never delete its files.{/if}
     </div>
     <button class="btn sm bad" disabled={alive} onclick={takeOff}><EyeOff size={13} />Remove from panel</button>
-    {#if inRoot}<label class="row keep small"><input type="checkbox" bind:checked={keepWorld} />Keep the world</label><button class="btn sm danger" disabled={alive} onclick={del}><Trash2 size={13} />Delete server…</button>{/if}
+    {#if inRoot}<button class="btn sm danger" disabled={alive} onclick={del}><Trash2 size={13} />Delete server…</button>{/if}
   </div>
 </div>
 
@@ -71,6 +72,4 @@
   .grow { flex: 1; min-width: 200px; color: var(--subtle); }
   .wrap { flex-wrap: wrap; gap: 8px; }
   .warn { color: var(--gold); }
-  .keep { gap: 6px; align-items: center; cursor: pointer; }
-  .keep input { accent-color: var(--acc); }
 </style>

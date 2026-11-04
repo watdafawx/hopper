@@ -136,6 +136,10 @@ pub struct PackFiles {
     /// What of this version Hopper may download (CurseForge), checked
     /// before the dialog opens.
     pub check: hopper::hosting::PackCheck,
+    /// The pack's newest version when it has no server files yet (these
+    /// files are older): the warning, and that version ready to build from
+    /// the client pack.
+    pub newer: Option<(String, Rc<PackFiles>)>,
 }
 
 impl PackFiles {
@@ -160,6 +164,7 @@ impl PackFiles {
             game_version,
             loader,
             check: Default::default(),
+            newer: None,
         }
     }
 
@@ -208,10 +213,16 @@ pub struct HostForm {
     motd: Entity<InputState>,
     /// The default name shown in the empty Name field.
     name_hint: String,
+    /// The port shown in the empty Port field ("Auto: 25567").
+    port_hint: String,
     /// What the port clashes with: (where, port) it was asked for, and the answer.
     port_check: Option<((Option<String>, u16), hopper::hosting::ports::PortCheck)>,
     /// The machine the server goes on: its name and RAM in GB, once known.
     host: Option<(Option<String>, String, f64)>,
+    /// Where players will join, for the place it was asked for: the port an
+    /// empty Port box gets (panel), the machine's LAN address, and the
+    /// panel's address domain when its addresses are on.
+    join: Option<(Option<String>, Option<u16>, Option<String>, Option<String>)>,
     source: Source,
     base: Entity<CreateForm>,
     memory: Entity<SliderState>,
@@ -265,7 +276,9 @@ impl HostForm {
             motd,
             port_check: None,
             host: None,
+            join: None,
             name_hint: String::new(),
+            port_hint: String::new(),
             source,
             base,
             memory,
@@ -434,6 +447,83 @@ impl HostForm {
         self.place = place;
         self.check_port(cx);
         self.look_up_host(cx);
+        self.look_up_join(cx);
+    }
+
+    /// Asks where players will join: on a panel, the port it would pick and
+    /// its address domain; here, this PC's LAN address.
+    fn look_up_join(&mut self, cx: &mut Context<Self>) {
+        let place = self.place.clone();
+        if self.join.as_ref().is_some_and(|(p, ..)| *p == place) {
+            return;
+        }
+        let client = place.as_ref().and_then(|id| {
+            self.store.read(cx).settings().hopper_panels.iter().find(|p| &p.id == id).and_then(hopper::hopperd::Client::for_panel)
+        });
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    match client {
+                        None => (None, hopper::hosting::ports::lan_ip(), None),
+                        Some(c) => {
+                            let p = c.get("/servers/port-check").ok();
+                            let router = c.get("/router").ok();
+                            let domain = router
+                                .filter(|r| r["config"]["enabled"].as_bool() == Some(true))
+                                .and_then(|r| r["config"]["domain"].as_str().map(str::to_string))
+                                .filter(|d| !d.is_empty());
+                            (
+                                p.as_ref().and_then(|v| v["auto"].as_u64()).map(|n| n as u16),
+                                p.as_ref().and_then(|v| v["lan"].as_str().map(str::to_string)),
+                                domain,
+                            )
+                        }
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.place == place {
+                    this.join = Some((place, r.0, r.1, r.2));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The panel's address domain, when its server addresses are on.
+    fn domain(&self) -> Option<&str> {
+        self.join.as_ref().filter(|(p, ..)| *p == self.place).and_then(|(.., d)| d.as_deref())
+    }
+
+    /// The address players join by, as the panel saves it: the typed name
+    /// (with the panel's domain when it has none), else, with addresses on,
+    /// the server's name as a subdomain (as Hopper Server's form does).
+    fn join_address(&self, cx: &App) -> String {
+        let typed = self.address.read(cx).value().trim().to_lowercase();
+        match (typed.as_str(), self.domain()) {
+            ("", Some(d)) => {
+                let slug = hopper::hosting::ports::slug(&self.server_name(cx));
+                if slug.is_empty() { String::new() } else { format!("{slug}.{d}") }
+            }
+            ("", None) => String::new(),
+            (t, Some(d)) if !t.contains('.') => format!("{t}.{d}"),
+            (t, _) => t.to_string(),
+        }
+    }
+
+    /// "Players join at …" for under the port.
+    fn join_line(&self, cx: &App) -> Option<String> {
+        let (_, auto, lan, _) = self.join.as_ref().filter(|(p, ..)| *p == self.place)?;
+        let port = self.port_value(cx).or(*auto);
+        let addr = self.join_address(cx);
+        let at = if !addr.is_empty() {
+            addr
+        } else {
+            format!("{}:{}", lan.as_ref()?, port?)
+        };
+        Some(format!("Players join at {at}."))
     }
 
     /// The game version the server will run.
@@ -478,7 +568,7 @@ impl HostForm {
             "memory_mb": (self.memory.read(cx).value().start() * 1024.0).round() as u32,
             "port": port,
             "motd": self.motd_text(cx),
-            "address": self.address.read(cx).value().trim(),
+            "address": self.join_address(cx),
             "accept_eula": true,
         })))
     }
@@ -518,7 +608,7 @@ impl HostForm {
             "name": self.server_name(cx),
             "memory_mb": (self.memory.read(cx).value().start() * 1024.0).round() as u32,
             "port": port,
-            "address": self.address.read(cx).value().trim(),
+            "address": self.join_address(cx),
             "accept_eula": true,
         }))
     }
@@ -836,6 +926,14 @@ impl Render for HostForm {
             self.name.update(cx, |i, cx| i.set_placeholder(hint.clone(), window, cx));
             self.name_hint = hint;
         }
+        let hint = match self.join.as_ref().filter(|(p, ..)| p.is_some() && *p == self.place).and_then(|(_, a, ..)| *a) {
+            Some(a) => format!("Auto: {a}"),
+            None => String::new(),
+        };
+        if hint != self.port_hint {
+            self.port.update(cx, |i, cx| i.set_placeholder(hint.clone(), window, cx));
+            self.port_hint = hint;
+        }
         let theme = cx.theme().clone();
         let store = self.store.read(cx);
         let instances: Vec<(PathBuf, String)> = store
@@ -949,7 +1047,29 @@ impl Render for HostForm {
                                 .child(div().font_semibold().child(p.name.clone()))
                                 .child(widgets::caption(p.version.clone(), cx)),
                         )
-                        .when(!on_panel, |c| c.children(self.website_only_notice(p, cx))),
+                        .when(!on_panel, |c| c.children(self.website_only_notice(p, cx)))
+                        .children(p.newer.clone().map(|(warning, alt)| {
+                            h_flex()
+                                .w_full()
+                                .min_w_0()
+                                .gap_2()
+                                .p_2()
+                                .rounded(px(crate::theme::RADIUS))
+                                .bg(cx.theme().warning.opacity(0.08))
+                                .text_sm()
+                                .child(div().flex_1().min_w_0().child(warning))
+                                .child(
+                                    Button::new("host-build-newer")
+                                        .outline()
+                                        .small()
+                                        .label(format!("Build {} from the client pack", alt.version))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.source = Source::Files(alt.clone());
+                                            this.zip = None;
+                                            cx.notify();
+                                        })),
+                                )
+                        })),
                 ),
             None => source_field,
         };
@@ -1119,10 +1239,14 @@ impl Render for HostForm {
                     .child(
                         Field::new()
                             .label("Port")
-                            .description(if on_panel {
-                                "Empty: the panel picks a free one."
-                            } else {
-                                "Players join on this port; forward it on your router for friends outside your network."
+                            .description({
+                                let auto = self.join.as_ref().filter(|(p, ..)| *p == self.place).and_then(|(_, a, ..)| *a);
+                                let join = self.join_line(cx).map(|j| format!(" {j}")).unwrap_or_default();
+                                match (on_panel, auto) {
+                                    (true, Some(a)) => format!("Empty: the panel uses {a}.{join}"),
+                                    (true, None) => format!("Empty: the panel picks a free one.{join}"),
+                                    (false, _) => format!("{} Forward the port on your router for friends outside your network.", join.trim()),
+                                }
                             })
                             .child(
                                 v_flex()
@@ -1135,7 +1259,10 @@ impl Render for HostForm {
                         f.child(
                             Field::new()
                                 .label("Address")
-                                .description("A name players join by, when the panel's server addresses are on.")
+                                .description(match self.domain() {
+                                    Some(d) => format!("A name players join by, under {d}. Empty: the server's name."),
+                                    None => "A name players join by, when the panel's server addresses are on.".to_string(),
+                                })
                                 .child(div().w_56().child(Input::new(&self.address).small())),
                         )
                     })
@@ -1228,18 +1355,42 @@ pub fn open_for_files(
             .background_spawn(async move {
                 let v = hopper::browse::server_files_version(&f2)?;
                 // Modrinth server zips are always downloadable.
-                let c = match f2.file {
-                    Some(_) => Default::default(),
-                    None => hopper::cf::get_mod(f2.project).map(|m| check(&m, &v)).unwrap_or_default(),
+                let m = match f2.file {
+                    Some(_) => None,
+                    None => hopper::cf::get_mod(f2.project).ok(),
                 };
-                anyhow::Ok((v, c))
+                let c = m.as_ref().map(|m| check(m, &v)).unwrap_or_default();
+                // A newer version without server files (CurseForge): say so,
+                // and have it ready to build from the client pack.
+                let newer = m.and_then(|m| {
+                    let files: Vec<hopper::cf::File> = hopper::source::files(m.id, "", hopper::cf::Loader::Any)
+                        .ok()?
+                        .into_iter()
+                        .filter(|f| f.is_server_pack != Some(true))
+                        .take(50)
+                        .collect();
+                    let rows: Vec<(&str, bool)> = files
+                        .iter()
+                        .map(|f| (f.display_name.as_str(), f.server_pack_file_id.is_some_and(|i| i != 0)))
+                        .collect();
+                    let view = hopper::hosting::pack_versions::view(&rows);
+                    let newest = files.get(view.newest_client?)?.clone();
+                    let c = check(&m, &newest);
+                    Some((view.warning?, m, newest, c))
+                });
+                anyhow::Ok((v, c, newer))
             })
             .await;
         handle
             .update(cx, |_, window, cx| match r {
-                Ok((v, c)) => {
-                    let mut p = PackFiles::new(Build::ServerFiles(files), name, &v);
+                Ok((v, c, newer)) => {
+                    let mut p = PackFiles::new(Build::ServerFiles(files), name.clone(), &v);
                     p.check = c;
+                    p.newer = newer.map(|(warning, m, f, c)| {
+                        let mut alt = PackFiles::new(Build::ClientPack(Box::new(m), Box::new(f.clone())), name, &f);
+                        alt.check = c;
+                        (warning, Rc::new(alt))
+                    });
                     open_files(store, p, panel, window, cx)
                 }
                 Err(e) => window.push_notification(

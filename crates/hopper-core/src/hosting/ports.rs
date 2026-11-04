@@ -72,8 +72,37 @@ pub fn check_here(port: u16, used: &[(String, u16)]) -> PortCheck {
     check(port, used, super::port_free)
 }
 
+/// This PC's address on its network, as players nearby join it (the one
+/// the default route uses; nothing is sent).
+pub fn lan_ip() -> Option<String> {
+    let s = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    s.connect(("192.0.2.1", 9)).ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    (!ip.is_unspecified() && !ip.is_loopback()).then(|| ip.to_string())
+}
+
+/// A server's name as an address label: lower case, each run of other
+/// characters one `-` (Hopper Server's New server form does the same).
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn slugs_like_the_web_form() {
+        assert_eq!(super::slug("Better MC [NEOFORGE] BMC5 server"), "better-mc-neoforge-bmc5-server");
+        assert_eq!(super::slug("  Ünï  "), "n");
+    }
+
     use super::*;
 
     fn used() -> Vec<(String, u16)> {
