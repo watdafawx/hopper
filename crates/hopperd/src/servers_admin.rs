@@ -38,7 +38,14 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/settings/servers-folder", get(folder_get).put(folder_set))
         .route("/api/v1/servers/import-folder", post(import_folder))
         .route("/api/v1/incoming/uploads", post(upload_start))
-        .route("/api/v1/incoming/uploads/{up}", get(upload_status).put(upload_chunk).delete(upload_cancel))
+        // Chunks as big as the file routes take (axum's own limit is 2 MB).
+        .route(
+            "/api/v1/incoming/uploads/{up}",
+            get(upload_status)
+                .put(upload_chunk)
+                .delete(upload_cancel)
+                .layer(axum::extract::DefaultBodyLimit::max(crate::fs_api::MAX_CHUNK)),
+        )
         .route("/api/v1/servers/zip-info", get(zip_info))
         .route("/api/v1/servers/import-zip", post(import_zip))
         .route("/api/v1/packs/search", get(pack_search))

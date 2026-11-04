@@ -859,7 +859,7 @@ impl Render for HostForm {
         let source_field = Field::new()
             .label("Start from")
             .description(if from_instance {
-                "Its Minecraft, loader and server-side mods, with config, defaultconfigs, kubejs and datapacks. Client-only mods stay out; the task lists what was copied and left out."
+                "Its loader, server-side mods, config, kubejs and datapacks. Client-only mods stay out."
             } else {
                 "A fresh server: pick the game and server type."
             })

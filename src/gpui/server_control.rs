@@ -853,7 +853,7 @@ impl ServerControl {
                 v2.update(cx, |this, cx| this.request(PanelAction::Kill, window, cx))
             }))
             .when_some(delete.clone(), |m, (store, root)| {
-                m.separator().item(PopupMenuItem::new("Delete server…").icon(IconName::Delete).on_click(move |_, window, cx| {
+                m.separator().item(PopupMenuItem::new("Delete server…").icon(IconName::Trash).on_click(move |_, window, cx| {
                     crate::server_delete::open(store.clone(), root.clone(), running, window, cx)
                 }))
             })

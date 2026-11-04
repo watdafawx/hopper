@@ -30,13 +30,18 @@ struct DeleteForm {
     worlds: Vec<(String, u64)>,
     backups: bool,
     keep_world: bool,
+    /// On a Hopper Server: whether this PC may delete there (only the
+    /// owner or a manager may; a paired PC is a device). None while asking.
+    may: Option<bool>,
+    /// The server's Settings › General page in the panel, where its owner deletes it.
+    web: Option<String>,
     confirm: Entity<InputState>,
     _sub: Subscription,
 }
 
 impl DeleteForm {
     fn ready(&self, cx: &App) -> bool {
-        self.confirm.read(cx).value().trim() == self.name.trim()
+        self.may != Some(false) && self.confirm.read(cx).value().trim() == self.name.trim()
     }
 }
 
@@ -64,6 +69,27 @@ impl Render for DeleteForm {
                 Some(size(ws.iter().map(|(_, b)| b).sum())),
             )),
         };
+        if self.may == Some(false) {
+            let web = self.web.clone();
+            return v_flex()
+                .gap_3()
+                .child(div().text_sm().child(format!(
+                    "{host} lets only its owner or a manager delete servers, and this PC is paired as a device. Delete it in the panel: Settings › General › Delete server."
+                )))
+                .when_some(web, |c, url| {
+                    c.child(
+                        h_flex().child(
+                            Button::new("delete-open-panel")
+                                .outline()
+                                .small()
+                                .icon(gpui_kit::assets::IconName::ExternalLink)
+                                .label("Open in browser")
+                                .on_click(move |_, _, cx| cx.open_url(&url)),
+                        ),
+                    )
+                })
+                .into_any_element();
+        }
         let kept_where = format!("Kept worlds\\{}", self.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         v_flex()
             .gap_3()
@@ -109,6 +135,7 @@ impl Render for DeleteForm {
                     .child(div().text_sm().child(format!("Type {} to delete it", self.name)))
                     .child(Input::new(&self.confirm).small()),
             )
+            .into_any_element()
     }
 }
 
@@ -139,10 +166,29 @@ pub fn open(store: Entity<Store>, root: PathBuf, running: bool, window: &mut Win
     } else {
         (Vec::new(), true)
     };
+    let client = srv.remote.as_ref().and_then(|r| {
+        store.read(cx).settings().hopper_panels.iter().find(|p| p.id == r.panel).and_then(hopper::hopperd::Client::for_panel)
+    });
+    let web = srv.remote.as_ref().map(|r| format!("{}/#/server/{}/settings/general", r.base, hopper::hopperd::enc(&r.id)));
     let form = cx.new(|cx| {
         let confirm = cx.new(|cx| InputState::new(window, cx).placeholder(srv.name.clone()));
-        let _sub = cx.subscribe(&confirm, |_, _, _: &InputEvent, cx| cx.notify());
-        DeleteForm { store: store.clone(), root: root.clone(), name: srv.name.clone(), panel, worlds, backups, keep_world: true, confirm, _sub }
+        let _sub = cx.subscribe(&confirm, |_: &mut DeleteForm, _, _: &InputEvent, cx| cx.notify());
+        // Ask the panel who this PC is there before offering to delete.
+        if let Some(c) = client {
+            cx.spawn(async move |this: WeakEntity<DeleteForm>, cx: &mut AsyncApp| {
+                let role = cx.background_spawn(async move { c.get("/auth/me").ok() }).await;
+                let may = role.map(|v| matches!(v["role"].as_str(), Some("owner" | "manager")));
+                this.update(cx, |this, cx| {
+                    // Unknown (an old panel): offer it; the panel still checks.
+                    this.may = Some(may.unwrap_or(true));
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        let may = if panel.is_some() { None } else { Some(true) };
+        DeleteForm { store: store.clone(), root: root.clone(), name: srv.name.clone(), panel, worlds, backups, keep_world: true, may, web, confirm, _sub }
     });
     window.open_dialog(cx, move |dialog, window, cx| {
         let ready = form.read(cx).ready(cx);
