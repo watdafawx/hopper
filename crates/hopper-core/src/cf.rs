@@ -365,6 +365,8 @@ pub struct Links {
 
 impl Links {
     /// (label, url) for every link but the project page, in display order.
+    /// The source link is named after its git host ("GitHub", "Codeberg")
+    /// when it's one of the known ones, else "Source".
     pub fn extra(&self) -> Vec<(&'static str, &str)> {
         [
             ("Source", &self.source_url),
@@ -375,9 +377,78 @@ impl Links {
         .into_iter()
         .filter_map(|(l, u)| {
             let u = u.as_deref()?.trim();
+            let l = if l == "Source" { git_host(u).unwrap_or(l) } else { l };
             u.starts_with("http").then_some((l, u))
         })
         .collect()
+    }
+}
+
+/// The git host a source link points at, by name: "GitHub", "GitLab",
+/// "Codeberg", "Bitbucket", "Gitea", "Forgejo" or "SourceHut". Self-hosted
+/// GitLab, Gitea and Forgejo are known by their usual host names
+/// (gitlab.example.org, gitea.example.org, …).
+pub fn git_host(url: &str) -> Option<&'static str> {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next()?.rsplit('@').next()?;
+    let host = host.split(':').next()?.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let is = |d: &str| host == d || host.ends_with(&format!(".{d}"));
+    let first = host.split('.').next().unwrap_or("");
+    Some(if is("github.com") {
+        "GitHub"
+    } else if is("gitlab.com") || first == "gitlab" {
+        "GitLab"
+    } else if is("codeberg.org") {
+        "Codeberg"
+    } else if is("bitbucket.org") {
+        "Bitbucket"
+    } else if is("sr.ht") {
+        "SourceHut"
+    } else if first == "forgejo" || is("forgejo.org") {
+        "Forgejo"
+    } else if is("gitea.com") || first == "gitea" {
+        "Gitea"
+    } else {
+        return None;
+    })
+}
+
+#[cfg(test)]
+mod git_host_tests {
+    use super::git_host;
+
+    #[test]
+    fn known_hosts() {
+        assert_eq!(git_host("https://github.com/MehVahdJukaar/Polytone"), Some("GitHub"));
+        assert_eq!(git_host("https://www.github.com/a/b"), Some("GitHub"));
+        assert_eq!(git_host("https://gitlab.com/a/b/-/issues"), Some("GitLab"));
+        assert_eq!(git_host("https://gitlab.example.org/a/b"), Some("GitLab"));
+        assert_eq!(git_host("https://codeberg.org/a/b"), Some("Codeberg"));
+        assert_eq!(git_host("https://bitbucket.org/a/b"), Some("Bitbucket"));
+        assert_eq!(git_host("https://git.sr.ht/~a/b"), Some("SourceHut"));
+        assert_eq!(git_host("https://gitea.com/a/b"), Some("Gitea"));
+        assert_eq!(git_host("https://gitea.example.net/a/b"), Some("Gitea"));
+        assert_eq!(git_host("https://code.forgejo.org/a/b"), Some("Forgejo"));
+        assert_eq!(git_host("https://forgejo.example.net/a/b"), Some("Forgejo"));
+    }
+
+    #[test]
+    fn other_hosts() {
+        assert_eq!(git_host("https://notgithub.com/a"), None);
+        assert_eq!(git_host("https://example.com/github.com/a"), None);
+        assert_eq!(git_host("https://git.example.org/a"), None);
+        assert_eq!(git_host(""), None);
+    }
+
+    #[test]
+    fn source_link_named_after_host() {
+        let l = super::Links {
+            source_url: Some("https://codeberg.org/a/b".into()),
+            issues_url: Some("https://codeberg.org/a/b/issues".into()),
+            ..Default::default()
+        };
+        assert_eq!(l.extra().iter().map(|(n, _)| *n).collect::<Vec<_>>(), ["Codeberg", "Issues"]);
     }
 }
 

@@ -1,5 +1,5 @@
-//! Site and loader logos: CurseForge's and Modrinth's (from Simple Icons)
-//! and the loader icons Modrinth uses, served beside GPUI Kit's icons.
+//! Site and loader logos: CurseForge's, Modrinth's and the git hosts'
+//! (from Simple Icons, CC0) and the loader icons Modrinth uses, served beside GPUI Kit's icons.
 //! They're single-color, so they take the color they're drawn in.
 
 use gpui_kit::assets::IconName;
@@ -14,6 +14,13 @@ const FILES: &[(&str, &[u8])] = &[
     ("brand/forge.svg", include_bytes!("../../assets/brand/forge.svg")),
     ("brand/fabric.svg", include_bytes!("../../assets/brand/fabric.svg")),
     ("brand/quilt.svg", include_bytes!("../../assets/brand/quilt.svg")),
+    ("brand/github.svg", include_bytes!("../../assets/brand/github.svg")),
+    ("brand/gitlab.svg", include_bytes!("../../assets/brand/gitlab.svg")),
+    ("brand/codeberg.svg", include_bytes!("../../assets/brand/codeberg.svg")),
+    ("brand/bitbucket.svg", include_bytes!("../../assets/brand/bitbucket.svg")),
+    ("brand/gitea.svg", include_bytes!("../../assets/brand/gitea.svg")),
+    ("brand/forgejo.svg", include_bytes!("../../assets/brand/forgejo.svg")),
+    ("brand/sourcehut.svg", include_bytes!("../../assets/brand/sourcehut.svg")),
 ];
 
 /// GPUI Kit's icons plus the logos above.
@@ -37,6 +44,21 @@ impl AssetSource for Assets {
 /// CurseForge's or Modrinth's logo.
 pub fn site_icon(modrinth: bool) -> Icon {
     Icon::new(IconName::Globe).path(if modrinth { "brand/modrinth.svg" } else { "brand/curseforge.svg" })
+}
+
+/// A git host's logo, by the name `hopper::cf::git_host` gives it.
+pub fn git_host_icon(host: &str) -> Option<Icon> {
+    let path = match host {
+        "GitHub" => "brand/github.svg",
+        "GitLab" => "brand/gitlab.svg",
+        "Codeberg" => "brand/codeberg.svg",
+        "Bitbucket" => "brand/bitbucket.svg",
+        "Gitea" => "brand/gitea.svg",
+        "Forgejo" => "brand/forgejo.svg",
+        "SourceHut" => "brand/sourcehut.svg",
+        _ => return None,
+    };
+    Some(Icon::new(IconName::Code).path(path))
 }
 
 /// A mod loader's icon and color, by name ("NeoForge", "fabric").
