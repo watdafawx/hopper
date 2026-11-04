@@ -17,7 +17,7 @@
   /** One image on, or back (wrapping round). */
   function step(d) {
     const n = images.length;
-    if (n > 1) at = (at + d + n) % n;
+    if (n > 1) { at = (at + d + n) % n; nat = null; }
   }
   /** The wheel moves like the arrows (down is next): a mouse notch is one
    * step, a touchpad steps every so many pixels (desktop's on_wheel). */
@@ -51,6 +51,16 @@
   let zerr = $state('');
   let peek = $state(null);
 
+  // Pixel size of the image shown and the room around it, so small pictures
+  // (pixel art) grow in whole steps and big ones shrink to fit, never cropped.
+  let nat = $state(null);
+  let room = $state({ w: 0, h: 0 });
+  const fit = $derived.by(() => {
+    if (!nat || !nat.w || !nat.h || !room.w || !room.h) return '';
+    const s = Math.min(room.w / nat.w, room.h / nat.h);
+    const k = s >= 1 ? Math.max(1, Math.min(Math.floor(s), 4, Math.floor((room.h * 0.6) / nat.h))) : s;
+    return `width:${Math.round(nat.w * k)}px;height:${Math.round(nat.h * k)}px`;
+  });
   const cur = $derived(mode === 'image' ? images[at] ?? path : path);
   const src = (p) => `/api/v1${base}/file?path=${encodeURIComponent(p)}&inline=1`;
   const entryUrl = (e, inline = false) => `/api/v1${base}/zip-entry?path=${encodeURIComponent(path)}&entry=${encodeURIComponent(inner ? `${inner}/${e}` : e)}${inline ? '&inline=1' : ''}`;
@@ -118,9 +128,9 @@
         <a class="btn sm ghost icon" title="Open in a new tab" href={src(cur)} target="_blank" rel="noopener"><ExternalLink size={13} /></a>
         <button class="btn sm" onclick={() => download(`/api/v1${base}/file?path=${encodeURIComponent(cur)}`)}><Download size={13} />Download</button>
         <button class="btn sm ghost icon" title="Close (Esc)" onclick={onClose}><X size={14} /></button></div>
-      <div class="stage" use:wheelable>
+      <div class="stage" use:wheelable bind:clientWidth={room.w} bind:clientHeight={room.h}>
         {#if images.length > 1}<button class="nav l" title="Previous (←)" onclick={() => step(-1)}><ChevronLeft size={22} /></button>{/if}
-        <img src={src(cur)} alt="" />
+        <img src={src(cur)} alt="" style={fit} onload={(e) => (nat = { w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })} />
         {#if images.length > 1}<button class="nav r" title="Next (→)" onclick={() => step(1)}><ChevronRight size={22} /></button>{/if}
       </div>
     </div>
@@ -166,7 +176,7 @@
   .icon { padding: 3px 5px; }
   .img { width: min(1100px, 100%); height: calc(100vh - var(--dialog-top) - 24px); max-height: 900px; gap: 8px; color: var(--text); }
   .stage { flex: 1; min-height: 0; display: grid; place-items: center; position: relative; background: repeating-conic-gradient(#1b1b20 0% 25%, #222228 0% 50%) 50% / 24px 24px; border-radius: var(--radius-lg); overflow: hidden; }
-  .stage img { max-width: 100%; max-height: 100%; image-rendering: pixelated; object-fit: contain; min-width: 64px; }
+  .stage img { max-width: 100%; max-height: 100%; image-rendering: pixelated; object-fit: contain; }
   .nav { position: absolute; top: 50%; transform: translateY(-50%); background: #000a; border-radius: var(--radius); padding: 8px; color: #fff; }
   .nav.l { left: 10px; } .nav.r { right: 10px; }
   .box { width: min(1000px, 100%); height: min(calc(100vh - var(--dialog-top) - 24px), 760px); gap: 8px; padding: 14px; }

@@ -1173,7 +1173,7 @@ fn blank_image() -> Arc<Image> {
 }
 
 /// The pixel size of a local image, read from its header once per path.
-fn image_size(path: &Path) -> Option<(u32, u32)> {
+pub fn image_size(path: &Path) -> Option<(u32, u32)> {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Mutex;
