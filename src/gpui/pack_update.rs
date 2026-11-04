@@ -2504,6 +2504,51 @@ pub fn open(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut Wi
     show(store, root, file, None, window, cx)
 }
 
+/// Moves an instance's modpack to a picked version (a roll back, or an
+/// update to a version other than the newest). By default it installs
+/// straight away: only the new version is downloaded, with the quick
+/// update's choices. The comparison dialog still opens first when the
+/// setting asks for it, or when something needs your say: settings you
+/// changed that the version also changes, or a mod of yours the version
+/// drops.
+pub fn switch(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut Window, cx: &mut App) {
+    let Some(inst) = store.read(cx).instance(&root).cloned() else {
+        return;
+    };
+    let reinstall = inst.pack.as_ref().is_some_and(|p| hopper::packdiff::is_reinstall(p, &file));
+    if store.read(cx).settings().compare_before_switch || reinstall || inst.pack.is_none() {
+        return open(store, root, file, window, cx);
+    }
+    let job = store
+        .read(cx)
+        .jobs()
+        .start(format!("Preparing {} → {}", inst.name, file.display_name));
+    job.announce();
+    window
+        .spawn(cx, async move |cx| {
+            let f2 = file.clone();
+            let r = cx
+                .background_spawn(async move {
+                    let r = hopper::packdiff::plan(&inst, &f2, false, &job);
+                    job.finish(&r.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("{e:#}")));
+                    r.map_err(|e| format!("{e:#}"))
+                })
+                .await;
+            cx.update(|window, cx| match r {
+                Ok(p) if !p.needs_say() => {
+                    let overrides = p.decisions_with(&p.default_take(), &p.default_choices());
+                    store.update(cx, |s, cx| {
+                        s.update_pack(&root, file, Some(overrides), false);
+                        cx.notify();
+                    });
+                }
+                r => show(store, root, file, Some(r), window, cx),
+            })
+            .ok();
+        })
+        .detach();
+}
+
 /// The preview dialog, comparing first unless `plan` is already known.
 fn show(
     store: Entity<Store>,

@@ -15,7 +15,7 @@
 //! [`LINK`] written when the panel makes a server from a pack without
 //! one, else from the server's `hopper.json`.
 
-use crate::api::{ApiError, ApiResult, bad, not_found, require};
+use crate::api::{ApiError, ApiResult, bad, not_found, require, require_owner};
 use crate::servers::Entry;
 use crate::App;
 use axum::extract::{Path, Query, State};
@@ -40,6 +40,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/pack/plan", post(plan))
         .route("/api/v1/servers/{id}/pack/diff", get(diff))
         .route("/api/v1/servers/{id}/pack/apply", post(apply))
+        .route("/api/v1/settings/pack-switch", get(switch_setting).put(set_switch_setting))
         .route("/api/v1/pack-updates", get(all_updates))
         .route("/api/v1/jobs/{job}", get(job))
         .route("/api/v1/jobs/{job}/cancel", post(cancel))
@@ -439,6 +440,30 @@ async fn plan(
     Ok(Json(json!({ "job": job })))
 }
 
+/// Whether switching a server's pack version compares first.
+async fn switch_setting(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    Ok(Json(json!({ "compare": app.cfg.read().unwrap().compare_before_switch })))
+}
+
+#[derive(Deserialize)]
+struct SwitchBody {
+    compare: bool,
+}
+
+async fn set_switch_setting(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Json(b): Json<SwitchBody>,
+) -> ApiResult<Json<Value>> {
+    require_owner(&app, &headers, &method)?;
+    let mut cfg = app.cfg.write().unwrap();
+    cfg.compare_before_switch = b.compare;
+    cfg.save(&app.data_dir).map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// What the web panel shows of a plan.
 fn summary(plan_id: u64, p: &ServerPlan) -> Value {
     json!({
@@ -450,6 +475,9 @@ fn summary(plan_id: u64, p: &ServerPlan) -> Value {
         "mods_note": p.mods_note,
         "kept": p.kept,
         "compared": p.plan.compared,
+        // Something the defaults can't settle: an update without a
+        // preview stops and shows the plan.
+        "needs_say": p.plan.needs_say(),
         "mods": p.plan.mods.iter().map(mod_json).collect::<Vec<_>>(),
         // Mods on the server's own versions: kept unless the update resets them.
         "kept_versions": p.kept_versions.iter().map(mod_json).collect::<Vec<_>>(),

@@ -149,8 +149,12 @@
   // Clicking the pack or loader version in the header, as in desktop.
   let versionsOpen = $state(null);
   let loaderOpen = $state(false);
-  function openUpdate(file = null) {
+  /** The version picked in Versions goes straight to updating (unless the
+   *  setting asks to compare first, or "Compare first" was pressed). */
+  let packCompare = $state(true);
+  function openUpdate(file = null, compareFirst = false) {
     versionsOpen = null;
+    packCompare = file == null || compareFirst;
     packFile = file;
     packOpen = packCheck;
   }
@@ -323,7 +327,7 @@
 
 
 {#if sharing && s}<ShareLog server={s} path={sharing.path} onClose={() => (sharing = null)} />{/if}
-{#if packOpen && s}{#key packFile}<PackUpdate server={s} check={packOpen} file={packFile} onClose={() => (packOpen = null)} onDone={() => checkPack(true)} openFiles={(p) => nav('files', p)} onOtherVersion={openVersions} />{/key}{/if}
+{#if packOpen && s}{#key packFile}<PackUpdate server={s} check={packOpen} file={packFile} compareFirst={packCompare} onClose={() => (packOpen = null)} onDone={() => checkPack(true)} openFiles={(p) => nav('files', p)} onOtherVersion={openVersions} />{/key}{/if}
 {#if versionsOpen && s}<PackVersions server={s} check={versionsOpen} onPick={openUpdate} onClose={() => (versionsOpen = null)} />{/if}
 {#if loaderOpen && s}<LoaderVersions server={s} onClose={() => (loaderOpen = false)} />{/if}
 <ModsRemove />

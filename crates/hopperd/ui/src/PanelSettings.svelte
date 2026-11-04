@@ -15,7 +15,7 @@
     { id: 'alerts', label: 'Alerts', icon: BellRing, owner: true, blurb: 'When the panel warns you: crashes, low TPS, a nearly full drive, PC memory.', words: 'warnings crash disk memory notify' },
     { id: 'automations', label: 'Automations', icon: Zap, owner: true, blurb: 'When a server does something, the panel acts: run a command, back up, restart, or call a URL.', words: 'rules automation trigger when then if restart lag tps players schedule timer cron command' },
     { id: 'backups', label: 'Backup copies', icon: CloudUpload, owner: true, blurb: 'Copy backups off this PC: a NAS or USB disk, SFTP, S3 / B2 / R2, or another Hopper Server.', words: 'offsite off-site s3 copies backups' },
-    { id: 'updates', label: 'Updates', icon: Download, owner: true, blurb: 'Hopper Server’s version, and updating it by itself.', words: 'update version auto-update upgrade release' },
+    { id: 'updates', label: 'Updates', icon: Download, owner: true, blurb: 'Hopper Server’s version, and updating it by itself.', words: 'update version auto-update upgrade release modpack pack rollback roll back switch compare' },
     { id: 'account', label: 'Account', icon: UserRound, owner: false, blurb: 'Your sign-in: two-factor and your password.', words: 'password 2fa me' },
   ];
 
@@ -30,6 +30,7 @@
   import Addresses from './Addresses.svelte';
   import CfKey from './CfKey.svelte';
   import SourcesSetting from './SourcesSetting.svelte';
+  import PackSwitchSetting from './PackSwitchSetting.svelte';
   import Security from './Security.svelte';
   import Users from './Users.svelte';
   import { ownerLike } from './lib/me.svelte.js';
@@ -89,7 +90,7 @@
         {:else if c.id === 'alerts'}<Alerts />
         {:else if c.id === 'automations'}<Automations />
         {:else if c.id === 'backups'}<BackupTargets />
-        {:else if c.id === 'updates'}<PanelUpdate />
+        {:else if c.id === 'updates'}<PanelUpdate /><PackSwitchSetting />
         {/if}
       </div>
     </div>

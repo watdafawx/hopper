@@ -3,7 +3,7 @@
   // Versions window: how far behind it is, then every version newest first
   // with its changelog. "Update to this" on a newer one and "Switch to
   // this" on an older one open the update window for that version.
-  import { X, Download, ChevronDown, ChevronRight, Package, ExternalLink, ArrowRightLeft } from '@lucide/svelte';
+  import { X, Download, ChevronDown, ChevronRight, Package, ExternalLink, ArrowRightLeft, GitCompare } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import { api } from './lib/api.js';
   import { ago } from './lib/browse.js';
@@ -82,6 +82,7 @@
               <span class="tiny muted">{ago(v.date)}</span>
             </button>
             {#if !installed}
+              <button class="btn sm ghost" disabled={!!why(v)} title="See what changes before switching, and which of the server's edits stay" onclick={() => onPick(v.id, true)}><GitCompare size={13} />Compare first</button>
               <button class="btn sm" class:pri={top} disabled={!!why(v)} title={why(v)} onclick={() => onPick(v.id)}>
                 {#if verb(v) === 'Switch to this'}<ArrowRightLeft size={13} />{:else}<Download size={13} />{/if}{verb(v)}
               </button>

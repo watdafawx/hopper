@@ -272,6 +272,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Appearance, "smooth-scroll", "Smooth scrolling", "The mouse wheel glides lists and pages instead of jumping a few lines at a time. Touchpads scroll the same either way. Off with reduced motion.", "scroll scrolling wheel mouse smooth animation motion"),
     e(C::Appearance, "zoom", "Zoom", "Ctrl + and Ctrl - change it anywhere; Ctrl 0 resets it.", "scale size font bigger smaller"),
     e(C::Updates, "self-update", "Hopper updates", "Hopper checks for new releases at start and every 30 minutes, and updates itself from them.", "version upgrade release"),
+    e(C::Updates, "compare-switch", "Compare versions before switching", "Rolling a modpack back, or moving it to a version you pick, shows what changes first. Off, it installs straight away and only stops if settings you changed clash. Each version's page keeps a Compare first button.", "modpack pack rollback roll back switch version downgrade compare review diff"),
     e(C::Updates, "update-repo", "Update source", "The GitHub repository (owner/name) Hopper's releases come from.", "github repo repository"),
     e(C::Updates, "start-menu", "Start menu", "Adds this copy of Hopper to the Start menu without installing it, so you can pin it to Start.", "pin start menu shortcut taskbar portable"),
     e(C::Updates, "install", "Install", "Copies Hopper into your apps with Start menu and desktop shortcuts. No admin rights needed.", "shortcut start menu uninstall"),
@@ -2438,6 +2439,12 @@ impl SettingsPage {
                 None,
                 vec![
                     Row::new("self-update").control_any(action).below(version),
+                    Row::new("compare-switch").control(self.switch(
+                        "compare-switch",
+                        self.store.read(cx).settings().compare_before_switch,
+                        |st, v| st.compare_before_switch = v,
+                        cx,
+                    )),
                     Row::new("update-repo")
                         .control(div().w(rems(16.)).child(Input::new(&self.texts[&Text::UpdateRepo]).small()))
                         .note(self.note(Text::UpdateRepo, cx)),

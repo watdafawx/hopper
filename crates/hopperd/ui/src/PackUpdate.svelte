@@ -22,7 +22,7 @@
 
   // `file`: the pack version to update to (the newest by default);
   // `onOtherVersion`: opens the pack's Versions and changelogs to pick another.
-  let { server, check, file = null, onClose, onDone = () => {}, openFiles = null, onOtherVersion = null } = $props();
+  let { server, check, file = null, compareFirst = true, onClose, onDone = () => {}, openFiles = null, onOtherVersion = null } = $props();
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const pack = $derived(check.pack);
@@ -98,6 +98,12 @@
       if (jobId !== job) return;
       plan = r;
       defaults(r);
+      // A picked version goes straight to updating when the setting is off
+      // and nothing needs the owner's say.
+      if (!compareFirst && !r.needs_say && !r.compared && !why && !alive) {
+        const on = await api('/settings/pack-switch').then((s) => s.compare, () => true);
+        if (!on && jobId === job) update();
+      }
     } catch (e) {
       // Another comparison took over (or the window closed): not this one's error.
       if (jobId !== mine && jobId !== job) return;
