@@ -1142,6 +1142,14 @@ impl LibraryView {
                         crate::dialogs::open_create(this.store.clone(), window, cx)
                     })),
             )
+            .child(
+                Button::new("rail-find-pack")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Package)
+                    .tooltip("Find a modpack")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(LibraryEvent::BrowsePacks))),
+            )
             .child(div().w_8().h_px().my_1().bg(theme.sidebar_border))
             .child(
                 v_flex()
