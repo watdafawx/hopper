@@ -162,7 +162,7 @@ impl AddonsView {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if this.globals.root.as_ref() != Some(&root) {
+                if this.globals.root.as_ref() != Some(&root) || this.class != cf::CLASS_RESOURCE_PACKS {
                     return;
                 }
                 for (i, (d, _)) in this.globals.dirs.iter().enumerate() {
@@ -274,7 +274,7 @@ impl AddonsView {
         let rel = self.folder.clone();
         cx.spawn(async move |this, cx| {
             let packs = cx.background_spawn(async move { pack_files(&dir) }).await;
-            let still = |this: &AddonsView| this.folder == rel;
+            let still = |this: &AddonsView| this.folder == rel && this.class == cf::CLASS_DATAPACKS;
             let ok = this
                 .update(cx, |this, cx| {
                     if still(this) {
