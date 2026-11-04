@@ -415,7 +415,7 @@ pub fn import_pack(store: Entity<Store>, window: &mut Window, cx: &mut App) {
                         let root = PathBuf::from(&s.settings().instances_root);
                         s.spawn_job(format!("Importing {}", path.display()), move |job| {
                             let inst = hopper::modpack::import_file(&root, &path, &skip, job)?;
-                            Ok(Msg::InstanceChanged(inst.root))
+                            Ok(Msg::installed(inst.root, &[], None))
                         });
                     });
                 })
@@ -1622,7 +1622,7 @@ impl RedeemForm {
                     if let Some(n) = note {
                         job.note(n);
                     }
-                    Ok(Msg::InstanceChanged(inst.root))
+                    Ok(Msg::installed(inst.root, &[], None))
                 });
             });
         });

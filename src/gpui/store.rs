@@ -130,6 +130,17 @@ pub enum Msg {
     Nothing,
 }
 
+impl Msg {
+    /// After an install or import into the instance at `root`: the
+    /// website-only files it left to download (pages not in `before`) go
+    /// to the download window, and the task waits for them. `by` is the
+    /// project that asked, for its button.
+    pub fn installed(root: PathBuf, before: &[String], by: Option<u64>) -> Msg {
+        let pages: Vec<String> = hopper::modpack::pending_urls_at(&root).into_iter().filter(|u| !before.contains(u)).collect();
+        if pages.is_empty() { Msg::InstanceChanged(root) } else { Msg::Updated(root, Vec::new(), pages, by) }
+    }
+}
+
 /// What the store tells the window about.
 pub enum StoreEvent {
     /// A game started (none was running).
@@ -1952,6 +1963,12 @@ impl Store {
                         .unwrap_or_default();
                     Err(anyhow::anyhow!("Hopper hit a bug and stopped this task. {why}"))
                 });
+            // Website-only files go to the download window after this: the
+            // install or update isn't done until they're in.
+            if let Ok(Msg::Updated(_, _, pages, _)) = &r {
+                let pages: Vec<String> = pages.iter().filter(|u| !u.is_empty()).cloned().collect();
+                job.wait_for(&pages);
+            }
             job.finish(&r);
             crate::hero_drift::job_ended();
             if let Some(r) = &root {
@@ -2539,6 +2556,7 @@ impl Store {
         q.0 = true;
         drop(q);
         let (queue, fetching, tx, wake) = (self.fetch_queue.clone(), self.fetching.clone(), self.tx.clone(), self.wake.clone());
+        let (jobs, parallel) = (self.jobs.clone(), self.settings.web_downloads());
         std::thread::spawn(move || loop {
             let urls = {
                 let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -2552,6 +2570,10 @@ impl Store {
             // downloads them and the download watcher picks them up.
             let (true, Some(dir)) = (cfg!(windows), hopper::modpack::fetch_dir()) else {
                 fetching.lock().unwrap_or_else(|e| e.into_inner()).retain(|f| !urls.contains(&f.url));
+                // The browser has them now; the jobs that asked are done.
+                for u in &urls {
+                    jobs.settle(u, true);
+                }
                 let _ = tx.send(Msg::OpenUrls(urls));
                 wake();
                 continue;
@@ -2568,8 +2590,18 @@ impl Store {
                         x.step = *step;
                     }
                 }
+                drop(f);
+                // A job that waits for a file (the install that asked for
+                // it) hears when it came or won't.
+                for (u, step) in urls.iter().zip(&run.steps) {
+                    match step {
+                        Step::Done => jobs.settle(u, true),
+                        Step::Failed | Step::Closed => jobs.settle(u, false),
+                        _ => {}
+                    }
+                }
             };
-            let code = crate::fetch_progress::run_window(&dir, &urls, |e| {
+            let code = crate::fetch_progress::run_window(&dir, &urls, parallel, |e| {
                 run.apply(e);
                 copy(&run);
                 wake();
@@ -2590,6 +2622,9 @@ impl Store {
             } else {
                 log::warn!("download window: {code:?}");
                 fetching.lock().unwrap_or_else(|e| e.into_inner()).retain(|f| !urls.contains(&f.url));
+                for u in &urls {
+                    jobs.settle(u, false);
+                }
                 let _ = tx.send(Msg::OpenUrls(urls));
             }
             wake();
@@ -3696,7 +3731,7 @@ impl Store {
                     }
                     Ok(Msg::InstanceChanged(inst.root.clone()))
                 }
-                None => Ok(last.map_or(Msg::Nothing, Msg::InstanceChanged)),
+                None => Ok(last.map_or(Msg::Nothing, |r| Msg::installed(r, &[], None))),
             }
         });
     }

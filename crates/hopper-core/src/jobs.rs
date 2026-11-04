@@ -21,6 +21,15 @@ pub struct JobState {
     /// Kept out of the task list (a game launch): it only shows up if it
     /// fails, so the error isn't lost.
     pub quiet: bool,
+    /// Files it still waits for after its own work ended (website-only
+    /// downloads that Hopper's download window gets, keyed by page): it
+    /// counts as finished only once they're in. See [`Job::wait_for`].
+    pub waits: Vec<String>,
+    /// How many it waited for in all, and how many of those didn't come.
+    pub waited: usize,
+    pub waits_failed: usize,
+    /// Its work ended fine while [`JobState::waits`] remained.
+    held: bool,
 }
 
 #[derive(Clone, Default)]
@@ -83,6 +92,10 @@ impl Jobs {
             notes: Vec::new(),
             announce: false,
             quiet,
+            waits: Vec::new(),
+            waited: 0,
+            waits_failed: 0,
+            held: false,
         });
         drop(g);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -150,6 +163,45 @@ impl Jobs {
             .1
             .retain(|j| !j.done);
         self.forget_cancels();
+    }
+
+    /// A file job(s) waited for ([`Job::wait_for`]) came (`ok`) or won't.
+    /// A job whose work already ended finishes with its last one, with a
+    /// note for the ones that didn't come.
+    pub fn settle(&self, key: &str, ok: bool) {
+        let mut changed = false;
+        {
+            let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            for j in g.1.iter_mut().filter(|j| j.waits.iter().any(|w| w == key)) {
+                changed = true;
+                j.waits.retain(|w| w != key);
+                if !ok {
+                    j.waits_failed += 1;
+                }
+                let got = j.waited - j.waits.len();
+                if !j.held {
+                    continue;
+                }
+                if j.waits.is_empty() {
+                    j.held = false;
+                    j.done = true;
+                    j.progress = Some(1.0);
+                    j.detail = waited_line(j.waited, j.waits_failed);
+                    if j.waits_failed > 0 {
+                        j.notes.push(format!(
+                            "{} of {} files from the CurseForge website didn't download. Retry them from the instance's Mods tab.",
+                            j.waits_failed, j.waited
+                        ));
+                    }
+                } else {
+                    j.progress = Some(got as f32 / j.waited as f32);
+                    j.detail = format!("Getting files from the CurseForge website: {got} of {}", j.waited);
+                }
+            }
+        }
+        if changed {
+            self.repaint();
+        }
     }
 
     fn repaint(&self) {
@@ -243,11 +295,33 @@ impl Job {
         self.jobs.update(self.id, |j| j.notes.truncate(n));
     }
 
-    /// Marks the job finished with `result`.
+    /// The job isn't finished until these files came (or failed): each
+    /// key is settled by [`Jobs::settle`]. Called before [`Job::finish`].
+    pub fn wait_for(&self, keys: &[String]) {
+        self.jobs.update(self.id, |j| {
+            for k in keys {
+                if !j.waits.contains(k) {
+                    j.waits.push(k.clone());
+                    j.waited += 1;
+                }
+            }
+        });
+    }
+
+    /// Marks the job finished with `result`. Work that ended fine while
+    /// files it waits for are still coming stays open until they're in.
     pub fn finish<T>(&self, result: &anyhow::Result<T>) {
         let err = result.as_ref().err().map(|e| format!("{e:#}"));
         let failed = err.is_some();
         self.jobs.update(self.id, |j| {
+            if !failed && !j.waits.is_empty() {
+                j.held = true;
+                let got = j.waited - j.waits.len();
+                j.progress = Some(got as f32 / j.waited as f32);
+                j.detail = format!("Getting files from the CurseForge website: {got} of {}", j.waited);
+                return;
+            }
+            j.waits.clear();
             j.done = true;
             j.progress = Some(1.0);
             j.error = err;
@@ -257,16 +331,51 @@ impl Job {
             }
         });
         // One that went fine leaves no trace.
-        let gone = self.jobs.inner.lock().unwrap_or_else(|e| e.into_inner()).1.iter().any(|j| j.id == self.id && j.quiet);
+        let gone = self.jobs.inner.lock().unwrap_or_else(|e| e.into_inner()).1.iter().any(|j| j.id == self.id && j.quiet && j.done);
         if gone {
             self.jobs.dismiss(self.id);
         }
     }
 }
 
+/// A held job's last line once its files are in.
+fn waited_line(n: usize, failed: usize) -> String {
+    match (n, failed) {
+        (1, 0) => "Done, with 1 file from the CurseForge website".to_string(),
+        (n, 0) => format!("Done, with {n} files from the CurseForge website"),
+        (n, f) => format!("Done; {f} of {n} files from the CurseForge website didn't download"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_job_waits_for_its_web_downloads() {
+        let jobs = Jobs::default();
+        let job = jobs.start("Installing a pack");
+        job.wait_for(&["a".into(), "b".into()]);
+        // One came before the install's own work ended.
+        jobs.settle("a", true);
+        assert!(!jobs.snapshot()[0].done);
+        job.finish(&anyhow::Ok(()));
+        let s = &jobs.snapshot()[0];
+        assert!(!s.done, "still getting b");
+        assert_eq!(s.detail, "Getting files from the CurseForge website: 1 of 2");
+        jobs.settle("other", true);
+        assert!(!jobs.snapshot()[0].done);
+        jobs.settle("b", false);
+        let s = &jobs.snapshot()[0];
+        assert!(s.done && s.error.is_none());
+        assert_eq!(s.detail, "Done; 1 of 2 files from the CurseForge website didn't download");
+        assert_eq!(s.notes.len(), 1);
+        // A failed job doesn't wait.
+        let bad = jobs.start("bad");
+        bad.wait_for(&["c".into()]);
+        bad.finish::<()>(&Err(anyhow::anyhow!("boom")));
+        assert!(jobs.snapshot().iter().any(|j| j.title == "bad" && j.done));
+    }
 
     #[test]
     fn quiet_jobs_show_only_when_they_fail() {

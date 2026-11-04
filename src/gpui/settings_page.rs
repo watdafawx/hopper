@@ -265,6 +265,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Servers, "files-test", "Connection", "Whether the server answers with these details. SFTP remembers the server's key the first time and refuses a different one later.", "test connect host key fingerprint"),
     e(C::Content, "cf-key", "CurseForge API key", "Needed for CurseForge: browsing, installs and updates. Get one at console.curseforge.com.", "api key token console"),
     e(C::Content, "browse-source", "Browse searches", "Which site Browse opens on. Switch any time in Browse too.", "modrinth curseforge source search"),
+    e(C::Content, "web-downloads", "Parallel web downloads", "Some CurseForge files only download from the website. Hopper's download window gets this many at once. Fewer helps if CurseForge keeps asking it to wait.", "curseforge website download window parallel tabs pages at once speed cloudflare"),
     e(C::Content, "allow-sources", "Allow mods from GitHub and other links", "Lets Add content's \"From GitHub or a link\" and a mod's \"Follow a source\" get mods from there. These files skip CurseForge's and Modrinth's checks, so add them only from people you trust.", "github maven jenkins link url source release jar"),
     e(C::Content, "github-token", "GitHub token", "Optional. Without one GitHub allows 60 checks an hour; Hopper asks only when something may have changed. A token (no scopes needed) raises that to 5,000. Kept in Windows Credential Manager.", "github token api rate limit"),
     e(C::Appearance, "theme", "Theme", "Hopper's colors. Your own theme files go in the folder next to it.", "dark light color colour glass mica"),
@@ -2056,7 +2057,7 @@ impl SettingsPage {
         .detach();
     }
 
-    fn content(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {
+    fn content(&self, s: &hopper::settings::Settings, rem: Pixels, cx: &mut Context<Self>) -> Vec<Block> {
         use hopper::cf::KeySource;
         let theme = cx.theme().clone();
         let source = hopper::cf::api_key_source().map(|(_, s)| s);
@@ -2157,7 +2158,24 @@ impl SettingsPage {
             |st, v| st.allow_sources = v,
             cx,
         ));
-        let mut rows = vec![key, browse, allow];
+        let web = {
+            let label = |n: usize| if n == 1 { "1 at a time".to_string() } else { format!("{n} at once") };
+            let now = s.web_downloads();
+            let store = self.store.clone();
+            Row::new("web-downloads").control(
+                div().w(rems(10.)).child(widgets::picker(
+                    "web-downloads",
+                    label(now),
+                    (1..=8).map(|n| (label(n), n == now)).collect(),
+                    rem,
+                    Rc::new(move |ix, _, cx| {
+                        let n = (ix + 1).min(8) as u8;
+                        store.update(cx, |s, cx| s.update_settings(|st| st.web_downloads = n, cx));
+                    }),
+                )),
+            )
+        };
+        let mut rows = vec![key, browse, web, allow];
         if s.allow_sources {
             let saved = hopper::sources::http::has_github_token();
             let typed = !self.gh_token.read(cx).value().trim().is_empty();
@@ -2852,7 +2870,7 @@ impl Render for SettingsPage {
             Category::Java => self.java(&s, window, cx),
             Category::Minecraft => self.minecraft(&s, window, cx),
             Category::Servers => self.servers(&s, window, cx),
-            Category::Content => self.content(&s, cx),
+            Category::Content => self.content(&s, window.rem_size(), cx),
             Category::Appearance => self.appearance(&s, window, cx),
             Category::Updates => self.updates(cx),
             Category::Advanced => self.advanced(&s, window.rem_size(), cx),

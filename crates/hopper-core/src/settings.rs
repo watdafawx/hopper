@@ -166,6 +166,9 @@ pub struct Settings {
     /// Days a downloaded pack (kept to compare and install updates without
     /// downloading it again) stays after it was last used; 0 keeps them.
     pub pack_keep_days: u32,
+    /// How many website-only CurseForge files Hopper's download window
+    /// gets at once (1 to 8), each in its own page.
+    pub web_downloads: u8,
     /// Deleted instances, worlds and backups are removed outright instead
     /// of filling the Recycle Bin (on C:) with gigabytes.
     pub delete_permanently: bool,
@@ -515,6 +518,7 @@ impl Default for Settings {
             last_sort: String::new(),
             dependents: String::new(),
             pack_keep_days: 30,
+            web_downloads: 4,
             delete_permanently: true,
             allow_sources: false,
             // A new user: Hopper shows its setup on the first start.
@@ -537,6 +541,12 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// [`Settings::web_downloads`], kept to 1..=8 (an old or hand-edited
+    /// file may hold 0 or more).
+    pub fn web_downloads(&self) -> usize {
+        self.web_downloads.clamp(1, 8) as usize
+    }
+
     fn path() -> Option<PathBuf> {
         crate::paths::dirs().map(|d| d.data_dir().join("settings.json"))
     }
