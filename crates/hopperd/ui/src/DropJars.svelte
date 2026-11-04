@@ -68,10 +68,10 @@
     if (!working) run();
   }
 
-  function send(sid, f, replace, row) {
+  function send(sid, f, conflict, row) {
     return new Promise((resolve) => {
       const x = new XMLHttpRequest();
-      x.open('POST', `/api/v1/servers/${encodeURIComponent(sid)}/mods/upload?name=${encodeURIComponent(f.name)}${replace ? '&replace=1' : ''}`);
+      x.open('POST', `/api/v1/servers/${encodeURIComponent(sid)}/mods/upload?name=${encodeURIComponent(f.name)}&conflict=${conflict}`);
       x.setRequestHeader('X-Hopperd', '1');
       x.setRequestHeader('Content-Type', 'application/octet-stream');
       x.upload.onprogress = (e) => (row.pct = e.lengthComputable ? Math.round((e.loaded / e.total) * 100) : 0);
@@ -92,16 +92,24 @@
     while (queue.length) {
       const { f, row, sid } = queue.shift();
       row.state = 'up';
-      let r = await send(sid, f, false, row);
-      if (r.status === 409) {
-        // The same file name is already there: the old jar is kept in Backups.
-        const a = await choose(`${f.name} is already in mods`, { body: 'Replace it with the dropped file? The old one goes to Backups.', ok: 'Replace', alt: 'Skip' });
-        if (a !== 'ok') {
+      let r = await send(sid, f, 'ask', row);
+      if (r.status === 409 && r.body?.conflict) {
+        // The same mod is on the server already (matched by the id inside
+        // the jar, so a new version with another file name counts).
+        const c = r.body.conflict;
+        const v = (x) => (x ? ` ${x}` : '');
+        const same = c.old_version && c.old_version === c.new_version;
+        const a = await choose(`Replace ${c.mod}${v(c.old_version)} with${v(c.new_version) || ' this file'}?`, {
+          body: `${c.old_file} is on the server${same ? ' with the same version' : ''}. The old jar goes to Backups, where it can be put back. Cancel skips ${f.name}.`,
+          ok: 'Replace',
+          alt: c.same_name ? '' : 'Keep both',
+        });
+        if (!a) {
           row.state = 'skip';
           row.note = 'Skipped';
           continue;
         }
-        r = await send(sid, f, true, row);
+        r = await send(sid, f, a === 'ok' ? 'replace' : 'both', row);
       }
       if (r.status === 200) {
         row.state = 'done';

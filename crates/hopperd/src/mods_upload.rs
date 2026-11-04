@@ -4,13 +4,15 @@
 //! for a jar dropped on an instance; the name is cleaned first so nothing can
 //! land outside that folder.
 
-use crate::api::{ApiError, ApiResult, bad};
+use crate::api::{ApiResult, bad};
 use crate::App;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::routing::post;
+use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use hopper_core::install;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path as FsPath;
@@ -62,10 +64,6 @@ pub fn dest_in(mods_dir: &FsPath, name: &str) -> Result<std::path::PathBuf, Stri
     Ok(dest)
 }
 
-fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
-    ApiError(code, msg.into())
-}
-
 async fn upload(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -73,15 +71,14 @@ async fn upload(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
     body: Body,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Response> {
     let e = crate::mods_api::entry(&app, &headers, &method, &id)?;
     let name = clean_name(q.get("name").map_or("", |s| s.as_str())).map_err(bad)?;
-    let replace = q.get("replace").is_some_and(|v| v == "1");
+    // What to do when the jar is a mod the server has already: "ask" (the
+    // default) answers 409 with what's there, "replace" or "both" go on.
+    let on_conflict = q.get("conflict").map_or("ask", |s| s.as_str()).to_string();
     let mods = e.root.join("mods");
     let dest = dest_in(&mods, &name).map_err(bad)?;
-    if dest.exists() && !replace {
-        return Err(err(StatusCode::CONFLICT, format!("{name} is already in mods.")));
-    }
     tokio::fs::create_dir_all(&mods).await.map_err(bad)?;
     // Written beside the target and moved in when whole, so a dropped
     // connection never leaves half a jar the server would try to load.
@@ -112,28 +109,63 @@ async fn upload(
         let _ = tokio::fs::remove_file(&part).await;
         return Err(bad(format!("{name} isn't a jar file.")));
     }
-    let (root, dest2, part2) = (e.root.clone(), dest.clone(), part.clone());
-    let replaced = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+    let (e2, dest2, part2, name2) = (e.clone(), dest.clone(), part.clone(), name.clone());
+    let done = tokio::task::spawn_blocking(move || -> anyhow::Result<Result<bool, Value>> {
+        let mods = dest2.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let new = hopper_core::scan::scan_file(&part2);
+        let new_version = if new.version.is_empty() { hopper_core::scan::version_from_file_name(&name2) } else { new.version.clone() };
+        // The same mod already on the server: by its id from the jar, not
+        // by file name (a new version usually has another name); the same
+        // file name is the same mod whatever the jar says.
+        let found: Vec<_> = hopper_core::scan::scan_folder(&mods)?
+            .into_iter()
+            .filter(|m| m.file_name.eq_ignore_ascii_case(&name2) || (!new.mod_id.is_empty() && m.mod_id == new.mod_id))
+            .collect();
+        let same_name = found.iter().any(|m| m.file_name.eq_ignore_ascii_case(&name2));
+        if !found.is_empty() {
+            if on_conflict == "ask" {
+                let old = &found[0];
+                let old_version = if old.version.is_empty() { hopper_core::scan::version_from_file_name(&old.file_name) } else { old.version.clone() };
+                let _ = std::fs::remove_file(&part2);
+                return Ok(Err(json!({
+                    "error": format!("{} is already on the server.", new.mod_name),
+                    "conflict": { "mod": new.mod_name, "old_file": old.file_name, "old_version": old_version, "new_version": new_version, "same_name": same_name },
+                })));
+            }
+            if on_conflict == "both" && same_name {
+                let _ = std::fs::remove_file(&part2);
+                anyhow::bail!("{name2} is already there under that name; both can't stay.");
+            }
+        }
         let mut replaced = false;
-        // The old file with that name is kept aside, as desktop does.
-        if dest2.exists() {
-            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let keep = root.join(".hopper-backups").join(stamp.to_string()).join("mods");
-            std::fs::create_dir_all(&keep)?;
-            std::fs::rename(&dest2, keep.join(dest2.file_name().unwrap_or_default()))?;
-            replaced = true;
+        if on_conflict == "replace" {
+            // The old jars go where a removal puts them (Backups in the Mods
+            // tab), so they can come back.
+            let mut inst = crate::mods_api::instance_of(&e2)?;
+            for m in &found {
+                let i = crate::mods_api::index_of(&mut inst, &m.file_name)?;
+                install::remove(&mut inst, i).map_err(install::explain_locked)?;
+                replaced = true;
+            }
         }
         std::fs::rename(&part2, &dest2)?;
-        Ok(replaced)
+        Ok(Ok(replaced))
     })
     .await
-    .map_err(bad)?
-    .map_err(|x| bad(format!("{x:#}")))?;
+    .map_err(bad)?;
+    let replaced = match done {
+        Err(x) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(bad(format!("{x:#}")));
+        }
+        Ok(Err(conflict)) => return Ok((StatusCode::CONFLICT, Json(conflict)).into_response()),
+        Ok(Ok(r)) => r,
+    };
     // The jar is new: the last update check doesn't know it.
     crate::mods_api::forget_updates(&e.id);
     // TODO(server-live-sync): broadcast the mod-changed event here once
     // claude/distracted-banach-512d85 is on main.
-    Ok(Json(json!({ "name": name, "size": size, "replaced": replaced, "running": e.server.state().is_alive() })))
+    Ok(Json(json!({ "name": name, "size": size, "replaced": replaced, "running": e.server.state().is_alive() })).into_response())
 }
 
 #[cfg(test)]
