@@ -153,6 +153,9 @@ impl Render for ImageViewer {
                     .rounded(theme.radius_lg)
                     .bg(theme.muted)
                     .overflow_hidden()
+                    .relative()
+                    // One image per notch: keep the window's smoother off it.
+                    .child(crate::smooth_scroll::stepped_area())
                     .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.on_wheel(e, cx)))
                     .child(picture),
             )
