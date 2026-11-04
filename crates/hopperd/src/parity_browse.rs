@@ -62,7 +62,7 @@ async fn plan(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Q
             })
             .collect();
         let total: u64 = p.steps.iter().map(|(_, f)| f.file_length).sum();
-        let kept: Vec<Value> = p.kept.iter().map(|(n, on)| json!({ "name": n, "on": on })).collect();
+        let kept: Vec<Value> = p.kept.iter().map(|k| json!({ "id": k.id.to_string(), "source": if hopper_core::modrinth::is_mr(k.id) { "modrinth" } else { "curseforge" }, "name": k.name, "icon": k.icon, "on": k.on })).collect();
         let notes: Vec<&String> = p.notes.iter().chain(&p.suggest).collect();
         Ok(json!({
             "file": { "id": f.id.to_string(), "name": f.display_name, "size": f.file_length },

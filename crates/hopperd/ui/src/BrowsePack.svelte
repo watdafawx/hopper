@@ -10,7 +10,7 @@
   import { ArrowLeft, Download, RefreshCw, Clock, ExternalLink, Server, Hammer, Plus, ChevronDown, ChevronRight, ChevronLeft, X, Scale, Check, Monitor, Box, Blocks, Hash, Tag, Code, Bug, BookOpen, MessageCircle, Layers, CircleCheck, RotateCcw, TriangleAlert, Info } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { session } from './lib/me.svelte.js';
-  import { SITE, TYPES, SIDE, LOADER_NAME, count, ago, date, preset, size, andList, browseHash } from './lib/browse.js';
+  import { SITE, TYPES, SIDE, LOADER_NAME, count, ago, date, preset, size, andList, browseHash, store } from './lib/browse.js';
   import BrowseRich from './BrowseRich.svelte';
   import FeaturedTag from './lib/FeaturedTag.svelte';
   import Changelog from './lib/Changelog.svelte';
@@ -37,6 +37,12 @@
   let vError = $state('');
   let onlyMatching = $state(untrack(() => !!(mc || loader)));
   let openLog = $state({});
+  // The install card's dependency list: the player's own fold, kept across visits; null follows the default.
+  let depsOpen = $state(store('install-deps') === 'open' ? true : store('install-deps') === 'closed' ? false : null);
+  function toggleDeps(open) {
+    depsOpen = !open;
+    store('install-deps', depsOpen ? 'open' : 'closed');
+  }
   let logs = $state({});
   let viewer = $state(-1);
   let deps = $state(null); // null: loading; [] or the list; { error }
@@ -352,18 +358,26 @@
           {:else if target}<button class="btn pri {p.source}" disabled={!canInstall || p.distribution === false} onclick={() => install()}><Download size={14} />Install</button>{/if}
         </div>
         {#if target && !have && plan && plan !== 'loading' && !plan.error}
-          {#if plan.extra.length}
+          {@const on = plan.kept.filter((k) => k.on)}
+          {@const off = plan.kept.filter((k) => !k.on).map((k) => k.name)}
+          {#if plan.extra.length || on.length}
+            <!-- Folded by default when long or when nothing is downloaded; the choice is remembered (desktop's install card). -->
+            {@const open = depsOpen ?? (plan.extra.length > 0 && plan.extra.length + on.length <= 3)}
             <div class="also">
-              <div class="lbl">Also downloads</div>
-              {#each plan.extra as d (d.source + d.id)}
-                {#snippet tags()}<span class="tiny muted">{size(d.size)}</span>{/snippet}
-                {@render row(d, { sub: d.by ? `Needed by ${d.by}` : 'Required', tags })}
-              {/each}
+              <button class="lbl fold" aria-expanded={open} onclick={() => toggleDeps(open)}>{#if open}<ChevronDown size={12} />{:else}<ChevronRight size={12} />{/if}{plan.extra.length ? 'Also downloads' : `Already on ${target.name}`}</button>
+              {#if open}
+                {#each plan.extra as d (d.source + d.id)}
+                  {#snippet tags()}<span class="tiny muted">{size(d.size)}</span>{/snippet}
+                  {@render row(d, { sub: d.by ? `Needed by ${d.by}` : 'Required', tags })}
+                {/each}
+                {#if plan.extra.length && on.length}<div class="lbl sub">Already on {target.name}</div>{/if}
+                {#each on as k (k.source + k.id)}
+                  {#snippet tags()}<span class="tiny muted">Already installed</span>{/snippet}
+                  {@render row({ ...k, kind: 'mods' }, { sub: 'Required', tags })}
+                {/each}
+              {/if}
             </div>
           {/if}
-          {@const on = plan.kept.filter((k) => k.on).map((k) => k.name)}
-          {@const off = plan.kept.filter((k) => !k.on).map((k) => k.name)}
-          {#if on.length}<div class="line muted"><Check size={12} />Already on {target.name}: {andList(on)}</div>{/if}
           {#if off.length}<div class="line warn"><RotateCcw size={12} />Turns back on: {andList(off)}</div>{/if}
           {#each plan.notes as n (n)}<div class="line warn"><TriangleAlert size={12} />{n}</div>{/each}
         {/if}
@@ -514,6 +528,9 @@
   .btn.pri.modrinth { background: #1bd96a; border-color: #1bd96a; color: #06210f; }
   .also { border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 1px; }
   .also .lbl { padding: 0 8px 4px; }
+  .also .lbl.fold { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding-bottom: 4px; }
+  .also .lbl.fold:hover { color: var(--text); }
+  .also .lbl.sub { padding-top: 8px; }
   .line { display: flex; gap: 6px; align-items: flex-start; padding: 0 8px; font-size: 11.5px; }
   .line :global(svg) { flex: none; margin-top: 2px; }
   .prow { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--radius); text-align: left; width: 100%; min-width: 0; }

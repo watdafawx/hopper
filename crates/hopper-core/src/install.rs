@@ -295,10 +295,27 @@ pub struct Plan {
     pub by: HashMap<u64, String>,
     /// Required mods the instance already has: name, and whether it is on
     /// (an off one is turned back on).
-    pub kept: Vec<(String, bool)>,
+    pub kept: Vec<Kept>,
     /// Installed entries that stand in for a dependency from the other
     /// site (CurseForge's Pipez for Modrinth's), by project id.
     pub same: Vec<u64>,
+}
+
+/// A required mod the instance already has, listed in the install card like
+/// the ones it downloads (icon, name, opens its page).
+#[derive(Clone, Debug, Default)]
+pub struct Kept {
+    pub id: u64,
+    pub name: String,
+    pub icon: String,
+    /// Off ones are turned back on.
+    pub on: bool,
+}
+
+impl Kept {
+    fn of(a: &crate::instances::Addon) -> Self {
+        Self { id: a.project_id, name: a.name.clone(), icon: a.icon.clone(), on: a.enabled }
+    }
 }
 
 impl Plan {
@@ -340,7 +357,7 @@ pub fn plan(inst: &Instance, m: &cf::Mod, file: &cf::File, job: Option<&Job>) ->
                 if let Some(a) = inst.addons.iter().find(|a| a.project_id == dep)
                     && (is_mod(&pm) || a.class_id == cf::CLASS_MODS)
                 {
-                    out.kept.push((a.name.clone(), a.enabled));
+                    out.kept.push(Kept::of(a));
                 }
                 continue;
             }
@@ -352,7 +369,7 @@ pub fn plan(inst: &Instance, m: &cf::Mod, file: &cf::File, job: Option<&Job>) ->
             // swap the entry (and its history) for a new one.
             if let Some(a) = crate::browse::installed_addon(inst, &dm) {
                 if is_mod(&pm) || is_mod(&dm) {
-                    out.kept.push((a.name.clone(), a.enabled));
+                    out.kept.push(Kept::of(a));
                     out.same.push(a.project_id);
                 }
                 continue;

@@ -1611,6 +1611,7 @@ impl BrowseView {
                             .extra()
                             .iter()
                             .filter_map(|(d, _)| d.icon().map(str::to_string))
+                            .chain(p.kept.iter().filter(|k| !k.icon.is_empty()).map(|k| k.icon.clone()))
                             .collect();
                         this.store
                             .update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
@@ -3860,7 +3861,8 @@ impl BrowseView {
             .when_some(fetch.as_ref(), |c, v| c.child(crate::fetch_progress::status_line(&self.store, v, "panel-fetch", cx)));
 
         if let Load::Ready(p) = plan {
-            if !p.extra().is_empty() {
+            let kept_on: Vec<&hopper::install::Kept> = p.kept.iter().filter(|k| k.on).collect();
+            if !p.extra().is_empty() || !kept_on.is_empty() {
                 let rows = p.extra().iter().map(|(d, f)| {
                     let icon = d.icon().and_then(|u| store.image(u)).map(Path::to_path_buf);
                     let by = p.by.get(&d.id).filter(|b| **b != m.name);
@@ -3894,6 +3896,61 @@ impl BrowseView {
                         )
                         .child(widgets::caption(size(f.file_length), cx).text_xs().flex_none())
                 });
+                // Mods the instance already has: the same row, with
+                // "Already installed" where the download size would be.
+                let have_rows = kept_on.iter().map(|k| {
+                    let url = (!k.icon.is_empty()).then_some(k.icon.as_str());
+                    let icon = url.and_then(|u| store.image(u)).map(Path::to_path_buf);
+                    let id = k.id;
+                    h_flex()
+                        .id(ElementId::Name(format!("plan-have:{}", k.id).into()))
+                        .gap_3()
+                        .px_2()
+                        .py_1p5()
+                        .rounded(theme.radius)
+                        .when(id != 0, |r| {
+                            r.clickable(cx)
+                                .hover(|s| s.bg(theme.list_hover))
+                                .on_click(cx.listener(move |this, _, _, cx| this.show_project(id, cx)))
+                        })
+                        .child(crate::logos::thumb(&self.logos, url, icon.as_deref(), rems(1.75), cx))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_sm().truncate().child(k.name.clone()))
+                                .child(widgets::caption("Required", cx).text_xs()),
+                        )
+                        .child(widgets::caption("Already installed", cx).text_xs().flex_none())
+                });
+                // Folds shut by default when it is long, or when nothing is
+                // downloaded; the player's own choice is kept in settings.
+                let (open_key, shut_key) = ("install-deps:open", "install-deps:closed");
+                let groups = &self.store.read(cx).settings().collapsed_groups;
+                let n_rows = p.extra().len() + kept_on.len();
+                let open = if groups.contains(open_key) {
+                    true
+                } else if groups.contains(shut_key) {
+                    false
+                } else {
+                    !p.extra().is_empty() && n_rows <= 3
+                };
+                let flip = {
+                    let store = self.store.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        store.update(cx, |s, cx| {
+                            s.update_settings(
+                                |st| {
+                                    let (on, off) = if open { (shut_key, open_key) } else { (open_key, shut_key) };
+                                    st.collapsed_groups.remove(off);
+                                    st.collapsed_groups.insert(on.to_string());
+                                },
+                                cx,
+                            )
+                        })
+                    }
+                };
+                let title = if p.extra().is_empty() { "ALREADY IN THIS INSTANCE" } else { "ALSO DOWNLOADS" };
                 card = card.child(
                     v_flex()
                         .gap_0p5()
@@ -3901,15 +3958,39 @@ impl BrowseView {
                         .border_t_1()
                         .border_color(theme.border)
                         .child(
-                            div()
+                            h_flex()
+                                .id("plan-deps-fold")
+                                .gap_1p5()
                                 .px_2()
                                 .pb_1()
+                                .rounded(theme.radius)
                                 .text_xs()
                                 .font_semibold()
                                 .text_color(theme.muted_foreground)
-                                .child("ALSO DOWNLOADS"),
+                                .clickable(cx)
+                                .hover(|s| s.text_color(theme.foreground))
+                                .on_click(flip)
+                                .child(
+                                    Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                                        .xsmall(),
+                                )
+                                .child(title),
                         )
-                        .children(rows),
+                        .when(open, |c| {
+                            c.children(rows).when(!p.extra().is_empty() && !kept_on.is_empty(), |c| {
+                                c.child(
+                                    div()
+                                        .px_2()
+                                        .pt_2()
+                                        .pb_1()
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(theme.muted_foreground)
+                                        .child("ALREADY IN THIS INSTANCE"),
+                                )
+                            })
+                            .children(have_rows)
+                        }),
                 );
             }
             let line = |icon: IconName, color: Hsla, text: String| {
@@ -3922,15 +4003,7 @@ impl BrowseView {
                     .child(Icon::new(icon).xsmall().flex_none())
                     .child(div().flex_1().min_w_0().child(text))
             };
-            let on: Vec<String> = p.kept.iter().filter(|(_, e)| *e).map(|(n, _)| n.clone()).collect();
-            let off: Vec<String> = p.kept.iter().filter(|(_, e)| !*e).map(|(n, _)| n.clone()).collect();
-            if !on.is_empty() {
-                card = card.child(line(
-                    IconName::Check,
-                    theme.muted_foreground,
-                    format!("Already in this instance: {}", and_list(&on)),
-                ));
-            }
+            let off: Vec<String> = p.kept.iter().filter(|k| !k.on).map(|k| k.name.clone()).collect();
             if !off.is_empty() {
                 card = card.child(line(
                     IconName::RotateCcw,
