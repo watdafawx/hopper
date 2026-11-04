@@ -415,6 +415,26 @@ pub fn own_version(path: &Path) -> String {
     jar(path).and_then(|j| j.versions.first().map(|v| v.1.clone())).unwrap_or_default()
 }
 
+/// The mod ids the jar at `path` names as needed or optional.
+pub fn wants(path: &Path) -> Vec<String> {
+    jar(path).map(|j| j.requires.iter().chain(&j.optional).map(|(i, _)| i.clone()).collect()).unwrap_or_default()
+}
+
+/// The version range the jar at `path` declares for mod `id` (needed or
+/// optional), when it declares one that limits anything.
+pub fn range_for(path: &Path, id: &str) -> Option<String> {
+    let j = jar(path)?;
+    let forge = j.forge.as_ref().map(|f| [&f.0, &f.1]);
+    let fabric = j.fabric.as_ref().map(|f| &f.requires);
+    [&j.requires, &j.optional]
+        .into_iter()
+        .chain(forge.into_iter().flatten())
+        .chain(fabric)
+        .flatten()
+        .find(|(i, r)| i.eq_ignore_ascii_case(id) && !matches!(r.trim(), "" | "*" | "[0,)" | ">=0"))
+        .map(|(_, r)| r.clone())
+}
+
 /// Whether the jar at `path` asks for a newer `id` than `have`, the way
 /// [`blockers`] finds a wrong version or too old a loader.
 pub fn needs_newer(path: &Path, id: &str, have: &str) -> bool {

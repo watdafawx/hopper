@@ -486,6 +486,15 @@ pub fn advice(text: &str, log: &str, native: &str, server: bool) -> String {
     if !server && (REGISTRY_SYNC.is_match(text) || REGISTRY_SYNC.is_match(log)) {
         return "The server has content this game doesn't: your mods don't match the server's. Install the server's mod list (same mods, same versions).".into();
     }
+    // The report's error came while the loader was putting the registries
+    // back after an earlier failure, and no log of that run says which: the
+    // report's own error isn't the cause.
+    if text.contains(crate::crashdetect::UNDO_FRAME) && !log.contains("dispatch for modid") && !log.contains("Failed to create mod instance") {
+        let what = if server { "server" } else { "game" };
+        return format!(
+            "This error came while the loader was undoing the {what}'s registries after an earlier error, so it isn't the cause. The first error is in the log of that start (logs/latest.log, or debug.log): look for \"Caught exception during event\" and the mod it names."
+        );
+    }
     // A loop no report frame explains, and no mod in the log either: say
     // what happened and where to look.
     if let Some(l) = crate::crashloop::truncated(text)

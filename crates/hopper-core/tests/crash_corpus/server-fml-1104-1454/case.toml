@@ -1,0 +1,8 @@
+side = "server"
+mods = "884894e728"
+report = "crash-2026-11-04_14.54.48-fml.txt"
+problem = 14
+expect = ["mysticalagricultureplus"]
+at_least = "Certain"
+note = "Mystical Agriculture Plus was built for another Logistics Networks (NoSuchMethodError on NodeUpgradeItem.<init>) and failed to register. The report's chipped:spruce_torch error came while NeoForge undid the registries after that: a knock-on, as is Cognition's."
+pass = true

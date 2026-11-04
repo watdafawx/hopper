@@ -40,7 +40,8 @@ note = "What really caused it, in a sentence."
 ```
 
 `_mods/<hash>.txt.gz` is the instance's mod list at the time, one jar per line
-(tab-separated): file, mod ids, name, version, required mods, asset/data
+(tab-separated): file, mod ids, name, version, required mods (`id` or
+`id=range` when the jar limits the version), asset/data
 namespaces, the class packages the case's texts name, mixin configs, and `gone`
 when the jar wasn't there any more to read. The test makes a fake jar per line
 (metadata, folders and empty classes, no code), so the mod index and the

@@ -1,0 +1,9 @@
+side = "server"
+mods = "884894e728"
+report = "crash-2026-11-04_14.54.48-fml.txt"
+problem = 14
+expect = []
+advice = "undoing"
+scored = false
+note = "The same crash with its log lost: the report alone says its error came while NeoForge undid the registries (revertToVanilla), so it names no mod and points at the log."
+pass = true

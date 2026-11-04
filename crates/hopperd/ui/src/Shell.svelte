@@ -8,7 +8,7 @@
   import {
     LayoutDashboard, Compass, ChevronLeft, ChevronRight, Search, RefreshCw, Settings as Gear, LogOut,
     Plus, Play, Square, RotateCw, Server, Terminal, Folder, Puzzle, Earth, Users, Archive, CalendarClock, SlidersHorizontal,
-    CircleCheck, CircleAlert, FolderOpen, X as Close,
+    CircleCheck, CircleAlert, FolderOpen, Stethoscope, X as Close,
   } from '@lucide/svelte';
   import { loaderText } from './lib/format.js';
   import { boot } from './lib/boot.svelte.js';
@@ -120,7 +120,7 @@
     { id: 'browse', label: 'Browse', icon: Compass, to: '/browse' },
   ];
   const TABS = [
-    ['console', 'Console', Terminal], ['files', 'Files', Folder], ['mods', 'Mods', Puzzle], ['configs', 'Configs', SlidersHorizontal], ['worlds', 'Worlds', Earth],
+    ['console', 'Console', Terminal], ['logs', 'Logs & crashes', Stethoscope], ['files', 'Files', Folder], ['mods', 'Mods', Puzzle], ['configs', 'Configs', SlidersHorizontal], ['worlds', 'Worlds', Earth],
     ['players', 'Players', Users], ['backups', 'Backups', Archive], ['schedule', 'Schedule', CalendarClock], ['settings', 'Settings', SlidersHorizontal],
   ];
 

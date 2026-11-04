@@ -143,6 +143,9 @@ pub struct SyncPanel {
     crash: Option<ServerCrash>,
     /// The crash card's mods (jars) whose "Why?" list is open.
     why_open: std::collections::HashSet<String>,
+    /// "Turn off…" asked: the jars ticked in its list (nothing is turned
+    /// off until its confirm).
+    turn_off_pick: Option<std::collections::HashSet<String>>,
     /// A change put back from the crash card, with its crash's time: the
     /// crash no longer names it, so the card keeps it to say it's back.
     crash_back: Option<(i64, hopper::crashdetect::Changed)>,
@@ -280,6 +283,7 @@ impl SyncPanel {
             pack_marker: None,
             crash: None,
             why_open: Default::default(),
+            turn_off_pick: None,
             crash_back: None,
             crash_configs: Vec::new(),
             drift: None,
@@ -1666,36 +1670,73 @@ impl SyncPanel {
         cx.notify();
     }
 
-    /// "Turn off <mod>" for these jars.
+    /// "Turn off <mod>…" for these jars: it only opens the list of them
+    /// (each ticked, with why), and the list's confirm turns off the ticked.
     fn crash_turn_off(&self, files: Vec<String>, label: String, blocked: bool, cx: &mut Context<Self>) -> AnyElement {
         Button::new("srv-crash-turn-off")
             .small()
             .outline()
             .icon(IconName::PowerOff)
             .label(label)
-            .tooltip("Certain and Likely mods. Turn them back on in the server's Mods.")
-            .disabled(blocked)
+            .tooltip("Shows the mods first. Turn them back on in the server's Mods.")
+            .disabled(blocked || self.turn_off_pick.is_some())
             .on_click(cx.listener(move |this, _, _, cx| {
-                let files = files.clone();
-                this.crash_fix(
-                    move |root| {
-                        let n = files.len();
-                        match hopper::hopperd::locate(root) {
-                            Some(r) => {
-                                let (c, id, _) = r?;
-                                c.post(
-                                    &format!("/servers/{}/mods/toggle-many", hopper::hopperd::enc(&id)),
-                                    serde_json::json!({ "files": files, "enabled": false }),
-                                )?;
-                            }
-                            None => hopper::crashdetect::turn_off_in(root, &files)?,
-                        }
-                        Ok(if n == 1 { "Turned off 1 mod.".into() } else { format!("Turned off {n} mods.") })
-                    },
-                    cx,
-                );
+                this.turn_off_pick = Some(files.iter().cloned().collect());
+                cx.notify();
             }))
             .into_any_element()
+    }
+
+    /// The list "Turn off…" opened, with its confirm and cancel.
+    fn crash_turn_off_list(
+        &self,
+        suspects: &[&hopper::crashdetect::Suspect],
+        link: crate::crash_view::Link,
+        readable: &dyn Fn(&str) -> String,
+        blocked: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let picked = self.turn_off_pick.as_ref()?;
+        let view = cx.entity().downgrade();
+        let toggle: std::rc::Rc<dyn Fn(String, bool, &mut Window, &mut App)> = std::rc::Rc::new(move |file, on, _, cx| {
+            view.update(cx, |this, cx| {
+                if let Some(p) = this.turn_off_pick.as_mut() {
+                    if on {
+                        p.insert(file);
+                    } else {
+                        p.remove(&file);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        let confirm = cx.listener(|this, _, _, cx| {
+            let Some(picked) = this.turn_off_pick.take() else { return };
+            let files: Vec<String> = picked.into_iter().collect();
+            this.crash_fix(
+                move |root| {
+                    let n = files.len();
+                    match hopper::hopperd::locate(root) {
+                        Some(r) => {
+                            let (c, id, _) = r?;
+                            c.post(
+                                &format!("/servers/{}/mods/toggle-many", hopper::hopperd::enc(&id)),
+                                serde_json::json!({ "files": files, "enabled": false }),
+                            )?;
+                        }
+                        None => hopper::crashdetect::turn_off_in(root, &files)?,
+                    }
+                    Ok(if n == 1 { "Turned off 1 mod.".into() } else { format!("Turned off {n} mods.") })
+                },
+                cx,
+            );
+        });
+        let cancel = cx.listener(|this, _, _, cx| {
+            this.turn_off_pick = None;
+            cx.notify();
+        });
+        Some(crate::crash_view::turn_off_picker("srv-crash", suspects, picked, link, readable, toggle, confirm, cancel, blocked, "server", cx))
     }
 
     /// The server's last start crashed: the same card a game crash gets
@@ -1727,15 +1768,29 @@ impl SyncPanel {
         let readable = |why: &str| {
             named.iter().fold(why.to_string(), |w, (id, n)| w.replace(&format!(" {id},"), &format!(" {n},")).replace(&format!(" {id} "), &format!(" {n} ")))
         };
-        let turn_off: Vec<String> = c
-            .suspects
-            .iter()
-            .filter(|s| s.certainty <= Certainty::Likely && !s.client_only && on(&s.file_name))
-            .map(|s| s.file_name.clone())
-            .collect();
+        let turn_off_mods: Vec<&hopper::crashdetect::Suspect> =
+            hopper::crashdetect::to_turn_off(&c).into_iter().filter(|s| on(&s.file_name)).collect();
+        let turn_off: Vec<String> = turn_off_mods.iter().map(|s| s.file_name.clone()).collect();
         let turn_off_label = match turn_off.len() {
-            1 => format!("Turn off {}", display(&turn_off[0])),
-            n => format!("Turn off the {n} likely ones"),
+            1 => format!("Turn off {}…", display(&turn_off[0])),
+            n => format!("Turn off {n} mods…"),
+        };
+        let turn_off_list = self.crash_turn_off_list(&turn_off_mods, &link, &readable, blocked, cx);
+        // Each mod's row: its reason, the other mod it doesn't match, what
+        // to do, and what Hopper weighed ("Why?").
+        let row = |i: usize, s: &hopper::crashdetect::Suspect, mut below: Vec<AnyElement>, cx: &mut Context<Self>| -> AnyElement {
+            below.extend(crash_view::partner_line(s, &link, cx));
+            below.extend(crash_view::steps_list(s, &readable, cx));
+            let key = s.file_name.clone();
+            let open = self.why_open.contains(&key);
+            let toggle = cx.listener(move |this, _, _, cx| {
+                if !this.why_open.remove(&key) {
+                    this.why_open.insert(key.clone());
+                }
+                cx.notify();
+            });
+            below.extend(crash_view::why_fold(ElementId::Name(format!("srv-crash-why:{i}").into()), s, open, &readable, toggle, cx));
+            crash_view::suspect_row(link(&s.file_name, &format!("row{i}"), cx), s, readable(&s.why), below, cx).into_any_element()
         };
         let st = c.stopped.clone().filter(|st| c.suspects.iter().any(|s| s.file_name == st.file_name));
         let mut body: Vec<AnyElement> = Vec::new();
@@ -1822,15 +1877,23 @@ impl SyncPanel {
                 }
                 body.push(fix.into_any_element());
             }
+            body.extend(turn_off_list);
             let now_file = changed.as_ref().map(|ch| {
                 if is_back { ch.backup.file_name().map_or(ch.file_name.clone(), |n| n.to_string_lossy().into_owned()) } else { ch.file_name.clone() }
             });
             body.push(crash_view::what_happened(&c, st, changed.as_ref().zip(now_file.as_deref()), &link, cx));
+            // Every mod the crash names, with its reason and what to do: the
+            // story says what happened, these say why and which to change.
+            let rows: Vec<AnyElement> = c.suspects.iter().enumerate().map(|(i, s)| row(i, s, Vec::new(), cx)).collect();
+            if !rows.is_empty() {
+                body.push(widgets::caption("Mods in this crash, most likely first:", cx).text_xs().into_any_element());
+                body.push(v_flex().children(rows).into_any_element());
+            }
         } else {
             if !c.headline.is_empty() {
                 body.push(div().text_sm().font_medium().line_clamp(2).child(c.headline.clone()).into_any_element());
             }
-            let likely: Vec<String> = c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely).take(3).map(|s| display(&s.file_name)).collect();
+            let likely: Vec<String> = c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.knock_on).map(|s| display(&s.file_name)).collect();
             if !likely.is_empty() {
                 body.push(
                     h_flex()
@@ -1871,18 +1934,8 @@ impl SyncPanel {
                         })
                         .into_iter()
                         .collect();
-                    let mut below: Vec<AnyElement> = below.into_iter().map(|b| h_flex().child(b).into_any_element()).collect();
-                    // What Hopper weighed for it, folded under the reason.
-                    let key = s.file_name.clone();
-                    let open = self.why_open.contains(&key);
-                    let toggle = cx.listener(move |this, _, _, cx| {
-                        if !this.why_open.remove(&key) {
-                            this.why_open.insert(key.clone());
-                        }
-                        cx.notify();
-                    });
-                    below.extend(crash_view::why_fold(ElementId::Name(format!("srv-crash-why:{i}").into()), s, open, &readable, toggle, cx));
-                    crash_view::suspect_row(link(&s.file_name, &format!("row{i}"), cx), s, readable(&s.why), below, cx).into_any_element()
+                    let below: Vec<AnyElement> = below.into_iter().map(|b| h_flex().child(b).into_any_element()).collect();
+                    row(i, s, below, cx)
                 })
                 .collect();
             if !rows.is_empty() {
@@ -1895,6 +1948,7 @@ impl SyncPanel {
             if !turn_off.is_empty() {
                 body.push(h_flex().pt_1().child(self.crash_turn_off(turn_off.clone(), turn_off_label.clone(), blocked, cx)).into_any_element());
             }
+            body.extend(turn_off_list);
         }
         // A mod that needs a newer mod or loader: the older copy kept in this
         // server's .hopper-backups that works. Only a folder Hopper can read
@@ -3491,24 +3545,23 @@ fn crash_addon<'a>(addons: &'a [hopper::instances::Addon], file: &str, local: Op
     }
 }
 
-/// One line for why the last start crashed: the mods Hopper is sure of
-/// ("mysticalagricultureplus failed to load", "fancymenu is client-only"),
-/// else the likely one, else the crash's headline.
+/// One line for why the last start crashed, naming every mod Hopper is
+/// sure of ("Mystical Agriculture Plus doesn't match LogisticsNetworks",
+/// "A, B and C failed to load", "fancymenu is client-only"), else the likely
+/// ones, else the crash's headline (`crashdetect::verdict`, as Hopper
+/// Server's crash list says it).
 pub(crate) fn crash_reason(c: &ServerCrash) -> String {
-    use hopper::crashdetect::Certainty;
     let name = |s: &hopper::crashdetect::Suspect| {
-        if s.mod_id.is_empty() { s.file_name.trim_end_matches(".disabled").trim_end_matches(".jar").to_string() } else { s.mod_id.clone() }
+        let file = s.file_name.trim_end_matches(".disabled").trim_end_matches(".jar");
+        let p = std::path::Path::new(&c.source);
+        // A local server's jar names itself; a remote one's by its mod id.
+        match p.parent().and_then(|d| d.parent()).map(|r| r.join("mods")).filter(|d| d.is_dir()) {
+            Some(dir) => hopper::crashdetect::jar_name(&dir, &s.file_name),
+            None if !s.mod_id.is_empty() => s.mod_id.clone(),
+            None => file.to_string(),
+        }
     };
-    let certain: Vec<_> = c.suspects.iter().filter(|s| s.certainty == Certainty::Certain).collect();
-    match (certain.first(), certain.len()) {
-        (Some(s), 1) if s.client_only => format!("{} is client-only", name(s)),
-        (Some(s), 1) => format!("{} failed to load", name(s)),
-        (Some(s), n) => format!("{} and {} more failed to load", name(s), n - 1),
-        (None, _) => match c.suspects.iter().find(|s| s.certainty == Certainty::Likely) {
-            Some(s) => format!("likely {}", name(s)),
-            None => c.headline.clone(),
-        },
-    }
+    hopper::crashdetect::verdict(c, &name)
 }
 
 /// "1 to push · 1 to update · 1 to remove" for the rows given.

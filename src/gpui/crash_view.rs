@@ -8,7 +8,7 @@
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::crashdetect::{Certainty, Changed, Crash, Stopped, Suspect};
@@ -26,6 +26,11 @@ pub fn words(t: impl Into<SharedString>) -> AnyElement {
     div().child(t.into()).into_any_element()
 }
 
+/// Small muted text that wraps (`widgets::caption` keeps to one line).
+pub fn note_text(t: impl Into<SharedString>, cx: &App) -> Div {
+    div().text_xs().text_color(cx.theme().muted_foreground).whitespace_normal().child(t.into())
+}
+
 /// "game" or "server", for the card's sentences.
 pub fn what(c: &Crash) -> &'static str {
     if c.server { "server" } else { "game" }
@@ -41,6 +46,128 @@ pub fn tag(c: Certainty, cx: &App) -> AnyElement {
     widgets::chip(color).xsmall().outline().child(c.label()).into_any_element()
 }
 
+/// A suspect's tag: how sure, or "Knock-on" for an error that only
+/// followed from another mod's failure (ignore it).
+pub fn suspect_tag(s: &Suspect, cx: &App) -> AnyElement {
+    if s.knock_on {
+        return widgets::chip(cx.theme().muted_foreground)
+            .xsmall()
+            .outline()
+            .child("Knock-on")
+            .into_any_element();
+    }
+    tag(s.certainty, cx)
+}
+
+/// "Made for another version of <mod> 1.18.0": the other mod a suspect's
+/// error is about, by its link.
+pub fn partner_line(s: &Suspect, link: Link, cx: &App) -> Option<AnyElement> {
+    let p = s.partner.as_ref()?;
+    let mut parts = vec![words("Doesn't match")];
+    parts.push(link(&p.file_name, "partner", cx));
+    if !p.version.is_empty() {
+        parts.push(words(format!("{} (installed)", p.version)));
+    }
+    Some(sentence(parts).text_xs().into_any_element())
+}
+
+/// The suspect's next steps, numbered: what to update, change or remove.
+/// `readable` turns mod ids in them into names.
+pub fn steps_list(s: &Suspect, readable: &dyn Fn(&str) -> String, cx: &App) -> Option<AnyElement> {
+    if s.steps.is_empty() {
+        return None;
+    }
+    let theme = cx.theme();
+    let rows = s.steps.iter().enumerate().map(|(i, t)| {
+        h_flex()
+            .gap_1p5()
+            .items_start()
+            .text_xs()
+            .child(div().flex_none().w(rems(1.)).text_color(theme.muted_foreground).child(format!("{}.", i + 1)))
+            .child(div().flex_1().min_w_0().whitespace_normal().child(readable(t)))
+    });
+    Some(
+        v_flex()
+            .gap_0p5()
+            .child(div().text_xs().font_semibold().text_color(theme.muted_foreground).child("What to do"))
+            .children(rows)
+            .into_any_element(),
+    )
+}
+
+/// The mods "Turn off…" would turn off, before it does: each with a tick
+/// box, its name (icon and link), how sure and why, then a confirm. `picked`
+/// holds the jars ticked. Nothing is turned off until the confirm button.
+#[allow(clippy::too_many_arguments)]
+pub fn turn_off_picker(
+    key: &str,
+    suspects: &[&Suspect],
+    picked: &std::collections::HashSet<String>,
+    link: Link,
+    readable: &dyn Fn(&str) -> String,
+    toggle: std::rc::Rc<dyn Fn(String, bool, &mut Window, &mut App)>,
+    confirm: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    blocked: bool,
+    what: &str,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let n = suspects.iter().filter(|s| picked.contains(&s.file_name)).count();
+    let rows = suspects.iter().enumerate().map(|(i, s)| {
+        let file = s.file_name.clone();
+        let on = picked.contains(&file);
+        let t = toggle.clone();
+        h_flex()
+            .gap_2()
+            .items_start()
+            .py_1()
+            .child(
+                gpui_kit::component::checkbox::Checkbox::new(SharedString::from(format!("{key}-pick-{i}")))
+                    .checked(on)
+                    .on_change(move |v: &bool, w, cx| t(file.clone(), *v, w, cx)),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(sentence(vec![link(&s.file_name, &format!("pick{i}"), cx), suspect_tag(s, cx)]).text_sm())
+                    .child(crate::crash_view::note_text(readable(&s.why), cx)),
+            )
+    });
+    let label = match n {
+        0 => "Turn off".to_string(),
+        1 => "Turn off 1 mod".to_string(),
+        n => format!("Turn off {n} mods"),
+    };
+    v_flex()
+        .gap_1()
+        .p_3()
+        .rounded(theme.radius)
+        .border_1()
+        .border_color(theme.border)
+        .child(div().text_sm().font_semibold().child("Turn off these mods?"))
+        .child(note_text(format!("Untick any to keep. Mods that need them stop loading too. Turn them back on in the {what}'s Mods."), cx))
+        .children(rows)
+        .child(
+            h_flex()
+                .gap_2()
+                .pt_1()
+                .child(
+                    Button::new(SharedString::from(format!("{key}-pick-confirm")))
+                        .small()
+                        .danger()
+                        .icon(IconName::PowerOff)
+                        .label(label)
+                        .disabled(blocked || n == 0)
+                        .on_click(confirm),
+                )
+                .child(Button::new(SharedString::from(format!("{key}-pick-cancel"))).small().ghost().label("Cancel").on_click(cancel)),
+        )
+        .into_any_element()
+}
+
 /// One mod in the list: its name, how sure, and why (with anything under
 /// it: what it needs, a button).
 pub fn suspect_row(link: AnyElement, s: &Suspect, why: String, below: Vec<AnyElement>, cx: &App) -> Div {
@@ -48,14 +175,15 @@ pub fn suspect_row(link: AnyElement, s: &Suspect, why: String, below: Vec<AnyEle
         .gap_3()
         .items_start()
         .py_1()
+        .when(s.knock_on, |d| d.opacity(0.75))
         .child(div().w(rems(16.)).flex_none().text_sm().font_semibold().child(link))
-        .child(div().flex_none().w(rems(5.)).child(tag(s.certainty, cx)))
+        .child(div().flex_none().w(rems(5.)).child(suspect_tag(s, cx)))
         .child(
             v_flex()
                 .flex_1()
                 .min_w_0()
                 .gap_1()
-                .child(widgets::caption(why, cx).text_xs().whitespace_normal())
+                .child(crate::crash_view::note_text(why, cx))
                 .children(below),
         )
 }
@@ -157,7 +285,7 @@ pub fn what_happened(c: &Crash, st: &Stopped, changed: Option<(&Changed, &str)>,
                     "stopped loading with this error:".to_string()
                 }),
             ]))
-            .when(!st.error.is_empty(), |d| d.child(widgets::caption(format!("\"{}\"", st.error), cx).text_xs().whitespace_normal()))
+            .when(!st.error.is_empty(), |d| d.child(crate::crash_view::note_text(format!("\"{}\"", st.error), cx)))
             .into_any_element(),
     ));
     if !st.skipped.is_empty() {
@@ -171,19 +299,20 @@ pub fn what_happened(c: &Crash, st: &Stopped, changed: Option<(&Changed, &str)>,
         parts.extend(st.skipped.iter().enumerate().map(|(i, f)| link(f, &format!("skip{i}"), cx)));
         steps.push((false, sentence(parts).into_any_element()));
     }
-    let knock: Vec<&str> = c.suspects.iter().filter(|s| s.certainty == Certainty::Possible).map(|s| s.file_name.as_str()).collect();
+    let knock: Vec<&str> =
+        c.suspects.iter().filter(|s| s.knock_on || s.certainty == Certainty::Possible).map(|s| s.file_name.as_str()).collect();
     if !knock.is_empty() {
         let error = c.headline.split_once(" · ").map_or(c.headline.as_str(), |(_, e)| e).to_string();
         let mut parts = vec![words(format!("Then the {thing} crashed in"))];
         parts.extend(knock.iter().enumerate().map(|(i, f)| link(f, &format!("knock{i}"), cx)));
-        parts.push(words("(Possible). That's the report's own error, a knock-on effect:"));
+        parts.push(words("(knock-on, ignore). That's the report's own error, which only followed from step 2:"));
         steps.push((
             false,
             v_flex()
                 .gap_0p5()
                 .text_color(theme.muted_foreground)
                 .child(sentence(parts))
-                .when(!error.is_empty(), |d| d.child(widgets::caption(error, cx).text_xs().whitespace_normal()))
+                .when(!error.is_empty(), |d| d.child(crate::crash_view::note_text(error, cx)))
                 .into_any_element(),
         ));
     }
