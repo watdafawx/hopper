@@ -111,7 +111,10 @@ struct Extra {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Gallery {
+    /// A small copy (350px WebP), for thumbnails.
     pub url: String,
+    /// The image as uploaded, full size.
+    pub raw_url: String,
     pub title: Option<String>,
 }
 
@@ -337,7 +340,8 @@ fn to_mod(
     categories: &[String],
     updated: String,
     created: String,
-    gallery: Vec<(String, String)>,
+    // (thumbnail, full size, title)
+    gallery: Vec<(String, String, String)>,
     extra: Extra,
 ) -> cf::Mod {
     // Loaders ride along in a hit's categories.
@@ -381,8 +385,8 @@ fn to_mod(
         allow_mod_distribution: Some(true),
         screenshots: gallery
             .into_iter()
-            .map(|(url, title)| cf::Screenshot {
-                thumbnail_url: url.clone(),
+            .map(|(thumb, url, title)| cf::Screenshot {
+                thumbnail_url: thumb,
                 url,
                 title,
             })
@@ -409,7 +413,11 @@ pub fn project_to_mod(p: &Project, author: &str) -> cf::Mod {
         p.published.clone(),
         p.gallery
             .iter()
-            .map(|g| (g.url.clone(), g.title.clone().unwrap_or_default()))
+            .map(|g| {
+                // The viewer shows the full image; `url` is a 350px copy.
+                let full = if g.raw_url.is_empty() { &g.url } else { &g.raw_url };
+                (g.url.clone(), full.clone(), g.title.clone().unwrap_or_default())
+            })
             .collect(),
         Extra {
             links: cf::Links {
@@ -545,7 +553,9 @@ pub fn search(s: &cf::Search) -> anyhow::Result<(Vec<cf::Mod>, cf::Pagination)> 
                 &h.categories,
                 h.date_modified,
                 h.date_created,
-                h.gallery.into_iter().map(|u| (u, String::new())).collect(),
+                // A hit has only the small copies; the project's page
+                // brings the full ones (see `source::page`).
+                h.gallery.into_iter().map(|u| (u.clone(), u, String::new())).collect(),
                 Extra {
                     license: Some(h.license),
                     side: Some(env(&h.client_side, &h.server_side)).filter(|s| !s.is_empty()),
@@ -887,6 +897,23 @@ pub fn sha1(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gallery_thumbs_are_the_small_copy_and_the_viewer_gets_the_original() {
+        let p: Project = serde_json::from_str(
+            r#"{"gallery":[
+                {"url":"https://cdn.modrinth.com/data/x/images/abc_350.webp","raw_url":"https://cdn.modrinth.com/data/x/images/abc.png","title":"Taiga"},
+                {"url":"https://cdn.modrinth.com/data/x/images/def_350.webp"}
+            ]}"#,
+        )
+        .unwrap();
+        let m = project_to_mod(&p, "");
+        assert_eq!(m.screenshots[0].thumb(), "https://cdn.modrinth.com/data/x/images/abc_350.webp");
+        assert_eq!(m.screenshots[0].url, "https://cdn.modrinth.com/data/x/images/abc.png");
+        assert_eq!(m.screenshots[0].title, "Taiga");
+        // No original given: the one copy serves both.
+        assert_eq!(m.screenshots[1].url, "https://cdn.modrinth.com/data/x/images/def_350.webp");
+    }
 
     #[test]
     fn version_dependencies_keep_every_relation() {

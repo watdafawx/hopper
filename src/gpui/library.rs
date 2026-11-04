@@ -433,7 +433,7 @@ impl LibraryView {
                 }
                 cx.notify()
             }),
-            cx.observe(&peek, |_, _, cx| cx.notify()),
+            crate::browse::observe_peek(&peek, cx, |_, cx| cx.notify()),
             cx.subscribe(&addons, |this, _, event, cx| this.addons_event(event, cx)),
             cx.subscribe(&worlds, |this, _, event, cx| this.content_event(event, cx)),
             cx.subscribe(&store, |this, _, event: &store::StoreEvent, cx| this.disk_event(event, cx)),
@@ -716,7 +716,7 @@ impl LibraryView {
         let view = self.addons.read(cx).peek().clone();
         view.update(cx, |p, cx| {
             if p.selected_id() != peek {
-                p.peek_project(root, peek, cx);
+                p.peek_back(root, peek, cx);
             }
         });
     }

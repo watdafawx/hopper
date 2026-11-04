@@ -754,7 +754,7 @@ impl AddonsView {
         peek.update(cx, |p, _| p.set_logos(logos.clone()));
         let cfg_indexes = crate::config_view::indexes(cx);
         let subs = vec![
-            cx.observe(&peek, |_, _, cx| cx.notify()),
+            crate::browse::observe_peek(&peek, cx, |_, cx| cx.notify()),
             cx.observe(&cfg_indexes, |_, _, cx| cx.notify()),
             cx.observe(&store, |this, _, cx| {
                 this.want_updates(cx);

@@ -186,7 +186,7 @@ impl AppView {
         let subs = vec![
             // Each page notifies when it moves: back and forward note it.
             cx.observe(&library, |this, _, cx| this.track(cx)),
-            cx.observe(&peek, |this, _, cx| this.track(cx)),
+            crate::browse::observe_peek(&peek, cx, |this, cx| this.track(cx)),
             cx.observe(&browse, |this, _, cx| this.track(cx)),
             cx.observe(&servers, |this, _, cx| this.track(cx)),
             cx.observe(&settings, |this, _, cx| this.track(cx)),

@@ -1424,18 +1424,23 @@ pub fn description_view(
             _ => None,
         })
         .collect();
-    let gallery: Arc<Vec<(String, String)>> = Arc::new(
+    let gallery: Arc<Vec<crate::image_viewer::Shot>> = Arc::new(
         images
             .iter()
             .filter(|k| !posters.contains(&k.as_str()))
-            .map(|k| (hopper::imgcache::split_width(k).0.to_string(), String::new()))
+            .map(|k| crate::image_viewer::Shot {
+                url: hopper::imgcache::split_width(k).0.to_string(),
+                // The copy the page shows stands in while the full one loads.
+                thumb: Some(k.clone()),
+                title: String::new(),
+            })
             .collect(),
     );
     let open = {
         let store = store.clone();
         let gallery = gallery.clone();
         move |url: &str, window: &mut Window, cx: &mut App| {
-            match gallery.iter().position(|(u, _)| u == url) {
+            match gallery.iter().position(|s| s.url == url) {
                 Some(i) => {
                     crate::image_viewer::open(store.clone(), (*gallery).clone(), i, window, cx)
                 }

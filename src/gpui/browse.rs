@@ -113,6 +113,13 @@ struct TypeMemory {
     scroll: ListOffset,
 }
 
+/// How a project's panel was left: its scroll and tab.
+#[derive(Clone, Copy, Default)]
+struct PeekSpot {
+    scroll: Point<Pixels>,
+    tab: usize,
+}
+
 /// The list a history place showed when it was left: stepping back brings
 /// it (every page loaded, same scroll spot) instead of asking again.
 #[derive(Clone)]
@@ -321,6 +328,11 @@ pub struct BrowseView {
     detail_scroll: ScrollHandle,
     /// A history place's panel scroll, put back once its page is drawn.
     peek_scroll_after: Option<Point<Pixels>>,
+    /// How each project's panel was left (scroll, tab), for Back and
+    /// Forward, in Browse and in a peek docked beside a list.
+    peek_spots: HashMap<u64, PeekSpot>,
+    /// A Back or Forward step is opening this project: put its spot back.
+    restore_spot: Option<u64>,
     /// A description link being looked up: the panel shows a skeleton.
     opening: Option<String>,
     /// The source changed without a window at hand: the search box's
@@ -479,6 +491,8 @@ impl BrowseView {
             stepping: false,
             detail_scroll: ScrollHandle::new(),
             peek_scroll_after: None,
+            peek_spots: HashMap::new(),
+            restore_spot: None,
             opening: None,
             source_ui: false,
             hist_projects: HashMap::new(),
@@ -890,6 +904,7 @@ impl BrowseView {
             Some(m) if self.selected_id() != Some(m.id) => self.open_detail(m, cx),
             Some(_) => {}
             None => {
+                self.stash_peek();
                 self.selected = None;
                 self.author = None;
             }
@@ -902,6 +917,12 @@ impl BrowseView {
         self.selected.is_some() || self.author.is_some() || (self.peek && self.error.is_some())
     }
 
+    /// What a page with this peek docked beside it lays out by: whether
+    /// it's open, and on which project.
+    fn shown_key(&self) -> (bool, Option<u64>) {
+        (self.is_open(), self.selected_id())
+    }
+
     /// The project panel of `project` (`None` closes it), for an instance
     /// installed at `root`. Clicking the open one again closes it.
     pub fn peek_project(&mut self, root: PathBuf, project: Option<u64>, cx: &mut Context<Self>) {
@@ -912,9 +933,19 @@ impl BrowseView {
             Some(p) if self.selected.as_ref().is_none_or(|m| m.id != p) => {
                 self.open_project(root, p, cx)
             }
-            _ => self.selected = None,
+            _ => {
+                self.stash_peek();
+                self.selected = None;
+            }
         }
         cx.notify();
+    }
+
+    /// Like [`Self::peek_project`], for a Back or Forward step: the project
+    /// comes back scrolled as far as it was, on the tab it was on.
+    pub fn peek_back(&mut self, root: PathBuf, project: Option<u64>, cx: &mut Context<Self>) {
+        self.restore_spot = project;
+        self.peek_project(root, project, cx);
     }
 
     /// Searches for `text` (the box shows it on the next frame).
@@ -1434,10 +1465,13 @@ impl BrowseView {
         }
     }
 
-    /// Keeps how far the open project's panel is scrolled on the place
-    /// being left.
+    /// Keeps how far the open project's panel is scrolled (and its tab),
+    /// on the project and on the place being left.
     fn stash_peek(&mut self) {
         let (id, at) = (self.selected_id(), self.detail_scroll.offset());
+        if let Some(id) = id {
+            self.peek_spots.insert(id, PeekSpot { scroll: at, tab: self.detail_tab });
+        }
         if let Some(p) = self.hist.get_mut(self.hist_at)
             && id.is_some()
             && p.project == id
@@ -1538,6 +1572,7 @@ impl BrowseView {
         } else {
             self.refilter(cx);
         }
+        self.restore_spot = p.project;
         match p.project {
             Some(id) if self.selected_id() != Some(id) => match self.hist_projects.get(&id).cloned() {
                 Some(m) => self.open_detail(m, cx),
@@ -1549,6 +1584,9 @@ impl BrowseView {
                 self.author = None;
             }
         }
+        // Not opened here (the same project, or one gone from memory):
+        // nothing to put back later.
+        self.restore_spot = None;
         if p.project.is_some() {
             self.detail_scroll.set_offset(p.peek_scroll);
             self.peek_scroll_after = Some(p.peek_scroll);
@@ -1561,14 +1599,18 @@ impl BrowseView {
     fn open_detail(&mut self, m: cf::Mod, cx: &mut Context<Self>) {
         let id = m.id;
         self.opening = None;
+        let back = self.restore_spot.take().filter(|r| *r == id).and_then(|r| self.peek_spots.get(&r).copied());
         if self.selected_id() != Some(id) {
-            // Another project: the one left keeps its scroll for Back, the
-            // new one starts at its top.
+            // Another project: the one left keeps its scroll and tab for
+            // Back; the new one starts at its top, unless Back or Forward
+            // is bringing it back to where it was.
             if !self.stepping {
                 self.stash_peek();
             }
-            self.detail_scroll.set_offset(Point::default());
-            self.peek_scroll_after = None;
+            let spot = back.unwrap_or_default();
+            self.detail_scroll.set_offset(spot.scroll);
+            self.peek_scroll_after = back.map(|b| b.scroll);
+            self.detail_tab = spot.tab;
         }
         // Files for the current Minecraft and loader filters (they follow the
         // target instance); the newest 50 overall are mostly other loaders.
@@ -1609,7 +1651,6 @@ impl BrowseView {
         }
         self.author = None;
         self.selected = Some(m);
-        self.detail_tab = 0;
         // Shown before (Back to it): keep its page while it's asked again,
         // so the panel can scroll back to where it was.
         if !matches!(self.detail.get(&id), Some(Load::Ready(_))) {
@@ -1618,7 +1659,7 @@ impl BrowseView {
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
-                    let desc = hopper::source::description(id)?;
+                    let (desc, shots) = hopper::source::page(id)?;
                     let files = hopper::source::files(id, &gv, loader)?;
                     // Dependencies of the newest release that fits, like
                     // CurseForge's Relations tab.
@@ -1629,12 +1670,23 @@ impl BrowseView {
                         .map(dependencies)
                         .unwrap_or_default();
                     let images = hopper::richtext::images(&desc);
-                    anyhow::Ok((hopper::richtext::to_segments(&desc), images, files, deps))
+                    anyhow::Ok((hopper::richtext::to_segments(&desc), images, files, deps, shots))
                 })
                 .await;
             this.update(cx, |this, cx| {
                 match r {
-                    Ok((segments, images, files, deps)) => {
+                    Ok((segments, images, files, deps, shots)) => {
+                        // Modrinth's search hits carry 350px copies of the
+                        // gallery; the project brings the full images.
+                        if let Some(shots) = shots.filter(|s| !s.is_empty()) {
+                            if let Some(m) = this.selected.as_mut().filter(|m| m.id == id) {
+                                m.screenshots = shots.clone();
+                            }
+                            if let Some(m) = this.hist_projects.get_mut(&id) {
+                                m.screenshots = shots.clone();
+                            }
+                            this.store.update(cx, |s, _| shots.iter().for_each(|x| s.want_image(x.thumb())));
+                        }
                         let urls: Vec<String> = deps
                             .iter()
                             .filter_map(|(d, _)| d.icon().map(str::to_string))
@@ -3202,6 +3254,7 @@ impl BrowseView {
             .on_action(cx.listener(|this, _: &ResultLast, w, cx| this.key_jump(usize::MAX, w, cx)))
             .on_action(cx.listener(Self::key_enter))
             .on_action(cx.listener(|this, _: &ResultClose, _, cx| {
+                this.stash_peek();
                 this.selected = None;
                 this.author = None;
                 cx.notify();
@@ -3349,8 +3402,17 @@ impl BrowseView {
             None => format!("Open on {}", if m.modrinth.is_some() { "Modrinth" } else { "CurseForge" }),
         };
         let site_fg = if origin.is_some() { theme.foreground } else { site_color(m.modrinth.is_some()) };
-        let gallery: Vec<(String, String)> =
-            m.screenshots.iter().map(|s| (s.url.clone(), s.title.clone())).collect();
+        // The viewer shows the full image; the strip's small copy stands in
+        // while it loads.
+        let gallery: Vec<crate::image_viewer::Shot> = m
+            .screenshots
+            .iter()
+            .map(|s| crate::image_viewer::Shot {
+                url: s.url.clone(),
+                thumb: Some(s.thumb().to_string()),
+                title: s.title.clone(),
+            })
+            .collect();
         let store_e = self.store.clone();
         let shots: Vec<AnyElement> = m
             .screenshots
@@ -3528,6 +3590,7 @@ impl BrowseView {
                             .icon(IconName::X)
                             .tooltip("Close")
                             .on_click(cx.listener(|this, _, _, cx| {
+                                this.stash_peek();
                                 this.selected = None;
                                 this.author = None;
                                 cx.notify();
@@ -3916,6 +3979,7 @@ impl BrowseView {
                     .icon(IconName::X)
                     .tooltip("Close")
                     .on_click(cx.listener(|this, _, _, cx| {
+                        this.stash_peek();
                         this.author = None;
                         this.selected = None;
                         cx.notify();
@@ -4814,6 +4878,7 @@ impl BrowseView {
             if e.button == MouseButton::Left {
                 this.blur_armed = Some(this.peeks);
             } else {
+                this.stash_peek();
                 this.selected = None;
                 this.error = None;
                 cx.notify();
@@ -4826,6 +4891,7 @@ impl BrowseView {
             }
             cx.defer_in(window, move |this, _, cx| {
                 if this.peeks == at {
+                    this.stash_peek();
                     this.selected = None;
                     this.error = None;
                     cx.notify();
@@ -4930,4 +4996,24 @@ mod key_tests {
         assert_eq!(step_row(Some(3), -5, 5), Some(0));
         assert_eq!(step_row(Some(1), isize::MAX, 5), Some(4));
     }
+}
+
+/// Watches a docked peek for what the page beside it draws from it
+/// (whether it's open, which project), not for every redraw: a frame of its
+/// scrolling or of a GIF in its description then leaves the page alone.
+/// (Redrawing the Library's page on each made a 1,000-mod table cost
+/// ~19 ms a frame while the peek scrolled.)
+pub fn observe_peek<V: 'static>(
+    peek: &Entity<BrowseView>,
+    cx: &mut Context<V>,
+    mut changed: impl FnMut(&mut V, &mut Context<V>) + 'static,
+) -> Subscription {
+    let mut last = peek.read(cx).shown_key();
+    cx.observe(peek, move |this, p, cx| {
+        let now = p.read(cx).shown_key();
+        if now != last {
+            last = now;
+            changed(this, cx);
+        }
+    })
 }

@@ -81,16 +81,22 @@ pub fn changelog(f: &cf::File) -> anyhow::Result<Vec<Block>> {
 
 /// A project's description, parsed.
 pub fn description(id: u64) -> anyhow::Result<Vec<Block>> {
+    Ok(page(id)?.0)
+}
+
+/// A project's description, and for Modrinth its full gallery: a search
+/// hit carries only 350px copies of the images, the project the originals.
+pub fn page(id: u64) -> anyhow::Result<(Vec<Block>, Option<Vec<cf::Screenshot>>)> {
     // GitHub, Maven and links: never asked of CurseForge or Modrinth.
     if crate::sources::is_src(id) {
-        return crate::sources::page::description(id);
+        return Ok((crate::sources::page::description(id)?, None));
     }
     if !is_mr(id) {
-        return Ok(richtext::parse(&cf::description(id)?));
+        return Ok((richtext::parse(&cf::description(id)?), None));
     }
-    Ok(richtext::parse_markdown(
-        &modrinth::project(&real_id(id)?)?.body,
-    ))
+    let p = modrinth::project(&real_id(id)?)?;
+    let shots = modrinth::project_to_mod(&p, "").screenshots;
+    Ok((richtext::parse_markdown(&p.body), Some(shots)))
 }
 
 /// A project page link on CurseForge or Modrinth, read from its URL.

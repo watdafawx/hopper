@@ -493,7 +493,7 @@
   <div class="viewer" role="presentation" onclick={(e) => e.target === e.currentTarget && (viewer = -1)}>
     <button class="vbtn close" title="Close" onclick={() => (viewer = -1)}><X size={18} /></button>
     {#if p.gallery.length > 1}<button class="vbtn prev" title="Previous" onclick={() => (viewer = (viewer - 1 + p.gallery.length) % p.gallery.length)}><ChevronLeft size={22} /></button>{/if}
-    <figure><img src={g.url} alt={g.title} />{#if g.title}<figcaption>{g.title}</figcaption>{/if}<div class="tiny muted">{viewer + 1} / {p.gallery.length}</div></figure>
+    <figure><img src={g.url} alt={g.title} style:background-image="url({g.thumb})" />{#if g.title}<figcaption>{g.title}</figcaption>{/if}<div class="tiny muted">{viewer + 1} / {p.gallery.length}</div></figure>
     {#if p.gallery.length > 1}<button class="vbtn next" title="Next" onclick={() => (viewer = (viewer + 1) % p.gallery.length)}><ChevronRight size={22} /></button>{/if}
   </div>
 {/if}
@@ -587,6 +587,8 @@
   .viewer { position: fixed; inset: 0; background: #000d; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 40px 64px; }
   .viewer figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 100%; max-height: 100%; }
   .viewer img { max-width: 100%; max-height: calc(100vh - 140px); border-radius: var(--radius); object-fit: contain; }
+  /* The small copy shows under the full image while it streams in. */
+  .viewer figure img { background: center / contain no-repeat; }
   .viewer figcaption { color: var(--text); }
   .vbtn { position: absolute; color: var(--text); background: #ffffff14; border-radius: var(--radius); padding: 8px; display: grid; }
   .vbtn:hover { background: #ffffff26; }
