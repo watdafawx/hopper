@@ -158,7 +158,7 @@
   .cr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; padding: 9px 12px; border-radius: var(--radius); }
   .cr:hover { background: var(--hover); }
   .cr.dirty { background: #f973160d; }
-  .cr.bad { box-shadow: inset 3px 0 var(--red); }
+  .cr.bad { background: color-mix(in srgb, var(--red) 8%, transparent); }
   .txt { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .k { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-weight: 600; font-size: 13px; }
   .cdot { width: 6px; height: 6px; border-radius: 50%; background: var(--acc); flex: none; }
