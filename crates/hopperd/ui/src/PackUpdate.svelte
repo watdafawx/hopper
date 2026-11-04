@@ -7,7 +7,7 @@
   // server pack's files replace the server's); "Compare with my changes"
   // finds the files edited on the server so they can be kept. Replaced and
   // removed files go to .hopper-backups.
-  import { X, ChevronDown, ChevronRight as Caret, TriangleAlert, Package, ServerCog, FileText, Archive, Check,
+  import { X, ChevronDown, ChevronRight as Caret, TriangleAlert, Package, ServerCog, Server, FileText, Archive, Check,
     ShieldCheck, Settings2, GitCompare, Download, FolderOpen } from '@lucide/svelte';
   import { onMount, onDestroy, untrack } from 'svelte';
   import { api, post } from './lib/api.js';
@@ -473,7 +473,7 @@
               {/if}
               {#each log.entries as e (e.name)}
                 <div class="entry">
-                  <div class="row"><b class="en">{e.name}</b><span class="chip xs">{e.release}</span><span class="tiny muted">{ago(e.date)}</span></div>
+                  <div class="row"><b class="en">{e.name}</b><span class="chip xs">{e.release}</span>{#if e.server_files}<span class="chip lan xs" title="This version has a server pack"><Server size={11} />Server files</span>{/if}<span class="tiny muted">{ago(e.date)}</span></div>
                   <div class="notesbody small"><BrowseRich blocks={e.blocks} empty="No changelog for this version." /></div>
                 </div>
               {/each}

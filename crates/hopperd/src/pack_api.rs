@@ -492,7 +492,7 @@ async fn changelog(
             Some(f) if f != cur => Some(source::file(pid, f)?),
             _ => None,
         };
-        let (entries, _) = hopper_core::install::changelogs(&inst, pid, cur, update.as_ref(), true)?;
+        let (entries, all) = hopper_core::install::changelogs(&inst, pid, cur, update.as_ref(), true)?;
         let new: Vec<_> = entries.iter().filter(|e| !e.installed).collect();
         let shown: Vec<_> = if new.is_empty() { entries.iter().collect() } else { new };
         let md: Vec<String> = shown.iter().map(|e| hopper_core::richtext::to_markdown(&e.blocks)).collect();
@@ -501,6 +501,7 @@ async fn changelog(
             "advice": advice,
             "entries": shown.iter().map(|e| json!({
                 "name": e.name, "date": e.date, "release": e.release,
+                "server_files": all.iter().find(|f| f.display_name == e.name).is_some_and(|f| f.has_server_files()),
                 "blocks": crate::browse_api::blocks_json(&e.blocks),
             })).collect::<Vec<_>>(),
         }))

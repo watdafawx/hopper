@@ -443,6 +443,19 @@ pub struct FileHash {
 }
 
 impl File {
+    /// Whether this pack file ships server files: CurseForge's server pack
+    /// file, or a server zip beside a Modrinth .mrpack. The one check every
+    /// version list uses for its "Server files" marker.
+    pub fn has_server_files(&self) -> bool {
+        if self.is_server_pack == Some(true) {
+            return false;
+        }
+        match &self.modrinth {
+            Some(m) => m.has_server_zip,
+            None => self.server_pack_file_id.is_some_and(|id| id != 0),
+        }
+    }
+
     /// The file's sha1 (lower-case hex), when known.
     pub fn sha1(&self) -> Option<String> {
         self.hashes
@@ -1759,5 +1772,26 @@ fn real_loose_fingerprints() {
                 .map(|m| (&m.id, &m.file.file_name))
                 .collect::<Vec<_>>()
         );
+    }
+}
+
+#[cfg(test)]
+mod server_files_tests {
+    use super::*;
+
+    #[test]
+    fn has_server_files_per_source() {
+        let cf = |id: Option<u64>, is: Option<bool>| File { server_pack_file_id: id, is_server_pack: is, ..Default::default() };
+        assert!(cf(Some(7), None).has_server_files());
+        assert!(!cf(Some(0), None).has_server_files());
+        assert!(!cf(None, None).has_server_files());
+        // The server zip itself isn't a pack version.
+        assert!(!cf(Some(7), Some(true)).has_server_files());
+        let mr = |z: bool| File {
+            modrinth: Some(crate::modrinth::MrFile { has_server_zip: z, ..Default::default() }),
+            ..Default::default()
+        };
+        assert!(mr(true).has_server_files());
+        assert!(!mr(false).has_server_files());
     }
 }

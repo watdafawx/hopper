@@ -722,6 +722,24 @@ pub fn featured_chip(m: &hopper::cf::Mod, cx: &App) -> Option<AnyElement> {
     )
 }
 
+/// "Server files" chip for a pack version that ships a server pack (see
+/// `cf::File::has_server_files`), for every list of pack versions.
+/// `id` keeps its tooltip apart from other chips on the row.
+pub fn server_files_chip(id: impl Into<SharedString>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex_none()
+        .child(
+            chip(theme.info)
+                .child(h_flex().gap_1().child(Icon::new(IconName::Server).xsmall()).child("Server files")),
+        )
+        .tooltip(|w, cx| {
+            gpui_kit::component::tooltip::Tooltip::new("This version has a server pack").build(w, cx)
+        })
+        .into_any_element()
+}
+
 /// A tinted bar across a page with an icon at its start, for a notice or
 /// an offer (`color`: info blue, warning…); add its text and buttons.
 pub fn notice_bar(color: Hsla, icon: IconName, cx: &App) -> Div {
