@@ -123,7 +123,7 @@ pub(crate) fn col_date() -> Div {
 }
 /// The row's ⋯ menu and Remove.
 pub(crate) fn col_trash() -> Div {
-    h_flex().w_16().flex_none().justify_end()
+    h_flex().w(rems(5.5)).flex_none().justify_end()
 }
 
 /// The table's movable columns, in their default order. The user can drag
@@ -582,6 +582,8 @@ pub enum AddonsEvent {
     Compare(PathBuf),
     /// Collapse the Library's instance list to its rail, for room.
     CollapseList,
+    /// A mod's config button: its config in the side panel.
+    Config { root: PathBuf, file: String },
 }
 
 impl EventEmitter<AddonsEvent> for AddonsView {}
@@ -702,6 +704,10 @@ pub struct AddonsView {
     _ticker: Option<Task<()>>,
     /// The row whose ⋯ menu is open (its button stays shown).
     menu_for: Option<String>,
+    /// The mod whose config panel is open (its config button stays lit).
+    pub(crate) config_open: Option<String>,
+    /// Which mods have config files, and which you changed (Mods tab).
+    cfg_index: Option<std::sync::Arc<crate::config_view::InstIndex>>,
     /// Waits for a reviewed Update all to end, then sums it up.
     _bulk_watch: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -727,8 +733,10 @@ impl AddonsView {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let logos = crate::logos::Slots::default();
         peek.update(cx, |p, _| p.set_logos(logos.clone()));
+        let cfg_indexes = crate::config_view::indexes(cx);
         let subs = vec![
             cx.observe(&peek, |_, _, cx| cx.notify()),
+            cx.observe(&cfg_indexes, |_, _, cx| cx.notify()),
             cx.observe(&store, |this, _, cx| {
                 this.want_updates(cx);
                 this.pull_recent(cx);
@@ -797,6 +805,8 @@ impl AddonsView {
             slide_gen: 0,
             _ticker: None,
             menu_for: None,
+            config_open: None,
+            cfg_index: None,
             keys: false,
             _bulk_watch: None,
             _subscriptions: subs,
@@ -4040,6 +4050,7 @@ Change version", a.file_name).into()
             }))
             .child(
                 col_trash()
+                    .children(self.config_button(a, shown, cx))
                     .child(
                         // The right-click menu, for those who don't right-click.
                         div()
@@ -4331,6 +4342,41 @@ Change version", a.file_name).into()
 
     /// The row's menu, for right-click and its ⋯ button.
     #[allow(clippy::too_many_arguments)]
+    /// A mod's config button: orange when you changed its config (always
+    /// shown), grey on hover when it has config files, none without.
+    fn config_button(&self, a: &Addon, shown: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let idx = self.cfg_index.as_ref()?;
+        let key = a.file_name.trim_end_matches(".disabled");
+        let files = idx.mod_files(key);
+        if files.is_empty() {
+            return None;
+        }
+        let changed = idx.mod_changed(key);
+        let open = self.config_open.as_deref() == Some(key);
+        let theme = cx.theme();
+        let (accent, root, file) = (theme.primary, self.root.clone()?, key.to_string());
+        let n = files.len();
+        let tip = match (changed, n) {
+            (0, 1) => "Config (1 file)".to_string(),
+            (0, n) => format!("Config ({n} files)"),
+            (c, _) => format!("Config: {c} setting{} not at default", if c == 1 { "" } else { "s" }),
+        };
+        let id = ElementId::Name(format!("cfg:{}", a.file_name).into());
+        Some(
+            div()
+                .when(!shown && changed == 0 && !open, |d| d.invisible().group_hover(ROW_GROUP, |s| s.visible()))
+                .child(
+                    Button::new(id)
+                        .xsmall()
+                        .map(|b| if open { b.outline() } else { b.ghost() })
+                        .icon(Icon::new(IconName::SlidersHorizontal).when(changed > 0 || open, |i| i.text_color(accent)))
+                        .tooltip(tip)
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(AddonsEvent::Config { root: root.clone(), file: file.clone() }))),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn row_menu(
         view: Entity<Self>,
         f_menu: String,
@@ -5188,6 +5234,14 @@ impl Render for AddonsView {
         // may need applying again (in memory).
         self.ensure_rows();
         self.fit_columns(window, cx);
+        // Which mods have config files, for their config buttons.
+        self.cfg_index = match (&self.root, self.class == cf::CLASS_MODS) {
+            (Some(root), true) => {
+                let (root, store) = (root.clone(), self.store.clone());
+                crate::config_view::indexes(cx).update(cx, |i, cx| i.get(&root, &store, cx))
+            }
+            _ => None,
+        };
         let Some(inst) = self.table.inst.clone() else {
             return div().into_any_element();
         };

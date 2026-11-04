@@ -13,6 +13,7 @@ pub mod cf;
 pub mod cf_instance;
 pub mod changelog;
 pub mod configdiff;
+pub mod configcompare;
 pub mod configedit;
 pub mod configindex;
 pub mod configowner;

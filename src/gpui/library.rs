@@ -50,6 +50,7 @@ pub(crate) enum InstTab {
     Shaders,
     Datapacks,
     Worlds,
+    Configs,
     Screenshots,
     Server,
     Peers,
@@ -59,13 +60,14 @@ pub(crate) enum InstTab {
 }
 
 impl InstTab {
-    pub(crate) const ALL: [InstTab; 12] = [
+    pub(crate) const ALL: [InstTab; 13] = [
         InstTab::Overview,
         InstTab::Mods,
         InstTab::ResourcePacks,
         InstTab::Shaders,
         InstTab::Datapacks,
         InstTab::Worlds,
+        InstTab::Configs,
         InstTab::Screenshots,
         InstTab::Server,
         InstTab::Peers,
@@ -82,6 +84,7 @@ impl InstTab {
             InstTab::Shaders => "Shaders",
             InstTab::Datapacks => "Data packs",
             InstTab::Worlds => "Worlds",
+            InstTab::Configs => "Configs",
             InstTab::Screenshots => "Screenshots",
             InstTab::Server => "Server",
             InstTab::Peers => "Peers",
@@ -108,6 +111,7 @@ impl InstTab {
             InstTab::Shaders => IconName::Sun,
             InstTab::Datapacks => IconName::Database,
             InstTab::Worlds => IconName::Globe,
+            InstTab::Configs => IconName::FileCog,
             InstTab::Screenshots => IconName::Image,
             InstTab::Server => IconName::HardDrive,
             InstTab::Peers => IconName::Users,
@@ -136,11 +140,12 @@ impl InstTab {
 }
 
 /// The bar's tabs, left to right; `ResourcePacks` stands for "Packs".
-const BAR: [InstTab; 7] = [
+const BAR: [InstTab; 8] = [
     InstTab::Overview,
     InstTab::Mods,
     InstTab::ResourcePacks,
     InstTab::Worlds,
+    InstTab::Configs,
     InstTab::Screenshots,
     InstTab::Logs,
     InstTab::Performance,
@@ -287,6 +292,12 @@ pub struct LibraryView {
     addons: Entity<AddonsView>,
     server: Entity<SyncPanel>,
     worlds: Entity<WorldsView>,
+    configs: Entity<crate::configs_tab::ConfigsTab>,
+    /// A mod's config beside the Mods tab, from its config button.
+    config_panel: Option<Entity<crate::configs_tab::ConfigPanel>>,
+    /// A config button was pressed: the panel is made on the next draw.
+    pending_config: Option<(PathBuf, String)>,
+    config_sub: Option<Subscription>,
     shots: Entity<ScreenshotsView>,
     settings: Entity<InstanceSettings>,
     logs: Entity<LogsView>,
@@ -385,6 +396,7 @@ impl LibraryView {
             }),
             AddonsEvent::Compare(server) => cx.emit(LibraryEvent::Compare(server.clone())),
             AddonsEvent::CollapseList => self.set_collapsed(true, cx),
+            AddonsEvent::Config { root, file } => self.open_config_panel(root.clone(), file.clone(), cx),
         }
     }
 
@@ -397,6 +409,7 @@ impl LibraryView {
             p
         });
         let worlds = cx.new(|cx| WorldsView::new(store.clone(), window, cx));
+        let configs = cx.new(|cx| crate::configs_tab::ConfigsTab::new(store.clone(), window, cx));
         let peek = addons.read(cx).peek().clone();
         let shots = cx.new(|cx| ScreenshotsView::new(store.clone(), window, cx));
         let settings = cx.new(|cx| InstanceSettings::new(store.clone(), window, cx));
@@ -468,6 +481,10 @@ impl LibraryView {
             addons,
             server,
             worlds,
+            configs,
+            config_panel: None,
+            pending_config: None,
+            config_sub: None,
             shots,
             settings,
             logs,
@@ -767,6 +784,10 @@ impl LibraryView {
             }
             InstTab::Worlds => {
                 self.worlds.update(cx, |w, cx| w.show_for(root, cx));
+                return;
+            }
+            InstTab::Configs => {
+                self.configs.update(cx, |w, cx| w.show_for(root, cx));
                 return;
             }
             InstTab::Screenshots => {
@@ -2481,6 +2502,7 @@ impl LibraryView {
             None if self.tab == InstTab::Overview => self.overview_body(inst, cx),
             None if self.tab == InstTab::Server => self.server_tab(cx),
             None if self.tab == InstTab::Worlds => cached(self.worlds.clone()),
+            None if self.tab == InstTab::Configs => cached(self.configs.clone()),
             None if self.tab == InstTab::Screenshots => cached(self.shots.clone()),
             None if self.tab == InstTab::Settings => cached(self.settings.clone()),
             None if self.tab == InstTab::Logs => cached(self.logs.clone()),
@@ -2787,8 +2809,17 @@ impl Render for LibraryView {
             None if settings.sidebar_collapsed => RAIL,
             None => settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
         };
-        let peek = self.peek_shown(cx);
+        if let Some((root, file)) = self.pending_config.take() {
+            self.make_config_panel(root, file, window, cx);
+        }
+        let config_panel = self.config_shown();
+        let peek = self.peek_shown(cx).filter(|_| config_panel.is_none());
         let peek_w = peek.as_ref().map_or(0.0, |p| p.read(cx).panel_width(window, cx));
+        let config_w = config_panel.as_ref().map_or(0.0, |_| {
+            let s = self.store.read(cx).settings();
+            s.panel_widths.get("config.panel").copied().unwrap_or(30.).abs().clamp(24., 48.).min(window.viewport_size().width / window.rem_size() * 0.4)
+        });
+        let peek_w = peek_w + config_w;
         self.detail_w = window.viewport_size().width / window.rem_size() - side - peek_w;
         // The table fits its columns to this; it is re-laid out whenever
         // the room changes (its bounds change), so no notify is needed.
@@ -2844,11 +2875,69 @@ impl Render for LibraryView {
             .child(self.sidebar(list, cx))
             .child(page)
             .children(peek)
+            .children(config_panel)
             .child(self.logo_layer.clone())
     }
 }
 
 impl LibraryView {
+    /// A mod's config button: its config beside the Mods tab (made on the
+    /// next draw, which has the window).
+    fn open_config_panel(&mut self, root: PathBuf, file: String, cx: &mut Context<Self>) {
+        // The same mod's button again closes it.
+        if let Some(p) = &self.config_panel
+            && p.read(cx).key == file
+            && p.read(cx).root(cx) == root
+        {
+            self.close_config_panel(cx);
+            return;
+        }
+        self.pending_config = Some((root, file));
+        cx.notify();
+    }
+
+    fn make_config_panel(&mut self, root: PathBuf, file: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.config_panel.as_ref().is_some_and(|p| p.read(cx).unsaved(cx) > 0) {
+            window.push_notification(gpui_kit::component::notification::Notification::info("Save or discard the open config's changes first."), cx);
+            return;
+        }
+        let store = self.store.clone();
+        let Some((name, icon, files)) = crate::config_editor::mod_files(&store, &root, 0, &file, cx) else { return };
+        if files.is_empty() {
+            window.push_notification(gpui_kit::component::notification::Notification::info(format!("{name} has no config files yet. Most mods write them on the first launch.")), cx);
+            return;
+        }
+        let panel = cx.new(|cx| crate::configs_tab::ConfigPanel::new(store, root, file.clone(), name, icon, files, window, cx));
+        self.config_sub = Some(cx.subscribe(&panel, |this, _, e: &crate::configs_tab::ConfigPanelEvent, cx| match e {
+            crate::configs_tab::ConfigPanelEvent::Close => this.close_config_panel(cx),
+            crate::configs_tab::ConfigPanelEvent::OpenInTab(k) => {
+                let k = k.clone();
+                this.close_config_panel(cx);
+                this.configs.update(cx, |c, cx| c.pick_mod(k, cx));
+                this.set_tab(InstTab::Configs, cx);
+            }
+        }));
+        self.config_panel = Some(panel);
+        self.addons.update(cx, |a, cx| {
+            a.config_open = Some(file);
+            cx.notify();
+        });
+    }
+
+    fn close_config_panel(&mut self, cx: &mut Context<Self>) {
+        self.config_panel = None;
+        self.addons.update(cx, |a, cx| {
+            a.config_open = None;
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    /// The config panel, while its instance is shown on a tab that lists mods.
+    fn config_shown(&self) -> Option<Entity<crate::configs_tab::ConfigPanel>> {
+        self.config_panel.clone().filter(|_| self.tab.class().is_some() && self.selected.is_some())
+    }
+
     /// A mod's project page, docked full height beside the instance, when
     /// one is open on a tab that shows it.
     fn peek_shown(&self, cx: &App) -> Option<Entity<crate::browse::BrowseView>> {
