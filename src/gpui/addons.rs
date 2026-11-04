@@ -2351,7 +2351,6 @@ impl AddonsView {
         } else {
             vec![Show::All, Show::Updates, Show::Disabled]
         };
-        let show_ix = show_order.iter().position(|s| *s == self.show).unwrap_or(0);
         let n_group = |f: &dyn Fn(&hopper::pack_where::Group) -> bool| {
             of_class().filter(|a| f(&self.where_group(&a.file_name))).count()
         };
