@@ -103,14 +103,16 @@ fn main() {
     }
     #[cfg(windows)]
     if args.get(1).is_some_and(|a| a == "--fetch") && args.len() > 2 {
-        std::process::exit(fetch_window::run(args[2].clone().into(), args[3..].to_vec()));
+        let parallel = args[3..].iter().find_map(|a| a.strip_prefix("--parallel=")?.parse().ok()).unwrap_or(1);
+        let urls = args[3..].iter().filter(|a| !a.starts_with("--")).cloned().collect();
+        std::process::exit(fetch_window::run(args[2].clone().into(), urls, parallel));
     }
     // Website-only pack zips come through the same window, one at a time.
     #[cfg(windows)]
     hopper::modpack::set_website_fetcher(Box::new(|dir, url, on| {
         static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
-        let code = fetch_progress::run_window(dir, &[url.to_string()], on);
+        let code = fetch_progress::run_window(dir, &[url.to_string()], 1, on);
         log::info!("download window for {url}: {code:?}");
         code == Some(0)
     }));

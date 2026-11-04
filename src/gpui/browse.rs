@@ -1646,15 +1646,7 @@ impl BrowseView {
             let before = place.target.as_ref().map(|i| hopper::modpack::pending_urls_at(&i.root)).unwrap_or_default();
             let (changed, line) = hopper::browse::install_project(&m, file, browsing, place, job)?;
             job.detail(line);
-            let pages: Vec<String> = hopper::modpack::pending_urls_at(&changed)
-                .into_iter()
-                .filter(|u| !before.contains(u))
-                .collect();
-            if pages.is_empty() {
-                Ok(Msg::InstanceChanged(changed))
-            } else {
-                Ok(Msg::Updated(changed, Vec::new(), pages, Some(project)))
-            }
+            Ok(Msg::installed(changed, &before, Some(project)))
         };
         let store = self.store.read(cx);
         match &into {

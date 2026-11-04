@@ -39,14 +39,16 @@ fn wake() {
 /// whose size and SHA-1 match what CurseForge lists.
 pub const PLACE_WITHIN: Duration = Duration::from_secs(30);
 
-/// Runs `hopper --fetch DIR URL...` and passes each step it reports to
-/// `on`. Its exit code; `None` when it couldn't start.
-pub fn run_window(dir: &Path, urls: &[String], mut on: impl FnMut(Event)) -> Option<i32> {
+/// Runs `hopper --fetch DIR --parallel=N URL...` and passes each step it
+/// reports to `on`. `parallel` pages load at once. Its exit code; `None`
+/// when it couldn't start.
+pub fn run_window(dir: &Path, urls: &[String], parallel: usize, mut on: impl FnMut(Event)) -> Option<i32> {
     use std::io::BufRead;
     let exe = std::env::current_exe().ok()?;
     let mut child = std::process::Command::new(exe)
         .arg("--fetch")
         .arg(dir)
+        .arg(format!("--parallel={parallel}"))
         .args(urls)
         .stdout(std::process::Stdio::piped())
         .spawn()

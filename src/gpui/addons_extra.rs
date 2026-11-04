@@ -826,6 +826,7 @@ impl AddonsView {
         let for_chips = ids.clone();
         let job = store.spawn_instance_job_id(&root, title, move |job| {
             let mut got = 0;
+            let before = hopper::modpack::pending_urls_at(&inst.root);
             for id in &ids {
                 match hopper::install::install_mod_id(&mut inst, id, job) {
                     Ok(added) => {
@@ -838,7 +839,7 @@ impl AddonsView {
             if got == 0 {
                 anyhow::bail!("Couldn't find {} on Modrinth or CurseForge. Search for it in Browse.", ids.join(", "));
             }
-            Ok(crate::store::Msg::InstanceChanged(inst.root.clone()))
+            Ok(crate::store::Msg::installed(inst.root.clone(), &before, None))
         });
         for id in for_chips {
             self.dep_jobs.insert(id, job);
