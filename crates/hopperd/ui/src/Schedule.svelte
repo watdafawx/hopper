@@ -2,7 +2,7 @@
   import { onChange } from './lib/changes.svelte.js';
   // A server's schedule, as desktop's Server settings › Schedule: daily
   // restart with warnings, start again after a crash, start with the panel,
-  // plus scheduled backups. Save and Undo changes only light up once
+  // plus scheduled backups. Save and Discard only light up once
   // something changed.
   import { CalendarClock, Save, RotateCcw } from '@lucide/svelte';
   import { api } from './lib/api.js';
@@ -116,7 +116,7 @@
 
     <div class="row foot">
       <button class="btn pri" disabled={!changed || saving} onclick={save}><Save size={13} />Save</button>
-      <button class="btn ghost" disabled={!changed || saving} onclick={load}><RotateCcw size={13} />Undo changes</button>
+      <button class="btn ghost" disabled={!changed || saving} onclick={load}><RotateCcw size={13} />Discard</button>
     </div>
   </div>
 {/if}

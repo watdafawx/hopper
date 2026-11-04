@@ -17,7 +17,7 @@ use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMen
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::model::ModInfo;
@@ -302,7 +302,7 @@ fn server_list(
             .context_menu({
                 let (store, root) = (store.clone(), srv.root.clone());
                 let pack = s.paired(srv).map(|i| i.root.clone());
-                move |menu, _, _| {
+                move |menu, _, cx| {
                     let go = |compare: bool| {
                         let (store, root) = (store.clone(), root.clone());
                         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -312,7 +312,29 @@ fn server_list(
                         }
                     };
                     let r = root.clone();
-                    menu.item(PopupMenuItem::new("Open").icon(IconName::Server).on_click(go(false)))
+                    // Read when the menu opens: Start, or Restart and Stop,
+                    // and the first address players join by (as the web list).
+                    let power = crate::server_power::menu_items(&store, &root, cx);
+                    let address = {
+                        let s = store.read(cx);
+                        match s.panel_stats(&root) {
+                            Some(p) if !p.addresses.is_empty() => p.addresses.first().cloned(),
+                            _ => hopper::hosting::router::RouteSettings::load(&root).addresses.into_iter().next(),
+                        }
+                    };
+                    let menu = menu.item(PopupMenuItem::new("Open").icon(IconName::Server).on_click(go(false)));
+                    let menu = if power.is_empty() {
+                        menu
+                    } else {
+                        power.into_iter().fold(menu.separator(), |m, (label, icon, a)| {
+                            let (store, root) = (store.clone(), root.clone());
+                            m.item(PopupMenuItem::new(label).icon(icon).on_click(move |_, window, cx| {
+                                crate::server_power::request(store.clone(), root.clone(), a, window, cx)
+                            }))
+                        })
+                        .separator()
+                    };
+                    menu
                         .when(pack.is_some(), |m| {
                             let (store, pack) = (store.clone(), pack.clone().unwrap_or_default());
                             m.item(
@@ -334,6 +356,17 @@ fn server_list(
                                 .icon(IconName::FolderOpen)
                                 .on_click(move |_, _, _| crate::store::open_path(&r)),
                         )
+                        .when_some(address, |m, a| {
+                            m.item(PopupMenuItem::new("Copy address").icon(IconName::Copy).on_click(
+                                move |_, window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(a.clone()));
+                                    window.push_notification(
+                                        gpui_kit::component::notification::Notification::success(format!("Copied {a}")),
+                                        cx,
+                                    );
+                                },
+                            ))
+                        })
                 }
             })
             .child(server_thumb(

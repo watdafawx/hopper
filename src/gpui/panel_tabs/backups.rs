@@ -46,7 +46,6 @@ pub struct BackupsTab {
     target: Option<Target>,
     data: Load<Data>,
     note: Entity<InputState>,
-    worlds_only: bool,
     /// What the panel is doing (making or restoring), while it does it.
     busy: Option<String>,
     error: Option<String>,
@@ -140,7 +139,6 @@ impl BackupsTab {
             target: None,
             data: Load::Waiting,
             note,
-            worlds_only: false,
             busy: None,
             error: None,
             status: None,
@@ -179,10 +177,9 @@ impl BackupsTab {
         });
     }
 
-    fn make(&mut self, cx: &mut Context<Self>) {
+    fn make(&mut self, worlds: bool, cx: &mut Context<Self>) {
         let Some(t) = self.target.clone() else { return };
         let note = self.note.read(cx).value().trim().to_string();
-        let worlds = self.worlds_only;
         self.busy = Some("Backing up".into());
         self.error = None;
         self.status = None;
@@ -324,7 +321,6 @@ impl BackupsTab {
     fn header(&self, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.busy.is_some();
         let theme = cx.theme().clone();
-        let this = cx.entity();
         v_flex()
             .gap_2()
             .child(
@@ -332,25 +328,22 @@ impl BackupsTab {
                     .gap_3()
                     .items_center()
                     .child(div().flex_1().child(Input::new(&self.note).disabled(busy)))
+                    // Two buttons, as the web panel's Backups tab has them.
                     .child(
-                        Checkbox::new("worlds-only")
-                            .label("Worlds only")
-                            .checked(self.worlds_only)
-                            .on_click(move |v: &bool, _, cx| {
-                                let v = *v;
-                                this.update(cx, |t, cx| {
-                                    t.worlds_only = v;
-                                    cx.notify();
-                                });
-                            }),
+                        Button::new("back-up-worlds")
+                            .outline()
+                            .icon(IconName::Plus)
+                            .label("Back up worlds")
+                            .disabled(busy)
+                            .on_click(cx.listener(|t, _, _, cx| t.make(true, cx))),
                     )
                     .child(
-                        Button::new("back-up-now")
+                        Button::new("back-up-everything")
                             .primary()
-                            .icon(IconName::Archive)
-                            .label("Back up now")
+                            .icon(IconName::Plus)
+                            .label("Back up everything")
                             .disabled(busy)
-                            .on_click(cx.listener(|t, _, _, cx| t.make(cx))),
+                            .on_click(cx.listener(|t, _, _, cx| t.make(false, cx))),
                     ),
             )
             .child({
@@ -383,7 +376,7 @@ impl BackupsTab {
             return load_state(&self.data, cx).unwrap_or_else(|| div().into_any_element());
         };
         if d.backups.is_empty() {
-            return widgets::empty_state(IconName::Archive, "No backups yet", Some("Back up now makes the first one.".into()), cx)
+            return widgets::empty_state(IconName::Archive, "No backups yet", Some("Back up worlds or Back up everything makes the first one.".into()), cx)
                 .into_any_element();
         }
         let open = self.open.as_ref().map(|o| o.name.clone());

@@ -8,6 +8,7 @@
 //! or tab changes.
 
 pub mod backups;
+pub mod copy_remove;
 pub mod files;
 pub mod mods;
 pub mod motd_editor;

@@ -54,6 +54,39 @@
   const cap = $derived(xmx(s?.max_memory));
   const online = $derived(s?.state === 'running' ? s.players.length : null);
 
+  // The rail's Server card lists the same server.properties facts as
+  // desktop's Overview (servers.rs), read while the console shows.
+  const FACTS = [
+    ['max-players', 'Max players'],
+    ['level-name', 'World name'],
+    ['difficulty', 'Difficulty'],
+    ['gamemode', 'Game mode'],
+    ['view-distance', 'View distance'],
+    ['online-mode', 'Online mode'],
+    ['white-list', 'Whitelist'],
+  ];
+  let props = $state({});
+  $effect(() => {
+    if (tab !== 'console' || !id) return;
+    const want = id;
+    api(`/servers/${encodeURIComponent(want)}/properties`).then(
+      (r) => want === id && (props = r.values || {}),
+      () => (props = {}),
+    );
+  });
+  const facts = $derived(
+    FACTS.map(([k, label]) => {
+      const v = (props[k] ?? '').trim().replace(/§./g, '');
+      if (!v) return null;
+      const shown =
+        k === 'view-distance' ? `${v} chunks`
+        : k === 'online-mode' || k === 'white-list' ? (v === 'true' ? 'On' : 'Off')
+        : k === 'level-name' || k === 'max-players' ? v
+        : v[0].toUpperCase() + v.slice(1);
+      return [label, shown];
+    }).filter(Boolean),
+  );
+
   let sharing = $state(null);
   /** A mod the crash card opened, shown beside the console. */
   let peek = $state(null);
@@ -310,6 +343,7 @@
           <span>Memory</span><span>{s.max_memory ? `-Xmx${s.max_memory}` : 'not set'}</span>
           <span>Loader</span><span>{loaderText(s.loader) || '—'}</span>
           <span>Version</span><span>{s.version || '—'}</span>
+          {#each facts as [label, v] (label)}<span>{label}</span><span>{v}</span>{/each}
         </div>
       </div>
     </aside>
