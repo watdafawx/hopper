@@ -3203,28 +3203,30 @@ impl BrowseView {
             .collect();
 
         let header = h_flex()
+            .relative()
             .gap_4()
             .items_start()
             .child(crate::logos::thumb(&self.logos, m.icon(), icon.as_deref(), rems(4.), cx))
             .child(
+                // One spacing scale: the byline hugs the name, rows sit 8px
+                // apart and the buttons 12px under the last row.
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .gap_1()
-                    .child(div().text_xl().font_semibold().child(m.name.clone()))
-                    .children(widgets::featured_chip(m, cx).map(|c| h_flex().child(c)))
-                    .child(match &origin {
+                    .child(div().text_xl().font_semibold().line_height(rems(1.5)).pr(rems(6.)).child(m.name.clone()))
+                    .children(widgets::featured_chip(m, cx).map(|c| h_flex().mt_1().child(c)))
+                    .child(div().mt_0p5().child(match &origin {
                         Some(o) => source_byline(m, o, cx),
                         None => self.author_link(m, "detail-author".into(), cx),
-                    })
+                    }))
                     .child(match &origin {
-                        Some(o) => source_stats(o, cx).flex_wrap().pt_0p5(),
-                        None => stats(m, true, self.on_category(m, cx), cx).flex_wrap().pt_0p5(),
+                        Some(o) => source_stats(o, cx).flex_wrap().gap_y_2().mt_2(),
+                        None => stats(m, true, self.on_category(m, cx), cx).flex_wrap().gap_y_2().mt_2(),
                     })
-                    .children(facts(m, target, cx))
+                    .children(facts(m, target, cx).map(|f| f.mt_2()))
                     .child(
                         h_flex()
-                            .pt_1()
+                            .mt_3()
                             .gap_1()
                             .flex_wrap()
                             .child(
@@ -3232,7 +3234,18 @@ impl BrowseView {
                                     .small()
                                     .outline()
                                     .text_color(site_fg)
-                                    .icon(IconName::ExternalLink)
+                                    .map(|b| match &origin {
+                                        // GitHub's logo for a mod from GitHub; a
+                                        // plain link icon for other links.
+                                        Some(o) => match o.kind {
+                                            hopper::sources::Kind::GitHub => match crate::brand::git_host_icon("GitHub") {
+                                                Some(i) => b.icon(i),
+                                                None => b.icon(IconName::ExternalLink),
+                                            },
+                                            _ => b.icon(IconName::ExternalLink),
+                                        },
+                                        None => b.icon(crate::brand::site_icon(m.modrinth.is_some())),
+                                    })
                                     .label(site_label)
                                     .on_click(move |_, _, cx| cx.open_url(&page)),
                             )
@@ -3289,11 +3302,14 @@ impl BrowseView {
 
                             .children(m.links.extra().into_iter().map(|(label, url)| {
                                 let url = url.to_string();
+                                // The source link carries its git host's logo
+                                // and name (`cf::git_host`).
                                 let icon = match label {
-                                    "Source" => IconName::Code,
-                                    "Issues" => IconName::Bug,
-                                    "Wiki" => IconName::BookOpen,
-                                    _ => IconName::MessageCircle,
+                                    "Source" => IconName::Code.into(),
+                                    "Issues" => IconName::Bug.into(),
+                                    "Wiki" => IconName::BookOpen.into(),
+                                    "Discord" => IconName::MessageCircle.into(),
+                                    host => crate::brand::git_host_icon(host).unwrap_or_else(|| IconName::Code.into()),
                                 };
                                 Button::new(ElementId::Name(format!("link:{label}").into()))
                                     .small()
@@ -3302,22 +3318,46 @@ impl BrowseView {
                                     .label(label)
                                     .tooltip(url.clone())
                                     .on_click(move |_, _, cx| cx.open_url(&url))
-                            })),
+                            }))
                     ),
             )
-            .child(self.bookmark_button(m, "detail-bookmark".into(), cx))
+            // Copy id, bookmark and close sit over the name's line only, so
+            // the rows under the byline get the panel's whole width.
             .child(
-                Button::new("close-detail")
-
-                    .ghost()
-                    .small()
-                    .icon(IconName::X)
-                    .tooltip("Close")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.selected = None;
-                        this.author = None;
-                        cx.notify();
-                    })),
+                h_flex()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .gap_0p5()
+                    // The CurseForge project id, for the few who need it (support,
+                    // packs by id): copied, not shown. Up with the bookmark.
+                    .when(m.modrinth.is_none() && !hopper::sources::is_src(m.id), |r| {
+                        let id = m.id.to_string();
+                        r.child(
+                            Button::new("copy-id")
+                                .small()
+                                .ghost()
+                                .icon(IconName::Copy)
+                                .tooltip(format!("Copy project ID ({id})"))
+                                .on_click(move |_, window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+                                    window.push_notification(Notification::success("Copied the project ID."), cx);
+                                }),
+                        )
+                    })
+                    .child(self.bookmark_button(m, "detail-bookmark".into(), cx))
+                    .child(
+                        Button::new("close-detail")
+                            .ghost()
+                            .small()
+                            .icon(IconName::X)
+                            .tooltip("Close")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.selected = None;
+                                this.author = None;
+                                cx.notify();
+                            })),
+                    ),
             );
 
         let body: AnyElement = match self.detail.get(&m.id) {
@@ -3554,22 +3594,10 @@ impl BrowseView {
             .size_full()
             .px_5()
             .py_5()
-            .gap_5()
+            .gap_4()
             .child(header)
-            .when(!shots.is_empty(), |r| {
-                // A set height: the scroll wrapper otherwise stretches to
-                // fill the column, leaving gaps around the thumbnails.
-                r.child(
-                    div().flex_none().w_full().h_24().child(
-                        h_flex()
-                            .id("shots")
-                            .size_full()
-                            .gap_2()
-                            .children(shots)
-                            .overflow_x_scrollbar(),
-                    ),
-                )
-            })
+            // Install and what stops it come first: on screen without
+            // scrolling past the screenshots.
             .children(banner)
             // Turned off in the instance: updating or switching keeps it off.
             .children(
@@ -3603,6 +3631,20 @@ impl BrowseView {
                 )
             })
             .children(self.install_card(m, target, cx))
+            .when(!shots.is_empty(), |r| {
+                // A set height: the scroll wrapper otherwise stretches to
+                // fill the column, leaving gaps around the thumbnails.
+                r.child(
+                    div().flex_none().w_full().h_24().child(
+                        h_flex()
+                            .id("shots")
+                            .size_full()
+                            .gap_2()
+                            .children(shots)
+                            .overflow_x_scrollbar(),
+                    ),
+                )
+            })
             .child(body)
             .overflow_y_scrollbar()
             .into_any_element()
@@ -4161,7 +4203,8 @@ fn stats(m: &cf::Mod, full: bool, on_cat: Option<OnCategory>, cx: &App) -> Div {
                 h_flex()
                     .gap_1()
                     .min_w_0()
-                    .when(full, |r| r.flex_wrap())
+                    // The panel gives the categories a line of their own.
+                    .when(full, |r| r.flex_wrap().w_full())
                     .when(!full, |r| r.overflow_hidden())
                     .text_color(muted)
                     .child(Icon::new(IconName::Tag).xsmall().flex_none())
@@ -4170,8 +4213,9 @@ fn stats(m: &cf::Mod, full: bool, on_cat: Option<OnCategory>, cx: &App) -> Div {
         })
 }
 
-/// Game versions, loaders, environment and license as small tags, with the
-/// project id in a tooltip-free caption. `None` when nothing is known.
+/// Game versions, loaders, environment and license as small tags. The
+/// project id is behind the header's copy button. `None` when nothing is
+/// known.
 fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
     let theme = cx.theme();
     let versions = m.game_versions();
@@ -4223,20 +4267,37 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
             .child(Icon::new(icon).xsmall().text_color(color).flex_none())
             .children(tags)
     };
-    let mut row = h_flex().gap_3().pt_1().flex_wrap().text_xs();
+    // Versions get a line of their own; loaders, side and license share
+    // the next. Wrapped lines sit 8px apart, like the stats above.
+    let mut row = h_flex().gap_x_3().gap_y_2().flex_wrap().text_xs();
     if !versions.is_empty() {
         let mut tags: Vec<Tag> = versions.iter().take(SHOW).cloned().map(tag).collect();
         if more > 0 {
             tags.push(tag(format!("+{more}")));
         }
-        row = row.child(group(IconName::Box, tags).id("fact-versions").tooltip(move |w, cx| {
+        row = row.child(group(IconName::Box, tags).w_full().id("fact-versions").tooltip(move |w, cx| {
             gpui_kit::component::tooltip::Tooltip::new(all.clone()).build(w, cx)
         }));
     }
     if !loaders.is_empty() {
         row = row.child(group(
             IconName::Blocks,
-            loaders.into_iter().map(|l| tag(l.to_string())).collect(),
+            // Each loader with its logo, as in the loader pickers.
+            loaders
+                .into_iter()
+                .map(|l| {
+                    let chip = widgets::chip(cx.theme().muted_foreground).xsmall();
+                    match crate::brand::loader(&l) {
+                        Some(widgets::PickIcon::Svg(path, color)) => chip.child(
+                            h_flex()
+                                .gap_1()
+                                .child(Icon::new(IconName::Blocks).path(path).xsmall().text_color(color))
+                                .child(l.to_string()),
+                        ),
+                        _ => chip.child(l.to_string()),
+                    }
+                })
+                .collect(),
         ));
     }
     if let Some(s) = side {
@@ -4250,11 +4311,6 @@ fn facts(m: &cf::Mod, target: Option<&Instance>, cx: &App) -> Option<Div> {
                     .child(l.to_string()),
             ),
         );
-    }
-    if m.modrinth.is_none() {
-        row = row.child(group(IconName::Hash, Vec::new()).child(
-            div().text_color(theme.muted_foreground).child(m.id.to_string()),
-        ));
     }
     Some(row)
 }

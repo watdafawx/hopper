@@ -7,12 +7,14 @@
   // Gallery. A modpack shows which versions have server files and "Make a
   // server from this".
   import { onMount, untrack } from 'svelte';
-  import { ArrowLeft, Download, RefreshCw, Clock, ExternalLink, Server, Hammer, Plus, ChevronDown, ChevronRight, ChevronLeft, X, Scale, Check, Monitor, Box, Blocks, Hash, Tag, Code, Bug, BookOpen, MessageCircle, Layers, CircleCheck, RotateCcw, TriangleAlert, Info } from '@lucide/svelte';
+  import { ArrowLeft, Download, RefreshCw, Clock, ExternalLink, Server, Hammer, Plus, ChevronDown, ChevronRight, ChevronLeft, X, Scale, Check, Monitor, Box, Blocks, Tag, Code, Copy, Bug, BookOpen, MessageCircle, Layers, CircleCheck, RotateCcw, TriangleAlert, Info } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { session } from './lib/me.svelte.js';
   import { SITE, TYPES, SIDE, LOADER_NAME, count, ago, date, preset, size, andList, browseHash } from './lib/browse.js';
   import BrowseRich from './BrowseRich.svelte';
   import FeaturedTag from './lib/FeaturedTag.svelte';
+  import Brand from './lib/Brand.svelte';
+  import { say } from './lib/toast.svelte.js';
   import Changelog from './lib/Changelog.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
 
@@ -70,7 +72,13 @@
   const otherSite = $derived(cur.source === 'modrinth' ? 'CurseForge' : 'Modrinth');
   // Desktop's facts: Minecraft (first five, the rest in a tooltip), loaders, where it runs.
   const mcs = $derived(p?.all_versions?.length ? p.all_versions : p?.mc_versions || []);
-  const LINK_ICON = { Source: Code, Issues: Bug, Wiki: BookOpen };
+  // The source link comes named after its git host ("GitHub", "Codeberg"), which gets its logo.
+  const LINK_ICON = { Source: Code, Issues: Bug, Wiki: BookOpen, Discord: MessageCircle };
+  // Desktop's loader colors (theme::palette).
+  const LOADER_COLOR = { neoforge: 'hsl(20 75% 60%)', forge: 'hsl(215 35% 65%)', fabric: 'hsl(38 45% 70%)', quilt: 'hsl(270 55% 70%)' };
+  async function copyId() {
+    try { await navigator.clipboard.writeText(String(p.id)); say('Copied the project ID.'); } catch { say(`Project ID: ${p.id}`); }
+  }
 
   function reset() {
     p = null;
@@ -274,7 +282,7 @@
       {#if p.icon}<img class="ico" src={p.icon} alt="" width="72" height="72" />{:else}<span class="ico"></span>{/if}
       <div class="col grow info">
         <h2>{p.name}</h2>
-        {#if p.featured}<div><FeaturedTag tag={p.featured} /></div>{/if}
+        {#if p.featured}<div class="fr"><FeaturedTag tag={p.featured} /></div>{/if}
         {#if p.author}<button class="by small" title="Everything {p.author} made" onclick={showAuthor}>by {p.author}</button>{/if}
         <div class="meta">
           <span class="dl"><Download size={12} />{count(p.downloads)} downloads</span>
@@ -286,22 +294,22 @@
           {/if}
         </div>
         <div class="facts">
-          {#if mcs.length}<span class="grp" title={mcs.join(', ')}><Box size={12} class="v" />{#each mcs.slice(0, 5) as v (v)}<span class="chip">{v}</span>{/each}{#if mcs.length > 5}<span class="chip">+{mcs.length - 5}</span>{/if}</span>{/if}
-          {#if p.loaders.length && !['datapacks'].includes(kind)}<span class="grp"><Blocks size={12} class="l" />{#each p.loaders as l (l)}<span class="chip">{l}</span>{/each}</span>{/if}
+          {#if mcs.length}<span class="grp vers" title={mcs.join(', ')}><Box size={12} class="v" />{#each mcs.slice(0, 5) as v (v)}<span class="chip">{v}</span>{/each}{#if mcs.length > 5}<span class="chip">+{mcs.length - 5}</span>{/if}</span>{/if}
+          {#if p.loaders.length && !['datapacks'].includes(kind)}<span class="grp"><Blocks size={12} class="l" />{#each p.loaders as l (l)}<span class="chip ld"><Brand name={l} size={11} color={LOADER_COLOR[l.toLowerCase()]} />{l}</span>{/each}</span>{/if}
           {#if SIDE[p.side]}<span class="grp"><Monitor size={12} class="s" /><span class="chip">{SIDE[p.side]}</span></span>{/if}
           {#if p.license}<span class="grp muted"><Scale size={12} />{p.license}</span>{/if}
-          {#if p.source === 'curseforge'}<span class="grp muted"><Hash size={12} />{p.id}</span>{/if}
         </div>
         <div class="row wrap links">
-          <a class="btn sm {p.source}" href={p.url} target="_blank" rel="noreferrer noopener"><ExternalLink size={13} />Open on {SITE[p.source]}</a>
+          <a class="btn sm {p.source}" href={p.url} target="_blank" rel="noreferrer noopener"><Brand name={p.source} />Open on {SITE[p.source]}</a>
           {#if packs}
             {#if p.server_files}<span class="chip running" title="The pack author's own server files"><Server size={11} />Server files</span>
             {:else}<span class="chip starting" title="This pack has no official server files: Hopper builds the server from the pack, leaving client-only mods out"><Hammer size={11} />Built from the client pack</span>{/if}
           {:else if p.side === 'client'}<span class="chip starting" title="It says it runs on the client only: a server doesn't need it"><Monitor size={11} />Client only</span>{/if}
           {#each p.links as l (l.url)}
-            {@const LIcon = LINK_ICON[l.label] || MessageCircle}
-            <a class="btn sm ghost" href={l.url} title={l.url} target="_blank" rel="noreferrer noopener"><LIcon size={13} />{l.label}</a>
+            {@const LIcon = LINK_ICON[l.label]}
+            <a class="btn sm ghost" href={l.url} title={l.url} target="_blank" rel="noreferrer noopener">{#if LIcon}<LIcon size={13} />{:else}<Brand name={l.label} />{/if}{l.label}</a>
           {/each}
+          {#if p.source === 'curseforge'}<button class="btn sm ghost icon" title="Copy project ID ({p.id})" aria-label="Copy project ID" onclick={copyId}><Copy size={13} /></button>{/if}
         </div>
       </div>
       {#if packs && session.owner}
@@ -312,13 +320,6 @@
       {/if}
     </div>
 
-    {#if p.gallery.length}
-      <div class="strip">
-        {#each p.gallery.slice(0, 5) as g, i (g.url)}<button class="shot" title={g.title} onclick={() => (viewer = i)}><img src={g.thumb} alt={g.title} loading="lazy" /></button>{/each}
-        {#if p.gallery.length > 5}<button class="shot more" onclick={() => (tab = 'gallery')}>+{p.gallery.length - 5}</button>{/if}
-      </div>
-    {/if}
-
     {#if have && have.enabled === false && target}
       <div class="note warn"><Info size={14} /><span>Off in {target.name}. Updating or switching versions keeps it off; turn it on in the Mods tab.</span></div>
     {/if}
@@ -328,7 +329,7 @@
 
     {#if !packs && (target || !onBack)}
       <!-- The install box: where it goes and every mod it pulls in (desktop's install card). -->
-      <div class="ic card">
+      <div class="icard card">
         <div class="row ich">
           <div class="col grow">
             {#if !target}
@@ -367,6 +368,13 @@
           {#if off.length}<div class="line warn"><RotateCcw size={12} />Turns back on: {andList(off)}</div>{/if}
           {#each plan.notes as n (n)}<div class="line warn"><TriangleAlert size={12} />{n}</div>{/each}
         {/if}
+      </div>
+    {/if}
+
+    {#if p.gallery.length}
+      <div class="strip">
+        {#each p.gallery.slice(0, 5) as g, i (g.url)}<button class="shot" title={g.title} onclick={() => (viewer = i)}><img src={g.thumb} alt={g.title} loading="lazy" /></button>{/each}
+        {#if p.gallery.length > 5}<button class="shot more" onclick={() => (tab = 'gallery')}>+{p.gallery.length - 5}</button>{/if}
       </div>
     {/if}
 
@@ -476,27 +484,32 @@
 {/if}
 
 <style>
-  .pack { display: flex; flex-direction: column; gap: 12px; padding: 18px; }
+  .pack { display: flex; flex-direction: column; gap: 16px; padding: 18px; }
   .grow { flex: 1; min-width: 0; }
   .hd { display: flex; gap: 16px; align-items: flex-start; }
   .ico { width: 72px; height: 72px; border-radius: var(--radius-lg); object-fit: cover; background: var(--raise); flex: none; display: block; }
-  .info { gap: 4px; }
-  .info h2 { font-size: 20px; font-weight: 700; }
-  .by { align-self: flex-start; color: var(--muted); padding: 0; }
+  /* One spacing scale, as on desktop: the byline hugs the name, rows sit 8px apart, buttons 12px under. */
+  .info { gap: 0; }
+  .info h2 { font-size: 20px; font-weight: 700; line-height: 24px; }
+  .fr { margin-top: 4px; }
+  .by { align-self: flex-start; color: var(--muted); padding: 0; margin-top: 2px; }
   .by:hover { color: var(--acc); text-decoration: underline; }
-  .meta { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .meta { display: flex; gap: 8px 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .meta .cats { flex-basis: 100%; }
   .meta > span { display: inline-flex; align-items: center; gap: 4px; }
   .meta .dl, .dl { color: var(--blue); display: inline-flex; align-items: center; gap: 3px; }
   .meta .up { color: var(--green); }
   .meta .cr { color: var(--gold); }
   .catlink { color: inherit; font: inherit; padding: 0; }
   .catlink:hover { color: var(--text); text-decoration: underline; }
-  .facts { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; padding-top: 2px; }
+  .facts { display: flex; gap: 8px 12px; flex-wrap: wrap; font-size: 11.5px; margin-top: 8px; }
+  .facts .vers { flex-basis: 100%; }
+  .chip.ld { display: inline-flex; align-items: center; gap: 4px; }
   .grp { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
   .grp :global(.v) { color: var(--blue); }
   .grp :global(.l) { color: var(--gold); }
   .grp :global(.s) { color: var(--green); }
-  .links { gap: 6px; margin-top: 4px; }
+  .links { gap: 6px; margin-top: 12px; }
   .links a.curseforge { color: var(--acc); }
   .links a.modrinth { color: #1bd96a; }
   .wrap { flex-wrap: wrap; }
@@ -507,7 +520,7 @@
   .warn { color: var(--gold); }
   .ok { color: var(--green); }
   /* The install card: desktop's secondary box with the plan under it. */
-  .ic { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; max-width: 860px; background: var(--surface); }
+  .icard { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; max-width: 860px; background: var(--surface); }
   .ich { gap: 12px; align-items: center; }
   .ich .col { gap: 2px; }
   .ich .row { gap: 6px; }
