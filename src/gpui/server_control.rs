@@ -2171,7 +2171,7 @@ impl ConsoleFilter {
 
 #[cfg(test)]
 mod console_tests {
-    use super::*;
+    use super::{ConsoleFilter, LineKind, line_kind};
 
     #[test]
     fn console_lines_sort_like_the_web_console() {

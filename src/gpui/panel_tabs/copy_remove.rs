@@ -113,7 +113,47 @@ fn server_name(t: &Target, store: &Entity<Store>, cx: &App) -> String {
         .map_or_else(|| t.remote.id.clone(), |s| s.name.clone())
 }
 
+/// Asks the panel who this PC is there first: only its owner or a manager
+/// may take servers off it, and a paired PC is usually a device. Then
+/// either asks to remove, or says where to do it (as Delete server does).
 fn ask_remove(t: Target, store: Entity<Store>, name: String, window: &mut Window, cx: &mut App) {
+    let handle = window.window_handle();
+    let client = t.client.clone();
+    let panel = store
+        .read(cx)
+        .settings()
+        .hopper_panels
+        .iter()
+        .find(|p| p.id == t.remote.panel)
+        .map_or_else(|| hopper::hopperd::host_name(&t.remote.base), |p| p.name.clone());
+    cx.spawn(async move |cx| {
+        let role = cx.background_spawn(async move { client.get("/auth/me").ok() }).await;
+        // Unknown (an old panel): offer it; the panel still checks.
+        let may = role.is_none_or(|v| matches!(v["role"].as_str(), Some("owner" | "manager")));
+        handle
+            .update(cx, |_, window, cx| {
+                if may {
+                    confirm_remove(t, store, name, window, cx);
+                } else {
+                    let url = format!("{}/#/server/{}/settings/general", t.remote.base, hopper::hopperd::enc(&t.remote.id));
+                    confirm(
+                        window,
+                        cx,
+                        format!("Remove {name} in the panel"),
+                        format!("{panel} lets only its owner or a manager remove servers, and this PC is paired as a device. Remove it in the panel: Settings › General › Remove from panel."),
+                        "Open in browser",
+                        false,
+                        move |_, cx| cx.open_url(&url),
+                        None,
+                    );
+                }
+            })
+            .ok();
+    })
+    .detach();
+}
+
+fn confirm_remove(t: Target, store: Entity<Store>, name: String, window: &mut Window, cx: &mut App) {
     let body = "The folder stays as it is. Add it again any time with New server › Folder in the panel.".to_string();
     confirm(
         window,
