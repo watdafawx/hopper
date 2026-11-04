@@ -259,9 +259,9 @@
 <svelte:window onkeydown={key} />
 
 {#snippet row(r, right)}
-  <button class="prow row-hover" title={r.summary} onclick={() => openProject(r)} oncontextmenu={(e) => { e.preventDefault(); menu = { r, x: e.clientX, y: e.clientY }; }}>
+  <button class="prow row-hover" class:compact={right.compact} title={r.summary} onclick={() => openProject(r)} oncontextmenu={(e) => { e.preventDefault(); menu = { r, x: e.clientX, y: e.clientY }; }}>
     {#if r.icon}<img src={r.icon} alt="" width="28" height="28" loading="lazy" />{:else}<span class="pico"></span>{/if}
-    <span class="grow col"><span class="small ell">{r.name}</span>{#if right.sub}<span class="tiny muted ell">{right.sub}</span>{/if}</span>
+    <span class="grow col"><span class="small ell">{r.name}</span>{#if right.sub && !right.compact}<span class="tiny muted ell">{right.sub}</span>{/if}</span>
     {@render right.tags()}
   </button>
 {/snippet}
@@ -362,18 +362,19 @@
           {@const off = plan.kept.filter((k) => !k.on).map((k) => k.name)}
           {#if plan.extra.length || on.length}
             <!-- Folded by default when long or when nothing is downloaded; the choice is remembered (desktop's install card). -->
+            {@const compact = plan.extra.length + on.length > 2}
             {@const open = depsOpen ?? (plan.extra.length > 0 && plan.extra.length + on.length <= 3)}
             <div class="also">
               <button class="lbl fold" aria-expanded={open} onclick={() => toggleDeps(open)}>{#if open}<ChevronDown size={12} />{:else}<ChevronRight size={12} />{/if}{plan.extra.length ? 'Also downloads' : `Already on ${target.name}`}</button>
               {#if open}
                 {#each plan.extra as d (d.source + d.id)}
                   {#snippet tags()}<span class="tiny muted">{size(d.size)}</span>{/snippet}
-                  {@render row(d, { sub: d.by ? `Needed by ${d.by}` : 'Required', tags })}
+                  {@render row(d, { sub: d.by ? `Needed by ${d.by}` : 'Required', tags, compact })}
                 {/each}
                 {#if plan.extra.length && on.length}<div class="lbl sub">Already on {target.name}</div>{/if}
                 {#each on as k (k.source + k.id)}
-                  {#snippet tags()}<span class="tiny muted">Already installed</span>{/snippet}
-                  {@render row({ ...k, kind: 'mods' }, { sub: 'Required', tags })}
+                  {#snippet tags()}<span class="tiny muted">{compact ? 'Installed' : 'Already installed'}</span>{/snippet}
+                  {@render row({ ...k, kind: 'mods' }, { sub: 'Required', tags, compact })}
                 {/each}
               {/if}
             </div>
@@ -536,6 +537,9 @@
   .prow { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: var(--radius); text-align: left; width: 100%; min-width: 0; }
   .prow img, .pico { width: 28px; height: 28px; border-radius: var(--radius); object-fit: cover; background: var(--raise); flex: none; display: block; }
   .prow .col { gap: 0; }
+  /* Past two mods: one line each, so the list stays short. */
+  .prow.compact { padding-top: 2px; padding-bottom: 2px; }
+  .prow.compact img, .prow.compact .pico { width: 20px; height: 20px; }
   .plist { display: flex; flex-direction: column; gap: 1px; max-width: 860px; }
   .ah { gap: 6px; }
   .strip { display: flex; gap: 8px; overflow: hidden; }

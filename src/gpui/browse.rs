@@ -3863,6 +3863,10 @@ impl BrowseView {
         if let Load::Ready(p) = plan {
             let kept_on: Vec<&hopper::install::Kept> = p.kept.iter().filter(|k| k.on).collect();
             if !p.extra().is_empty() || !kept_on.is_empty() {
+                // Past two mods the rows shrink to one line each (icon, name,
+                // size or "Installed") so a long list doesn't push the page down.
+                let compact = p.extra().len() + kept_on.len() > 2;
+                let (ico, row_py) = if compact { (rems(1.25), px(2.)) } else { (rems(1.75), px(6.)) };
                 let rows = p.extra().iter().map(|(d, f)| {
                     let icon = d.icon().and_then(|u| store.image(u)).map(Path::to_path_buf);
                     let by = p.by.get(&d.id).filter(|b| **b != m.name);
@@ -3871,18 +3875,19 @@ impl BrowseView {
                         .id(ElementId::Name(format!("plan:{}", d.id).into()))
                         .gap_3()
                         .px_2()
-                        .py_1p5()
+                        .py(row_py)
+                        .items_center()
                         .rounded(theme.radius)
                         .clickable(cx)
                         .hover(|s| s.bg(theme.list_hover))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_detail(open.clone(), cx)))
-                        .child(crate::logos::thumb(&self.logos, d.icon(), icon.as_deref(), rems(1.75), cx))
+                        .child(crate::logos::thumb(&self.logos, d.icon(), icon.as_deref(), ico, cx))
                         .child(
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
                                 .child(div().text_sm().truncate().child(d.name.clone()))
-                                .child(
+                                .when(!compact, |c| c.child(
                                     widgets::caption(
                                         match (by, mod_for_pack(m, d)) {
                                             (Some(b), _) => format!("Needed by {b}"),
@@ -3892,7 +3897,7 @@ impl BrowseView {
                                         cx,
                                     )
                                     .text_xs(),
-                                ),
+                                )),
                         )
                         .child(widgets::caption(size(f.file_length), cx).text_xs().flex_none())
                 });
@@ -3906,22 +3911,23 @@ impl BrowseView {
                         .id(ElementId::Name(format!("plan-have:{}", k.id).into()))
                         .gap_3()
                         .px_2()
-                        .py_1p5()
+                        .py(row_py)
+                        .items_center()
                         .rounded(theme.radius)
                         .when(id != 0, |r| {
                             r.clickable(cx)
                                 .hover(|s| s.bg(theme.list_hover))
                                 .on_click(cx.listener(move |this, _, _, cx| this.show_project(id, cx)))
                         })
-                        .child(crate::logos::thumb(&self.logos, url, icon.as_deref(), rems(1.75), cx))
+                        .child(crate::logos::thumb(&self.logos, url, icon.as_deref(), ico, cx))
                         .child(
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
                                 .child(div().text_sm().truncate().child(k.name.clone()))
-                                .child(widgets::caption("Required", cx).text_xs()),
+                                .when(!compact, |c| c.child(widgets::caption("Required", cx).text_xs())),
                         )
-                        .child(widgets::caption("Already installed", cx).text_xs().flex_none())
+                        .child(widgets::caption(if compact { "Installed" } else { "Already installed" }, cx).text_xs().flex_none())
                 });
                 // Folds shut by default when it is long, or when nothing is
                 // downloaded; the player's own choice is kept in settings.
