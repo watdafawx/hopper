@@ -115,7 +115,6 @@ impl Changes {
 
 /// Records a change on the panel (for code that changes things outside an
 /// API request, such as a job finishing).
-#[allow(dead_code)] // for work that lands outside a request (jobs)
 pub fn emit(app: &App, server: Option<&str>, areas: &[&str]) {
     app.changes.emit(server, areas, None);
 }
