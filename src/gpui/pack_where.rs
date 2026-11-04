@@ -43,9 +43,11 @@ pub(crate) struct WhereState {
     pub packs: HashMap<String, Vec<PackFile>>,
     /// A row whose file isn't the instance's: the folder it's in.
     pub rep: Rc<HashMap<String, PathBuf>>,
-    /// The folders' times when `packs` was read, and for which instance.
+    /// The folders' times when `packs` was read, and for which instance
+    /// and kind (resource packs and data packs share this state).
     pub stamp: Vec<Option<std::time::SystemTime>>,
     pub root: Option<PathBuf>,
+    pub class: u32,
     /// The pack being dragged and its group, while a drag is on.
     pub dragging: Option<(String, Group)>,
 }
@@ -137,17 +139,17 @@ impl AddonsView {
     /// are and their updates, filling the table at each step.
     pub(crate) fn load_where(&mut self, inst: &Instance, cx: &mut Context<Self>) {
         let stamp = self.where_stamp();
-        let same = self.wh.root.as_ref() == Some(&inst.root);
+        let class = self.class;
+        let same = self.wh.root.as_ref() == Some(&inst.root) && self.wh.class == class;
         if same && stamp == self.wh.stamp {
             return;
         }
         if !same {
-            self.wh = WhereState::default();
+            self.wh = WhereState { class, ..WhereState::default() };
         }
         self.wh.root = Some(inst.root.clone());
         self.wh.stamp = stamp;
         let dirs = self.where_dirs();
-        let class = self.class;
         let root = inst.root.clone();
         let header = inst.clone_header();
         cx.spawn(async move |this, cx| {
@@ -159,11 +161,16 @@ impl AddonsView {
             let all: Vec<PackFile> = read.values().flatten().cloned().collect();
             let ok = this
                 .update(cx, |this, cx| {
-                    if this.wh.root.as_ref() != Some(&root) {
+                    // Read for another instance or kind since: dropped.
+                    if this.wh.root.as_ref() != Some(&root) || this.wh.class != class {
                         return false;
                     }
                     this.wh.packs = read;
-                    this.apply_where(cx);
+                    // Kept for when the sub-tab is back; shown only if it's
+                    // the one open now.
+                    if this.class == class {
+                        this.apply_where(cx);
+                    }
                     true
                 })
                 .unwrap_or(false);
@@ -174,11 +181,18 @@ impl AddonsView {
             let urls = cx.background_spawn(async move { crate::pack_lookup::look_up(&a2, class) }).await;
             this.update(cx, |this, cx| {
                 this.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
-                this.apply_where(cx);
+                if this.class == class {
+                    this.apply_where(cx);
+                }
             })
             .ok();
             if cx.background_spawn(async move { crate::pack_lookup::check_versions(&all, &header) }).await {
-                this.update(cx, |this, cx| this.apply_where(cx)).ok();
+                this.update(cx, |this, cx| {
+                    if this.class == class {
+                        this.apply_where(cx);
+                    }
+                })
+                .ok();
             }
         })
         .detach();
@@ -188,6 +202,13 @@ impl AddonsView {
     /// one row for each pack only other places hold, from the copy in
     /// effect. Each row's group comes from `pack_where::list`.
     pub(crate) fn apply_where(&mut self, cx: &mut Context<Self>) {
+        // Only resource packs and data packs are one list. Run for Shaders
+        // or Mods (a lookup finishing after the sub-tab changed), it would
+        // put an instance with no addons in the table: an empty list under
+        // a tab that counts 13.
+        if !self.where_mode() {
+            return;
+        }
         let class = self.class;
         let Some(real) = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).cloned() else {
             return;
