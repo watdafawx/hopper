@@ -202,6 +202,16 @@ pub struct HostForm {
     place: Option<String>,
     /// Players join by this name (Hopper Server's addresses); optional.
     address: Entity<InputState>,
+    /// The server's name; empty: [`Self::default_name`].
+    name: Entity<InputState>,
+    /// The line in players' server lists; empty: the name.
+    motd: Entity<InputState>,
+    /// The default name shown in the empty Name field.
+    name_hint: String,
+    /// What the port clashes with: (where, port) it was asked for, and the answer.
+    port_check: Option<((Option<String>, u16), hopper::hosting::ports::PortCheck)>,
+    /// The machine the server goes on: its name and RAM in GB, once known.
+    host: Option<(Option<String>, String, f64)>,
     source: Source,
     base: Entity<CreateForm>,
     memory: Entity<SliderState>,
@@ -225,12 +235,19 @@ impl HostForm {
         let port = hopper::hosting::suggest_port(&root).to_string();
         let port = cx.new(|cx| InputState::new(window, cx).default_value(port));
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("Optional, like survival"));
+        let name = cx.new(|cx| InputState::new(window, cx));
+        let motd = cx.new(|cx| InputState::new(window, cx).placeholder("Same as the name"));
         let subs = vec![
             cx.subscribe(&address, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.subscribe(&name, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.subscribe(&motd, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.observe(&base, |_, _, cx| cx.notify()),
             cx.observe(&store, |_, _, cx| cx.notify()),
             cx.subscribe(&memory, |_, _, _: &SliderEvent, cx| cx.notify()),
-            cx.subscribe(&port, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.subscribe(&port, |this: &mut Self, _, _: &InputEvent, cx| {
+                this.check_port(cx);
+                cx.notify()
+            }),
         ];
         let source = match from {
             Some(r) => Source::Instance(r),
@@ -244,6 +261,11 @@ impl HostForm {
             store,
             place: None,
             address,
+            name,
+            motd,
+            port_check: None,
+            host: None,
+            name_hint: String::new(),
             source,
             base,
             memory,
@@ -269,6 +291,151 @@ impl HostForm {
         }
     }
 
+    /// The name a server from the picked source gets unless one is typed.
+    fn default_name(&self, cx: &App) -> String {
+        match &self.source {
+            Source::Instance(r) => self.store.read(cx).instance(r).map(|i| format!("{} server", i.name)).unwrap_or_default(),
+            Source::Fresh => self.base.read(cx).choice(cx).map(|(n, _, _)| n).unwrap_or_default(),
+            Source::Files(p) => format!("{} server", p.name),
+        }
+    }
+
+    /// The server's name: the typed one, else [`Self::default_name`].
+    fn server_name(&self, cx: &App) -> String {
+        match self.name.read(cx).value().trim() {
+            "" => self.default_name(cx),
+            n => n.to_string(),
+        }
+    }
+
+    /// The MOTD: the typed one, else the name.
+    fn motd_text(&self, cx: &App) -> String {
+        match self.motd.read(cx).value().trim() {
+            "" => self.server_name(cx),
+            m => m.to_string(),
+        }
+    }
+
+    /// The port typed, when it is one.
+    fn port_value(&self, cx: &App) -> Option<u16> {
+        self.port.read(cx).value().trim().parse().ok().filter(|p| *p > 0)
+    }
+
+    /// Where the server goes, for players: "this PC" or the panel's name.
+    fn host_label(&self, cx: &App) -> String {
+        match &self.place {
+            None => "this PC".into(),
+            Some(id) => self
+                .host
+                .as_ref()
+                .filter(|(p, _, _)| p.as_ref() == Some(id))
+                .map(|(_, n, _)| n.clone())
+                .or_else(|| self.store.read(cx).settings().hopper_panels.iter().find(|p| &p.id == id).map(|p| p.name.clone()))
+                .unwrap_or_else(|| "the panel".into()),
+        }
+    }
+
+    /// Asks whether the port clashes with another server on the same machine
+    /// (or anything listening there): here directly, on a panel through its
+    /// port check (an older panel without one: the servers this PC knows there).
+    fn check_port(&mut self, cx: &mut Context<Self>) {
+        let Some(port) = self.port_value(cx) else {
+            self.port_check = None;
+            return;
+        };
+        let key = (self.place.clone(), port);
+        if self.port_check.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let store = self.store.read(cx);
+        let used: Vec<(String, u16)> = store
+            .servers()
+            .iter()
+            .filter(|s| match &self.place {
+                None => store.is_hosted(&s.root),
+                Some(id) => s.remote.as_ref().is_some_and(|r| &r.panel == id),
+            })
+            .map(|s| (s.name.clone(), s.port()))
+            .collect();
+        let Some(id) = self.place.clone() else {
+            self.port_check = Some((key, hopper::hosting::ports::check_here(port, &used)));
+            return;
+        };
+        let client = store
+            .settings()
+            .hopper_panels
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(hopper::hopperd::Client::for_panel);
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    let asked = client.and_then(|c| c.get(&format!("/servers/port-check?port={port}")).ok());
+                    match asked.and_then(|v| serde_json::from_value(v).ok()) {
+                        Some(c) => c,
+                        None => hopper::hosting::ports::check(port, &used, |_| true),
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                // Only when it's still the port and place asked about.
+                if (this.place.clone(), this.port_value(cx)) == (key.0.clone(), Some(key.1)) {
+                    this.port_check = Some((key, r));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Looks up the machine's name and RAM: this PC's, or the panel's.
+    fn look_up_host(&mut self, cx: &mut Context<Self>) {
+        let place = self.place.clone();
+        if self.host.as_ref().is_some_and(|(p, _, _)| *p == place) {
+            return;
+        }
+        let client = place.as_ref().and_then(|id| {
+            self.store
+                .read(cx)
+                .settings()
+                .hopper_panels
+                .iter()
+                .find(|p| &p.id == id)
+                .and_then(hopper::hopperd::Client::for_panel)
+        });
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    match client {
+                        None => Some(("this PC".to_string(), hopper::hosting::local_panel::total_memory() as f64)),
+                        Some(c) => c.get("/host").ok().map(|v| {
+                            (v["hostname"].as_str().unwrap_or("").to_string(), v["mem_total"].as_f64().unwrap_or(0.0))
+                        }),
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.place == place
+                    && let Some((name, bytes)) = r.filter(|(_, b)| *b > 0.0)
+                {
+                    let name = if name.is_empty() { this.host_label(cx) } else { name };
+                    this.host = Some((place, name, bytes / 1_073_741_824.0));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Moves the server to `place` (None: this PC): the port and RAM there.
+    fn set_place(&mut self, place: Option<String>, cx: &mut Context<Self>) {
+        self.place = place;
+        self.check_port(cx);
+        self.look_up_host(cx);
+    }
+
     /// The game version the server will run.
     fn game_version(&self, cx: &App) -> Option<String> {
         match &self.source {
@@ -281,23 +448,19 @@ impl HostForm {
     /// What to ask a Hopper Server to make (`POST /servers/create`).
     fn panel_body(&self, cx: &App) -> Result<serde_json::Value, String> {
         let store = self.store.read(cx);
-        let (name, gv, loader) = match &self.source {
+        let (gv, loader) = match &self.source {
             Source::Instance(r) => {
                 let inst = store.instance(r).ok_or("That instance is gone.")?;
-                (format!("{} server", inst.name), inst.game_version.clone(), inst.loader.clone())
+                (inst.game_version.clone(), inst.loader.clone())
             }
-            Source::Fresh => self.base.read(cx).choice(cx).ok_or("Pick a version and loader.")?,
+            Source::Fresh => self.base.read(cx).choice(cx).map(|(_, g, l)| (g, l)).ok_or("Pick a version and loader.")?,
             Source::Files(_) => return Err("A pack's server files can only be hosted on this PC for now.".into()),
         };
-        let (kind, version) = match ServerLoader::from_instance(&loader).map_err(|e| format!("{e:#}"))? {
-            ServerLoader::Vanilla => ("vanilla", String::new()),
-            ServerLoader::Fabric(v) => ("fabric", v.unwrap_or_default()),
-            ServerLoader::Quilt(v) => ("quilt", v.unwrap_or_default()),
-            ServerLoader::NeoForge(v) => ("neoforge", v),
-            ServerLoader::Forge(v) => ("forge", v),
-            ServerLoader::Paper(v) => ("paper", v.unwrap_or_default()),
-            ServerLoader::Purpur(v) => ("purpur", v.unwrap_or_default()),
-        };
+        let name = self.server_name(cx);
+        if name.trim().is_empty() {
+            return Err("Name the server.".into());
+        }
+        let (kind, version) = ServerLoader::from_instance(&loader).map_err(|e| format!("{e:#}"))?.panel_kind();
         let port = self.port.read(cx).value().trim().to_string();
         let port: Option<u16> = if port.is_empty() { None } else { Some(port.parse().map_err(|_| "The port must be a number.")?) };
         if !self.eula {
@@ -310,7 +473,7 @@ impl HostForm {
             "loader_version": version,
             "memory_mb": (self.memory.read(cx).value().start() * 1024.0).round() as u32,
             "port": port,
-            "motd": name,
+            "motd": self.motd_text(cx),
             "address": self.address.read(cx).value().trim(),
             "accept_eula": true,
         }))
@@ -361,12 +524,11 @@ impl HostForm {
                 CreateOptions::new(&format!("{} server", p.name), &root, &p.game_version, l, &java)
             }
         };
-        if let Source::Instance(r) = &self.source
-            && let Some(name) = store.instance(r).map(|i| format!("{} server", i.name))
-        {
-            o.name = name;
-            o.motd = o.name.clone();
+        o.name = self.server_name(cx);
+        if o.name.trim().is_empty() {
+            return Err("Name the server.".into());
         }
+        o.motd = self.motd_text(cx);
         o.memory_mb = (self.memory.read(cx).value().start() * 1024.0).round() as u32;
         o.port = self
             .port
@@ -405,22 +567,39 @@ impl HostForm {
             return false;
         };
         let name = body["name"].as_str().unwrap_or("server").to_string();
+        // From an instance its server-side mods and config go over too (or
+        // the pack's server pack), as on this PC.
+        let from = inst.as_ref().and_then(|r| store.instance(r).cloned()).map(|i| {
+            let o = hopper::hosting::panel_create::PanelServer {
+                name: name.clone(),
+                motd: this.motd_text(cx),
+                memory_mb: body["memory_mb"].as_u64().unwrap_or(6144) as u32,
+                port: body["port"].as_u64().map(|p| p as u16),
+                address: body["address"].as_str().unwrap_or("").to_string(),
+                server_pack: this.server_pack && this.has_pack(cx),
+            };
+            (i, o, store.settings().sync_anyway.clone(), store.settings().sync_blacklist.clone())
+        });
         let job = store.start_job(format!("Making {name} on {}", p.name));
         let store = store_entity;
         cx.spawn(async move |cx| {
             let r = cx
                 .background_spawn(async move {
-                    let r = client.run_job("/servers/create", body, &job);
+                    let r = match from {
+                        Some((i, o, anyway, hidden)) => {
+                            hopper::hosting::panel_create::create_from_instance(&client, &i, &o, &anyway, &hidden, &job)
+                                .map(|r| r.made)
+                        }
+                        None => client.run_job("/servers/create", body, &job),
+                    };
                     job.finish(&r);
                     r.map(|v| (v, client.panel.clone()))
                 })
                 .await;
             if let Ok((v, panel)) = r {
-                let folder = v["path"]
-                    .as_str()
-                    .and_then(|p| p.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next())
-                    .unwrap_or("")
-                    .to_string();
+                let folder = hopper::hosting::panel_create::PanelReport { made: v, content: None }
+                    .folder()
+                    .unwrap_or_default();
                 store
                     .update(cx, |s, cx| {
                         if let Some(inst) = inst
@@ -604,6 +783,11 @@ impl HostForm {
 impl Render for HostForm {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rem = window.rem_size();
+        let hint = self.default_name(cx);
+        if hint != self.name_hint {
+            self.name.update(cx, |i, cx| i.set_placeholder(hint.clone(), window, cx));
+            self.name_hint = hint;
+        }
         let theme = cx.theme().clone();
         let store = self.store.read(cx);
         let instances: Vec<(PathBuf, String)> = store
@@ -626,7 +810,7 @@ impl Render for HostForm {
         let source_field = Field::new()
             .label("Start from")
             .description(if from_instance {
-                "Its Minecraft, loader, server-side mods and configs. Client-only mods stay out."
+                "Its Minecraft, loader and server-side mods, with config, defaultconfigs, kubejs and datapacks. Client-only mods stay out; the task lists what was copied and left out."
             } else {
                 "A fresh server: pick the game and server type."
             })
@@ -758,6 +942,43 @@ impl Render for HostForm {
         let problem = self.problem(cx);
         let hosted_root = self.store.read(cx).hosted_root();
         let on_panel = self.place.is_some();
+        let host = self.host_label(cx);
+        // "of 48 GB on rig", and a word when that leaves the machine little.
+        let host_ram = self.host.as_ref().filter(|(p, _, _)| *p == self.place).map(|(_, n, total)| {
+            (
+                format!("of {total:.0} GB on {n}"),
+                (gb as f64 > total * 0.75).then(|| format!("That leaves little for {n} and its other servers.")),
+            )
+        });
+        let port_warning = self
+            .port_check
+            .as_ref()
+            .filter(|((p, port), _)| *p == self.place && self.port_value(cx) == Some(*port))
+            .and_then(|((_, port), c)| Some((c.message(*port, &host)?, c.suggest)))
+            .map(|(msg, suggest)| {
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .p_2()
+                    .rounded(px(crate::theme::RADIUS))
+                    .bg(theme.warning.opacity(0.08))
+                    .text_sm()
+                    .child(div().flex_1().min_w_0().child(msg))
+                    .when_some(suggest, |r, s| {
+                        r.child(
+                            Button::new("host-port-free")
+                                .outline()
+                                .small()
+                                .label(format!("Use {s}"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.port.update(cx, |i, cx| i.set_value(s.to_string(), window, cx));
+                                    this.check_port(cx);
+                                    cx.notify();
+                                })),
+                        )
+                    })
+            });
         // This PC, then each paired Hopper Server (not for a pack's files).
         let panels: Vec<(String, String)> = self
             .store
@@ -779,7 +1000,7 @@ impl Render for HostForm {
             Field::new()
                 .label("Where")
                 .description(if on_panel {
-                    "The panel downloads the server and Java itself. Mods from an instance go over on the Sync tab after."
+                    "Hopper sends the instance's server files there; the panel gets the loader and Java itself."
                 } else {
                     "Runs on this PC while Hopper is open."
                 })
@@ -788,11 +1009,19 @@ impl Render for HostForm {
                     current,
                     items,
                     rem,
-                    Rc::new(move |ix, _, cx| {
+                    Rc::new(move |ix, window, cx| {
                         if let Some(p) = ids.get(ix) {
                             let p = p.clone();
                             view.update(cx, |this, cx| {
-                                this.place = p;
+                                if p != this.place {
+                                    // A panel picks a free port itself; this PC suggests one.
+                                    let port = match &p {
+                                        Some(_) => String::new(),
+                                        None => hopper::hosting::suggest_port(Path::new(&this.store.read(cx).hosted_root())).to_string(),
+                                    };
+                                    this.port.update(cx, |i, cx| i.set_value(port, window, cx));
+                                }
+                                this.set_place(p, cx);
                                 cx.notify();
                             });
                         }
@@ -801,18 +1030,35 @@ impl Render for HostForm {
         });
         v_flex()
             .gap_4()
-            .child(settings_form(rem).children(place_field).child(source_field).when(!on_panel, |f| f.children(pack_field)))
+            .child(settings_form(rem).children(place_field).child(source_field).children(pack_field))
             .when(!from_instance && files.is_none(), |c| c.child(self.base.clone()))
             .child(
                 settings_form(rem)
+                    .when(files.is_some() || from_instance, |f| {
+                        f.child(
+                            Field::new()
+                                .label("Name")
+                                .child(div().w_80().child(Input::new(&self.name).small())),
+                        )
+                    })
+                    .child(
+                        Field::new()
+                            .label("MOTD")
+                            .description("The line players see under the server in their list.")
+                            .child(div().w_80().child(Input::new(&self.motd).small())),
+                    )
                     .child(
                         Field::new()
                             .label("Memory")
+                            .when_some(host_ram.clone().and_then(|(_, w)| w), |f, w| f.description(w))
                             .child(
                                 h_flex()
                                     .gap_3()
                                     .child(div().w_56().child(Slider::new(&self.memory)))
-                                    .child(div().text_sm().child(format!("{gb:.1} GB"))),
+                                    .child(div().text_sm().child(format!("{gb:.1} GB")))
+                                    .when_some(host_ram.map(|(of, _)| of), |r, of| {
+                                        r.child(div().text_sm().text_color(theme.muted_foreground).child(of))
+                                    }),
                             ),
                     )
                     .child(
@@ -823,7 +1069,12 @@ impl Render for HostForm {
                             } else {
                                 "Players join on this port; forward it on your router for friends outside your network."
                             })
-                            .child(div().w_32().child(Input::new(&self.port).small())),
+                            .child(
+                                v_flex()
+                                    .gap_1p5()
+                                    .child(div().w_32().child(Input::new(&self.port).small()))
+                                    .children(port_warning),
+                            ),
                     )
                     .when(on_panel, |f| {
                         f.child(
@@ -871,17 +1122,21 @@ pub fn open_on(store: Entity<Store>, panel: Option<String>, from: Option<PathBuf
     let form = cx.new(|cx| {
         let mut f = HostForm::new(store, from, window, cx);
         if panel.is_some() {
-            f.place = panel;
             // The panel picks a free port.
             f.port.update(cx, |p, cx| p.set_value("", window, cx));
         }
+        f.set_place(panel, cx);
         f
     });
     open_form(form, window, cx);
 }
 
 pub fn open(store: Entity<Store>, from: Option<PathBuf>, window: &mut Window, cx: &mut App) {
-    let form = cx.new(|cx| HostForm::new(store, from, window, cx));
+    let form = cx.new(|cx| {
+        let mut f = HostForm::new(store, from, window, cx);
+        f.set_place(None, cx);
+        f
+    });
     open_form(form, window, cx);
 }
 
@@ -891,6 +1146,7 @@ pub fn open_files(store: Entity<Store>, pack: PackFiles, window: &mut Window, cx
     let form = cx.new(|cx| {
         let mut f = HostForm::new(store, None, window, cx);
         f.source = Source::Files(Rc::new(pack));
+        f.set_place(None, cx);
         f
     });
     open_form(form, window, cx);

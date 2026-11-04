@@ -46,6 +46,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/packs/check", get(pack_check))
         .route("/api/v1/servers/create-from-pack", post(create_from_pack))
         .route("/api/v1/servers/{id}/remove", post(remove))
+        .route("/api/v1/servers/port-check", get(port_check))
         .route("/api/v1/deleted/{name}/restore", put(restore))
         .route("/api/v1/deleted/{name}", axum::routing::delete(purge))
 }
@@ -754,6 +755,34 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
     Ok(Json(json!({ "job": job })))
 }
 
+// ---- ports -------------------------------------------------------------------------------------
+
+/// Whether a port clashes with this machine's other servers (or anything
+/// listening on it), and a free one if so: `?port=25565`, plus `&skip=<id>`
+/// for a server's own port while editing it.
+async fn port_check(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Query(q): Query<HashMap<String, String>>) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let port: u16 = q.get("port").and_then(|p| p.trim().parse().ok()).filter(|p| *p > 0).ok_or_else(|| bad("Which port?"))?;
+    let skip = q.get("skip").filter(|s| !s.is_empty());
+    let list = app.servers.list();
+    let mut used: Vec<(String, u16)> = list.iter().filter(|e| Some(&e.id) != skip).map(|e| (e.name.clone(), crate::router::port_of(e))).collect();
+    // A server being edited is listening on its own port while it runs.
+    let own = skip.and_then(|id| list.iter().find(|e| &e.id == id)).is_some_and(|e| crate::router::port_of(e) == port && e.server.state().is_alive());
+    {
+        let c = app.cfg.read().unwrap();
+        if c.router.enabled {
+            used.push(("The address router".into(), c.router.port));
+        }
+    }
+    let mut c = blocking(move || Ok(hopper_core::hosting::ports::check_here(port, &used))).await?;
+    if own && c.taken_by.is_empty() {
+        c.in_use = false;
+        c.suggest = None;
+    }
+    let host = crate::config::hostname();
+    Ok(Json(json!({ "taken_by": c.taken_by, "in_use": c.in_use, "suggest": c.suggest, "message": c.message(port, &host) })))
+}
+
 // ---- removing and deleting -------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -763,6 +792,9 @@ struct RemoveBody {
     /// Delete only: the server's name, typed to confirm.
     #[serde(default)]
     confirm: String,
+    /// Delete only: move its worlds to `Kept worlds` first.
+    #[serde(default)]
+    keep_world: bool,
 }
 
 async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<RemoveBody>) -> ApiResult<Json<Value>> {
@@ -773,6 +805,7 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     }
     let root_dir = app.cfg.read().unwrap().servers_root.clone();
     let in_root = root_dir.as_deref().is_some_and(|r| e.root.parent().is_some_and(|p| same_path(p, r)));
+    let mut kept = None;
     match b.mode.as_str() {
         "remove" => {
             {
@@ -799,12 +832,13 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
             let root = root_dir.expect("in_root");
             let folder = e.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let dest = root.join(DELETED_DIR).join(format!("{folder}-{}", now()));
-            let (src, name) = (e.root.clone(), e.name.clone());
-            blocking(move || {
+            let (src, name, keep) = (e.root.clone(), e.name.clone(), b.keep_world);
+            kept = blocking(move || {
+                let kept = if keep { hopper_core::hosting::worlds::keep_worlds(&src)? } else { None };
                 std::fs::create_dir_all(dest.parent().unwrap())?;
                 std::fs::rename(&src, &dest).map_err(|err| anyhow::anyhow!("moving {} to {}: {err}", src.display(), dest.display()))?;
                 std::fs::write(dest.join(".hopper-deleted.json"), serde_json::to_vec(&json!({ "name": name, "from": src, "at": now() }))?)?;
-                Ok(())
+                Ok(kept)
             })
             .await?;
             log::info!("{} deleted (kept {KEEP_DELETED_DAYS} days in {DELETED_DIR})", e.name);
@@ -813,7 +847,7 @@ async fn remove(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     }
     app.rescan();
     app.refresh.notify_one();
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "kept_world": kept, "keep_days": KEEP_DELETED_DAYS })))
 }
 
 fn deleted_dir(app: &App, name: &str) -> ApiResult<PathBuf> {

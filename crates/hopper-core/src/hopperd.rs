@@ -847,15 +847,32 @@ impl Client {
     /// Uploads `local` to `rel` in the server folder, replacing what is
     /// there (the panel keeps the old file in its trash).
     pub fn upload(&self, id: &str, local: &Path, rel: &str) -> anyhow::Result<()> {
-        let mut f = std::fs::File::open(local).with_context(|| format!("opening {}", local.display()))?;
-        let size = f.metadata()?.len();
+        let size = std::fs::metadata(local).with_context(|| format!("opening {}", local.display()))?.len();
         let start = self.post(&format!("/fs/{}/uploads", enc(id)), json!({ "path": rel, "size": size, "overwrite": true }))?;
         let up = start["id"].as_str().context("no upload id")?.to_string();
+        self.send_chunks(local, |offset| format!("/fs/{}/uploads/{up}?offset={offset}", enc(id)), |_| {})
+    }
+
+    /// Uploads zip `local` to the panel's incoming folder, where its zip
+    /// import (`/servers/import-zip`) finds it; returns its name there.
+    /// `progress` gets the bytes sent so far.
+    pub fn upload_incoming(&self, local: &Path, progress: impl Fn(u64)) -> anyhow::Result<String> {
+        let size = std::fs::metadata(local).with_context(|| format!("opening {}", local.display()))?.len();
+        let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).context("no file name")?;
+        let start = self.post("/incoming/uploads", json!({ "path": name, "size": size }))?;
+        let up = start["id"].as_str().context("no upload id")?.to_string();
+        self.send_chunks(local, |offset| format!("/incoming/uploads/{up}?offset={offset}"), progress)?;
+        Ok(start["path"].as_str().filter(|p| !p.is_empty()).unwrap_or(&name).to_string())
+    }
+
+    /// Sends `local` in chunks to the upload at `chunk_path(offset)`.
+    fn send_chunks(&self, local: &Path, chunk_path: impl Fn(u64) -> String, progress: impl Fn(u64)) -> anyhow::Result<()> {
+        let mut f = std::fs::File::open(local).with_context(|| format!("opening {}", local.display()))?;
         let mut offset = 0u64;
         let mut buf = vec![0u8; CHUNK];
         loop {
             let n = read_full(&mut f, &mut buf)?;
-            let url = self.url(&format!("/fs/{}/uploads/{up}?offset={offset}", enc(id)));
+            let url = self.url(&chunk_path(offset));
             let v = reply(self.send_via(true, |slow| {
                 slow
                     .put(&url)
@@ -864,6 +881,7 @@ impl Client {
                     .send(&buf[..n])
             }))?;
             offset = v["offset"].as_u64().unwrap_or(offset + n as u64);
+            progress(offset);
             if v["done"].as_bool() == Some(true) || n == 0 {
                 return Ok(());
             }

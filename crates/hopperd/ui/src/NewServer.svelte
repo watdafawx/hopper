@@ -139,6 +139,16 @@
     if (!eula) return 'Agree to the Minecraft EULA to make a server.';
     return '';
   });
+  // A port another server here uses (or something listens on): say so and
+  // offer a free one, as desktop's New server does. Empty port: the panel picks.
+  let portCheck = $state(null);
+  let portTimer;
+  $effect(() => {
+    const p = Number(port);
+    clearTimeout(portTimer);
+    if (!port || !Number.isInteger(p) || p < 1 || p > 65535) { portCheck = null; return; }
+    portTimer = setTimeout(() => api(`/servers/port-check?port=${p}`).then((r) => { if (Number(port) === p) portCheck = r; }, () => (portCheck = null)), 300);
+  });
   api('/router').then((r) => (router = r), () => {});
   api('/templates').then((r) => (templates = r.templates || []), () => {});
   api('/settings/curseforge').then((r) => (cfKey = !!r.set), () => {});
@@ -557,6 +567,7 @@
           <div class="f">
             <label class="lbl" for="ns-port">Port</label>
             <div class="input"><input id="ns-port" type="number" min="1" max="65535" bind:value={port} placeholder="Auto" disabled={!!busy} /></div>
+            {#if portCheck?.message}<div class="tiny warn row port-warn"><span>{portCheck.message}</span>{#if portCheck.suggest}<button class="btn sm" disabled={!!busy} onclick={() => (port = portCheck.suggest)}>Use {portCheck.suggest}</button>{/if}</div>{/if}
             <div class="tiny muted">Empty: the panel picks a free one.</div>
           </div>
           <div class="f span">
@@ -608,6 +619,7 @@
   .sel.ghost { border-style: dashed; }
   .range { width: 100%; accent-color: var(--acc); }
   .eula { display: flex; gap: 8px; align-items: center; }
+  .port-warn { gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
   .eula label { gap: 8px; cursor: pointer; }
   .pi { border-radius: var(--radius); flex: none; }
   .curseforge { color: var(--acc); }

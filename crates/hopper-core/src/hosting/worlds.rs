@@ -128,6 +128,34 @@ pub fn folders(root: &Path, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Where a deleted server's worlds are kept, inside its servers folder.
+pub const KEPT_DIR: &str = "Kept worlds";
+
+/// Before a server is deleted: moves its worlds' folders (with their
+/// dimension folders) to `Kept worlds/<server folder>` beside it, so they
+/// outlive the server. Returns where they went, or None when it has no
+/// world yet. A rename, so instant on the same drive.
+pub fn keep_worlds(root: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let dirs: Vec<String> = list(root).iter().filter(|w| w.created).flat_map(|w| w.folders.clone()).collect();
+    if dirs.is_empty() {
+        return Ok(None);
+    }
+    let parent = root.parent().context("the server folder has no parent")?;
+    let folder = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "server".into());
+    let kept = parent.join(KEPT_DIR);
+    let mut dest = kept.join(&folder);
+    let mut n = 2;
+    while dest.exists() {
+        dest = kept.join(format!("{folder} ({n})"));
+        n += 1;
+    }
+    fs::create_dir_all(&dest)?;
+    for d in dirs {
+        fs::rename(root.join(&d), dest.join(&d)).with_context(|| format!("moving {d} to {}", dest.display()))?;
+    }
+    Ok(Some(dest))
+}
+
 /// The server's worlds, active first, then by last played.
 pub fn list(root: &Path) -> Vec<World> {
     let active = level_name(root);
@@ -854,6 +882,26 @@ mod tests {
         delete(&d, "event", &trash).unwrap();
         assert!(list(&d).iter().all(|w| w.name != "event"));
         let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn keeps_worlds_beside_the_server() {
+        let base = tmp("keep");
+        let d = base.join("My server");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("server.properties"), "level-name=world\n").unwrap();
+        level_dat(&d.join("world/level.dat"));
+        level_dat(&d.join("world_nether/level.dat"));
+        fs::create_dir_all(d.join("mods")).unwrap();
+        let kept = keep_worlds(&d).unwrap().unwrap();
+        assert_eq!(kept, base.join(KEPT_DIR).join("My server"));
+        assert!(kept.join("world/level.dat").is_file() && kept.join("world_nether/level.dat").is_file());
+        assert!(!d.join("world").exists() && d.join("mods").is_dir());
+        // Nothing left to keep; a second server of the same name gets its own folder.
+        assert_eq!(keep_worlds(&d).unwrap(), None);
+        level_dat(&d.join("world/level.dat"));
+        assert_eq!(keep_worlds(&d).unwrap().unwrap(), base.join(KEPT_DIR).join("My server (2)"));
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]

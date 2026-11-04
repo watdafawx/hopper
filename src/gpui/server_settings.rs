@@ -302,6 +302,53 @@ impl ServerSettings {
         }
     }
 
+    /// For a hosted server's changed port: another server here already on
+    /// it (or something listening), with a free one to use instead. As the
+    /// New server dialog says it.
+    fn port_warning(&self, value: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let root = self.root.as_ref()?;
+        let port: u16 = value.trim().parse().ok().filter(|p| *p > 0)?;
+        let store = self.store.read(cx);
+        if !store.is_hosted(root) || self.props.get("server-port").is_some_and(|p| p.trim() == value.trim()) {
+            return None;
+        }
+        let used: Vec<(String, u16)> = store
+            .servers()
+            .iter()
+            .filter(|s| &s.root != root && store.is_hosted(&s.root))
+            .map(|s| (s.name.clone(), s.port()))
+            .collect();
+        let c = hopper::hosting::ports::check_here(port, &used);
+        let msg = c.message(port, "this PC")?;
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .max_w(rems(28.))
+                .gap_2()
+                .p_2()
+                .rounded(px(crate::theme::RADIUS))
+                .bg(theme.warning.opacity(0.08))
+                .text_sm()
+                .child(div().flex_1().min_w_0().child(msg))
+                .when_some(c.suggest, |r, s| {
+                    r.child(
+                        Button::new("settings-port-free")
+                            .outline()
+                            .small()
+                            .label(format!("Use {s}"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(i) = this.inputs.get("server-port") {
+                                    i.update(cx, |i, cx| i.set_value(s.to_string(), window, cx));
+                                }
+                                this.values.insert("server-port", s.to_string());
+                                cx.notify();
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     fn field(&self, spec: &'static hopper::hosting::PropSpec, rem: Pixels, cx: &mut Context<Self>) -> Field {
         let value = self.values.get(spec.key).cloned().unwrap_or_default();
         if spec.key == "motd"
@@ -342,7 +389,11 @@ impl ServerSettings {
                     .into_any_element()
             }
             PropKind::Int { .. } => match self.inputs.get(spec.key) {
-                Some(i) => div().w_32().child(Input::new(i).small()).into_any_element(),
+                Some(i) => v_flex()
+                    .gap_1p5()
+                    .child(div().w_32().child(Input::new(i).small()))
+                    .children((spec.key == "server-port").then(|| self.port_warning(&value, cx)).flatten())
+                    .into_any_element(),
                 None => div().into_any_element(),
             },
             PropKind::String => match self.inputs.get(spec.key) {

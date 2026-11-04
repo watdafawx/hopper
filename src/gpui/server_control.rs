@@ -837,6 +837,12 @@ impl ServerControl {
 
     fn more_menu(&self, b: Button, running: bool, cx: &mut Context<Self>) -> AnyElement {
         let menu_view = cx.entity();
+        // Servers Hopper hosts here or a Hopper Server runs can be deleted.
+        let delete = self
+            .root
+            .clone()
+            .filter(|r| crate::server_delete::can_delete(self.store.read(cx), r))
+            .map(|r| (self.store.clone(), r));
         b.icon(IconName::Ellipsis).dropdown_menu(move |menu, _, _| {
             let (v1, v2) = (menu_view.clone(), menu_view.clone());
             menu.item(PopupMenuItem::new("Back up now").on_click(move |_, window, cx| {
@@ -846,6 +852,11 @@ impl ServerControl {
             .item(PopupMenuItem::new("Kill (no save)").disabled(!running).on_click(move |_, window, cx| {
                 v2.update(cx, |this, cx| this.request(PanelAction::Kill, window, cx))
             }))
+            .when_some(delete.clone(), |m, (store, root)| {
+                m.separator().item(PopupMenuItem::new("Delete server…").icon(IconName::Delete).on_click(move |_, window, cx| {
+                    crate::server_delete::open(store.clone(), root.clone(), running, window, cx)
+                }))
+            })
         })
         .into_any_element()
     }
