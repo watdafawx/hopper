@@ -154,8 +154,8 @@ pub fn create_from_instance(
     Ok(PanelReport { made, content: Some(report) })
 }
 
-/// Sets the server's MOTD when it isn't the name (which the panel uses).
-fn set_motd(client: &Client, made: &Value, motd: &str, name: &str) {
+/// Sets the new server's MOTD when it isn't the name (which the panel uses).
+pub fn set_motd(client: &Client, made: &Value, motd: &str, name: &str) {
     let motd = motd.trim();
     let Some(id) = made["id"].as_str() else { return };
     if motd.is_empty() || motd == name.trim() {
