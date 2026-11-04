@@ -3475,6 +3475,9 @@ impl BrowseView {
                                         .text_xs(),
                                     ),
                             )
+                            .when(m.modrinth.is_none() && f.has_server_files(), |r| {
+                                r.child(widgets::server_files_chip(format!("srv-file-{}", f.id), cx))
+                            })
                             .children(server_pack)
                             .child(action)
                     }));

@@ -59,6 +59,9 @@ pub struct MrFile {
     pub requires: Vec<String>,
     /// Markdown.
     pub changelog: String,
+    /// The version carries a server zip beside its .mrpack (see
+    /// [`server_zip`]).
+    pub has_server_zip: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -476,6 +479,7 @@ pub fn version_to_file(v: &Version) -> cf::File {
                 .filter_map(|d| d.project_id.clone())
                 .collect(),
             changelog: v.changelog.clone().unwrap_or_default(),
+            has_server_zip: v.files.iter().any(|f| !f.primary && is_server_zip(&f.filename)),
         }),
         // Every relation, as CurseForge lists them: the Dependencies tab
         // and incompatibility checks read these.

@@ -3,7 +3,7 @@
   // Versions window: how far behind it is, then every version newest first
   // with its changelog. "Update to this" on a newer one and "Switch to
   // this" on an older one open the update window for that version.
-  import { X, Download, ChevronDown, ChevronRight, Package, ExternalLink, ArrowRightLeft, GitCompare } from '@lucide/svelte';
+  import { X, Download, Server, ChevronDown, ChevronRight, Package, ExternalLink, ArrowRightLeft, GitCompare } from '@lucide/svelte';
   import { untrack } from 'svelte';
   import { api } from './lib/api.js';
   import { ago } from './lib/browse.js';
@@ -78,6 +78,7 @@
               <b class="ell">{v.name}</b>
               <span class="chip xs">{v.type ? v.type[0].toUpperCase() + v.type.slice(1) : 'Release'}</span>
               {#if installed}<span class="chip running xs">Installed</span>{/if}
+              {#if v.server_files}<span class="chip lan xs" title="This version has a server pack"><Server size={11} />Server files</span>{/if}
               {#if pack.updatable && !v.server_files}<span class="chip xs" title="The author didn't publish a server pack for this version">No server files</span>{/if}
               <span class="tiny muted">{ago(v.date)}</span>
             </button>

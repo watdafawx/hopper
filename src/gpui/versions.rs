@@ -274,7 +274,7 @@ impl Render for VersionsView {
                     });
                     // Named by what it does: these are all newer than the
                     // installed version.
-                    let action = file.filter(|_| !e.installed).map(|f| {
+                    let action = file.clone().filter(|_| !e.installed).map(|f| {
                         let b = Button::new(SharedString::from(format!("install:{}", f.id)))
                             .small()
                             .icon(IconName::Download)
@@ -300,7 +300,10 @@ impl Render for VersionsView {
                                 .gap_y_1()
                                 .child(div().min_w_0().font_semibold().child(e.name.clone()))
                                 .child(widgets::chip(theme.muted_foreground).child(e.release))
-                                .when(e.installed, |r| r.child(widgets::chip(theme.success).child("Installed"))),
+                                .when(e.installed, |r| r.child(widgets::chip(theme.success).child("Installed")))
+                                .when(pack && file.as_ref().is_some_and(|f| f.has_server_files()), |r| {
+                                    r.child(widgets::server_files_chip(format!("srv-card-{i}"), cx))
+                                }),
                         )
                         .child(
                             h_flex()
@@ -402,6 +405,9 @@ impl Render for VersionsView {
                                         )
                                         .child(div().text_sm().font_medium().truncate().child(f.display_name.clone()))
                                         .child(widgets::chip(theme.muted_foreground).child(f.release_name()))
+                                        .when(self.pack && f.has_server_files(), |r| {
+                                            r.child(widgets::server_files_chip(format!("srv-other-{}", f.id), cx))
+                                        })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.open_other(f1.clone(), cx)
                                         })),
@@ -445,6 +451,14 @@ impl Render for VersionsView {
                         .children(body)
                 });
                 let view = cx.entity();
+                // The target has no server pack yet while other versions of
+                // this pack do: someone hosting from it should know before
+                // updating.
+                let no_server = self.pack
+                    && behind > 0
+                    && latest.as_ref().is_some_and(|f| !f.has_server_files())
+                    && self.all.iter().any(|f| f.has_server_files());
+                let latest_has_server = latest.as_ref().is_some_and(|f| f.has_server_files());
                 v_flex()
                     .gap_3()
                     .child(
@@ -457,6 +471,12 @@ impl Render for VersionsView {
                                     .text_color(if behind == 0 { theme.success } else { theme.primary })
                                     .child(status),
                             )
+                            .when(self.pack && behind > 0 && latest_has_server, |r| {
+                                r.child(widgets::server_files_chip("srv-target", cx))
+                            })
+                            .when(no_server, |r| {
+                                r.child(widgets::caption("No server files yet", cx).text_xs())
+                            })
                             .when_some(latest, |r, f| {
                                 r.child(
                                     Button::new("update-latest")
