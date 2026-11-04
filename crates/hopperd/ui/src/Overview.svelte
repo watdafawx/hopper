@@ -24,6 +24,8 @@
   // Running servers first, as in the server list.
   const servers = $derived([...live.servers].sort((a, b) => Number(alive(b)) - Number(alive(a))));
   const loading = $derived(!live.connected && !live.servers.length);
+  // Two names, then "+N": the rest are in the tooltip.
+  const names = (p) => (p.length > 2 ? `${p.slice(0, 2).join(', ')} +${p.length - 2}` : p.join(', '));
   const href = (s) => `#/server/${encodeURIComponent(s.id)}`;
 </script>
 
@@ -94,15 +96,15 @@
           {/if}
         </div>
         {#if s.progress}<Progress server={s} />{/if}
-        <!-- One chip fits beside the footer's buttons; several get their own row. -->
-        {#if nchips > 1}<div class="row chips">{@render chips(s, up)}</div>{/if}
+        <!-- Status chips get their own row, so they never crowd the buttons. -->
+        {#if nchips}<div class="row chips">{@render chips(s, up)}</div>{/if}
         <!-- Players show once, in the header pill; the two meters get half the card each. -->
         <div class="meters">
           <div>
             <div class="t">CPU<b>{on ? `${Math.round(s.cpu)} %` : '—'}</b></div>
             <div class="bar"><i style:width="{on ? Math.min(100, s.cpu) : 0}%"></i></div>
           </div>
-          <div title={on ? memTitle(mem, cap) : undefined}>
+          <div title={on ? (mem > cap && cap ? `${bytes(mem)} of ${bytes(cap)}, over the memory setting. ` : '') + memTitle(mem, cap) : undefined}>
             <div class="t">RAM<b>{on ? bytes(mem) : '—'}{#if cap}<span class="u">{` / ${bytes(cap)}`}</span>{/if}</b></div>
             <div class="bar b mem">
               {#if span}<i style:width="{(Math.min(mem, cap || mem) / span) * 100}%"></i>{/if}
@@ -112,8 +114,7 @@
         </div>
         <div class="row foot">
           <span class="left">
-            {#if nchips === 1}{@render chips(s, up)}{/if}
-            <span class="small subtle ell" title={s.players.join(', ')}>{s.players.join(', ') || (on ? 'Nobody online' : '')}</span>
+            <span class="small subtle ell" title={s.players.join(', ')}>{names(s.players) || (on ? 'Nobody online' : '')}</span>
           </span>
           {#if !on}
             <button class="btn sm go" onclick={() => power(s, 'start')}><Play size={13} />Start</button>
@@ -150,7 +151,7 @@
   .stat .u { font-size: 12px; color: var(--muted); font-weight: 400; }
   .stat .s { font-size: 12px; color: var(--muted); }
   .dbar { margin-top: 16px; }
-  .servers { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; margin-top: 12px; }
+  .servers { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; margin-top: 12px; }
   .scard { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 14px; display: flex; flex-direction: column; gap: 12px; }
   .scard:hover { border-color: var(--line2); }
   .nmw { flex: 1; min-width: 0; color: inherit; }
@@ -158,6 +159,7 @@
   .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
   .cap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chips { flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+  .chips :global(.chip) { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .stopped { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); flex: none; }
   .meters { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .t { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; color: var(--muted); margin-bottom: 5px; white-space: nowrap; }
@@ -169,13 +171,14 @@
   .mem s { right: 0; border-radius: 0 9px 9px 0; background: repeating-linear-gradient(135deg, #38bdf8aa 0 3px, #38bdf833 3px 6px); }
   .mem u { top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text); opacity: .7; }
   .foot { gap: 4px; }
-  .foot .left { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-  /* Names take what the chips leave, down to a few letters, before wrapping. */
-  .foot .left .ell { flex: 1 1 0; min-width: 40px; }
+  .foot { flex-wrap: nowrap; }
+  .foot .left { flex: 1; min-width: 0; display: flex; align-items: center; }
+  .foot .left .ell { flex: 1 1 0; min-width: 0; }
+  .foot .btn { flex: none; }
   .foot .btn { height: 26px; }
   .foot .btn.icon { width: 26px; justify-content: center; padding: 0; }
   .foot .btn + .btn { margin-left: 2px; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .empty { grid-column: 1 / -1; padding: 0; }
-  @media (max-width: 760px) { .pad { padding: 16px; } .servers { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) { .pad { padding: 16px; } .servers { grid-template-columns: minmax(0, 1fr); } }
 </style>
