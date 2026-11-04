@@ -4,26 +4,14 @@
 use crate::instances::{Addon, Instance};
 use std::path::Path;
 
-/// Endings a config's name carries after the mod id (`jei-client.toml`,
-/// `create-server.toml`).
-const SUFFIXES: &[&str] = &[
-    "-client", "_client", "-common", "_common", "-server", "_server", "-startup", "_startup", "-config", "_config",
-    "-neoforge", "_neoforge", "-forge", "_forge", "-fabric", "_fabric",
-];
-
 fn squash(s: &str) -> String {
-    s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
+    crate::configowner::squash(s)
 }
 
-/// The mod id a top-level entry of `config/` is named after, squashed: the
-/// file `jei-client.toml` and the folder `mekanism` give `jei`, `mekanism`.
+/// The mod id a top-level entry of `config/` is named after, squashed (the
+/// same rule as every other screen: [`crate::configowner::stem`]).
 fn owner(name: &str, is_dir: bool) -> String {
-    let l = name.to_lowercase();
-    let mut stem = if is_dir { l.as_str() } else { l.split('.').next().unwrap_or(&l) };
-    for s in SUFFIXES {
-        stem = stem.strip_suffix(s).unwrap_or(stem);
-    }
-    squash(stem)
+    crate::configowner::stem(&if is_dir { format!("config/{name}/x") } else { format!("config/{name}") })
 }
 
 /// The config files of `addon`, relative to the instance with `/`, file by

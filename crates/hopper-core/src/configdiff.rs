@@ -978,19 +978,10 @@ fn server_side_config(folder: &str, rel: &str) -> bool {
 /// and `mekanism/general.toml` give `bedrockores` and `mekanism`. Client
 /// configs don't matter to a server.
 fn config_owner(rel: &str) -> Option<String> {
-    let l = rel.to_lowercase();
-    if l.contains("client") {
+    if rel.to_lowercase().contains("client") {
         return None;
     }
-    let (first, nested) = match l.split_once('/') {
-        Some((d, _)) => (d, true),
-        None => (l.as_str(), false),
-    };
-    let mut stem = if nested { first } else { first.split('.').next().unwrap_or(first) };
-    for s in ["-common", "_common", "-server", "_server", "-startup", "_startup", "-config", "_config"] {
-        stem = stem.strip_suffix(s).unwrap_or(stem);
-    }
-    let k = squash(stem);
+    let k = crate::configowner::stem(rel);
     (!k.is_empty()).then_some(k)
 }
 
