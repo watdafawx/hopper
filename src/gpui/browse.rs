@@ -113,9 +113,22 @@ struct TypeMemory {
     scroll: ListOffset,
 }
 
+/// The list a history place showed when it was left: stepping back brings
+/// it (every page loaded, same scroll spot) instead of asking again.
+#[derive(Clone)]
+struct Snap {
+    /// The query the results answer (see [`BrowseView::query_key`]).
+    key: String,
+    results: Vec<cf::Mod>,
+    total: u32,
+    scroll: ListOffset,
+}
+
 /// A place in Browse's own history: what back and forward step through.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct Place {
+    /// Names the place in the app's history (see `nav::Loc::Browse`).
+    id: u64,
     class: u32,
     text: String,
     category: Option<u64>,
@@ -125,6 +138,24 @@ struct Place {
     modrinth: bool,
     bookmarked: bool,
     project: Option<u64>,
+    /// Not part of where the place is, only what it showed.
+    snap: Option<Snap>,
+    /// How far the open project's panel was scrolled.
+    peek_scroll: Point<Pixels>,
+}
+
+impl PartialEq for Place {
+    fn eq(&self, o: &Self) -> bool {
+        self.class == o.class
+            && self.text == o.text
+            && self.category == o.category
+            && self.sort == o.sort
+            && self.game_version == o.game_version
+            && self.loader == o.loader
+            && self.modrinth == o.modrinth
+            && self.bookmarked == o.bookmarked
+            && self.project == o.project
+    }
 }
 
 /// How many places Browse's history keeps.
@@ -282,6 +313,19 @@ pub struct BrowseView {
     /// Back and forward inside Browse.
     hist: Vec<Place>,
     hist_at: usize,
+    /// The id the next new place gets.
+    next_place: u64,
+    /// Set while stepping through history (a step shouldn't re-stash).
+    stepping: bool,
+    /// The project panel's scroll, kept per history place.
+    detail_scroll: ScrollHandle,
+    /// A history place's panel scroll, put back once its page is drawn.
+    peek_scroll_after: Option<Point<Pixels>>,
+    /// A description link being looked up: the panel shows a skeleton.
+    opening: Option<String>,
+    /// The source changed without a window at hand: the search box's
+    /// placeholder follows on the next draw.
+    source_ui: bool,
     /// Projects the history can open again.
     hist_projects: HashMap<u64, cf::Mod>,
     /// Pack folders of the target, for (root, resource packs?, mod count).
@@ -361,8 +405,8 @@ impl BrowseView {
         // A description's link to another project opens it here.
         let me = cx.entity().downgrade();
         desc.update(cx, |d, _| {
-            d.on_project = Some(std::sync::Arc::new(move |p, _, cx| {
-                me.update(cx, |b, cx| b.show_project(p, cx)).ok();
+            d.on_project = Some(std::sync::Arc::new(move |url, link, _, cx| {
+                me.update(cx, |b, cx| b.open_desc_project(url, link, cx)).ok();
             }))
         });
         let subs = vec![
@@ -431,6 +475,12 @@ impl BrowseView {
             scroll_after: Default::default(),
             hist: Vec::new(),
             hist_at: 0,
+            next_place: 1,
+            stepping: false,
+            detail_scroll: ScrollHandle::new(),
+            peek_scroll_after: None,
+            opening: None,
+            source_ui: false,
             hist_projects: HashMap::new(),
             pack_targets: None,
             pending: Vec::new(),
@@ -740,20 +790,56 @@ impl BrowseView {
                 .background_spawn(async move { hopper::source::get_mod(project) })
                 .await;
             this.update(cx, |this, cx| match r {
-                Ok(m) => {
-                    this.modrinth = m.modrinth.is_some();
-                    this.switch_class(m.class_id.unwrap_or(cf::CLASS_MODS));
-                    this.restored = None;
-                    this.open_detail(m, cx);
-                    if !this.peek {
-                        this.run_search(false, cx);
-                    }
-                }
+                Ok(m) => this.show_mod(m, cx),
                 Err(e) => {
                     this.error = Some(cf::explain(&e, |e| {
                         format!("Couldn't load that project. Check your connection and try again. ({e:#})")
                     }));
                     cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shows `m` in the panel, with its source and type's list behind it.
+    fn show_mod(&mut self, m: cf::Mod, cx: &mut Context<Self>) {
+        self.source_quiet(m.modrinth.is_some(), cx);
+        self.switch_class(m.class_id.unwrap_or(cf::CLASS_MODS));
+        self.restored = None;
+        self.open_detail(m, cx);
+        if !self.peek {
+            self.run_search(false, cx);
+        }
+    }
+
+    /// A description's link to a project: its panel shows a skeleton at
+    /// once, then the project, found by the link's slug in one lookup; the
+    /// list loads behind it. One that can't be found opens in the browser.
+    fn open_desc_project(&mut self, url: String, link: hopper::source::ProjectLink, cx: &mut Context<Self>) {
+        self.opening = Some(url.clone());
+        cx.notify();
+        let started = Instant::now();
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move { hopper::source::mod_from_link(&link) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.opening.as_deref() != Some(url.as_str()) {
+                    return;
+                }
+                match r {
+                    Ok(m) => {
+                        log::info!("description link {url}: shown in {} ms", started.elapsed().as_millis());
+                        this.show_mod(m, cx);
+                    }
+                    Err(e) => {
+                        log::warn!("description link {url}: {e:#}");
+                        this.opening = None;
+                        cx.open_url(&url);
+                        cx.notify();
+                    }
                 }
             })
             .ok();
@@ -978,6 +1064,7 @@ impl BrowseView {
         let generation = self.generation;
         if !append {
             // A new query starts at the top, with nothing "new" pending.
+            self.stash_list();
             self.query_gen += 1;
             self.fresh.clear();
             self._check = None;
@@ -1232,6 +1319,7 @@ impl BrowseView {
     }
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
+        self.stash_list();
         self.results.clear();
         self.run_search(false, cx);
     }
@@ -1314,6 +1402,7 @@ impl BrowseView {
 
     fn place(&self) -> Place {
         Place {
+            id: 0,
             class: self.class,
             text: self.searched_text.clone(),
             category: self.category,
@@ -1323,25 +1412,70 @@ impl BrowseView {
             modrinth: self.modrinth,
             bookmarked: self.bookmarked,
             project: self.selected_id(),
+            snap: None,
+            peek_scroll: Point::default(),
+        }
+    }
+
+    /// Keeps the list as it is now (results, pages loaded, scroll spot) on
+    /// the place being left, before a new query replaces it.
+    fn stash_list(&mut self) {
+        if self.stepping || self.results.is_empty() || self.bookmarked {
+            return;
+        }
+        let snap = Snap {
+            key: self.results_key.clone(),
+            results: self.results.clone(),
+            total: self.total,
+            scroll: self.list.logical_scroll_top(),
+        };
+        if let Some(p) = self.hist.get_mut(self.hist_at) {
+            p.snap = Some(snap);
+        }
+    }
+
+    /// Keeps how far the open project's panel is scrolled on the place
+    /// being left.
+    fn stash_peek(&mut self) {
+        let (id, at) = (self.selected_id(), self.detail_scroll.offset());
+        if let Some(p) = self.hist.get_mut(self.hist_at)
+            && id.is_some()
+            && p.project == id
+        {
+            p.peek_scroll = at;
+        }
+    }
+
+    /// Switches between CurseForge and Modrinth where no window is at hand
+    /// (history, a link): the search box follows on the next draw.
+    fn source_quiet(&mut self, modrinth: bool, cx: &mut Context<Self>) {
+        if self.modrinth == modrinth {
+            return;
+        }
+        self.modrinth = modrinth;
+        self.source_ui = true;
+        if !self.peek {
+            self.store
+                .update(cx, |s, cx| s.update_settings(|st| st.browse_modrinth = modrinth, cx));
         }
     }
 
     /// Notes where Browse is, when it's a new place (a search, a type,
-    /// a category, a sort, a filter, the open project).
-    fn note_place(&mut self) {
+    /// a category, a sort, a filter, the open project). The app's history
+    /// holds the order; Browse keeps what each place showed.
+    pub(crate) fn note_place(&mut self) {
         if self.peek || !self.searched {
             return;
         }
-        let here = self.place();
+        let mut here = self.place();
         if self.hist.get(self.hist_at) == Some(&here) {
             return;
         }
         if let Some(m) = &self.selected {
             self.hist_projects.entry(m.id).or_insert_with(|| m.clone());
         }
-        if !self.hist.is_empty() {
-            self.hist.truncate(self.hist_at + 1);
-        }
+        here.id = self.next_place;
+        self.next_place += 1;
         self.hist.push(here);
         if self.hist.len() > HISTORY_KEEP {
             self.hist.remove(0);
@@ -1349,30 +1483,26 @@ impl BrowseView {
         self.hist_at = self.hist.len() - 1;
     }
 
-    /// The place one step back (or forward) from here, skipping those
-    /// from the other source (their categories don't carry over).
-    fn step_target(&self, back: bool) -> Option<usize> {
-        let mut at = self.hist_at;
-        loop {
-            at = if back { at.checked_sub(1)? } else { at + 1 };
-            let p = self.hist.get(at)?;
-            if p.modrinth == self.modrinth {
-                return Some(at);
-            }
+    /// The place Browse is at, for the app's history (0 before a search).
+    pub(crate) fn place_id(&self) -> u64 {
+        self.hist.get(self.hist_at).map_or(0, |p| p.id)
+    }
+
+    /// Goes back (or forward) to a place `place_id` gave. False when it's
+    /// gone (too old).
+    pub(crate) fn goto_place(&mut self, id: u64, cx: &mut Context<Self>) -> bool {
+        let Some(at) = self.hist.iter().position(|p| p.id == id) else { return false };
+        if at == self.hist_at && self.hist[at] == self.place() {
+            return true;
         }
-    }
-
-    /// Whether Browse has a place of its own to go back (or forward) to.
-    pub fn can_step(&self, back: bool) -> bool {
-        !self.peek && self.step_target(back).is_some()
-    }
-
-    /// One step back (or forward) through Browse's own history. False when
-    /// there's none, and the app steps its pages instead.
-    pub fn step(&mut self, back: bool, cx: &mut Context<Self>) -> bool {
-        let Some(at) = self.step_target(back) else { return false };
+        // The place left keeps its list and scroll spots for the way back.
+        self.stash_list();
+        self.stash_peek();
+        self.stepping = true;
+        self.opening = None;
         let p = self.hist[at].clone();
         self.hist_at = at;
+        self.source_quiet(p.modrinth, cx);
         if p.class != self.class {
             self.remember_type();
             self.class = p.class;
@@ -1385,9 +1515,29 @@ impl BrowseView {
         self.loader = p.loader;
         self.dest = None;
         self.text = p.text.clone();
-        self.pending_query = Some(p.text);
+        self.pending_query = Some(p.text.clone());
         self.want_global(cx);
-        self.refilter(cx);
+        let key = self.query_key();
+        if !self.results.is_empty() && self.results_key == key && !self.bookmarked {
+            // Same query as the list on screen (only the open project
+            // differs): leave the list, and its scroll spot, alone.
+        } else if let Some(snap) = p.snap.filter(|n| n.key == key && !self.bookmarked) {
+            self.query_gen += 1;
+            self.generation += 1;
+            self.loading = false;
+            self.error = None;
+            self.fresh.clear();
+            self._check = None;
+            self.results_key = snap.key;
+            self.searched_text = p.text;
+            self.results = snap.results;
+            self.total = snap.total;
+            self.scroll_after.set(Some(snap.scroll));
+            self.load_categories(cx);
+            self.want_server_files(cx);
+        } else {
+            self.refilter(cx);
+        }
         match p.project {
             Some(id) if self.selected_id() != Some(id) => match self.hist_projects.get(&id).cloned() {
                 Some(m) => self.open_detail(m, cx),
@@ -1399,12 +1549,27 @@ impl BrowseView {
                 self.author = None;
             }
         }
+        if p.project.is_some() {
+            self.detail_scroll.set_offset(p.peek_scroll);
+            self.peek_scroll_after = Some(p.peek_scroll);
+        }
+        self.stepping = false;
         cx.notify();
         true
     }
 
     fn open_detail(&mut self, m: cf::Mod, cx: &mut Context<Self>) {
         let id = m.id;
+        self.opening = None;
+        if self.selected_id() != Some(id) {
+            // Another project: the one left keeps its scroll for Back, the
+            // new one starts at its top.
+            if !self.stepping {
+                self.stash_peek();
+            }
+            self.detail_scroll.set_offset(Point::default());
+            self.peek_scroll_after = None;
+        }
         // Files for the current Minecraft and loader filters (they follow the
         // target instance); the newest 50 overall are mostly other loaders.
         let gv = self.game_version.clone();
@@ -1445,7 +1610,11 @@ impl BrowseView {
         self.author = None;
         self.selected = Some(m);
         self.detail_tab = 0;
-        self.detail.insert(id, Load::Loading);
+        // Shown before (Back to it): keep its page while it's asked again,
+        // so the panel can scroll back to where it was.
+        if !matches!(self.detail.get(&id), Some(Load::Ready(_))) {
+            self.detail.insert(id, Load::Loading);
+        }
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
@@ -1503,6 +1672,11 @@ impl BrowseView {
                                 files,
                             }),
                         );
+                        if this.selected_id() == Some(id)
+                            && let Some(at) = this.peek_scroll_after.take()
+                        {
+                            this.detail_scroll.set_offset(at);
+                        }
                     }
                     Err(e) => {
                         this.detail.insert(id, Load::Failed(format!("{e:#}")));
@@ -3590,9 +3764,9 @@ impl BrowseView {
             }
         };
 
-        v_flex()
+        let page = v_flex()
             .id("browse-detail")
-            .size_full()
+            .w_full()
             .px_5()
             .py_5()
             .gap_4()
@@ -3646,8 +3820,21 @@ impl BrowseView {
                     ),
                 )
             })
-            .child(body)
-            .overflow_y_scrollbar()
+            .child(body);
+        // A scroll handle of Browse's own, so Back can put the panel's
+        // scroll back.
+        div()
+            .relative()
+            .size_full()
+            .child(
+                div()
+                    .id("browse-detail-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.detail_scroll)
+                    .child(page),
+            )
+            .vertical_scrollbar(&self.detail_scroll)
             .into_any_element()
     }
 }
@@ -4482,6 +4669,13 @@ impl Render for BrowseView {
             return self.panel(target.as_ref(), window, cx).unwrap_or_else(|| div().into_any_element());
         }
         self.note_place();
+        if std::mem::take(&mut self.source_ui) {
+            let modrinth = self.modrinth;
+            cx.defer_in(window, move |this, window, cx| {
+                this.search
+                    .update(cx, |s, cx| s.set_placeholder(placeholder(modrinth), window, cx))
+            });
+        }
         if let Some(q) = self.pending_query.take() {
             cx.defer_in(window, move |this, window, cx| {
                 this.search.update(cx, |s, cx| s.set_value(q, window, cx))
@@ -4668,6 +4862,10 @@ impl BrowseView {
                 )
                 .into_any_element()
         };
+        if self.opening.is_some() {
+            let body = v_flex().p_5().child(widgets::skeleton_rows(8, rems(2.5), cx)).into_any_element();
+            return Some(frame("detail:opening".into(), body));
+        }
         if let Some(name) = self.author.as_ref().map(|a| a.name.clone()) {
             let body = self.author_panel(target, cx);
             return Some(frame(ElementId::Name(format!("author:{name}").into()), body));

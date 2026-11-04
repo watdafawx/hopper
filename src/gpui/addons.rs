@@ -644,6 +644,9 @@ pub struct AddonsView {
     /// What the table shows, built when it changes rather than per frame.
     pub(crate) table: Table,
     pub(crate) scroll: UniformListScrollHandle,
+    /// Each instance and type's filter and scroll spot when it was left,
+    /// so going back to it (Back, or picking it again) finds it as it was.
+    kept: HashMap<(PathBuf, u32), (Show, Point<Pixels>)>,
     /// A mod's project page, docked on the right.
     peek: Entity<crate::browse::BrowseView>,
     /// Where the rows and the peek drew animated logos, which the page
@@ -797,6 +800,7 @@ impl AddonsView {
             loose: (None, Vec::new()),
             table: Table::default(),
             scroll: UniformListScrollHandle::new(),
+            kept: HashMap::new(),
             peek,
             logos,
             cols: Cols::default(),
@@ -867,10 +871,22 @@ impl AddonsView {
     /// Points the table at an instance and class.
     pub fn show_for(&mut self, root: PathBuf, class: u32, cx: &mut Context<Self>) {
         if self.root.as_ref() != Some(&root) || self.class != class {
+            if let Some(old) = self.root.clone() {
+                let at = self.scroll.0.borrow().base_handle.offset();
+                self.kept.insert((old, self.class), (self.show, at));
+            }
             self.selected.clear();
-            self.show = Show::All;
             self.cursor = None;
-            self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+            match self.kept.get(&(root.clone(), class)).copied() {
+                Some((show, at)) => {
+                    self.show = show;
+                    self.scroll.0.borrow().base_handle.set_offset(at);
+                }
+                None => {
+                    self.show = Show::All;
+                    self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                }
+            }
             self.peek
                 .update(cx, |p, cx| p.peek_project(root.clone(), None, cx));
         }

@@ -1343,8 +1343,10 @@ pub fn description_wait(images: &[String], store: &crate::store::Store) -> Optio
     images.iter().filter_map(|k| store.anim(k)).map(|c| c.wait_now()).min()
 }
 
-/// Opens a project's page by id, where a description link to it was clicked.
-pub type OnProject = Arc<dyn Fn(u64, &mut Window, &mut App) + Send + Sync>;
+/// Opens a project a description link points at (the link as clicked, and
+/// as read), where it was clicked. The page resolves it, so it can show the
+/// project's panel at once while the lookup runs.
+pub type OnProject = Arc<dyn Fn(String, hopper::source::ProjectLink, &mut Window, &mut App) + Send + Sync>;
 
 /// A link in a description: a CurseForge or Modrinth project page opens
 /// that project in Hopper (`on_project`, else Browse); anything else, or a
@@ -1360,17 +1362,18 @@ pub fn open_desc_link(
         cx.open_url(url);
         return;
     };
+    if let Some(f) = on_project {
+        f(url.to_string(), link, window, cx);
+        return;
+    }
     let (store, url) = (store.clone(), url.to_string());
     window
         .spawn(cx, async move |cx| {
             let r = cx
                 .background_spawn(async move { hopper::source::project_from_link(&link) })
                 .await;
-            cx.update(|window, cx| match r {
-                Ok(project) => match &on_project {
-                    Some(f) => f(project, window, cx),
-                    None => store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Project(project))),
-                },
+            cx.update(|_, cx| match r {
+                Ok(project) => store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Project(project))),
                 Err(e) => {
                     log::warn!("description link {url}: {e:#}");
                     cx.open_url(&url);

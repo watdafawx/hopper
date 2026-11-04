@@ -12,7 +12,8 @@
   //   #/browse/<site>/<id>                    a modpack's page (older links)
   // A project's page opens over the list, which stays mounted underneath,
   // so Back keeps its filters and scroll.
-  import { onMount, untrack } from 'svelte';
+  import { onMount, untrack, tick } from 'svelte';
+  import { navPush, navReplace, navGet } from './lib/nav.js';
   import { Search, Flame, Sparkles, RefreshCw, Download, ArrowDownAZ, Server, Hammer, SlidersHorizontal, X, SearchX, KeyRound, Package, Puzzle, Braces, Check, Monitor, Layers, Tag, Star, Plus } from '@lucide/svelte';
   import { loaderText } from './lib/format.js';
   import { api, post } from './lib/api.js';
@@ -113,10 +114,72 @@
     return u;
   }
 
-  async function run(append = false) {
+  // Each search, filter, sort or site is a place in the browser's history,
+  // like desktop's Browse: Back brings the list it showed (every page
+  // loaded) back at the same scroll spot instead of searching again.
+  const filters = () => ({ type, into, source, sort, query, mc, loader, category });
+  const listKey_ = (f) => JSON.stringify([f.type, f.into, f.source, f.sort, f.query, f.mc, f.loader, f.category?.name || '']);
+  const lists = new Map();
+  let shownKey = '';
+  /** Keeps the list shown now for the way back. */
+  function keepList() {
+    if (!shownKey || !results.length || error) return;
+    lists.delete(shownKey);
+    lists.set(shownKey, { results, page, more, total, warnings, cfKey, y: scroller()?.scrollTop || 0 });
+    if (lists.size > 30) lists.delete(lists.keys().next().value);
+  }
+  /** Puts the filters an entry carries back (Back or Forward to it). */
+  function applyFilters(b) {
+    source = b.source;
+    sort = b.sort;
+    query = b.query;
+    mc = b.mc;
+    loader = b.loader;
+    category = b.category;
+  }
+  // Back or Forward between entries of the same type and server.
+  function popped() {
+    if (openSite) return;
+    const b = navGet('browse');
+    if (!b || b.type !== type || b.into !== into || listKey_(b) === shownKey) return;
+    applyFilters(b);
+    run(false, 'restore');
+  }
+
+  /**
+   * Searches again from the first page (or the next page, `append`).
+   * `how`: 'push' makes a new history entry (a filter the user changed),
+   * 'replace' notes the filters on the entry shown (a new address made
+   * one), 'restore' shows an entry gone back to, from the kept list when
+   * there is one.
+   */
+  async function run(append = false, how = 'push') {
     const my = ++seq;
     // A search now replaces one still waiting on the typing pause.
     if (!append) clearTimeout(timer);
+    if (!append) {
+      keepList();
+      const f = filters();
+      const k = listKey_(f);
+      if (how === 'push' && navGet('browse') && listKey_(navGet('browse')) !== k) navPush({ browse: $state.snapshot(f) });
+      else if (how !== 'restore') navReplace({ browse: $state.snapshot(f) });
+      shownKey = k;
+      const kept = how !== 'push' ? lists.get(k) : null;
+      if (kept) {
+        results = kept.results;
+        page = kept.page;
+        more = kept.more;
+        total = kept.total;
+        warnings = kept.warnings;
+        cfKey = kept.cfKey;
+        error = '';
+        loading = false;
+        saved = kept.y;
+        await tick();
+        requestAnimationFrame(() => scroller()?.scrollTo({ top: kept.y }));
+        return;
+      }
+    }
     const p = append ? page + 1 : 0;
     loading = true;
     error = '';
@@ -197,7 +260,12 @@
         if (i) store('browse.into', i);
         await loadTarget(i);
       }
-      run(false);
+      // Back to an entry that had filters of its own: those come back too.
+      const b = navGet('browse');
+      if (b && b.type === t && b.into === i) {
+        applyFilters(b);
+        run(false, 'restore');
+      } else run(false, 'replace');
     });
   });
 
@@ -331,7 +399,11 @@
 
   onMount(() => {
     api('/meta/minecraft').then((r) => (mcVersions = r.versions || []), () => {});
-    return () => io.disconnect();
+    addEventListener('popstate', popped);
+    return () => {
+      io.disconnect();
+      removeEventListener('popstate', popped);
+    };
   });
 </script>
 
@@ -481,7 +553,7 @@
   {#key openSite + openId}
     <BrowsePack source={openSite} id={openId} {type} target={intoServer ? target : null} {mc} loader={useLoader ? loader : ''}
       back={browseHash(type, into)} busy={busy[openSite + ':' + openId]} onMake={(p) => (making = p)} onInstall={install}
-      canFilter={(n) => !!catOf(n)} onCategory={(n) => { category = catOf(n); saved = 0; location.hash = browseHash(type, into); run(false); }} />
+      canFilter={(n) => !!catOf(n)} onCategory={(n) => { category = catOf(n); saved = 0; location.hash = browseHash(type, into); run(false, 'replace'); }} />
   {/key}
 {/if}
 {#if making}<NewServer preset={making} close={() => (making = null)} />{/if}
