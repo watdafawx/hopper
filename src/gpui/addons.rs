@@ -342,6 +342,9 @@ pub(crate) struct RowsKey {
     query: String,
     show: Show,
     added_only: bool,
+    /// The "Config changed" filter, with how many mods it keeps (the
+    /// config index arriving rebuilds the rows).
+    cfg_changed: Option<usize>,
     show_copies: bool,
     /// The "also in" map changed (copies to fold).
     also: usize,
@@ -619,6 +622,8 @@ pub struct AddonsView {
     query: String,
     show: Show,
     added_only: bool,
+    /// Only mods whose config has settings not at their default.
+    cfg_changed_only: bool,
     updates_first: bool,
     sort: (SortCol, bool),
     pub(crate) selected: HashSet<String>,
@@ -781,6 +786,7 @@ impl AddonsView {
             query: String::new(),
             show: Show::All,
             added_only: false,
+            cfg_changed_only: false,
             show_copies: false,
             updates_first: true,
             sort: (SortCol::Added, false),
@@ -1012,6 +1018,7 @@ impl AddonsView {
             query: self.query.clone(),
             show: self.show,
             added_only: self.added_only,
+            cfg_changed: self.cfg_changed_only.then(|| self.cfg_changed_keys().len()),
             show_copies: self.show_copies,
             also: self.table.also.len(),
             updates_first: self.updates_first,
@@ -1336,6 +1343,7 @@ impl AddonsView {
             .enumerate()
             .filter(|(_, a)| in_class(a, self.class))
             .filter(|(_, a)| !self.added_only || inst.pack.is_none() || !a.from_pack)
+            .filter(|(_, a)| !self.cfg_changed_only || self.cfg_index.as_ref().is_some_and(|i| i.mod_changed(a.file_name.trim_end_matches(".disabled")) > 0))
             .filter(|(_, a)| match self.show {
                 Show::Updates => updates.contains_key(&a.project_id),
                 Show::Disabled => !self.row_on(a),
@@ -2577,6 +2585,17 @@ impl AddonsView {
                                 .tooltip("Only what you added on top of the modpack")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.added_only = !on;
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .when_some(self.cfg_index.as_ref().filter(|_| self.class == cf::CLASS_MODS).map(|_| self.cfg_changed_keys().len()).filter(|n| *n > 0 || self.cfg_changed_only), |r, n| {
+                        let on = self.cfg_changed_only;
+                        r.child(
+                            widgets::toggle_chip("cfg-changed-only", format!("Config changed ({n})"), on, cx)
+                                .tooltip("Only mods whose config has settings that aren't at their default")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.cfg_changed_only = !on;
                                     cx.notify();
                                 })),
                         )
@@ -4384,6 +4403,13 @@ Change version", a.file_name).into()
 
     /// The row's menu, for right-click and its ⋯ button.
     #[allow(clippy::too_many_arguments)]
+    /// Mods (jar names) whose config has settings not at their default.
+    fn cfg_changed_keys(&self) -> Vec<String> {
+        let Some(i) = &self.cfg_index else { return Vec::new() };
+        let Some(inst) = &self.table.inst else { return Vec::new() };
+        inst.addons.iter().map(|a| a.file_name.trim_end_matches(".disabled").to_string()).filter(|k| i.mod_changed(k) > 0).collect()
+    }
+
     /// A mod's config button: orange when you changed its config (always
     /// shown), grey on hover when it has config files, none without.
     fn config_button(&self, a: &Addon, shown: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -5272,10 +5298,6 @@ impl Render for AddonsView {
         let peek_open = self.peek.read(cx).is_open();
         self.compact = peek_open;
         self.tight = peek_open && self.global_dir().is_some();
-        // Built by `sync` when the store changes; here only the filters
-        // may need applying again (in memory).
-        self.ensure_rows();
-        self.fit_columns(window, cx);
         // Which mods have config files, for their config buttons.
         self.cfg_index = match (&self.root, self.class == cf::CLASS_MODS) {
             (Some(root), true) => {
@@ -5284,6 +5306,10 @@ impl Render for AddonsView {
             }
             _ => None,
         };
+        // Built by `sync` when the store changes; here only the filters
+        // may need applying again (in memory).
+        self.ensure_rows();
+        self.fit_columns(window, cx);
         let Some(inst) = self.table.inst.clone() else {
             return div().into_any_element();
         };
@@ -5315,7 +5341,7 @@ impl Render for AddonsView {
         let header = self.header(&rows, &inst, cx);
         let count = rows.len();
         let body: AnyElement = if count == 0 {
-            let filtered = !(self.query.is_empty() && self.show == Show::All && !self.added_only);
+            let filtered = !(self.query.is_empty() && self.show == Show::All && !self.added_only && !self.cfg_changed_only);
             // Only the Updates filter on, and nothing to update.
             let up_to_date = self.show == Show::Updates && self.query.is_empty() && !self.added_only;
             let state = if up_to_date {
@@ -5352,6 +5378,7 @@ impl Render for AddonsView {
                             this.query.clear();
                             this.show = Show::All;
                             this.added_only = false;
+                            this.cfg_changed_only = false;
                             cx.notify();
                         })),
                 )
