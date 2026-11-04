@@ -6,6 +6,8 @@
 //! and its own fixes.
 
 use crate::widgets;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -59,6 +61,49 @@ pub fn suspect_row(link: AnyElement, s: &Suspect, why: String, below: Vec<AnyEle
 }
 
 /// "<mod> stopped the game from loading [Certain]".
+/// The "Why?" fold under a mod's reason: what Hopper weighed for and
+/// against it, strongest first, and where it sits in the error's trace
+/// (see `hopper::crashengine`). `None` when there is nothing beyond the
+/// reason itself (a card saved before Hopper kept these). `readable` turns
+/// mod ids in the sentences into names, as the reason does.
+pub fn why_fold(
+    id: ElementId,
+    s: &Suspect,
+    open: bool,
+    readable: &dyn Fn(&str) -> String,
+    toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Option<AnyElement> {
+    if s.facts.len() < 2 {
+        return None;
+    }
+    let theme = cx.theme();
+    let button = Button::new(id)
+        .xsmall()
+        .ghost()
+        .icon(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+        .label(if open { "Hide why" } else { "Why?" })
+        .on_click(toggle);
+    let mut col = v_flex().gap_1().child(h_flex().child(button));
+    if open {
+        let rows = s.facts.iter().map(|f| {
+            let (mark, color) = match f.weight {
+                w if w > 0 => ("+", theme.success),
+                w if w < 0 => ("−", theme.danger),
+                _ => ("·", theme.muted_foreground),
+            };
+            h_flex()
+                .gap_2()
+                .items_start()
+                .text_xs()
+                .child(div().w(rems(0.75)).flex_none().text_color(color).child(mark))
+                .child(div().flex_1().min_w_0().whitespace_normal().text_color(theme.muted_foreground).child(readable(&f.text)))
+        });
+        col = col.child(v_flex().gap_0p5().px_2().py_1p5().rounded(theme.radius).bg(theme.list_hover).children(rows));
+    }
+    Some(col.into_any_element())
+}
+
 pub fn story_title(c: &Crash, st: &Stopped, link: Link, cx: &App) -> Div {
     let words_ = if c.server { "stopped the server from starting" } else { "stopped the game from loading" };
     sentence(vec![link(&st.file_name, "title", cx), words(words_), tag(Certainty::Certain, cx)]).text_sm()

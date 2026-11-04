@@ -141,6 +141,8 @@ pub struct SyncPanel {
     /// Which server pack the server was built or last updated from.
     pack_marker: Option<hopper::server_pack_update::Marker>,
     crash: Option<ServerCrash>,
+    /// The crash card's mods (jars) whose "Why?" list is open.
+    why_open: std::collections::HashSet<String>,
     /// A change put back from the crash card, with its crash's time: the
     /// crash no longer names it, so the card keeps it to say it's back.
     crash_back: Option<(i64, hopper::crashdetect::Changed)>,
@@ -277,6 +279,7 @@ impl SyncPanel {
             note: None,
             pack_marker: None,
             crash: None,
+            why_open: Default::default(),
             crash_back: None,
             crash_configs: Vec::new(),
             drift: None,
@@ -1868,7 +1871,17 @@ impl SyncPanel {
                         })
                         .into_iter()
                         .collect();
-                    let below = below.into_iter().map(|b| h_flex().child(b).into_any_element()).collect();
+                    let mut below: Vec<AnyElement> = below.into_iter().map(|b| h_flex().child(b).into_any_element()).collect();
+                    // What Hopper weighed for it, folded under the reason.
+                    let key = s.file_name.clone();
+                    let open = self.why_open.contains(&key);
+                    let toggle = cx.listener(move |this, _, _, cx| {
+                        if !this.why_open.remove(&key) {
+                            this.why_open.insert(key.clone());
+                        }
+                        cx.notify();
+                    });
+                    below.extend(crash_view::why_fold(ElementId::Name(format!("srv-crash-why:{i}").into()), s, open, &readable, toggle, cx));
                     crash_view::suspect_row(link(&s.file_name, &format!("row{i}"), cx), s, readable(&s.why), below, cx).into_any_element()
                 })
                 .collect();
