@@ -78,6 +78,17 @@ pub struct ServerControl {
     /// Backups a backup mod in the server made, once looked for.
     mod_backups: Option<Vec<hopper::backupmods::ModBackups>>,
     command: Entity<InputState>,
+    /// Commands sent from this console, newest first, for ↑ / ↓ in the
+    /// command box (the web console keeps the same 50).
+    sent: Vec<String>,
+    /// Which of `sent` the command box shows while stepping through them.
+    sent_at: Option<usize>,
+    /// The console's search box and line filter (the web console's chips).
+    console_query: Entity<InputState>,
+    console_filter: ConsoleFilter,
+    /// The lines shown while filtered, as indexes into `console`; None
+    /// shows them all.
+    console_visible: Option<Vec<usize>>,
     /// The console's lines on screen, with text picking.
     lines: crate::line_select::LineSelect,
     /// Console lines that scrolled off the panel's window so far, so a
@@ -109,6 +120,7 @@ impl ServerControl {
         let command = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Console command, e.g. say Restarting soon")
         });
+        let console_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search this log"));
         let stop_input = cx.new(|cx| InputState::new(window, cx).placeholder("stop"));
         let delay_input = cx.new(|cx| InputState::new(window, cx).placeholder("0"));
         let log_days_input = cx.new(|cx| InputState::new(window, cx).placeholder("0"));
@@ -116,6 +128,12 @@ impl ServerControl {
             cx.subscribe_in(&command, window, |this, _, e: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } = e {
                     this.send(window, cx);
+                }
+            }),
+            cx.subscribe(&console_query, |this, _, e: &InputEvent, cx| {
+                if matches!(e, InputEvent::Change) {
+                    this.refilter(cx);
+                    cx.notify();
                 }
             }),
             // Settings may have set the panel up (or changed it).
@@ -154,6 +172,11 @@ impl ServerControl {
             backups: None,
             mod_backups: None,
             command,
+            sent: Vec::new(),
+            sent_at: None,
+            console_query,
+            console_filter: ConsoleFilter::All,
+            console_visible: None,
             lines: crate::line_select::LineSelect::new(cx),
             console_base: 0,
             console_full: false,
@@ -264,6 +287,7 @@ impl ServerControl {
         self.backups = None;
         self.console.clear();
         self.console_base = 0;
+        self.console_visible = None;
         self.lines.clear();
         self.options = None;
         self.opts_loading = false;
@@ -369,8 +393,9 @@ impl ServerControl {
             let follow = !self.lines.is_active() && self.lines.scroll.is_scrolled_to_end().unwrap_or(true);
             self.console_base += crate::line_select::shift(&self.console, &lines);
             self.console = lines;
+            self.refilter(cx);
             if follow {
-                self.lines.scroll_to_end(self.console.len());
+                self.lines.scroll_to_end(self.console_rows());
             }
         }
         match &stats {
@@ -580,6 +605,10 @@ impl ServerControl {
         if line.is_empty() {
             return;
         }
+        self.sent.retain(|s| *s != line);
+        self.sent.insert(0, line.clone());
+        self.sent.truncate(50);
+        self.sent_at = None;
         self.command
             .update(cx, |s, cx| s.set_value(String::new(), window, cx));
         cx.spawn_in(window, async move |this, cx| {
@@ -1652,17 +1681,29 @@ impl ServerControl {
                         )),
                 )
             })
+            .when(!self.console.is_empty(), |c| c.child(self.console_toolbar(cx)))
             .child(crate::line_select::view(self, "console", Some(empty), window, cx))
             .child(
                 h_flex()
                     .gap_2()
                     .child(
-                        div().flex_1().child(
-                            Input::new(&self.command)
-                                .small()
-                                .disabled(!running)
-                                .prefix(widgets::caption("/", cx)),
-                        ),
+                        div()
+                            .flex_1()
+                            // ↑ / ↓ step through the commands sent before.
+                            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveUp, w, cx| {
+                                this.step_sent(true, w, cx);
+                                cx.stop_propagation();
+                            }))
+                            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveDown, w, cx| {
+                                this.step_sent(false, w, cx);
+                                cx.stop_propagation();
+                            }))
+                            .child(
+                                Input::new(&self.command)
+                                    .small()
+                                    .disabled(!running)
+                                    .prefix(widgets::caption("/", cx)),
+                            ),
                     )
                     .child(
                         Button::new("console-send")
@@ -1688,9 +1729,85 @@ impl ServerControl {
         self.console_full = full;
         self.console.clear();
         self.console_base = 0;
+        self.console_visible = None;
         self.lines.clear();
         self.poll_now(cx);
         cx.notify();
+    }
+
+    /// The rows the console shows (all its lines, or the filtered ones).
+    fn console_rows(&self) -> usize {
+        self.console_visible.as_ref().map_or(self.console.len(), Vec::len)
+    }
+
+    /// Picks the lines that pass the filter chip and the search.
+    fn refilter(&mut self, cx: &App) {
+        let q = self.console_query.read(cx).value().trim().to_lowercase();
+        let f = self.console_filter;
+        self.console_visible = (f != ConsoleFilter::All || !q.is_empty()).then(|| {
+            self.console
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| f.fits(line_kind(l)) && (q.is_empty() || l.to_lowercase().contains(&q)))
+                .map(|(i, _)| i)
+                .collect()
+        });
+    }
+
+    /// Puts an older (`back`) or newer command sent before in the box; past
+    /// the newest it empties, like a shell.
+    fn step_sent(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sent.is_empty() {
+            return;
+        }
+        self.sent_at = match (self.sent_at, back) {
+            (None, true) => Some(0),
+            (None, false) => return,
+            (Some(i), true) => Some((i + 1).min(self.sent.len() - 1)),
+            (Some(0), false) => None,
+            (Some(i), false) => Some(i - 1),
+        };
+        let text = self.sent_at.and_then(|i| self.sent.get(i)).cloned().unwrap_or_default();
+        self.command.update(cx, |s, cx| s.set_value(text, window, cx));
+    }
+
+    /// Filter chips (All / Errors / Warnings / Joins / Chat) and the search
+    /// above the console, as the web console has them.
+    fn console_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let kinds: Vec<LineKind> = self.console.iter().map(|l| line_kind(l)).collect();
+        let errors = kinds.iter().filter(|k| **k == LineKind::Error).count();
+        let warnings = kinds.iter().filter(|k| **k == LineKind::Warn).count();
+        let label = |f: ConsoleFilter| match f {
+            ConsoleFilter::Errors => format!("Errors {errors}"),
+            ConsoleFilter::Warnings => format!("Warnings {warnings}"),
+            _ => f.label().to_string(),
+        };
+        let picked = CONSOLE_FILTERS.iter().position(|f| *f == self.console_filter).unwrap_or(0);
+        h_flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(
+                TabBar::new("console-filter")
+                    .segmented()
+                    .small()
+                    .selected_index(picked)
+                    .children(CONSOLE_FILTERS.iter().map(|f| Tab::new().label(label(*f))))
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        if let Some(f) = CONSOLE_FILTERS.get(*ix) {
+                            this.console_filter = *f;
+                            this.refilter(cx);
+                            this.lines.scroll_to_end(this.console_rows());
+                            cx.notify();
+                        }
+                    })),
+            )
+            .when_some(self.console_visible.as_ref(), |r, v| {
+                r.child(widgets::caption(format!("{} of {} lines", v.len(), self.console.len()), cx).text_xs())
+            })
+            .child(div().flex_1())
+            .child(div().w(rems(16.)).child(widgets::search_input(&self.console_query).small().cleanable(true)))
+            .into_any_element()
     }
 
     /// Reads how the panel runs the server, and fills the form.
@@ -1876,7 +1993,7 @@ impl ServerControl {
                                 Button::new("panel-options-undo")
                                     .ghost()
                                     .icon(IconName::RotateCcw)
-                                    .label("Undo changes")
+                                    .label("Discard")
                                     .disabled(!changed)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         if let Some(o) = this.saved_options().cloned() {
@@ -1909,11 +2026,15 @@ impl crate::line_select::Lines for ServerControl {
     }
 
     fn row_count(&self) -> usize {
-        self.console.len()
+        self.console_rows()
     }
 
     fn row_key(&self, row: usize) -> Option<usize> {
-        (row < self.console.len()).then_some(self.console_base + row)
+        let i = match &self.console_visible {
+            Some(v) => *v.get(row)?,
+            None => row,
+        };
+        (i < self.console.len()).then_some(self.console_base + i)
     }
 
     fn key_text(&self, key: usize) -> Option<String> {
@@ -1923,7 +2044,8 @@ impl crate::line_select::Lines for ServerControl {
 
     fn row_color(&self, row: usize, cx: &App) -> Hsla {
         let theme = cx.theme();
-        let l = self.console.get(row).map(String::as_str).unwrap_or("");
+        let i = self.row_key(row).map_or(usize::MAX, |k| k - self.console_base);
+        let l = self.console.get(i).map(String::as_str).unwrap_or("");
         if l.contains("ERROR") || l.contains("FATAL") {
             theme.danger
         } else if l.contains("WARN") {
@@ -1969,5 +2091,106 @@ pub fn state_of(
         _ if pinged == Some(false) => (theme.muted_foreground, "stopped"),
         // No panel and no ping yet: nothing to say.
         _ => (theme.muted_foreground, ""),
+    }
+}
+
+/// How a console line reads, as the web console sorts it
+/// (hopperd ui/src/lib/consoleKit.js `kind`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LineKind {
+    /// Hopper's own notes.
+    Hopper,
+    Error,
+    Warn,
+    /// A stack trace line, shown with the errors.
+    Frame,
+    /// Someone joined or left.
+    Join,
+    Chat,
+    Plain,
+}
+
+fn line_kind(line: &str) -> LineKind {
+    let t = line.trim_start();
+    if line.contains("[Hopper]") {
+        LineKind::Hopper
+    } else if line.contains("ERROR") || line.contains("FATAL") || line.contains("Exception") {
+        LineKind::Error
+    } else if line.contains("WARN") {
+        LineKind::Warn
+    } else if line.starts_with(char::is_whitespace) && t.starts_with("at ")
+        || t.starts_with("Caused by:")
+        || t.starts_with("... ") && t.ends_with(" more")
+    {
+        LineKind::Frame
+    } else if line.contains(" joined the game") || line.contains(" left the game") {
+        LineKind::Join
+    } else if line.find('<').is_some_and(|a| line[a..].find("> ").is_some_and(|b| b > 1)) {
+        LineKind::Chat
+    } else {
+        LineKind::Plain
+    }
+}
+
+/// The console's filter chips.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConsoleFilter {
+    All,
+    Errors,
+    Warnings,
+    Joins,
+    Chat,
+}
+
+const CONSOLE_FILTERS: [ConsoleFilter; 5] =
+    [ConsoleFilter::All, ConsoleFilter::Errors, ConsoleFilter::Warnings, ConsoleFilter::Joins, ConsoleFilter::Chat];
+
+impl ConsoleFilter {
+    fn label(self) -> &'static str {
+        match self {
+            ConsoleFilter::All => "All",
+            ConsoleFilter::Errors => "Errors",
+            ConsoleFilter::Warnings => "Warnings",
+            ConsoleFilter::Joins => "Joins",
+            ConsoleFilter::Chat => "Chat",
+        }
+    }
+
+    /// Errors bring their stack traces; Warnings shows errors too, like the
+    /// logs' "Errors and warnings only".
+    fn fits(self, k: LineKind) -> bool {
+        match self {
+            ConsoleFilter::All => true,
+            ConsoleFilter::Errors => matches!(k, LineKind::Error | LineKind::Frame),
+            ConsoleFilter::Warnings => matches!(k, LineKind::Error | LineKind::Frame | LineKind::Warn),
+            ConsoleFilter::Joins => k == LineKind::Join,
+            ConsoleFilter::Chat => k == LineKind::Chat,
+        }
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+
+    #[test]
+    fn console_lines_sort_like_the_web_console() {
+        assert_eq!(line_kind("[18:04:07] [Server thread/ERROR]: Exception ticking"), LineKind::Error);
+        assert_eq!(line_kind("[18:02:14] [Server thread/WARN]: Can't keep up!"), LineKind::Warn);
+        assert_eq!(line_kind("\tat net.minecraft.server.Main.main(Main.java:1)"), LineKind::Frame);
+        assert_eq!(line_kind("Caused by: java.lang.NullPointerException"), LineKind::Error);
+        assert_eq!(line_kind("\t... 12 more"), LineKind::Frame);
+        assert_eq!(line_kind("[18:03:40] [Server thread/INFO]: Steve joined the game"), LineKind::Join);
+        assert_eq!(line_kind("[18:03:52] [Server thread/INFO]: <Steve> anyone on?"), LineKind::Chat);
+        assert_eq!(line_kind("[18:02:11] [Server thread/INFO]: Done (41.2s)!"), LineKind::Plain);
+        assert_eq!(line_kind("[Hopper] Starting the server"), LineKind::Hopper);
+    }
+
+    #[test]
+    fn warnings_filter_keeps_errors() {
+        assert!(ConsoleFilter::Warnings.fits(LineKind::Error));
+        assert!(ConsoleFilter::Errors.fits(LineKind::Frame));
+        assert!(!ConsoleFilter::Errors.fits(LineKind::Warn));
+        assert!(!ConsoleFilter::Chat.fits(LineKind::Join));
     }
 }
