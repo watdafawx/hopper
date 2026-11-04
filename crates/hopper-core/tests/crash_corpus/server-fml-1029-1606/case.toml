@@ -1,0 +1,8 @@
+side = "server"
+mods = "d05ad93bfd"
+report = "crash-2026-10-29_16.06.57-fml.txt"
+problem = 10
+expect = ["securitycraft", "naturesaura"]
+at_least = "Likely"
+note = "SecurityCraft mixin cannot inject: another mod merged the method first (clash)."
+pass = true

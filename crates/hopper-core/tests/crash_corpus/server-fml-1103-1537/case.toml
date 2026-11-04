@@ -1,0 +1,8 @@
+side = "server"
+mods = "b7067a4767"
+report = "crash-2026-11-03_15.37.51-fml.txt"
+problem = 11
+expect = []
+advice = "another"
+note = "graal-sdk.jar is in use by another process: another copy of the server (or its Java) is still running. Integrated Scripting is only where it showed."
+pass = true

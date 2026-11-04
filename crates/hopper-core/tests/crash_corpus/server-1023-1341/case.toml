@@ -1,0 +1,8 @@
+side = "server"
+mods = "47776b7b38"
+report = "crash-2026-10-23_13.41.37-server.txt"
+problem = 6
+expect = ["bedrockores"]
+at_least = "Likely"
+note = "NPE in Bedrock Ores, called through an Architectury proxy."
+pass = true

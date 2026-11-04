@@ -1,0 +1,8 @@
+side = "server"
+mods = "d5925f9255"
+report = "crash-2026-10-28_22.47.24-server.txt"
+problem = 7
+expect = ["mysticalagricultureplus"]
+at_least = "Certain"
+note = "Mystical Agriculture Plus puts fe_seeds in a creative tab after an item that is turned off."
+pass = true

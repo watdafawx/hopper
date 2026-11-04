@@ -159,6 +159,8 @@ pub struct LogsView {
     shared: HashMap<PathBuf, Option<Result<String, String>>>,
     /// The latest crash report of the instance, if any.
     crash: Option<Crash>,
+    /// The crash card's mods (jars) whose "Why?" list is open.
+    why_open: std::collections::HashSet<String>,
     /// Every crash report, newest first.
     crashes: Vec<PathBuf>,
     tab: LogTab,
@@ -196,6 +198,7 @@ impl LogsView {
             keep_names: false,
             shared: HashMap::new(),
             crash: None,
+            why_open: Default::default(),
             crashes: Vec::new(),
             tab: LogTab::Game,
             tab_picked: false,
@@ -803,7 +806,7 @@ impl LogsView {
                         )
                         .flex_none()
                         .into_any_element();
-                let below: Vec<AnyElement> = s.needs.iter().enumerate().map(|(k, (id, ver))| {
+                let mut below: Vec<AnyElement> = s.needs.iter().enumerate().map(|(k, (id, ver))| {
                                 let loader = ["minecraft", "neoforge", "forge", "fabricloader", "quilt_loader", "java"]
                                     .contains(&id.as_str());
                                 // Installed since the crash: a jar named like it that provides it.
@@ -851,6 +854,23 @@ impl LogsView {
                                     })
                                     .into_any_element()
                             }).collect();
+                // What Hopper weighed for it, folded under the reason.
+                let readable = |t: &str| {
+                    let mut t = t.to_string();
+                    for (id, n) in &named {
+                        t = t.replace(&format!(" {id},"), &format!(" {n},")).replace(&format!(" {id} "), &format!(" {n} "));
+                    }
+                    t
+                };
+                let key = s.file_name.clone();
+                let open = self.why_open.contains(&key);
+                let toggle = cx.listener(move |this, _, _, cx| {
+                    if !this.why_open.remove(&key) {
+                        this.why_open.insert(key.clone());
+                    }
+                    cx.notify();
+                });
+                below.extend(crate::crash_view::why_fold(ElementId::Name(format!("crash-why:{i}").into()), s, open, &readable, toggle, cx));
                 crate::crash_view::suspect_row(link, s, why, below, cx).into_any_element()
             })
             .collect();

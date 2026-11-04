@@ -1,0 +1,8 @@
+side = "client"
+mods = "cd4d6dcef8"
+report = "crash-2026-10-30_23.20.50-fml.txt"
+problem = 2
+expect = ["buildinggadgetsextra", "logisticsnetworks", "buildinggadgets2"]
+at_least = "Certain"
+note = "Two addons want different Building Gadgets 2 versions."
+pass = true

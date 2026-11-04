@@ -994,8 +994,12 @@ impl Store {
                 let told = self.live_told.remove(&root);
                 match &c {
                     Some(c) => hopper::crashdetect::save(&root, c),
-                    // A game that ended fine clears the last crash.
-                    None => hopper::crashdetect::clear(&root),
+                    // A game that ended fine clears the last crash, and is
+                    // the last game that worked.
+                    None => {
+                        hopper::crashdetect::clear(&root);
+                        hopper::crashdetect::mark_good_run(&root);
+                    }
                 }
                 if let (Some(c), Some(i)) = (&c, self.instances.iter().find(|i| i.root == root))
                     && told.as_ref() != Some(&c.source)

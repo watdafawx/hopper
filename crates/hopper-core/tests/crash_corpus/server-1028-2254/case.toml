@@ -1,0 +1,6 @@
+side = "server"
+mods = "896125c641"
+report = "crash-2026-10-28_22.54.09-server.txt"
+problem = 8
+scored = false
+note = "Watchdog after the 22:47 crash: no single mod to blame yet."

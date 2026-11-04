@@ -1,0 +1,8 @@
+side = "server"
+mods = "b4b86d7f24"
+report = "crash-2026-11-03_19.16.07-fml.txt"
+problem = 13
+expect = ["ars_polymorphia"]
+at_least = "Certain"
+note = "Ars Polymorphia mixin failed to apply."
+pass = true

@@ -1,0 +1,8 @@
+side = "client"
+mods = "eb7183a8d5"
+report = "crash-2026-03-06_00.55.56-fml.txt"
+problem = 1
+expect = ["cobblemon_battle_extras", "cobblestats"]
+at_least = "Certain"
+note = "The loader says Cobblemon Battle Extras is incompatible with CobbleStats."
+pass = true

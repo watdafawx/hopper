@@ -1,0 +1,8 @@
+side = "client"
+mods = "d728b24d53"
+report = "crash-2026-11-01_04.07.15-client.txt"
+problem = 3
+expect = ["ftbquests"]
+at_least = "Likely"
+note = "ClassCastException between two Architectury types at an event proxy: FTB Quests fired the event wrong."
+pass = true

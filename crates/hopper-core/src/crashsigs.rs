@@ -432,11 +432,32 @@ pub fn driver_crash(native: &str) -> Option<&'static str> {
     PROBLEM_FRAME.captures(native).and_then(|m| driver_maker(&m[1]))
 }
 
+/// The computer's own errors, not a mod's: (what the message says, the
+/// sentence for the card).
+const ENVIRONMENT: [(&str, &str); 5] = [
+    ("being used by another process", "A file the game needs is open in another program, most often another copy of the game or server that is still running."),
+    ("The process cannot access the file", "A file the game needs is open in another program, most often another copy of the game or server that is still running."),
+    ("No space left on device", "The disk is full, so the game couldn't write its files."),
+    ("There is not enough space on the disk", "The disk is full, so the game couldn't write its files."),
+    ("AccessDeniedException", "Windows didn't let the game open one of its files (another program has it open, or the folder is read-only)."),
+];
+
+/// A crash the computer caused rather than a mod: a file another program
+/// holds, a full disk. Read from the report's errors only, not its details.
+pub fn environment(text: &str) -> Option<&'static str> {
+    let head = text.split("-- System Details --").next().unwrap_or(text);
+    ENVIRONMENT.iter().find(|(m, _)| head.contains(m)).map(|(_, why)| *why)
+}
+
 /// One plain sentence about a cause that isn't one mod, with what to do:
 /// the wrong Java, a graphics driver, a world entry whose mod is gone, a
 /// server and player with different mods. `text` is the crash report, `log`
 /// the game log, `native` Java's own crash file. Empty when none applies.
 pub fn advice(text: &str, log: &str, native: &str, server: bool) -> String {
+    if let Some(why) = environment(text) {
+        let what = if server { "server" } else { "game" };
+        return format!("{why} Close the other copy of the {what} (check Task Manager for a leftover Java) and start it again.");
+    }
     let java_where = if server { "the server's Java settings" } else { "Hopper's Java settings for this instance" };
     let java = JAVA_VERSION.captures(text).or_else(|| JAVA_VERSION.captures(log));
     if let Some(m) = java

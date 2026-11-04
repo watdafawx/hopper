@@ -5,7 +5,7 @@
   // the fix first, then "What happened" in order; otherwise the headline
   // and each mod it names, most certain first, with Certain / Likely /
   // Possible and why. Mod names carry their icon and open the mod peek.
-  import { AlertTriangle, FileText, Share2, RefreshCw, Undo2, PowerOff, Trash2, Check } from '@lucide/svelte';
+  import { AlertTriangle, FileText, Share2, RefreshCw, Undo2, PowerOff, Trash2, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { removeMods, setOn } from './lib/modops.js';
   import { relative } from './lib/worlds.js';
@@ -24,6 +24,10 @@
   let lingered = $state(null);
   let mods = $state([]);
   let checking = $state(false);
+  // Mods (jars) whose "Why?" list is open (what Hopper weighed for each).
+  let whyOpen = $state({})
+  // What was weighed, less what the sentence above already says.
+  const moreFacts = (s) => (s.facts || []).filter((f) => !(s.why || '').includes(f.text));
   let busy = $state(false);
   // A change put back from this card: (jar now in mods, version back).
   let back = $state(null);
@@ -252,6 +256,18 @@
               <div class="why">
                 <div class="tiny muted">{named(s.why)}</div>
                 {#each s.needs || [] as [id, ver] (id)}<div class="tiny need">Needs {id}{ver ? ` ${ver}` : ''}</div>{/each}
+                {#if (s.facts || []).length > 1 && moreFacts(s).length}
+                  <button class="btn ghost sm whybtn" aria-expanded={!!whyOpen[s.file_name]} onclick={() => (whyOpen[s.file_name] = !whyOpen[s.file_name])}>
+                    {#if whyOpen[s.file_name]}<ChevronDown size={12} />Hide why{:else}<ChevronRight size={12} />Why?{/if}
+                  </button>
+                  {#if whyOpen[s.file_name]}
+                    <ul class="facts">
+                      {#each moreFacts(s) as f, k (k)}
+                        <li><span class="mark" class:up={f.weight > 0} class:down={f.weight < 0}>{f.weight > 0 ? '+' : f.weight < 0 ? '−' : '·'}</span><span class="tiny muted">{named(f.text)}</span></li>
+                      {/each}
+                    </ul>
+                  {/if}
+                {/if}
               </div>
               {#if s.client_only && modOf(s.file_name)}
                 <button class="btn sm" disabled={busy || alive} title={alive ? 'Stop the server first' : `Moves ${s.file_name} to .hopper-backups`} onclick={() => remove(s)}><Trash2 size={13} />Remove from server</button>
@@ -301,6 +317,12 @@
   .why { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
   .why .tiny, .quote, .steps .tiny { white-space: normal; overflow-wrap: anywhere; }
   .need { color: var(--gold); font-family: var(--mono, monospace); }
+  .whybtn { align-self: flex-start; gap: 4px; padding: 0 4px; margin-left: -4px; }
+  .facts { list-style: none; margin: 2px 0 0; padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; border-radius: var(--radius); background: var(--raise); }
+  .facts li { display: flex; gap: 8px; align-items: flex-start; }
+  .mark { flex: none; width: 10px; font-size: 12px; color: var(--subtle); }
+  .mark.up { color: var(--green); }
+  .mark.down { color: var(--red); }
   .note { font-size: 13px; }
   .switches, .sw { display: flex; flex-direction: column; gap: 6px; }
   code { font-family: var(--mono, Consolas, monospace); font-size: 12px; color: var(--gold); }

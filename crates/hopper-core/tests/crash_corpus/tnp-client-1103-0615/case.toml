@@ -1,0 +1,8 @@
+side = "client"
+mods = "9dbbd07d20"
+report = "crash-2026-11-03_06.15.27-client.txt"
+problem = 4
+expect = ["collapsible_groups"]
+at_least = "Likely"
+note = "StackOverflow in DataFixerUpper; the log loop before it starts in Collapsible Groups."
+pass = true
