@@ -98,6 +98,49 @@ struct Pending {
     ended: Option<Instant>,
 }
 
+/// What one Browse type (Mods, Resource packs…) was showing when it was
+/// left, to come back to.
+struct TypeMemory {
+    text: String,
+    sort: SortField,
+    category: Option<u64>,
+    game_version: String,
+    loader: Loader,
+    /// The query the results answer (see [`BrowseView::query_key`]).
+    key: String,
+    results: Vec<cf::Mod>,
+    total: u32,
+    scroll: ListOffset,
+}
+
+/// A place in Browse's own history: what back and forward step through.
+#[derive(Clone, PartialEq)]
+struct Place {
+    class: u32,
+    text: String,
+    category: Option<u64>,
+    sort: SortField,
+    game_version: String,
+    loader: Loader,
+    modrinth: bool,
+    bookmarked: bool,
+    project: Option<u64>,
+}
+
+/// How many places Browse's history keeps.
+const HISTORY_KEEP: usize = 100;
+
+/// What Browse knows of an instance's global pack folders (Paxi…).
+#[derive(Default)]
+struct GlobalPacks {
+    /// The folders' stamp when `matches` was read.
+    stamp: Option<u64>,
+    /// Pack file → the project it is, as found.
+    matches: Vec<(PathBuf, u64, &'static str)>,
+    checked: Option<Instant>,
+    busy: bool,
+}
+
 /// What Browse asks the rest of the app to do.
 pub enum BrowseEvent {
     OpenInstance(PathBuf),
@@ -222,6 +265,25 @@ pub struct BrowseView {
     dest: Option<String>,
     /// Projects already in the target's global pack folders (Paxi…).
     global: HashMap<PathBuf, HashMap<u64, &'static str>>,
+    global_info: HashMap<PathBuf, GlobalPacks>,
+    /// Looks at the global pack folders every second while packs are shown.
+    _global_poll: Option<Task<()>>,
+    /// Each type's last search, filters and scroll.
+    memory: HashMap<u32, TypeMemory>,
+    /// The type just switched to, if it had a memory, and what to show
+    /// again when the query is still the same.
+    restored: Option<TypeMemory>,
+    /// The query the results on show answer.
+    results_key: String,
+    /// The text last searched for (the box may hold more, still typed).
+    searched_text: String,
+    /// Where the list scrolls to once its rows are laid out again.
+    scroll_after: std::cell::Cell<Option<ListOffset>>,
+    /// Back and forward inside Browse.
+    hist: Vec<Place>,
+    hist_at: usize,
+    /// Projects the history can open again.
+    hist_projects: HashMap<u64, cf::Mod>,
     /// Pack folders of the target, for (root, resource packs?, mod count).
     pack_targets: Option<(TargetsKey, Vec<(String, String)>)>,
     /// Installs started here that are still running or just ended.
@@ -306,12 +368,19 @@ impl BrowseView {
         let subs = vec![
             cx.observe(&store, |this, _, cx| {
                 this.check_pending(cx);
+                // Packs added or removed (here, in a tab, or on disk).
+                this.want_global(cx);
                 cx.notify()
             }),
             cx.subscribe_in(&search, window, |this, state, event, _, cx| match event {
                 InputEvent::Change => {
-                    this.text = state.read(cx).value().trim().to_string();
-                    this.search_soon(cx);
+                    let text = state.read(cx).value().trim().to_string();
+                    // Text put in by Browse itself (a restored search) was
+                    // searched for already.
+                    if text != this.text {
+                        this.text = text;
+                        this.search_soon(cx);
+                    }
                 }
                 InputEvent::PressEnter { .. } => this.run_search(false, cx),
                 _ => {}
@@ -353,6 +422,16 @@ impl BrowseView {
             target: None,
             dest: None,
             global: HashMap::new(),
+            global_info: HashMap::new(),
+            _global_poll: None,
+            memory: HashMap::new(),
+            restored: None,
+            results_key: String::new(),
+            searched_text: String::new(),
+            scroll_after: Default::default(),
+            hist: Vec::new(),
+            hist_at: 0,
+            hist_projects: HashMap::new(),
             pack_targets: None,
             pending: Vec::new(),
             searched: false,
@@ -396,6 +475,7 @@ impl BrowseView {
     }
 
     pub fn shown(&mut self, fallback: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.want_global(cx);
         if self.target.is_none()
             && let Some(root) = fallback
         {
@@ -427,10 +507,10 @@ impl BrowseView {
         // carry on where the list was, and look for anything new.
         if self.class == class && self.dest == dest && self.can_resume(Some(&root)) {
             self.check_new(cx);
+            self.want_global(cx);
             return;
         }
-        self.class = class;
-        self.category = None;
+        self.switch_class(class);
         if class == cf::CLASS_WORLDS {
             // Modrinth has no worlds.
             self.modrinth = false;
@@ -438,7 +518,92 @@ impl BrowseView {
         self.set_target(root, cx);
         self.dest = dest;
         self.want_global(cx);
-        self.run_search(false, cx);
+        self.search_or_restore(cx);
+    }
+
+    /// The query the filters describe, as text, to tell whether a list
+    /// still answers it.
+    fn query_key(&self) -> String {
+        let s = self.search_params();
+        format!(
+            "{}|{}|{}|{:?}|{:?}|{:?}|{}",
+            s.class_id, s.text, s.game_version, s.loader, s.category, s.sort, self.modrinth
+        )
+    }
+
+    /// Makes `class` the type shown: what the old type was showing is
+    /// kept, and the new one's last state comes back (or a clear search).
+    fn switch_class(&mut self, class: u32) {
+        if self.class == class {
+            return;
+        }
+        if self.peek {
+            self.class = class;
+            return;
+        }
+        self.remember_type();
+        self.class = class;
+        self.dest = None;
+        self.bookmarked = false;
+        match self.memory.remove(&class) {
+            Some(m) => {
+                self.text = m.text.clone();
+                self.sort = m.sort;
+                self.category = m.category;
+                self.game_version = m.game_version.clone();
+                self.loader = m.loader;
+                self.restored = Some(m);
+            }
+            None => {
+                self.text.clear();
+                self.category = None;
+                self.restored = None;
+            }
+        }
+        // The box shows the type's text (a clear one when it had none).
+        self.pending_query = Some(self.text.clone());
+    }
+
+    fn remember_type(&mut self) {
+        let m = TypeMemory {
+            text: self.text.clone(),
+            sort: self.sort,
+            category: self.category,
+            game_version: self.game_version.clone(),
+            loader: self.loader,
+            key: self.results_key.clone(),
+            results: self.results.clone(),
+            total: self.total,
+            scroll: self.list.logical_scroll_top(),
+        };
+        self.memory.insert(self.class, m);
+    }
+
+    /// Shows what the type had when it was left, when its query is the
+    /// one now (the instance may have moved the filters); else searches.
+    fn search_or_restore(&mut self, cx: &mut Context<Self>) {
+        if let Some(m) = self.restored.take()
+            && !m.results.is_empty()
+            && m.key == self.query_key()
+        {
+            self.searched = true;
+            self.query_gen += 1;
+            self.generation += 1;
+            self.loading = false;
+            self.error = None;
+            self.fresh.clear();
+            self._check = None;
+            self.results_key = m.key;
+            self.searched_text = self.text.clone();
+            self.results = m.results;
+            self.total = m.total;
+            self.scroll_after.set(Some(m.scroll));
+            self.load_categories(cx);
+            self.want_server_files(cx);
+            cx.notify();
+            return;
+        }
+        self.refilter(cx);
     }
 
     /// Whether Browse still holds a list for `root` (the instance picked in
@@ -545,7 +710,8 @@ impl BrowseView {
             this.update(cx, |this, cx| match r {
                 Ok((m, f)) => {
                     this.modrinth = false;
-                    this.class = m.class_id.unwrap_or(cf::CLASS_MODS);
+                    this.switch_class(m.class_id.unwrap_or(cf::CLASS_MODS));
+                    this.restored = None;
                     this.link_file = f;
                     this.open_detail(m, cx);
                     this.run_search(false, cx);
@@ -576,7 +742,8 @@ impl BrowseView {
             this.update(cx, |this, cx| match r {
                 Ok(m) => {
                     this.modrinth = m.modrinth.is_some();
-                    this.class = m.class_id.unwrap_or(cf::CLASS_MODS);
+                    this.switch_class(m.class_id.unwrap_or(cf::CLASS_MODS));
+                    this.restored = None;
                     this.open_detail(m, cx);
                     if !this.peek {
                         this.run_search(false, cx);
@@ -597,8 +764,9 @@ impl BrowseView {
     /// Shows only `category` of `class`, with no search: a click on a
     /// project's category.
     fn filter_category(&mut self, class: u32, category: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.class = class;
+        self.switch_class(class);
         self.category = Some(category);
+        self.restored = None;
         self.text.clear();
         self.search.update(cx, |s, cx| s.set_value("", window, cx));
         self.refilter(cx);
@@ -690,15 +858,22 @@ impl BrowseView {
         self.selected = None;
         self.link_file = None;
         self.text.clear();
+        self.memory.clear();
+        self.restored = None;
+        self.bookmarked = false;
         self.search.update(cx, |s, cx| s.set_value("", window, cx));
         self.refilter(cx);
     }
 
     /// Opens Browse on a class with no instance in mind.
     pub fn browse_class(&mut self, class: u32, cx: &mut Context<Self>) {
-        self.class = class;
-        self.category = None;
-        self.run_search(false, cx);
+        if self.class == class {
+            self.category = None;
+            self.run_search(false, cx);
+            return;
+        }
+        self.switch_class(class);
+        self.search_or_restore(cx);
     }
 
     fn set_target(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -807,6 +982,9 @@ impl BrowseView {
             self.fresh.clear();
             self._check = None;
             self.list.scroll_to(ListOffset::default());
+            self.scroll_after.set(Some(ListOffset::default()));
+            self.results_key = self.query_key();
+            self.searched_text = self.text.clone();
         }
         let s = cf::Search {
             index: if append { self.results.len() as u32 } else { 0 },
@@ -838,6 +1016,8 @@ impl BrowseView {
                         } else {
                             this.results = mods;
                             this.fuzzy_results(cx);
+                            // The new list starts at the top.
+                            this.scroll_after.set(Some(ListOffset::default()));
                         }
                         this.total = page.total_count;
                         this.error = None;
@@ -1021,27 +1201,171 @@ impl BrowseView {
         self.run_search(false, cx);
     }
 
+    /// Looks for the target's projects in its global pack folders (Paxi…),
+    /// again whenever the folders changed: a pack deleted drops its
+    /// "In Paxi" badge at once, one added is looked up.
     fn want_global(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.class, cf::CLASS_RESOURCE_PACKS | cf::CLASS_DATAPACKS) {
             return;
         }
         let Some(inst) = self.target(cx) else { return };
-        if self.global.contains_key(&inst.root) {
+        if self._global_poll.is_none() {
+            // Packs also change on disk, with no word to the store (a file
+            // deleted by hand, or by a mod).
+            self._global_poll = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if this.update(cx, |this, cx| this.want_global(cx)).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        let info = self.global_info.entry(inst.root.clone()).or_default();
+        // Called on every store change: look at the folders at most this often.
+        if info.busy || info.checked.is_some_and(|t| t.elapsed() < Duration::from_millis(500)) {
             return;
         }
-        self.global.insert(inst.root.clone(), HashMap::new());
+        info.checked = Some(Instant::now());
+        let stamp = hopper::instance_ops::global_packs_stamp(&inst);
+        if info.stamp == Some(stamp) {
+            return;
+        }
+        let before = info.matches.len();
+        info.matches.retain(|(p, _, _)| p.exists());
+        if info.matches.len() != before {
+            self.rebuild_global(&inst.root);
+            cx.notify();
+        }
+        let Some(info) = self.global_info.get_mut(&inst.root) else { return };
+        info.busy = true;
         cx.spawn(async move |this, cx| {
             let root = inst.root.clone();
-            let ids = cx
-                .background_spawn(async move { hopper::instance_ops::global_pack_projects(&inst) })
+            let found = cx
+                .background_spawn(async move { hopper::instance_ops::global_pack_matches(&inst) })
                 .await;
             this.update(cx, |this, cx| {
-                this.global.insert(root, ids);
+                if let Some(info) = this.global_info.get_mut(&root) {
+                    // A lookup that failed (offline) leaves out files that
+                    // are still there: keep what was known of them.
+                    let old = std::mem::take(&mut info.matches);
+                    info.matches = found;
+                    for m in old {
+                        if m.0.exists() && !info.matches.iter().any(|n| n.0 == m.0) {
+                            info.matches.push(m);
+                        }
+                    }
+                    info.stamp = Some(stamp);
+                    info.busy = false;
+                }
+                this.rebuild_global(&root);
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    fn rebuild_global(&mut self, root: &Path) {
+        let ids = self
+            .global_info
+            .get(root)
+            .map(|i| i.matches.iter().map(|(_, id, name)| (*id, *name)).collect())
+            .unwrap_or_default();
+        self.global.insert(root.to_path_buf(), ids);
+    }
+
+    // ---- history -------------------------------------------------------
+
+    fn place(&self) -> Place {
+        Place {
+            class: self.class,
+            text: self.searched_text.clone(),
+            category: self.category,
+            sort: self.sort,
+            game_version: self.game_version.clone(),
+            loader: self.loader,
+            modrinth: self.modrinth,
+            bookmarked: self.bookmarked,
+            project: self.selected_id(),
+        }
+    }
+
+    /// Notes where Browse is, when it's a new place (a search, a type,
+    /// a category, a sort, a filter, the open project).
+    fn note_place(&mut self) {
+        if self.peek || !self.searched {
+            return;
+        }
+        let here = self.place();
+        if self.hist.get(self.hist_at) == Some(&here) {
+            return;
+        }
+        if let Some(m) = &self.selected {
+            self.hist_projects.entry(m.id).or_insert_with(|| m.clone());
+        }
+        if !self.hist.is_empty() {
+            self.hist.truncate(self.hist_at + 1);
+        }
+        self.hist.push(here);
+        if self.hist.len() > HISTORY_KEEP {
+            self.hist.remove(0);
+        }
+        self.hist_at = self.hist.len() - 1;
+    }
+
+    /// The place one step back (or forward) from here, skipping those
+    /// from the other source (their categories don't carry over).
+    fn step_target(&self, back: bool) -> Option<usize> {
+        let mut at = self.hist_at;
+        loop {
+            at = if back { at.checked_sub(1)? } else { at + 1 };
+            let p = self.hist.get(at)?;
+            if p.modrinth == self.modrinth {
+                return Some(at);
+            }
+        }
+    }
+
+    /// Whether Browse has a place of its own to go back (or forward) to.
+    pub fn can_step(&self, back: bool) -> bool {
+        !self.peek && self.step_target(back).is_some()
+    }
+
+    /// One step back (or forward) through Browse's own history. False when
+    /// there's none, and the app steps its pages instead.
+    pub fn step(&mut self, back: bool, cx: &mut Context<Self>) -> bool {
+        let Some(at) = self.step_target(back) else { return false };
+        let p = self.hist[at].clone();
+        self.hist_at = at;
+        if p.class != self.class {
+            self.remember_type();
+            self.class = p.class;
+        }
+        self.restored = None;
+        self.bookmarked = p.bookmarked;
+        self.category = p.category;
+        self.sort = p.sort;
+        self.game_version = p.game_version;
+        self.loader = p.loader;
+        self.dest = None;
+        self.text = p.text.clone();
+        self.pending_query = Some(p.text);
+        self.want_global(cx);
+        self.refilter(cx);
+        match p.project {
+            Some(id) if self.selected_id() != Some(id) => match self.hist_projects.get(&id).cloned() {
+                Some(m) => self.open_detail(m, cx),
+                None => self.selected = None,
+            },
+            Some(_) => {}
+            None => {
+                self.selected = None;
+                self.author = None;
+            }
+        }
+        cx.notify();
+        true
     }
 
     fn open_detail(&mut self, m: cf::Mod, cx: &mut Context<Self>) {
@@ -1615,11 +1939,9 @@ impl BrowseView {
                             {
                                 this.set_target(root, cx);
                             }
-                            this.class = id;
-                            this.category = None;
-                            this.dest = None;
+                            this.switch_class(id);
                             this.want_global(cx);
-                            this.refilter(cx);
+                            this.search_or_restore(cx);
                         }
                     }))
             }))
@@ -2640,6 +2962,11 @@ impl BrowseView {
         let ids: Vec<u64> = shown.iter().map(|m| m.id).chain([LIST_END]).collect();
         let mut old = self.list_ids.borrow_mut();
         if *old == ids {
+            if ids.len() > 1
+                && let Some(at) = self.scroll_after.take()
+            {
+                self.list.scroll_to(at);
+            }
             return;
         }
         let pre = old.iter().zip(&ids).take_while(|(a, b)| a == b).count();
@@ -2647,6 +2974,13 @@ impl BrowseView {
         let suf = old.iter().rev().zip(ids.iter().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
         self.list.splice(pre..old.len() - suf, ids.len() - pre - suf);
         *old = ids;
+        // Once there are rows to scroll among: a new query's top, or a
+        // type's remembered spot.
+        if old.len() > 1
+            && let Some(at) = self.scroll_after.take()
+        {
+            self.list.scroll_to(at);
+        }
     }
 
     /// The result cards. Only the rows in view (and a screen's worth
@@ -3944,6 +4278,7 @@ impl Render for BrowseView {
             let target = self.target(cx);
             return self.panel(target.as_ref(), window, cx).unwrap_or_else(|| div().into_any_element());
         }
+        self.note_place();
         if let Some(q) = self.pending_query.take() {
             cx.defer_in(window, move |this, window, cx| {
                 this.search.update(cx, |s, cx| s.set_value(q, window, cx))

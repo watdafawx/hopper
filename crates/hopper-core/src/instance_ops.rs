@@ -646,27 +646,55 @@ pub fn has_shader_loader(inst: &Instance) -> bool {
 /// global pack folders (Paxi, OpenLoader, Global Packs), mapped to the
 /// loader's name. Found by fingerprint and sha1, like CurseForge's scan.
 pub fn global_pack_projects(inst: &Instance) -> std::collections::HashMap<u64, &'static str> {
+    global_pack_matches(inst).into_iter().map(|(_, id, name)| (id, name)).collect()
+}
+
+/// Cheap fingerprint of the global pack folders (names, sizes, times), to
+/// tell whether they changed without reading the files.
+pub fn global_packs_stamp(inst: &Instance) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (dir, _, _) in GLOBAL_RESOURCEPACK_DIRS.iter().chain(GLOBAL_DATAPACK_DIRS) {
+        let mut entries: Vec<_> = fs::read_dir(inst.root.join(dir))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| {
+                let m = e.metadata().ok();
+                (e.file_name(), m.as_ref().map(|m| m.len()), m.and_then(|m| m.modified().ok()))
+            })
+            .collect();
+        entries.sort();
+        dir.hash(&mut h);
+        entries.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Like [`global_pack_projects`], with the file each project was found
+/// by, so a deleted file can drop its project without asking again.
+pub fn global_pack_matches(inst: &Instance) -> Vec<(PathBuf, u64, &'static str)> {
     use std::collections::HashMap;
-    let mut by_fp: HashMap<u32, &'static str> = HashMap::new();
-    let mut by_sha: HashMap<String, &'static str> = HashMap::new();
+    let mut by_fp: HashMap<u32, (&'static str, PathBuf)> = HashMap::new();
+    let mut by_sha: HashMap<String, (&'static str, PathBuf)> = HashMap::new();
     for (dir, name, _) in GLOBAL_RESOURCEPACK_DIRS.iter().chain(GLOBAL_DATAPACK_DIRS) {
         for p in datapacks(&inst.root.join(dir)) {
             if p.is_dir() {
                 continue;
             }
             let Ok(bytes) = fs::read(&p) else { continue };
-            by_fp.insert(cf::fingerprint(&bytes), name);
-            by_sha.insert(crate::modrinth::sha1(&bytes), name);
+            by_fp.insert(cf::fingerprint(&bytes), (name, p.clone()));
+            by_sha.insert(crate::modrinth::sha1(&bytes), (name, p));
         }
     }
-    let mut out = HashMap::new();
+    let mut out = Vec::new();
     if by_fp.is_empty() {
         return out;
     }
     if let Ok(matches) = cf::match_fingerprints(&by_fp.keys().copied().collect::<Vec<_>>()) {
         for m in matches {
-            if let Some(n) = by_fp.get(&(m.file.file_fingerprint as u32)) {
-                out.insert(m.id, *n);
+            if let Some((n, p)) = by_fp.get(&(m.file.file_fingerprint as u32)) {
+                out.push((p.clone(), m.id, *n));
             }
         }
     }
@@ -674,8 +702,8 @@ pub fn global_pack_projects(inst: &Instance) -> std::collections::HashMap<u64, &
         crate::modrinth::versions_by_sha1(&by_sha.keys().cloned().collect::<Vec<_>>())
     {
         for (sha, v) in versions {
-            if let Some(n) = by_sha.get(&sha) {
-                out.insert(crate::modrinth::num_id(&v.project_id), *n);
+            if let Some((n, p)) = by_sha.get(&sha) {
+                out.push((p.clone(), crate::modrinth::num_id(&v.project_id), *n));
             }
         }
     }
@@ -1045,6 +1073,23 @@ mod tests {
         assert_eq!(mc_spans("a§zb§")[0].text, "ab");
         assert_eq!(unescape_property(r"\uZZ"), r"\uZZ");
         assert!(mc_spans("").is_empty());
+    }
+
+    #[test]
+    fn global_pack_stamp_changes_when_a_pack_comes_or_goes() {
+        let root = std::env::temp_dir().join(format!("hopper-gstamp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("config/paxi/resourcepacks");
+        fs::create_dir_all(&dir).unwrap();
+        let inst = Instance { root: root.clone(), name: "t".into(), ..Default::default() };
+        let empty = global_packs_stamp(&inst);
+        assert_eq!(empty, global_packs_stamp(&inst));
+        fs::write(dir.join("a.zip"), [0u8; 10]).unwrap();
+        let with = global_packs_stamp(&inst);
+        assert_ne!(empty, with);
+        fs::remove_file(dir.join("a.zip")).unwrap();
+        assert_eq!(empty, global_packs_stamp(&inst));
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
