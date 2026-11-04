@@ -1002,6 +1002,12 @@ impl ServersView {
         if let Some(r) = self.picked.clone() {
             self.strip.update(cx, |s, cx| s.refresh(r, cx));
         }
+        // Looked at: the Logs & crashes tab's dot goes.
+        if tab == TAB_LOGS
+            && let Some(k) = self.strip.read(cx).unseen_key()
+        {
+            self.store.update(cx, |s, cx| s.hide_notice(&k, cx));
+        }
         // Logs & crashes polls the server only while it's open.
         if was == TAB_LOGS && tab != TAB_LOGS {
             self.logs.update(cx, |v, cx| v.hidden(cx));
@@ -1584,6 +1590,8 @@ impl ServersView {
             .map(|c| if self.tab == TAB_OVERVIEW { c.gap_5() } else { c.gap_3() })
             .child({
                 let codes = tabs_for(remote);
+                let danger = cx.theme().danger;
+                let logs_dot = self.strip.read(cx).unseen_key().is_some_and(|k| !self.store.read(cx).notice_hidden(&k));
                 let online = pstats.as_ref().filter(|p| p.running).map(|p| p.online);
                 TabBar::new("server-tabs")
                     .underline()
@@ -1594,7 +1602,10 @@ impl ServersView {
                             TAB_PLAYERS => online.map_or("Players".to_string(), |n| format!("Players {n}")),
                             _ => tab_name(code).to_string(),
                         };
-                        Tab::new().prefix(Icon::new(tab_icon(code)).small()).label(label)
+                        Tab::new()
+                            .prefix(Icon::new(tab_icon(code)).small())
+                            .label(label)
+                            .when(code == TAB_LOGS && logs_dot && self.tab != TAB_LOGS, |t| t.suffix(widgets::tab_dot(danger)))
                     }))
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                         if let Some(code) = codes.get(*ix) {

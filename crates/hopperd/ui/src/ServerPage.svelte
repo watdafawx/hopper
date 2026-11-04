@@ -15,6 +15,7 @@
   import { askPower, askKickOrBan, playerAct, head } from './lib/consoleKit.js';
   import ConsoleView from './ConsoleView.svelte';
   import CrashStrip from './CrashStrip.svelte';
+  import { unseen, markSeen } from './lib/crashseen.svelte.js';
   import ServerLogs from './ServerLogs.svelte';
   import ModPeek from './ModPeek.svelte';
   import Spark from './Spark.svelte';
@@ -76,6 +77,10 @@
     ['schedule', 'Schedule', Clock],
     ['settings', 'Settings', Settings2],
   ];
+  // Looked at: Logs & crashes' dot goes.
+  $effect(() => {
+    if (tab === 'logs') markSeen(id);
+  });
   const onTab = (t) => (t === 'files' ? filesTab : tab === t);
 
   // The header backdrop bends toward the new tab, and quickens on Start/Stop/Restart and while a start or stop runs.
@@ -243,11 +248,11 @@
 
   <nav class="tabs">
     {#each TABS as [t, label, Icon] (t)}
-      <button class:tab-sel={onTab(t)} onclick={() => nav(t)}><Icon size={14} />{label}{t === 'players' && online != null ? ` ${online}` : ''}</button>
+      <button class:tab-sel={onTab(t)} onclick={() => nav(t)}><Icon size={14} />{label}{#if t === 'logs' && tab !== 'logs' && unseen(id)}<i class="dot" title="A crash you haven't looked at"></i>{/if}{t === 'players' && online != null ? ` ${online}` : ''}</button>
     {/each}
   </nav>
 
-  {#if tab !== 'logs'}<CrashStrip server={s} seeWhy={() => nav('logs')} />{/if}
+  <CrashStrip server={s} hidden={tab === 'logs'} seeWhy={() => nav('logs')} />
 
   {#if tab === 'files'}
     <div class="full"><Files server={s} {path} go={(p) => nav('files', p)} openFile={(p) => nav('edit', p)} openTrash={() => nav('trash')} /></div>
@@ -363,6 +368,7 @@
   .menu-item.bad { color: var(--red); }
   .menu-item:disabled { opacity: .45; cursor: default; background: none; }
   .pmenu { position: fixed; z-index: 80; }
+  .tabs .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--red); margin-left: 6px; }
   .full { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 18px 18px; }
   .full.scroll { overflow: auto; display: block; }
   .split { flex: 1; min-height: 0; display: flex; gap: 14px; padding: 0 18px 18px; }

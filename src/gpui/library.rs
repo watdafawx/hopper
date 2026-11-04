@@ -803,7 +803,13 @@ impl LibraryView {
                 return;
             }
             InstTab::Logs => {
-                self.logs.update(cx, |w, cx| w.show_for(root, cx));
+                self.logs.update(cx, |w, cx| w.show_for(root.clone(), cx));
+                // Looked at: the tab's dot goes.
+                if let Some(inst) = self.store.read(cx).instance(&root).cloned()
+                    && let Some((key, _)) = self.logs_news(&inst, cx)
+                {
+                    self.store.update(cx, |s, cx| s.hide_notice(&key, cx));
+                }
                 return;
             }
             InstTab::Performance => {
@@ -2281,6 +2287,7 @@ impl LibraryView {
     /// report where they were laid out; the underline is placed from that
     /// (one frame late the very first time).
     fn tabs(&self, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
+        let news = self.logs_news(inst, cx).filter(|(key, _)| !self.store.read(cx).notice_hidden(key));
         let theme = cx.theme();
         let slot = |tab: InstTab| if tab.is_pack() { InstTab::ResourcePacks } else { tab };
         // Which bar tabs fit: a rough width per tab from its label, against
@@ -2335,6 +2342,7 @@ impl LibraryView {
                         .when(active, |i| i.text_color(theme.primary)),
                 )
                 .child(Self::bar_label(tab))
+                .when_some(news.clone().filter(|_| tab == InstTab::Logs && !active), |d, (_, color)| d.child(widgets::tab_dot(color)))
                 .when_some(count, |d, n| d.child(div().text_xs().text_color(theme.muted_foreground).child(n.to_string())))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let to = if tab.is_pack() { this.last_pack } else { tab };
@@ -2423,6 +2431,21 @@ impl LibraryView {
     }
 
     /// A bar tab's name: "Packs" for the pack tabs.
+    /// What the Logs & crashes tab has to show that wasn't looked at yet:
+    /// its settings key and the dot's color (red: the game crashed; amber:
+    /// problems it will hit loading). The key names the crash or the
+    /// problems, so a new one shows again.
+    fn logs_news(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<(String, Hsla)> {
+        let place = inst.root.to_string_lossy().into_owned();
+        let crash = self.store.update(cx, |s, _| s.crash(&inst.root).map(|c| format!("crash|{}|{}", c.source.to_string_lossy(), c.when)));
+        let theme = cx.theme();
+        if let Some(id) = crash {
+            return Some((hopper::settings::notice_key(&place, "logs-seen", &id), theme.danger));
+        }
+        let n = self.addons.read(cx).load_problems(&inst.root);
+        (n > 0).then(|| (hopper::settings::notice_key(&place, "logs-seen", &format!("load|{n}")), theme.warning))
+    }
+
     fn bar_label(t: InstTab) -> &'static str {
         if t.is_pack() { "Packs" } else { t.label() }
     }

@@ -7,8 +7,9 @@
   import { AlertTriangle, Undo2, X } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
+  import { crashes } from './lib/crashseen.svelte.js';
 
-  let { server, seeWhy } = $props();
+  let { server, seeWhy, hidden = false } = $props();
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
@@ -27,6 +28,8 @@
       if (n !== seq) return;
       crash = r.crash;
       mods = m;
+      if (r.crash) crashes[server.id] = r.crash.when;
+      else delete crashes[server.id];
     } catch {
       if (n === seq) crash = null;
     }
@@ -81,7 +84,7 @@
   }
 </script>
 
-{#if crash && settled && !closed}
+{#if crash && settled && !closed && !hidden}
   <div class="strip">
     <AlertTriangle size={14} />
     <b class="t">The server crashed</b>

@@ -2336,3 +2336,9 @@ pub fn clear_search(
         }
     });
 }
+
+/// A small round mark on a tab that has something unseen: red for a crash,
+/// amber for problems the game will hit at loading.
+pub fn tab_dot(color: Hsla) -> Div {
+    div().flex_none().size(px(7.)).rounded_full().bg(color)
+}

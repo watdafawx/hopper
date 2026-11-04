@@ -113,6 +113,13 @@ impl CrashStrip {
         }
     }
 
+    /// The settings key of the "seen" mark for the crash on screen (the
+    /// Logs & crashes tab's dot shows until it's set).
+    pub fn unseen_key(&self) -> Option<String> {
+        let (root, c) = (self.root.as_ref()?, self.crash()?);
+        Some(hopper::settings::notice_key(&root.to_string_lossy(), "logs-seen", &format!("crash|{}|{}", c.source.to_string_lossy(), c.when)))
+    }
+
     /// The crash this server last had, when it has one.
     pub fn crash(&self) -> Option<&Crash> {
         self.crash.as_ref().and_then(|c| c.as_ref())
