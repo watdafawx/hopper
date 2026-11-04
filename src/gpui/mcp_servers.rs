@@ -102,7 +102,7 @@ pub fn find_server<'a>(s: &'a Store, q: &str) -> Result<&'a ServerInfo, String> 
 }
 
 /// The panel that runs `server`, as the server page's controls make it.
-fn panel_for(s: &Store, server: &ServerInfo) -> Option<Arc<dyn ServerPanel>> {
+pub(crate) fn panel_for(s: &Store, server: &ServerInfo) -> Option<Arc<dyn ServerPanel>> {
     if s.is_hosted(&server.root) {
         return Some(s.local_panel());
     }
@@ -117,7 +117,7 @@ fn panel_for(s: &Store, server: &ServerInfo) -> Option<Arc<dyn ServerPanel>> {
 }
 
 /// The server's id in its panel.
-fn panel_id(panel: &dyn ServerPanel, server: &ServerInfo) -> Result<String, String> {
+pub(crate) fn panel_id(panel: &dyn ServerPanel, server: &ServerInfo) -> Result<String, String> {
     if let Some(r) = &server.remote {
         return Ok(r.id.clone());
     }

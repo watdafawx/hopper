@@ -61,6 +61,7 @@ mod server_control;
 mod server_delete;
 mod server_logs;
 mod server_progress;
+mod server_power;
 mod server_settings;
 mod panel_tabs;
 mod part;
