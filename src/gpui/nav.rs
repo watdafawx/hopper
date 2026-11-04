@@ -5,8 +5,6 @@
 use crate::app::Page;
 use crate::library::InstTab;
 use crate::settings_page::Category;
-use hopper::cf;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -44,8 +42,6 @@ pub struct History {
     /// A place being gone back to, and since when: what shows on the way
     /// (a project panel still loading) isn't a new place.
     going: Option<(Loc, Instant)>,
-    /// Browse projects seen, to open them again.
-    projects: HashMap<u64, cf::Mod>,
 }
 
 impl History {
@@ -93,14 +89,5 @@ impl History {
     /// Whether there is a place to go back (or forward) to.
     pub fn can_step(&self, back: bool) -> bool {
         if back { !self.back.is_empty() } else { !self.forward.is_empty() }
-    }
-
-    /// A Browse project, kept to open it again.
-    pub fn remember(&mut self, m: &cf::Mod) {
-        self.projects.entry(m.id).or_insert_with(|| m.clone());
-    }
-
-    pub fn project(&self, id: u64) -> Option<cf::Mod> {
-        self.projects.get(&id).cloned()
     }
 }

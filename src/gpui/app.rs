@@ -714,11 +714,8 @@ impl AppView {
                 Loc::Library(i, t, p)
             }
             Page::Browse => {
-                let (class, m) = self.browse.read(cx).nav_loc();
-                if let Some(m) = m {
-                    self.history.remember(m);
-                }
-                Loc::Browse(class, m.map(|m| m.id))
+                // Browse steps through its own history first (see `step`).
+                Loc::Browse(0, None)
             }
             Page::Servers => {
                 let (r, t) = self.servers.read(cx).nav_loc();
@@ -749,9 +746,20 @@ impl AppView {
         cx.propagate();
     }
 
+    /// Whether back (or forward) has somewhere to go: a place in Browse, or
+    /// another page.
+    fn can_step(&self, back: bool, cx: &App) -> bool {
+        self.history.can_step(back) || (self.page == Page::Browse && self.browse.read(cx).can_step(back))
+    }
+
     /// One step back (or forward) through the places visited.
     fn step(&mut self, back: bool, cx: &mut Context<Self>) {
         use crate::nav::Loc;
+        // In Browse, its own places first; then the pages.
+        if self.page == Page::Browse && self.browse.update(cx, |b, cx| b.step(back, cx)) {
+            cx.notify();
+            return;
+        }
         let Some(loc) = self.history.step(back) else { return };
         if self.page != loc.page() {
             self.leaving(loc.page(), cx);
@@ -764,12 +772,7 @@ impl AppView {
         }
         match loc {
             Loc::Library(i, t, p) => self.library.update(cx, |l, cx| l.nav_restore(i, t, p, cx)),
-            Loc::Browse(class, id) => {
-                let m = id.and_then(|id| self.history.project(id));
-                if id.is_none() || m.is_some() {
-                    self.browse.update(cx, |b, cx| b.nav_restore(class, m, cx));
-                }
-            }
+            Loc::Browse(..) => {}
             Loc::Servers(r, t) => self.servers.update(cx, |s, cx| s.nav_restore(r, t, cx)),
             Loc::Settings(c) => self.settings.update(cx, |s, cx| s.show(c, cx)),
         }
@@ -1125,7 +1128,7 @@ impl AppView {
                                 .small()
                                 .icon(IconName::ChevronLeft)
                                 .when(!dialog, |b| b.tooltip("Back (Alt+Left)"))
-                                .disabled(!self.history.can_step(true))
+                                .disabled(!self.can_step(true, cx))
                                 .on_click(cx.listener(|this, _, _, cx| this.step(true, cx))),
                         )
                         .child(
@@ -1134,7 +1137,7 @@ impl AppView {
                                 .small()
                                 .icon(IconName::ChevronRight)
                                 .when(!dialog, |b| b.tooltip("Forward (Alt+Right)"))
-                                .disabled(!self.history.can_step(false))
+                                .disabled(!self.can_step(false, cx))
                                 .on_click(cx.listener(|this, _, _, cx| this.step(false, cx))),
                         ),
                 )
