@@ -25,7 +25,9 @@
   let mods = $state([]);
   let checking = $state(false);
   // Mods (jars) whose "Why?" list is open (what Hopper weighed for each).
-  let whyOpen = $state({});
+  let whyOpen = $state({})
+  // What was weighed, less what the sentence above already says.
+  const moreFacts = (s) => (s.facts || []).filter((f) => !(s.why || '').includes(f.text));
   let busy = $state(false);
   // A change put back from this card: (jar now in mods, version back).
   let back = $state(null);
@@ -254,13 +256,13 @@
               <div class="why">
                 <div class="tiny muted">{named(s.why)}</div>
                 {#each s.needs || [] as [id, ver] (id)}<div class="tiny need">Needs {id}{ver ? ` ${ver}` : ''}</div>{/each}
-                {#if (s.facts || []).length > 1}
+                {#if (s.facts || []).length > 1 && moreFacts(s).length}
                   <button class="btn ghost sm whybtn" aria-expanded={!!whyOpen[s.file_name]} onclick={() => (whyOpen[s.file_name] = !whyOpen[s.file_name])}>
                     {#if whyOpen[s.file_name]}<ChevronDown size={12} />Hide why{:else}<ChevronRight size={12} />Why?{/if}
                   </button>
                   {#if whyOpen[s.file_name]}
                     <ul class="facts">
-                      {#each s.facts as f, k (k)}
+                      {#each moreFacts(s) as f, k (k)}
                         <li><span class="mark" class:up={f.weight > 0} class:down={f.weight < 0}>{f.weight > 0 ? '+' : f.weight < 0 ? '−' : '·'}</span><span class="tiny muted">{named(f.text)}</span></li>
                       {/each}
                     </ul>

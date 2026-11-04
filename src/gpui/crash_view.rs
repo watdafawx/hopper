@@ -74,7 +74,9 @@ pub fn why_fold(
     toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Option<AnyElement> {
-    if s.facts.len() < 2 {
+    // What was weighed, less what the sentence above already says.
+    let facts: Vec<_> = s.facts.iter().filter(|f| !s.why.contains(&f.text)).collect();
+    if s.facts.len() < 2 || facts.is_empty() {
         return None;
     }
     let theme = cx.theme();
@@ -86,7 +88,7 @@ pub fn why_fold(
         .on_click(toggle);
     let mut col = v_flex().gap_1().child(h_flex().child(button));
     if open {
-        let rows = s.facts.iter().map(|f| {
+        let rows = facts.into_iter().map(|f| {
             let (mark, color) = match f.weight {
                 w if w > 0 => ("+", theme.success),
                 w if w < 0 => ("−", theme.danger),
