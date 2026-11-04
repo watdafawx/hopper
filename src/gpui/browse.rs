@@ -3865,10 +3865,11 @@ impl BrowseView {
                     .min_w_0()
                     .gap_0p5()
                     .child(
-                        div()
-                            .font_semibold()
-                            .truncate()
-                            .child(format!("Install into {}", t.name)),
+                        h_flex()
+                            .gap_1()
+                            .min_w_0()
+                            .child(div().flex_none().text_color(theme.muted_foreground).child("Into"))
+                            .child(div().min_w_0().font_semibold().truncate().child(t.name.clone())),
                     )
                     .child(summary),
             )
@@ -3889,13 +3890,14 @@ impl BrowseView {
                 .on_click(cx.listener(move |this, _, w, cx| this.install(m1.clone(), None, w, cx))),
             );
 
+        // A bar closing the header, not a boxed card: a line above and
+        // below, the panel's full width.
         let mut card = v_flex()
             .gap_3()
-            .p_4()
-            .rounded(theme.radius_lg)
-            .border_1()
+            .py_3()
+            .border_t_1()
+            .border_b_1()
             .border_color(theme.border)
-            .bg(theme.secondary)
             .child(head)
             // The download window's step, with Show window, or Retry and
             // "Pick the file myself" when it failed.

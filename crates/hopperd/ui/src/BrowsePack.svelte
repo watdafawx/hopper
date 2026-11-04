@@ -329,7 +329,7 @@
 
     {#if !packs && (target || !onBack)}
       <!-- The install box: where it goes and every mod it pulls in (desktop's install card). -->
-      <div class="icard card">
+      <div class="icard">
         <div class="row ich">
           <div class="col grow">
             {#if !target}
@@ -338,7 +338,7 @@
               <b class="ell">{have.update ? `A newer file is out for ${target.name}` : `Installed on ${target.name}`}</b>
               <span class="small muted ell" title={have.file}>{have.file}{have.same_project ? '' : ` (from ${otherSite})`}</span>
             {:else}
-              <b class="ell">Install into {target.name}</b>
+              <span class="ell"><span class="muted">Into</span> <b>{target.name}</b></span>
               {#if isMods && !target.loader}<span class="small warn">{target.name} has no mod loader, so it can't run mods.</span>
               {:else if !isMods}<span class="small muted">The newest for Minecraft {target.game_version || 'it runs'}.</span>
               {:else if plan === 'loading' || plan === null}<span class="small muted row"><span class="spinner"></span>Checking what it needs</span>
@@ -520,7 +520,8 @@
   .warn { color: var(--gold); }
   .ok { color: var(--green); }
   /* The install card: desktop's secondary box with the plan under it. */
-  .icard { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; max-width: 860px; background: var(--surface); }
+  /* A bar closing the header, as on desktop: lines above and below, no box. */
+  .icard { display: flex; flex-direction: column; gap: 10px; padding: 10px 0; max-width: 860px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
   .ich { gap: 12px; align-items: center; }
   .ich .col { gap: 2px; }
   .ich .row { gap: 6px; }
