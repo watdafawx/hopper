@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   // Automations, beside Webhooks and Alerts: "when server X does Y, do Z".
   // Same shape as Webhooks: a list, an inline form, a switch, Run now.
   import { onMount } from 'svelte';
@@ -110,6 +111,9 @@
       servers = await api('/servers');
     } catch {}
   });
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(null, ['panel'], load));
 </script>
 
 <div class="card">

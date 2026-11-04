@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   // Files, like a file explorer: back / forward / up (also mouse buttons 4/5
   // and Alt+←/→), a path you can type, a folder tree, list or tiles, a
   // preview pane, a right-click menu, cut/copy/paste, drag to move (Ctrl to
@@ -687,6 +688,9 @@
     node.select();
   };
   const openMods = () => (location.hash = `/server/${encodeURIComponent(server.id)}/mods`);
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(sid, ['files', 'mods', 'configs', 'worlds', 'backups', 'server', 'players', 'schedule'], refresh));
 </script>
 
 <svelte:window onclick={() => (ctx = null)} onmouseup={bandEnd} onmousemove={bandMove} />

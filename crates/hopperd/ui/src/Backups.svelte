@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   // A server's backups: the list (each new one only stores what changed),
   // and a rail with the space they take, which ones are kept, and copies
   // somewhere else.
@@ -291,6 +292,9 @@
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   });
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(sid, ['backups'], load));
 </script>
 
 <div class="split">

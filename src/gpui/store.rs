@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod disk_sync;
+mod panel_events;
 
 /// Results from worker threads.
 /// Hopper's own update, as far as it has got.
@@ -45,6 +46,8 @@ pub enum Msg {
     PanelServers(String, Result<Vec<ServerInfo>, String>),
     /// An SFTP / FTP site's servers (and its SSH key, to pin), or why not.
     SiteServers(String, Result<(Vec<ServerInfo>, Option<String>), String>),
+    /// What changed on a paired Hopper Server (see `panel_events`).
+    PanelEvents(String, Vec<hopper::hopperd::PanelChange>),
     /// An instance changed on disk; reload it.
     InstanceChanged(PathBuf),
     /// A server's mods were synced while it ran (when it had started):
@@ -159,6 +162,9 @@ pub enum StoreEvent {
     /// Files in an instance's content folder changed outside Hopper: the
     /// tab showing them reads them again.
     DiskContent(PathBuf, hopper::disk_watch::Area),
+    /// Something about a server on a Hopper Server changed elsewhere: its
+    /// open tab loads again. The areas are hopperd's (`mods`, `files`…).
+    PanelChanged(PathBuf, Vec<String>),
 }
 
 impl EventEmitter<StoreEvent> for Store {}
@@ -1179,6 +1185,7 @@ impl Store {
                 self.folder_servers = rig;
                 self.merge_servers(cx);
             }
+            Msg::PanelEvents(panel, changes) => self.panel_changed(panel, changes, cx),
             Msg::PanelServers(panel, list) => {
                 if let Err(e) = &list {
                     log::warn!("Hopper Server {panel:?}: {e}");
@@ -3085,6 +3092,8 @@ impl Store {
             }
         }
         // Each Hopper Server lists its servers itself; no shared drive needed.
+        // ...and says when they change.
+        self.follow_panels();
         let ids: Vec<String> = self.settings.hopper_panels.iter().map(|p| p.id.clone()).collect();
         self.panel_servers.retain(|k, _| ids.contains(k));
         for p in self.settings.hopper_panels.clone() {

@@ -26,6 +26,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 tokio-util = { version = "0.7", features = ["io"] }
 tokio-stream = "0.1"
 crc32fast = "1"
+# Change events: notices server files changed outside the panel.
+notify = "8.2"
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["compression-gzip"] }
 argon2 = "0.5"

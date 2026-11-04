@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   // The Players tab, as Hopper desktop shows a Hopper Server's players
   // (panel_tabs/players.rs): one column of sections (online now, the
   // operators, the whitelist with a box to add names, the bans), each row
@@ -62,6 +63,9 @@
     const t = setInterval(load, 10000);
     return () => clearInterval(t);
   });
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(sid, ['players'], load));
 </script>
 
 {#snippet face(n)}<img src={head(n, 44)} alt="" width="24" height="24" loading="lazy" />{/snippet}

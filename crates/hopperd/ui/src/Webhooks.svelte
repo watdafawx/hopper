@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   import { onMount } from 'svelte';
   import { Webhook, Plus, Trash2, Send, Pencil, AlertTriangle } from '@lucide/svelte';
   import { api, post, del } from './lib/api.js';
@@ -75,6 +76,9 @@
       servers = await api('/servers');
     } catch {}
   });
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(null, ['panel'], load));
 </script>
 
 <div class="card">

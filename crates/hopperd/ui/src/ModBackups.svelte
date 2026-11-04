@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   // Mods › Backups: what Hopper (desktop or this panel) set aside in
   // .hopper-backups: jars replaced by updates or removed, configs reset.
   // Restore puts files back; a jar coming back first moves the mod's current
@@ -88,6 +89,9 @@
     sid;
     untrack(load);
   });
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(sid, ['mods'], load));
 </script>
 
 <div class="col bk">

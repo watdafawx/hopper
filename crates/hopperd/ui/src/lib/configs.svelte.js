@@ -6,6 +6,7 @@
 // one file at a time, each checked together on the panel first.
 
 import { api, post } from './api.js';
+import { onChange } from './changes.svelte.js';
 
 /** What a hidden value (a token, a password) shows as; the panel sends it. */
 export const MASK = '••••••';
@@ -311,3 +312,15 @@ export function sideChip(side) {
 
 /** The file's name without the config folder. */
 export const shortRel = (rel) => rel.replace(/^(config|defaultconfigs|kubejs\/config)\//, '');
+
+/** Reads the index, the open files and the players' compare again when a
+ * server's configs change elsewhere. Edits not saved yet stay on top. For
+ * an `$effect`: returns the unsubscribe. */
+export function followConfigs(sid) {
+  return onChange(sid, ['configs'], async () => {
+    if (cfg.sid !== sid) return;
+    await loadIndex(sid, true);
+    await loadFiles(sid, Object.keys(cfg.files), true);
+    if (cfg.players) await loadPlayers(sid);
+  });
+}

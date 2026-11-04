@@ -562,6 +562,12 @@ impl SettingsTab {
         (self.addresses(cx) != a.addresses, self.sleep_minutes(cx) != a.sleep)
     }
 
+    /// Edits not saved yet (or an editor open): a change made elsewhere
+    /// doesn't replace them.
+    pub fn unsaved(&self, cx: &App) -> bool {
+        self.editor.is_some() || !self.changes(cx).is_empty()
+    }
+
     /// Names of everything unsaved, for the save bar.
     fn changes(&self, cx: &App) -> Vec<String> {
         let mut out = self.changed_props();

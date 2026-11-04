@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   // A server's worlds, as desktop's Worlds tab shows an instance's: one card
   // per world (size, last played, seed), the one in level-name marked
   // Active. New world, Make active, Reset and delete (a backup first only
@@ -201,6 +202,9 @@
       }
     }
   }
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(sid, ['worlds', 'backups'], load));
 </script>
 
 <svelte:window onkeydowncapture={dlgKeys} />

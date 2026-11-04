@@ -2,6 +2,7 @@
 // second) and the consoles the UI follows. Reconnects on its own, and
 // after a reconnect checks whether the panel came back on a new version.
 import { hello, seen, check } from './boot.svelte.js';
+import { dispatch, resync } from './changes.svelte.js';
 
 const MAX_LINES = 2000;
 
@@ -59,7 +60,11 @@ export function connect() {
   socket.onopen = () => {
     live.connected = true;
     retry = 0;
-    if (wasUp) check();
+    if (wasUp) {
+      check();
+      // Changes made while we were away weren't heard: show them now.
+      resync();
+    }
     wasUp = true;
     for (const id of followed) send({ op: 'console', server: id });
   };
@@ -69,6 +74,8 @@ export function connect() {
       live.servers = msg.servers;
       live.host = msg.host;
       record(msg.servers, msg.host);
+    } else if (msg.t === 'changed') {
+      dispatch(msg);
     } else if (msg.t === 'console') {
       const prev = msg.reset ? [] : consoles[msg.server] || [];
       const next = prev.concat(msg.lines);

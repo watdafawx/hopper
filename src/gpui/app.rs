@@ -251,6 +251,8 @@ impl AppView {
                 StoreEvent::SessionSaved(_) => {}
                 // The Library reads the changed folder again itself.
                 StoreEvent::DiskContent(..) => {}
+                // The Servers page reloads its open tab itself.
+                StoreEvent::PanelChanged(..) => {}
                 StoreEvent::ShowServer { root, compare } => {
                     let root = root.clone();
                     if *compare {

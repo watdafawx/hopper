@@ -869,6 +869,11 @@ impl ServersView {
                 // This page has a Console tab of its own.
                 ControlEvent::Console => this.set_tab(TAB_CONSOLE, cx),
             }),
+            cx.subscribe(&store, |this, _, e: &crate::store::StoreEvent, cx| {
+                if let crate::store::StoreEvent::PanelChanged(root, areas) = e {
+                    this.panel_changed(root, areas, cx);
+                }
+            }),
             cx.observe(&store, |this, _, cx| {
                 this.ensure_pick(cx);
                 this.want_icons(cx);
@@ -1145,6 +1150,29 @@ impl ServersView {
         if !same {
             self.target = remote.map(panel_tabs::Target::new);
             self.p_shown = None;
+        }
+    }
+
+    /// Its server changed elsewhere (the web panel, another PC, its disk):
+    /// the open panel tab loads again, unless it holds edits not saved yet.
+    fn panel_changed(&mut self, root: &std::path::Path, areas: &[String], cx: &mut Context<Self>) {
+        if self.picked.as_deref() != Some(root) {
+            return;
+        }
+        let any = |want: &[&str]| areas.iter().any(|a| a == "*" || want.contains(&a.as_str()));
+        let reload = match self.tab {
+            TAB_FILES => any(&["files", "mods", "configs", "worlds", "backups", "server", "players", "schedule"]),
+            TAB_MODS => any(&["mods"]),
+            TAB_PLAYERS => any(&["players"]),
+            TAB_BACKUPS => any(&["backups"]),
+            TAB_SCHEDULE => any(&["schedule"]) && !self.p_schedule.read(cx).unsaved(),
+            TAB_SETTINGS => any(&["server"]) && !self.p_settings.read(cx).unsaved(cx),
+            _ => false,
+        };
+        if reload {
+            // Rendering shows the tab again, which loads it.
+            self.p_shown = None;
+            cx.notify();
         }
     }
 

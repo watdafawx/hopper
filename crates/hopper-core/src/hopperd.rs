@@ -430,6 +430,35 @@ pub struct Client {
     on_web: std::sync::atomic::AtomicBool,
 }
 
+/// An answer from `GET /changes` ([`Client::changes`]).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct PanelChanges {
+    /// The panel's run: a new one means start over.
+    pub boot: String,
+    /// The place to ask from next time.
+    pub rev: u64,
+    /// Changes were missed: reload everything shown.
+    pub reset: bool,
+    pub changes: Vec<PanelChange>,
+}
+
+/// One change: what about which server (`None`: the panel, or its list).
+#[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct PanelChange {
+    pub server: Option<String>,
+    /// `list`, `server`, `mods`, `configs`, `files`, `backups`, `schedule`,
+    /// `players`, `worlds`, `panel`, or `*` for anything.
+    pub areas: Vec<String>,
+}
+
+impl PanelChange {
+    pub fn touches(&self, area: &str) -> bool {
+        self.areas.iter().any(|a| a == area || a == "*")
+    }
+}
+
 /// The reply's JSON, or its `error` as the error.
 fn reply(resp: anyhow::Result<ureq::http::Response<ureq::Body>>) -> anyhow::Result<Value> {
     let mut resp = resp?;
@@ -596,6 +625,17 @@ impl Client {
             .flatten()
             .map(|v| info_from(v, &self.base, &self.ca, &self.panel))
             .collect())
+    }
+
+    /// What changed on the panel after `at` (its run and place, from the
+    /// last answer), waiting up to `wait` seconds for something. Without
+    /// `at`: where to start from. See hopperd's `changes.rs`.
+    pub fn changes(&self, at: Option<(&str, u64)>, wait: u64) -> anyhow::Result<PanelChanges> {
+        let q = match at {
+            Some((boot, since)) => format!("/changes?boot={}&since={since}&wait={wait}", enc(boot)),
+            None => "/changes".to_string(),
+        };
+        Ok(serde_json::from_value(self.get(&q)?)?)
     }
 
     /// A server's mods, read by the panel itself (no jar crosses the wire).

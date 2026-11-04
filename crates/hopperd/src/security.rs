@@ -214,7 +214,19 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
         }
     }
 
+    let client = req.headers().get("x-hopperd-client").and_then(|v| v.to_str().ok()).map(|v| v.chars().take(64).collect::<String>());
     let res = next.run(req).await;
+
+    // A change went through: tell every open client what to show again.
+    if api && res.status().is_success()
+        && let Some((server, areas)) = crate::changes::from_request(&method, &path)
+    {
+        // The server list and headers come with the live snapshot: send it now.
+        if areas.iter().any(|a| matches!(*a, "list" | "server")) {
+            app.refresh.notify_one();
+        }
+        app.changes.emit(server.as_deref(), &areas, client);
+    }
 
     // Changes, sign-ins and pairing go in the audit log.
     // Reads aren't logged (the UI checks who's signed in all the time).
