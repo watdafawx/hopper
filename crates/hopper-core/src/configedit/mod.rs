@@ -234,6 +234,8 @@ pub fn same(a: &Value, b: &Value) -> bool {
             (Some(p), Some(q)) => p == q,
             _ => x.split_whitespace().collect::<String>() == y.split_whitespace().collect::<String>(),
         },
+        // An opaque value (`null`) typed as a plain one reads back as that kind.
+        (Value::Text(_), _) | (_, Value::Text(_)) => a.text().trim() == b.text().trim(),
         _ => a == b,
     }
 }

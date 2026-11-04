@@ -40,7 +40,8 @@ pub(crate) fn range(s: &str) -> Option<(Option<f64>, Option<f64>)> {
     let (a, b) = match s.split_once('~') {
         Some(p) => p,
         // `1 - 10`: a dash between spaces, so `-5` stays a number.
-        None => s.split_once(" - ").or_else(|| s.split_once(" to "))?,
+        // HammerLib writes `[16; 16384]`.
+        None => s.split_once(" - ").or_else(|| s.split_once(" to ")).or_else(|| s.split_once(';'))?,
     };
     let (lo, hi) = (num(a), num(b));
     // Something that isn't a number at all isn't a range.
@@ -81,7 +82,7 @@ fn take(h: &mut Hints, part: &str) -> bool {
         h.range = range(r).or(h.range);
         return true;
     }
-    if let Some(v) = after(p, &["allowed values:", "valid values:", "allowed:", "valid:", "possible values:", "options:"]) {
+    if let Some(v) = after(p, &["allowed values:", "valid values:", "allowed:", "valid:", "possible values:", "options:", "must be one of:", "must be one of"]) {
         let c = choices(v);
         if !c.is_empty() {
             h.allowed = c;
@@ -104,7 +105,8 @@ pub fn describe<S: AsRef<str>>(lines: &[S]) -> Hints {
     let mut h = Hints::default();
     let mut text: Vec<String> = Vec::new();
     for l in lines {
-        let l = l.as_ref().trim();
+        // Carbon Config puts a zero-width space after its `#`.
+        let l = l.as_ref().trim().trim_start_matches('\u{200b}').trim();
         // Create writes `#.` lines as spacers.
         if l.is_empty() || l.chars().all(|c| c == '.' || c == '-' || c == '=' || c == '#') {
             continue;
@@ -135,6 +137,17 @@ pub fn describe<S: AsRef<str>>(lines: &[S]) -> Hints {
             } else {
                 take(&mut h, rest);
             }
+            let before = l[..open].trim();
+            if !before.is_empty() {
+                text.push(before.to_string());
+            }
+            continue;
+        }
+        // HammerLib: `Some text (Range: [16; 16384])`.
+        if let Some(open) = low.rfind("(range:")
+            && l.ends_with(')')
+        {
+            take(&mut h, &l[open + 1..l.len() - 1]);
             let before = l[..open].trim();
             if !before.is_empty() {
                 text.push(before.to_string());
@@ -189,5 +202,13 @@ mod tests {
         // A sentence mentioning a range isn't a limit.
         assert_eq!(d("The range of the wand").range, None);
         assert_eq!(d("Range: far").range, None);
+        // HammerLib, Carbon Config.
+        let h = d("Item size (Range: [16; 16384])");
+        assert_eq!((h.text.as_str(), h.range), ("Item size", Some((Some(16.0), Some(16384.0)))));
+        assert_eq!(d("Height (Range: [0.0; 16.0))").range, Some((Some(0.0), Some(16.0))));
+        assert_eq!(d("Capacity (Range: [1; 9223372036854775807])").range, Some((Some(1.0), Some(9223372036854775807.0))));
+        assert_eq!(d("\u{200b} Must be one of [PLANKS, STONE]").allowed, ["PLANKS", "STONE"]);
+        assert_eq!(d("Must be one of: A, B").allowed, ["A", "B"]);
+        assert_eq!(d("\u{200b} Requires Restart").restart, Restart::Game);
     }
 }
