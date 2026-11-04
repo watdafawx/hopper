@@ -1,0 +1,43 @@
+modLoader = "javafml" #mandatory
+loaderVersion = "[4,)" #mandatory
+license = "CC0-1.0" # Review your options at https://choosealicense.com/.
+#issueTrackerURL="https://change.me.to.your.issue.tracker.example.invalid/" #optional
+[[mods]] #mandatory
+modId = "citresewn" #mandatory
+version = "0" #mandatory
+displayName = "CITResewn" #mandatory
+#updateJSONURL="https://change.me.example.invalid/updates.json" #optional (see https://docs.neoforged.net/docs/misc/updatechecker/)
+#displayURL="https://change.me.to.your.mods.homepage.example.invalid/" #optional (displayed in the mod UI)
+logoFile="citresewn.png" #optional
+credits="" #optional
+authors = "Tfarcenim,ShSuperCM" #optional
+description = "Re-implements MCPatcher's CIT" #mandatory (Supports multiline text)
+[[mixins]]
+config = "citresewn.mixins.json"
+[[mixins]]
+config = "citresewn.neoforge.mixins.json"
+[[dependencies.citresewn]] #optional
+modId = "neoforge" #mandatory
+type="required" #mandatory (Can be one of "required", "optional", "incompatible" or "discouraged")
+versionRange = "[21.1.80,)" #mandatory
+ordering = "NONE" # The order that this dependency should load in relation to your mod, required to be either 'BEFORE' or 'AFTER' if the dependency is not mandatory
+side = "BOTH" # Side this dependency is applied on - 'BOTH', 'CLIENT' or 'SERVER'
+[[dependencies.citresewn]]
+modId = "minecraft"
+type="required" #mandatory (Can be one of "required", "optional", "incompatible" or "discouraged")
+versionRange = "[1.21.1, 1.22)"
+ordering = "NONE"
+side = "BOTH"
+[[dependencies.citresewn]]
+modId="connector"
+type="incompatible" #mandatory (Can be one of "required", "optional", "incompatible" or "discouraged")
+versionRange = "*"
+ordering = "NONE"
+side = "BOTH"
+reason="For being the cause of some crash reports and general incompatibility"
+
+# Features are specific properties of the game environment, that you may want to declare you require. This example declares
+# that your mod requires GL version 3.2 or higher. Other features will be added. They are side aware so declaring this won't
+# stop your mod loading on the server for example.
+#[features.citresewn]
+#openGLVersion="[3.2,)"

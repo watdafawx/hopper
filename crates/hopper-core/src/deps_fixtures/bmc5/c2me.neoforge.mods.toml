@@ -1,0 +1,37 @@
+modLoader="javafml"
+loaderVersion="*"
+license="MIT"
+issueTrackerURL="https://github.com/RelativityMC/C2ME-neoforge/issues"
+clientSideOnly = false
+showAsResourcePack = false
+showAsDataPack = false
+
+[[mods]]
+modId="c2me"
+version="0.4.0-alpha.0.112+1.21.1"
+displayName="Concurrent Chunk Management Engine"
+logoFile="assets/c2me/icon.png"
+authors="RelativityMC, ishland"
+description='''A NeoForge mod designed to improve the chunk performance of Minecraft.'''
+displayURL = "https://github.com/RelativityMC/C2ME-neoforge"
+
+[[dependencies.c2me]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1,1.21.2)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.c2me]]
+modId = "dynview"
+type = "discouraged"
+reason = "keeping virtually every chunk from unloading when the server is running for a whole minute or even longer"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.c2me]]
+modId = "betterchunkloading"
+type = "discouraged"
+reason = "causes the world to save infinitely"
+ordering = "NONE"
+side = "BOTH"
