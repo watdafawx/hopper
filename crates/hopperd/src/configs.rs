@@ -124,6 +124,34 @@ fn masked(e: &Entry) -> bool {
     secret(&e.key) && matches!(&e.value, CValue::Str(s) if !s.is_empty())
 }
 
+/// Whether a file has values that are only ever shown masked.
+pub(crate) fn has_secrets(sections: &[Section]) -> bool {
+    sections.iter().flat_map(|s| &s.entries).any(masked)
+}
+
+/// `text` with every secret's value replaced by the mask (only the value's
+/// own characters, written as the format writes a string), so a token never
+/// reaches the web page. The text this gives is for showing: saves go onto
+/// the panel's own copy of the file.
+pub(crate) fn mask_text(f: Format, text: &str, sections: &[Section]) -> String {
+    let secrets: Vec<&Entry> = sections.iter().flat_map(|s| &s.entries).filter(|e| masked(e)).collect();
+    let mut out = text.to_string();
+    for e in &secrets {
+        if let Ok(t) = configedit::set_as(f, &out, &e.path, &e.key, &CValue::Str(MASK.into())) {
+            out = t;
+        }
+    }
+    // The same value anywhere else (a comment, a second copy) goes too.
+    for e in &secrets {
+        if let CValue::Str(v) = &e.value
+            && v.chars().count() >= 6
+        {
+            out = out.replace(v.as_str(), MASK);
+        }
+    }
+    out
+}
+
 /// One setting, the same for every route that shows settings (here and the
 /// Files editor's), so they agree.
 pub(crate) fn entry_json(e: &Entry) -> Value {
@@ -208,6 +236,7 @@ pub(crate) fn build_index(root: &std::path::Path) -> Value {
     let mut total = 0;
     let mut by_mod: BTreeMap<String, (Vec<String>, usize)> = BTreeMap::new();
     let mut unmatched = Vec::new();
+    let level = level_name(root);
     let rows: Vec<Value> = files
         .iter()
         .map(|f| {
@@ -229,6 +258,7 @@ pub(crate) fn build_index(root: &std::path::Path) -> Value {
             json!({
                 "rel": f.rel, "format": format_name(f.format), "side": format!("{:?}", f.side).to_lowercase(), "side_label": f.side.label(),
                 "size": f.size, "owner": f.owner, "changed": changed, "settings": settings, "error": error,
+                "live": live_of(root, &f.rel, &level).map(|(label, used)| json!({ "label": label, "used": used })),
             })
         })
         .collect();
@@ -243,6 +273,35 @@ pub(crate) fn build_index(root: &std::path::Path) -> Value {
         })
         .collect();
     json!({ "mods": mods, "files": rows, "unmatched": unmatched, "settings": total })
+}
+
+/// The server's world folder, named in server.properties (`world` by default).
+pub(crate) fn level_name(root: &std::path::Path) -> String {
+    std::fs::read_to_string(root.join("server.properties"))
+        .ok()
+        .and_then(|t| t.lines().find_map(|l| l.strip_prefix("level-name=").map(|s| s.trim().to_string())))
+        .filter(|l| !l.is_empty() && hopper_core::configdiff::safe_rel(l))
+        .unwrap_or_else(|| "world".into())
+}
+
+/// Which copy of a server config NeoForge reads, as the file's chip says
+/// it: the world's `serverconfig/` copy when there is one, else `config/`;
+/// `defaultconfigs/` only fills in a missing world copy and is never read
+/// live. `None` for files that aren't server configs. (NeoForge 21.1,
+/// ConfigTracker; the same rule as configcompare's.)
+fn live_of(root: &std::path::Path, rel: &str, level: &str) -> Option<(&'static str, bool)> {
+    if configindex::side_of(rel) != configindex::Side::Server {
+        return None;
+    }
+    // Another world's copy: not what this server reads.
+    if rel.contains("/serverconfig/") && !rel.starts_with(&format!("{level}/serverconfig/")) {
+        return Some(("Another world's copy", false));
+    }
+    let world = format!("{level}/serverconfig/{}", configowner::inner(rel));
+    let overridden = rel.starts_with("config/") && crate::files::resolve(root, &world).is_ok_and(|p| p.is_file());
+    // The same words as desktop (hopper-core's one rule).
+    let label = hopper_core::configcompare::live_label(rel, overridden)?;
+    Some((label, matches!(label, "In use" | "In use for this world")))
 }
 
 /// `{ hits: [{ rel, owner, entry }] }`: settings whose name or key (and with
@@ -307,7 +366,7 @@ pub(crate) fn parse_one(root: &std::path::Path, rel: &str) -> Value {
     let side = configindex::side_of(rel);
     match &*configindex::read(root, rel) {
         Ok((text, sections)) => json!({
-            "ok": true, "text": text, "format": format_name(Format::of(rel)),
+            "ok": true, "text": if has_secrets(sections) { mask_text(Format::of(rel).unwrap_or(Format::Toml), text, sections) } else { text.clone() }, "format": format_name(Format::of(rel)),
             "side": format!("{side:?}").to_lowercase(), "side_label": side.label(), "sections": sections_json(sections),
         }),
         Err(error) => json!({ "ok": false, "error": error }),
@@ -326,8 +385,11 @@ pub(crate) struct BatchEdit {
 #[derive(Deserialize)]
 pub(crate) struct BatchBody {
     rel: String,
-    /// The text the edits were made on.
-    base: String,
+    /// The text the edits were made on. Optional: without it, or when the
+    /// file holds secrets (the page only ever had a masked copy), the edits
+    /// go onto the panel's own copy.
+    #[serde(default)]
+    base: Option<String>,
     edits: Vec<BatchEdit>,
 }
 
@@ -386,13 +448,18 @@ pub(crate) fn batch_save(root: &std::path::Path, b: BatchBody) -> Value {
     if let Err(bad) = configedit::apply(f, &disk, &edits) {
         return failed(bad.iter().map(|r| refused(&r.path, &r.key, r.error.clone())).collect());
     }
+    let base = match b.base {
+        Some(t) if !has_secrets(&sections) => t,
+        _ => disk.clone(),
+    };
     let started = now_secs();
-    match configedit::save_edits(root, &rel, &b.base, &edits) {
+    match configedit::save_edits(root, &rel, &base, &edits) {
         Ok(saved) => {
-            let sections = configedit::parse_as(f, &saved.text).map(|s| sections_json(&s)).unwrap_or(Value::Array(Vec::new()));
+            let after = configedit::parse_as(f, &saved.text).unwrap_or_default();
+            let text = if has_secrets(&after) { mask_text(f, &saved.text, &after) } else { saved.text.clone() };
             let backup = backup_of(root, &rel, started);
             json!({
-                "ok": true, "text": saved.text, "sections": sections, "reapplied": saved.reapplied,
+                "ok": true, "text": text, "sections": sections_json(&after), "reapplied": saved.reapplied,
                 "backup": backup.as_ref().map(|b| format!("The old copy is in {b}. Backups can put it back.")),
                 "backup_path": backup,
             })
@@ -444,7 +511,7 @@ mod tests {
     fn body(edits: &[(&str, &str)]) -> BatchBody {
         BatchBody {
             rel: "config/x-common.toml".into(),
-            base: CFG.into(),
+            base: Some(CFG.into()),
             edits: edits.iter().map(|(k, v)| BatchEdit { path: vec!["general".into()], key: k.to_string(), value: v.to_string() }).collect(),
         }
     }
@@ -482,11 +549,16 @@ mod tests {
         assert!(backup.starts_with(".hopper-backups/"), "{backup}");
         assert_eq!(std::fs::read_to_string(root.join(&backup)).unwrap(), CFG);
         assert!(r["backup"].as_str().unwrap().contains(&backup));
-        // Made on an older copy: the edit goes onto the newer one.
+        // A file with a secret always takes edits onto the panel's own copy.
         let r = batch_save(&root, body(&[("reach", "20")]));
-        assert_eq!(r["reapplied"], true);
+        assert_eq!(r["reapplied"], false);
+        // Without secrets, a base older than the disk: the edit goes onto the newer copy.
+        let plain = CFG.replace("\tbotToken = \"abc123\"\n", "");
+        std::fs::write(root.join("config/x-common.toml"), plain.replace("reach = 8", "reach = 20").replace("\"SAFE\"", "\"FAST\"")).unwrap();
+        let r = batch_save(&root, BatchBody { base: Some(plain), ..body(&[("reach", "30")]) });
+        assert_eq!(r["reapplied"], true, "{r}");
         let disk = std::fs::read_to_string(root.join("config/x-common.toml")).unwrap();
-        assert!(disk.contains("reach = 20") && disk.contains("mode = \"FAST\""));
+        assert!(disk.contains("reach = 30") && disk.contains("mode = \"FAST\""));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -502,16 +574,47 @@ mod tests {
         assert_eq!((reach["kind"].as_str(), reach["value"].as_str(), reach["is_default"].as_bool()), (Some("int"), Some("8"), Some(true)));
         assert_eq!(reach["slider"], json!([1.0, 64.0]));
         assert_eq!(entries.iter().find(|e| e["key"] == "mode").unwrap()["kind"], "choice");
-        // Sending the mask back leaves the token alone; a new value replaces it.
-        let r = batch_save(&root, body(&[("botToken", MASK), ("reach", "9")]));
+        // No secret bytes anywhere in the reply, the text included.
+        let all = p.to_string();
+        assert!(!all.contains("abc123"), "{all}");
+        let shown = p["text"].as_str().unwrap();
+        assert!(shown.contains(&format!("botToken = \"{MASK}\"")) && shown.contains("reach = 8"));
+        // The page's masked text as the base, the mask sent back: the token stays.
+        let r = batch_save(&root, BatchBody { base: Some(shown.to_string()), ..body(&[("botToken", MASK), ("reach", "9")]) });
         assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["reapplied"], false);
+        assert!(!r.to_string().contains("abc123"));
         let disk = std::fs::read_to_string(root.join("config/x-common.toml")).unwrap();
-        assert!(disk.contains("botToken = \"abc123\"") && disk.contains("reach = 9"));
-        let base = disk.clone();
-        let r = batch_save(&root, BatchBody { base, ..body(&[("botToken", "new")]) });
-        assert_eq!(r["ok"], true);
-        assert!(std::fs::read_to_string(root.join("config/x-common.toml")).unwrap().contains("botToken = \"new\""));
+        assert!(disk.contains("botToken = \"abc123\"") && disk.contains("reach = 9"), "{disk}");
+        // No base at all; a new value replaces the token.
+        let r = batch_save(&root, BatchBody { base: None, ..body(&[("botToken", "new-token-value")]) });
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(!r.to_string().contains("new-token-value"));
+        assert!(std::fs::read_to_string(root.join("config/x-common.toml")).unwrap().contains("botToken = \"new-token-value\""));
         assert!(secret("discord_webhook_url") && secret("apiKey") && !secret("maxBeltLength"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn which_server_copy_is_live() {
+        let root = scratch("live");
+        let w = |rel: &str| {
+            std::fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(root.join(rel), "a = 1
+").unwrap();
+        };
+        std::fs::write(root.join("server.properties"), "level-name=T
+").unwrap();
+        w("config/a-server.toml");
+        w("config/b-server.toml");
+        w("T/serverconfig/a-server.toml");
+        w("defaultconfigs/a-server.toml");
+        let l = |rel: &str| live_of(&root, rel, &level_name(&root));
+        assert_eq!(l("T/serverconfig/a-server.toml"), Some(("In use for this world", true)));
+        assert_eq!(l("config/a-server.toml"), Some(("Not used: the world's copy wins", false)));
+        assert_eq!(l("config/b-server.toml"), Some(("In use", true)));
+        assert_eq!(l("defaultconfigs/a-server.toml"), Some(("Only fills in a missing file", false)));
+        assert_eq!(l("config/x-common.toml"), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
