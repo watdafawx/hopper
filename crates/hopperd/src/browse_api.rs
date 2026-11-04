@@ -509,7 +509,12 @@ async fn changelog(State(app): State<Arc<App>>, headers: HeaderMap, method: Meth
     require(&app, &headers, &method)?;
     let project: u64 = arg(&q, "id").parse().map_err(|_| bad("Which pack?"))?;
     let file: u64 = arg(&q, "file").parse().map_err(|_| bad("Which version?"))?;
-    let v = blocking(move || Ok(blocks_json(&richtext::parse(&cf::changelog(project, file)?)))).await?;
+    let v = blocking(move || {
+        // Through the shared door: a changelog that is only a link to a changelog file shows that file's section.
+        let f = hopper_core::source::file(project, file)?;
+        Ok(blocks_json(&hopper_core::source::changelog(&f)?))
+    })
+    .await?;
     Ok(Json(json!({ "changelog": v })))
 }
 

@@ -26,6 +26,9 @@ enum Target {
     Pull { repo: String, number: u64 },
     /// A wiki page of a repo ("Home" when the link names none).
     Wiki { repo: String, page: String },
+    /// A changelog file on GitLab, Codeberg or Bitbucket: `raw` is the
+    /// plain-text URL, `anchor` a heading slug.
+    Remote { host: &'static str, repo: String, path: String, raw: String, anchor: Option<String> },
 }
 
 impl Target {
@@ -36,7 +39,8 @@ impl Target {
             | Target::Compare { repo, .. }
             | Target::Release { repo, .. }
             | Target::Pull { repo, .. }
-            | Target::Wiki { repo, .. } => repo,
+            | Target::Wiki { repo, .. }
+            | Target::Remote { repo, .. } => repo,
         }
     }
 
@@ -49,6 +53,7 @@ impl Target {
             Target::Release { repo, tag } => format!("{repo} · release {tag}"),
             Target::Pull { repo, number } => format!("{repo} · pull request #{number}"),
             Target::Wiki { repo, page } => format!("{repo} · wiki {page}"),
+            Target::Remote { host, repo, path, .. } => format!("{repo} · {} on {host}", path.rsplit('/').next().unwrap_or(path)),
         }
     }
 }
@@ -78,6 +83,9 @@ fn parse_target(url: &str) -> Option<Target> {
             anchor,
         });
     }
+    if let Some(t) = parse_remote(&host, &segs, anchor.clone()) {
+        return Some(t);
+    }
     if host != "github.com" && host != "www.github.com" {
         return None;
     }
@@ -102,6 +110,35 @@ fn parse_target(url: &str) -> Option<Target> {
         ("releases", ["tag", tag @ ..]) if !tag.is_empty() => Some(Target::Release { repo, tag: tag.join("/") }),
         _ => None,
     }
+}
+
+/// A changelog file link on GitLab (`/-/blob/`), Codeberg (`/src/branch/`)
+/// or Bitbucket (`/src/`), as its plain-text URL. Only these hosts are ever
+/// fetched.
+fn parse_remote(host: &str, segs: &[&str], anchor: Option<String>) -> Option<Target> {
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let (name, raw, repo, path): (&'static str, String, String, String) = match host {
+        "gitlab.com" => {
+            // Groups nest: everything before `/-/` is the project.
+            let dash = segs.iter().position(|s| *s == "-")?;
+            let ["blob" | "raw", r, path @ ..] = &segs[dash + 1..] else { return None };
+            let repo = segs[..dash].join("/");
+            let path = path.join("/");
+            ("GitLab", format!("https://gitlab.com/{repo}/-/raw/{r}/{path}"), repo, path)
+        }
+        "codeberg.org" => {
+            let [owner, repo, "src" | "raw", kind @ ("branch" | "tag" | "commit"), r, path @ ..] = segs else { return None };
+            let path = path.join("/");
+            ("Codeberg", format!("https://codeberg.org/{owner}/{repo}/raw/{kind}/{r}/{path}"), format!("{owner}/{repo}"), path)
+        }
+        "bitbucket.org" => {
+            let [owner, repo, "src" | "raw", r, path @ ..] = segs else { return None };
+            let path = path.join("/");
+            ("Bitbucket", format!("https://bitbucket.org/{owner}/{repo}/raw/{r}/{path}"), format!("{owner}/{repo}"), path)
+        }
+        _ => return None,
+    };
+    (!path.is_empty() && !repo.is_empty()).then_some(Target::Remote { host: name, repo, path, raw, anchor })
 }
 
 /// The one URL a changelog consists of, when it has nothing much besides
@@ -184,7 +221,7 @@ fn resolve(t: &Target, f: &cf::File) -> anyhow::Result<Option<String>> {
                 return Ok(None);
             }
             let text = fetch(&format!("https://raw.githubusercontent.com/{repo}/{git_ref}/{path}"), FILE_TTL)?;
-            let Some(s) = section(&text, anchor.as_deref(), &version_hints(f)) else {
+            let Some(s) = file_notes(&text, anchor.as_deref(), &version_hints(f)) else {
                 return Ok(None);
             };
             let dir = path.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
@@ -194,6 +231,17 @@ fn resolve(t: &Target, f: &cf::File) -> anyhow::Result<Option<String>> {
                 &format!("https://github.com/{repo}/blob/{git_ref}/{dir}"),
                 &format!("https://raw.githubusercontent.com/{repo}/{git_ref}/{dir}"),
             )
+        }
+        Target::Remote { path, raw, anchor, .. } => {
+            let ext = path.rsplit('/').next().unwrap_or("").rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+            if !matches!(ext.as_deref(), None | Some("md" | "markdown" | "txt")) {
+                return Ok(None);
+            }
+            let text = fetch(raw, FILE_TTL)?;
+            let Some(s) = file_notes(&text, anchor.as_deref(), &version_hints(f)) else {
+                return Ok(None);
+            };
+            s
         }
         Target::Wiki { page, .. } => {
             let text = fetch(&format!("https://raw.githubusercontent.com/wiki/{repo}/{page}.md"), FILE_TTL)?;
@@ -385,11 +433,28 @@ fn has_version(text: &str, v: &str) -> bool {
     })
 }
 
-/// The part of a Markdown file under the heading `anchor` points at, or
-/// failing that the first heading naming one of `versions`; without the
-/// heading itself. `None` when no heading matches or it's empty.
-fn section(md: &str, anchor: Option<&str>, versions: &[String]) -> Option<String> {
-    let lines: Vec<&str> = md.lines().collect();
+/// Whether a line is only a version, as plain changelogs head their
+/// entries: "4.0.52", "v4.0.52:", "Version 1.21-4.0.52", "[1.2.0] - 2024-01-02".
+fn version_line(t: &str) -> bool {
+    let s = t.trim().trim_end_matches(':').trim();
+    if s.is_empty() || s.len() > 60 || s.split_whitespace().count() > 6 {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    let s = ["version ", "release ", "v"]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p).map(|_| &s[p.len()..]))
+        .unwrap_or(s);
+    let s = s.trim_start_matches(['[', '(']);
+    s.starts_with(|c: char| c.is_ascii_digit())
+        && s.contains('.')
+        && s.chars().all(|c| c.is_alphanumeric() || " .-_+[]()/,:".contains(c))
+}
+
+/// Every heading of a Markdown or plain-text changelog: (line, level, text).
+/// Besides `#` headings: a bare version line after a blank line, and a
+/// version line underlined with `===` or `---`.
+fn headings(lines: &[&str]) -> Vec<(usize, usize, String)> {
     let mut heads: Vec<(usize, usize, String)> = Vec::new();
     let mut fence = false;
     for (i, l) in lines.iter().enumerate() {
@@ -404,8 +469,29 @@ fn section(md: &str, anchor: Option<&str>, versions: &[String]) -> Option<String
         let level = t.chars().take_while(|&c| c == '#').count();
         if (1..=6).contains(&level) && t[level..].starts_with([' ', '\t']) {
             heads.push((i, level, heading_text(&t[level..])));
+            continue;
+        }
+        if !version_line(t) || l.len() != t.len() {
+            continue;
+        }
+        let under = lines.get(i + 1).map(|u| u.trim()).filter(|u| u.len() >= 3);
+        if let Some(u) = under
+            && (u.chars().all(|c| c == '=') || u.chars().all(|c| c == '-'))
+        {
+            heads.push((i, 1, heading_text(t)));
+        } else if (i == 0 || lines[i - 1].trim().is_empty()) && !t.starts_with(['-', '*', '+']) {
+            heads.push((i, 6, heading_text(t)));
         }
     }
+    heads
+}
+
+/// The part of a Markdown file under the heading `anchor` points at, or
+/// failing that the first heading naming one of `versions`; without the
+/// heading itself. `None` when no heading matches or it's empty.
+fn section(md: &str, anchor: Option<&str>, versions: &[String]) -> Option<String> {
+    let lines: Vec<&str> = md.lines().collect();
+    let heads = headings(&lines);
     let mut seen: HashMap<String, usize> = HashMap::new();
     let slugs: Vec<String> = heads
         .iter()
@@ -427,9 +513,35 @@ fn section(md: &str, anchor: Option<&str>, versions: &[String]) -> Option<String
         .iter()
         .find(|(_, l, _)| *l <= level)
         .map_or(lines.len(), |h| h.0);
-    let body = lines[start + 1..end].join("\n");
+    // A setext heading's underline isn't part of the text.
+    let underlined = lines.get(start + 1).is_some_and(|u| {
+        let u = u.trim();
+        u.len() >= 3 && (u.chars().all(|c| c == '=') || u.chars().all(|c| c == '-'))
+    }) && !lines[start].trim_start().starts_with('#');
+    let from = (start + 1 + usize::from(underlined)).min(end);
+    let body = lines[from..end].join("\n");
     let body = body.trim();
     (!body.is_empty()).then(|| body.chars().take(30_000).collect())
+}
+
+/// Lines of a changelog file shown when it has no headings to find a
+/// version by.
+const TOP_LINES: usize = 40;
+
+/// What to show of a changelog file for a version: its section; for a plain
+/// file without headings, its first lines; for a file with headings but none
+/// for this version, a short note (its top entries would be other versions).
+fn file_notes(md: &str, anchor: Option<&str>, versions: &[String]) -> Option<String> {
+    if let Some(s) = section(md, anchor, versions) {
+        return Some(s);
+    }
+    let lines: Vec<&str> = md.lines().collect();
+    if headings(&lines).is_empty() {
+        let top = lines.iter().copied().take(TOP_LINES).collect::<Vec<_>>().join("\n");
+        return Some(top.trim().to_string()).filter(|t| !t.is_empty());
+    }
+    let v = versions.first()?;
+    Some(format!("*This file has no section for {v}.*"))
 }
 
 /// Relative links and images in a repo's Markdown made absolute: anchors
@@ -690,7 +802,8 @@ mod tests {
         );
         assert_eq!(parse_target("https://github.com/a/b/pull/12/files"), Some(Target::Pull { repo: "a/b".into(), number: 12 }));
         assert_eq!(parse_target("https://github.com/a/b/commits/main"), None);
-        assert_eq!(parse_target("https://gitlab.com/a/b/-/blob/main/CHANGELOG.md"), None);
+        assert!(matches!(parse_target("https://gitlab.com/a/b/-/blob/main/CHANGELOG.md"), Some(Target::Remote { .. })));
+        assert_eq!(parse_target("https://example.com/a/b/blob/main/CHANGELOG.md"), None);
     }
 
     #[test]
@@ -777,6 +890,129 @@ Old
         assert_eq!(slug(&heading_text("[1.2.0](https://x) - 2024-01-02")), "120---2024-01-02");
     }
 
+    fn pick(md: &str, name: &str) -> Option<String> {
+        section(md, None, &version_hints(&file(name)))
+    }
+
+    #[test]
+    fn real_formats() {
+        // Keep a Changelog.
+        let kac = "# Changelog
+
+## [Unreleased]
+
+## [4.0.52] - 2026-11-04
+
+### Fixed
+
+- A crash
+
+## [4.0.51] - 2026-10-01
+
+### Added
+
+- Old
+";
+        assert_eq!(pick(kac, "titanium-1.21-4.0.52.jar").as_deref(), Some("### Fixed
+
+- A crash"));
+        assert_eq!(pick(kac, "titanium-1.21-4.0.51.jar").as_deref(), Some("### Added
+
+- Old"));
+        // Plain "### x.y.z" with the Minecraft version in the file name only.
+        let plain = "### 4.0.52
+- Fix a
+- Fix b
+### 4.0.51
+- Old
+";
+        assert_eq!(pick(plain, "titanium-1.21-4.0.52.jar").as_deref(), Some("- Fix a
+- Fix b"));
+        // Heading with the Minecraft version prefix.
+        let prefixed = "### Version 1.21-4.0.52
+- New
+
+### Version 1.21-4.0.5
+- Other
+";
+        assert_eq!(pick(prefixed, "titanium-1.21-4.0.52.jar").as_deref(), Some("- New"));
+        assert_eq!(pick(prefixed, "titanium-1.21-4.0.5.jar").as_deref(), Some("- Other"));
+        // 4.0.5 is not 4.0.52.
+        assert_eq!(pick("### 4.0.52
+- x
+", "titanium-1.21-4.0.5.jar"), None);
+        // Bare version lines, with and without colon / v.
+        let bare = "v4.0.52:
+  * Fixed a
+  * Fixed b
+
+4.0.51
+  * Old
+";
+        assert_eq!(pick(bare, "x-4.0.52.jar").as_deref(), Some("* Fixed a
+  * Fixed b"));
+        assert_eq!(pick(bare, "x-4.0.51.jar").as_deref(), Some("* Old"));
+        // Underlined headings.
+        let setext = "4.0.52
+======
+
+New thing.
+
+4.0.51
+------
+
+Old thing.
+";
+        assert_eq!(pick(setext, "x-4.0.52.jar").as_deref(), Some("New thing."));
+        assert_eq!(pick(setext, "x-4.0.51.jar").as_deref(), Some("Old thing."));
+        // A version mentioned in a list item is not a heading.
+        assert_eq!(pick("# Notes
+
+- 4.0.52 fixed things
+", "x-4.0.52.jar"), None);
+    }
+
+    #[test]
+    fn file_fallbacks() {
+        let hints = ["4.0.52".to_string()];
+        // Headings, none for this version: a note, not the wrong entries.
+        let stale = "### Version 1.16.5-3.2.8.10
+- Old
+";
+        assert_eq!(file_notes(stale, None, &hints).as_deref(), Some("*This file has no section for 4.0.52.*"));
+        // No headings at all: the top of the file, capped.
+        let flat: String = (1..=100).map(|n| format!("line {n}
+")).collect();
+        let top = file_notes(&flat, None, &hints).unwrap();
+        assert_eq!(top.lines().count(), TOP_LINES);
+        assert!(top.starts_with("line 1
+"));
+    }
+
+    #[test]
+    fn other_hosts() {
+        let raw = |u: &str| match parse_target(u) {
+            Some(Target::Remote { raw, .. }) => Some(raw),
+            _ => None,
+        };
+        assert_eq!(
+            raw("https://gitlab.com/grp/sub/proj/-/blob/main/docs/CHANGELOG.md").as_deref(),
+            Some("https://gitlab.com/grp/sub/proj/-/raw/main/docs/CHANGELOG.md")
+        );
+        assert_eq!(
+            raw("https://codeberg.org/o/r/src/branch/main/CHANGELOG.md#x").as_deref(),
+            Some("https://codeberg.org/o/r/raw/branch/main/CHANGELOG.md")
+        );
+        assert_eq!(
+            raw("https://bitbucket.org/o/r/src/master/CHANGES.txt").as_deref(),
+            Some("https://bitbucket.org/o/r/raw/master/CHANGES.txt")
+        );
+        // Not changelog files, or hosts that aren't known.
+        assert_eq!(raw("https://gitlab.com/grp/proj/-/issues/3"), None);
+        assert_eq!(raw("https://evil.example/o/r/src/branch/main/CHANGELOG.md"), None);
+        assert_eq!(parse_target("https://gitlab.com/a/b/-/blob/main/CHANGELOG.md").map(|t| t.label()).as_deref(), Some("a/b · CHANGELOG.md on GitLab"));
+    }
+
     #[test]
     fn tag_messages() {
         assert_eq!(tag_text("Changelog\n- Fixed a crash\n- Added x").as_deref(), Some("- Fixed a crash\n- Added x"));
@@ -817,6 +1053,8 @@ Old
             ("https://github.com/VazkiiMods/Morph-o-Tool/releases/tag/release-1.21.1-1.8-40", "x"),
             ("https://github.com/FabricMC/fabric-loader/compare/0.16.9...0.16.10", "x"),
             ("https://github.com/FabricMC/fabric-loader/commit/a1f9c1c", "x"),
+            ("https://github.com/InnovativeOnlineIndustries/Titanium/blob/changelog/CHANGELOG.md", "titanium-1.21-4.0.52.jar"),
+            ("https://github.com/InnovativeOnlineIndustries/Titanium/blob/changelog/CHANGELOG.md", "titanium-1.16.5-3.2.8.7.jar"),
         ] {
             let b = richtext::parse(&format!("<p>{url}</p>"));
             let out = expand(b, &file(name));
