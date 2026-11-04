@@ -125,9 +125,31 @@ impl Render for ImageViewer {
         let frame = store.anim(&crate::store::view_key(&url)).map(|c| c.frame_now());
         let path = store.image(&url).map(|p| p.to_path_buf());
         let h = (window.viewport_size().height - window.rem_size() * 12.).max(window.rem_size() * 12.);
+        // Room for the picture: the dialog's width less its padding.
+        let rem = f32::from(window.rem_size());
+        let room_w = (f32::from(window.viewport_size().width) - rem * 6.).min(rem * 80.) - rem * 2.;
+        let room_h = f32::from(h);
+        // Whole image inside the frame, never cropped. Small pictures (pixel
+        // art) grow by whole steps only, up to a sensible size; big ones
+        // shrink to fit.
+        let fit = |w: f32, h: f32| -> (Pixels, Pixels) {
+            let s = (room_w / w).min(room_h / h);
+            let s = if s >= 1. { s.floor().min(4.).min((room_h * 0.6 / h).floor().max(1.)).max(1.) } else { s };
+            (px(w * s), px(h * s))
+        };
         let picture: AnyElement = match (frame, path) {
-            (Some(f), _) => img(ImageSource::Render(f)).size_full().object_fit(ObjectFit::Contain).into_any_element(),
-            (None, Some(p)) => img(p).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            (Some(f), _) => {
+                let sz = f.size(0);
+                let (w, h) = fit(sz.width.0.max(1) as f32, sz.height.0.max(1) as f32);
+                h_flex().size_full().justify_center().items_center().child(img(ImageSource::Render(f)).w(w).h(h).object_fit(ObjectFit::Contain)).into_any_element()
+            }
+            (None, Some(p)) => match widgets::image_size(&p) {
+                Some((iw, ih)) if iw > 0 && ih > 0 => {
+                    let (w, h) = fit(iw as f32, ih as f32);
+                    h_flex().size_full().justify_center().items_center().child(img(p).w(w).h(h).object_fit(ObjectFit::Contain)).into_any_element()
+                }
+                _ => img(p).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            },
             (None, None) => h_flex()
                 .size_full()
                 .justify_center()
