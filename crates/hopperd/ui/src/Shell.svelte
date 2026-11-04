@@ -120,7 +120,7 @@
     { id: 'browse', label: 'Browse', icon: Compass, to: '/browse' },
   ];
   const TABS = [
-    ['console', 'Console', Terminal], ['files', 'Files', Folder], ['mods', 'Mods', Puzzle], ['worlds', 'Worlds', Earth],
+    ['console', 'Console', Terminal], ['files', 'Files', Folder], ['mods', 'Mods', Puzzle], ['configs', 'Configs', SlidersHorizontal], ['worlds', 'Worlds', Earth],
     ['players', 'Players', Users], ['backups', 'Backups', Archive], ['schedule', 'Schedule', CalendarClock], ['settings', 'Settings', SlidersHorizontal],
   ];
 

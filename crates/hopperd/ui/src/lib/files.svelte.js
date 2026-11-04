@@ -42,4 +42,4 @@ export const PACKED = /\.(gz|tgz|7z|rar)$/i;
 export const IMAGE = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Where the next opened file should land: its 1-based line (search hits). */
-export const jump = $state({ path: '', line: 0 });
+export const jump = $state({ path: '', line: 0, text: false });

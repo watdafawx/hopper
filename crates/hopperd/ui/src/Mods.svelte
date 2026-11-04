@@ -20,8 +20,10 @@
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
-    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info, Link, Unlink,
+    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info, Link, Unlink, SlidersHorizontal,
   } from '@lucide/svelte';
+  import ModConfigPanel from './ModConfigPanel.svelte';
+  import { cfg, loadIndex, modForFile } from './lib/configs.svelte.js';
   import SourceAdd from './SourceAdd.svelte';
   import SourceFind from './SourceFind.svelte';
   import { askPower } from './lib/consoleKit.js';
@@ -35,7 +37,7 @@
   import { pick, startPick, swept, sweeping, clickSwallowed, tickLabel, countLabel } from './lib/dragpick.svelte.js';
   import { rightClear } from './lib/rightclear.js';
 
-  let { server } = $props();
+  let { server, openConfigs } = $props();
   // The live feed hands over a new `server` object every second; effects
   // that should run once per server key on the id alone.
   const sid = $derived(server.id);
@@ -54,6 +56,19 @@
   let picked = $state(null);
   let versionsFor = $state(null);
   let cfgPick = $state(null);
+  // The mod whose config shows in the side panel (in place of its details).
+  let cfgFor = $state(null);
+  const cfgMod = $derived(cfgFor && cfg.sid === sid ? modForFile(cfgFor.file) : null);
+  // Which mods have config files, and changed ones (the icon on each row).
+  $effect(() => {
+    const id = sid;
+    untrack(() => loadIndex(id).catch(() => {}));
+  });
+  function openCfg(m, e) {
+    e?.stopPropagation();
+    picked = null;
+    cfgFor = cfgFor?.file === m.file ? null : m;
+  }
   let loaderOpen = $state(false);
   let backupCount = $state(null);
   let selected = $state(new Set());
@@ -191,7 +206,7 @@
   const cols = $derived(colOrder.filter((c) => c === 'on' || (!colHidden.includes(c) && fitsCol(c))));
   const COL_W = { author: '130px', side: '40px', on: '64px', added: '86px' };
   // Check, icon, name, Update / Changelog, the movable columns, ⋯ and Remove.
-  const gridCols = $derived(`22px 30px minmax(0, 1fr) ${narrow ? 110 : 190}px ${cols.map((c) => COL_W[c]).join(' ')} 52px`);
+  const gridCols = $derived(`22px 30px minmax(0, 1fr) ${narrow ? 110 : 190}px ${cols.map((c) => COL_W[c]).join(' ')} 74px`);
   // The same mod in twice (an old jar left beside the new one): every
   // copy but the newest, as desktop's "Keep newest" finds them.
   const twice = $derived.by(() => {
@@ -388,6 +403,7 @@
   }
 
   async function editConfig(m) {
+    if (modForFile(m.file)) return openCfg(m);
     const files = await configFiles(base, m);
     if (!files) return;
     if (!files.length) return say(`No config files named after ${m.name} in config/.`);
@@ -483,6 +499,7 @@
 
   function peek(m, e) {
     e?.stopPropagation();
+    cfgFor = null;
     picked = picked?.file === m.file ? null : peekOf(m);
   }
 
@@ -861,6 +878,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
             </div>
             {#each cols as c (c)}{@render modCell(c, m, ix, swOn)}{/each}
             <span class="c-end row">
+              {#if cfg.sid === sid}{@const cm = modForFile(m.file)}{#if cm}<button class="ib cfg" class:chg={cm.changed > 0} class:on={cfgFor?.file === m.file} title={cm.changed ? `Config: ${cm.changed} setting${cm.changed === 1 ? '' : 's'} not at default` : 'Config'} aria-label="{m.name} config" onclick={(e) => openCfg(m, e)}><SlidersHorizontal size={13} /></button>{/if}{/if}
               <button class="ib more" title="More" onclick={(e) => openMenu(m, e)}><Ellipsis size={14} /></button>
               <button class="ib del" title="Remove (kept in .hopper-backups)" onclick={async (e) => { e.stopPropagation(); if (await drop([m])) changed(true); }}><Trash2 size={13} /></button>
             </span>
@@ -881,7 +899,8 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
           {/if}
         {/if}
       </div>
-      {#if pickedMod}<ModPeek {server} mod={pickedMod} onClose={() => (picked = null)} onChanged={changed} onUpdate={(m) => applyUpdates([m.project_id])} onFollow={(m) => (sourceFor = { follow: m })} />{/if}
+      {#if cfgFor && cfgMod}<ModConfigPanel {server} mod={cfgFor} cmod={cfgMod} onClose={() => (cfgFor = null)} onOpenPage={openConfigs ? () => openConfigs(cfgMod.key) : null} />
+      {:else if pickedMod}<ModPeek {server} mod={pickedMod} onClose={() => (picked = null)} onChanged={changed} onUpdate={(m) => applyUpdates([m.project_id])} onFollow={(m) => (sourceFor = { follow: m })} onConfig={cfg.sid === sid && modForFile(pickedMod.file) ? () => openCfg(pickedMod) : null} />{/if}
     </div>
 
     {#if selMods.length}
@@ -1065,7 +1084,11 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .ib:hover { color: var(--text); background: #ffffff10; }
   .ib.del:hover { color: var(--red); }
   /* Hover-only controls stay shown on the picked row, the key row and the row whose menu is open. */
-  .mod .more, .mod .ghostcl { visibility: hidden; }
+  .mod .more, .mod .ghostcl, .mod .cfg { visibility: hidden; }
+  /* The config icon: shown on hover when the mod has config files, always (orange) when one is changed. */
+  .mod:hover .cfg, .mod.sel .cfg, .mod.keys .cfg, .mod.peeked .cfg, .cfg.chg, .cfg.on { visibility: visible; }
+  .ib.cfg.chg { color: var(--acc); }
+  .ib.cfg.on { color: var(--text); background: #ffffff10; }
   .mod:hover .more, .mod:hover .ghostcl, .mod.sel .more, .mod.sel .ghostcl, .mod.keys .more, .mod.keys .ghostcl, .mod.menu .more, .mod.menu .ghostcl, .mod.peeked .more, .mod.peeked .ghostcl { visibility: visible; }
   .ghostcl { color: var(--subtle); gap: 5px; }
   .splitb { display: inline-flex; border: 1px solid var(--line2); border-radius: var(--radius); overflow: hidden; font-size: 12px; max-width: 100%; }

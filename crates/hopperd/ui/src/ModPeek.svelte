@@ -2,13 +2,13 @@
   // A mod's side panel: what it is, its actions (update, ignore updates,
   // reset config, switch site, remove) and the same Versions and changelogs
   // view the dialog shows.
-  import { X, TriangleAlert, Download, Lock, LockOpen, Settings2, Trash2, ExternalLink, Shuffle, Search, Link } from '@lucide/svelte';
+  import { X, TriangleAlert, Download, Lock, LockOpen, Settings2, Trash2, ExternalLink, Shuffle, Search, Link, SlidersHorizontal } from '@lucide/svelte';
   import { browseHash } from './lib/browse.js';
   import ModVersions from './ModVersions.svelte';
   import SourceAbout from './SourceAbout.svelte';
   import { resetConfig, setLocked, removeMods, switchSource, versionLocked, problems } from './lib/modops.js';
 
-  let { server, mod, onClose, onChanged, onUpdate, onFollow } = $props();
+  let { server, mod, onClose, onChanged, onUpdate, onFollow, onConfig = null } = $props();
   let busy = $state('');
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
@@ -32,6 +32,7 @@
   <div class="row wrap">
     {#if mod.update && !mod.locked && !vl}<button class="btn sm pri" disabled={!!busy} onclick={() => onUpdate(mod)}><Download size={13} />Update to {mod.update.to}</button>{/if}
     {#if mod.source}<button class="btn sm" onclick={async () => (await setLocked(base, [mod], !mod.locked)) && onChanged(false)}>{#if mod.locked}<LockOpen size={13} />Allow updates{:else}<Lock size={13} />Ignore updates{/if}</button>{/if}
+    {#if onConfig}<button class="btn sm" title="This mod's settings" onclick={onConfig}><SlidersHorizontal size={13} />Config</button>{/if}
     {#if mod.source}<button class="btn sm ghost" onclick={() => resetConfig(base, mod)}><Settings2 size={13} />Reset config…</button>{/if}
     <span class="sp"></span>
     {#if browse && (mod.source !== 'modrinth' || mod.mr_project)}<a class="btn sm ghost icon" href={browse} title="Open in Browse"><Search size={13} /></a>{/if}

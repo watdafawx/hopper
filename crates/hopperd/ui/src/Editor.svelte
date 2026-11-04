@@ -1,5 +1,5 @@
 <script>
-  // A file opened to edit, like desktop's config editor: a TOML config opens
+  // A file opened to edit, like desktop's config editor: a config opens
   // as Settings (switches, pickers and values from the file's own comments;
   // edits keep the rest of the file), with Text beside it; other files open
   // as text. A mod's config shows the mod (its icon opens the mod's panel)
@@ -58,7 +58,8 @@
   const base = $derived(`/fs/${encodeURIComponent(server.id)}`);
   const name = $derived(path.split('/').pop());
   const crumbs = $derived(path.split('/'));
-  const toml = $derived(/\.toml$/i.test(path));
+  // Config files of a kind Hopper reads as settings (TOML, .cfg, SNBT, JSON, flat files).
+  const toml = $derived(/\.toml$/i.test(path) || (/^(config|defaultconfigs|kubejs\/config)\/|\/serverconfig\//i.test(path) && /\.(toml|cfg|snbt|json5?|jsonc|properties|ya?ml|ini)$/i.test(path)));
   const running = $derived(['running', 'starting'].includes(server.state));
   const configish = $derived(/^(config|defaultconfigs|kubejs)\//i.test(path) || /\.(toml|properties|json5?|cfg|ya?ml|ini|snbt)$/i.test(path));
   const mod = $derived(ownerOf(owners, path));
@@ -130,7 +131,7 @@
     if (view === 'settings' || !toml || !ed) return;
     const t = edText();
     try {
-      const r = await post(`${base}/config/parse`, { text: t });
+      const r = await post(`${base}/config/parse`, { text: t, rel: path });
       if (!r.ok) return say(`The text has a mistake, so it can't show as settings: ${r.error}`, true);
       text = t;
       sections = r.sections;
@@ -151,7 +152,7 @@
   }
   async function setNow(table, key, value) {
     try {
-      const r = await post(`${base}/config/set`, { text, table, key, value });
+      const r = await post(`${base}/config/set`, { text, rel: path, table, key, value });
       if (!r.ok) return r.error;
       text = r.text;
       sections = r.sections;
@@ -267,8 +268,11 @@
     addEventListener('beforeunload', guard);
     configOwners(server.id).then((o) => (owners = o));
     const want = jump.path === path ? jump.line : 0;
+    // Opened from a setting that can't be one (Configs' "Edit as text"): the text, at its line.
+    const wantText = jump.path === path && jump.text;
     jump.path = '';
     jump.line = 0;
+    jump.text = false;
     try {
       const [t, cm] = await Promise.all([api(`${base}/text?path=${encodeURIComponent(path)}`), import('./lib/cm.js')]);
       modified = t.modified;
@@ -284,8 +288,8 @@
         },
       });
       if (toml) {
-        const r = await post(`${base}/config/parse`, { text: t.content }).catch(() => null);
-        if (r?.ok) {
+        const r = await post(`${base}/config/parse`, { text: t.content, rel: path }).catch(() => null);
+        if (r?.ok && r.sections.length && !wantText) {
           sections = r.sections;
           view = 'settings';
         }

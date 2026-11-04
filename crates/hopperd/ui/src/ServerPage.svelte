@@ -4,7 +4,7 @@
   import { session, outside } from './lib/me.svelte.js';
   import Avatar from './Avatar.svelte';
   import { onMount, onDestroy } from 'svelte';
-  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder } from '@lucide/svelte';
+  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder, SlidersHorizontal } from '@lucide/svelte';
   import { live, history, follow, unfollow } from './lib/live.svelte.js';
   import { api, post } from './lib/api.js';
   import { bytes, uptime, xmx, stateText, bootLeft, memTitle, loaderText } from './lib/format.js';
@@ -25,6 +25,7 @@
   import Schedule from './Schedule.svelte';
   import Settings from './Settings.svelte';
   import Mods from './Mods.svelte';
+  import Configs from './Configs.svelte';
   import Worlds from './Worlds.svelte';
   import Addr from './Addr.svelte';
   import ServerAlerts from './ServerAlerts.svelte';
@@ -66,6 +67,7 @@
     ['console', 'Console', SquareTerminal],
     ['files', 'Files', FolderOpen],
     ['mods', 'Mods', Puzzle],
+    ['configs', 'Configs', SlidersHorizontal],
     ['worlds', 'Worlds', Globe],
     ['players', 'Players', Users],
     ['backups', 'Backups', Archive],
@@ -246,7 +248,9 @@
   {:else if tab === 'trash'}
     <div class="full"><Trash server={s} close={() => nav('files')} /></div>
   {:else if tab === 'mods'}
-    <div class="full scroll"><Mods server={s} /></div>
+    <div class="full scroll"><Mods server={s} openConfigs={(key) => nav('configs', key)} /></div>
+  {:else if tab === 'configs'}
+    <div class="full"><Configs server={s} {path} go={(key) => nav('configs', key)} /></div>
   {:else if tab === 'worlds'}
     <div class="full scroll"><Worlds server={s} openFiles={(p) => nav('files', p)} openBackups={() => nav('backups')} /></div>
   {:else if tab === 'players'}
