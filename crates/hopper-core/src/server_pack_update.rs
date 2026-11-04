@@ -441,6 +441,8 @@ pub fn plan(
             prefixes: vec![prefix],
             same,
             merged,
+            settings: Default::default(),
+            settings_merged: Default::default(),
         },
         pack: pack.clone(),
         loader,

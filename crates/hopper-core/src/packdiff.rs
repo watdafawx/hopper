@@ -200,6 +200,69 @@ pub struct UpdatePlan {
     pub(crate) same: Vec<String>,
     /// Merged contents of the `Merge` files.
     pub(crate) merged: HashMap<String, Vec<u8>>,
+    /// Conflicting settings files: the settings where yours and the pack's
+    /// differ, so you can see what taking the pack's copy would change.
+    #[serde(default)]
+    pub settings: HashMap<String, Vec<SettingDiff>>,
+    /// The pack's new file with the settings you changed put back in (when
+    /// the installed version is known): "Both" on a conflicting file.
+    #[serde(default)]
+    pub(crate) settings_merged: HashMap<String, Vec<u8>>,
+}
+
+/// One setting of a conflicting settings file.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SettingDiff {
+    pub path: Vec<String>,
+    pub key: String,
+    pub label: String,
+    pub yours: String,
+    pub pack: String,
+    /// You changed it from the installed pack's value (false when the
+    /// installed version isn't known: then it may be the pack's change).
+    pub changed_by_you: bool,
+}
+
+/// The settings where `yours` and `theirs` differ, and `theirs` with the
+/// settings you changed (from `base`) put back in, when `base` is known
+/// and that works.
+pub fn setting_diffs(rel: &str, base: Option<&str>, yours: &str, theirs: &str) -> Option<(Vec<SettingDiff>, Option<String>)> {
+    use crate::configedit::{self, Edit};
+    let f = configedit::Format::of(rel)?;
+    let pairs = crate::configcompare::pairs(f, yours, theirs).ok()?;
+    let base_vals: Option<HashMap<(Vec<String>, String), configedit::Value>> = base.and_then(|b| configedit::parse_as(f, b).ok()).map(|s| {
+        s.into_iter().flat_map(|s| s.entries).map(|e| ((e.path, e.key), e.value)).collect()
+    });
+    let mine = |path: &[String], key: &str, v: &configedit::Value| {
+        base_vals.as_ref().is_some_and(|b| b.get(&(path.to_vec(), key.to_string())).is_some_and(|bv| !configedit::same(bv, v)))
+    };
+    let diffs: Vec<SettingDiff> = pairs
+        .iter()
+        .filter(|p| p.differs())
+        .map(|p| SettingDiff {
+            path: p.entry.path.clone(),
+            key: p.entry.key.clone(),
+            label: p.entry.label(),
+            yours: p.client.text(),
+            pack: p.server.text(),
+            changed_by_you: mine(&p.entry.path, &p.entry.key, &p.client),
+        })
+        .collect();
+    if diffs.is_empty() {
+        return None;
+    }
+    let merged = base_vals.as_ref().and_then(|_| {
+        let edits: Vec<Edit> = pairs
+            .iter()
+            .filter(|p| p.differs() && mine(&p.entry.path, &p.entry.key, &p.client))
+            .map(|p| Edit { path: p.entry.path.clone(), key: p.entry.key.clone(), value: p.client.clone() })
+            .collect();
+        if edits.is_empty() {
+            return None;
+        }
+        configedit::apply(f, theirs, &edits).ok()
+    });
+    Some((diffs, merged))
 }
 
 impl UpdatePlan {
@@ -220,6 +283,8 @@ impl UpdatePlan {
     /// like the CurseForge app; compared, the pack content folders.
     pub fn default_take(&self) -> HashSet<String> {
         self.conflicts()
+            // Settings you changed are asked about, not taken by default.
+            .filter(|f| !self.settings.get(&f.rel).is_some_and(|d| !d.is_empty()))
             .filter(|f| if self.base_known { pack_content(&f.rel) } else { !keep_local(&f.rel) })
             .map(|f| f.rel.clone())
             .collect()
@@ -269,6 +334,30 @@ impl UpdatePlan {
             }
         }
         o
+    }
+
+    /// Conflicting settings files that can take the pack's file with your
+    /// changed settings put back in ("Both", the default for them).
+    pub fn default_both(&self) -> HashSet<String> {
+        self.settings_merged.keys().cloned().collect()
+    }
+
+    /// Whether `rel` can take "Both".
+    pub fn can_both(&self, rel: &str) -> bool {
+        self.settings_merged.contains_key(rel)
+    }
+
+    /// Adds "Both" to `o`: for each file in `both`, the pack's new file with
+    /// the settings you changed put back in, your copy backed up first.
+    pub fn apply_both(&self, o: &mut Overrides, both: &HashSet<String>) {
+        for rel in both {
+            let Some(b) = self.settings_merged.get(rel) else { continue };
+            o.skip.insert(rel.clone());
+            o.backup.retain(|r| r != rel);
+            o.backup.push(rel.clone());
+            o.write.retain(|(r, _)| r != rel);
+            o.write.push((rel.clone(), b.clone()));
+        }
     }
 
     /// The choices made before you pick: turned-off mods stay off, removed
@@ -336,6 +425,39 @@ impl UpdatePlan {
                 .header("yours", "pack")
                 .to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod setting_tests {
+    #[test]
+    fn both_keeps_your_settings_on_the_packs_file() {
+        let base = "#Range: 1 ~ 64
+reach = 8
+mode = \"SAFE\"
+fast = false
+";
+        let yours = "#Range: 1 ~ 64
+reach = 20
+mode = \"SAFE\"
+fast = false
+";
+        let theirs = "#Range: 1 ~ 64
+#New comment
+reach = 8
+mode = \"FAST\"
+fast = true
+newKey = 1
+";
+        let (d, m) = super::setting_diffs("config/x.toml", Some(base), yours, theirs).unwrap();
+        assert_eq!(d.len(), 3);
+        assert!(d.iter().find(|x| x.key == "reach").unwrap().changed_by_you);
+        assert!(!d.iter().find(|x| x.key == "mode").unwrap().changed_by_you);
+        let m = m.unwrap();
+        assert!(m.contains("reach = 20") && m.contains("mode = \"FAST\"") && m.contains("newKey = 1") && m.contains("#New comment"));
+        // Without the installed version: only the list, no merge.
+        let (d, m) = super::setting_diffs("config/x.toml", None, yours, theirs).unwrap();
+        assert!(m.is_none() && d.iter().all(|x| !x.changed_by_you));
     }
 }
 
@@ -625,6 +747,23 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
             }
         }
     }
+    // Settings files still in conflict: which settings differ, and the
+    // pack's file with yours put back in.
+    let (mut settings, mut settings_merged) = (HashMap::new(), HashMap::new());
+    {
+        let old_prefixes = old_prefixes.clone().unwrap_or_else(|| prefixes.clone());
+        for f in files.iter().filter(|f| f.action == FileAction::Conflict && crate::configedit::Format::of(&f.rel).is_some()) {
+            let Some(theirs) = read_entry(&new_zip, &prefixes, &f.rel).and_then(|b| String::from_utf8(b).ok()) else { continue };
+            let Ok(yours) = fs::read_to_string(inst.root.join(&f.rel)) else { continue };
+            let base = old_zip.as_ref().and_then(|z| read_entry(z, &old_prefixes, &f.rel)).and_then(|b| String::from_utf8(b).ok());
+            if let Some((d, m)) = setting_diffs(&f.rel, base.as_deref(), &yours, &theirs) {
+                settings.insert(f.rel.clone(), d);
+                if let Some(m) = m {
+                    settings_merged.insert(f.rel.clone(), m.into_bytes());
+                }
+            }
+        }
+    }
     let (off, off_old) = off_mods(inst, &mods, &mut files);
     removed.extend(removed_files(inst, &mut files, old.as_ref()));
     removed.sort_by_key(|m| m.name.to_lowercase());
@@ -679,6 +818,8 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
         prefixes,
         same,
         merged,
+        settings,
+        settings_merged,
     })
 }
 
@@ -1248,6 +1389,8 @@ mod tests {
             prefixes: Vec::new(),
             same,
             merged: HashMap::new(),
+            settings: HashMap::new(),
+            settings_merged: HashMap::new(),
         };
         // Like CurseForge: the pack's copy, except your own settings.
         let take = plan.default_take();
@@ -1399,6 +1542,8 @@ mod tests {
             prefixes: Vec::new(),
             same: Vec::new(),
             merged: HashMap::new(),
+            settings: HashMap::new(),
+            settings_merged: HashMap::new(),
         };
         // Keep all off.
         let o = plan.decisions_with(&HashSet::new(), &HashSet::new());
@@ -1459,6 +1604,8 @@ mod tests {
             prefixes: Vec::new(),
             same: Vec::new(),
             merged: HashMap::new(),
+            settings: HashMap::new(),
+            settings_merged: HashMap::new(),
         };
         let o = plan.decisions_with(&HashSet::new(), &HashSet::new());
         assert!(o.skip.contains("mods/gone-2.jar"));
@@ -1496,6 +1643,8 @@ mod tests {
             prefixes: Vec::new(),
             same: vec!["s".into()],
             merged: HashMap::new(),
+            settings: HashMap::new(),
+            settings_merged: HashMap::new(),
         };
         let o = plan.decisions(&["d".to_string()].into());
         assert!(o.skip.contains("b") && o.skip.contains("c") && o.skip.contains("s"));
