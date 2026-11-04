@@ -142,6 +142,19 @@ pub fn scan_folder(dir: &Path) -> anyhow::Result<Vec<ModInfo>> {
     Ok(mods)
 }
 
+/// What one jar says about itself (id, name, version, side); the file name
+/// stands in for what it doesn't say. For a file that isn't in a mods folder
+/// yet, like a dropped one.
+pub fn scan_file(path: &Path) -> ModInfo {
+    let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut m = ModInfo { file_name, file_size: fs::metadata(path).map_or(0, |x| x.len()), ..Default::default() };
+    read_jar_metadata(path, &mut m);
+    if m.mod_name.is_empty() {
+        m.mod_name = strip_version_suffix(&m.file_name);
+    }
+    m
+}
+
 fn read_jar_metadata(path: &Path, m: &mut ModInfo) {
     let Ok(file) = fs::File::open(path) else {
         return;

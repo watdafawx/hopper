@@ -11,6 +11,7 @@
   import { untrack } from 'svelte';
   import { browseHash } from './lib/browse.js';
   import CfKey from './CfKey.svelte';
+  import DropJars from './DropJars.svelte';
   import ModPeek from './ModPeek.svelte';
   import ModVersions from './ModVersions.svelte';
   import ReviewUpdates from './ReviewUpdates.svelte';
@@ -765,6 +766,7 @@
   {:else}<span class="c-added muted" title={dateOf(m.date_added)}>{ago(m.date_added)}</span>{/if}
 {/snippet}
 
+<DropJars {server} onAdded={() => { load(); identify(true); }} />
 <div class="card">
   <nav class="subtabs">
     <button class="tab" class:tab-sel={sub === 'mods'} onclick={() => (sub = 'mods')}>Mods{data ? ` ${mods.length}` : ''}</button>

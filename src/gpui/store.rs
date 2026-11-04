@@ -3658,10 +3658,24 @@ impl Store {
     /// Adds dropped files: pack zips and .mrpacks become instances; jars go
     /// to `target`'s mods, anything else to its `folder`.
     /// `skip`: pinned mods from other sources the player left out of packs.
-    pub fn add_dropped(&self, paths: Vec<PathBuf>, target: Option<PathBuf>, folder: String, skip: Vec<hopper::sources::carry::Pin>) {
+    pub fn add_dropped(&self, paths: Vec<PathBuf>, target: Option<PathBuf>, folder: String, skip: Vec<hopper::sources::carry::Pin>, replace_old: Vec<String>) {
         let instances_root = PathBuf::from(&self.settings.instances_root);
         let target = target.and_then(|r| self.instance(&r).cloned());
         self.spawn_job(format!("Adding {} dropped files", paths.len()), move |job| {
+            // Older versions of mods being replaced go to Backups first.
+            let mut target = target;
+            if let Some(inst) = target.as_mut() {
+                for f in &replace_old {
+                    let r = match inst.addons.iter().position(|a| a.file_name.eq_ignore_ascii_case(f) && a.folder() == "mods") {
+                        Some(i) => hopper::install::remove(inst, i),
+                        None => hopper::install::remove_loose_file(inst, f),
+                    };
+                    match r {
+                        Ok(()) => job.note(format!("{f} replaced; the old one is in Backups")),
+                        Err(e) => job.note(format!("{f}: {e:#}")),
+                    }
+                }
+            }
             let mut jars = 0;
             let mut last = None;
             let mut failed = 0;

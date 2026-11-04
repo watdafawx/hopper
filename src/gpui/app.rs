@@ -653,8 +653,27 @@ impl AppView {
             .flat_map(|p| hopper::modpack::source_pins(p))
             .collect();
         let store = self.store.clone();
-        crate::incoming_sources::gate(store.clone(), pins, window, cx, move |skip, _, cx| {
-            store.read(cx).add_dropped(paths.clone(), target.clone(), folder.clone(), skip);
+        // Jars that are a mod the instance has already: replace, keep both or skip.
+        let conflicts = match &target {
+            Some(root) if !folder.ends_with("datapacks") && !folder.starts_with("config/") && !folder.starts_with("global_packs/") => {
+                crate::drop_conflicts::find(&paths, &root.join("mods"))
+            }
+            _ => Vec::new(),
+        };
+        crate::incoming_sources::gate(store.clone(), pins, window, cx, move |skip, window, cx| {
+            let (store, paths, target, folder) = (store.clone(), paths.clone(), target.clone(), folder.clone());
+            crate::drop_conflicts::ask(
+                conflicts.clone(),
+                Default::default(),
+                window,
+                cx,
+                std::rc::Rc::new(move |plan, _, cx| {
+                    let kept: Vec<_> = paths.iter().filter(|p| !plan.skip.contains(p)).cloned().collect();
+                    if !kept.is_empty() {
+                        store.read(cx).add_dropped(kept, target.clone(), folder.clone(), skip.clone(), plan.replace_old);
+                    }
+                }),
+            );
         });
         self.go(Page::Library, cx);
     }
