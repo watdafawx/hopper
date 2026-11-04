@@ -884,6 +884,34 @@ pub fn check_updates(inst: &Instance) -> anyhow::Result<Vec<Update>> {
     Ok(out)
 }
 
+/// Projects whose installed CurseForge file the author archived. One
+/// batched `/mods/files` call per 500 installed files; none without a key.
+pub fn archived_projects(inst: &Instance) -> anyhow::Result<HashSet<u64>> {
+    if cf::api_key().is_none() {
+        return Ok(HashSet::new());
+    }
+    let ids: Vec<u64> = inst
+        .addons
+        .iter()
+        .filter(|a| a.file_id != 0 && a.project_id != 0 && !crate::modrinth::is_mr(a.project_id) && !crate::sources::is_src(a.project_id))
+        .map(|a| a.file_id)
+        .collect();
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    Ok(archived_in(&inst.addons, &cf::get_files(&ids)?))
+}
+
+/// The projects among `addons` whose installed file is an archived one of `files`.
+pub fn archived_in(addons: &[Addon], files: &[cf::File]) -> HashSet<u64> {
+    files
+        .iter()
+        .filter(|f| f.archived())
+        .filter(|f| addons.iter().any(|a| a.project_id == f.mod_id && a.file_id == f.id))
+        .map(|f| f.mod_id)
+        .collect()
+}
+
 /// The newest CurseForge file of `m` for this instance, from its file
 /// index: right Minecraft version and loader, as stable as the channel
 /// allows (or as the file already installed). Bigger than `a.file_id`
@@ -2083,5 +2111,36 @@ mod pack_mark_tests {
         let mut new = Addon::default();
         super::keep_history(&mut new, &old);
         assert!(new.from_pack);
+    }
+}
+
+#[cfg(test)]
+mod archived_files {
+    use super::*;
+
+    /// `POST /v1/mods/files` for one approved and one archived file
+    /// (`fileStatus` 8, as the CurseForge app's warning reads it).
+    const FILES: &str = r#"{"data":[
+        {"id":10,"modId":1,"fileName":"a-1.0.jar","fileStatus":4,"isAvailable":true,"releaseType":1},
+        {"id":20,"modId":2,"fileName":"iss_elden_ring-1.1.3.jar","fileStatus":8,"isAvailable":true,"releaseType":1},
+        {"id":31,"modId":3,"fileName":"c-1.0.jar","fileStatus":8,"isAvailable":true,"releaseType":1},
+        {"id":40,"modId":4,"fileName":"d-1.0.jar","isAvailable":true,"releaseType":1}
+    ]}"#;
+
+    fn addon(project: u64, file: u64) -> Addon {
+        Addon { project_id: project, file_id: file, ..Default::default() }
+    }
+
+    #[test]
+    fn only_installed_archived_files_count() {
+        #[derive(serde::Deserialize)]
+        struct D {
+            data: Vec<cf::File>,
+        }
+        let files = serde_json::from_str::<D>(FILES).unwrap().data;
+        assert!(!files[0].archived() && files[1].archived() && !files[3].archived());
+        // Project 3 moved on to file 32: its archived file 31 isn't installed.
+        let addons = [addon(1, 10), addon(2, 20), addon(3, 32), addon(4, 40)];
+        assert_eq!(archived_in(&addons, &files), HashSet::from([2]));
     }
 }

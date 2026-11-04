@@ -401,6 +401,9 @@ pub struct FileIndex {
     pub mod_loader: Option<u32>,
 }
 
+/// `FileStatus::Archived` in CurseForge's API.
+pub const FILE_ARCHIVED: u32 = 8;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct File {
@@ -422,6 +425,8 @@ pub struct File {
     pub is_server_pack: Option<bool>,
     /// Checksums CurseForge lists for the file (algo 1 sha1, 2 md5).
     pub hashes: Vec<FileHash>,
+    /// CurseForge's `FileStatus` (4 approved, 8 archived, 0 not sent).
+    pub file_status: u32,
     /// Set for a Modrinth version.
     #[serde(skip)]
     pub modrinth: Option<crate::modrinth::MrFile>,
@@ -450,6 +455,12 @@ impl File {
                     .map(|m| m.sha1.to_ascii_lowercase())
                     .filter(|h| !h.is_empty())
             })
+    }
+
+    /// The author archived this file: still downloadable, but CurseForge's
+    /// own app warns about it.
+    pub fn archived(&self) -> bool {
+        self.file_status == FILE_ARCHIVED
     }
 
     /// What a download of this file must come to.

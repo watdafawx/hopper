@@ -274,6 +274,28 @@ fn keep_updates(id: &str, v: Vec<Value>) {
     save_checks(m);
 }
 
+/// Projects with an archived installed file, by server, as the last check
+/// found them (memory only: an old answer is looked up again).
+fn archived_cache() -> std::sync::MutexGuard<'static, HashMap<String, (u64, Vec<String>)>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (u64, Vec<String>)>>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The project ids (as strings) whose installed file the author archived.
+fn archived_ids(inst: &Instance) -> Vec<String> {
+    match install::archived_projects(inst) {
+        Ok(set) => {
+            let mut v: Vec<u64> = set.into_iter().collect();
+            v.sort_unstable();
+            v.into_iter().map(id_str).collect()
+        }
+        Err(e) => {
+            log::warn!("archived files of {}: {e:#}", inst.name);
+            Vec::new()
+        }
+    }
+}
+
 pub(crate) fn cached_updates(id: &str) -> Option<Vec<Value>> {
     let g = checks();
     let (at, v) = g.as_ref()?.get(id)?;
@@ -709,16 +731,30 @@ async fn updates(
     let e = entry(&app, &headers, &method, &id)?;
     let force = q.get("force").is_some_and(|f| f == "1");
     if !force && let Some(v) = cached_updates(&id) {
-        return Ok(Json(json!({ "updates": v, "cached": true, "curseforge": cf::api_key().is_some() })));
+        let known = archived_cache().get(&id).filter(|(at, _)| now_secs().saturating_sub(*at) < UPDATES_FOR).map(|(_, a)| a.clone());
+        let archived = match known {
+            Some(a) => a,
+            None => {
+                let a = blocking({
+                    let e = e.clone();
+                    move || Ok(archived_ids(&instance(&e)?))
+                })
+                .await?;
+                archived_cache().insert(id.clone(), (now_secs(), a.clone()));
+                a
+            }
+        };
+        return Ok(Json(json!({ "updates": v, "archived": archived, "cached": true, "curseforge": cf::api_key().is_some() })));
     }
-    let v = blocking(move || {
+    let (v, archived) = blocking(move || {
         let inst = instance(&e)?;
+        let archived = archived_ids(&inst);
         let pack = PackMods::of(&inst);
         let ups = install::check_updates(&inst)?;
         // Names of required mods the server lacks, looked up once; `None`
         // is one that's installed after all (from the other site).
         let mut names: HashMap<u64, Option<String>> = HashMap::new();
-        Ok(offered(&inst, &pack, &ups)
+        let list = offered(&inst, &pack, &ups)
             .into_iter()
             .map(|(u, a)| {
                 let (from, to) = u.versions();
@@ -756,11 +792,13 @@ async fn updates(
                     "changed": u.file.source.as_ref().is_some_and(|s| s.changed),
                 })
             })
-            .collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        Ok((list, archived))
     })
     .await?;
     keep_updates(&id, v.clone());
-    Ok(Json(json!({ "updates": v, "cached": false, "curseforge": cf::api_key().is_some() })))
+    archived_cache().insert(id.clone(), (now_secs(), archived.clone()));
+    Ok(Json(json!({ "updates": v, "archived": archived, "cached": false, "curseforge": cf::api_key().is_some() })))
 }
 
 #[derive(Deserialize)]
