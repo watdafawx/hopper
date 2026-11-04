@@ -19,13 +19,19 @@
   // that), never wider than the column.
   const imgW = (s) => (s.w ? `min(${s.w}px, 100%)` : null);
   const imgH = (s) => (!s.w && s.h ? `${s.h}px` : null);
+
+  // A table of screenshots (every cell only images): cells share the width,
+  // images without a size of their own fill their cell, and cells wrap
+  // rather than shrink to icons. Sized images (badges) keep their size.
+  const shots = (cells) => cells.every((c) => c.every((s) => s.img || !s.t.trim())) && cells.some((c) => c.some((s) => s.img));
+  const fill = (s, grid) => grid && !s.w && !s.h;
 </script>
 
-{#snippet spans(list)}
+{#snippet spans(list, grid = false)}
   {#each list as s, i (i)}
     {#if s.img}
-      {#if s.href}<a href={s.href} target="_blank" rel="noreferrer noopener" onclick={(e) => click(e, s.href)}><img src={s.img} alt={s.t} loading="lazy" style:max-width={imgW(s)} style:height={imgH(s)} /></a>
-      {:else}<img src={s.img} alt={s.t} loading="lazy" style:max-width={imgW(s)} style:height={imgH(s)} />{/if}
+      {#if s.href}<a href={s.href} class:fill={fill(s, grid)} target="_blank" rel="noreferrer noopener" onclick={(e) => click(e, s.href)}><img src={s.img} alt={s.t} loading="lazy" class:fill={fill(s, grid)} style:max-width={imgW(s)} style:height={imgH(s)} /></a>
+      {:else}<img src={s.img} alt={s.t} loading="lazy" class:fill={fill(s, grid)} style:max-width={imgW(s)} style:height={imgH(s)} />{/if}
     {:else if s.href}
       <a href={s.href} target="_blank" rel="noreferrer noopener" class:b={s.b} class:i={s.i} onclick={(e) => click(e, s.href)}>{s.t}</a>
     {:else if s.c}<code>{s.t}</code>
@@ -44,7 +50,11 @@
     {:else if b.k === 'code'}
       <pre>{b.s.map((s) => s.t).join('')}</pre>
     {:else if b.k === 'row'}
-      <div class="tr" style:grid-template-columns="repeat({b.cells.length}, minmax(0, 1fr))">{#each b.cells as c, j (j)}<div>{@render spans(c)}</div>{/each}</div>
+      {#if shots(b.cells)}
+        <div class="tr shots" style:grid-template-columns="repeat(auto-fit, minmax(min(160px, 100%), 1fr))">{#each b.cells.filter((c) => c.length) as c, j (j)}<div>{@render spans(c, true)}</div>{/each}</div>
+      {:else}
+        <div class="tr" style:grid-template-columns="repeat({b.cells.length}, minmax(0, 1fr))">{#each b.cells as c, j (j)}<div>{@render spans(c)}</div>{/each}</div>
+      {/if}
     {:else if b.k === 'video'}
       {#if b.url}<a class="video" href={b.url} target="_blank" rel="noreferrer noopener">{#if b.thumb}<img src={b.thumb} alt="" loading="lazy" />{/if}<span>▶ Watch {b.site === 'video' ? 'the video' : `on ${b.site}`}</span></a>{/if}
     {:else}
@@ -71,7 +81,9 @@
   pre { font: 12px var(--mono); background: var(--term); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; overflow: auto; margin: 0 0 8px; white-space: pre-wrap; }
   img { max-width: 100%; height: auto; border-radius: var(--radius-sm); vertical-align: middle; }
   hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+  .fill { display: block; width: 100%; }
   .tr { display: grid; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+  .tr.shots { border-bottom: 0; }
   .video { display: inline-flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; }
   .video img { max-width: 360px; }
 </style>
