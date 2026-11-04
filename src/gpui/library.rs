@@ -24,7 +24,7 @@ use gpui_kit::*;
 use hopper::cf;
 use hopper::instances::Instance;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -298,6 +298,9 @@ pub struct LibraryView {
     /// A config button was pressed: the panel is made on the next draw.
     pending_config: Option<(PathBuf, String)>,
     config_sub: Option<Subscription>,
+    /// Instances whose linked Hopper Server was asked for config pushes
+    /// (and sent this PC's settings) this session.
+    config_synced: HashSet<PathBuf>,
     shots: Entity<ScreenshotsView>,
     settings: Entity<InstanceSettings>,
     logs: Entity<LogsView>,
@@ -485,6 +488,7 @@ impl LibraryView {
             config_panel: None,
             pending_config: None,
             config_sub: None,
+            config_synced: HashSet::new(),
             shots,
             settings,
             logs,
@@ -2809,6 +2813,17 @@ impl Render for LibraryView {
             None if settings.sidebar_collapsed => RAIL,
             None => settings.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX),
         };
+        // Once a session per instance: its linked Hopper Server's config
+        // pushes for this PC, and this PC's settings for the panel's
+        // "Players' copy".
+        if let Some(root) = self.selected.clone()
+            && !self.config_synced.contains(&root)
+            && let Some(server) = self.store.read(cx).server_of(&root).filter(|s| s.remote.is_some()).cloned()
+        {
+            self.config_synced.insert(root.clone());
+            crate::config_pushes::send_snapshot(&root, &server);
+            crate::config_pushes::check(&self.store, &root, &server, window, cx);
+        }
         if let Some((root, file)) = self.pending_config.take() {
             self.make_config_panel(root, file, window, cx);
         }

@@ -24,6 +24,7 @@ mod autoupdate;
 mod backups_api;
 mod browse_api;
 mod config;
+mod config_sync;
 mod configs;
 mod control;
 mod discovery;

@@ -20,6 +20,8 @@ export const cfg = $state({
   edits: {},
   /** rel -> { id -> message } from the last Save. */
   errors: {},
+  /** GET configs/players: the newest players' copy beside the server's. */
+  players: null,
 });
 
 /** One setting's id inside its file. */
@@ -34,6 +36,7 @@ function use(sid) {
   cfg.files = {};
   cfg.edits = {};
   cfg.errors = {};
+  cfg.players = null;
 }
 
 let loading = null;
@@ -53,6 +56,28 @@ export async function loadIndex(sid, fresh = false) {
     if (loading?.p === p) loading = null;
   }
 }
+
+/** The players' copy compare (quiet when the panel can't say). */
+export async function loadPlayers(sid) {
+  use(sid);
+  try {
+    const v = await api(`${sidPath(sid)}/players`);
+    if (cfg.sid === sid) cfg.players = v;
+  } catch {
+    // an older panel, or no access: no column
+  }
+  return cfg.players;
+}
+
+/** The players' copy of a setting when it differs from the server's: { client, server, client_rel } or null. */
+export function playersOf(rel, e) {
+  const f = cfg.players?.files.find((x) => x.rel === rel);
+  const d = f?.diffs.find((x) => x.key === e.key && (x.path || []).join('.') === (e.path || []).join('.'));
+  return d ? { ...d, client_rel: f.client_rel } : null;
+}
+
+/** Server files whose players' copy differs, with how many settings. */
+export const playersDiffer = (rel) => cfg.players?.files.find((x) => x.rel === rel)?.diffs.length || 0;
 
 /** Reads the files not read yet (or all of them with `fresh`). */
 export async function loadFiles(sid, rels, fresh = false) {

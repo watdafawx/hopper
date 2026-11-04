@@ -4,7 +4,7 @@
   // beside the mod list; the Mods tab shows it in a side panel (stacked).
   import { FileText, SlidersHorizontal, AlertTriangle } from '@lucide/svelte';
   import ConfigRow from './ConfigRow.svelte';
-  import { cfg, loadFiles, edited, eid, same, sideChip, shortRel, fileRow } from './configs.svelte.js';
+  import { cfg, loadFiles, edited, eid, same, sideChip, shortRel, fileRow, playersOf, playersDiffer } from './configs.svelte.js';
   import { say } from './toast.svelte.js';
   import { untrack } from 'svelte';
 
@@ -28,13 +28,14 @@
   // The file shown: the one picked, else the first with a change, else the first.
   const current = $derived.by(() => {
     if (pick && shownRels.includes(pick)) return pick;
-    return shownRels.find((r) => fileRow(r)?.changed || cfg.edits[r]) || shownRels[0] || '';
+    return shownRels.find((r) => (filter === 'players' ? playersDiffer(r) : fileRow(r)?.changed || cfg.edits[r])) || shownRels[0] || '';
   });
   const file = $derived(cfg.files[current]);
 
   const words = $derived(query.trim().toLowerCase().split(/\s+/).filter(Boolean));
   function keep(e) {
     if (filter === 'unsaved' && !edited(current, e)) return false;
+    if (filter === 'players' && !playersOf(current, e)) return false;
     if (filter === 'changed' && !(edited(current, e) || (e.default_value != null ? !same(e.value, e.default_value) : e.is_default === false))) return false;
     if (!words.length) return true;
     const hay = `${e.label} ${e.key} ${(e.path || []).join(' ')} ${e.comment}`.toLowerCase();
@@ -54,6 +55,8 @@
         <button class="fchip" class:on={r === current} role="tab" aria-selected={r === current} title={r} onclick={() => (pick = r)}>
           <span class="mono ell">{shortRel(r)}</span>
           {#if sc}<span class="chip sc {sc[1]}">{sc[0]}</span>{/if}
+          {#if fileRow(r)?.live}{@const lv = fileRow(r).live}<span class="chip sc" class:running={lv.used} class:warn={!lv.used} title="Which copy the server reads">{lv.label}</span>{/if}
+          {#if playersDiffer(r)}<span class="chip lan sc" title="Players' copy differs in {playersDiffer(r)} settings">≠ {playersDiffer(r)}</span>{/if}
           {#if n}<span class="chip acc sc">{n}</span>{/if}
         </button>
       {/each}
@@ -70,6 +73,7 @@
     {#if !stacked}
       <div class="fhead">
         <span class="mono small subtle ell" title={current}>{current}</span>
+        {#if fileRow(current)?.live}<span class="chip sc" class:running={fileRow(current).live.used} class:warn={!fileRow(current).live.used}>{fileRow(current).live.label}</span>{/if}
         <span class="sp"></span>
         <button class="btn sm ghost" onclick={() => onEditText?.(current, 0)}><FileText size={13} />Text view</button>
       </div>
@@ -85,7 +89,7 @@
       {:else}
         <div class="empty-state">
           <span class="es-ic"><SlidersHorizontal size={18} /></span>
-          <b>{filter === 'unsaved' ? 'No unsaved changes here' : filter === 'changed' ? 'Nothing changed here' : words.length ? 'No settings match' : 'No settings'}</b>
+          <b>{filter === 'unsaved' ? 'No unsaved changes here' : filter === 'players' ? "Players' copy matches here" : filter === 'changed' ? 'Nothing changed here' : words.length ? 'No settings match' : 'No settings'}</b>
           <p>{filter !== 'all' ? 'Every setting in this file is as the file says by default, or it states no default.' : words.length ? 'Try another word.' : 'This file has nothing to show as settings. The Text view has all of it.'}</p>
         </div>
       {/each}
