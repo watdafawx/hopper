@@ -180,5 +180,5 @@
   .foot .btn + .btn { margin-left: 2px; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .empty { grid-column: 1 / -1; padding: 0; }
-  @media (max-width: 760px) { .pad { padding: 16px; } .servers { grid-template-columns: 1fr; } }
+  @media (max-width: 760px) { .pad { padding: 16px; } .servers { grid-template-columns: minmax(0, 1fr); } }
 </style>
