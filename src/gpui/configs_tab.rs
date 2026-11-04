@@ -8,7 +8,6 @@ use crate::config_view::{self, ConfigView, ConfigViewEvent, Host, InstIndex};
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
@@ -520,21 +519,23 @@ impl Render for ConfigsTab {
             .py_2()
             .flex_wrap()
             .child(div().w(rems(24.)).child(widgets::search_input(&self.search).small().cleanable(true)))
-            .child(chips)
-            .child(div().flex_1())
             .child(
-                Checkbox::new("cfg-desc").label("Search descriptions").checked(self.desc).on_click(cx.listener(|this, v: &bool, _, cx| {
-                    this.desc = *v;
-                    let d = *v;
-                    for view in this.views.values() {
-                        view.update(cx, |view, cx| {
-                            view.desc = d;
-                            cx.notify();
-                        });
-                    }
-                    this.run_search(cx);
-                })),
+                widgets::toggle_chip("cfg-desc", "Also in descriptions", self.desc, cx)
+                    .tooltip("Look in each setting's description too")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.desc = !this.desc;
+                        let d = this.desc;
+                        for view in this.views.values() {
+                            view.update(cx, |view, cx| {
+                                view.desc = d;
+                                cx.notify();
+                            });
+                        }
+                        this.run_search(cx);
+                    })),
             )
+            .child(div().flex_1())
+            .child(chips)
             .child(side_pick)
             .when_some(linked.clone(), |d, s| {
                 d.child(

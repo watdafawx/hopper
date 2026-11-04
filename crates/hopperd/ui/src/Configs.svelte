@@ -120,7 +120,8 @@
 <div class="cfgp">
   <div class="tools">
     <label class="input find"><Search size={13} /><input use:rightClear placeholder={index ? `Search ${index.settings.toLocaleString()} settings in every mod` : 'Search settings'} bind:value={query} />{#if searching}<span class="spinner"></span>{:else if query}<button class="clr" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</label>
-    <label class="ck small"><input type="checkbox" bind:checked={desc} />Search descriptions</label>
+    <button class="chip dchip" class:on={desc} aria-pressed={desc} title="Also look in each setting's description" onclick={() => (desc = !desc)}>Also in descriptions</button>
+    <div class="grow"></div>
     <div class="row fgroup">
       <span class="glabel"><Funnel size={12} />Filter</span>
       <div class="utabs" role="tablist">
@@ -225,8 +226,7 @@
   .find { width: 340px; padding: 5px 9px; }
   .find input { flex: 1; min-width: 0; }
   .clr { color: var(--muted); display: grid; place-items: center; }
-  .ck { display: inline-flex; align-items: center; gap: 6px; color: var(--subtle); cursor: pointer; }
-  .ck input { accent-color: var(--acc); }
+  .dchip { cursor: pointer; height: 26px; padding: 0 10px 2px; font-size: 12px; }
   .fgroup { gap: 6px; }
   .sidesel { width: auto; padding: 3px 8px; color: var(--text); outline: none; }
   .body { flex: 1; min-height: 0; display: grid; grid-template-columns: 260px minmax(0, 1fr); }
