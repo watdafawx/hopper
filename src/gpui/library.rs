@@ -233,6 +233,8 @@ pub enum LibraryEvent {
     OpenProject { root: PathBuf, project: u64 },
     /// Compare a server with its pack (its Sync tab on the Servers page).
     Compare(PathBuf),
+    /// A server's Logs & crashes (Servers page), on one crash report.
+    ServerLogs(PathBuf, Option<String>),
 }
 
 impl EventEmitter<LibraryEvent> for LibraryView {}
@@ -425,7 +427,12 @@ impl LibraryView {
             // The header's server dot follows the panel's polls and the
             // Server tab's crash read.
             cx.observe(&control, |_, _, cx| cx.notify()),
-            cx.subscribe(&server, |_, _, _: &crate::rigsync::SyncEvent, cx| cx.notify()),
+            cx.subscribe(&server, |_, _, e: &crate::rigsync::SyncEvent, cx| {
+                if let crate::rigsync::SyncEvent::SeeCrash(root, rel) = e {
+                    cx.emit(LibraryEvent::ServerLogs(root.clone(), rel.clone()));
+                }
+                cx.notify()
+            }),
             cx.observe(&peek, |_, _, cx| cx.notify()),
             cx.subscribe(&addons, |this, _, event, cx| this.addons_event(event, cx)),
             cx.subscribe(&worlds, |this, _, event, cx| this.content_event(event, cx)),

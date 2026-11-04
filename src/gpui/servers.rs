@@ -1048,6 +1048,17 @@ impl ServersView {
         cx.notify();
     }
 
+    /// Logs & crashes of server `root`, on crash report `rel`.
+    pub(crate) fn open_logs(&mut self, root: PathBuf, rel: Option<String>, cx: &mut Context<Self>) {
+        if self.picked.as_ref() != Some(&root) {
+            self.picked = Some(root.clone());
+            self.retarget(cx);
+            self.scan(root.clone(), false, cx);
+            self.control.update(cx, |c, cx| c.show(root, cx));
+        }
+        self.see_crash(rel, cx);
+    }
+
     /// "See why" on the crash notice: Logs & crashes, on that report.
     fn see_crash(&mut self, rel: Option<String>, cx: &mut Context<Self>) {
         self.set_tab(TAB_LOGS, cx);

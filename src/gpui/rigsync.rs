@@ -117,6 +117,9 @@ impl Show {
 pub enum SyncEvent {
     /// The last start's crash was read again (the header's status dot).
     Crash,
+    /// "See why" on the crash line: the server's Logs & crashes, on this
+    /// report (its path under the server folder).
+    SeeCrash(PathBuf, Option<String>),
 }
 
 impl EventEmitter<SyncEvent> for SyncPanel {}
@@ -135,20 +138,14 @@ pub struct SyncPanel {
     /// The Sync tab of a server's page, whose header already shows the
     /// server and its start / stop.
     in_server_page: bool,
+    /// The one-line crash notice (an instance's Server tab).
+    strip: Entity<crate::server_crash::CrashStrip>,
     server: Option<PathBuf>,
     diff: Option<Result<Vec<DiffEntry>, String>>,
     note: Option<Annotation>,
     /// Which server pack the server was built or last updated from.
     pack_marker: Option<hopper::server_pack_update::Marker>,
     crash: Option<ServerCrash>,
-    /// The crash card's mods (jars) whose "Why?" list is open.
-    why_open: std::collections::HashSet<String>,
-    /// "Turn off…" asked: the jars ticked in its list (nothing is turned
-    /// off until its confirm).
-    turn_off_pick: Option<std::collections::HashSet<String>>,
-    /// A change put back from the crash card, with its crash's time: the
-    /// crash no longer names it, so the card keeps it to say it's back.
-    crash_back: Option<(i64, hopper::crashdetect::Changed)>,
     /// Configs of the crash's mods that differ from the pack's.
     crash_configs: Vec<hopper::crashdetect::ConfigDiff>,
     /// Global datapacks and mod configs that differ from the pack, looked
@@ -245,6 +242,16 @@ impl SyncPanel {
             c
         });
         // The Configs tab shows how many files need syncing.
+        let strip = cx.new(|_| crate::server_crash::CrashStrip::new(store.clone()));
+        subs.push(cx.observe(&strip, |_, _, cx| cx.notify()));
+        subs.push(cx.subscribe(&strip, |this, _, e: &crate::server_crash::StripEvent, cx| match e {
+            crate::server_crash::StripEvent::SeeWhy(rel) => {
+                if let Some(root) = this.server.clone() {
+                    cx.emit(SyncEvent::SeeCrash(root, rel.clone()));
+                }
+            }
+            crate::server_crash::StripEvent::Fixed => this.rescan(cx),
+        }));
         subs.push(cx.subscribe(&configs, |_, _, _: &crate::configs::NeedsChanged, cx| cx.notify()));
         subs.push(cx.subscribe(&history, |this, _, _: &crate::configs::HistoryApplied, cx| {
             this.files_changed(cx);
@@ -277,15 +284,13 @@ impl SyncPanel {
             control,
             in_instance: false,
             in_server_page: false,
+            strip,
             server: None,
             diff: None,
             note: None,
             pack_marker: None,
             crash: None,
-            why_open: Default::default(),
-            turn_off_pick: None,
-            crash_back: None,
-            crash_configs: Vec::new(),
+                    crash_configs: Vec::new(),
             drift: None,
             drift_open: false,
             _drift_task: None,
@@ -1619,459 +1624,6 @@ impl SyncPanel {
             .children(live)
     }
 
-    /// A mod on the server's crash card, by its jar: the pack's copy gives
-    /// its name, icon and page; else the jar's own name (a local server).
-    fn crash_link(&self, cx: &mut Context<Self>) -> impl Fn(&str, &str, &App) -> AnyElement + 'static {
-        let addons: Vec<hopper::instances::Addon> = {
-            let store = self.store.read(cx);
-            self.server
-                .as_ref()
-                .and_then(|r| store.server(r))
-                .and_then(|sv| store.paired(sv))
-                .map(|i| i.addons.clone())
-                .unwrap_or_default()
-        };
-        let local = self.server.clone().filter(|r| !hopper::hopperd::is_remote_root(r)).map(|r| r.join("mods"));
-        let (store, view) = (self.store.clone(), cx.entity());
-        move |file: &str, key: &str, cx: &App| {
-            let (name, a) = crash_addon(&addons, file, local.as_deref());
-            let icon = a.and_then(|a| store.read(cx).image(&a.icon)).map(Path::to_path_buf);
-            let view = view.clone();
-            widgets::mod_link(
-                ElementId::Name(format!("srv-crash:{key}").into()),
-                name,
-                icon.as_deref(),
-                a.map_or(0, |a| a.project_id),
-                move |p, _, cx| view.update(cx, |this, cx| this.open_peek(p, cx)),
-                cx,
-            )
-            .flex_none()
-            .font_semibold()
-            .into_any_element()
-        }
-    }
-
-    /// A fix from the crash card, run on the server (through Hopper Server
-    /// when it manages the folder); its result shows like a sync's.
-    fn crash_fix(&mut self, f: impl FnOnce(&Path) -> anyhow::Result<String> + Send + 'static, cx: &mut Context<Self>) {
-        let Some(root) = self.server.clone() else { return };
-        self.running = true;
-        self.result = None;
-        self._task = Some(cx.spawn(async move |this, cx| {
-            let r = cx.background_spawn(async move { f(&root) }).await;
-            this.update(cx, |this, cx| {
-                this.running = false;
-                this.result = Some(r.map_err(|e| vec![format!("{e:#}")]));
-                this.files_changed(cx);
-                this.rescan(cx);
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    /// "Turn off <mod>…" for these jars: it only opens the list of them
-    /// (each ticked, with why), and the list's confirm turns off the ticked.
-    fn crash_turn_off(&self, files: Vec<String>, label: String, blocked: bool, cx: &mut Context<Self>) -> AnyElement {
-        Button::new("srv-crash-turn-off")
-            .small()
-            .outline()
-            .icon(IconName::PowerOff)
-            .label(label)
-            .tooltip("Shows the mods first. Turn them back on in the server's Mods.")
-            .disabled(blocked || self.turn_off_pick.is_some())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.turn_off_pick = Some(files.iter().cloned().collect());
-                cx.notify();
-            }))
-            .into_any_element()
-    }
-
-    /// The list "Turn off…" opened, with its confirm and cancel.
-    fn crash_turn_off_list(
-        &self,
-        suspects: &[&hopper::crashdetect::Suspect],
-        link: crate::crash_view::Link,
-        readable: &dyn Fn(&str) -> String,
-        blocked: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let picked = self.turn_off_pick.as_ref()?;
-        let view = cx.entity().downgrade();
-        let toggle: std::rc::Rc<dyn Fn(String, bool, &mut Window, &mut App)> = std::rc::Rc::new(move |file, on, _, cx| {
-            view.update(cx, |this, cx| {
-                if let Some(p) = this.turn_off_pick.as_mut() {
-                    if on {
-                        p.insert(file);
-                    } else {
-                        p.remove(&file);
-                    }
-                }
-                cx.notify();
-            })
-            .ok();
-        });
-        let confirm = cx.listener(|this, _, _, cx| {
-            let Some(picked) = this.turn_off_pick.take() else { return };
-            let files: Vec<String> = picked.into_iter().collect();
-            this.crash_fix(
-                move |root| {
-                    let n = files.len();
-                    match hopper::hopperd::locate(root) {
-                        Some(r) => {
-                            let (c, id, _) = r?;
-                            c.post(
-                                &format!("/servers/{}/mods/toggle-many", hopper::hopperd::enc(&id)),
-                                serde_json::json!({ "files": files, "enabled": false }),
-                            )?;
-                        }
-                        None => hopper::crashdetect::turn_off_in(root, &files)?,
-                    }
-                    Ok(if n == 1 { "Turned off 1 mod.".into() } else { format!("Turned off {n} mods.") })
-                },
-                cx,
-            );
-        });
-        let cancel = cx.listener(|this, _, _, cx| {
-            this.turn_off_pick = None;
-            cx.notify();
-        });
-        Some(crate::crash_view::turn_off_picker("srv-crash", suspects, picked, link, readable, toggle, confirm, cancel, blocked, "server", cx))
-    }
-
-    /// The server's last start crashed: the same card a game crash gets
-    /// (crash_view), with fixes run on the server.
-    fn crash_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use crate::crash_view::{self, sentence, words};
-        use hopper::crashdetect::Certainty;
-        let c = self.crash.clone()?;
-        let server_mods: Vec<ModInfo> = match &self.diff {
-            Some(Ok(d)) => d.iter().filter_map(|e| e.server.clone()).collect(),
-            _ => Vec::new(),
-        };
-        // On the server and on (an off jar is named "….jar.disabled").
-        let on = |f: &str| server_mods.iter().any(|m| m.file_name.eq_ignore_ascii_case(f.trim_end_matches(".disabled")));
-        let blocked = self.online(cx) || self.running;
-        let remote = self.kept_in() != ".hopper-backups";
-        let theme = cx.theme().clone();
-        let link = self.crash_link(cx);
-        // Names for sentences, from the pack's copies (as the links).
-        let addons: Vec<hopper::instances::Addon> = {
-            let store = self.store.read(cx);
-            self.server.as_ref().and_then(|r| store.server(r)).and_then(|sv| store.paired(sv)).map(|i| i.addons.clone()).unwrap_or_default()
-        };
-        let local = self.server.clone().filter(|r| !hopper::hopperd::is_remote_root(r)).map(|r| r.join("mods"));
-        let display = |f: &str| -> String { crash_addon(&addons, f, local.as_deref()).0 };
-        // Mod ids in a reason read as names.
-        let named: Vec<(String, String)> =
-            c.suspects.iter().filter(|s| !s.mod_id.is_empty()).map(|s| (s.mod_id.clone(), display(&s.file_name))).collect();
-        let readable = |why: &str| {
-            named.iter().fold(why.to_string(), |w, (id, n)| w.replace(&format!(" {id},"), &format!(" {n},")).replace(&format!(" {id} "), &format!(" {n} ")))
-        };
-        let turn_off_mods: Vec<&hopper::crashdetect::Suspect> =
-            hopper::crashdetect::to_turn_off(&c).into_iter().filter(|s| on(&s.file_name)).collect();
-        let turn_off: Vec<String> = turn_off_mods.iter().map(|s| s.file_name.clone()).collect();
-        let turn_off_label = match turn_off.len() {
-            1 => format!("Turn off {}…", display(&turn_off[0])),
-            n => format!("Turn off {n} mods…"),
-        };
-        let turn_off_list = self.crash_turn_off_list(&turn_off_mods, &link, &readable, blocked, cx);
-        // Each mod's row: its reason, the other mod it doesn't match, what
-        // to do, and what Hopper weighed ("Why?").
-        let row = |i: usize, s: &hopper::crashdetect::Suspect, mut below: Vec<AnyElement>, cx: &mut Context<Self>| -> AnyElement {
-            below.extend(crash_view::partner_line(s, &link, cx));
-            below.extend(crash_view::steps_list(s, &readable, cx));
-            let key = s.file_name.clone();
-            let open = self.why_open.contains(&key);
-            let toggle = cx.listener(move |this, _, _, cx| {
-                if !this.why_open.remove(&key) {
-                    this.why_open.insert(key.clone());
-                }
-                cx.notify();
-            });
-            below.extend(crash_view::why_fold(ElementId::Name(format!("srv-crash-why:{i}").into()), s, open, &readable, toggle, cx));
-            crash_view::suspect_row(link(&s.file_name, &format!("row{i}"), cx), s, readable(&s.why), below, cx).into_any_element()
-        };
-        let st = c.stopped.clone().filter(|st| c.suspects.iter().any(|s| s.file_name == st.file_name));
-        let mut body: Vec<AnyElement> = Vec::new();
-        if let Some(st) = &st {
-            let named = c.suspects.iter().find(|s| s.file_name == st.file_name).and_then(|s| s.changed.clone());
-            let back = if named.is_none() { self.crash_back.clone().filter(|(w, _)| *w == c.when).map(|(_, ch)| ch) } else { None };
-            let is_back = back.is_some();
-            let changed = named.or(back);
-            body.push(crash_view::story_title(&c, st, &link, cx).into_any_element());
-            if changed.is_some() || !turn_off.is_empty() {
-                let mut fix = crash_view::fix_box(cx);
-                if let Some(ch) = &changed {
-                    let when = hopper::time::relative_secs(ch.when);
-                    let ch_p = ch.clone();
-                    let put_back = Button::new("srv-crash-put-back")
-                        .small()
-                        .primary()
-                        .icon(IconName::Undo2)
-                        .label(if ch.from.is_empty() { "Put the older version back".to_string() } else { format!("Put {} back", ch.from) })
-                        .tooltip(if remote {
-                            "Swaps in the copy Hopper Server kept. The newer one goes to its backups."
-                        } else {
-                            "Swaps in the copy Hopper kept. The newer one goes to .hopper-backups, so you can undo this there."
-                        })
-                        .disabled(blocked)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let ch = ch_p.clone();
-                            this.crash_back = this.crash.as_ref().map(|c| (c.when, ch.clone()));
-                            this.crash_fix(
-                                move |root| {
-                                    match hopper::hopperd::locate(root) {
-                                        Some(r) => {
-                                            let (c, id, _) = r?;
-                                            c.crash_put_back(&id, &ch.file_name)?;
-                                        }
-                                        None => {
-                                            hopper::crashdetect::put_back(root, &ch)?;
-                                        }
-                                    }
-                                    let old = if ch.from.is_empty() { "The older version".to_string() } else { ch.from.clone() };
-                                    let new = if ch.to.is_empty() { "the newer one".to_string() } else { ch.to.clone() };
-                                    Ok(format!("{old} is back; {new} is in backups. Start the server to try again."))
-                                },
-                                cx,
-                            );
-                        }));
-                    // Once back, the older jar is the one in the mods folder.
-                    let now_file =
-                        if is_back { ch.backup.file_name().map_or(ch.file_name.clone(), |n| n.to_string_lossy().into_owned()) } else { ch.file_name.clone() };
-                    let back_row = is_back.then(|| {
-                        h_flex()
-                            .gap_2()
-                            .child(widgets::done_mark(
-                                "srv-crash-put-back-done",
-                                format!("{} is back", if ch.from.is_empty() { "The older version".to_string() } else { ch.from.clone() }),
-                                true,
-                                cx,
-                            ))
-                            .child(widgets::caption("Start the server to try again. Backups has the newer one.", cx).text_xs())
-                    });
-                    fix = fix
-                        .child(
-                            sentence(vec![link(&now_file, "fix", cx), words(format!("was updated {when}{}", crash_view::versions(ch)))])
-                                .text_sm()
-                                .font_semibold(),
-                        )
-                        .children(back_row)
-                        .when(!is_back, |d| d.child(
-                            h_flex()
-                                .gap_2()
-                                .flex_wrap()
-                                .child(put_back)
-                                .when(!turn_off.is_empty(), |r| r.child(self.crash_turn_off(turn_off.clone(), turn_off_label.clone(), blocked, cx)))
-                                .child(
-                                    widgets::caption(
-                                        if ch.to.is_empty() { "The newer one goes to Backups.".to_string() } else { format!("{} goes to Backups.", ch.to) },
-                                        cx,
-                                    )
-                                    .text_xs(),
-                                ),
-                        ));
-                } else {
-                    fix = fix.child(h_flex().child(self.crash_turn_off(turn_off.clone(), turn_off_label.clone(), blocked, cx)));
-                }
-                body.push(fix.into_any_element());
-            }
-            body.extend(turn_off_list);
-            let now_file = changed.as_ref().map(|ch| {
-                if is_back { ch.backup.file_name().map_or(ch.file_name.clone(), |n| n.to_string_lossy().into_owned()) } else { ch.file_name.clone() }
-            });
-            body.push(crash_view::what_happened(&c, st, changed.as_ref().zip(now_file.as_deref()), &link, cx));
-            // Every mod the crash names, with its reason and what to do: the
-            // story says what happened, these say why and which to change.
-            let rows: Vec<AnyElement> = c.suspects.iter().enumerate().map(|(i, s)| row(i, s, Vec::new(), cx)).collect();
-            if !rows.is_empty() {
-                body.push(widgets::caption("Mods in this crash, most likely first:", cx).text_xs().into_any_element());
-                body.push(v_flex().children(rows).into_any_element());
-            }
-        } else {
-            if !c.headline.is_empty() {
-                body.push(div().text_sm().font_medium().line_clamp(2).child(c.headline.clone()).into_any_element());
-            }
-            let likely: Vec<String> = c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.knock_on).map(|s| display(&s.file_name)).collect();
-            if !likely.is_empty() {
-                body.push(
-                    h_flex()
-                        .gap_1p5()
-                        .text_sm()
-                        .child(widgets::caption(if likely.len() == 1 { "Likely cause:" } else { "Likely causes:" }, cx))
-                        .child(div().font_semibold().child(likely.join(", ")))
-                        .into_any_element(),
-                );
-            }
-            let rows: Vec<AnyElement> = c
-                .suspects
-                .iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    let jar = (s.client_only && on(&s.file_name)).then(|| s.file_name.trim_end_matches(".disabled").to_string());
-                    let below: Vec<AnyElement> = jar
-                        .map(|j| {
-                            let server = self.server.clone();
-                            let mod_id = s.mod_id.clone();
-                            Button::new(ElementId::Name(format!("srv-crash-rm:{i}").into()))
-                                .xsmall()
-                                .outline()
-                                .icon(IconName::Trash)
-                                .label("Remove from server")
-                                .tooltip(if remote { format!("Moves {j} to Hopper Server's trash") } else { format!("Moves {j} to .hopper-backups (undo from History)") })
-                                .disabled(blocked)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(root) = &server {
-                                        let path = root.join("mods").join(&j);
-                                        this.run(Ops { up: vec![hopper::model::SyncOp::Delete { path }], down: Vec::new() }, cx);
-                                        // Client-only: keep later syncs from copying it back.
-                                        let key = if mod_id.is_empty() { j.to_lowercase() } else { mod_id.to_lowercase() };
-                                        this.store.update(cx, |s, cx| s.update_settings(|st| { st.sync_blacklist.insert(key.clone()); }, cx));
-                                    }
-                                }))
-                                .into_any_element()
-                        })
-                        .into_iter()
-                        .collect();
-                    let below: Vec<AnyElement> = below.into_iter().map(|b| h_flex().child(b).into_any_element()).collect();
-                    row(i, s, below, cx)
-                })
-                .collect();
-            if !rows.is_empty() {
-                body.push(widgets::caption("Mods in this crash, most likely first:", cx).text_xs().into_any_element());
-                body.push(v_flex().children(rows).into_any_element());
-            }
-            if let Some(n) = crash_view::note(&c) {
-                body.push(div().text_sm().child(n).into_any_element());
-            }
-            if !turn_off.is_empty() {
-                body.push(h_flex().pt_1().child(self.crash_turn_off(turn_off.clone(), turn_off_label.clone(), blocked, cx)).into_any_element());
-            }
-            body.extend(turn_off_list);
-        }
-        // A mod that needs a newer mod or loader: the older copy kept in this
-        // server's .hopper-backups that works. Only a folder Hopper can read
-        // (a remote Hopper Server's backups aren't).
-        if let Some(root) = self.server.clone().filter(|r| !hopper::hopperd::is_remote_root(r)) {
-            let pack = {
-                let store = self.store.read(cx);
-                store.server(&root).and_then(|sv| store.paired(sv)).map(|i| (i.loader.clone(), i.game_version.clone()))
-            };
-            if let Some((loader, game)) = pack {
-                self.store.update(cx, |s, _| s.want_reverts(&root, &loader, &game, &addons, false));
-            }
-            let offers: Vec<crate::revert_ui::Offer> = c
-                .suspects
-                .iter()
-                .filter(|s| s.certainty <= Certainty::Likely)
-                .filter_map(|s| self.store.read(cx).revert_offer(&root, s.file_name.trim_end_matches(".disabled")))
-                .filter(|o| o.backup.is_some())
-                .collect();
-            let buttons: Vec<AnyElement> = offers
-                .into_iter()
-                .enumerate()
-                .filter_map(|(k, o)| {
-                    let (label, tip) = o.label();
-                    let ch = o.backup?;
-                    Some(
-                        Button::new(ElementId::Name(format!("srv-crash-revert:{k}").into()))
-                            .small()
-                            .outline()
-                            .icon(IconName::Undo2)
-                            .label(label)
-                            .tooltip(tip)
-                            .disabled(blocked)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let ch = ch.clone();
-                                this.crash_fix(
-                                    move |root| {
-                                        hopper::crashdetect::put_back(root, &ch)?;
-                                        let old = if ch.from.is_empty() { "The older version".to_string() } else { ch.from.clone() };
-                                        let new = if ch.to.is_empty() { "the newer one".to_string() } else { ch.to.clone() };
-                                        Ok(format!("{old} is back; {new} is in backups. Start the server to try again."))
-                                    },
-                                    cx,
-                                );
-                            }))
-                            .into_any_element(),
-                    )
-                })
-                .collect();
-            if !buttons.is_empty() {
-                body.push(h_flex().gap_2().flex_wrap().pt_1().children(buttons).into_any_element());
-            }
-        }
-        if let Some(n) = c.lingered_note() {
-            body.push(widgets::caption(n, cx).text_xs().into_any_element());
-        }
-        // A config of the crash's mods that the pack has otherwise: often the
-        // fix itself (a setting turned off in the pack for this crash, never
-        // sent to the server). Right under the title.
-        if !self.crash_configs.is_empty() {
-            let mut cfg_box = crash_view::fix_box(cx);
-            for (i, d) in self.crash_configs.iter().enumerate() {
-                let who = match c.suspects.iter().find(|s| s.mod_id == d.mod_id) {
-                    Some(s) => link(&s.file_name, &format!("cfg{i}"), cx),
-                    None => words(d.mod_id.clone()),
-                };
-                let what = match &d.setting {
-                    Some((sw, mine, theirs)) => format!("isn't the same as your pack's: {} is {mine} in the pack, {theirs} on the server.", sw.key),
-                    None => format!("isn't the same as your pack's ({}).", d.file),
-                };
-                let (src, dst) = (self.pair_header(cx).map(|(_, i)| i.root.join(&d.file)), self.server.as_ref().map(|r| r.join(&d.file)));
-                let file = d.file.clone();
-                cfg_box = cfg_box.child(
-                    h_flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .child(sentence(vec![words("The server's config for"), who, words(what)]).text_sm())
-                        .child(
-                            Button::new(ElementId::Name(format!("srv-crash-cfg:{i}").into()))
-                                .small()
-                                .outline()
-                                .icon(IconName::Upload)
-                                .label("Send config to server")
-                                .tooltip(format!("Copies {file} from the pack to the server. The server's copy goes to backups."))
-                                .disabled(blocked || src.is_none() || dst.is_none())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let (Some(src), Some(dst)) = (src.clone(), dst.clone()) {
-                                        this.run(Ops { up: vec![hopper::model::SyncOp::Copy { src, dst }], down: Vec::new() }, cx);
-                                    }
-                                })),
-                        ),
-                );
-            }
-            body.insert(1.min(body.len()), cfg_box.into_any_element());
-        }
-        let report = c.source.clone();
-        let local_report = !remote && report.extension().is_some_and(|e| e == "txt") && report.is_file();
-        let place = self.server.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        let key = hopper::settings::notice_key(&place, "server-crash", &format!("{}|{}", c.source.to_string_lossy(), c.when));
-        let body = crate::crash_help::callout(theme.danger, cx)
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.danger))
-                        .child(div().font_semibold().text_color(theme.danger).child("The server crashed"))
-                        .when(c.when > 0, |r| r.child(widgets::caption(hopper::time::relative_secs(c.when), cx)))
-                        .child(div().flex_1())
-                        .when(local_report, |r| {
-                            r.child(
-                                Button::new("srv-crash-open-report")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::FileText)
-                                    .label("Open report")
-                                    .tooltip("Opens the crash report file")
-                                    .on_click(move |_, _, cx| cx.open_with_system(&report)),
-                            )
-                        }),
-                )
-                .children(body);
-        widgets::closable_notice(body, key, widgets::Closed::Chip, "The server crashed", theme.danger, &self.store, cx)
-    }
-
     /// Opens the Configs section on the files a drift group lists.
     fn review_drift(&mut self, folder: &str, filter: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.section = Section::Configs;
@@ -3293,7 +2845,13 @@ impl Render for SyncPanel {
         let sidebar = side.then(|| self.sidebar(&server, &inst, window, cx));
         // On the Servers page the crash is one line above every tab (see
         // server_crash.rs) and the card is in Logs & crashes.
-        let crash = if self.in_server_page { None } else { self.crash_banner(cx) };
+        let crash = if self.in_server_page {
+            None
+        } else {
+            let root = server.root.clone();
+            self.strip.update(cx, |st, cx| st.show(root, cx));
+            self.strip.read(cx).crash().is_some().then(|| self.strip.clone().into_any_element())
+        };
         let drift = self.drift_banner(cx);
         let drift_chip = self.drift_chip(cx);
         // The console is a section where the panel is set up (in an

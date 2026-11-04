@@ -323,6 +323,11 @@ impl AppView {
                     let server = server.clone();
                     this.open_sync(Some(server), cx);
                 }
+                LibraryEvent::ServerLogs(server, rel) => {
+                    let (server, rel) = (server.clone(), rel.clone());
+                    this.servers.update(cx, |s, cx| s.open_logs(server, rel, cx));
+                    this.go(Page::Servers, cx);
+                }
                 LibraryEvent::BrowsePacks => {
                     this.browse
                         .update(cx, |b, cx| b.browse_class(hopper::cf::CLASS_MODPACKS, cx));
