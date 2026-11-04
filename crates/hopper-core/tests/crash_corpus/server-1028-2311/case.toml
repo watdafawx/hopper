@@ -1,0 +1,6 @@
+side = "server"
+mods = "ff0e3b0a42"
+report = "crash-2026-10-28_23.11.23-server.txt"
+problem = 8
+scored = false
+note = "Watchdog after the 23:04 crash (second copy)."

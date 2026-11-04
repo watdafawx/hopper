@@ -89,6 +89,12 @@ fn main() {
     }
     // The window that fetches website-only files: `--fetch DIR URL...`.
     let args: Vec<String> = std::env::args().collect();
+    // Crash help's reading of a folder's newest crash, for checking rules:
+    // `hopper --crash-explain <instance or server folder> > out.txt`.
+    if args.get(1).is_some_and(|a| a == "--crash-explain") && args.len() > 2 {
+        print!("{}", hopper::crashdetect::explain(std::path::Path::new(&args[2])));
+        return;
+    }
     #[cfg(windows)]
     if args.get(1).is_some_and(|a| a == "--fetch") && args.len() > 2 {
         std::process::exit(fetch_window::run(args[2].clone().into(), args[3..].to_vec()));

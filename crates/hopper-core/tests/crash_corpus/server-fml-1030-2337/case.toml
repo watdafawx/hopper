@@ -1,0 +1,8 @@
+side = "server"
+mods = "0887ace39b"
+report = "crash-2026-10-30_23.37.44-fml.txt"
+problem = 9
+expect = ["ibp"]
+at_least = "Certain"
+note = "Second copy of problem 9."
+pass = true

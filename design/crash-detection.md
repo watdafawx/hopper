@@ -177,6 +177,46 @@ swords, whose nested gear data made the chain deep enough to overflow.
 Tests: `crashloop::tests`, `a_loop_the_report_cannot_name_is_read_from_the_log`
 (`emi-loop-*`).
 
+## The engine: weighing evidence (2026-11-03: built; `crashengine.rs`, `modindex.rs`)
+
+The rules above each decided a mod's certainty and wrote its sentence, and
+later rules rewrote earlier ones. Now they are **hints**: what they found
+gets a weight (Certain 100, Likely 40, Possible 10), and general rules add
+or take weight from facts in the report. No rule names a mod or one mod's
+message. Each leaves a plain-words fact on the mod: the card's "Why?" list.
+
+| Rule | Weight |
+|---|---|
+| A namespaced id in the error (`mythsandlegends:graveyard`) whose mod has no code in the trace | +35 (+15 when no mod's own code is there at all) |
+| …whose mod is in the trace | +35; the mod that threw: +10 |
+| A mod's folder in the error (`libraries-<id>`, `config/<id>`) | +25 |
+| A mod there only as a mixin that wraps a game call (`wrapOperation$`, `redirect$`, `modify…$`), when the error names a mod that wasn't running | down to 3 |
+| "Too early" message (`No model for layer`, `not initialized`, `Registry is already frozen`…), the thrower reached through an event, and below it, above the game's startup frame (`Minecraft.<init>`…), another mod's own code or injected handler | that mod +45, the thrower −20 |
+| A file another program holds, a full disk, access denied (`crashsigs::environment`) | every mod down to 20 (Possible), the card's advice says what to do |
+| Added or updated after the last game that worked (`.hopper-good-run`, written when a game ends without a crash or a server stops cleanly) | +15 |
+
+Certainty from the total: 90+ Certain; 40+ and at least 1.5× the next one
+Likely; else Possible. A mod no general rule weighed keeps the older rule's
+certainty and sentence, so cards only change where a rule had something to
+say. Its sentence is the strongest rule's fact (with the older sentence
+when that rule was a small one).
+
+**Mod index** (`modindex.rs`): each jar's class packages, `assets/`/`data/`
+namespaces and root mixin configs, from the zip's file list only. Built when
+a crash is read, cached in `.hopper-modindex.json` keyed by each jar's size
+and modified time, so a changed jar is read again and the rest come from the
+file. A namespace with two owners (an addon in its parent's) belongs to
+none; a mod id equal to the namespace wins first. `PackageIndex` reads it.
+
+**Corpus** (`crates/hopper-core/tests/crash_corpus/`, see its README): 20 real
+crashes (13 problems), anonymised, replayed through `from_report` / `server`
+with fake jars made from each mod list. It prints the older rules alone next
+to the engine and fails if a case either got right goes wrong. Add every new
+crash there first.
+
+`hopper --crash-explain <folder> > out.txt` prints a folder's newest crash
+with every fact weighed.
+
 ## Goal
 
 When a game started from Hopper crashes, Hopper tells the player which mods

@@ -1,0 +1,8 @@
+side = "client"
+mods = "3254279e44"
+report = "crash-2026-11-03_19.35.11-client.txt"
+problem = 5
+expect = ["darkwindowbar"]
+at_least = "Likely"
+note = "No model for layer twilightforest:knightmetal_shield at startup: Dark Window Bar resizes the window inside Minecraft.<init>, so Twilight Forest bakes models too early."
+pass = true

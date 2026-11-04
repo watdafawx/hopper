@@ -1,0 +1,8 @@
+side = "server"
+mods = "98ff41d12f"
+report = "crash-2026-10-28_23.04.39-server.txt"
+problem = 7
+expect = ["mysticalagricultureplus"]
+at_least = "Certain"
+note = "Second copy of problem 7."
+pass = true

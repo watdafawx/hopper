@@ -1,0 +1,148 @@
+---- Minecraft Crash Report ----
+
+// What is this thing
+Please make sure this issue is not caused by Sable before reporting it to other mod authors.
+If you cannot reproduce it without Sable, file a report on the issue tracker
+https://github.com/ryanhcode/sable/issues
+
+// This doesn't make any sense!
+
+Time: 2026-11-03 19:16:07
+Description: Mod loading failures have occurred; consult the issue messages for more details
+
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: main
+Stacktrace:
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attachFields(MixinPreProcessorStandard.java:624) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+-- Mod loading issue --
+Details:
+	Mod file: <No mod information provided>
+	Failure message: Mixin application of dev.qther.ars_polymorphia.mixin.CraftingLecternTileMixin from Ars Polymorphia (ars_polymorphia) has failed
+		org.spongepowered.asm.mixin.transformer.throwables.InvalidMixinException: @Shadow field currentRecipe was not located in the target class com.hollingsworth.arsnouveau.common.block.tile.CraftingLecternTile. No refMap loaded.
+	Mod version: <No mod information provided>
+	Mod issues URL: <No issues URL found>
+	Exception message: org.spongepowered.asm.mixin.transformer.throwables.InvalidMixinException: @Shadow field currentRecipe was not located in the target class com.hollingsworth.arsnouveau.common.block.tile.CraftingLecternTile. No refMap loaded.
+Stacktrace:
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attachFields(MixinPreProcessorStandard.java:624) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attach(MixinPreProcessorStandard.java:302) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.createContextFor(MixinPreProcessorStandard.java:277) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinInfo.createContextFor(MixinInfo.java:1292) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinApplicatorStandard.apply(MixinApplicatorStandard.java:203) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.apply(TargetClassContext.java:437) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.TargetClassContext.applyMixins(TargetClassContext.java:418) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:352) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:253) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at TRANSFORMER/libjf_unsafe_v0@3.17.6+forge/io.gitlab.jfronny.libjf.unsafe.asm.AsmTransformer.transformClass(AsmTransformer.java:127) ~[libjf-unsafe-v0-3.17.4+forge.jar%232427!/:?] {re:classloading}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.service.modlauncher.MixinTransformationHandler.processClass(MixinTransformationHandler.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.launch.MixinLaunchPluginLegacy.processClass(MixinLaunchPluginLegacy.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.serviceapi.ILaunchPluginService.processClassWithFlags(ILaunchPluginService.java:156) ~[modlauncher-11.0.5.jar%2364!/:11.0.5+main.901c6ea8] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.LaunchPluginHandler.offerClassNodeToPlugins(LaunchPluginHandler.java:94) ~[modlauncher-11.0.5.jar%2364!/:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.ClassTransformer.transform(ClassTransformer.java:120) ~[modlauncher-11.0.5.jar%2364!/:?] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.TransformingClassLoader.maybeTransformClassBytes(TransformingClassLoader.java:57) ~[modlauncher-11.0.5.jar%2364!/:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.readerToClass(ModuleClassLoader.java:190) ~[securejarhandler-3.0.8.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.lambda$findClass$20(ModuleClassLoader.java:298) ~[securejarhandler-3.0.8.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadFromModule(ModuleClassLoader.java:311) ~[securejarhandler-3.0.8.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.findClass(ModuleClassLoader.java:298) ~[securejarhandler-3.0.8.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadClass(ModuleClassLoader.java:214) ~[securejarhandler-3.0.8.jar:?] {}
+	at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:526) ~[?:?] {re:mixin}
+	at TRANSFORMER/ars_nouveau@5.13.4/com.hollingsworth.arsnouveau.setup.registry.BlockRegistry.<clinit>(BlockRegistry.java:337) ~[ars_nouveau-1.21.1-5.13.4.jar%231211!/:5.13.4] {re:mixin,re:classloading}
+	at TRANSFORMER/ars_nouveau@5.13.4/com.hollingsworth.arsnouveau.setup.ModSetup.registers(ModSetup.java:39) ~[ars_nouveau-1.21.1-5.13.4.jar%231211!/:5.13.4] {re:classloading}
+	at TRANSFORMER/ars_nouveau@5.13.4/com.hollingsworth.arsnouveau.ArsNouveau.<init>(ArsNouveau.java:94) ~[ars_nouveau-1.21.1-5.13.4.jar%231211!/:5.13.4] {re:mixin,re:classloading}
+	at java.base/jdk.internal.reflect.DirectConstructorHandleAccessor.newInstance(DirectConstructorHandleAccessor.java:62) ~[?:?] {}
+	at java.base/java.lang.reflect.Constructor.newInstanceWithCaller(Constructor.java:502) ~[?:?] {}
+	at java.base/java.lang.reflect.Constructor.newInstance(Constructor.java:486) ~[?:?] {}
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.javafmlmod.FMLModContainer.constructMod(FMLModContainer.java:122) ~[loader-4.0.45.jar%2359!/:4.0] {}
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$constructMods$3(ModLoader.java:153) ~[loader-4.0.45.jar%2359!/:4.0] {}
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$dispatchParallelTask$7(ModLoader.java:231) ~[loader-4.0.45.jar%2359!/:4.0] {}
+	at java.base/java.util.concurrent.CompletableFuture.uniHandle(CompletableFuture.java:934) ~[?:?] {}
+	at java.base/java.util.concurrent.CompletableFuture$UniHandle.tryFire(CompletableFuture.java:911) ~[?:?] {}
+	at java.base/java.util.concurrent.CompletableFuture$Completion.exec(CompletableFuture.java:483) ~[?:?] {}
+	at java.base/java.util.concurrent.ForkJoinTask.doExec(ForkJoinTask.java:387) ~[?:?] {re:mixin,re:mixin}
+	at java.base/java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(ForkJoinPool.java:1310) ~[?:?] {}
+	at java.base/java.util.concurrent.ForkJoinPool.scan(ForkJoinPool.java:1841) ~[?:?] {re:computing_frames}
+	at java.base/java.util.concurrent.ForkJoinPool.runWorker(ForkJoinPool.java:1806) ~[?:?] {re:computing_frames}
+	at java.base/java.util.concurrent.ForkJoinWorkerThread.run(ForkJoinWorkerThread.java:188) ~[?:?] {re:mixin,re:mixin,re:mixin}
+
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Minecraft Version ID: 1.21.1
+	Operating System: Windows 11 (amd64) version 10.0
+	Java Version: 21.0.11, Oracle Corporation
+	Java VM Version: Java HotSpot(TM) 64-Bit Server VM (mixed mode, sharing), Oracle Corporation
+	Memory: 4504936392 bytes (4296 MiB) / 12884901888 bytes (12288 MiB) up to 17179869184 bytes (16384 MiB)
+	CPUs: 24
+	Processor Vendor: AuthenticAMD
+	Processor Name: AMD Ryzen 9 5900X 12-Core Processor            
+	Identifier: AuthenticAMD Family 25 Model 33 Stepping 2
+	Microarchitecture: Zen 3
+	Frequency (GHz): 3.69
+	Number of physical packages: 1
+	Number of physical CPUs: 12
+	Number of logical CPUs: 24
+	Graphics card #0 name: NVIDIA GeForce RTX 3080
+	Graphics card #0 vendor: NVIDIA
+	Graphics card #0 VRAM (MiB): 10240.00
+	Graphics card #0 deviceId: VideoController1
+	Graphics card #0 versionInfo: 32.0.16.1714
+	Graphics card #1 name: NVIDIA GeForce RTX 3080
+	Graphics card #1 vendor: NVIDIA
+	Graphics card #1 VRAM (MiB): 10240.00
+	Graphics card #1 deviceId: VideoController2
+	Graphics card #1 versionInfo: 32.0.16.1714
+	Memory slot #0 capacity (MiB): 16384.00
+	Memory slot #0 clockSpeed (GHz): 3.60
+	Memory slot #0 type: DDR4
+	Memory slot #1 capacity (MiB): 16384.00
+	Memory slot #1 clockSpeed (GHz): 3.60
+	Memory slot #1 type: DDR4
+	Memory slot #2 capacity (MiB): 16384.00
+	Memory slot #2 clockSpeed (GHz): 3.60
+	Memory slot #2 type: DDR4
+	Memory slot #3 capacity (MiB): 16384.00
+	Memory slot #3 clockSpeed (GHz): 3.60
+	Memory slot #3 type: DDR4
+	Virtual memory max (MiB): 84380.02
+	Virtual memory used (MiB): 33702.30
+	Swap memory total (MiB): 18944.00
+	Swap memory used (MiB): 28.99
+	Space in storage for jna.tmpdir (MiB): <path not set>
+	Space in storage for org.lwjgl.system.SharedLibraryExtractPath (MiB): <path not set>
+	Space in storage for io.netty.native.workdir (MiB): <path not set>
+	Space in storage for java.io.tmpdir (MiB): available: 54091.48, total: 238458.00
+	Space in storage for workdir (MiB): available: 573859.13, total: 976745.00
+	JVM Flags: 23 total; -XX:ThreadPriorityPolicy=1 -XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCIProduct -XX:-UnlockExperimentalVMOptions -Xms12G -Xmx16G -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+UnlockDiagnosticVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:+UseNUMA -XX:G1HeapRegionSize=16M -XX:G1ReservePercent=15 -XX:InitiatingHeapOccupancyPercent=45 -XX:G1MixedGCCountTarget=8 -XX:G1MixedGCLiveThresholdPercent=85 -XX:G1HeapWastePercent=5 -XX:+PerfDisableSharedMem -XX:+UseStringDeduplication -XX:ReservedCodeCacheSize=512M -XX:+SegmentedCodeCache
+	ModLauncher: 11.0.5+main.901c6ea8
+	ModLauncher launch target: forgeserver
+	ModLauncher services: 
+		sponge-mixin-0.16.4+mixin.0.8.7.jar mixin PLUGINSERVICE 
+		loader-4.0.45.jar slf4jfixer PLUGINSERVICE 
+		loader-4.0.45.jar runtime_enum_extender PLUGINSERVICE 
+		at-modlauncher-10.0.1.jar accesstransformer PLUGINSERVICE 
+		loader-4.0.45.jar runtimedistcleaner PLUGINSERVICE 
+		modlauncher-11.0.5.jar micsable_loader TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar jcplugin TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar mixin TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar logfilterbootstrap TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar fml TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar jasione TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar asynclogger TRANSFORMATIONSERVICE 
+	FML Language Providers: 
+		kotlinforforge@5.12.0
+		gml@7.0.3
+		kotori_scala@3.7.1-build-11
+		javafml@4.0
+		lowcodefml@4.0
+		minecraft@4.0
+	Mod List: 
+		[the mod list is in the case's mods file]
+	Crash Report UUID: c4173115-8656-45e4-9e84-cb36c4caf96c
+	FML: 4.0.45
+	NeoForge: 21.1.265

@@ -73,6 +73,37 @@ pub struct Suspect {
     /// A client-only mod on a dedicated server: it goes, not just off.
     #[serde(default)]
     pub client_only: bool,
+    /// What Hopper weighed for it, strongest first: the card's "Why" list
+    /// (see [`crate::crashengine`]). Empty on cards saved before it.
+    #[serde(default)]
+    pub facts: Vec<Fact>,
+}
+
+/// One thing a crash says about a mod, and how much it counted for or
+/// against it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Fact {
+    /// The rule that found it (`crashengine::IN_MESSAGE`, …).
+    pub rule: String,
+    /// Points for the mod (negative: against it; 0: where it is, only).
+    pub weight: i32,
+    /// One plain sentence.
+    pub text: String,
+}
+
+/// When a game here last ended without a crash (seconds since the epoch),
+/// beside the instance.
+pub const GOOD_RUN_FILE: &str = ".hopper-good-run";
+
+/// Notes that a game (or server) here just ended normally: what's added or
+/// updated after it is new since the last game that worked.
+pub fn mark_good_run(root: &Path) {
+    let _ = fs::write(root.join(GOOD_RUN_FILE), crate::time::now().to_string());
+}
+
+/// When the last game that worked ended, if Hopper saw one.
+pub fn last_good_run(root: &Path) -> Option<i64> {
+    fs::read_to_string(root.join(GOOD_RUN_FILE)).ok()?.trim().parse().ok()
 }
 
 /// A mod that changed before the crash, which a suspect's error names:
@@ -217,7 +248,7 @@ fn after_loading_event(line: &str) -> bool {
 }
 
 /// Mod ids that are the game or the loader, not a mod someone installed.
-const NOT_MODS: [&str; 7] = ["minecraft", "neoforge", "forge", "fml", "fml_loader", "fabricloader", "java"];
+pub(crate) const NOT_MODS: [&str; 7] = ["minecraft", "neoforge", "forge", "fml", "fml_loader", "fabricloader", "java"];
 
 /// One finding in a crash text, before it's matched to the instance.
 #[derive(Clone, Debug, PartialEq)]
@@ -752,50 +783,22 @@ fn needs_in(why: &str) -> Vec<(String, String)> {
 }
 
 /// Which jar has each class package, from the jars' file lists: a package
-/// in more than one jar (a shaded library) belongs to none.
+/// in more than one jar (a shaded library) belongs to none. A jar turned
+/// off is asked only when no jar that's on has the package. Kept in
+/// [`crate::modindex`]'s cache beside the instance.
 #[derive(Default)]
-pub struct PackageIndex {
-    owner: std::collections::HashMap<String, Option<String>>,
-    /// The same for jars turned off: a mod turned off after the crash is
-    /// still the one it names. Only asked when no jar that's on has the
-    /// package, so an old copy kept off can't hide the one in use.
-    off: std::collections::HashMap<String, Option<String>>,
-}
+pub struct PackageIndex(crate::modindex::ModIndex);
 
 impl PackageIndex {
-    /// Reads the file list of each jar in `dir` named in `mods`.
+    /// The file list of each jar in `dir` named in `mods` (read again only
+    /// for jars that changed since the last crash).
     pub fn build(dir: &Path, mods: &[String]) -> Self {
-        let mut idx = Self::default();
-        for m in mods.iter().filter(|m| m.ends_with(".jar") || m.ends_with(".jar.disabled")) {
-            let Ok(f) = fs::File::open(dir.join(m)) else { continue };
-            let Ok(z) = zip::ZipArchive::new(f) else { continue };
-            let pkgs: std::collections::HashSet<String> = z
-                .file_names()
-                .filter(|n| n.ends_with(".class") && !n.starts_with("META-INF/"))
-                .filter_map(|n| n.rsplit_once('/').map(|(p, _)| p.replace('/', ".")))
-                .collect();
-            let owner = if m.ends_with(".jar") { &mut idx.owner } else { &mut idx.off };
-            for p in pkgs {
-                owner
-                    .entry(p)
-                    .and_modify(|o| {
-                        if o.as_deref() != Some(m.as_str()) {
-                            *o = None;
-                        }
-                    })
-                    .or_insert_with(|| Some(m.clone()));
-            }
-        }
-        idx
+        Self(crate::modindex::ModIndex::load_dir(dir.parent().unwrap_or(dir), dir, mods))
     }
 
     /// The jar a class (`com.x.Y$Z`) is in.
     pub fn jar_of(&self, class: &str) -> Option<&str> {
-        let pkg = class.rsplit_once('.')?.0;
-        match self.owner.get(pkg) {
-            Some(o) => o.as_deref(),
-            None => self.off.get(pkg)?.as_deref(),
-        }
+        self.0.jar_of_class(class)
     }
 }
 
@@ -999,6 +1002,48 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
     Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice })
 }
 
+/// What crash help makes of the newest crash in an instance or server
+/// folder, with everything it weighed, as text (for `hopper
+/// --crash-explain <folder>`: checking a new crash against the rules).
+pub fn explain(root: &Path) -> String {
+    let dir = root.join("mods");
+    let c = if root.join("server.properties").is_file() {
+        server(root)
+    } else {
+        let mods: Vec<String> = fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+            .collect();
+        crate::logs::crash_reports(root)
+            .into_iter()
+            .next()
+            .and_then(|r| from_report(root, &r, &mods, |f| crate::deps::own_ids(&dir.join(f)).0))
+    };
+    let Some(c) = c else { return format!("No crash found in {}.
+", root.display()) };
+    let mut out = format!("{}
+{}
+", c.source.display(), c.headline);
+    if !c.advice.is_empty() {
+        out.push_str(&format!("Advice: {}
+", c.advice));
+    }
+    for s in &c.suspects {
+        out.push_str(&format!("
+{} {} [{}]
+  {}
+", s.certainty.label(), s.mod_id, s.file_name, s.why));
+        for f in &s.facts {
+            out.push_str(&format!("    {:+4} {:<16} {}
+", f.weight, f.rule, f.text));
+        }
+    }
+    out
+}
+
 /// What the game or server logs as it writes its crash report. After it
 /// comes the shutdown, where mods can fail too (a config that won't
 /// unload): those errors follow from the crash, so the scan stops here.
@@ -1029,6 +1074,7 @@ fn shaders_as_a_factor(suspects: &mut Vec<Suspect>, mods: &[String], ids: &impl 
             needs: Vec::new(),
             changed: None,
             client_only: false,
+            facts: Vec::new(),
         });
     }
 }
@@ -1299,6 +1345,7 @@ fn client_only(root: &Path, text: &str, log: &str, suspects: &mut Vec<Suspect>, 
                 needs: Vec::new(),
                 changed: None,
                 client_only: true,
+                facts: Vec::new(),
             }),
         }
     }
@@ -1400,7 +1447,7 @@ fn analyze(
         if suspects.iter().any(|s| s.file_name == file) {
             continue;
         }
-        suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs, changed: None, client_only: false });
+        suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs, changed: None, client_only: false, facts: Vec::new() });
     }
     demote_libraries(&mut suspects, &crate::deps::dependents(&root.join("mods")), ids);
     // A loop's mods added lately: the change that likely brought it.
@@ -1412,6 +1459,15 @@ fn analyze(
                 s.why = format!("{} {note}", s.why);
             }
         }
+    }
+    // The general rules weigh what was found and what the crash names.
+    // (`HOPPER_CRASH_ENGINE=off` keeps the older rules' answer alone, to
+    // compare.)
+    if std::env::var("HOPPER_CRASH_ENGINE").map_or(true, |v| v != "off") {
+        let mut index: Option<std::rc::Rc<crate::modindex::ModIndex>> = None;
+        let mut get = || index.get_or_insert_with(|| std::rc::Rc::new(crate::modindex::ModIndex::load(root, mods))).clone();
+        let input = crate::crashengine::Input { text, log, root, mods };
+        crate::crashengine::weigh(&input, &mut suspects, ids, &mut get);
     }
     // What the loader names may say which other mod it wanted: if that one
     // changed lately, the change is the likely trigger.
@@ -1831,6 +1887,7 @@ impl LiveWatch {
                     needs: Vec::new(),
                     changed: None,
                     client_only: false,
+                    facts: Vec::new(),
                 });
             }
         }
@@ -1876,7 +1933,7 @@ mod tests {
     use super::*;
 
     fn sus(file: &str, id: &str, c: Certainty) -> Suspect {
-        Suspect { file_name: file.into(), mod_id: id.into(), certainty: c, why: String::new(), needs: Vec::new(), changed: None, client_only: false }
+        Suspect { file_name: file.into(), mod_id: id.into(), certainty: c, why: String::new(), needs: Vec::new(), changed: None, client_only: false, facts: Vec::new() }
     }
 
     #[test]
@@ -2332,6 +2389,7 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
             needs: Vec::new(),
             changed: None,
             client_only: false,
+            facts: Vec::new(),
         };
         let c = what_changed(&root, &s, &list, &crate::backups::list(&root)).expect("a change");
         assert_eq!(
@@ -3061,6 +3119,85 @@ java.lang.RuntimeException: Attempted to load class com/example/fancyhud/client/
         let m = PLAIN_FRAME.captures("\tat com.some.Mod$$Lambda/0x0000000801570218.accept(Unknown Source)").unwrap();
         assert_eq!(&m[1], "com.some.Mod");
         assert_eq!(&PLAIN_FRAME.captures("\tat com.some.Mod.run(Mod.java:3)").unwrap()[1], "com.some.Mod");
+    }
+
+    /// An instance with these mods (file, id, name) and a crash report.
+    fn engine_case(tag: &str, mods: &[(&str, &str, &str)], report: &str) -> Crash {
+        let root = std::env::temp_dir().join(format!("hopper-engine-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dir = root.join("mods");
+        for (file, id, name) in mods {
+            fake_jar(&dir.join(file), id, name, "1.0");
+        }
+        let p = root.join("crash-reports/crash-2026-11-03_12.00.00-client.txt");
+        fs::write(&p, report).unwrap();
+        let list: Vec<String> = mods.iter().map(|m| m.0.to_string()).collect();
+        let c = from_report(&root, &p, &list, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        c
+    }
+
+    /// The error names a mod's content that none of its code ran: that mod,
+    /// not the mixin that only wraps the game's call on the way.
+    #[test]
+    fn the_mod_an_error_names_beats_a_wrapping_mixin() {
+        let report = "---- Minecraft Crash Report ----\nDescription: Exception in server tick loop\n\n\
+java.lang.IllegalStateException: Trying to access unbound value 'ResourceKey[minecraft:worldgen/structure / ruins:tower]' from registry x\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.core.Holder$Reference.value(Holder.java:151) ~[server-1.21.1.jar%231!/:?] {}\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.wrapOperation$zhe000$wrapper$addRules(MinecraftServer.java:3708) ~[server-1.21.1.jar%231!/:?] {}\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.createLevels(MinecraftServer.java:367) ~[server-1.21.1.jar%231!/:?] {}\n\n";
+        let c = engine_case("ns", &[("ruins-1.0.jar", "ruins", "Ruins"), ("wrapper-1.0.jar", "wrapper", "Wrapper")], report);
+        assert_eq!((c.suspects[0].mod_id.as_str(), c.suspects[0].certainty), ("ruins", Certainty::Likely), "{:#?}", c.suspects);
+        assert!(c.suspects[0].why.contains("ruins:tower"), "{}", c.suspects[0].why);
+        let w = c.suspects.iter().find(|s| s.mod_id == "wrapper").unwrap();
+        assert_eq!(w.certainty, Certainty::Possible);
+        assert!(w.facts.iter().any(|f| f.rule == crate::crashengine::WRAPPER && f.weight < 0));
+        // Without the engine the wrapper was the likely one.
+        assert!(c.suspects[0].facts.iter().any(|f| f.rule == crate::crashengine::IN_MESSAGE));
+    }
+
+    /// A mod asked for its models before the game had made them, because
+    /// another mod's code ran during the game's startup and set off the
+    /// screen rebuild: that other mod is the likely one.
+    #[test]
+    fn a_mod_that_runs_a_step_too_early_is_the_cause() {
+        let report = "---- Minecraft Crash Report ----\nDescription: Initializing game\n\n\
+java.lang.IllegalArgumentException: No model for layer victim:shield#main\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.model.geom.EntityModelSet.bakeLayer(EntityModelSet.java:17) ~[client-1.21.1.jar%231!/:?] {}\n\
+\tat TRANSFORMER/victim@1.0/com.victim.client.Renderer.<init>(Renderer.java:106) ~[victim-1.0.jar%232!/:?] {}\n\
+\tat TRANSFORMER/victim@1.0/com.victim.client.Events.boot(Events.java:120) ~[victim-1.0.jar%232!/:?] {}\n\
+\tat MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.jar%233!/:?] {}\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.Screen.rebuildWidgets(Screen.java:337) ~[client-1.21.1.jar%231!/:?] {}\n\
+\tat TRANSFORMER/minecraft@1.21.1/com.mojang.blaze3d.platform.Window.redirect$abc000$speedy$monitor(Window.java:5543) ~[client-1.21.1.jar%231!/:?] {}\n\
+\tat TRANSFORMER/minecraft@1.21.1/com.mojang.blaze3d.platform.Window.setWindowed(Window.java:365) ~[client-1.21.1.jar%231!/:?] {}\n\
+\tat TRANSFORMER/earlybird@1.0/com.earlybird.Bar.apply(Bar.java:58) ~[earlybird-1.0.jar%234!/:?] {}\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.<init>(Minecraft.java:636) ~[client-1.21.1.jar%231!/:?] {}\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.main.Main.main(Main.java:214) ~[client-1.21.1.jar%231!/:?] {}\n\n";
+        let mods = [("victim-1.0.jar", "victim", "Victim"), ("earlybird-1.0.jar", "earlybird", "Early Bird"), ("speedy-1.0.jar", "speedy", "Speedy")];
+        let c = engine_case("early", &mods, report);
+        assert_eq!((c.suspects[0].mod_id.as_str(), c.suspects[0].certainty), ("earlybird", Certainty::Likely), "{:#?}", c.suspects);
+        assert!(c.suspects[0].why.contains("Victim asked for something before the game had made it"), "{}", c.suspects[0].why);
+        let v = c.suspects.iter().find(|s| s.mod_id == "victim").unwrap();
+        assert_eq!(v.certainty, Certainty::Possible);
+        // A mixin that only redirects a call on the way isn't the one.
+        assert!(c.suspects.iter().filter(|s| s.mod_id == "speedy").all(|s| s.certainty == Certainty::Possible));
+    }
+
+    /// A file another program holds: the computer, not the mod the loader
+    /// names, with what to do.
+    #[test]
+    fn a_locked_file_is_advice_not_a_mod() {
+        let report = "---- Minecraft Crash Report ----\nDescription: Mod loading failures have occurred\n\n\
+-- Mod loading issue for: scripts --\nDetails:\n\tMod file: /x/mods/scripts-1.0.jar\n\tFailure message: Scripts (scripts) has failed to load correctly\n\
+\t\tjava.lang.RuntimeException: java.nio.file.FileSystemException: ./libraries-scripts/sdk.jar: The process cannot access the file because it is being used by another process\n\
+\tException message: java.nio.file.FileSystemException: ./libraries-scripts/sdk.jar: The process cannot access the file because it is being used by another process\n\n";
+        let c = engine_case("locked", &[("scripts-1.0.jar", "scripts", "Scripts")], report);
+        assert!(c.advice.contains("another copy"), "{}", c.advice);
+        assert_eq!(c.suspects[0].certainty, Certainty::Possible, "{:#?}", c.suspects);
+        assert!(c.suspects[0].facts.iter().any(|f| f.rule == crate::crashengine::ENVIRONMENT));
     }
 
     /// Prints what Hopper's crash card would name for the newest report in

@@ -1,0 +1,8 @@
+side = "server"
+mods = "9dbb45d904"
+report = "crash-2026-10-26_00.46.13-fml.txt"
+problem = 2
+expect = ["logisticsnetworks", "buildinggadgetsextra", "buildinggadgets2"]
+at_least = "Certain"
+note = "Server copy of problem 2."
+pass = true

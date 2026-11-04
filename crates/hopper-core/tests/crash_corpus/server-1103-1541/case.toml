@@ -1,0 +1,8 @@
+side = "server"
+mods = "7391c040e3"
+report = "crash-2026-11-03_15.41.50-server.txt"
+problem = 12
+expect = ["mythsandlegends"]
+at_least = "Likely"
+note = "Unbound structure mythsandlegends:graveyard: Myths & Legends structure never got registered. Biolith and Moonlight only wrap the call."
+pass = true

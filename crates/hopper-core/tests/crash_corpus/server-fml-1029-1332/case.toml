@@ -1,0 +1,8 @@
+side = "server"
+mods = "ef65c1e993"
+report = "crash-2026-10-29_13.32.01-fml.txt"
+problem = 9
+expect = ["ibp"]
+at_least = "Certain"
+note = "InteractiveBlockPrompt is client-only: it loads ClientLevel on a dedicated server."
+pass = true

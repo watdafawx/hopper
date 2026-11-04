@@ -892,6 +892,11 @@ fn reap(g: &mut Shared) {
             g.info = None;
             if !g.root.as_os_str().is_empty() {
                 let _ = std::fs::remove_file(g.root.join(RUN_FILE));
+                // Stopped when asked, cleanly: the last start that worked,
+                // for crash help's "changed since" (see crashengine).
+                if g.stop_requested && code == Some(0) {
+                    crate::crashdetect::mark_good_run(&g.root);
+                }
             }
         }
         Ok(None) => {}

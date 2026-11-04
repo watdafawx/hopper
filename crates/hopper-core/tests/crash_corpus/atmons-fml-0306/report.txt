@@ -1,0 +1,84 @@
+---- Minecraft Crash Report ----
+// My bad.
+
+Time: 2026-03-06 00:55:56
+Description: Mod loading failures have occurred; consult the issue messages for more details
+
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Mod loading issue for: cobblemon_battle_extras --
+Details:
+	Mod file: /G:/Games/Minecraft/Curse/Instances/All the Mons - ATMons/mods/cobblemon-battle-extras-neoforge-1.8.29.jar
+	Failure message: Mod cobblemon_battle_extras is incompatible with cobblestats 0 or above
+		Currently, cobblestats is 1.9.2+1.21.1
+		The reason is: fml.modloadingissue.incompatiblemod.noreason
+	Mod version: 1.8.29
+	Mod issues URL: <No issues URL found>
+	Exception message: <No associated exception found>
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Minecraft Version ID: 1.21.1
+	Operating System: Windows 11 (amd64) version 10.0
+	Java Version: 21.0.9, Eclipse Adoptium
+	Java VM Version: OpenJDK 64-Bit Server VM (mixed mode, sharing), Eclipse Adoptium
+	Memory: 613145936 bytes (584 MiB) / 1476395008 bytes (1408 MiB) up to 8589934592 bytes (8192 MiB)
+	CPUs: 32
+	Processor Vendor: GenuineIntel
+	Processor Name: Intel(R) Core(TM) i9-14900K
+	Identifier: Intel64 Family 6 Model 183 Stepping 1
+	Microarchitecture: Raptor Lake
+	Frequency (GHz): 3.19
+	Number of physical packages: 1
+	Number of physical CPUs: 24
+	Number of logical CPUs: 32
+	Graphics card #0 name: Intel(R) UHD Graphics 770
+	Graphics card #0 vendor: Intel Corporation
+	Graphics card #0 VRAM (MiB): 2048.00
+	Graphics card #0 deviceId: VideoController1
+	Graphics card #0 versionInfo: 32.0.101.7084
+	Graphics card #1 name: NVIDIA GeForce RTX 5070 Ti
+	Graphics card #1 vendor: NVIDIA
+	Graphics card #1 VRAM (MiB): 16303.00
+	Graphics card #1 deviceId: VideoController2
+	Graphics card #1 versionInfo: 32.0.15.9186
+	Memory slot #0 capacity (MiB): 32768.00
+	Memory slot #0 clockSpeed (GHz): 6.40
+	Memory slot #0 type: Unknown
+	Memory slot #1 capacity (MiB): 32768.00
+	Memory slot #1 clockSpeed (GHz): 6.40
+	Memory slot #1 type: Unknown
+	Virtual memory max (MiB): 76483.77
+	Virtual memory used (MiB): 42352.79
+	Swap memory total (MiB): 11264.00
+	Swap memory used (MiB): 1649.91
+	Space in storage for jna.tmpdir (MiB): available: 191881.20, total: 953868.00
+	Space in storage for org.lwjgl.system.SharedLibraryExtractPath (MiB): available: 191881.20, total: 953868.00
+	Space in storage for io.netty.native.workdir (MiB): available: 191881.20, total: 953868.00
+	Space in storage for java.io.tmpdir (MiB): available: 237976.66, total: 952997.00
+	Space in storage for workdir (MiB): available: 191881.20, total: 953868.00
+	JVM Flags: 10 total; -XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump -Xss1M -Xmx8192m -Xms256m -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M
+	ModLauncher: 11.0.5+main.901c6ea8
+	ModLauncher launch target: forgeclient
+	ModLauncher services: 
+		sponge-mixin-0.15.2+mixin.0.8.7.jar mixin PLUGINSERVICE 
+		loader-4.0.42.jar slf4jfixer PLUGINSERVICE 
+		loader-4.0.42.jar runtime_enum_extender PLUGINSERVICE 
+		at-modlauncher-10.0.1.jar accesstransformer PLUGINSERVICE 
+		loader-4.0.42.jar runtimedistcleaner PLUGINSERVICE 
+		modlauncher-11.0.5.jar mixin TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar fml TRANSFORMATIONSERVICE 
+		modlauncher-11.0.5.jar crash_assistant TRANSFORMATIONSERVICE 
+	FML Language Providers: 
+		kotori_scala@3.7.1-build-11
+		kotlinforforge@5.11.0
+		javafml@4.0
+		lowcodefml@4.0
+		minecraft@4.0
+	Mod List: 
+		[the mod list is in the case's mods file]
