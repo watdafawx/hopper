@@ -155,6 +155,8 @@
   const yours = (m) => hasPack && m.source && !m.from_pack;
   const isArchived = (m) => archived.has(m.project_id) && !done.has(m.project_id);
   const pending = (m) => !!m.update && !m.locked && !done.has(m.project_id);
+  // Settings not at the default their config file states (the Configs index).
+  const cfgChanged = (m) => cfg.sid === sid && (modForFile(m.file)?.changed || 0) > 0;
   const base0 = $derived(mods.filter((m) => !onlyYours || !hasPack || yours(m)));
   const counts = $derived({
     all: base0.length,
@@ -163,13 +165,14 @@
     archived: base0.filter(isArchived).length,
     client: base0.filter((m) => m.side === 'client').length,
     unknown: base0.filter((m) => !m.source).length,
+    config: base0.filter(cfgChanged).length,
     yours: mods.filter(yours).length,
   });
   // Desktop's All / Updates / Off, then the server's own two when any.
-  const CHIPS = [['all', 'All'], ['updates', 'Updates'], ['off', 'Disabled'], ['archived', 'Archived'], ['client', 'Client-only'], ['unknown', 'Unknown']];
+  const CHIPS = [['all', 'All'], ['updates', 'Updates'], ['off', 'Disabled'], ['archived', 'Archived'], ['client', 'Client-only'], ['unknown', 'Unknown'], ['config', 'Config changed']];
   const fits = {
     all: () => true, updates: pending, off: (m) => !m.enabled, archived: isArchived,
-    client: (m) => m.side === 'client', unknown: (m) => !m.source,
+    client: (m) => m.side === 'client', unknown: (m) => !m.source, config: cfgChanged,
   };
   // The orders the list can take, named as their column headers are.
   const SORTS = $derived([['name', 'Name'], ['author', 'Author'], ...(hasSide ? [['side', 'Side']] : []), ['on', 'Enabled'], ['added', 'Added']]);
