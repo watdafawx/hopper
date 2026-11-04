@@ -46,6 +46,8 @@
   let busy = $state('');
   let identifying = $state('');
   let updates = $state(null);
+  // Projects whose installed file the author archived (from the update check).
+  let archived = $state(new Set());
   let checking = $state(false);
   // The review's updates (all pending, or the selected rows'), or null.
   let reviewing = $state(null);
@@ -136,20 +138,22 @@
   // "Added by you" only means something on a server made from a pack.
   const hasPack = $derived(!!data?.pack);
   const yours = (m) => hasPack && m.source && !m.from_pack;
+  const isArchived = (m) => archived.has(m.project_id) && !done.has(m.project_id);
   const pending = (m) => !!m.update && !m.locked && !done.has(m.project_id);
   const base0 = $derived(mods.filter((m) => !onlyYours || !hasPack || yours(m)));
   const counts = $derived({
     all: base0.length,
     updates: base0.filter(pending).length,
     off: base0.filter((m) => !m.enabled).length,
+    archived: base0.filter(isArchived).length,
     client: base0.filter((m) => m.side === 'client').length,
     unknown: base0.filter((m) => !m.source).length,
     yours: mods.filter(yours).length,
   });
   // Desktop's All / Updates / Off, then the server's own two when any.
-  const CHIPS = [['all', 'All'], ['updates', 'Updates'], ['off', 'Disabled'], ['client', 'Client-only'], ['unknown', 'Unknown']];
+  const CHIPS = [['all', 'All'], ['updates', 'Updates'], ['off', 'Disabled'], ['archived', 'Archived'], ['client', 'Client-only'], ['unknown', 'Unknown']];
   const fits = {
-    all: () => true, updates: pending, off: (m) => !m.enabled,
+    all: () => true, updates: pending, off: (m) => !m.enabled, archived: isArchived,
     client: (m) => m.side === 'client', unknown: (m) => !m.source,
   };
   // The orders the list can take, named as their column headers are.
@@ -312,6 +316,7 @@
     try {
       const r = await api(`${base}/mods/updates${force ? '?force=1' : ''}`);
       updates = r.updates;
+      archived = new Set(r.archived || []);
       await load();
       if (force && !updates.length) say(hasPack ? 'Every mod added on top of the pack is up to date.' : 'Every mod is up to date.');
     } catch (e) {
@@ -849,6 +854,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
             <div class="c-act">
               {#if done.has(m.project_id)}<span class="okt small row"><CircleCheck size={13} />Updated</span>
               {:else if up}
+                {#if isArchived(m)}<span class="archw" title="The author archived this version. Update to get the newer one."><TriangleAlert size={14} /></span>{/if}
                 <div class="splitb" class:warnb={breaking} class:lockb={vl}>
                   <button class="lead" class:lit={swSweep === 'action' && swept('mods', ix)} disabled={updating.has(m.project_id) || !!busy}
                     title={vl ? `${up.to} is locked: you keep ${up.from}.\nShift+click to update anyway, or click the lock tag to unlock.` : breaking ? `${up.from}  →  ${up.file}\nThis stops the server loading: ${problems(up).join('; ')}` : !m.enabled ? `${up.from}  →  ${up.file}\nIt stays disabled after updating: turn it on in the On column.` : `${up.from}  →  ${up.file}`}
@@ -856,6 +862,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
                   <button onclick={() => (versionsFor = m)}>What changed</button>
                 </div>
               {:else if m.source}
+                {#if isArchived(m)}<span class="chip tag warnc" title="The author archived this version. No newer version on CurseForge.">Archived</span>{/if}
                 <button class="btn sm ghostcl" onclick={() => (versionsFor = m)} title="Versions and changelogs"><ScrollText size={12} />Changelog</button>
               {/if}
             </div>
@@ -1058,7 +1065,8 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .vchip.upc:hover { background: #f9731640; }
   .vchip.warnv { background: var(--gold-dim); color: var(--gold); }
   .vchip.lockv { background: #ffffff0d; color: var(--muted); }
-  .c-act { display: flex; justify-content: flex-start; }
+  .c-act { display: flex; justify-content: flex-start; align-items: center; gap: 6px; }
+  .archw { display: inline-flex; color: var(--gold); flex: none; cursor: help; }
   .c-on { display: flex; }
   .c-end { gap: 2px; justify-content: flex-end; }
   .ib { color: var(--muted); padding: 3px; border-radius: var(--radius); display: grid; }

@@ -37,6 +37,8 @@ enum Show {
     InGame,
     /// Packs a loader (Paxi…) puts in every world.
     AlwaysOn,
+    /// The author archived the installed file.
+    Archived,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -315,6 +317,8 @@ pub(crate) struct Table {
     pub(crate) inst: Option<Rc<Instance>>,
     /// Pending updates of this tab's class, by project.
     pub(crate) updates: Rc<HashMap<u64, Update>>,
+    /// Projects whose installed file the author archived.
+    pub(crate) archived: Rc<HashSet<u64>>,
     /// Lower-case resource pack files switched on in game.
     pub(crate) active_rp: Rc<HashSet<String>>,
     /// The shader pack on in game, as options say it.
@@ -366,6 +370,11 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
                 (x.project_id, x.file.id).hash(&mut h);
             }
         }
+    }
+    if let Some(s) = store.archived(root) {
+        let mut ids: Vec<&u64> = s.iter().collect();
+        ids.sort();
+        ids.hash(&mut h);
     }
     // The game writes options.txt (resource packs, shaders) as it runs.
     store.running(root).is_some().hash(&mut h);
@@ -946,10 +955,12 @@ impl AddonsView {
         if class == cf::CLASS_MODS {
             self.want_missing(&inst, cx);
         }
+        let archived = self.store.read(cx).archived(&root).cloned().unwrap_or_default();
         self.table = Table {
             sig,
             inst: Some(Rc::new(inst)),
             updates: Rc::new(updates),
+            archived: Rc::new(archived),
             active_rp: Rc::new(active_rp),
             shader,
             has_shader_loader,
@@ -1323,6 +1334,7 @@ impl AddonsView {
                     hopper::pack_where::Group::InGame | hopper::pack_where::Group::InWorlds
                 ),
                 Show::AlwaysOn => matches!(self.where_group(&a.file_name), hopper::pack_where::Group::Global(_)),
+                Show::Archived => self.table.archived.contains(&a.project_id),
                 Show::All => true,
             })
             .filter(|(_, a)| {
@@ -2339,7 +2351,6 @@ impl AddonsView {
         } else {
             vec![Show::All, Show::Updates, Show::Disabled]
         };
-        let show_ix = show_order.iter().position(|s| *s == self.show).unwrap_or(0);
         let n_group = |f: &dyn Fn(&hopper::pack_where::Group) -> bool| {
             of_class().filter(|a| f(&self.where_group(&a.file_name))).count()
         };
@@ -2356,6 +2367,16 @@ impl AddonsView {
         } else {
             vec![("All".into(), None), ("Updates".into(), Some(n_up)), ("Disabled".into(), Some(n_off))]
         };
+        // Only offered when something here is archived (or is being viewed).
+        let n_arch = of_class().filter(|a| self.table.archived.contains(&a.project_id)).count();
+        let show_arch = n_arch > 0 || self.show == Show::Archived;
+        let mut show_order = show_order;
+        let mut show_tabs = show_tabs;
+        if show_arch {
+            show_order.push(Show::Archived);
+            show_tabs.push(("Archived".into(), Some(n_arch)));
+        }
+        let show_ix = show_order.iter().position(|s| *s == self.show).unwrap_or(0);
         // The last check's results stay up while a new check runs or after
         // one fails; the spinner or the error sits beside them.
         let (checking, error, listed) = self
@@ -3597,10 +3618,31 @@ Details").into()),
         let progress = progress.or_else(|| fetch.as_ref().filter(|v| v.running()).and_then(|v| v.progress));
         let compact = self.compact;
         let pill_w = rems(if compact { widgets::SPLIT_W_COMPACT } else { widgets::SPLIT_W });
+        // The author archived the installed file (the CurseForge app warns
+        // about these too): a warning beside Update, or a chip with no update.
+        let archived = self.table.archived.contains(&a.project_id) && !done;
         let action = col_action(compact).when(done, |c| {
             // Updated: a quiet green mark where the button was, until the
             // row goes.
             c.child(widgets::done_mark(id("updated"), "Updated", false, cx))
+        }).when(archived, |c| {
+            let color = cx.theme().warning;
+            let (tip, tint) = if update.is_some() {
+                ("The author archived this version. Update to get the newer one.", false)
+            } else {
+                ("The author archived this version. No newer version on CurseForge.", true)
+            };
+            c.child(
+                div()
+                    .id(id("archived"))
+                    .flex_none()
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip).build(w, cx))
+                    .child(if tint {
+                        widgets::chip(color).child("Archived").into_any_element()
+                    } else {
+                        Icon::new(IconName::TriangleAlert).small().text_color(color).into_any_element()
+                    }),
+            )
         }).when_some(update.cloned().filter(|_| !done), |c, u| {
             let tip = format!("{}  →  {}", u.from, u.file.file_name);
             let (pid, file) = (u.project_id, u.file.clone());

@@ -80,6 +80,8 @@ pub enum Msg {
     /// What each update would stop loading: project → (mod, the range it
     /// needs).
     Breaks(PathBuf, HashMap<u64, Vec<(String, String)>>),
+    /// Projects whose installed file the author archived.
+    Archived(PathBuf, std::collections::HashSet<u64>),
     /// A mods folder's Revert offers (see [`Store::revert_offer`]).
     Reverts(PathBuf, crate::revert_ui::Cached),
     Updates {
@@ -271,6 +273,7 @@ pub struct Store {
     /// Per instance, the mods each update would stop loading (see
     /// [`Store::update_breaks`]).
     breaks: HashMap<PathBuf, HashMap<u64, Vec<(String, String)>>>,
+    archived: HashMap<PathBuf, std::collections::HashSet<u64>>,
     /// Per instance or server folder, the mods an older version would fix
     /// (by jar), as of the mods folder's modified time; folders being read.
     reverts: HashMap<PathBuf, crate::revert_ui::Cached>,
@@ -460,6 +463,7 @@ impl Store {
             cats_pending: Default::default(),
             updates: HashMap::new(),
             breaks: HashMap::new(),
+            archived: HashMap::new(),
             reverts: HashMap::new(),
             reverts_pending: HashSet::new(),
             updates_at: HashMap::new(),
@@ -1106,6 +1110,9 @@ impl Store {
             }
             Msg::Breaks(root, map) => {
                 self.breaks.insert(root, map);
+            }
+            Msg::Archived(root, set) => {
+                self.archived.insert(root, set);
             }
             Msg::Reverts(root, cached) => {
                 self.reverts_pending.remove(&root);
@@ -2315,6 +2322,16 @@ impl Store {
         let prev = state.ready().cloned().unwrap_or_default();
         state.begin();
         let root = root.to_path_buf();
+        // One batched file lookup beside the update check; a failure shows
+        // no warnings rather than an error.
+        let (inst2, root2) = (inst.clone(), root.clone());
+        self.spawn(move || match install::archived_projects(&inst2) {
+            Ok(set) => Msg::Archived(root2, set),
+            Err(e) => {
+                log::warn!("archived files of {}: {e:#}", inst2.name);
+                Msg::Archived(root2, Default::default())
+            }
+        });
         self.spawn(move || Msg::Updates {
             result: install::check_updates(&inst).map_err(|e| format!("{e:#}")),
             root,
@@ -2736,6 +2753,12 @@ impl Store {
             .find(|i| i.root == root)
             .ok_or("That instance is gone.")?;
         install::delete_profile(inst, name).map(|_| ()).map_err(|e| format!("{e:#}"))
+    }
+
+    /// The author archived the file of `project` installed here (set by the
+    /// last update check; false until it has run).
+    pub fn archived(&self, root: &Path) -> Option<&std::collections::HashSet<u64>> {
+        self.archived.get(root)
     }
 
     /// The mods `project`'s offered update would stop loading: (mod, the
