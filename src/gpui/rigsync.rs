@@ -3291,7 +3291,9 @@ impl Render for SyncPanel {
         let side = self.in_instance;
         let header = (!side).then(|| self.header(&server, &inst, cx));
         let sidebar = side.then(|| self.sidebar(&server, &inst, window, cx));
-        let crash = self.crash_banner(cx);
+        // On the Servers page the crash is one line above every tab (see
+        // server_crash.rs) and the card is in Logs & crashes.
+        let crash = if self.in_server_page { None } else { self.crash_banner(cx) };
         let drift = self.drift_banner(cx);
         let drift_chip = self.drift_chip(cx);
         // The console is a section where the panel is set up (in an
@@ -3523,7 +3525,7 @@ pub(crate) fn server_online(
 /// icon and page: the same file, else the same name stem. A stem can match
 /// another mod (cc-tweaked, CC Tweaked Compat), so on a local server the
 /// copy must also carry the jar's own name; else the jar's name alone.
-fn crash_addon<'a>(addons: &'a [hopper::instances::Addon], file: &str, local: Option<&Path>) -> (String, Option<&'a hopper::instances::Addon>) {
+pub(crate) fn crash_addon<'a>(addons: &'a [hopper::instances::Addon], file: &str, local: Option<&Path>) -> (String, Option<&'a hopper::instances::Addon>) {
     let bare = file.trim_end_matches(".disabled");
     if let Some(a) = addons.iter().find(|a| a.file_name.trim_end_matches(".disabled").eq_ignore_ascii_case(bare)) {
         let name = if a.name.is_empty() { bare.trim_end_matches(".jar").to_string() } else { a.name.clone() };
