@@ -548,7 +548,7 @@ impl Render for ServerSettings {
                         Button::new("server-settings-reload")
                             .ghost()
                             .icon(IconName::RotateCcw)
-                            .label("Undo changes")
+                            .label("Discard")
                             .disabled(!changed)
                             .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
                     )
