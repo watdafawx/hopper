@@ -1,4 +1,4 @@
-//! A server's Crashes & logs tab (Servers page): its crash reports, each
+//! A server's Logs & crashes tab (Servers page): its crash reports, each
 //! read the way the crash card reads the last one, and latest.log and
 //! debug.log followed while the server runs, each with search, an
 //! errors-only filter and sharing on mclo.gs. The same for a server in a

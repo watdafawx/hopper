@@ -754,7 +754,7 @@ pub struct ServersView {
     settings_view: Entity<ServerSettings>,
     /// The Sync tab: the server against its pack.
     sync: Entity<SyncPanel>,
-    /// The Crashes & logs tab.
+    /// The Logs & crashes tab.
     logs: Entity<crate::server_logs::ServerLogsView>,
     /// The tabs only a Hopper Server's servers have.
     p_files: Entity<panel_tabs::files::FilesTab>,
@@ -815,7 +815,7 @@ fn tab_icon(code: usize) -> IconName {
         TAB_FILES => IconName::FolderOpen,
         TAB_PLAYERS => IconName::Users,
         TAB_SCHEDULE => IconName::Clock,
-        TAB_LOGS => IconName::ScrollText,
+        TAB_LOGS => IconName::Stethoscope,
         _ => IconName::ArrowLeftRight,
     }
 }
@@ -830,7 +830,7 @@ fn tab_name(code: usize) -> &'static str {
         TAB_FILES => "Files",
         TAB_PLAYERS => "Players",
         TAB_SCHEDULE => "Schedule",
-        TAB_LOGS => "Crashes & logs",
+        TAB_LOGS => "Logs & crashes",
         _ => "Sync",
     }
 }
@@ -981,7 +981,7 @@ impl ServersView {
         } else if was == TAB_SYNC {
             self.sync.update(cx, |p, cx| p.hidden(cx));
         }
-        // Crashes & logs polls the server only while it's open.
+        // Logs & crashes polls the server only while it's open.
         if was == TAB_LOGS && tab != TAB_LOGS {
             self.logs.update(cx, |v, cx| v.hidden(cx));
         }

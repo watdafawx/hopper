@@ -1,5 +1,5 @@
 <script>
-  // One log file (latest.log, debug.log) in Crashes & logs: its last part,
+  // One log file (latest.log, debug.log) in Logs & crashes: its last part,
   // then what the server writes to it, read every 2 s while it runs and
   // the page is in view. Search, "Errors and warnings only", lines coloured
   // by level (desktop's hopper::logs::level). Only the lines in view are

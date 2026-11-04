@@ -1,5 +1,5 @@
 <script>
-  // A server's Crashes & logs tab, as desktop's: its crash reports, newest
+  // A server's Logs & crashes tab, as desktop's: its crash reports, newest
   // first with Hopper's one-line verdict, and the picked one read like the
   // crash card (ServerCrash with `given`); then latest.log and debug.log,
   // followed while the server runs (LogText).

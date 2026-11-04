@@ -4,7 +4,7 @@
   import { session, outside } from './lib/me.svelte.js';
   import Avatar from './Avatar.svelte';
   import { onMount, onDestroy } from 'svelte';
-  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder, SlidersHorizontal, ScrollText } from '@lucide/svelte';
+  import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder, SlidersHorizontal, Stethoscope } from '@lucide/svelte';
   import { live, history, follow, unfollow } from './lib/live.svelte.js';
   import { api, post } from './lib/api.js';
   import { bytes, uptime, xmx, stateText, bootLeft, memTitle, loaderText } from './lib/format.js';
@@ -66,7 +66,7 @@
   // The tabs, in desktop's order for a Hopper Server's servers.
   const TABS = [
     ['console', 'Console', SquareTerminal],
-    ['logs', 'Crashes & logs', ScrollText],
+    ['logs', 'Logs & crashes', Stethoscope],
     ['files', 'Files', FolderOpen],
     ['mods', 'Mods', Puzzle],
     ['configs', 'Configs', SlidersHorizontal],

@@ -5,7 +5,7 @@
   // the fix first, then "What happened" in order; otherwise the headline
   // and each mod it names, most certain first, with Certain / Likely /
   // Possible and why. Mod names carry their icon and open the mod peek.
-  // With `given` (a report picked in Crashes & logs: {crash, report, names,
+  // With `given` (a report picked in Logs & crashes: {crash, report, names,
   // lingered}) it shows that one instead, read-only: no fixes from an old
   // report.
   import { AlertTriangle, FileText, Share2, RefreshCw, Undo2, PowerOff, Trash2, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
