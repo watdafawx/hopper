@@ -463,6 +463,59 @@ fn read_all(list: &[&PathBuf]) -> Vec<(PathBuf, Arc<JarInfo>)> {
     })
 }
 
+/// The pack's NeoForge dependency overrides (`config/fml.toml` beside the
+/// mods folder): for each mod id, the mods whose constraints the loader
+/// drops for it ("-dep"). Better MC 5 ships `citresewn = ["-connector"]`,
+/// so CITResewn's "incompatible with Connector" never stops the game.
+/// "+dep" only changes load order, so it isn't kept.
+type Overrides = HashMap<String, HashSet<String>>;
+
+fn overrides(mods_dir: &Path) -> Overrides {
+    let Some(text) = mods_dir.parent().and_then(|p| std::fs::read_to_string(p.join("config").join("fml.toml")).ok()) else {
+        return Overrides::new();
+    };
+    let Ok(v) = toml::from_str::<toml::Value>(&text) else { return Overrides::new() };
+    let mut out = Overrides::new();
+    for (target, list) in v.get("dependencyOverrides").and_then(|t| t.as_table()).into_iter().flatten() {
+        // An array of entries, or one bare string (TNP Limitless 8 writes it so).
+        let entries: Vec<&str> = match list {
+            toml::Value::String(s) => vec![s.as_str()],
+            toml::Value::Array(a) => a.iter().filter_map(|x| x.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        for e in entries {
+            if let Some(dep) = e.trim().strip_prefix('-') {
+                out.entry(target.to_lowercase()).or_default().insert(dep.trim().to_lowercase());
+            }
+        }
+    }
+    out
+}
+
+/// Whether the overrides drop `j`'s constraint on mod `dep`.
+fn overridden(o: &Overrides, j: &JarInfo, dep: &str) -> bool {
+    !o.is_empty() && j.own.iter().any(|m| o.get(m).is_some_and(|s| s.contains(dep)))
+}
+
+/// The mod ids the game got far enough to load resources for on its last
+/// start (Minecraft's "Reloading ResourceManager: ..., mod/<id>, ..." line in
+/// `logs/latest.log`), and when that log was last written. Two mods both in
+/// there did load side by side, whatever their metadata says.
+fn loaded_last_start(mods_dir: &Path) -> Option<(HashSet<String>, std::time::SystemTime)> {
+    let log = mods_dir.parent()?.join("logs").join("latest.log");
+    let at = std::fs::metadata(&log).ok()?.modified().ok()?;
+    let text = std::fs::read_to_string(&log).ok()?;
+    let line = text.lines().find_map(|l| l.split_once("Reloading ResourceManager:").map(|x| x.1))?;
+    let ids = line
+        .split(", ")
+        .filter_map(|p| p.trim().strip_prefix("mod/"))
+        // A jar with several mods is one pack: "mod/accessories_compat_layer,tclayer".
+        .flat_map(|p| p.split(','))
+        .map(|id| id.trim().to_lowercase())
+        .collect();
+    Some((ids, at))
+}
+
 /// The enabled jars of a mods folder.
 fn enabled_jars(mods_dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(mods_dir)
@@ -519,9 +572,11 @@ pub fn broken_by(mods_dir: &Path, file: &str, from: &str, to: &str) -> Vec<(Stri
     let mut out: Vec<(String, String)> = Vec::new();
     let on = read_all(&refs);
     let v = view(&on);
+    let ov = overrides(mods_dir);
     for (_, j) in &on {
         for (id, range) in seen_as(j, v).1 {
             if me.own.contains(id)
+                && !overridden(&ov, j, id)
                 && accepts(range, from) == Some(true)
                 && accepts(range, to) == Some(false)
                 && !out.iter().any(|(n, _)| *n == j.name)
@@ -563,11 +618,12 @@ pub fn missing_without(mods_dir: &Path, without: &[String]) -> Vec<Missing> {
         .flat_map(|(p, j)| j.versions.iter().map(move |(id, v)| (id.as_str(), (p, v.as_str()))))
         .collect();
     let name_of = |p: &Path| p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let ov = overrides(mods_dir);
     let mut out = Vec::new();
     for (path, j) in &on {
         let mut seen = HashSet::new();
         for (id, range) in seen_as(j, v).1 {
-            if !seen.insert(id.clone()) {
+            if !seen.insert(id.clone()) || overridden(&ov, j, id) {
                 continue;
             }
             if provided.contains(&normalize(id, v.connector)) {
@@ -862,6 +918,14 @@ pub fn blockers(mods_dir: &Path, loader: &str, game: &str) -> Vec<Blocker> {
     // Fabric and Quilt read a dual jar's fabric.mod.json.
     let fabric = lv.is_some_and(|(k, _)| k.eq_ignore_ascii_case("fabric") || k.eq_ignore_ascii_case("quilt"));
     let none: Vec<(String, String)> = Vec::new();
+    let ov = overrides(mods_dir);
+    let last = loaded_last_start(mods_dir);
+    // Both mods loaded on the last start, and neither jar changed since.
+    let loaded_together = |a: &Path, a_ids: &[String], b: &Path, b_id: &str| {
+        let Some((ids, at)) = &last else { return false };
+        let older = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).is_ok_and(|t| t <= *at);
+        a_ids.iter().any(|i| ids.contains(i)) && ids.contains(b_id) && older(a) && older(b)
+    };
     for (path, j) in &on {
         let (requires, optional, incompatible) = match (&j.fabric, &j.forge) {
             (Some(f), _) if fabric => (&f.requires, &none, &f.incompatible),
@@ -870,7 +934,7 @@ pub fn blockers(mods_dir: &Path, loader: &str, game: &str) -> Vec<Blocker> {
         };
         let mut seen = HashSet::new();
         for (id, range) in requires.iter().chain(optional) {
-            if !seen.insert(id.clone()) || j.provides.contains(id) {
+            if !seen.insert(id.clone()) || j.provides.contains(id) || overridden(&ov, j, id) {
                 continue;
             }
             if let Some(have) = builtin.get(id.as_str()) {
@@ -901,10 +965,13 @@ pub fn blockers(mods_dir: &Path, loader: &str, game: &str) -> Vec<Blocker> {
         }
         for (id, range, reason) in incompatible {
             // Embeddium gets Iris past its own "incompatible" (ATM10 runs both).
-            if id == "embeddium" {
+            if id == "embeddium" || overridden(&ov, j, id) {
                 continue;
             }
             let Some(by) = provider.get(id.as_str()).filter(|by| **by != path) else { continue };
+            if loaded_together(path, &j.own, by, id) {
+                continue;
+            }
             // Its version, when known, must be in the range.
             let hit = match inc_versions.get(id.as_str()) {
                 Some(have) => accepts(range, have) != Some(false),
@@ -1115,7 +1182,11 @@ pub fn loaded_fine(root: &Path) -> Option<i64> {
         .into_iter()
         .flatten()
         .flatten()
+        // Not mods: caches like Sinytra Connector's "mods/.connector", which
+        // it rewrites while the game starts.
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .filter_map(|e| e.metadata().ok()?.modified().ok())
+        // The folder's own time: a jar taken out.
         .chain(std::fs::metadata(root.join("mods")).ok().and_then(|m| m.modified().ok()))
         .max()?;
     if changed > started {
@@ -1369,12 +1440,17 @@ side = "BOTH"
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("mods")).unwrap();
         std::fs::write(root.join("mods/a.jar"), "x").unwrap();
+        std::fs::create_dir_all(root.join("mods/.connector")).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::create_dir_all(root.join("logs")).unwrap();
         std::fs::write(root.join("logs/latest.log"), "[Render thread/INFO]: Starting\n").unwrap();
         assert_eq!(loaded_fine(&root), None, "never reached the title screen");
         std::fs::write(root.join("logs/latest.log"), "[Render thread/INFO]: Sound engine started\n").unwrap();
         assert!(loaded_fine(&root).is_some());
+        // Connector's cache in the mods folder changes while the game starts.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(root.join("mods/.connector/cache.json"), "x").unwrap();
+        assert!(loaded_fine(&root).is_some(), "a cache isn't a mod");
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(root.join("mods/b.jar"), "x").unwrap();
         assert_eq!(loaded_fine(&root), None, "a mod changed after that run");
@@ -1597,6 +1673,88 @@ version=\"4.5\"
         bundle("aperture-b.jar", "1.6.1");
         assert_eq!(incompatible(&t), 1, "1.6.1 is inside (1.6.0,)");
         std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    /// Better MC 5: CITResewn's neoforge.mods.toml says "incompatible" with
+    /// Connector (whose mod sits in a jar nested in Connector's jar), but the
+    /// pack's config/fml.toml drops that with a dependency override, and the
+    /// game loads both. Metadata copied from the real jars.
+    #[test]
+    fn bmc5_citresewn_beside_connector() {
+        let fx = |n: &str| match n {
+            "citresewn" => include_str!("deps_fixtures/bmc5/citresewn.neoforge.mods.toml"),
+            "connector" => include_str!("deps_fixtures/bmc5/connector.neoforge.mods.toml"),
+            _ => include_str!("deps_fixtures/bmc5/c2me.neoforge.mods.toml"),
+        };
+        let neo = "META-INF/neoforge.mods.toml";
+        let base = std::env::temp_dir().join(format!("hopper-bmc5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(base.join("config")).unwrap();
+        std::fs::create_dir_all(base.join("logs")).unwrap();
+        jar(&mods.join("citresewn-neoforge-1.21.1-0.jar"), &[(neo, fx("citresewn"))]);
+        let inner = jar_bytes(&[(neo, fx("connector").as_bytes())]);
+        std::fs::write(
+            mods.join("connector-2.0.0-beta.14+1.21.1-full.jar"),
+            jar_bytes(&[("META-INF/jarjar/org.sinytra.connector-mod.jar", &inner)]),
+        )
+        .unwrap();
+        // C2ME only "discourages" dynview: a warning, never a blocker.
+        jar(&mods.join("c2me.jar"), &[(neo, fx("c2me"))]);
+        let head = "modLoader=\"javafml\"\nloaderVersion=\"[1,)\"\n";
+        jar(&mods.join("dynview.jar"), &[(neo, &format!("{head}[[mods]]\nmodId=\"dynview\"\nversion=\"1.0\"\n"))]);
+        // Needs a mod that isn't there; an override can drop that too.
+        jar(&mods.join("needsfoo.jar"), &[(neo, &format!(
+            "{head}[[mods]]\nmodId=\"needsfoo\"\nversion=\"1.0\"\n[[dependencies.needsfoo]]\nmodId=\"foo\"\ntype=\"required\"\nversionRange=\"[1,)\"\n"
+        ))]);
+        let blocked = || -> Vec<(String, String)> {
+            blockers(&mods, "neoforge-21.1.234", "1.21.1")
+                .into_iter()
+                .filter_map(|b| match b.kind {
+                    BlockerKind::Incompatible { with, .. } => Some((b.mod_name, with)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let fml = base.join("config/fml.toml");
+        let log = base.join("logs/latest.log");
+        let set_time = |p: &Path, secs: i64| {
+            let t = std::time::SystemTime::now();
+            let t = if secs < 0 { t - std::time::Duration::from_secs(secs.unsigned_abs()) } else { t + std::time::Duration::from_secs(secs as u64) };
+            std::fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+        };
+
+        // No override, no log: the rule stands (by real mod id, nested too).
+        assert_eq!(blocked(), vec![("CITResewn".to_string(), "connector".to_string())]);
+        assert_eq!(missing(&mods).len(), 1, "needsfoo lacks foo");
+
+        // The pack's own override, as Better MC 5 ships it.
+        std::fs::write(&fml, "[dependencyOverrides]\n\tcitresewn = [\"-connector\"]\n\tneedsfoo = [\"-foo\"]\n").unwrap();
+        assert!(blocked().is_empty(), "override drops the rule");
+        assert!(missing(&mods).is_empty(), "override drops the requirement");
+        // One bare string, as TNP Limitless 8 writes it.
+        std::fs::write(&fml, "[dependencyOverrides]\ncitresewn = \"-connector\"\n").unwrap();
+        assert!(blocked().is_empty());
+        // "+" only orders loading: the rule stands.
+        std::fs::write(&fml, "[dependencyOverrides]\ncitresewn = [\"+connector\"]\n").unwrap();
+        assert_eq!(blocked().len(), 1);
+        std::fs::remove_file(&fml).unwrap();
+
+        // The last start loaded both, and neither jar changed since.
+        std::fs::write(&log, "[main/INFO]: Reloading ResourceManager: vanilla, mod_resources, mod/citresewn, mod/accessories_compat_layer,tclayer, mod/connector, fabric\n").unwrap();
+        for e in std::fs::read_dir(&mods).unwrap().flatten() {
+            set_time(&e.path(), -60);
+        }
+        assert!(blocked().is_empty(), "loaded together last start");
+        // CITResewn changed after that start: judge it again.
+        set_time(&mods.join("citresewn-neoforge-1.21.1-0.jar"), 60);
+        assert_eq!(blocked().len(), 1);
+        // A start that never got to resources proves nothing.
+        std::fs::write(&log, "[main/INFO]: Mod List:\n\t\tCITResewn 0 (citresewn)\n").unwrap();
+        set_time(&mods.join("citresewn-neoforge-1.21.1-0.jar"), -60);
+        assert_eq!(blocked().len(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
