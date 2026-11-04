@@ -688,13 +688,21 @@ struct PackBody {
 /// with client-only mods left out, as desktop does.
 async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Json(b): Json<PackBody>) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
-    let project: u64 = b.project.trim().parse().map_err(|_| bad("Which pack?"))?;
-    let file_id: u64 = b.file.trim().parse().map_err(|_| bad("Which version?"))?;
+    let mr = b.source == "modrinth";
+    // Modrinth ids may come as Modrinth's own strings (from Hopper desktop,
+    // whose numbers only its own process can map back) or as this panel's
+    // numbers (from its web UI).
+    let id_of = |s: &str| match s.trim().parse::<u64>() {
+        Ok(n) => Some(n),
+        Err(_) if mr && !s.trim().is_empty() => Some(modrinth::num_id(s.trim())),
+        Err(_) => None,
+    };
+    let project = id_of(&b.project).ok_or_else(|| bad("Which pack?"))?;
+    let file_id = id_of(&b.file).ok_or_else(|| bad("Which version?"))?;
     if b.name.trim().is_empty() {
         return Err(bad("Give the server a name."));
     }
     let c = common(&app, &b.address, b.port, b.accept_eula)?;
-    let mr = b.source == "modrinth";
     let a = app.clone();
     let job = crate::pack_api::spawn(&app, format!("Making {}", b.name.trim()), move |job| {
         job.detail("Looking the pack up");

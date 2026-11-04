@@ -278,8 +278,12 @@ impl HostForm {
         }
     }
 
-    /// What to ask a Hopper Server to make (`POST /servers/create`).
-    fn panel_body(&self, cx: &App) -> Result<serde_json::Value, String> {
+    /// What to ask a Hopper Server to make: the route and its body
+    /// (`/servers/create`, or `/servers/create-from-pack` for a pack).
+    fn panel_body(&self, cx: &App) -> Result<(&'static str, serde_json::Value), String> {
+        if let Source::Files(p) = &self.source {
+            return self.panel_pack_body(p, cx).map(|b| ("/servers/create-from-pack", b));
+        }
         let store = self.store.read(cx);
         let (name, gv, loader) = match &self.source {
             Source::Instance(r) => {
@@ -287,7 +291,7 @@ impl HostForm {
                 (format!("{} server", inst.name), inst.game_version.clone(), inst.loader.clone())
             }
             Source::Fresh => self.base.read(cx).choice(cx).ok_or("Pick a version and loader.")?,
-            Source::Files(_) => return Err("A pack's server files can only be hosted on this PC for now.".into()),
+            Source::Files(_) => unreachable!("handled above"),
         };
         let (kind, version) = match ServerLoader::from_instance(&loader).map_err(|e| format!("{e:#}"))? {
             ServerLoader::Vanilla => ("vanilla", String::new()),
@@ -303,7 +307,7 @@ impl HostForm {
         if !self.eula {
             return Err("Agree to the Minecraft EULA to make a server.".into());
         }
-        Ok(serde_json::json!({
+        Ok(("/servers/create", serde_json::json!({
             "name": name,
             "mc_version": gv,
             "loader": kind,
@@ -311,6 +315,46 @@ impl HostForm {
             "memory_mb": (self.memory.read(cx).value().start() * 1024.0).round() as u32,
             "port": port,
             "motd": name,
+            "address": self.address.read(cx).value().trim(),
+            "accept_eula": true,
+        })))
+    }
+
+    /// The body of `/servers/create-from-pack` for a pack version: the panel
+    /// uses its server files when it has them, else builds from the client
+    /// pack, as this PC does.
+    fn panel_pack_body(&self, p: &PackFiles, cx: &App) -> Result<serde_json::Value, String> {
+        // The panel has no download window for a website-only pack.
+        if p.needs_zip() {
+            return Err(format!(
+                "{} can only be downloaded from the CurseForge website, so a Hopper Server can't get it. Host it on this PC instead.",
+                p.name
+            ));
+        }
+        let (mr, project, file) = match &p.build {
+            // Modrinth server files carry no CurseForge server pack id.
+            Build::ServerFiles(f) => (f.server_file == 0 && hopper::modrinth::is_mr(f.project), f.project, f.pack_file),
+            Build::ClientPack(pack, file) => (pack.modrinth.is_some(), pack.id, file.id),
+        };
+        // Modrinth's own ids: the numbers Hopper keys them by only map back
+        // in this process.
+        let id = |n: u64| if mr { hopper::modrinth::real_id(n).unwrap_or_default() } else { n.to_string() };
+        let (project, file) = (id(project), id(file));
+        if project.is_empty() || file.is_empty() {
+            return Err(format!("Couldn't look up {} on Modrinth. Open it again from Browse.", p.name));
+        }
+        let port = self.port.read(cx).value().trim().to_string();
+        let port: Option<u16> = if port.is_empty() { None } else { Some(port.parse().map_err(|_| "The port must be a number.")?) };
+        if !self.eula {
+            return Err("Agree to the Minecraft EULA to make a server.".into());
+        }
+        Ok(serde_json::json!({
+            "source": if mr { "modrinth" } else { "curseforge" },
+            "project": project,
+            "file": file,
+            "name": format!("{} server", p.name),
+            "memory_mb": (self.memory.read(cx).value().start() * 1024.0).round() as u32,
+            "port": port,
             "address": self.address.read(cx).value().trim(),
             "accept_eula": true,
         }))
@@ -389,7 +433,7 @@ impl HostForm {
     /// server made from an instance is paired with it, ready for Sync.
     fn create_on_panel(form: &Entity<Self>, panel: &str, window: &mut Window, cx: &mut App) -> bool {
         let this = form.read(cx);
-        let Ok(body) = this.panel_body(cx) else { return false };
+        let Ok((route, body)) = this.panel_body(cx) else { return false };
         let inst = match &this.source {
             Source::Instance(r) => Some(r.clone()),
             _ => None,
@@ -410,7 +454,7 @@ impl HostForm {
         cx.spawn(async move |cx| {
             let r = cx
                 .background_spawn(async move {
-                    let r = client.run_job("/servers/create", body, &job);
+                    let r = client.run_job(route, body, &job);
                     job.finish(&r);
                     r.map(|v| (v, client.panel.clone()))
                 })
@@ -621,6 +665,7 @@ impl Render for HostForm {
             Source::Files(p) => Some(p.clone()),
             _ => None,
         };
+        let on_panel = self.place.is_some();
         let view = cx.entity();
         let roots: Vec<PathBuf> = instances.iter().map(|(r, _)| r.clone()).collect();
         let source_field = Field::new()
@@ -682,6 +727,9 @@ impl Render for HostForm {
                         p.game_version
                     );
                     match (&self.zip, &p.build) {
+                        _ if on_panel => format!(
+                            "Its server files, or built from the pack if it has none, on {on}."
+                        ),
                         (Some(z), _) => format!(
                             "From {}, the zip you downloaded.",
                             z.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
@@ -713,7 +761,7 @@ impl Render for HostForm {
                                 .child(div().font_semibold().child(p.name.clone()))
                                 .child(widgets::caption(p.version.clone(), cx)),
                         )
-                        .children(self.website_only_notice(p, cx)),
+                        .when(!on_panel, |c| c.children(self.website_only_notice(p, cx))),
                 ),
             None => source_field,
         };
@@ -757,8 +805,7 @@ impl Render for HostForm {
         );
         let problem = self.problem(cx);
         let hosted_root = self.store.read(cx).hosted_root();
-        let on_panel = self.place.is_some();
-        // This PC, then each paired Hopper Server (not for a pack's files).
+        // This PC, then each paired Hopper Server.
         let panels: Vec<(String, String)> = self
             .store
             .read(cx)
@@ -767,7 +814,7 @@ impl Render for HostForm {
             .iter()
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
-        let place_field = (!panels.is_empty() && files.is_none()).then(|| {
+        let place_field = (!panels.is_empty()).then(|| {
             let current = match &self.place {
                 Some(id) => panels.iter().find(|(i, _)| i == id).map_or("Hopper Server".to_string(), |(_, n)| format!("{n} · Hopper Server")),
                 None => "This PC".to_string(),
@@ -778,7 +825,9 @@ impl Render for HostForm {
             let view = cx.entity();
             Field::new()
                 .label("Where")
-                .description(if on_panel {
+                .description(if on_panel && files.is_some() {
+                    "The panel downloads the pack, the server and Java itself."
+                } else if on_panel {
                     "The panel downloads the server and Java itself. Mods from an instance go over on the Sync tab after."
                 } else {
                     "Runs on this PC while Hopper is open."
@@ -886,11 +935,17 @@ pub fn open(store: Entity<Store>, from: Option<PathBuf>, window: &mut Window, cx
 }
 
 /// Opens the New server dialog for a pack's server files (from Browse):
-/// the server is built from them alone, no instance needed.
-pub fn open_files(store: Entity<Store>, pack: PackFiles, window: &mut Window, cx: &mut App) {
+/// the server is built from them alone, no instance needed. On a paired
+/// Hopper Server (`panel`, by id) when given, else on this PC.
+pub fn open_files(store: Entity<Store>, pack: PackFiles, panel: Option<String>, window: &mut Window, cx: &mut App) {
     let form = cx.new(|cx| {
         let mut f = HostForm::new(store, None, window, cx);
         f.source = Source::Files(Rc::new(pack));
+        if panel.is_some() {
+            f.place = panel;
+            // The panel picks a free port.
+            f.port.update(cx, |p, cx| p.set_value("", window, cx));
+        }
         f
     });
     open_form(form, window, cx);
@@ -901,6 +956,7 @@ pub fn open_for_files(
     store: Entity<Store>,
     files: hopper::browse::ServerFiles,
     name: String,
+    panel: Option<String>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -923,7 +979,7 @@ pub fn open_for_files(
                 Ok((v, c)) => {
                     let mut p = PackFiles::new(Build::ServerFiles(files), name, &v);
                     p.check = c;
-                    open_files(store, p, window, cx)
+                    open_files(store, p, panel, window, cx)
                 }
                 Err(e) => window.push_notification(
                     gpui_kit::component::notification::Notification::error(format!(
@@ -939,7 +995,13 @@ pub fn open_for_files(
 
 /// Looks up the newest version of `pack` (a modpack without server
 /// files), then opens [`open_files`] to build a server from the client pack.
-pub fn open_for_client_pack(store: Entity<Store>, pack: hopper::cf::Mod, window: &mut Window, cx: &mut App) {
+pub fn open_for_client_pack(
+    store: Entity<Store>,
+    pack: hopper::cf::Mod,
+    panel: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let handle = window.window_handle();
     cx.spawn(async move |cx| {
         let p2 = pack.clone();
@@ -957,7 +1019,7 @@ pub fn open_for_client_pack(store: Entity<Store>, pack: hopper::cf::Mod, window:
                     let build = Build::ClientPack(Box::new(pack), Box::new(f.clone()));
                     let mut p = PackFiles::new(build, name, &f);
                     p.check = c;
-                    open_files(store, p, window, cx)
+                    open_files(store, p, panel, window, cx)
                 }
                 Err(e) => window.push_notification(
                     gpui_kit::component::notification::Notification::error(format!(

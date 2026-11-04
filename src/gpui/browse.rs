@@ -1128,6 +1128,7 @@ impl BrowseView {
             return self.build_button(m, id, long, cx);
         };
         let (store, name, pack) = (self.store.clone(), m.name.clone(), m.clone());
+        let panels = paired_panels(&self.store, cx);
         Some(
             Button::new(id)
                 .xsmall()
@@ -1141,29 +1142,41 @@ impl BrowseView {
                     let (s3, p3) = (store.clone(), pack.clone());
                     let pid = pack.id;
                     // Hosting is using server tools: it turns them on.
-                    menu.item(
-                        PopupMenuItem::new("Download the server pack…")
-                            .icon(IconName::Download)
-                            .on_click(move |_, _, cx| {
-                                s1.update(cx, |s, _| s.note_server_files(pid));
-                                crate::dialogs::save_server_files(s1.clone(), f1.clone(), n1.clone(), cx)
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Host a server on this PC…")
-                            .icon(IconName::Server)
-                            .on_click(move |_, window, cx| {
-                                s2.update(cx, |s, cx| s.set_server_tools(true, cx));
-                                crate::host_dialog::open_for_files(s2.clone(), f2.clone(), n2.clone(), window, cx)
-                            }),
-                    )
-                    .separator()
-                    .item(
+                    let mut menu = menu
+                        .item(
+                            PopupMenuItem::new("Download the server pack…")
+                                .icon(IconName::Download)
+                                .on_click(move |_, _, cx| {
+                                    s1.update(cx, |s, _| s.note_server_files(pid));
+                                    crate::dialogs::save_server_files(s1.clone(), f1.clone(), n1.clone(), cx)
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Host a server on this PC…")
+                                .icon(IconName::Server)
+                                .on_click(move |_, window, cx| {
+                                    s2.update(cx, |s, cx| s.set_server_tools(true, cx));
+                                    crate::host_dialog::open_for_files(s2.clone(), f2.clone(), n2.clone(), None, window, cx)
+                                }),
+                        );
+                    // Each paired Hopper Server: the panel gets the files itself.
+                    for (panel, label) in &panels {
+                        let (s, f, n, panel) = (store.clone(), files.clone(), name.clone(), panel.clone());
+                        menu = menu.item(
+                            PopupMenuItem::new(format!("Host on {label}…"))
+                                .icon(IconName::Server)
+                                .on_click(move |_, window, cx| {
+                                    s.update(cx, |s, cx| s.set_server_tools(true, cx));
+                                    crate::host_dialog::open_for_files(s.clone(), f.clone(), n.clone(), Some(panel.clone()), window, cx)
+                                }),
+                        );
+                    }
+                    menu.separator().item(
                         PopupMenuItem::new("Build a server from this pack instead…")
                             .icon(IconName::ServerCog)
                             .on_click(move |_, window, cx| {
                                 s3.update(cx, |s, cx| s.set_server_tools(true, cx));
-                                crate::host_dialog::open_for_client_pack(s3.clone(), p3.clone(), window, cx)
+                                crate::host_dialog::open_for_client_pack(s3.clone(), p3.clone(), None, window, cx)
                             }),
                     )
                 })
@@ -1173,24 +1186,46 @@ impl BrowseView {
 
     /// For a pack with no server files (as far as known): build a server
     /// from its client pack, leaving client-only mods out.
-    fn build_button(&self, m: &cf::Mod, id: ElementId, long: bool, _: &Context<Self>) -> Option<AnyElement> {
+    fn build_button(&self, m: &cf::Mod, id: ElementId, long: bool, cx: &Context<Self>) -> Option<AnyElement> {
         // A Modrinth pack not looked up yet may still have server files.
         if m.modrinth.is_some() && !self.server_files.contains_key(&m.id) {
             return None;
         }
         let (store, pack) = (self.store.clone(), m.clone());
+        let button = Button::new(id)
+            .xsmall()
+            .ghost()
+            .icon(IconName::ServerCog)
+            .label(if long { "Build a server from this pack" } else { "Build a server" });
+        let panels = paired_panels(&self.store, cx);
+        if panels.is_empty() {
+            return Some(
+                button
+                    .tooltip("This pack has no official server files. Click to build a server on this PC from the pack, leaving client-only mods out")
+                    .on_click(move |_, window, cx| {
+                        // Not a click on the card: the page stays as it is.
+                        cx.stop_propagation();
+                        store.update(cx, |s, cx| s.set_server_tools(true, cx));
+                        crate::host_dialog::open_for_client_pack(store.clone(), pack.clone(), None, window, cx)
+                    })
+                    .into_any_element(),
+            );
+        }
+        // With a Hopper Server paired: where to build it.
         Some(
-            Button::new(id)
-                .xsmall()
-                .ghost()
-                .icon(IconName::ServerCog)
-                .label(if long { "Build a server from this pack" } else { "Build a server" })
-                .tooltip("This pack has no official server files. Click to build a server on this PC from the pack, leaving client-only mods out")
-                .on_click(move |_, window, cx| {
-                    // Not a click on the card: the page stays as it is.
-                    cx.stop_propagation();
-                    store.update(cx, |s, cx| s.set_server_tools(true, cx));
-                    crate::host_dialog::open_for_client_pack(store.clone(), pack.clone(), window, cx)
+            button
+                .tooltip("This pack has no official server files. Build a server from the pack, leaving client-only mods out")
+                .dropdown_menu(move |mut menu, _, _| {
+                    let places = std::iter::once((None, "On this PC…".to_string()))
+                        .chain(panels.iter().map(|(id, n)| (Some(id.clone()), format!("On {n}…"))));
+                    for (panel, label) in places {
+                        let (s, p) = (store.clone(), pack.clone());
+                        menu = menu.item(PopupMenuItem::new(label).icon(IconName::ServerCog).on_click(move |_, window, cx| {
+                            s.update(cx, |s, cx| s.set_server_tools(true, cx));
+                            crate::host_dialog::open_for_client_pack(s.clone(), p.clone(), panel.clone(), window, cx)
+                        }));
+                    }
+                    menu
                 })
                 .into_any_element(),
         )
@@ -3212,21 +3247,52 @@ impl BrowseView {
                             .children(self.server_badge(m, "detail-server".into(), true, cx))
                             .children(self.server_files_of(m).map(|files| {
                                 let (store, name) = (self.store.clone(), m.name.clone());
-                                Button::new("detail-host")
+                                let button = Button::new("detail-host")
                                     .small()
                                     .ghost()
                                     .icon(IconName::Server)
-                                    .label("Host a server")
-                                    .tooltip("Make a server on this PC from the pack's server files")
-                                    .on_click(move |_, window, cx| {
-                                        crate::host_dialog::open_for_files(
-                                            store.clone(),
-                                            files.clone(),
-                                            name.clone(),
-                                            window,
-                                            cx,
-                                        )
+                                    .label("Host a server");
+                                let panels = paired_panels(&self.store, cx);
+                                if panels.is_empty() {
+                                    return button
+                                        .tooltip("Make a server on this PC from the pack's server files")
+                                        .on_click(move |_, window, cx| {
+                                            crate::host_dialog::open_for_files(
+                                                store.clone(),
+                                                files.clone(),
+                                                name.clone(),
+                                                None,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                        .into_any_element();
+                                }
+                                // With a Hopper Server paired: where to host it.
+                                button
+                                    .tooltip("Make a server from the pack's server files")
+                                    .dropdown_menu(move |mut menu, _, _| {
+                                        let places = std::iter::once((None, "On this PC…".to_string()))
+                                            .chain(panels.iter().map(|(id, n)| (Some(id.clone()), format!("On {n}…"))));
+                                        for (panel, label) in places {
+                                            let (s, f, n) = (store.clone(), files.clone(), name.clone());
+                                            menu = menu.item(PopupMenuItem::new(label).icon(IconName::Server).on_click(
+                                                move |_, window, cx| {
+                                                    s.update(cx, |s, cx| s.set_server_tools(true, cx));
+                                                    crate::host_dialog::open_for_files(
+                                                        s.clone(),
+                                                        f.clone(),
+                                                        n.clone(),
+                                                        panel.clone(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                },
+                                            ));
+                                        }
+                                        menu
                                     })
+                                    .into_any_element()
                             }))
 
                             .children(m.links.extra().into_iter().map(|(label, url)| {
@@ -4002,6 +4068,11 @@ fn stat(icon: IconName, text: impl Into<SharedString>, cx: &App) -> Div {
 
 /// What a click on a category does: filters Browse by it.
 type OnCategory = Rc<dyn Fn(u64, &mut Window, &mut App)>;
+
+/// The paired Hopper Servers a pack can be hosted on, as (id, name).
+fn paired_panels(store: &Entity<Store>, cx: &App) -> Vec<(String, String)> {
+    store.read(cx).settings().hopper_panels.iter().map(|p| (p.id.clone(), p.name.clone())).collect()
+}
 
 /// Downloads, last update and categories; `full` adds when it came out
 /// and words for each. With `on_cat`, each category is a link.
