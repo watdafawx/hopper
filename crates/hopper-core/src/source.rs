@@ -94,7 +94,7 @@ pub fn description(id: u64) -> anyhow::Result<Vec<Block>> {
 }
 
 /// A project page link on CurseForge or Modrinth, read from its URL.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectLink {
     /// CurseForge: a class (None when the URL doesn't say) and a slug.
     Cf(Option<u32>, String),
@@ -154,6 +154,22 @@ pub fn project_from_link(link: &ProjectLink) -> anyhow::Result<u64> {
             .map(|m| m.id)
             .ok_or_else(|| anyhow::anyhow!("no CurseForge project \"{slug}\"")),
         ProjectLink::Mr(slug) => Ok(modrinth::num_id(&modrinth::project(slug)?.id)),
+    }
+}
+
+/// The project a page link points at, ready to show: one lookup by slug
+/// rather than the id first and the project after.
+pub fn mod_from_link(link: &ProjectLink) -> anyhow::Result<cf::Mod> {
+    match link {
+        ProjectLink::CfId(id) => cf::get_mod(*id),
+        ProjectLink::Cf(class, slug) => {
+            cf::by_slug(*class, slug)?.ok_or_else(|| anyhow::anyhow!("no CurseForge project \"{slug}\""))
+        }
+        ProjectLink::Mr(slug) => {
+            let p = modrinth::project(slug)?;
+            let owner = modrinth::team_owners(std::slice::from_ref(&p.team)).unwrap_or_default();
+            Ok(modrinth::project_to_mod(&p, owner.get(&p.team).map_or("", String::as_str)))
+        }
     }
 }
 
