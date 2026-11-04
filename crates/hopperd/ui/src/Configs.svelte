@@ -232,7 +232,7 @@
   .body { flex: 1; min-height: 0; display: grid; grid-template-columns: 260px minmax(0, 1fr); }
   .mods { border-right: 1px solid var(--line); overflow: auto; padding: 6px; display: flex; flex-direction: column; gap: 1px; }
   .grp { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; padding: 10px 10px 4px; }
-  .mrow { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: var(--radius); text-align: left; color: var(--text); min-height: 32px; }
+  .mrow { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: var(--radius); text-align: left; color: var(--text); min-height: 32px; /* A pack has hundreds of mods: the browser skips drawing the ones off screen. */ content-visibility: auto; contain-intrinsic-size: auto 32px; }
   .mrow img, .mh img { border-radius: var(--radius-sm); flex: none; }
   .sic.ph { background: var(--raise); color: var(--subtle); }
   .sic.q { background: var(--raise); color: var(--muted); }

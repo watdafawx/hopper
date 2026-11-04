@@ -19,6 +19,7 @@ use hopper::configindex::Side;
 use hopper::server::ServerInfo;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 /// Which way a picked setting goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -87,7 +88,22 @@ pub struct CompareView {
     fixed: HashMap<String, String>,
     /// Drawn inside another list (Sync): no server chip, a set height.
     embedded: bool,
+    /// The lines shown (file headings and settings): only those in view are
+    /// built, and the list is remade only when what it shows changes.
+    list: ListState,
+    lines: Rc<Vec<Line>>,
+    lines_key: Option<LinesKey>,
 }
+
+#[derive(Clone)]
+enum Line {
+    Head(String),
+    Pair(String, usize),
+}
+
+/// The files shown, whether all settings are, and how many each has.
+#[derive(Clone, PartialEq)]
+struct LinesKey(Vec<(String, Option<usize>)>, bool);
 
 /// Settings were applied (Sync compares its files again).
 pub struct CompareApplied;
@@ -96,7 +112,7 @@ impl EventEmitter<CompareApplied> for CompareView {}
 
 impl CompareView {
     pub fn new(store: Entity<Store>, root: PathBuf, server: ServerInfo, _cx: &mut Context<Self>) -> Self {
-        Self { store, root, server, only: None, files: HashMap::new(), loading: false, all: false, picks: BTreeMap::new(), applying: false, fixed: HashMap::new(), embedded: false }
+        Self { store, root, server, only: None, files: HashMap::new(), loading: false, all: false, picks: BTreeMap::new(), applying: false, fixed: HashMap::new(), embedded: false, list: ListState::new(0, ListAlignment::Top, px(400.)), lines: Rc::new(Vec::new()), lines_key: None }
     }
 
     /// One file of Sync › Configs: `rel` on this PC beside `srel` on the
@@ -231,7 +247,8 @@ impl CompareView {
         .detach();
     }
 
-    fn file_block(&self, rel: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// A file's heading and what to say about it; its settings follow as rows.
+    fn block_head(&self, rel: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
         let side = hopper::configindex::side_of(rel);
@@ -280,71 +297,75 @@ impl CompareView {
         if shown.is_empty() {
             col = col.child(div().px_3().child(widgets::caption("The same on both sides.", cx).text_xs()));
         }
-        for p in shown {
-            let k = (rel.to_string(), p.entry.path.clone(), p.entry.key.clone());
-            let pick = self.picks.get(&k).copied();
-            let cell = |v: &configedit::Value, on: bool, dim: bool| {
-                div()
-                    .w(rems(10.))
-                    .flex_none()
-                    .px_2()
-                    .py_0p5()
-                    .rounded(theme.radius)
-                    .border_1()
-                    .border_color(if on { theme.primary.opacity(0.6) } else { theme.border })
-                    .when(dim, |d| d.text_color(theme.muted_foreground))
-                    .font_family("Consolas")
-                    .text_xs()
-                    .truncate()
-                    .child(v.text())
-            };
-            let arrow = |id: String, dir: Dir, icon: IconName, tip: &str, k: (String, Vec<String>, String)| {
-                Button::new(SharedString::from(id))
-                    .xsmall()
-                    .map(|b| if pick == Some(dir) { b.primary() } else { b.ghost() })
-                    .icon(icon)
-                    .tooltip(tip.to_string())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.picks.get(&k) == Some(&dir) {
-                            this.picks.remove(&k);
-                        } else {
-                            this.picks.insert(k.clone(), dir);
-                        }
-                        cx.notify();
-                    }))
-            };
-            let id = format!("cmp:{rel}:{}:{}", p.entry.path.join("."), p.entry.key);
-            let server_dims = side == Side::Server;
-            let row = h_flex()
-                .gap_3()
-                .px_3()
-                .py_1p5()
-                .rounded(theme.radius)
-                .when(p.differs(), |d| d.bg(theme.primary.opacity(0.05)))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().text_sm().font_semibold().truncate().child(p.entry.label()))
-                        .child(div().text_xs().font_family("Consolas").text_color(theme.muted_foreground).truncate().child(p.entry.key.clone()))
-                        .when(!p.entry.comment.is_empty(), |d| d.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(p.entry.comment.clone()))),
-                )
-                .child(cell(&p.client, pick == Some(Dir::ToServer), server_dims))
-                .child(
-                    h_flex()
-                        .w(rems(4.))
-                        .flex_none()
-                        .gap_0p5()
-                        .justify_center()
-                        .when(p.differs(), |d| {
-                            d.child(arrow(format!("{id}:s"), Dir::ToServer, IconName::ArrowRight, "Copy this PC's value to the server", k.clone()))
-                                .child(arrow(format!("{id}:c"), Dir::ToPc, IconName::ArrowLeft, "Copy the server's value to this PC", k.clone()))
-                        }),
-                )
-                .child(cell(&p.server, pick == Some(Dir::ToPc), false));
-            col = col.child(row);
-        }
         col.into_any_element()
+    }
+
+    /// One setting's row: this PC's value, the arrows, the server's value.
+    fn pair_row(&self, rel: &str, p: &Pair, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let side = hopper::configindex::side_of(rel);
+        let k = (rel.to_string(), p.entry.path.clone(), p.entry.key.clone());
+        let pick = self.picks.get(&k).copied();
+        let cell = |v: &configedit::Value, on: bool, dim: bool| {
+            div()
+                .w(rems(10.))
+                .flex_none()
+                .px_2()
+                .py_0p5()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(if on { theme.primary.opacity(0.6) } else { theme.border })
+                .when(dim, |d| d.text_color(theme.muted_foreground))
+                .font_family("Consolas")
+                .text_xs()
+                .truncate()
+                .child(v.text())
+        };
+        let arrow = |id: String, dir: Dir, icon: IconName, tip: &str, k: (String, Vec<String>, String)| {
+            Button::new(SharedString::from(id))
+                .xsmall()
+                .map(|b| if pick == Some(dir) { b.primary() } else { b.ghost() })
+                .icon(icon)
+                .tooltip(tip.to_string())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if this.picks.get(&k) == Some(&dir) {
+                        this.picks.remove(&k);
+                    } else {
+                        this.picks.insert(k.clone(), dir);
+                    }
+                    cx.notify();
+                }))
+        };
+        let id = format!("cmp:{rel}:{}:{}", p.entry.path.join("."), p.entry.key);
+        let server_dims = side == Side::Server;
+        let row = h_flex()
+            .gap_3()
+            .px_3()
+            .py_1p5()
+            .rounded(theme.radius)
+            .when(p.differs(), |d| d.bg(theme.primary.opacity(0.05)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().font_semibold().truncate().child(p.entry.label()))
+                    .child(div().text_xs().font_family("Consolas").text_color(theme.muted_foreground).truncate().child(p.entry.key.clone()))
+                    .when(!p.entry.comment.is_empty(), |d| d.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(p.entry.comment.clone()))),
+            )
+            .child(cell(&p.client, pick == Some(Dir::ToServer), server_dims))
+            .child(
+                h_flex()
+                    .w(rems(4.))
+                    .flex_none()
+                    .gap_0p5()
+                    .justify_center()
+                    .when(p.differs(), |d| {
+                        d.child(arrow(format!("{id}:s"), Dir::ToServer, IconName::ArrowRight, "Copy this PC's value to the server", k.clone()))
+                            .child(arrow(format!("{id}:c"), Dir::ToPc, IconName::ArrowLeft, "Copy the server's value to this PC", k.clone()))
+                    }),
+            )
+            .child(cell(&p.server, pick == Some(Dir::ToPc), false));
+        row.into_any_element()
     }
 }
 
@@ -380,7 +401,6 @@ impl Render for CompareView {
             .child(h_flex().w(rems(10.)).gap_1().child(Icon::new(IconName::Monitor).xsmall()).child("This PC"))
             .child(div().w(rems(4.)))
             .child(h_flex().w(rems(10.)).gap_1().child(Icon::new(IconName::Server).xsmall()).child("Server"));
-        let mut body = v_flex().gap_1().pb_4();
         // Server-read files first: they're the ones that matter.
         let mut order = files.clone();
         order.sort_by_key(|r| match hopper::configindex::side_of(r) {
@@ -389,12 +409,43 @@ impl Render for CompareView {
             Side::Unknown | Side::Startup => 2,
             Side::Client => 3,
         });
-        for r in &order {
-            body = body.child(self.file_block(r, cx));
+        let key = LinesKey(order.iter().map(|r| (r.clone(), self.files.get(r).map(|c| c.pairs.as_ref().map_or(0, Vec::len)))).collect(), self.all);
+        if self.lines_key.as_ref() != Some(&key) {
+            let mut lines = Vec::new();
+            for r in &order {
+                lines.push(Line::Head(r.clone()));
+                if let Some(Ok(pairs)) = self.files.get(r).map(|c| &c.pairs) {
+                    lines.extend(pairs.iter().enumerate().filter(|(_, p)| self.all || p.differs()).map(|(i, _)| Line::Pair(r.clone(), i)));
+                }
+            }
+            self.list.reset(lines.len());
+            self.lines = Rc::new(lines);
+            self.lines_key = Some(key);
         }
-        if files.is_empty() {
-            body = body.child(widgets::empty_state(IconName::GitCompare, "Pick a mod to compare", None, cx));
-        }
+        let body: AnyElement = if files.is_empty() {
+            widgets::empty_state(IconName::GitCompare, "Pick a mod to compare", None, cx).into_any_element()
+        } else {
+            div()
+                .size_full()
+                .child(
+                    list(
+                        self.list.clone(),
+                        cx.processor(|this, ix: usize, _, cx| match this.lines.get(ix).cloned() {
+                            Some(Line::Head(r)) => this.block_head(&r, cx),
+                            Some(Line::Pair(r, i)) => {
+                                let pair = this.files.get(&r).and_then(|c| c.pairs.as_ref().ok()).and_then(|p| p.get(i)).cloned();
+                                match pair {
+                                    Some(p) => this.pair_row(&r, &p, cx),
+                                    None => div().into_any_element(),
+                                }
+                            }
+                            None => div().into_any_element(),
+                        }),
+                    )
+                    .size_full(),
+                )
+                .into_any_element()
+        };
         let (to_s, to_c) = (self.picks.values().filter(|d| **d == Dir::ToServer).count(), self.picks.values().filter(|d| **d == Dir::ToPc).count());
         let n = self.picks.len();
         let bar = h_flex()
@@ -424,7 +475,8 @@ impl Render for CompareView {
             .size_full()
             .child(head)
             .child(cols)
-            .child(div().id("cmp-body").flex_1().min_h_0().overflow_y_scroll().child(body).when(self.loading, |d| d.child(div().px_3().child(widgets::caption("Reading the server's copies…", cx)))))
+            .child(div().id("cmp-body").flex_1().min_h_0().child(body))
+            .when(self.loading, |d| d.child(div().px_3().child(widgets::caption("Reading the server's copies…", cx))))
             .child(bar)
     }
 }

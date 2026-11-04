@@ -19,6 +19,7 @@ use gpui_kit::component::input::{
     Editor, EditorState, Input, InputEvent, InputState, Position, RangeDecoration, RangeDecorationCollection, RangeDecorationStyle,
 };
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -126,6 +127,28 @@ enum Row {
     Entry(usize, usize),
 }
 
+/// What the settings list was built from: when none of it changed since
+/// the last frame (a scroll frame), the rows and their heights stay.
+#[derive(Clone, PartialEq)]
+struct RowsKey {
+    rel: String,
+    query: String,
+    desc: bool,
+    changed_only: bool,
+    edits: usize,
+    text_len: usize,
+    sections: usize,
+    editing: bool,
+    edit_error: bool,
+    errors: usize,
+    focus: Option<usize>,
+}
+
+struct ChipInfo {
+    short: String,
+    live: Option<(String, SharedString)>,
+}
+
 fn file_name(rel: &str) -> String {
     rel.rsplit('/').next().unwrap_or(rel).to_string()
 }
@@ -185,7 +208,17 @@ pub struct ConfigView {
     review: bool,
     review_off: HashSet<String>,
     focus: Option<Focus>,
-    scroll: ScrollHandle,
+    /// The settings list: only the rows in view are built, so a file with
+    /// thousands of settings scrolls as smoothly as one with ten.
+    list: ListState,
+    /// The rows the list shows, and what they were made from; rebuilt only
+    /// when that changes, never by scrolling.
+    rows: Rc<Vec<Row>>,
+    rows_key: Option<RowsKey>,
+    /// Per file chip: its short name and the "who reads it" label, worked out
+    /// once (the label scans every config file of the instance).
+    chip_info: HashMap<String, ChipInfo>,
+    chip_info_for: usize,
     scrolled: bool,
     _mark: Option<RangeDecorationCollection>,
     _subs: Vec<Subscription>,
@@ -256,7 +289,11 @@ impl ConfigView {
             review: false,
             review_off: HashSet::new(),
             focus,
-            scroll: ScrollHandle::new(),
+            list: ListState::new(0, ListAlignment::Top, px(600.)),
+            rows: Rc::new(Vec::new()),
+            rows_key: None,
+            chip_info: HashMap::new(),
+            chip_info_for: 0,
             scrolled: false,
             _mark: None,
             _subs: subs,
@@ -609,6 +646,50 @@ impl ConfigView {
         q.split_whitespace().all(|w| hay.contains(w))
     }
 
+    fn rows_key(&self) -> RowsKey {
+        let s = self.cur();
+        RowsKey {
+            rel: self.rel.clone(),
+            query: self.query.clone(),
+            desc: self.desc,
+            changed_only: self.changed_only,
+            edits: s.map_or(0, |s| s.edits.len()),
+            text_len: s.map_or(0, |s| s.text.len()),
+            sections: s.and_then(|s| s.sections.as_ref().ok()).map_or(0, |v| v.as_ptr() as usize),
+            editing: self.editing.is_some(),
+            edit_error: self.edit_error.is_some(),
+            errors: self.errors.len(),
+            focus: self.focus.as_ref().map(|f| f.line),
+        }
+    }
+
+    /// Remakes the row list for `key`. The scroll spot stays when it's the
+    /// same file and search (an edit changed it), else the list starts at the
+    /// top, or at the setting an opened-at line points to.
+    fn rebuild_rows(&mut self, key: RowsKey) {
+        let same = self.rows_key.as_ref().is_some_and(|k| k.rel == key.rel && k.query == key.query && k.desc == key.desc && k.changed_only == key.changed_only);
+        let top = self.list.logical_scroll_top();
+        let rows = self.rows();
+        self.list.reset(rows.len());
+        if same && !rows.is_empty() {
+            self.list.scroll_to(ListOffset { item_ix: top.item_ix.min(rows.len() - 1), offset_in_item: top.offset_in_item });
+        }
+        if !self.scrolled
+            && let Some(f) = &self.focus
+        {
+            let target = rows.iter().position(|r| match r {
+                Row::Entry(si, ei) => self.cur().and_then(|s| s.sections.as_ref().ok()).is_some_and(|s| s[*si].entries[*ei].line == f.line),
+                _ => false,
+            });
+            if let Some(ix) = target {
+                self.list.scroll_to(ListOffset { item_ix: ix.saturating_sub(1), offset_in_item: px(0.) });
+            }
+            self.scrolled = true;
+        }
+        self.rows = Rc::new(rows);
+        self.rows_key = Some(key);
+    }
+
     fn rows(&self) -> Vec<Row> {
         let Some(Ok(sections)) = self.cur().map(|s| &s.sections) else { return Vec::new() };
         let q = self.query.trim().to_lowercase();
@@ -850,6 +931,7 @@ impl ConfigView {
             Row::Head(si) => {
                 let s = &sections[si];
                 v_flex()
+                    .w_full()
                     .pt_3()
                     .pb_1()
                     .px_3()
@@ -931,6 +1013,7 @@ impl ConfigView {
                 let row = if self.host == Host::Panel {
                     v_flex()
                         .id(SharedString::from(format!("{id}-row")))
+                        .w_full()
                         .gap_1p5()
                         .px_3()
                         .py_2()
@@ -938,7 +1021,7 @@ impl ConfigView {
                         .child(h_flex().gap_1().items_start().child(div().flex_1().min_w_0().child(control)).child(reset_slot))
                 } else {
                     let ctl_w = if self.host == Host::Tab { 18. } else { 16. };
-                    v_flex().id(SharedString::from(format!("{id}-row"))).px_3().py_2().child(
+                    v_flex().id(SharedString::from(format!("{id}-row"))).w_full().px_3().py_2().child(
                         h_flex()
                             .gap_4()
                             .items_start()
@@ -1087,20 +1170,23 @@ fn color_text(v: &Value) -> String {
 }
 
 impl Render for ConfigView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let rem = window.rem_size();
         let readable = self.cur().is_some_and(|s| s.sections.is_ok());
         let has_format = Format::of(&self.rel).is_some();
         let problem = self.cur().and_then(|s| s.problem.clone());
         let files = self.visible_files();
 
-        // The files: chips with who reads each.
-        let chips = h_flex().gap_1p5().flex_wrap().children(files.iter().map(|f| {
-            let on = *f == self.rel;
-            let side = hopper::configindex::side_of(f);
-            let dirty = self.states.get(f).is_some_and(FileState::dirty);
-            let rel = f.clone();
+        // The files: chips with who reads each. The names and labels come from
+        // a cache: working them out scans every config file of the instance.
+        if self.chip_info_for != self.all_files.len() {
+            self.chip_info.clear();
+            self.chip_info_for = self.all_files.len();
+        }
+        for f in &files {
+            if self.chip_info.contains_key(f) {
+                continue;
+            }
             // Which copy of a server config the game reads (NeoForge 21.1).
             let world_copies = hopper::configcompare::overrides(f, &self.all_files);
             let live = hopper::configcompare::live_label(f, !world_copies.is_empty()).map(|l| {
@@ -1109,8 +1195,17 @@ impl Render for ConfigView {
                 } else {
                     format!("{} has its own copy, which wins in that world.", world_copies.iter().map(|r| r.split('/').nth(1).unwrap_or("A world")).collect::<Vec<_>>().join(", "))
                 };
-                (l, SharedString::from(tip))
+                (l.to_string(), SharedString::from(tip))
             });
+            self.chip_info.insert(f.clone(), ChipInfo { short: short_name(f, &self.files), live });
+        }
+        let chips = h_flex().gap_1p5().flex_wrap().children(files.iter().map(|f| {
+            let on = *f == self.rel;
+            let side = hopper::configindex::side_of(f);
+            let dirty = self.states.get(f).is_some_and(FileState::dirty);
+            let rel = f.clone();
+            let info = &self.chip_info[f];
+            let live = info.live.clone().map(|(l, tip)| (l, tip));
             let side_color = match side {
                 Side::Client => theme.muted_foreground,
                 Side::Common => theme.info,
@@ -1128,7 +1223,7 @@ impl Render for ConfigView {
                 .clickable(cx)
                 .map(|d| if on { d.bg(theme.primary.opacity(0.12)).border_color(theme.primary.opacity(0.35)).text_color(theme.foreground) } else { d.border_color(theme.border).text_color(theme.muted_foreground).hover(|s| widgets::row_hover(s, cx)) })
                 .when(dirty, |d| d.child(div().size(px(6.)).rounded_full().bg(theme.primary)))
-                .child(short_name(f, &self.files))
+                .child(info.short.clone())
                 .when(!side.label().is_empty(), |d| d.child(widgets::chip(side_color).child(side.label())))
                 .when_some(live.clone(), |d, (l, tip)| d.child(div().id(SharedString::from(format!("cfg-live:{f}"))).child(widgets::chip(if l.starts_with("Not used") { theme.muted_foreground } else { theme.success }).child(l)).tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))))
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -1171,25 +1266,11 @@ impl Render for ConfigView {
                 .child(div().flex_1().min_h_0().child(Editor::new(&self.editor).h_full()))
                 .into_any_element()
         } else {
-            let rows = self.rows();
-            if !self.scrolled
-                && let Some(f) = &self.focus
-            {
-                let target = rows.iter().position(|r| match r {
-                    Row::Entry(si, ei) => self.cur().and_then(|s| s.sections.as_ref().ok()).is_some_and(|s| s[*si].entries[*ei].line == f.line),
-                    _ => false,
-                });
-                match target {
-                    Some(ix) if self.scroll.bounds_for_item(ix).is_some() => {
-                        self.scroll.scroll_to_top_of_item(ix.saturating_sub(1));
-                        self.scrolled = true;
-                    }
-                    Some(_) => cx.on_next_frame(window, |_, _, cx| cx.notify()),
-                    None => self.scrolled = true,
-                }
+            let key = self.rows_key();
+            if self.rows_key.as_ref() != Some(&key) {
+                self.rebuild_rows(key);
             }
-            let children: Vec<AnyElement> = rows.into_iter().map(|r| self.render_row(r, rem, window, cx)).collect();
-            if children.is_empty() {
+            if self.rows.is_empty() {
                 widgets::empty_state(
                     IconName::Search,
                     if self.changed_only { "Nothing changed here" } else if self.query.is_empty() { "No settings" } else { "No settings match" },
@@ -1198,7 +1279,25 @@ impl Render for ConfigView {
                 )
                 .into_any_element()
             } else {
-                div().id("cfg-rows").size_full().overflow_y_scroll().track_scroll(&self.scroll).px_1().children(children).into_any_element()
+                div()
+                    .id("cfg-rows")
+                    .size_full()
+                    .px_1()
+                    .child(
+                        list(
+                            self.list.clone(),
+                            cx.processor(|this, ix: usize, window, cx| match this.rows.get(ix).copied() {
+                                Some(r) => {
+                                    let rem = window.rem_size();
+                                    this.render_row(r, rem, window, cx)
+                                }
+                                None => div().into_any_element(),
+                            }),
+                        )
+                        .size_full(),
+                    )
+                    .vertical_scrollbar(&self.list)
+                    .into_any_element()
             }
         };
 

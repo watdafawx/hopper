@@ -194,7 +194,7 @@
   .sh { padding: 12px 12px 4px; }
   .st { font-size: 11.5px; font-weight: 600; color: var(--muted); }
   .wrap { white-space: normal; }
-  .ent { display: flex; align-items: flex-start; gap: 16px; padding: 8px 12px; border-radius: var(--radius); }
+  .ent { display: flex; align-items: flex-start; gap: 16px; padding: 8px 12px; border-radius: var(--radius); /* A file can have thousands of settings: the browser skips drawing the ones off screen. */ content-visibility: auto; contain-intrinsic-size: auto 64px; }
   .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .k { font-size: 13px; font-weight: 600; }
   .cap { color: var(--subtle); }

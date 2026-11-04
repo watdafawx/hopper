@@ -10,11 +10,13 @@ use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::configindex::Side;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -116,7 +118,33 @@ pub struct ConfigsTab {
     /// The compare with the linked server, when it's on.
     compare: Option<Entity<crate::config_compare::CompareView>>,
     compare_on: bool,
+    /// The mod list, built when something it shows changes, never by a
+    /// scroll frame (it sorts every mod by name and counts every setting).
+    cache: Option<ListCache>,
+    /// Bumped whenever the list's inputs change.
+    ver: u64,
+    placeholder_total: Option<usize>,
+    scroll: UniformListScrollHandle,
     _subs: Vec<Subscription>,
+}
+
+/// One line of the mod list.
+#[derive(Clone)]
+enum Item {
+    Head(SharedString),
+    Row(Pick),
+}
+
+/// Height of every line of the mod list, so only the visible ones are built.
+const LINE_H: f32 = 1.9;
+
+struct ListCache {
+    /// What it was built from: the index it read (by address) and `ver`.
+    key: (usize, u64),
+    items: Rc<Vec<Item>>,
+    total: usize,
+    changed_n: usize,
+    unsaved_n: usize,
 }
 
 impl ConfigsTab {
@@ -147,6 +175,10 @@ impl ConfigsTab {
             views: HashMap::new(),
             compare: None,
             compare_on: false,
+            cache: None,
+            ver: 0,
+            placeholder_total: None,
+            scroll: UniformListScrollHandle::new(),
             _subs: subs,
         }
     }
@@ -160,6 +192,7 @@ impl ConfigsTab {
             self.compare = None;
             self.compare_on = false;
             self.index = None;
+            self.ver += 1;
         }
         self.root = Some(root);
         self.refresh_index(cx);
@@ -177,6 +210,7 @@ impl ConfigsTab {
         let idx = config_view::indexes(cx).update(cx, |i, cx| i.get(&root, &store, cx));
         if idx.is_some() {
             self.index = idx;
+            self.ver += 1;
             if !self.query.trim().is_empty() {
                 self.run_search(cx);
             }
@@ -195,6 +229,7 @@ impl ConfigsTab {
         }
         if q.is_empty() {
             self.hits = None;
+            self.ver += 1;
             cx.notify();
             return;
         }
@@ -227,6 +262,7 @@ impl ConfigsTab {
             let _ = this.update(cx, |t, cx| {
                 if t.search_serial == serial {
                     t.hits = Some(hits);
+                    t.ver += 1;
                     cx.notify();
                 }
             });
@@ -283,9 +319,9 @@ impl ConfigsTab {
         });
         let sub = cx.subscribe(&view, |this, _, e: &ConfigViewEvent, cx| {
             if let ConfigViewEvent::Changed = e {
+                this.ver += 1;
                 cx.notify();
             }
-            let _ = this;
         });
         self._subs.push(sub);
         self.views.insert(p.clone(), view.clone());
@@ -294,6 +330,7 @@ impl ConfigsTab {
 
     fn set_filter(&mut self, f: Filter, cx: &mut Context<Self>) {
         self.filter = f;
+        self.ver += 1;
         let changed = f == Filter::Changed;
         for v in self.views.values() {
             v.update(cx, |v, cx| {
@@ -306,6 +343,7 @@ impl ConfigsTab {
 
     fn set_side(&mut self, s: Option<Side>, cx: &mut Context<Self>) {
         self.side = s;
+        self.ver += 1;
         for v in self.views.values() {
             v.update(cx, |v, cx| {
                 v.side = s;
@@ -347,6 +385,45 @@ impl ConfigsTab {
         vec![("Changed", changed), ("All mods", rest), ("Not matched to a mod", unmatched)].into_iter().filter(|(_, v)| !v.is_empty()).collect()
     }
 
+    /// Rebuilds the mod list when what it shows changed since the last frame.
+    fn sync_list(&mut self, idx: &Arc<InstIndex>, cx: &App) {
+        let key = (Arc::as_ptr(idx) as usize, self.ver);
+        if self.cache.as_ref().is_some_and(|c| c.key == key) {
+            return;
+        }
+        let groups = self.groups(cx);
+        let all: Vec<Pick> = groups.iter().flat_map(|(_, v)| v.iter().cloned()).collect();
+        // The first entry when nothing is picked (or the pick is filtered out).
+        if self.picked.as_ref().is_none_or(|p| !all.contains(p) && self.hits.is_some()) {
+            self.picked = all.first().cloned();
+        }
+        let mut items = Vec::new();
+        for (title, picks) in &groups {
+            items.push(Item::Head(format!("{} · {}", title.to_uppercase(), picks.len()).into()));
+            items.extend(picks.iter().take(1500).cloned().map(Item::Row));
+        }
+        self.cache = Some(ListCache {
+            key,
+            items: Rc::new(items),
+            total: idx.total_settings(),
+            changed_n: idx.changed.values().sum(),
+            unsaved_n: self.views.values().map(|v| v.read(cx).unsaved()).sum(),
+        });
+    }
+
+    /// Lines `range` of the mod list.
+    fn list_lines(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(items) = self.cache.as_ref().map(|c| c.items.clone()) else { return Vec::new() };
+        let theme = cx.theme().clone();
+        range
+            .filter_map(|i| items.get(i).cloned())
+            .map(|it| match it {
+                Item::Head(t) => div().w_full().h(rems(LINE_H)).flex_none().px_2().pb_1().flex().items_end().text_xs().font_semibold().text_color(theme.muted_foreground).child(t).into_any_element(),
+                Item::Row(p) => self.list_row(&p, cx),
+            })
+            .collect()
+    }
+
     fn list_row(&self, p: &Pick, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let root = self.root.clone().unwrap_or_default();
@@ -373,7 +450,9 @@ impl ConfigsTab {
             .id(SharedString::from(format!("cfg-mod:{p:?}")))
             .gap_2()
             .px_2()
-            .py_1()
+            .w_full()
+            .h(rems(LINE_H))
+            .flex_none()
             .rounded(theme.radius)
             .text_sm()
             .clickable(cx)
@@ -407,18 +486,14 @@ impl Render for ConfigsTab {
                 .child(widgets::skeleton_rows(8, rems(2.5), cx))
                 .into_any_element();
         };
-        let groups = self.groups(cx);
-        // The first entry when nothing is picked (or the pick is filtered out).
-        let all: Vec<Pick> = groups.iter().flat_map(|(_, v)| v.clone()).collect();
-        if self.picked.as_ref().is_none_or(|p| !all.contains(p) && self.hits.is_some()) {
-            self.picked = all.first().cloned();
-        }
+        self.sync_list(&idx, cx);
         let picked = self.picked.clone();
         let view = picked.as_ref().and_then(|p| self.view_for(p, window, cx));
-        let total = idx.total_settings();
-        let changed_n: usize = idx.changed.values().sum();
-        let unsaved_n: usize = self.views.values().map(|v| v.read(cx).unsaved()).sum();
-        self.search.update(cx, |s, cx| s.set_placeholder(format!("Search {} settings in every mod", fmt_n(total)), window, cx));
+        let (total, changed_n, unsaved_n) = self.cache.as_ref().map_or((0, 0, 0), |c| (c.total, c.changed_n, c.unsaved_n));
+        if self.placeholder_total != Some(total) {
+            self.placeholder_total = Some(total);
+            self.search.update(cx, |s, cx| s.set_placeholder(format!("Search {} settings in every mod", fmt_n(total)), window, cx));
+        }
         let linked = self.store.read(cx).server_of(&root).cloned();
 
         let chips = h_flex()
@@ -472,22 +547,26 @@ impl Render for ConfigsTab {
                 )
             });
 
-        let mut list = v_flex().gap_0p5().p_2();
-        let empty = groups.is_empty();
-        for (title, picks) in &groups {
-            list = list.child(div().px_2().pt_2().pb_1().text_xs().font_semibold().text_color(theme.muted_foreground).child(format!("{} · {}", title.to_uppercase(), picks.len())));
-            for p in picks.iter().take(1500) {
-                list = list.child(self.list_row(p, cx));
-            }
-        }
-        if empty {
-            list = list.child(widgets::empty_state(
-                IconName::FileCog,
-                if self.hits.is_some() { "No settings match" } else if self.filter != Filter::All { "Nothing here" } else { "No config files yet" },
-                (self.hits.is_none() && self.filter == Filter::All).then(|| "Most mods write theirs on the first launch.".into()),
-                cx,
-            ));
-        }
+        let n = self.cache.as_ref().map_or(0, |c| c.items.len());
+        let list: AnyElement = if n == 0 {
+            div()
+                .p_2()
+                .child(widgets::empty_state(
+                    IconName::FileCog,
+                    if self.hits.is_some() { "No settings match" } else if self.filter != Filter::All { "Nothing here" } else { "No config files yet" },
+                    (self.hits.is_none() && self.filter == Filter::All).then(|| "Most mods write theirs on the first launch.".into()),
+                    cx,
+                ))
+                .into_any_element()
+        } else {
+            div()
+                .size_full()
+                .relative()
+                .p_2()
+                .child(uniform_list("cfg-mods-list", n, cx.processor(|this, range: Range<usize>, _, cx| this.list_lines(range, cx))).track_scroll(&self.scroll).size_full())
+                .vertical_scrollbar(&self.scroll)
+                .into_any_element()
+        };
 
         let right: AnyElement = if self.compare_on
             && let Some(server) = linked
@@ -519,7 +598,7 @@ impl Render for ConfigsTab {
                     .min_h_0()
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(div().id("cfg-mods").w(rems(17.)).flex_none().h_full().border_r_1().border_color(theme.border).overflow_y_scroll().child(list))
+                    .child(div().id("cfg-mods").w(rems(17.)).flex_none().h_full().border_r_1().border_color(theme.border).child(list))
                     .child(div().flex_1().min_w_0().h_full().child(right)),
             )
             .into_any_element()

@@ -158,7 +158,7 @@
 </div>
 
 <style>
-  .cr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; padding: 9px 12px; border-radius: var(--radius); }
+  .cr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: start; padding: 9px 12px; border-radius: var(--radius); content-visibility: auto; contain-intrinsic-size: auto 64px; }
   .cr:hover { background: var(--hover); }
   .cr.dirty { background: #f973160d; }
   .cr.bad { background: color-mix(in srgb, var(--red) 8%, transparent); }
