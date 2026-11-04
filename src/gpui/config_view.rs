@@ -159,6 +159,8 @@ pub struct ConfigView {
     title: String,
     icon: Option<PathBuf>,
     files: Vec<String>,
+    /// Every settings file of the instance (which world copies win).
+    pub all_files: Vec<String>,
     rel: String,
     states: HashMap<String, FileState>,
     text_view: bool,
@@ -235,6 +237,7 @@ impl ConfigView {
             title,
             icon,
             files,
+            all_files: Vec::new(),
             rel: String::new(),
             states: HashMap::new(),
             text_view: false,
@@ -258,6 +261,7 @@ impl ConfigView {
             _mark: None,
             _subs: subs,
         };
+        this.all_files = indexes(cx).read(cx).peek(&this.root).map(|i| i.files.iter().map(|f| f.rel.clone()).collect()).unwrap_or_default();
         if !first.is_empty() {
             this.load(first, window, cx);
         }
@@ -1097,6 +1101,16 @@ impl Render for ConfigView {
             let side = hopper::configindex::side_of(f);
             let dirty = self.states.get(f).is_some_and(FileState::dirty);
             let rel = f.clone();
+            // Which copy of a server config the game reads (NeoForge 21.1).
+            let world_copies = hopper::configcompare::overrides(f, &self.all_files);
+            let live = hopper::configcompare::live_label(f, !world_copies.is_empty()).map(|l| {
+                let tip = if world_copies.is_empty() {
+                    "The game reads a world's serverconfig copy when there is one, else this file.".to_string()
+                } else {
+                    format!("{} has its own copy, which wins in that world.", world_copies.iter().map(|r| r.split('/').nth(1).unwrap_or("A world")).collect::<Vec<_>>().join(", "))
+                };
+                (l, SharedString::from(tip))
+            });
             let side_color = match side {
                 Side::Client => theme.muted_foreground,
                 Side::Common => theme.info,
@@ -1116,6 +1130,7 @@ impl Render for ConfigView {
                 .when(dirty, |d| d.child(div().size(px(6.)).rounded_full().bg(theme.primary)))
                 .child(short_name(f, &self.files))
                 .when(!side.label().is_empty(), |d| d.child(widgets::chip(side_color).child(side.label())))
+                .when_some(live.clone(), |d, (l, tip)| d.child(div().id(SharedString::from(format!("cfg-live:{f}"))).child(widgets::chip(if l.starts_with("Not used") { theme.muted_foreground } else { theme.success }).child(l)).tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.focus = None;
                     this.load(rel.clone(), window, cx)
