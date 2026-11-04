@@ -1,4 +1,6 @@
 <script>
+  import { followConfigs } from './lib/configs.svelte.js';
+  import { onChange } from './lib/changes.svelte.js';
   // The Mods tab, laid out like Hopper desktop's: a table with Update /
   // What changed (or Changelog) per row, Author, Side, On and Added
   // columns that sort, checkboxes for bulk work (the bar floats at the
@@ -734,6 +736,12 @@
   // A mod named in an update's "breaks X", for its icon and side panel.
   const byName = (n) => mods.find((m) => m.name === n) || null;
   const nameTip = (m) => [m.author ? `by ${m.author}` : '', 'Details'].filter(Boolean).join('\n');
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(sid, ['mods'], () => Promise.all([load(), loadBackupCount()])));
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => followConfigs(sid));
 </script>
 
 <svelte:window onclick={() => { menu = null; colMenu = null; addMenu = null; }} oncontextmenu={() => { menu = null; colMenu = null; addMenu = null; }} onkeydown={escape} />

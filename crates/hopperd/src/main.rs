@@ -20,6 +20,7 @@ mod acme;
 mod alerts;
 mod api;
 mod auth;
+mod changes;
 mod autoupdate;
 mod backups_api;
 mod browse_api;
@@ -127,6 +128,8 @@ pub struct App {
     pub router: router::Router,
     /// Finished jobs' results, until fetched.
     pub results: std::sync::Mutex<std::collections::HashMap<u64, serde_json::Value>>,
+    /// What changed, for every open client (see [`changes`]).
+    pub changes: changes::Changes,
 }
 
 impl App {
@@ -315,6 +318,7 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         refresh: Notify::new(),
         jobs: Default::default(),
         results: Default::default(),
+        changes: Default::default(),
         router: Default::default(),
         scheduler: Default::default(),
         limiter: Default::default(),
@@ -448,6 +452,7 @@ async fn serve(app: Arc<App>, cfg: Config, own_cert: tls::OwnCert, shutdown: Shu
     });
 
     webhooks::watch(app.clone());
+    changes::watch(app.clone());
     rules::start(app.clone());
     router::start(app.clone());
     if cfg.sftp_port != 0 {

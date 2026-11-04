@@ -532,6 +532,8 @@ fn finish(app: &App, folder: &FsPath, address: Option<String>, skipped: &[(Strin
         );
     }
     app.rescan();
+    // The job ran after its request: tell open clients the server is here now.
+    crate::changes::emit(app, None, &["list"]);
     app.refresh.notify_one();
     let id = app.servers.list().into_iter().find(|e| e.root == folder).map(|e| e.id.clone());
     log::info!("made {}", folder.display());

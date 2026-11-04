@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   // A server's data packs as one list, as desktop's Data packs tab: every
   // place a pack can be (Paxi, Global Packs, OpenLoader, each world) folded
   // into one row, grouped by where it counts (Always on, In worlds, Off).
@@ -129,6 +130,9 @@
       load();
     }
   }
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(server.id, ['worlds', 'mods'], load));
 </script>
 
 <svelte:window onclick={() => (menu = '')} onkeydown={(e) => e.key === 'Escape' && menu && (menu = '')} />

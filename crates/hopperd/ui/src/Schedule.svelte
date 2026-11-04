@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   // A server's schedule, as desktop's Server settings › Schedule: daily
   // restart with warnings, start again after a crash, start with the panel,
   // plus scheduled backups. Save and Undo changes only light up once
@@ -70,6 +71,9 @@
       save();
     }
   }
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(sid, ['schedule'], () => !changed && load()));
 </script>
 
 <svelte:window onkeydown={keys} />

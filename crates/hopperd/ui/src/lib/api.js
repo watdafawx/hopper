@@ -1,5 +1,7 @@
 // Calls to hopperd's API. Every request carries X-Hopperd, which the panel
-// requires from browsers (other sites can't add it).
+// requires from browsers (other sites can't add it), and X-Hopperd-Client,
+// so the change events it causes don't reload this tab (lib/changes.svelte.js).
+import { clientId } from './changes.svelte.js';
 
 export class ApiError extends Error {
   constructor(status, message, data = null) {
@@ -13,7 +15,7 @@ export class ApiError extends Error {
 export async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(`/api/v1${path}`, {
     method,
-    headers: { 'X-Hopperd': '1', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { 'X-Hopperd': '1', 'X-Hopperd-Client': clientId, ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     credentials: 'same-origin',
   });

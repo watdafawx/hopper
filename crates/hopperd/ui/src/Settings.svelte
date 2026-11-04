@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   import { untrack } from 'svelte';
   import RemoveServer from './RemoveServer.svelte';
   import CopyServer from './CopyServer.svelte';
@@ -106,6 +107,19 @@
     }
   }
 
+  /** The settings changed elsewhere: read them again, keeping what this
+   * form changed and hasn't saved yet on top. */
+  async function fromPanel() {
+    if (saving) return;
+    const mine = Object.fromEntries(changed.map((k) => [k, values[k]]));
+    const mem = memDirty ? [xmx, xms] : null;
+    const flags = flagsDirty ? flagsText : null;
+    await load();
+    for (const [k, v] of Object.entries(mine)) values[k] = v;
+    if (mem) [xmx, xms] = mem;
+    if (flags != null) flagsText = flags;
+  }
+
   /** Keys among `keys` that changed in the file since the form read it
    * (the server, a command or someone else saved it meanwhile). */
   async function changedOnDisk(keys) {
@@ -205,6 +219,9 @@
     const off = onUploaded((s, folder) => s === server.id && folder === '' && say('Server icon changed. The server list shows it after a restart.'));
     return () => off();
   });
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(sid, ['server'], fromPanel));
 </script>
 
 <!-- Passwords stay hidden until asked for (the panel may have made them). -->

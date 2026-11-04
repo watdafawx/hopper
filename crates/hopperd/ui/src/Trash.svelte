@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   import { ArrowLeft, RotateCcw, Trash2, Folder, FileClock, File } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { bytes } from './lib/format.js';
@@ -67,6 +68,9 @@
     sid;
     load();
   });
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(sid, ['files'], load));
 </script>
 
 <div class="wrap">

@@ -1,4 +1,5 @@
 <script>
+  import { followConfigs } from './lib/configs.svelte.js';
   // A server's Configs page, like desktop's Configs tab: mods with config
   // files on the left (changed ones first, then all, then files no mod
   // matched), a search across every setting, filters and a side picker on
@@ -115,6 +116,9 @@
     location.hash = `/server/${[server.id, 'edit', ...rel.split('/')].map(encodeURIComponent).join('/')}`;
   }
   const initials = (n) => n.replace(/[^A-Za-z0-9 ]/g, '').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || '?';
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => followConfigs(server.id));
 </script>
 
 <div class="cfgp">

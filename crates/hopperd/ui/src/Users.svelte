@@ -1,4 +1,5 @@
 <script>
+  import { onChange } from './lib/changes.svelte.js';
   import { onMount } from 'svelte';
   import { Users, Plus, Pencil, Trash2, ShieldOff } from '@lucide/svelte';
   import { api, post, del } from './lib/api.js';
@@ -72,6 +73,9 @@
   const names = (ids) => ids.map((id) => live.servers.find((s) => s.id === id)?.name || id).join(', ');
 
   onMount(load);
+
+  // Changed elsewhere (another tab, Hopper desktop, on disk): show it.
+  $effect(() => onChange(null, ['panel'], load));
 </script>
 
 <div class="card">

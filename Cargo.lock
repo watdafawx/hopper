@@ -4562,6 +4562,7 @@ dependencies = [
  "instant-acme",
  "log",
  "mdns-sd",
+ "notify",
  "qrcode",
  "rcgen 0.14.10",
  "regex",

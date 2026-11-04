@@ -153,6 +153,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/servers/{id}/console", get(console))
         .route("/api/v1/servers/{id}/icon", get(icon))
         .route("/api/v1/ws", get(ws))
+        .merge(crate::changes::routes())
         .merge(crate::fs_api::routes())
         .merge(crate::pack_api::routes())
         .merge(crate::manage_api::routes())
@@ -887,6 +888,8 @@ enum ClientMsg {
 /// follows (checked every 150 ms).
 async fn live(app: Arc<App>, who: Who, mut socket: WebSocket) {
     let mut snap_rx = app.snapshot.subscribe();
+    let mut change_rx = app.changes.subscribe();
+    let mut sent_rev = *change_rx.borrow_and_update();
     let mut follows: HashMap<String, u64> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_millis(150));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -900,6 +903,11 @@ async fn live(app: Arc<App>, who: Who, mut socket: WebSocket) {
                 if changed.is_err() { break; }
                 let snap = snap_rx.borrow_and_update().clone();
                 if send_snapshot(&mut socket, &snap, &who).await.is_err() { break; }
+            }
+            changed = change_rx.changed() => {
+                if changed.is_err() { break; }
+                change_rx.borrow_and_update();
+                if send_changes(&mut socket, &app, &who, &mut sent_rev).await.is_err() { break; }
             }
             _ = tick.tick() => {
                 for (id, seen) in follows.iter_mut() {
@@ -925,6 +933,29 @@ async fn live(app: Arc<App>, who: Who, mut socket: WebSocket) {
             }
         }
     }
+}
+
+/// What changed since `sent` that this client may see (see
+/// [`crate::changes`]); after a gap too long to replay, one `*` change.
+async fn send_changes(socket: &mut WebSocket, app: &App, who: &Who, sent: &mut u64) -> Result<(), axum::Error> {
+    let list = match app.changes.since(*sent) {
+        Some(list) => list,
+        None => {
+            *sent = app.changes.rev();
+            let msg = json!({ "t": "changed", "rev": *sent, "server": null, "areas": ["*"] });
+            return socket.send(Message::Text(msg.to_string().into())).await;
+        }
+    };
+    for c in list {
+        *sent = c.rev;
+        if c.server.as_deref().is_some_and(|s| !who.sees(s)) {
+            continue;
+        }
+        let mut msg = serde_json::to_value(&c).unwrap_or_default();
+        msg["t"] = json!("changed");
+        socket.send(Message::Text(msg.to_string().into())).await?;
+    }
+    Ok(())
 }
 
 async fn send_snapshot(socket: &mut WebSocket, snap: &Snapshot, who: &Who) -> Result<(), axum::Error> {

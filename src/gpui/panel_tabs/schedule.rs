@@ -183,6 +183,11 @@ impl ScheduleTab {
         cx.notify();
     }
 
+    /// Edits not saved yet: a change made elsewhere doesn't replace them.
+    pub fn unsaved(&self) -> bool {
+        self.sched != self.saved
+    }
+
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(t) = self.target.clone() else { return };
         let mut s = self.sched.clone();
