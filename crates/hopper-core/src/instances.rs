@@ -13,8 +13,10 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 pub const HOPPER_FILE: &str = "hopper.json";
 /// Current `Instance::format`. 5: CurseForge's locks (`isLocked`) are read,
-/// so instances imported before re-import once to pick them up.
-pub const FORMAT: u32 = 5;
+/// so instances imported before re-import once to pick them up. 6: a
+/// re-import no longer takes a stale pack or loader from the CurseForge app
+/// over Hopper's; re-importing once finds packs an older Hopper got wrong.
+pub const FORMAT: u32 = 6;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -53,6 +55,32 @@ pub struct Instance {
     /// is saved over the file (see [`set_aside_unreadable`]). Never saved.
     #[serde(default, skip)]
     pub unreadable: Option<String>,
+    /// What the CurseForge app wrote over Hopper's pack version, loader or
+    /// Minecraft version, while Hopper kept its own (the mod files agree
+    /// with Hopper). Shown until the player picks one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cf_change: Option<CfChange>,
+}
+
+/// The CurseForge app's values when they disagree with Hopper's record (see
+/// [`Instance::cf_change`]).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CfChange {
+    /// The pack file the CurseForge app lists, when it differs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pack: Option<PackRef>,
+    /// Its loader ("neoforge-21.1.256"), when it differs.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub loader: String,
+    /// Its Minecraft version, when it differs.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub game_version: String,
+    /// Hopper's own record held the CurseForge app's file id under the right
+    /// version (an older Hopper took it over), so keeping Hopper's looks the
+    /// file up again by its version.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lost_file: bool,
 }
 
 /// A saved set of mods to keep disabled.
@@ -65,7 +93,7 @@ pub struct ModProfile {
 }
 
 /// The modpack an instance was installed from.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PackRef {
     pub project_id: u64,
@@ -638,6 +666,83 @@ fn merge_reimport(imported: &mut Instance, own: Instance, root: &Path) {
     }
 }
 
+/// After a re-import, decides whose pack version, loader and Minecraft
+/// version stand: `imported` holds the CurseForge app's, `own` Hopper's.
+///
+/// The CurseForge app can write back an old copy of its file (it keeps one
+/// while it runs), which would undo a pack update or loader change Hopper
+/// made. So Hopper's values stay unless the mods on disk fit the CurseForge
+/// app's pack better than the one Hopper installed (`manifest.json`): that
+/// is a real update done in the CurseForge app. When Hopper's stay, the
+/// CurseForge app's go in [`Instance::cf_change`] for the player to pick.
+fn settle_cf_change(
+    imported: &mut Instance,
+    own: &Instance,
+    cf_manifest: Option<&PackManifest>,
+    disk_manifest: Option<&PackManifest>,
+    root: &Path,
+) {
+    imported.cf_change = None;
+    let cf_version = cf_manifest.map(|m| m.version.as_str()).unwrap_or_default();
+    let (cf_pack, own_pack) = match (&imported.pack, &own.pack) {
+        (Some(c), Some(o)) if c.project_id == o.project_id => (Some(c), Some(o)),
+        _ => (None, None),
+    };
+    let pack_moved = matches!((cf_pack, own_pack), (Some(c), Some(o)) if c.file_id != o.file_id);
+    // An older Hopper took the CurseForge app's file id on a re-import but
+    // kept the version from manifest.json: the two no longer belong together.
+    let lost_file = matches!((cf_pack, own_pack), (Some(c), Some(o))
+        if c.file_id == o.file_id && !cf_version.is_empty() && !o.version.is_empty() && o.version != cf_version);
+    let loader_moved = !own.loader.is_empty() && !imported.loader.eq_ignore_ascii_case(&own.loader);
+    let mc_moved = !own.game_version.is_empty() && imported.game_version != own.game_version;
+    if !pack_moved && !lost_file && !loader_moved && !mc_moved {
+        return;
+    }
+    if pack_moved || lost_file {
+        let disk = disk_mods(imported, own, root);
+        let fit = |m: &PackManifest| m.files.iter().filter(|f| disk.contains(&(f.project_id, f.file_id))).count();
+        let cf_updated = match (cf_manifest, disk_manifest) {
+            // The CurseForge app updated the pack and wrote its manifest too.
+            (Some(c), Some(d)) if !c.version.is_empty() && c.version == d.version => true,
+            (Some(c), Some(d)) => fit(c) > fit(d),
+            _ => false,
+        };
+        if cf_updated {
+            return;
+        }
+    }
+    let mut change = CfChange { lost_file, ..Default::default() };
+    if pack_moved || lost_file {
+        change.pack = imported.pack.clone();
+        imported.pack = own.pack.clone();
+    }
+    if loader_moved {
+        change.loader = std::mem::replace(&mut imported.loader, own.loader.clone());
+    }
+    if mc_moved {
+        change.game_version = std::mem::replace(&mut imported.game_version, own.game_version.clone());
+    }
+    log::warn!(
+        "{}: the CurseForge app changed this instance's info (pack {:?}, loader {:?}, Minecraft {:?}); kept Hopper's",
+        root.display(),
+        change.pack.as_ref().map(|p| &p.version),
+        change.loader,
+        change.game_version
+    );
+    imported.cf_change = Some(change);
+}
+
+/// `(project, file)` of every mod either app lists whose file is on disk.
+fn disk_mods(imported: &Instance, own: &Instance, root: &Path) -> std::collections::HashSet<(u64, u64)> {
+    imported
+        .addons
+        .iter()
+        .chain(&own.addons)
+        .filter(|a| a.project_id != 0 && file_state(root, a).is_some())
+        .map(|a| (a.project_id, a.file_id))
+        .collect()
+}
+
 /// The lock after a re-import: CurseForge's when it changed since Hopper
 /// last saw it, else Hopper's own.
 fn merged_lock(imported: &Addon, own: &Addon) -> bool {
@@ -717,9 +822,10 @@ pub fn load(root: &Path) -> Option<Instance> {
         own => {
             // CurseForge changed the instance (or we never saw it): re-import,
             // keeping Hopper-only settings.
-            let mut imported = import_curseforge(root)?;
+            let Imported { inst: mut imported, cf_manifest, disk_manifest } = import_curseforge(root)?;
             imported.imported_from_cf = cf_time;
             if let Some(own) = own {
+                settle_cf_change(&mut imported, &own, cf_manifest.as_ref(), disk_manifest.as_ref(), root);
                 merge_reimport(&mut imported, own, root);
             }
             imported.root = root.to_path_buf();
@@ -842,6 +948,9 @@ struct CfInstance {
     base_mod_loader: Option<CfName>,
     installed_modpack: Option<CfAddon>,
     installed_addons: Vec<CfAddon>,
+    /// The pack's manifest as the CurseForge app last installed it. Read
+    /// loosely: a field it spells oddly mustn't stop the whole import.
+    manifest: Option<serde_json::Value>,
     allocated_memory: u32,
     is_memory_override: bool,
     java_args_override: Option<String>,
@@ -970,12 +1079,28 @@ pub fn env_from_tags<'a>(tags: impl IntoIterator<Item = &'a str>) -> String {
     .into()
 }
 
-fn import_curseforge(root: &Path) -> Option<Instance> {
-    let raw: CfInstance =
+/// What [`import_curseforge`] read.
+struct Imported {
+    inst: Instance,
+    /// The manifest inside `minecraftinstance.json`: the pack as the
+    /// CurseForge app last installed it.
+    cf_manifest: Option<PackManifest>,
+    /// `manifest.json`: the pack as last installed into the folder (by
+    /// Hopper or the CurseForge app).
+    disk_manifest: Option<PackManifest>,
+}
+
+fn import_curseforge(root: &Path) -> Option<Imported> {
+    let mut raw: CfInstance =
         serde_json::from_slice(&fs::read(root.join("minecraftinstance.json")).ok()?).ok()?;
     let manifest: Option<PackManifest> = fs::read(root.join("manifest.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
+    let cf_manifest = raw
+        .manifest
+        .take()
+        .and_then(|v| serde_json::from_value::<PackManifest>(v).ok())
+        .filter(|m| !m.version.is_empty());
     let pack_ids: std::collections::HashSet<u64> = manifest
         .iter()
         .flat_map(|m| m.files.iter().map(|f| f.project_id))
@@ -990,8 +1115,11 @@ fn import_curseforge(root: &Path) -> Option<Instance> {
                 .max(p.addon_id),
             file_id: f.map_or(0, |f| f.id),
             name: p.name.clone(),
-            version: manifest
+            // The version of the file the CurseForge app names, so the two
+            // always belong together; manifest.json only when it names none.
+            version: cf_manifest
                 .as_ref()
+                .or(manifest.as_ref())
                 .map(|m| m.version.clone())
                 .unwrap_or_default(),
             server_pack_file_id: f.map_or(0, |f| f.server_pack_file_id),
@@ -1058,7 +1186,7 @@ fn import_curseforge(root: &Path) -> Option<Instance> {
         .or_else(|| manifest.as_ref().map(PackManifest::loader))
         .unwrap_or_default();
 
-    Some(Instance {
+    let inst = Instance {
         mod_profiles: Vec::new(),
         name: raw.name,
         root: root.to_path_buf(),
@@ -1089,7 +1217,9 @@ fn import_curseforge(root: &Path) -> Option<Instance> {
         play_seconds: raw.time_played / 1000,
         applied_options: Default::default(),
         unreadable: None,
-    })
+        cf_change: None,
+    };
+    Some(Imported { inst, cf_manifest, disk_manifest: manifest })
 }
 
 impl Instance {
@@ -1104,6 +1234,7 @@ impl Instance {
             icon: self.icon.clone(),
             play_seconds: self.play_seconds,
             unreadable: self.unreadable.clone(),
+            cf_change: self.cf_change.clone(),
             ..Default::default()
         }
     }
@@ -1326,6 +1457,119 @@ mod tests {
         let again = load(&root).unwrap();
         assert!(again.addon_by_file("hopper.jar").is_some());
         assert!(again.addon_by_file("a.jar").unwrap().locked);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // Trimmed, anonymised copies of a real pack's files after the CurseForge
+    // app wrote back an old copy of its file over a pack update Hopper made.
+    const FIX_CF_STALE: &str = include_str!("instances_fixtures/cf-app-stale.json");
+    const FIX_CF_HOPPER: &str = include_str!("instances_fixtures/cf-hopper-wrote.json");
+    const FIX_MANIFEST: &str = include_str!("instances_fixtures/manifest-1.78.1.json");
+    const FIX_HOPPER: &str = include_str!("instances_fixtures/hopper.json");
+
+    /// A pack folder from the fixtures: `cf` as CurseForge's file, the mods
+    /// Hopper's record lists on disk, then `edit` on Hopper's record.
+    fn pack_folder(tag: &str, cf: &str, manifest: &str, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
+        let root = temp(tag);
+        let mut own: serde_json::Value = serde_json::from_str(FIX_HOPPER).unwrap();
+        for a in own["addons"].as_array().unwrap() {
+            fs::write(root.join("mods").join(a["file_name"].as_str().unwrap()), "x").unwrap();
+        }
+        edit(&mut own);
+        fs::write(root.join(HOPPER_FILE), own.to_string()).unwrap();
+        fs::write(root.join("manifest.json"), manifest).unwrap();
+        fs::write(root.join("minecraftinstance.json"), cf).unwrap();
+        root
+    }
+
+    fn cf_with(base: &str, edit: impl FnOnce(&mut serde_json::Value)) -> String {
+        let mut v: serde_json::Value = serde_json::from_str(base).unwrap();
+        edit(&mut v);
+        v.to_string()
+    }
+
+    #[test]
+    fn stale_curseforge_copy_keeps_hoppers_pack_and_loader() {
+        let root = pack_folder("cf-stale", FIX_CF_STALE, FIX_MANIFEST, |_| {});
+        let inst = load(&root).unwrap();
+        let pack = inst.pack.as_ref().unwrap();
+        assert_eq!((pack.file_id, pack.version.as_str()), (9341561, "1.78.1"));
+        assert_eq!(pack.file_name, "Limitless-8-1.78.1.zip");
+        assert_eq!(inst.loader, "neoforge-21.1.259");
+        let change = inst.cf_change.as_ref().expect("the change is shown");
+        let cf_pack = change.pack.as_ref().unwrap();
+        assert_eq!((cf_pack.file_id, cf_pack.version.as_str()), (8816233, "1.71.1"));
+        assert_eq!(change.loader, "neoforge-21.1.256");
+        assert!(!change.lost_file);
+        // Saved: the next start still knows both.
+        let again = load(&root).unwrap();
+        assert_eq!(again.pack.as_ref().unwrap().file_id, 9341561);
+        assert_eq!(again.cf_change, inst.cf_change);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn record_an_older_hopper_mixed_up_is_flagged() {
+        // What 0.30.2 saved: the CurseForge app's file id under the version
+        // from manifest.json, and the loader the player set again.
+        let cf = cf_with(FIX_CF_STALE, |v| v["baseModLoader"]["name"] = "neoforge-21.1.265".into());
+        let root = pack_folder("cf-lost", &cf, FIX_MANIFEST, |own| {
+            own["pack"]["file_id"] = 8816233.into();
+            own["pack"]["file_name"] = "Limitless-8-1.71.1.zip".into();
+            own["loader"] = "neoforge-21.1.265".into();
+            own["format"] = 5.into();
+        });
+        let inst = load(&root).unwrap();
+        assert_eq!(inst.pack.as_ref().unwrap().version, "1.78.1");
+        assert_eq!(inst.loader, "neoforge-21.1.265");
+        let change = inst.cf_change.as_ref().unwrap();
+        assert!(change.lost_file);
+        assert_eq!(change.pack.as_ref().unwrap().version, "1.71.1");
+        assert!(change.loader.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pack_updated_in_the_curseforge_app_is_taken() {
+        // Hopper last saw 1.71.1; the CurseForge app updated to 1.78.1 and
+        // the mods on disk are 1.78.1's.
+        let old: serde_json::Value = serde_json::from_str(FIX_CF_STALE).unwrap();
+        let old_manifest = old["manifest"].to_string();
+        let downgrade = |own: &mut serde_json::Value| {
+            own["pack"]["file_id"] = 8816233.into();
+            own["pack"]["version"] = "1.71.1".into();
+            own["loader"] = "neoforge-21.1.248".into();
+        };
+        for (tag, manifest) in [("cf-upd-wrote", FIX_MANIFEST), ("cf-upd-mods", old_manifest.as_str())] {
+            let root = pack_folder(tag, FIX_CF_HOPPER, manifest, downgrade);
+            let inst = load(&root).unwrap();
+            let pack = inst.pack.as_ref().unwrap();
+            assert_eq!((pack.file_id, pack.version.as_str()), (9341561, "1.78.1"), "{tag}");
+            assert_eq!(inst.loader, "neoforge-21.1.259", "{tag}");
+            assert!(inst.cf_change.is_none(), "{tag}");
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn loader_changed_by_the_curseforge_app_is_never_taken_silently() {
+        let cf = cf_with(FIX_CF_HOPPER, |v| v["baseModLoader"]["name"] = "neoforge-21.1.248".into());
+        let root = pack_folder("cf-loader", &cf, FIX_MANIFEST, |_| {});
+        let inst = load(&root).unwrap();
+        assert_eq!(inst.loader, "neoforge-21.1.259");
+        assert_eq!(inst.pack.as_ref().unwrap().file_id, 9341561);
+        let change = inst.cf_change.as_ref().unwrap();
+        assert_eq!(change.loader, "neoforge-21.1.248");
+        assert!(change.pack.is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn matching_curseforge_file_shows_no_change() {
+        let root = pack_folder("cf-same", FIX_CF_HOPPER, FIX_MANIFEST, |_| {});
+        let inst = load(&root).unwrap();
+        assert!(inst.cf_change.is_none());
+        assert_eq!(inst.pack.as_ref().unwrap().version, "1.78.1");
         let _ = fs::remove_dir_all(&root);
     }
 

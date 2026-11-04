@@ -189,6 +189,62 @@ pub fn write_pack(inst: &mut Instance) -> anyhow::Result<Synced> {
     Ok(Synced::Written)
 }
 
+/// The player keeps Hopper's record over what the CurseForge app wrote
+/// ([`Instance::cf_change`]). When an older Hopper lost the pack's file id,
+/// it's looked up again by the pack version (a web request). The caller
+/// saves; [`write_pack`] and [`write_loader`] then tell the CurseForge app,
+/// when the player asks for that.
+pub fn keep_hopper(inst: &mut Instance) -> anyhow::Result<()> {
+    let lost = inst.cf_change.as_ref().is_some_and(|c| c.lost_file);
+    if lost && let Some(pack) = inst.pack.as_mut() {
+        let files = crate::cf::files(pack.project_id, "", crate::cf::Loader::Any)?;
+        let f = files
+            .iter()
+            .find(|f| f.is_server_pack != Some(true) && names_version(f, &pack.version))
+            .with_context(|| format!("CurseForge has no file for version {}", pack.version))?;
+        pack.file_id = f.id;
+        pack.file_name = f.file_name.clone();
+        pack.server_pack_file_id = f.server_pack_file_id.unwrap_or(0);
+    }
+    inst.cf_change = None;
+    Ok(())
+}
+
+/// The player takes what the CurseForge app wrote ([`Instance::cf_change`])
+/// as the instance's pack version, loader and Minecraft version. Files
+/// aren't touched: Hopper offers the pack update or the loader from there.
+/// The caller saves.
+pub fn use_curseforge(inst: &mut Instance) {
+    let Some(c) = inst.cf_change.take() else { return };
+    if let Some(p) = c.pack {
+        inst.pack = Some(p);
+    }
+    if !c.loader.is_empty() {
+        inst.loader = c.loader;
+    }
+    if !c.game_version.is_empty() {
+        inst.game_version = c.game_version;
+    }
+}
+
+/// Whether a pack file is the given version: its name or file name holds
+/// it as a whole ("Limitless 8 - v1.78.1" is 1.78.1, not 1.78 or 1.78.10).
+fn names_version(f: &crate::cf::File, version: &str) -> bool {
+    let whole = |s: &str| {
+        !version.is_empty()
+            && s.match_indices(version).any(|(i, _)| {
+                let before = s[..i].chars().next_back();
+                let after = s[i + version.len()..].chars().next();
+                let digit_or_dot = |c: Option<char>| c.is_some_and(|c| c.is_ascii_digit() || c == '.');
+                // "1.78.1.zip": a dot then letters is the extension.
+                let after_ok = !digit_or_dot(after)
+                    || (after == Some('.') && !s[i + version.len() + 1..].starts_with(|c: char| c.is_ascii_digit()));
+                !digit_or_dot(before) && after_ok
+            })
+    };
+    whole(&f.display_name) || whole(&f.file_name)
+}
+
 fn strip_bom(b: &[u8]) -> &[u8] {
     b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(b)
 }
@@ -432,6 +488,54 @@ mod tests {
         assert_eq!(doc["manifest"], json!({"v": 1}));
         assert_eq!(doc["modpackOverrides"], json!(["a"]));
         assert_eq!(doc["installedModpack"]["installedFile"]["id"], 2);
+    }
+
+    #[test]
+    fn pack_files_match_a_whole_version() {
+        let f = |display: &str, file: &str| crate::cf::File {
+            display_name: display.into(),
+            file_name: file.into(),
+            ..Default::default()
+        };
+        assert!(names_version(&f("Limitless 8 - v1.78.1", "x.zip"), "1.78.1"));
+        assert!(names_version(&f("", "Limitless-8-1.78.1.zip"), "1.78.1"));
+        assert!(!names_version(&f("Limitless 8 - v1.78.10", "Limitless-8-1.78.10.zip"), "1.78.1"));
+        assert!(!names_version(&f("Limitless 8 - v1.78", "Limitless-8-1.78.zip"), "1.78.1"));
+        assert!(!names_version(&f("Limitless 8 - v11.78.1", ""), "1.78.1"));
+        assert!(!names_version(&f("anything", "a.zip"), ""));
+    }
+
+    #[test]
+    fn using_curseforge_values_takes_each_one_it_changed() {
+        use crate::instances::{CfChange, PackRef};
+        let mut inst = Instance {
+            loader: "neoforge-21.1.259".into(),
+            game_version: "1.21.1".into(),
+            pack: Some(PackRef { project_id: 1, file_id: 9, version: "1.78.1".into(), ..Default::default() }),
+            cf_change: Some(CfChange {
+                pack: Some(PackRef { project_id: 1, file_id: 2, version: "1.71.1".into(), ..Default::default() }),
+                loader: "neoforge-21.1.256".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        use_curseforge(&mut inst);
+        assert_eq!(inst.pack.as_ref().map(|p| p.file_id), Some(2));
+        assert_eq!(inst.loader, "neoforge-21.1.256");
+        assert_eq!(inst.game_version, "1.21.1");
+        assert!(inst.cf_change.is_none());
+    }
+
+    #[test]
+    fn keeping_hopper_values_clears_the_change() {
+        let mut inst = Instance {
+            loader: "neoforge-21.1.259".into(),
+            cf_change: Some(crate::instances::CfChange { loader: "neoforge-21.1.256".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        keep_hopper(&mut inst).unwrap();
+        assert_eq!(inst.loader, "neoforge-21.1.259");
+        assert!(inst.cf_change.is_none());
     }
 
     #[test]

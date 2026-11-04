@@ -1,0 +1,52 @@
+{
+ "minecraft": {
+  "version": "1.21.1",
+  "modLoaders": [
+   {
+    "id": "neoforge-21.1.259",
+    "primary": true
+   }
+  ],
+  "recommendedRam": 12288
+ },
+ "manifestType": "minecraftModpack",
+ "manifestVersion": 1,
+ "name": "TNP Limitless 8 - 1.21.1",
+ "version": "1.78.1",
+ "author": "Gbergz",
+ "overrides": "overrides",
+ "projectID": 1027782,
+ "image": "profileImage/LL8-Icon.png",
+ "files": [
+  {
+   "projectID": 59613,
+   "fileID": 6913812,
+   "required": true,
+   "isLocked": false
+  },
+  {
+   "projectID": 225738,
+   "fileID": 8903254,
+   "required": true,
+   "isLocked": false
+  },
+  {
+   "projectID": 223794,
+   "fileID": 8992605,
+   "required": true,
+   "isLocked": false
+  },
+  {
+   "projectID": 64578,
+   "fileID": 8832691,
+   "required": true,
+   "isLocked": false
+  },
+  {
+   "projectID": 60028,
+   "fileID": 7901588,
+   "required": true,
+   "isLocked": false
+  }
+ ]
+}

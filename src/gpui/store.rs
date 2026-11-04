@@ -3845,7 +3845,7 @@ impl Store {
 /// "NeoForge 21.1.256" from "neoforge-21.1.256".
 /// Tells CurseForge's own file about a loader Hopper changed, so the
 /// instance starts the same loader from CurseForge.
-fn sync_cf_loader(inst: &mut hopper::instances::Instance, job: &Job) {
+pub(crate) fn sync_cf_loader(inst: &mut hopper::instances::Instance, job: &Job) {
     use hopper::cf_instance::Synced;
     match hopper::cf_instance::write_loader(inst) {
         Ok(Synced::Written) => {
@@ -3866,7 +3866,7 @@ fn sync_cf_loader(inst: &mut hopper::instances::Instance, job: &Job) {
 /// Tells CurseForge's own file about a pack update, so CurseForge doesn't
 /// offer or reinstall the old version. False when CurseForge is open and
 /// nothing could be written.
-fn sync_cf_pack(inst: &mut hopper::instances::Instance, job: &Job) -> bool {
+pub(crate) fn sync_cf_pack(inst: &mut hopper::instances::Instance, job: &Job) -> bool {
     use hopper::cf_instance::Synced;
     match hopper::cf_instance::write_pack(inst) {
         Ok(Synced::Written) => {

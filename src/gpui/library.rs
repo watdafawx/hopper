@@ -1609,6 +1609,69 @@ impl LibraryView {
         )
     }
 
+    /// The CurseForge app wrote other pack info over Hopper's (see
+    /// `Instance::cf_change`): say so, and let the player pick whose stays.
+    fn cf_change_bar(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let change = inst.cf_change.as_ref()?;
+        let text = cf_change_text(inst, change);
+        let busy = self.store.read(cx).is_busy(&inst.root);
+        let (r1, r2, r3) = (inst.root.clone(), inst.root.clone(), inst.root.clone());
+        Some(
+            widgets::notice_bar(cx.theme().warning, IconName::TriangleAlert, cx)
+                .mx_6()
+                .mt_3()
+                .child(div().flex_1().min_w_0().text_sm().child(text))
+                .child(
+                    Button::new("cf-change-keep")
+                        .small()
+                        .primary()
+                        .label("Keep Hopper's")
+                        .disabled(busy)
+                        .tooltip("Hopper keeps its pack version and loader. The CurseForge app's file stays as it is.")
+                        .on_click(cx.listener(move |this, _, _, cx| this.settle_cf_change(&r1, CfChoice::Keep, cx))),
+                )
+                .child(
+                    Button::new("cf-change-keep-write")
+                        .small()
+                        .outline()
+                        .label("Keep, and fix the CurseForge app")
+                        .disabled(busy)
+                        .tooltip("Hopper keeps its pack version and loader and writes them into the CurseForge app's file, so both apps agree. Close the CurseForge app first.")
+                        .on_click(cx.listener(move |this, _, _, cx| this.settle_cf_change(&r2, CfChoice::KeepAndWrite, cx))),
+                )
+                .child(
+                    Button::new("cf-change-use")
+                        .small()
+                        .outline()
+                        .label("Use the CurseForge app's")
+                        .disabled(busy)
+                        .tooltip("Hopper takes the CurseForge app's pack version and loader. No files change; a pack update is offered as usual.")
+                        .on_click(cx.listener(move |this, _, _, cx| this.settle_cf_change(&r3, CfChoice::UseCurseForge, cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn settle_cf_change(&mut self, root: &Path, choice: CfChoice, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        let Some(mut inst) = store.instance(root).cloned() else { return };
+        let title = match choice {
+            CfChoice::UseCurseForge => format!("Using the CurseForge app's info for {}", inst.name),
+            _ => format!("Keeping Hopper's info for {}", inst.name),
+        };
+        store.spawn_instance_job(root, title, move |job| {
+            match choice {
+                CfChoice::UseCurseForge => hopper::cf_instance::use_curseforge(&mut inst),
+                CfChoice::Keep | CfChoice::KeepAndWrite => hopper::cf_instance::keep_hopper(&mut inst)?,
+            }
+            inst.save()?;
+            if choice == CfChoice::KeepAndWrite && store::sync_cf_pack(&mut inst, job) {
+                store::sync_cf_loader(&mut inst, job);
+            }
+            Ok(Msg::InstanceChanged(inst.root.clone()))
+        });
+    }
+
     fn pending_banner(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
         let pending = self.store.read(cx).pending(&inst.root).to_vec();
         if pending.is_empty() {
@@ -2594,6 +2657,7 @@ impl LibraryView {
         self.want_size(&inst.root, cx);
         let header = self.header(&inst, cx);
         let hint = self.server_hint(&inst, cx);
+        let cf_change = self.cf_change_bar(&inst, cx);
         let pending = self.pending_banner(&inst, cx);
         let pre_join = crate::join_help::pre_join_bar(&self.store, &inst.root, cx);
         let tabs = self.tabs(&inst, cx);
@@ -2607,6 +2671,7 @@ impl LibraryView {
                 div().flex_none().child(header),
             ))
             .children(hint)
+            .children(cf_change)
             .children(pending)
             .children(pre_join)
             .child(tabs)
@@ -2617,6 +2682,42 @@ impl LibraryView {
             )))
             .into_any_element()
     }
+}
+
+/// What the player picks when the CurseForge app changed a pack's info.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CfChoice {
+    Keep,
+    KeepAndWrite,
+    UseCurseForge,
+}
+
+/// "The CurseForge app changed this pack's info: it says v1.71.1 with
+/// NeoForge 21.1.256. Hopper's record says v1.78.1 with NeoForge 21.1.259,
+/// and the mod files match it."
+fn cf_change_text(inst: &Instance, c: &hopper::instances::CfChange) -> String {
+    let version = |p: &hopper::instances::PackRef| {
+        if p.version.is_empty() { p.file_name.clone() } else { format!("v{}", p.version) }
+    };
+    let (mut theirs, mut ours) = (Vec::new(), Vec::new());
+    if let Some(p) = &c.pack {
+        theirs.push(version(p));
+        ours.push(inst.pack.as_ref().map(version).unwrap_or_default());
+    }
+    if !c.loader.is_empty() {
+        theirs.push(store::loader_label(&c.loader));
+        ours.push(store::loader_label(&inst.loader));
+    }
+    if !c.game_version.is_empty() {
+        theirs.push(format!("Minecraft {}", c.game_version));
+        ours.push(format!("Minecraft {}", inst.game_version));
+    }
+    let files = if c.pack.is_some() { ", and the mod files match it" } else { "" };
+    format!(
+        "The CurseForge app changed this pack's info: it says {}. Hopper's record says {}{files}.",
+        theirs.join(" with "),
+        ours.join(" with ")
+    )
 }
 
 /// Asks for an image and makes it the instance's icon.
