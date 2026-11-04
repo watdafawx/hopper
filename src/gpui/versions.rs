@@ -111,7 +111,7 @@ impl VersionsView {
         let (project_id, name, from) = (v.project_id, v.name.clone(), v.from.clone());
         if pack {
             window.close_dialog(cx);
-            crate::pack_update::open(store, root, file, window, cx);
+            crate::pack_update::switch(store, root, file, window, cx);
             return;
         } else {
             let u = Update {
@@ -407,6 +407,25 @@ impl Render for VersionsView {
                                         })),
                                 )
                                 .child(widgets::caption(hopper::time::relative(&f.file_date), cx).text_xs().flex_none())
+                                .when(self.pack, |r| {
+                                    // The setting skips the comparison; this
+                                    // is the way back to it for one switch.
+                                    let (store, root, f3) = (self.store.clone(), self.root.clone(), f.clone());
+                                    r.child(
+                                        Button::new(SharedString::from(format!("other-compare:{}", f.id)))
+                                            .xsmall()
+                                            .ghost()
+                                            .flex_none()
+                                            .icon(IconName::GitCompare)
+                                            .label("Compare first")
+                                            .tooltip("See what changes before switching, and which of your edits stay")
+                                            .disabled(locked)
+                                            .on_click(move |_, window, cx| {
+                                                window.close_dialog(cx);
+                                                crate::pack_update::open(store.clone(), root.clone(), f3.clone(), window, cx)
+                                            }),
+                                    )
+                                })
                                 .child(
                                     Button::new(SharedString::from(format!("other-install:{}", f.id)))
                                         .xsmall()

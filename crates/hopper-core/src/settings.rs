@@ -46,6 +46,10 @@ pub struct Settings {
     pub theme: u8,
     /// After a pack update, bring its paired rig server along (when offline).
     pub auto_update_servers: bool,
+    /// Switching a modpack to another version (roll back, update to a
+    /// picked one) opens the comparison first. Off: it installs straight
+    /// away, only stopping to ask when your own settings clash.
+    pub compare_before_switch: bool,
     /// How each non-mods folder syncs, per server root.
     pub folder_rules: crate::folderrules::Rules,
     /// Peer sync with other PCs running Hopper.
@@ -463,6 +467,7 @@ impl Default for Settings {
             groups: HashMap::new(),
             theme: 0,
             auto_update_servers: false,
+            compare_before_switch: false,
             folder_rules: Default::default(),
             peer_sync: false,
             datapack_dest: HashMap::new(),

@@ -278,6 +278,15 @@ impl UpdatePlan {
         self.files.iter().filter(|f| f.action == FileAction::Conflict)
     }
 
+    /// Something the defaults can't settle: settings you changed that the
+    /// pack changes too, or mods of yours that the pack drops. An update
+    /// without a preview stops and shows the plan instead.
+    pub fn needs_say(&self) -> bool {
+        self.settings.values().any(|d| d.iter().any(|x| x.changed_by_you))
+            || (!self.base_known && !self.settings.is_empty())
+            || !self.needed.is_empty()
+    }
+
     /// Conflicts that default to the pack's copy: without a base (a quick
     /// update or a reinstall) all but your own settings ([`keep_local`]),
     /// like the CurseForge app; compared, the pack content folders.

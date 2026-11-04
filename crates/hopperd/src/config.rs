@@ -67,6 +67,10 @@ pub struct Config {
     /// Set by rolling back: auto-update doesn't install this version or
     /// older ones again (a newer release still installs).
     pub skip_auto_up_to: Option<String>,
+    /// Switching a server to another pack version opens the comparison
+    /// first. Off: it updates straight away, stopping only when something
+    /// needs the owner's say (as in Hopper desktop's setting).
+    pub compare_before_switch: bool,
     /// How long each server's `.hopper-backups` keeps the files behind Undo.
     pub backup_retention: hopper_core::retention::Retention,
 }
@@ -97,6 +101,7 @@ impl Default for Config {
             trust_local_setup: true,
             auto_update: true,
             skip_auto_up_to: None,
+            compare_before_switch: false,
             backup_retention: Default::default(),
         }
     }
