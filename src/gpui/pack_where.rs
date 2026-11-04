@@ -488,10 +488,7 @@ impl AddonsView {
                         .link()
                         .xsmall()
                         .label("Open folder")
-                        .on_click(move |_, _, _| {
-                            let _ = std::fs::create_dir_all(&dir);
-                            crate::store::open_path(&dir)
-                        }),
+                        .on_click(move |_, _, _| crate::store::open_folder(&dir)),
                 )
             })
             .into_any_element()

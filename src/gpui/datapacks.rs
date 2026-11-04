@@ -9,7 +9,7 @@ use crate::addons::{
 };
 use crate::addons_extra::is_hopper_file;
 use crate::crash_help::callout;
-use crate::store::open_path;
+use crate::store::open_folder;
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -424,10 +424,7 @@ impl AddonsView {
                                 .link()
                                 .xsmall()
                                 .label("Open folder")
-                                .on_click(move |_, _, _| {
-                                    let _ = std::fs::create_dir_all(&dir);
-                                    open_path(&dir)
-                                }),
+                                .on_click(move |_, _, _| open_folder(&dir)),
                         ),
                 )
                 .when(no_loader, |c| c.children(self.paxi_callout(&root, cx)))
