@@ -41,6 +41,7 @@ mod mcp;
 mod mods_api;
 mod mods_hunt;
 mod mods_more;
+mod mods_upload;
 mod mods_table;
 mod motd_live;
 mod security;
