@@ -221,9 +221,10 @@ fn resolve(t: &Target, f: &cf::File) -> anyhow::Result<Option<String>> {
                 return Ok(None);
             }
             let text = fetch(&format!("https://raw.githubusercontent.com/{repo}/{git_ref}/{path}"), FILE_TTL)?;
-            let Some(s) = file_notes(&text, anchor.as_deref(), &version_hints(f)) else {
+            let Some(notes) = file_notes(&text, anchor.as_deref(), &version_hints(f)) else {
                 return Ok(None);
             };
+            let s = with_commits(notes, Forge::GitHub, repo, f);
             let dir = path.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
             rebase_links(
                 &s,
@@ -232,16 +233,20 @@ fn resolve(t: &Target, f: &cf::File) -> anyhow::Result<Option<String>> {
                 &format!("https://raw.githubusercontent.com/{repo}/{git_ref}/{dir}"),
             )
         }
-        Target::Remote { path, raw, anchor, .. } => {
+        Target::Remote { host, path, raw, anchor, .. } => {
             let ext = path.rsplit('/').next().unwrap_or("").rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
             if !matches!(ext.as_deref(), None | Some("md" | "markdown" | "txt")) {
                 return Ok(None);
             }
             let text = fetch(raw, FILE_TTL)?;
-            let Some(s) = file_notes(&text, anchor.as_deref(), &version_hints(f)) else {
+            let Some(notes) = file_notes(&text, anchor.as_deref(), &version_hints(f)) else {
                 return Ok(None);
             };
-            s
+            match *host {
+                "GitLab" => with_commits(notes, Forge::GitLab, repo, f),
+                "Codeberg" => with_commits(notes, Forge::Codeberg, repo, f),
+                _ => notes.text(),
+            }
         }
         Target::Wiki { page, .. } => {
             let text = fetch(&format!("https://raw.githubusercontent.com/wiki/{repo}/{page}.md"), FILE_TTL)?;
@@ -528,20 +533,226 @@ fn section(md: &str, anchor: Option<&str>, versions: &[String]) -> Option<String
 /// version by.
 const TOP_LINES: usize = 40;
 
+/// What a changelog file has for a version.
+#[derive(Debug, PartialEq)]
+enum Notes {
+    /// Its section, or the first lines of a file without headings.
+    Text(String),
+    /// A file with headings but none for this version.
+    Missing(String),
+}
+
+impl Notes {
+    fn text(self) -> String {
+        match self {
+            Notes::Text(t) => t,
+            Notes::Missing(v) => missing_line(&v),
+        }
+    }
+}
+
+fn missing_line(v: &str) -> String {
+    format!("*This file has no section for {v}.*")
+}
+
 /// What to show of a changelog file for a version: its section; for a plain
 /// file without headings, its first lines; for a file with headings but none
-/// for this version, a short note (its top entries would be other versions).
-fn file_notes(md: &str, anchor: Option<&str>, versions: &[String]) -> Option<String> {
+/// for this version, `Missing` (its top entries would be other versions).
+fn file_notes(md: &str, anchor: Option<&str>, versions: &[String]) -> Option<Notes> {
     if let Some(s) = section(md, anchor, versions) {
-        return Some(s);
+        return Some(Notes::Text(s));
     }
     let lines: Vec<&str> = md.lines().collect();
     if headings(&lines).is_empty() {
         let top = lines.iter().copied().take(TOP_LINES).collect::<Vec<_>>().join("\n");
-        return Some(top.trim().to_string()).filter(|t| !t.is_empty());
+        return Some(Notes::Text(top.trim().to_string())).filter(|n| *n != Notes::Text(String::new()));
     }
-    let v = versions.first()?;
-    Some(format!("*This file has no section for {v}.*"))
+    Some(Notes::Missing(versions.first()?.clone()))
+}
+
+// ---- commits instead of a stale file -----------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Forge {
+    GitHub,
+    GitLab,
+    Codeberg,
+}
+
+impl Forge {
+    fn name(self) -> &'static str {
+        match self {
+            Forge::GitHub => "GitHub",
+            Forge::GitLab => "GitLab",
+            Forge::Codeberg => "Codeberg",
+        }
+    }
+
+    /// The repo's API root.
+    fn base(self, repo: &str) -> String {
+        match self {
+            Forge::GitHub => format!("https://api.github.com/repos/{repo}"),
+            Forge::GitLab => format!("https://gitlab.com/api/v4/projects/{}", repo.replace('/', "%2F")),
+            Forge::Codeberg => format!("https://codeberg.org/api/v1/repos/{repo}"),
+        }
+    }
+}
+
+/// Most commits listed.
+const MAX_LISTED: usize = 30;
+
+/// A file with no section for the version: the commits between the previous
+/// release and this one stand in, and the "no section" line stays as a quiet
+/// note under them.
+fn with_commits(notes: Notes, forge: Forge, repo: &str, f: &cf::File) -> String {
+    let Notes::Missing(v) = notes else { return notes.text() };
+    match commits_between(forge, repo, f) {
+        Ok(Some(md)) => format!("{md}\n\n{}", missing_line(&v)),
+        Ok(None) => missing_line(&v),
+        // A rate limit or no network: no data, just the note.
+        Err(e) => {
+            log::warn!("commits {repo}: {e:#}");
+            missing_line(&v)
+        }
+    }
+}
+
+/// Whether `v` looks like a Minecraft version ("1.21", "1.21.1").
+fn is_mc(v: &str) -> bool {
+    v.starts_with("1.") && v.chars().all(|c| c.is_ascii_digit() || c == '.') && !v.ends_with('.')
+}
+
+fn loaders_of(f: &cf::File) -> Vec<&str> {
+    ["NeoForge", "Forge", "Fabric", "Quilt"]
+        .into_iter()
+        .filter(|l| f.game_versions.iter().any(|g| g == l))
+        .collect()
+}
+
+/// The release before `f` for the same Minecraft version and loader: the
+/// newest older file with another version number.
+fn previous_file(f: &cf::File) -> Option<cf::File> {
+    let mc = f.game_versions.iter().find(|g| is_mc(g))?;
+    let mine = version_hints(f);
+    let all = crate::source::files(f.mod_id, mc, cf::Loader::Any).ok()?;
+    all.into_iter()
+        .filter(|p| {
+            p.id != f.id
+                && !p.file_date.is_empty()
+                && p.file_date < f.file_date
+                && loaders_of(p) == loaders_of(f)
+                && version_hints(p).first() != mine.first()
+        })
+        .max_by(|a, b| a.file_date.cmp(&b.file_date))
+}
+
+/// Branch names a release for `mcs` could come from, best first.
+fn branch_candidates(mcs: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for mc in mcs {
+        // 1.21.1 also has the x.y line: 1.21.
+        let mut forms = vec![mc.clone()];
+        if let Some((xy, _)) = mc.rsplit_once('.').filter(|(xy, _)| xy.contains('.')) {
+            forms.push(xy.to_string());
+        }
+        for m in forms {
+            for c in [m.clone(), format!("release-{m}"), format!("release/{m}"), format!("{m}.x"), format!("{m}-release")] {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The branch to list commits of: the first candidate the repo has; None
+/// means its default branch.
+fn pick_branch(names: &[String], mcs: &[String]) -> Option<String> {
+    branch_candidates(mcs).into_iter().find(|c| names.iter().any(|n| n == c))
+}
+
+/// One commit as (title, sha, page), from GitHub's, Gitea's or GitLab's JSON.
+fn commit_of(c: &serde_json::Value, forge: Forge, repo: &str) -> Option<(String, String, String)> {
+    let title = c["commit"]["message"].as_str().or_else(|| c["title"].as_str())?.lines().next()?.trim();
+    let sha = c["sha"].as_str().or_else(|| c["id"].as_str())?;
+    let url = c["html_url"].as_str().or_else(|| c["web_url"].as_str()).map(str::to_string).unwrap_or_else(|| match forge {
+        Forge::GitHub => format!("https://github.com/{repo}/commit/{sha}"),
+        Forge::GitLab => format!("https://gitlab.com/{repo}/-/commit/{sha}"),
+        Forge::Codeberg => format!("https://codeberg.org/{repo}/commit/{sha}"),
+    });
+    (!title.is_empty()).then(|| (title.to_string(), sha.to_string(), url))
+}
+
+/// A commit list as Markdown, newest first as the APIs send it unless
+/// `oldest_first`; merges skipped, capped at [`MAX_LISTED`].
+fn commits_list(v: &serde_json::Value, forge: Forge, repo: &str, oldest_first: bool) -> Option<String> {
+    let mut commits: Vec<_> = v.as_array()?.iter().filter_map(|c| commit_of(c, forge, repo)).collect();
+    if oldest_first {
+        commits.reverse();
+    }
+    commits.retain(|(t, _, _)| !t.starts_with("Merge "));
+    if commits.is_empty() {
+        return None;
+    }
+    let total = commits.len();
+    let mut lines: Vec<String> = commits
+        .iter()
+        .take(MAX_LISTED)
+        .map(|(t, sha, url)| format!("- {t} ([`{}`](<{url}>))", &sha[..sha.len().min(7)]))
+        .collect();
+    if total > MAX_LISTED {
+        lines.push(format!("- *…and {} more*", total - MAX_LISTED));
+    }
+    Some(lines.join("\n"))
+}
+
+/// The commits that went into `f` since the release before it, headed
+/// "Commits between 4.0.51 and 4.0.52 (from GitHub)". Between two tags when
+/// the repo has tags for both (GitHub), else the commits on the branch for
+/// the file's Minecraft version (else the default branch) between the two
+/// files' dates. Nothing when the dates aren't known.
+fn commits_between(forge: Forge, repo: &str, f: &cf::File) -> anyhow::Result<Option<String>> {
+    let Some(prev) = previous_file(f) else { return Ok(None) };
+    let (Some(v), Some(pv)) = (version_hints(f).first().cloned(), version_hints(&prev).first().cloned()) else {
+        return Ok(None);
+    };
+    let head = format!("*Commits between {pv} and {v} (from {}):*", forge.name());
+    let base = forge.base(repo);
+    if forge == Forge::GitHub {
+        let tags = get_json(&format!("{base}/tags?per_page=100"), FILE_TTL)?;
+        let names: Vec<&str> = tags.as_array().map(|a| a.iter().filter_map(|t| t["name"].as_str()).collect()).unwrap_or_default();
+        let tag = |ver: &str| names.iter().find(|n| has_version(n, ver)).copied();
+        if let (Some(a), Some(b)) = (tag(&pv), tag(&v)) {
+            let c = get_json(&format!("{base}/compare/{a}...{b}"), API_TTL)?;
+            return Ok(commits_list(&c["commits"], forge, repo, true).map(|l| format!("*Changes between {a} and {b} (from GitHub):*\n\n{l}")));
+        }
+    }
+    let mut mcs: Vec<String> = f.game_versions.iter().filter(|g| is_mc(g)).cloned().collect();
+    mcs.sort_by_key(|m| std::cmp::Reverse(m.len()));
+    let names: Vec<String> = {
+        let url = match forge {
+            Forge::GitHub => format!("{base}/branches?per_page=100"),
+            Forge::GitLab => format!("{base}/repository/branches?per_page=100"),
+            Forge::Codeberg => format!("{base}/branches?limit=50"),
+        };
+        let b = get_json(&url, FILE_TTL)?;
+        b.as_array().map(|a| a.iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect()).unwrap_or_default()
+    };
+    let branch = pick_branch(&names, &mcs);
+    let (since, until) = (&prev.file_date, &f.file_date);
+    let enc = |b: &str| b.replace('/', "%2F");
+    let url = match (forge, &branch) {
+        (Forge::GitHub, b) => format!("{base}/commits?{}since={since}&until={until}&per_page=100", b.as_ref().map_or(String::new(), |b| format!("sha={}&", enc(b)))),
+        (Forge::GitLab, b) => format!("{base}/repository/commits?{}since={since}&until={until}&per_page=100", b.as_ref().map_or(String::new(), |b| format!("ref_name={}&", enc(b)))),
+        (Forge::Codeberg, b) => format!("{base}/commits?{}since={since}&until={until}&limit=50&stat=false&verification=false&files=false", b.as_ref().map_or(String::new(), |b| format!("sha={}&", enc(b)))),
+    };
+    let c = get_json(&url, API_TTL)?;
+    Ok(commits_list(&c, forge, repo, false).map(|l| format!("{head}\n\n{l}")))
+}
+
+fn get_json(url: &str, ttl: Duration) -> anyhow::Result<serde_json::Value> {
+    Ok(serde_json::from_str(&fetch(url, ttl)?)?)
 }
 
 /// Relative links and images in a repo's Markdown made absolute: anchors
@@ -979,14 +1190,60 @@ Old thing.
         let stale = "### Version 1.16.5-3.2.8.10
 - Old
 ";
-        assert_eq!(file_notes(stale, None, &hints).as_deref(), Some("*This file has no section for 4.0.52.*"));
+        assert_eq!(file_notes(stale, None, &hints), Some(Notes::Missing("4.0.52".into())));
         // No headings at all: the top of the file, capped.
         let flat: String = (1..=100).map(|n| format!("line {n}
 ")).collect();
-        let top = file_notes(&flat, None, &hints).unwrap();
+        let Some(Notes::Text(top)) = file_notes(&flat, None, &hints) else { panic!("no top") };
         assert_eq!(top.lines().count(), TOP_LINES);
         assert!(top.starts_with("line 1
 "));
+    }
+
+    /// Trimmed from GitHub's `commits?sha=1.21&since=…` for Titanium, plus a
+    /// merge and a GitLab-shaped entry.
+    const COMMITS: &str = r#"[
+      {"sha":"5588bd7a1d0c5b1d2d3e4f5a6b7c8d9e0f1a2b3c","commit":{"message":"Fixed TileFieldNetworkMessage not checking the side, closes #162\n\nlong body"},"html_url":"https://github.com/InnovativeOnlineIndustries/Titanium/commit/5588bd7a1d0c5b1d2d3e4f5a6b7c8d9e0f1a2b3c"},
+      {"sha":"aaaaaaa1111111111111111111111111111111111","commit":{"message":"Merge branch '1.21' into release-1.21"},"html_url":"https://github.com/x/y/commit/aaaaaaa"},
+      {"sha":"bbbbbbb2222222222222222222222222222222222","commit":{"message":"Increased version"},"html_url":"https://github.com/x/y/commit/bbbbbbb"}
+    ]"#;
+
+    #[test]
+    fn commit_lists() {
+        let v: serde_json::Value = serde_json::from_str(COMMITS).unwrap();
+        let md = commits_list(&v, Forge::GitHub, "InnovativeOnlineIndustries/Titanium", false).unwrap();
+        assert_eq!(
+            md,
+            "- Fixed TileFieldNetworkMessage not checking the side, closes #162 ([`5588bd7`](<https://github.com/InnovativeOnlineIndustries/Titanium/commit/5588bd7a1d0c5b1d2d3e4f5a6b7c8d9e0f1a2b3c>))\n- Increased version ([`bbbbbbb`](<https://github.com/x/y/commit/bbbbbbb>))"
+        );
+        // Oldest first for a compare.
+        assert!(commits_list(&v, Forge::GitHub, "x/y", true).unwrap().starts_with("- Increased version"));
+        // GitLab's shape: id, title, web_url; the link is built when absent.
+        let gl: serde_json::Value = serde_json::from_str(r#"[{"id":"abcdef0123456789","title":"Fix a crash"}]"#).unwrap();
+        assert_eq!(
+            commits_list(&gl, Forge::GitLab, "g/p", false).unwrap(),
+            "- Fix a crash ([`abcdef0`](<https://gitlab.com/g/p/-/commit/abcdef0123456789>))"
+        );
+        // Only merges, or an error object from a rate limit: nothing.
+        assert_eq!(commits_list(&serde_json::json!([{"sha":"a","commit":{"message":"Merge pull request #1"}}]), Forge::GitHub, "x/y", false), None);
+        assert_eq!(commits_list(&serde_json::json!({"message":"API rate limit exceeded"}), Forge::GitHub, "x/y", false), None);
+        // Capped.
+        let many: Vec<_> = (0..45).map(|n| serde_json::json!({"sha": format!("{n:040}"), "commit": {"message": format!("c{n}")}})).collect();
+        let md = commits_list(&serde_json::Value::Array(many), Forge::GitHub, "x/y", false).unwrap();
+        assert_eq!(md.lines().count(), MAX_LISTED + 1);
+        assert!(md.ends_with("*…and 15 more*"));
+    }
+
+    #[test]
+    fn branches() {
+        let names: Vec<String> = ["main", "1.20", "1.21", "26.1.2", "release-1.21"].map(String::from).to_vec();
+        let mc = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(pick_branch(&names, &mc(&["1.21.1", "1.21"])).as_deref(), Some("1.21"));
+        assert_eq!(pick_branch(&names, &mc(&["1.20.1"])).as_deref(), Some("1.20"));
+        assert_eq!(pick_branch(&["release-1.21".to_string()], &mc(&["1.21.1"])).as_deref(), Some("release-1.21"));
+        // Nothing matching: the default branch.
+        assert_eq!(pick_branch(&names, &mc(&["1.19.2"])), None);
+        assert!(is_mc("1.21.1") && !is_mc("NeoForge") && !is_mc("1.21."));
     }
 
     #[test]
