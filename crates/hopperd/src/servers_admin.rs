@@ -643,7 +643,7 @@ async fn pack_versions(State(app): State<Arc<App>>, headers: HeaderMap, method: 
                 .map(|f| json!({
                     "id": f.id.to_string(), "name": f.display_name, "date": f.file_date,
                     "mc_version": mc_of(&f.game_versions), "type": f.release_name(),
-                    "server_files": f.server_pack_file_id.is_some_and(|i| i != 0),
+                    "server_files": f.has_server_files(),
                 }))
                 .collect()
         };

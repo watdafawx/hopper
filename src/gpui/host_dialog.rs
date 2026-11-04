@@ -1371,7 +1371,7 @@ pub fn open_for_files(
                         .collect();
                     let rows: Vec<(&str, bool)> = files
                         .iter()
-                        .map(|f| (f.display_name.as_str(), f.server_pack_file_id.is_some_and(|i| i != 0)))
+                        .map(|f| (f.display_name.as_str(), f.has_server_files()))
                         .collect();
                     let view = hopper::hosting::pack_versions::view(&rows);
                     let newest = files.get(view.newest_client?)?.clone();

@@ -492,7 +492,7 @@ async fn versions(State(app): State<Arc<App>>, headers: HeaderMap, method: Metho
                         "version": Some(hopper_core::scan::short_version(&f.file_name)).filter(|v| !v.is_empty()).unwrap_or_else(|| f.display_name.clone()),
                         "mc_version": mc_of(&f.game_versions), "loaders": loaders_of(&f.game_versions),
                         "type": f.release_name().to_lowercase(),
-                        "server_files": f.server_pack_file_id.is_some_and(|i| i != 0),
+                        "server_files": f.has_server_files(),
                         "changelog": Value::Null,
                     })
                 })
