@@ -4016,10 +4016,24 @@ fn open_with_system(target: &std::ffi::OsStr) {
     let _ = std::process::Command::new("xdg-open").arg(target).spawn();
 }
 
+/// Explorer's `/select,"<path>"` argument. The quotes go around the path only:
+/// when Rust quotes a whole argument that has spaces it produces
+/// `"/select,C:\a b\c.jar"`, which Explorer can't read, so it opens Documents.
+/// Also drops a `\\?\` prefix, which Explorer's `/select` doesn't accept.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn select_arg(path: &Path) -> String {
+    let p = clean_path(path).to_string_lossy().replace('/', "\\");
+    let p = p.strip_prefix(r"\\?\").unwrap_or(&p);
+    format!("/select,\"{p}\"")
+}
+
 /// Opens the folder holding `path` with `path` selected ("Show in folder").
 pub fn reveal_path(path: &Path) {
     #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", clean_path(path).display())).spawn();
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("explorer").raw_arg(select_arg(path)).spawn();
+    }
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
     // xdg-open can't select a file, so open the folder it's in.
@@ -4069,6 +4083,20 @@ fn warn_once(url: &str, step: &str, e: &anyhow::Error) {
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     if seen.get_or_insert_with(Default::default).insert(format!("{step}|{url}")) {
         log::warn!("image {url}: {step} failed: {e:#}");
+    }
+}
+
+#[cfg(test)]
+mod select_arg_tests {
+    use super::select_arg;
+    use std::path::Path;
+
+    #[test]
+    fn quotes_only_the_path_and_cleans_it() {
+        let a = select_arg(Path::new(r"G:\Games\TNP Limitless 8\mods/Ars Nouveau, 1.jar"));
+        assert_eq!(a, r#"/select,"G:\Games\TNP Limitless 8\mods\Ars Nouveau, 1.jar""#);
+        let b = select_arg(Path::new(r"\\?\G:\x y\a.jar"));
+        assert_eq!(b, r#"/select,"G:\x y\a.jar""#);
     }
 }
 
