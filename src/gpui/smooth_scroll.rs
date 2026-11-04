@@ -65,11 +65,30 @@ fn ease(t: f32) -> f32 {
     1. - (1. - t).powi(3)
 }
 
+thread_local! {
+    /// Areas painted this frame whose wheel handler counts notches (image
+    /// viewer, ...). The window's catcher clears it before each paint.
+    static STEPPED: RefCell<Vec<Bounds<Pixels>>> = RefCell::new(Vec::new());
+}
+
+/// An invisible element that fills its (relative) parent and marks it as a
+/// control that steps once per wheel notch. Notches over it pass through
+/// untouched, so a glide's many small pixel steps don't count as many
+/// steps. Put it inside the element that has the `on_scroll_wheel`.
+pub fn stepped_area() -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        |bounds, _, _, _| STEPPED.with(|s| s.borrow_mut().push(bounds)),
+    )
+    .absolute()
+    .size_full()
+}
+
 /// An invisible element for the root view: while painted, it catches wheel
 /// notches for the whole window.
 pub fn catcher() -> impl IntoElement {
     canvas(
-        |_, _, _| {},
+        |_, _, _| STEPPED.with(|s| s.borrow_mut().clear()),
         |_, _, window, _| {
             // A notch is this many pixels per line, as the lists count it.
             let line = f32::from(window.line_height());
@@ -83,6 +102,9 @@ pub fn catcher() -> impl IntoElement {
                     return;
                 }
                 let ScrollDelta::Lines(lines) = e.delta else { return };
+                if STEPPED.with(|s| s.borrow().iter().any(|b| b.contains(&e.position))) {
+                    return;
+                }
                 cx.stop_propagation();
                 let start = STATE.with(|g| {
                     let mut g = g.borrow_mut();
