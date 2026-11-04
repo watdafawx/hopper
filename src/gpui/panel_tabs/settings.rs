@@ -251,7 +251,6 @@ struct Editor {
 }
 
 pub struct SettingsTab {
-    #[allow(dead_code)]
     store: Entity<Store>,
     target: Option<Target>,
     /// Bumped on every load, so a late answer for an old one is dropped.
@@ -836,7 +835,7 @@ impl SettingsTab {
 
     /// One setting: its label, description and raw key on the left, its
     /// control on the right; tinted while it has an unsaved change.
-    fn row(label: AnyElement, desc: Option<String>, key: Option<&str>, control: AnyElement, dirty: bool, cx: &App) -> Div {
+    pub(super) fn row(label: AnyElement, desc: Option<String>, key: Option<&str>, control: AnyElement, dirty: bool, cx: &App) -> Div {
         let theme = cx.theme();
         h_flex()
             .gap_4()
@@ -866,11 +865,11 @@ impl SettingsTab {
             .child(h_flex().flex_none().gap_2().justify_end().child(control))
     }
 
-    fn label(text: impl Into<SharedString>) -> AnyElement {
+    pub(super) fn label(text: impl Into<SharedString>) -> AnyElement {
         div().text_sm().font_medium().child(text.into()).into_any_element()
     }
 
-    fn heading(text: &str, cx: &App) -> Div {
+    pub(super) fn heading(text: &str, cx: &App) -> Div {
         div()
             .pt_5()
             .pb_1()
@@ -1499,6 +1498,11 @@ impl Render for SettingsTab {
                 }
             }
             match id {
+                "general" => {
+                    if let Some(t) = self.target.clone() {
+                        body.extend(super::copy_remove::rows(&t, &self.store, d.alive(), cx));
+                    }
+                }
                 "network" => body.extend(self.address(&d, cx)),
                 "java" => body.extend(self.java_page(&d, rem, cx)),
                 "all" => {
