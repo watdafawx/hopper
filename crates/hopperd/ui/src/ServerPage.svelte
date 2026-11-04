@@ -14,7 +14,7 @@
   import { followJob } from './lib/jobs.js';
   import { askPower, askKickOrBan, playerAct, head } from './lib/consoleKit.js';
   import ConsoleView from './ConsoleView.svelte';
-  import ServerCrash from './ServerCrash.svelte';
+  import CrashStrip from './CrashStrip.svelte';
   import ServerLogs from './ServerLogs.svelte';
   import ModPeek from './ModPeek.svelte';
   import Spark from './Spark.svelte';
@@ -247,6 +247,8 @@
     {/each}
   </nav>
 
+  {#if tab !== 'logs'}<CrashStrip server={s} seeWhy={() => nav('logs')} />{/if}
+
   {#if tab === 'files'}
     <div class="full"><Files server={s} {path} go={(p) => nav('files', p)} openFile={(p) => nav('edit', p)} openTrash={() => nav('trash')} /></div>
   {:else if tab === 'edit'}
@@ -272,7 +274,6 @@
   {:else}
   <div class="split">
     <div class="main">
-      <ServerCrash server={s} onPeek={(m) => (peek = m)} onShare={(p) => (sharing = { path: p })} openFile={(p) => nav('edit', p)} />
       <ConsoleView server={s} onShare={(p) => (sharing = { path: p })} />
     </div>
 
