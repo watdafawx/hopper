@@ -656,6 +656,52 @@ impl Client {
         Ok(serde_json::from_value(v["dirs"].clone())?)
     }
 
+    // ---- configs -------------------------------------------------------------------
+
+    /// The server's config files with their mods, sides and changed counts
+    /// (the panel's Configs page reads the same).
+    pub fn configs_index(&self, id: &str) -> anyhow::Result<Value> {
+        self.get(&Self::server_path(id, "/configs/index"))
+    }
+
+    /// Config files' text, read by the panel: per file the text, or why it
+    /// couldn't be read as settings.
+    pub fn configs_parse(&self, id: &str, rels: &[String]) -> anyhow::Result<std::collections::HashMap<String, Result<String, String>>> {
+        let v = self.post(&Self::server_path(id, "/configs/parse"), json!({ "rels": rels }))?;
+        let mut out = std::collections::HashMap::new();
+        for (rel, f) in v["files"].as_object().into_iter().flatten() {
+            let r = if f["ok"].as_bool() == Some(true) {
+                Ok(f["text"].as_str().unwrap_or("").to_string())
+            } else {
+                Err(f["error"].as_str().unwrap_or("The panel couldn't read it.").to_string())
+            };
+            out.insert(rel.clone(), r);
+        }
+        Ok(out)
+    }
+
+    /// Saves settings in one of the server's config files, checked together
+    /// on the panel; `base` is the text they were made on (when the file
+    /// changed since, the panel puts them onto the newer copy). The old copy
+    /// goes to the server's `.hopper-backups`.
+    pub fn configs_batch(&self, id: &str, rel: &str, base: &str, edits: &[crate::configedit::Edit]) -> anyhow::Result<crate::configedit::Saved> {
+        let edits: Vec<Value> = edits.iter().map(|e| json!({ "path": e.path, "key": e.key, "value": e.value.text() })).collect();
+        let v = self.post(&Self::server_path(id, "/configs/batch"), json!({ "rel": rel, "base": base, "edits": edits }))?;
+        if v["ok"].as_bool() != Some(true) {
+            let errs: Vec<String> = v["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    let (k, m) = (e["key"].as_str().unwrap_or(""), e["error"].as_str().unwrap_or(""));
+                    if k.is_empty() { m.to_string() } else { format!("{k}: {m}") }
+                })
+                .collect();
+            anyhow::bail!("{}", if errs.is_empty() { "The panel didn't save it.".to_string() } else { errs.join(" ") });
+        }
+        Ok(crate::configedit::Saved { text: v["text"].as_str().unwrap_or("").to_string(), reapplied: v["reapplied"].as_bool().unwrap_or(false) })
+    }
+
     // ---- jobs on the panel ---------------------------------------------------------
 
     /// Follows a job the panel runs until it ends, showing its detail and

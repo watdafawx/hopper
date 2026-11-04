@@ -1,0 +1,531 @@
+//! The server's Configs page, like Hopper desktop's Configs tab: every
+//! config file with the mod it belongs to and who reads it, a search across
+//! all their settings, several files read at once, and a batch of edits to
+//! one file checked together and saved with the old copy in
+//! `.hopper-backups`. The same access as the Files routes, and every path
+//! is checked against the server folder.
+
+use crate::App;
+use crate::api::{ApiResult, bad, not_found, require};
+use crate::servers::Entry as Server;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::http::{HeaderMap, Method};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use hopper_core::configedit::{self, Edit, Entry, Format, Kind, Restart, Section, Value as CValue};
+use hopper_core::configindex::{self, CfgFile};
+use hopper_core::configowner::{self, ModRef, Owners};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+/// The text of a file travels with each batch (as `base`).
+const MAX_BODY: usize = 8 * 1024 * 1024;
+
+/// What a secret shows as; sent back unchanged, it leaves the value alone.
+pub(crate) const MASK: &str = "••••••";
+
+pub fn routes() -> Router<Arc<App>> {
+    Router::new()
+        .route("/api/v1/servers/{id}/configs/index", get(index))
+        .route("/api/v1/servers/{id}/configs/search", get(search))
+        .route("/api/v1/servers/{id}/configs/parse", post(parse).layer(DefaultBodyLimit::max(MAX_BODY)))
+        .route("/api/v1/servers/{id}/configs/batch", post(batch).layer(DefaultBodyLimit::max(MAX_BODY)))
+}
+
+fn server(app: &App, headers: &HeaderMap, method: &Method, id: &str) -> ApiResult<Arc<Server>> {
+    require(app, headers, method)?;
+    app.servers.get(id).ok_or_else(|| not_found("server"))
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> ApiResult<T> {
+    tokio::task::spawn_blocking(f).await.map_err(bad)
+}
+
+// ---- mods and files ------------------------------------------------------------------
+
+/// The server's jars as configs are matched to them, with the panel's names
+/// and icons for the ones Hopper knows. Keys are the jar's name without
+/// `.disabled`, as the Mods list keys its rows.
+pub(crate) fn mod_refs(root: &std::path::Path) -> (Vec<ModRef>, HashMap<String, String>) {
+    let Ok(dir) = crate::files::resolve(root, "mods") else { return Default::default() };
+    // Read only: the Mods tab makes and heals hopper.json, not this page.
+    let addons: HashMap<String, (String, String)> = if root.join(hopper_core::instances::HOPPER_FILE).is_file() {
+        hopper_core::instances::load(root)
+            .map(|i| i.addons.into_iter().map(|a| (a.file_name.trim_end_matches(".disabled").to_lowercase(), (a.name, a.icon))).collect())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut jars = Vec::new();
+    let mut icons = HashMap::new();
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let lower = name.to_lowercase();
+        if !(lower.ends_with(".jar") || lower.ends_with(".jar.disabled")) || !e.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let key = name.trim_end_matches(".disabled").to_string();
+        if !seen.insert(key.to_lowercase()) {
+            continue;
+        }
+        let (shown, icon) = addons.get(&key.to_lowercase()).cloned().unwrap_or_default();
+        if !icon.is_empty() {
+            icons.insert(key.clone(), icon);
+        }
+        jars.push((key, e.path(), shown));
+    }
+    (configowner::of_jars(jars), icons)
+}
+
+/// The config files Hopper reads as settings, each in a folder that stays
+/// inside the server folder (a linked `config/` leading elsewhere is left out).
+fn files_of(root: &std::path::Path, owners: &Owners) -> Vec<CfgFile> {
+    let mut ok_dirs: HashMap<String, bool> = HashMap::new();
+    configindex::index(root, owners)
+        .into_iter()
+        .filter(|f| {
+            let dir = f.rel.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+            *ok_dirs.entry(dir.clone()).or_insert_with(|| crate::files::resolve(root, &dir).is_ok())
+        })
+        .collect()
+}
+
+/// A path the page may read as settings: a config file, inside the server folder.
+fn readable(root: &std::path::Path, rel: &str) -> Result<(), String> {
+    if !configedit::editable(rel) || Format::of(rel).is_none() {
+        return Err("That isn't a config file Hopper can read as settings.".into());
+    }
+    crate::files::resolve(root, rel).map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn format_name(f: Option<Format>) -> &'static str {
+    match f {
+        Some(Format::Toml) => "toml",
+        Some(Format::ForgeCfg) => "cfg",
+        Some(Format::Snbt) => "snbt",
+        Some(Format::Json) => "json",
+        Some(Format::Flat) => "flat",
+        None => "",
+    }
+}
+
+// ---- one setting as JSON --------------------------------------------------------------
+
+/// Keys whose values are passwords, tokens and the like: shown masked.
+pub(crate) fn secret(key: &str) -> bool {
+    let k = configowner::squash(key);
+    ["token", "secret", "password", "passwd", "apikey", "webhook", "privatekey"].iter().any(|w| k.contains(w))
+}
+
+fn masked(e: &Entry) -> bool {
+    secret(&e.key) && matches!(&e.value, CValue::Str(s) if !s.is_empty())
+}
+
+/// One setting, the same for every route that shows settings (here and the
+/// Files editor's), so they agree.
+pub(crate) fn entry_json(e: &Entry) -> Value {
+    let kind = e.kind();
+    let (kind_name, choices, color_fmt) = match &kind {
+        Kind::Bool => ("bool", Vec::new(), None),
+        Kind::Int => ("int", Vec::new(), None),
+        Kind::Float => ("float", Vec::new(), None),
+        Kind::Str => ("str", Vec::new(), None),
+        Kind::Choice(c) => ("choice", c.clone(), None),
+        Kind::List => ("list", Vec::new(), None),
+        Kind::Color(f) => (
+            "color",
+            Vec::new(),
+            Some(match f {
+                configedit::ColorFmt::Int => "int",
+                configedit::ColorFmt::Hash => "hash",
+                configedit::ColorFmt::Hex0x => "0x",
+            }),
+        ),
+        Kind::Opaque => ("opaque", Vec::new(), None),
+    };
+    let hide = masked(e);
+    let text = e.value.text();
+    json!({
+        "key": e.key,
+        "label": e.label(),
+        "path": e.path,
+        "kind": kind_name,
+        "choices": choices,
+        // The older Files editor reads `allowed`.
+        "allowed": e.allowed,
+        "color_fmt": color_fmt,
+        "value": if hide { MASK.to_string() } else { text.clone() },
+        "masked": hide,
+        "list": if kind == Kind::List { configedit::list_items(&text) } else { None },
+        "color": if matches!(kind, Kind::Color(_)) { configedit::color_of(&e.value) } else { None },
+        "comment": e.comment,
+        "range": e.range.map(|(lo, hi)| json!([lo, hi])),
+        "slider": e.slider().map(|(lo, hi)| json!([lo, hi])),
+        "default": if hide { None } else { e.default.clone() },
+        // The default as this setting's value would be written (Reset sends it).
+        "default_value": if hide { None } else { e.default_value().map(|v| v.text()) },
+        "is_default": if hide { None } else { e.is_default() },
+        "restart": match e.restart {
+            Restart::None => "none",
+            Restart::World => "world",
+            Restart::Game => "game",
+        },
+        "guessed": e.guessed,
+        "line": e.line,
+    })
+}
+
+pub(crate) fn sections_json(sections: &[Section]) -> Value {
+    Value::Array(
+        sections
+            .iter()
+            .map(|s| json!({ "path": s.path, "comment": s.comment, "entries": s.entries.iter().map(entry_json).collect::<Vec<_>>() }))
+            .collect(),
+    )
+}
+
+// ---- index and search -------------------------------------------------------------------
+
+/// `{ mods: [{ key, name, icon, files, changed }], files: [{ rel, format,
+/// side, side_label, size, owner, changed, settings }], unmatched: [rel],
+/// settings }`: every config file, its mod (the one rule desktop uses), who
+/// reads it, and how many settings aren't at the default the file states.
+async fn index(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let v = blocking(move || build_index(&e.root)).await?;
+    Ok(Json(v))
+}
+
+pub(crate) fn build_index(root: &std::path::Path) -> Value {
+    let (refs, icons) = mod_refs(root);
+    let owners = Owners::new(refs);
+    let files = files_of(root, &owners);
+    let rels: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
+    let parsed: HashMap<String, _> = configindex::read_all(root, &rels).into_iter().collect();
+    let mut total = 0;
+    let mut by_mod: BTreeMap<String, (Vec<String>, usize)> = BTreeMap::new();
+    let mut unmatched = Vec::new();
+    let rows: Vec<Value> = files
+        .iter()
+        .map(|f| {
+            let p = parsed.get(&f.rel);
+            let (changed, settings, error) = match p.map(|p| &**p) {
+                Some(Ok((_, s))) => (configindex::changed_count(s), s.iter().map(|s| s.entries.len()).sum::<usize>(), None),
+                Some(Err(e)) => (0, 0, Some(e.clone())),
+                None => (0, 0, None),
+            };
+            total += settings;
+            match &f.owner {
+                Some(k) => {
+                    let m = by_mod.entry(k.clone()).or_default();
+                    m.0.push(f.rel.clone());
+                    m.1 += changed;
+                }
+                None => unmatched.push(f.rel.clone()),
+            }
+            json!({
+                "rel": f.rel, "format": format_name(f.format), "side": format!("{:?}", f.side).to_lowercase(), "side_label": f.side.label(),
+                "size": f.size, "owner": f.owner, "changed": changed, "settings": settings, "error": error,
+            })
+        })
+        .collect();
+    let mods: Vec<Value> = owners
+        .mods()
+        .iter()
+        .filter_map(|m| {
+            let (files, changed) = by_mod.get(&m.key)?;
+            let icon = icons.get(&m.key).map(|i| crate::mods_api::icon_url(i)).unwrap_or_default();
+            let name = if m.name.is_empty() { m.key.trim_end_matches(".jar").to_string() } else { m.name.clone() };
+            Some(json!({ "key": m.key, "name": name, "icon": icon, "files": files, "changed": changed }))
+        })
+        .collect();
+    json!({ "mods": mods, "files": rows, "unmatched": unmatched, "settings": total })
+}
+
+/// `{ hits: [{ rel, owner, entry }] }`: settings whose name or key (and with
+/// `desc=1` description) holds every word of `q`.
+async fn search(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let query = q.get("q").cloned().unwrap_or_default();
+    let desc = q.get("desc").is_some_and(|d| d == "1" || d == "true");
+    let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(200usize).clamp(1, 2000);
+    let v = blocking(move || {
+        let root = &e.root;
+        let (refs, _) = mod_refs(root);
+        let owners = Owners::new(refs);
+        let files = files_of(root, &owners);
+        let owner_of: HashMap<&str, Option<&String>> = files.iter().map(|f| (f.rel.as_str(), f.owner.as_ref())).collect();
+        let rels: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
+        let hits: Vec<Value> = configindex::search(root, &rels, &query, desc, limit)
+            .iter()
+            .map(|h| json!({ "rel": h.rel, "owner": owner_of.get(h.rel.as_str()).copied().flatten(), "entry": entry_json(&h.entry) }))
+            .collect();
+        json!({ "hits": hits })
+    })
+    .await?;
+    Ok(Json(v))
+}
+
+// ---- parse and batch ---------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ParseBody {
+    rels: Vec<String>,
+}
+
+/// `{ files: { rel: { ok, text, format, side, side_label, sections } | { ok:
+/// false, error } } }` for each file asked for.
+async fn parse(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<ParseBody>) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    if b.rels.len() > 500 {
+        return Err(bad("Ask for fewer files at once."));
+    }
+    let v = blocking(move || {
+        let mut out = serde_json::Map::new();
+        for rel in b.rels {
+            out.insert(rel.clone(), parse_one(&e.root, &rel));
+        }
+        json!({ "files": out })
+    })
+    .await?;
+    Ok(Json(v))
+}
+
+pub(crate) fn parse_one(root: &std::path::Path, rel: &str) -> Value {
+    if let Err(error) = readable(root, rel) {
+        return json!({ "ok": false, "error": error });
+    }
+    let side = configindex::side_of(rel);
+    match &*configindex::read(root, rel) {
+        Ok((text, sections)) => json!({
+            "ok": true, "text": text, "format": format_name(Format::of(rel)),
+            "side": format!("{side:?}").to_lowercase(), "side_label": side.label(), "sections": sections_json(sections),
+        }),
+        Err(error) => json!({ "ok": false, "error": error }),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct BatchEdit {
+    #[serde(default)]
+    path: Vec<String>,
+    key: String,
+    /// As typed (`true`, `8`, `SAFE`, `["a", "b"]`).
+    value: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct BatchBody {
+    rel: String,
+    /// The text the edits were made on.
+    base: String,
+    edits: Vec<BatchEdit>,
+}
+
+/// Saves several settings in one file: each value read as its setting's
+/// kind, all checked together, then written with the old copy in
+/// `.hopper-backups`. `{ ok, text, sections, reapplied, backup }`, or `{ ok:
+/// false, errors: [{ path, key, error }] }` with nothing written.
+async fn batch(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<BatchBody>) -> ApiResult<Json<Value>> {
+    let e = server(&app, &headers, &method, &id)?;
+    let v = blocking(move || batch_save(&e.root, b)).await?;
+    Ok(Json(v))
+}
+
+fn refused(path: &[String], key: &str, error: impl Into<String>) -> Value {
+    json!({ "path": path, "key": key, "error": error.into() })
+}
+
+fn failed(errors: Vec<Value>) -> Value {
+    json!({ "ok": false, "errors": errors })
+}
+
+pub(crate) fn batch_save(root: &std::path::Path, b: BatchBody) -> Value {
+    let rel = b.rel.replace('\\', "/");
+    if let Err(e) = readable(root, &rel) {
+        return failed(vec![refused(&[], "", e)]);
+    }
+    let Some(f) = Format::of(&rel) else { return failed(vec![refused(&[], "", "Hopper can't read this kind of file as settings.")]) };
+    let disk = match std::fs::read_to_string(root.join(&rel)) {
+        Ok(t) => t,
+        Err(e) => return failed(vec![refused(&[], "", format!("Couldn't read it: {e}"))]),
+    };
+    // Kinds from the file as it is now: the edits go onto that copy.
+    let sections = match configedit::parse_as(f, &disk) {
+        Ok(s) => s,
+        Err(e) => return failed(vec![refused(&[], "", e)]),
+    };
+    let mut errors = Vec::new();
+    let mut edits = Vec::new();
+    for x in &b.edits {
+        let Some(entry) = sections.iter().flat_map(|s| &s.entries).find(|e| e.path == x.path && e.key == x.key) else {
+            errors.push(refused(&x.path, &x.key, format!("{} isn't in the file any more.", x.key)));
+            continue;
+        };
+        // The mask came back: the secret wasn't touched.
+        if masked(entry) && x.value == MASK {
+            continue;
+        }
+        match entry.value.parse_like(&x.value) {
+            Ok(value) => edits.push(Edit { path: x.path.clone(), key: x.key.clone(), value }),
+            Err(e) => errors.push(refused(&x.path, &x.key, e)),
+        }
+    }
+    if !errors.is_empty() {
+        return failed(errors);
+    }
+    if let Err(bad) = configedit::apply(f, &disk, &edits) {
+        return failed(bad.iter().map(|r| refused(&r.path, &r.key, r.error.clone())).collect());
+    }
+    let started = now_secs();
+    match configedit::save_edits(root, &rel, &b.base, &edits) {
+        Ok(saved) => {
+            let sections = configedit::parse_as(f, &saved.text).map(|s| sections_json(&s)).unwrap_or(Value::Array(Vec::new()));
+            let backup = backup_of(root, &rel, started);
+            json!({
+                "ok": true, "text": saved.text, "sections": sections, "reapplied": saved.reapplied,
+                "backup": backup.as_ref().map(|b| format!("The old copy is in {b}. Backups can put it back.")),
+                "backup_path": backup,
+            })
+        }
+        Err(e) => failed(vec![refused(&[], "", format!("{e:#}"))]),
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Where the save put the old copy of `rel`: the newest `.hopper-backups`
+/// set since `since` holding a file of that name.
+fn backup_of(root: &std::path::Path, rel: &str, since: u64) -> Option<String> {
+    let name = rel.rsplit('/').next()?;
+    let dir = root.join(hopper_core::sync::BACKUP_DIR);
+    let mut sets: Vec<u64> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u64>().ok())
+        .filter(|s| *s >= since)
+        .collect();
+    sets.sort_unstable();
+    for s in sets.into_iter().rev() {
+        let set = dir.join(s.to_string());
+        let found = std::fs::read_dir(&set).ok()?.flatten().filter_map(|e| e.file_name().to_str().map(str::to_string)).find(|n| n == name || n.ends_with(&format!("-{name}")));
+        if let Some(n) = found {
+            return Some(format!("{}/{s}/{n}", hopper_core::sync::BACKUP_DIR));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CFG: &str = "[general]\n\t#How far it reaches\n\t#Range: 1 ~ 64\n\t#Default: 8\n\treach = 8\n\t#Allowed Values: FAST, SAFE\n\tmode = \"SAFE\"\n\tbotToken = \"abc123\"\n";
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("hopperd-configs-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(root.join("config/x-common.toml"), CFG).unwrap();
+        root
+    }
+
+    fn body(edits: &[(&str, &str)]) -> BatchBody {
+        BatchBody {
+            rel: "config/x-common.toml".into(),
+            base: CFG.into(),
+            edits: edits.iter().map(|(k, v)| BatchEdit { path: vec!["general".into()], key: k.to_string(), value: v.to_string() }).collect(),
+        }
+    }
+
+    #[test]
+    fn batch_checks_everything_before_writing() {
+        let root = scratch("check");
+        // One bad value (out of range) and one of the wrong kind: nothing written.
+        let r = batch_save(&root, body(&[("reach", "99"), ("mode", "FAST"), ("nope", "1")]));
+        assert_eq!(r["ok"], false);
+        let errs = r["errors"].as_array().unwrap();
+        assert_eq!(errs.len(), 1, "{r}");
+        assert_eq!(errs[0]["key"], "nope");
+        let r = batch_save(&root, body(&[("reach", "99"), ("mode", "FAST")]));
+        assert_eq!(r["errors"][0]["error"], "Between 1 and 64.");
+        let r = batch_save(&root, body(&[("reach", "x")]));
+        assert_eq!(r["errors"][0]["error"], "Type a whole number.");
+        assert_eq!(std::fs::read_to_string(root.join("config/x-common.toml")).unwrap(), CFG);
+        assert!(!root.join(".hopper-backups").exists());
+        // Outside the config folders, or above the server folder.
+        assert_eq!(batch_save(&root, BatchBody { rel: "../x.toml".into(), ..body(&[]) })["ok"], false);
+        assert_eq!(batch_save(&root, BatchBody { rel: "server.properties".into(), ..body(&[]) })["ok"], false);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn batch_saves_with_a_backup() {
+        let root = scratch("save");
+        let r = batch_save(&root, body(&[("reach", "12"), ("mode", "FAST")]));
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["reapplied"], false);
+        let disk = std::fs::read_to_string(root.join("config/x-common.toml")).unwrap();
+        assert!(disk.contains("reach = 12") && disk.contains("mode = \"FAST\"") && disk.contains("#How far it reaches"));
+        let backup = r["backup_path"].as_str().unwrap().to_string();
+        assert!(backup.starts_with(".hopper-backups/"), "{backup}");
+        assert_eq!(std::fs::read_to_string(root.join(&backup)).unwrap(), CFG);
+        assert!(r["backup"].as_str().unwrap().contains(&backup));
+        // Made on an older copy: the edit goes onto the newer one.
+        let r = batch_save(&root, body(&[("reach", "20")]));
+        assert_eq!(r["reapplied"], true);
+        let disk = std::fs::read_to_string(root.join("config/x-common.toml")).unwrap();
+        assert!(disk.contains("reach = 20") && disk.contains("mode = \"FAST\""));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn secrets_are_masked_and_kept() {
+        let root = scratch("mask");
+        let p = parse_one(&root, "config/x-common.toml");
+        let entries = p["sections"][0]["entries"].as_array().unwrap();
+        let tok = entries.iter().find(|e| e["key"] == "botToken").unwrap();
+        assert_eq!(tok["value"], MASK);
+        assert_eq!(tok["masked"], true);
+        let reach = entries.iter().find(|e| e["key"] == "reach").unwrap();
+        assert_eq!((reach["kind"].as_str(), reach["value"].as_str(), reach["is_default"].as_bool()), (Some("int"), Some("8"), Some(true)));
+        assert_eq!(reach["slider"], json!([1.0, 64.0]));
+        assert_eq!(entries.iter().find(|e| e["key"] == "mode").unwrap()["kind"], "choice");
+        // Sending the mask back leaves the token alone; a new value replaces it.
+        let r = batch_save(&root, body(&[("botToken", MASK), ("reach", "9")]));
+        assert_eq!(r["ok"], true, "{r}");
+        let disk = std::fs::read_to_string(root.join("config/x-common.toml")).unwrap();
+        assert!(disk.contains("botToken = \"abc123\"") && disk.contains("reach = 9"));
+        let base = disk.clone();
+        let r = batch_save(&root, BatchBody { base, ..body(&[("botToken", "new")]) });
+        assert_eq!(r["ok"], true);
+        assert!(std::fs::read_to_string(root.join("config/x-common.toml")).unwrap().contains("botToken = \"new\""));
+        assert!(secret("discord_webhook_url") && secret("apiKey") && !secret("maxBeltLength"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn index_groups_files() {
+        let root = scratch("index");
+        std::fs::write(root.join("config/async.toml"), "a = 1\n").unwrap();
+        let v = build_index(&root);
+        assert_eq!(v["files"].as_array().unwrap().len(), 2);
+        // No jars here: both are unmatched.
+        assert_eq!(v["unmatched"].as_array().unwrap().len(), 2);
+        let x = v["files"].as_array().unwrap().iter().find(|f| f["rel"] == "config/x-common.toml").unwrap().clone();
+        assert_eq!((x["side_label"].as_str(), x["format"].as_str(), x["changed"].as_u64()), (Some("Both"), Some("toml"), Some(0)));
+        assert_eq!(v["settings"], 4);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

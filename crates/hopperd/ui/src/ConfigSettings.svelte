@@ -1,5 +1,5 @@
 <script>
-  // A TOML config as settings, like desktop's config editor: each table's
+  // A config file as settings, like desktop's config editor: each table's
   // title and comment, each setting with its comment, limits and default, a
   // switch for true/false, a picker for allowed values, and other values
   // typed into a field (Enter takes it, Escape drops it). The setting the
@@ -152,7 +152,8 @@
         {@const lim = limits(e)}
         <div class="ent row-hover" class:row-sel={focusLine === e.line} data-line={e.line}>
           <div class="txt">
-            <div class="k">{e.key}</div>
+            <div class="k">{e.label || e.key}</div>
+            {#if e.label && e.label !== e.key}<div class="tiny mono muted">{e.key}</div>{/if}
             {#if e.comment}<div class="tiny muted wrap">{e.comment}</div>{/if}
             {#if lim}<div class="tiny cap">{lim}</div>{/if}
           </div>
@@ -162,10 +163,10 @@
                 <input type="checkbox" checked={e.value === 'true'} onchange={(ev) => pick(ev, s, e, ev.currentTarget.checked ? 'true' : 'false')} />
                 <span></span>
               </label>
-            {:else if e.kind === 'str' && e.allowed.length && editing !== id}
+            {:else if (e.kind === 'choice' || (e.kind === 'str' && e.allowed?.length)) && editing !== id}
               <select class="input pick" value={e.value} onchange={(ev) => pick(ev, s, e, ev.currentTarget.value)}>
-                {#each e.allowed as a (a)}<option value={a}>{a}</option>{/each}
-                {#if !e.allowed.includes(e.value)}<option value={e.value}>{e.value}</option>{/if}
+                {#each e.choices?.length ? e.choices : e.allowed as a (a)}<option value={a}>{a}</option>{/each}
+                {#if !(e.choices?.length ? e.choices : e.allowed).includes(e.value)}<option value={e.value}>{e.value}</option>{/if}
               </select>
             {:else if editing === id}
               <div class="fw">

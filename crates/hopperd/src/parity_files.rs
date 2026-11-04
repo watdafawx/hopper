@@ -1,16 +1,17 @@
 //! Routes added to bring the panel's files area closer to Hopper desktop:
-//! a TOML config as settings (switches, pickers and values from the file's
+//! a config file as settings (switches, pickers and values from the file's
 //! own comments, edits that keep the rest of the file), and which mod each
 //! entry of `config/` belongs to, so the panel can show the mod's icon and
 //! name beside its configs and a picker over a mod's other config files.
 
 use crate::App;
 use crate::api::{ApiResult, bad, not_found, require};
+use crate::configs::sections_json;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, Method};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use hopper_core::configedit::{self, Section, Value as CValue};
+use hopper_core::configedit;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -21,13 +22,6 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 
 /// Endings of config files that are text (desktop's config editor's list).
 const TEXT_ENDINGS: [&str; 10] = [".toml", ".json", ".json5", ".cfg", ".properties", ".txt", ".yml", ".yaml", ".snbt", ".ini"];
-
-/// Endings a config's name carries after the mod id (as hopper-core's
-/// modconfig reads them).
-const SUFFIXES: &[&str] = &[
-    "-client", "_client", "-common", "_common", "-server", "_server", "-startup", "_startup", "-config", "_config",
-    "-neoforge", "_neoforge", "-forge", "_forge", "-fabric", "_fabric",
-];
 
 pub fn routes() -> Router<Arc<App>> {
     Router::new()
@@ -54,20 +48,6 @@ async fn version_text(
         .map_err(bad)?
         .map_err(|e| bad(format!("{e:#}")))?;
     Ok(Json(json!({ "content": text })))
-}
-
-fn squash(s: &str) -> String {
-    s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
-}
-
-/// The mod id a top-level entry of `config/` is named after, squashed.
-fn owner(name: &str, is_dir: bool) -> String {
-    let l = name.to_lowercase();
-    let mut stem = if is_dir { l.as_str() } else { l.split('.').next().unwrap_or(&l) };
-    for s in SUFFIXES {
-        stem = stem.strip_suffix(s).unwrap_or(stem);
-    }
-    squash(stem)
 }
 
 fn is_text(rel: &str) -> bool {
@@ -101,23 +81,8 @@ async fn owners(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
         // Inside the server folder only (a linked mods/ or config/ that
         // leads elsewhere reads as empty).
         let inside = |name: &str| crate::files::resolve(&root, name).ok();
-        // Squashed mod id -> the jar (name without `.disabled`).
-        let mut by_id: HashMap<String, String> = HashMap::new();
-        for entry in inside("mods").and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let lower = name.to_lowercase();
-            if !(lower.ends_with(".jar") || lower.ends_with(".jar.disabled")) {
-                continue;
-            }
-            let jar = name.trim_end_matches(".disabled").to_string();
-            let (ids, _) = hopper_core::deps::own_ids(&entry.path());
-            for i in ids {
-                let s = squash(&i);
-                if s.len() >= 3 && s != "minecraft" {
-                    by_id.entry(s).or_insert_with(|| jar.clone());
-                }
-            }
-        }
+        // The same rule as the Configs page and Hopper desktop.
+        let owners_of = hopper_core::configowner::Owners::new(crate::configs::mod_refs(&root).0);
         let mut owners: BTreeMap<String, String> = BTreeMap::new();
         let mut files: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for entry in inside("config").and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten() {
@@ -128,13 +93,14 @@ async fn owners(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
             }
             let is_dir = ft.is_dir();
             let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(jar) = by_id.get(&owner(&name, is_dir)) else { continue };
             let rel = format!("config/{name}");
+            let probe = if is_dir { format!("{rel}/") } else { rel.clone() };
+            let Some(jar) = owners_of.owner(&probe).map(|m| m.key.clone()) else { continue };
             if hopper_core::packdiff::pack_content(&rel) {
                 continue;
             }
             owners.insert(name, jar.clone());
-            let list = files.entry(jar.clone()).or_default();
+            let list = files.entry(jar).or_default();
             if is_dir {
                 walk(&path, &rel, list);
             } else {
@@ -152,50 +118,27 @@ async fn owners(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
     Ok(Json(v))
 }
 
-fn value_json(v: &CValue) -> (&'static str, String) {
-    let kind = match v {
-        CValue::Bool(_) => "bool",
-        CValue::Int(_) => "int",
-        CValue::Float(_) => "float",
-        CValue::Str(_) => "str",
-        CValue::Text(_) => "text",
-    };
-    (kind, v.text())
-}
-
-fn sections_json(sections: &[Section]) -> Value {
-    Value::Array(
-        sections
-            .iter()
-            .map(|s| {
-                json!({
-                    "path": s.path,
-                    "comment": s.comment,
-                    "entries": s.entries.iter().map(|e| {
-                        let (kind, value) = value_json(&e.value);
-                        json!({
-                            "key": e.key, "kind": kind, "value": value, "comment": e.comment,
-                            "range": e.range.map(|(lo, hi)| json!([lo, hi])),
-                            "allowed": e.allowed, "default": e.default, "line": e.line,
-                        })
-                    }).collect::<Vec<_>>(),
-                })
-            })
-            .collect(),
-    )
-}
-
 #[derive(Deserialize)]
 struct ParseBody {
     text: String,
+    /// The file's path: read as its own format. Without it, TOML.
+    #[serde(default)]
+    rel: String,
 }
 
-/// `{ ok, sections }` for TOML text, or `{ ok: false, error }` when it
+fn format_of(rel: &str) -> Result<configedit::Format, String> {
+    if rel.is_empty() {
+        return Ok(configedit::Format::Toml);
+    }
+    configedit::Format::of(rel).ok_or_else(|| "Hopper can't read this kind of file as settings.".to_string())
+}
+
+/// `{ ok, sections }` for a config's text, or `{ ok: false, error }` when it
 /// doesn't read.
 async fn parse(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<ParseBody>) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
     app.servers.get(&id).ok_or_else(|| not_found("server"))?;
-    let v = tokio::task::spawn_blocking(move || match configedit::parse(&b.text) {
+    let v = tokio::task::spawn_blocking(move || match format_of(&b.rel).and_then(|f| configedit::parse_as(f, &b.text)) {
         Ok(s) => json!({ "ok": true, "sections": sections_json(&s) }),
         Err(error) => json!({ "ok": false, "error": error }),
     })
@@ -207,6 +150,9 @@ async fn parse(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, 
 #[derive(Deserialize)]
 struct SetBody {
     text: String,
+    /// The file's path: read as its own format. Without it, TOML.
+    #[serde(default)]
+    rel: String,
     /// The table the setting is in.
     #[serde(default)]
     table: Vec<String>,
@@ -224,23 +170,29 @@ async fn set(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Pa
     app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let v = tokio::task::spawn_blocking(move || {
         let fail = |error: String| json!({ "ok": false, "error": error });
-        let sections = match configedit::parse(&b.text) {
+        let f = match format_of(&b.rel) {
+            Ok(f) => f,
+            Err(e) => return fail(e),
+        };
+        let sections = match configedit::parse_as(f, &b.text) {
             Ok(s) => s,
             Err(e) => return fail(e),
         };
         let Some(entry) = sections.iter().flat_map(|s| &s.entries).find(|e| e.path == b.table && e.key == b.key) else {
             return fail(format!("No {} in the file.", b.key));
         };
+        // The masked secret sent back: nothing changes.
+        if b.value == crate::configs::MASK && crate::configs::secret(&entry.key) {
+            return json!({ "ok": true, "text": b.text, "sections": sections_json(&sections) });
+        }
         let value = match entry.value.parse_like(&b.value) {
             Ok(v) => v,
             Err(e) => return fail(e),
         };
-        if let Some(e) = entry.check(&value) {
-            return fail(e);
-        }
-        match configedit::set(&b.text, &b.table, &b.key, &value).and_then(|t| configedit::parse(&t).map(|s| (t, s))) {
+        let edit = configedit::Edit { path: b.table.clone(), key: b.key.clone(), value };
+        match configedit::apply(f, &b.text, &[edit]).and_then(|t| configedit::parse_as(f, &t).map(|s| (t, s)).map_err(|e| vec![configedit::Refused { path: Vec::new(), key: String::new(), error: e }])) {
             Ok((text, s)) => json!({ "ok": true, "text": text, "sections": sections_json(&s) }),
-            Err(e) => fail(format!("{}: {e}", b.key)),
+            Err(bad) => fail(bad.into_iter().next().map(|r| r.error).unwrap_or_default()),
         }
     })
     .await
