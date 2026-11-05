@@ -45,6 +45,14 @@
       : !v.server_files ? 'No server pack for this version.'
         : '';
   const verb = (v) => (curIx >= 0 && ix(v) > curIx ? 'Switch to this' : 'Update to this');
+
+  // How Update and Switch treat the server's changes, remembered per server.
+  let clean = $state(null);
+  api(`/settings/pack-switch?server=${encodeURIComponent(untrack(() => server.id))}`).then((s) => (clean = s.clean), () => (clean = true));
+  function setClean(on) {
+    clean = on;
+    api('/settings/pack-switch', { method: 'PUT', body: { server: server.id, clean: on } }).catch(() => {});
+  }
 </script>
 
 <svelte:window onkeydown={(e) => e.key === 'Escape' && !e.defaultPrevented && !dialog.open && (e.preventDefault(), onClose())} />
@@ -65,7 +73,19 @@
         <b class="behind">{newer.length} version{newer.length === 1 ? '' : 's'} behind</b>
         <button class="btn sm pri" disabled={!!why(newer[0])} title={why(newer[0])} onclick={() => onPick(newer[0].id)}><Download size={13} />Update to {newer[0].name}</button>
       {:else}<span class="small subtle">Up to date: {server.name} runs the newest version.</span>{/if}
+      {#if pack.updatable && clean != null}
+        <span class="sp"></span>
+        <div class="seg" role="tablist" aria-label="How updates treat the server's changes">
+          <button role="tab" aria-selected={clean} class:on={clean} onclick={() => setClean(true)}>Clean update</button>
+          <button role="tab" aria-selected={!clean} class:on={!clean} onclick={() => setClean(false)}>Keep the server's changes</button>
+        </div>
+      {/if}
     </div>
+    {#if pack.updatable && clean != null}
+      <div class="tiny muted">{clean
+        ? "Like the CurseForge app: every pack mod and pack file becomes the new version's. The server's own mods, worlds and server.properties stay. Undo from History."
+        : "Update and Switch open a preview first, to pick which of the server's edits stay."}</div>
+    {/if}
 
     <div class="scroll col">
       {#each versions as v, i (v.id)}
@@ -83,7 +103,7 @@
               <span class="tiny muted">{ago(v.date)}</span>
             </button>
             {#if !installed}
-              <button class="btn sm ghost" disabled={!!why(v)} title="See what changes before switching, and which of the server's edits stay" onclick={() => onPick(v.id, true)}><GitCompare size={13} />Compare first</button>
+              {#if clean}<button class="btn sm ghost" disabled={!!why(v)} title="See what changes before switching, and which of the server's edits stay" onclick={() => onPick(v.id, true)}><GitCompare size={13} />Compare first</button>{/if}
               <button class="btn sm" class:pri={top} disabled={!!why(v)} title={why(v)} onclick={() => onPick(v.id)}>
                 {#if verb(v) === 'Switch to this'}<ArrowRightLeft size={13} />{:else}<Download size={13} />{/if}{verb(v)}
               </button>

@@ -53,6 +53,9 @@
 
   // ---- preparing the update ----
   let compare = $state(false);
+  // A clean update (every pack mod and file becomes the pack's), or keep
+  // the server's changes: the server's own choice, else the default.
+  let clean = $state(true);
   let plan = $state(null);
   let planErr = $state('');
   let status = $state(null);
@@ -98,12 +101,9 @@
       if (jobId !== job) return;
       plan = r;
       defaults(r);
-      // A picked version goes straight to updating when the setting is off
-      // and nothing needs the owner's say.
-      if (!compareFirst && !r.needs_say && !r.compared && !why && !alive) {
-        const on = await api('/settings/pack-switch').then((s) => s.compare, () => true);
-        if (!on && jobId === job) update();
-      }
+      // A version picked in Versions and changelogs goes straight to
+      // updating when it's a clean update.
+      if (!compareFirst && clean && !why && !alive && jobId === job) update();
     } catch (e) {
       // Another comparison took over (or the window closed): not this one's error.
       if (jobId !== mine && jobId !== job) return;
@@ -118,8 +118,19 @@
     prepare();
   }
 
-  onMount(() => {
+  async function setClean(on) {
+    if (clean === on) return;
+    clean = on;
+    api('/settings/pack-switch', { method: 'PUT', body: { server: server.id, clean: on } }).catch((e) => say(e.message, true));
+    section = null;
+    // A clean update starts from the quick comparison: the server's edits all give way.
+    if (on && plan?.compared) setCompare(false);
+    else if (plan) defaults(plan);
+  }
+
+  onMount(async () => {
     loadLog();
+    clean = await api(`/settings/pack-switch?server=${encodeURIComponent(server.id)}`).then((s) => s.clean, () => true);
     prepare();
   });
 
@@ -180,6 +191,11 @@
     keep = new Set();
     resetVersions = false;
     openVersions = false;
+    if (clean) {
+      take = new Set(p.clean_take || []);
+      resetVersions = true;
+      openConflicts = false;
+    }
   }
 
   const choices = $derived.by(() => {
@@ -362,9 +378,19 @@
     }
   }
 
+  const cleanText = $derived.by(() => {
+    if (!plan) return '';
+    const n = (k, one, many, v1, vn) => (k === 1 ? `${one} ${v1}` : `${k} ${many} ${vn}`);
+    const out = ["Every pack mod and pack file becomes the server pack's."];
+    if (take.size) out.push(`${n(take.size, 'A file that differs', 'files that differ', 'takes', 'take')} the pack's copy.`);
+    if (heldVersions.length) out.push(`${n(heldVersions.length, 'A mod on another version', 'mods on other versions', 'takes', 'take')} the pack's.`);
+    if (needed.length) out.push(`${n(needed.length, 'A mod the pack drops', 'mods the pack drops', 'goes', 'go')}, though a mod the server added needs it.`);
+    return out.join(' ');
+  });
+
   const strip = $derived(
     plan
-      ? `${bulk === 'mine' ? "Mods update to the server pack's; the server's edited files stay as they are." : bulk === 'review' ? "Mods update to the server pack's; files as you picked them." : plan.base_known ? "Mods and the pack's files update to the server pack's, keeping your edits as picked." : "Pack files are replaced with the server pack's, like the CurseForge app."} The server's own mods and files stay.`
+      ? `${clean ? "Every pack mod and pack file becomes the server pack's, like the CurseForge app." : bulk === 'mine' ? "Mods update to the server pack's; the server's edited files stay as they are." : bulk === 'review' ? "Mods update to the server pack's; files as you picked them." : plan.base_known ? "Mods and the pack's files update to the server pack's, keeping your edits as picked." : "Pack files are replaced with the server pack's, like the CurseForge app."} The server's own mods and files stay.`
       : planErr ? "The update couldn't be prepared: see Changes."
         : why ? why
           : 'Preparing the update in the background…',
@@ -437,6 +463,13 @@
       <div class="small subtle row wrap cap">
         <span class="ell">{plan?.base || `${pack.current.name}'s server pack`}  →  {plan?.server_pack || target?.file_name || target?.name}</span>
         {#if onOtherVersion && !result}<button class="link tiny" disabled={!!applying} onclick={onOtherVersion}>Other version…</button>{/if}
+        {#if !result}
+          <span class="sp"></span>
+          <div class="seg" role="tablist" aria-label="How the update treats the server's changes">
+            <button role="tab" aria-selected={clean} class:on={clean} disabled={!!applying} onclick={() => setClean(true)}>Clean update</button>
+            <button role="tab" aria-selected={!clean} class:on={!clean} disabled={!!applying} onclick={() => setClean(false)}>Keep the server's changes</button>
+          </div>
+        {/if}
       </div>
 
       {#if result}
@@ -497,6 +530,14 @@
               <div class="tiny muted">{compare ? "The panel reads the old server pack's file list and compares it with the server's files." : 'The panel downloads the new server pack and compares it with the server.'} Nothing changes yet.</div>
             </div>
           {:else}
+            {#if clean}
+            <div class="choice col">
+              <b class="small">Clean update, like the CurseForge app</b>
+              <div class="small">{cleanText}</div>
+              <div class="small">Stays: the server's own mods and their files, worlds, server.properties.</div>
+              <div class="tiny muted">Anything replaced can be undone from History. Pick Keep the server's changes to keep its edits.</div>
+            </div>
+            {:else}
             <!-- Your choice: mods on the server's own versions -->
             {#if heldVersions.length}
               <div class="choice col">
@@ -555,6 +596,7 @@
                 <button class="btn sm" onclick={() => setCompare(true)}><GitCompare size={13} />Compare with my changes</button>
                 <span class="tiny muted grow">Finds the files you edited on the server so you can keep them, and merges edits where the pack changed other lines. Reads the old server pack's file list (no full download).</span>
               </div>
+            {/if}
             {/if}
 
             <!-- What changes -->

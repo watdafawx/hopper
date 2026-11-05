@@ -168,6 +168,10 @@ pub struct UpdatePlan {
     /// Pack mods you updated yourself that the pack has another file for
     /// (key "u:<project>"): yours stays unless you take the pack's.
     pub updated: Vec<OffMod>,
+    /// Pack mods you turned off that the update leaves as they are (key
+    /// "p:<project>"): they stay off, but a clean update turns them on.
+    #[serde(default)]
+    pub still_off: Vec<OffMod>,
     /// For a pack-shipped jar in `off`: your turned-off file it replaces.
     pub(crate) off_old: HashMap<String, String>,
     /// The installed pack version could be read, so your own changes can
@@ -400,6 +404,55 @@ impl UpdatePlan {
                     }
                 }
                 FileAction::Add | FileAction::Update => {}
+            }
+        }
+        o
+    }
+
+    /// A clean update's files: every pack file that differs from yours
+    /// takes the pack's copy, except your own settings ([`keep_local`]).
+    pub fn clean_take(&self) -> HashSet<String> {
+        self.files
+            .iter()
+            .filter(|f| {
+                matches!(f.action, FileAction::Conflict | FileAction::KeepYours | FileAction::Merge | FileAction::KeepDropped)
+                    && !keep_local(&f.rel)
+            })
+            .map(|f| f.rel.clone())
+            .collect()
+    }
+
+    /// A clean update's mod choices: mods you turned off come back on, pack
+    /// mods you removed come back, and mods you updated take the pack's
+    /// file.
+    pub fn clean_choices(&self) -> HashSet<String> {
+        self.off.iter().chain(&self.removed).chain(&self.updated).chain(&self.still_off).map(|m| m.key.clone()).collect()
+    }
+
+    /// A clean update, like the CurseForge app: the instance ends up with
+    /// exactly the pack's mods and files. Mods you added, their settings,
+    /// files the pack doesn't ship and your own settings ([`keep_local`])
+    /// stay; everything replaced goes to History first.
+    pub fn clean_decisions(&self) -> Overrides {
+        let take = self.clean_take();
+        let mut o = self.decisions_with(&take, &self.clean_choices());
+        o.enable.extend(self.still_off.iter().map(|m| m.project));
+        for f in self.files.iter().filter(|f| take.contains(&f.rel)) {
+            match f.action {
+                // Your edit (or the merge of it) gives way to the pack's copy.
+                FileAction::KeepYours | FileAction::Merge => {
+                    o.skip.remove(&f.rel);
+                    o.write.retain(|(r, _)| *r != f.rel);
+                    if !o.backup.contains(&f.rel) {
+                        o.backup.push(f.rel.clone());
+                    }
+                }
+                // The pack dropped it: it goes, edited or not.
+                FileAction::KeepDropped => {
+                    o.skip.remove(&f.rel);
+                    o.remove.push(f.rel.clone());
+                }
+                _ => {}
             }
         }
         o
@@ -776,6 +829,7 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
     let (off, off_old) = off_mods(inst, &mods, &mut files);
     removed.extend(removed_files(inst, &mut files, old.as_ref()));
     removed.sort_by_key(|m| m.name.to_lowercase());
+    let still_off = still_off(inst, &mods, &off);
     job.detail("Checking what your mods need");
     let yours: Vec<&crate::instances::Addon> = inst.addons.iter().filter(|a| !a.from_pack).collect();
     let dropped: Vec<(String, String, u64, String)> = mods
@@ -816,6 +870,7 @@ pub fn plan(inst: &Instance, file: &cf::File, compare: bool, job: &Job) -> anyho
         off_old,
         removed,
         updated,
+        still_off,
         kept_mods: inst.addons.iter().filter(|a| !a.from_pack).count(),
         base_known: old.is_some(),
         compared: compare,
@@ -1019,6 +1074,29 @@ fn disabled_twin(root: &Path, rel: &str) -> Option<String> {
 /// The mods you turned off that this update changes: pack-listed mods it
 /// updates, and pack-shipped jars that would otherwise arrive turned on.
 /// Those jars leave `files`: the off list handles them.
+/// Pack mods you turned off that the update leaves alone (neither in
+/// `off`, which it changes, nor dropped).
+fn still_off(inst: &Instance, mods: &[ModChange], off: &[OffMod]) -> Vec<OffMod> {
+    let mut out: Vec<OffMod> = inst
+        .addons
+        .iter()
+        .filter(|a| a.from_pack && !a.enabled && a.project_id != 0)
+        .filter(|a| !off.iter().any(|m| m.project == a.project_id))
+        .filter(|a| !mods.iter().any(|m| m.action == ModAction::Remove && (m.project == a.project_id || m.from.eq_ignore_ascii_case(&a.file_name))))
+        .map(|a| OffMod {
+            name: if a.name.is_empty() { a.file_name.clone() } else { a.name.clone() },
+            from: a.file_name.clone(),
+            to: a.file_name.clone(),
+            key: format!("p:{}", a.project_id),
+            project: a.project_id,
+            icon: a.icon.clone(),
+            ..Default::default()
+        })
+        .collect();
+    out.sort_by_key(|m| m.name.to_lowercase());
+    out
+}
+
 fn off_mods(
     inst: &Instance,
     mods: &[ModChange],
@@ -1387,6 +1465,7 @@ mod tests {
             off: Vec::new(),
             removed: Vec::new(),
             updated: Vec::new(),
+            still_off: Vec::new(),
             off_old: HashMap::new(),
             base_known: false,
             compared: false,
@@ -1541,6 +1620,7 @@ mod tests {
             off_old,
             removed: Vec::new(),
             updated: Vec::new(),
+            still_off: Vec::new(),
             base_known: true,
             compared: true,
             needed: Vec::new(),
@@ -1603,6 +1683,7 @@ mod tests {
             ]
             .concat(),
             updated: Vec::new(),
+            still_off: Vec::new(),
             base_known: true,
             compared: true,
             needed: Vec::new(),
@@ -1642,6 +1723,7 @@ mod tests {
             off_old: HashMap::new(),
             removed: Vec::new(),
             updated: Vec::new(),
+            still_off: Vec::new(),
             base_known: true,
             compared: true,
             needed: Vec::new(),
@@ -1660,6 +1742,56 @@ mod tests {
         assert!(!o.skip.contains("a") && !o.skip.contains("d"));
         assert_eq!(o.backup, vec!["d".to_string()]);
         assert_eq!(o.remove, vec!["e".to_string()]);
+    }
+
+    #[test]
+    fn clean_update_takes_everything_but_your_settings() {
+        let fc = |rel: &str, action| FileChange { rel: rel.into(), action };
+        let off = |key: &str| OffMod { key: key.into(), project: 7, ..Default::default() };
+        let plan = UpdatePlan {
+            file: cf::File::default(),
+            mods: Vec::new(),
+            files: vec![
+                fc("config/a.toml", FileAction::Update),
+                fc("config/b.toml", FileAction::KeepYours),
+                fc("config/c.toml", FileAction::Conflict),
+                fc("config/m.toml", FileAction::Merge),
+                fc("config/gone.toml", FileAction::KeepDropped),
+                fc("options.txt", FileAction::Conflict),
+            ],
+            kept_mods: 0,
+            off: vec![off("p:7")],
+            off_old: HashMap::new(),
+            removed: vec![off("r:9"), off("rf:mods/x.jar")],
+            updated: vec![OffMod { key: "u:5".into(), project: 5, ..Default::default() }],
+            still_off: vec![OffMod { key: "p:11".into(), project: 11, ..Default::default() }],
+            base_known: true,
+            compared: true,
+            needed: Vec::new(),
+            your_mods: Vec::new(),
+            your_files: Vec::new(),
+            mod_made: 0,
+            new_zip: PathBuf::new(),
+            prefixes: Vec::new(),
+            same: Vec::new(),
+            merged: [("config/m.toml".to_string(), b"merged".to_vec())].into(),
+            settings: HashMap::new(),
+            settings_merged: HashMap::new(),
+        };
+        let o = plan.clean_decisions();
+        // Your edits give way to the pack's copy, backed up first.
+        for rel in ["config/b.toml", "config/c.toml", "config/m.toml"] {
+            assert!(!o.skip.contains(rel), "{rel} skipped");
+            assert!(o.backup.iter().any(|b| b == rel), "{rel} not backed up");
+        }
+        assert!(o.write.is_empty());
+        assert!(o.remove.iter().any(|r| r == "config/gone.toml"));
+        // Your own game settings stay.
+        assert!(o.skip.contains("options.txt"));
+        // Turned-off mods come on, removed ones come back, yours updated take the pack's.
+        assert!(o.enable.contains(&7) && o.enable.contains(&11));
+        assert!(o.leave_out.is_empty() && !o.skip.contains("mods/x.jar"));
+        assert!(o.keep_mine.is_empty());
     }
 }
 

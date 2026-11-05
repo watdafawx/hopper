@@ -1,27 +1,28 @@
 <script>
-  // Settings › Updates: whether moving a server to another pack version
-  // (rolling back, or updating to a picked one) compares first, as in
-  // Hopper desktop's "Compare versions before switching".
+  // Settings › Updates: whether pack updates and roll backs are clean by
+  // default (every pack mod and file becomes the server pack's, like the
+  // CurseForge app), as in Hopper desktop's "Clean modpack updates". Each
+  // server can pick its own in Versions and changelogs.
   import { GitCompare } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
 
-  let compare = $state(null);
+  let clean = $state(null);
   let saving = $state(false);
 
   async function load() {
     try {
-      compare = (await api('/settings/pack-switch')).compare;
+      clean = (await api('/settings/pack-switch')).clean_default;
     } catch {
-      compare = null;
+      clean = null;
     }
   }
 
   async function put(on) {
     saving = true;
     try {
-      await api('/settings/pack-switch', { method: 'PUT', body: { compare: on } });
-      compare = on;
+      await api('/settings/pack-switch', { method: 'PUT', body: { clean_default: on } });
+      clean = on;
     } catch (e) {
       say(e.message, true);
     } finally {
@@ -32,11 +33,11 @@
   load();
 </script>
 
-{#if compare != null}
+{#if clean != null}
   <div class="card col sw">
     <h3><GitCompare size={14} />Pack versions</h3>
-    <label class="row small"><input type="checkbox" checked={compare} disabled={saving} onchange={(e) => put(e.currentTarget.checked)} /><b>Compare versions before switching</b></label>
-    <div class="small subtle">Rolling a server's modpack back, or moving it to a version you pick, shows what changes first. Off, it updates straight away and only stops if something needs your say. Each version keeps a Compare first button.</div>
+    <label class="row small"><input type="checkbox" checked={clean} disabled={saving} onchange={(e) => put(e.currentTarget.checked)} /><b>Clean modpack updates</b></label>
+    <div class="small subtle">Updates and roll backs make every pack mod and pack file the server pack's, like the CurseForge app. The server's own mods, worlds and server.properties stay, and History undoes the rest. Off, they start on Keep the server's changes: a preview where you pick which edits stay. Each server can pick its own in Versions and changelogs.</div>
   </div>
 {/if}
 

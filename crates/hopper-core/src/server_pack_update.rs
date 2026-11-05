@@ -431,6 +431,7 @@ pub fn plan(
             off_old: HashMap::new(),
             removed: Vec::new(),
             updated: Vec::new(),
+            still_off: Vec::new(),
             base_known: file_base.is_some(),
             compared: compare,
             needed,

@@ -440,15 +440,42 @@ async fn plan(
     Ok(Json(json!({ "job": job })))
 }
 
-/// Whether switching a server's pack version compares first.
-async fn switch_setting(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
+#[derive(Deserialize)]
+struct SwitchQuery {
+    #[serde(default)]
+    server: Option<String>,
+}
+
+/// How switching a server's pack version treats its changes: the default
+/// (clean or not) and, with `?server=`, that server's own choice.
+async fn switch_setting(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Query(q): Query<SwitchQuery>,
+) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
-    Ok(Json(json!({ "compare": app.cfg.read().unwrap().compare_before_switch })))
+    let cfg = app.cfg.read().unwrap();
+    let clean = q
+        .server
+        .as_deref()
+        .and_then(|id| cfg.pack_update_clean.get(id).copied())
+        .unwrap_or(cfg.clean_pack_updates);
+    Ok(Json(json!({ "compare": cfg.compare_before_switch, "clean_default": cfg.clean_pack_updates, "clean": clean })))
 }
 
 #[derive(Deserialize)]
 struct SwitchBody {
-    compare: bool,
+    #[serde(default)]
+    compare: Option<bool>,
+    /// The default for servers that haven't picked (owner only).
+    #[serde(default)]
+    clean_default: Option<bool>,
+    /// One server's choice: `server` with `clean`.
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    clean: Option<bool>,
 }
 
 async fn set_switch_setting(
@@ -457,9 +484,28 @@ async fn set_switch_setting(
     method: Method,
     Json(b): Json<SwitchBody>,
 ) -> ApiResult<Json<Value>> {
-    require_owner(&app, &headers, &method)?;
+    // The defaults are the owner's; a server's own choice anyone who may
+    // update it.
+    if b.compare.is_some() || b.clean_default.is_some() {
+        require_owner(&app, &headers, &method)?;
+    } else {
+        require(&app, &headers, &method)?;
+    }
+    if let Some(id) = &b.server
+        && app.servers.get(id).is_none()
+    {
+        return Err(not_found("server"));
+    }
     let mut cfg = app.cfg.write().unwrap();
-    cfg.compare_before_switch = b.compare;
+    if let Some(c) = b.compare {
+        cfg.compare_before_switch = c;
+    }
+    if let Some(c) = b.clean_default {
+        cfg.clean_pack_updates = c;
+    }
+    if let (Some(id), Some(c)) = (b.server, b.clean) {
+        cfg.pack_update_clean.insert(id, c);
+    }
     cfg.save(&app.data_dir).map_err(|e| bad(format!("{e:#}")))?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -490,6 +536,8 @@ fn summary(plan_id: u64, p: &ServerPlan) -> Value {
         })).collect::<Vec<_>>(),
         "files": p.plan.files,
         "take": p.plan.default_take(),
+        // A clean update's picks: every differing file takes the pack's.
+        "clean_take": p.plan.clean_take(),
     })
 }
 

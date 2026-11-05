@@ -356,6 +356,7 @@ impl Render for VersionsView {
                             ),
                         })
                 });
+                let clean = self.store.read(cx).settings().clean_update(&self.root);
                 let other_cards = others.into_iter().map(|f| {
                     let older = f.id < self.installed_file;
                     let open = self.others.get(&f.id);
@@ -413,9 +414,9 @@ impl Render for VersionsView {
                                         })),
                                 )
                                 .child(widgets::caption(hopper::time::relative(&f.file_date), cx).text_xs().flex_none())
-                                .when(self.pack, |r| {
-                                    // The setting skips the comparison; this
-                                    // is the way back to it for one switch.
+                                .when(self.pack && clean, |r| {
+                                    // A clean update skips the preview; this
+                                    // is the way to it for one switch.
                                     let (store, root, f3) = (self.store.clone(), self.root.clone(), f.clone());
                                     r.child(
                                         Button::new(SharedString::from(format!("other-compare:{}", f.id)))
@@ -459,6 +460,27 @@ impl Render for VersionsView {
                     && latest.as_ref().is_some_and(|f| !f.has_server_files())
                     && self.all.iter().any(|f| f.has_server_files());
                 let latest_has_server = latest.as_ref().is_some_and(|f| f.has_server_files());
+                // Packs: how Update and Roll back treat your changes,
+                // remembered for this instance.
+                let mode = self.pack.then(|| {
+                    let key = self.root.to_string_lossy().to_string();
+                    crate::pack_update::mode_tabs("pack-mode", clean)
+                        .on_click(cx.listener(move |this, ix: &usize, _, cx| {
+                            let key = key.clone();
+                            this.store.update(cx, |s, cx| {
+                                s.update_settings(
+                                    |st| {
+                                        st.pack_update_clean.insert(key, *ix == 0);
+                                    },
+                                    cx,
+                                )
+                            });
+                            cx.notify();
+                        }))
+                });
+                let mode_note = self
+                    .pack
+                    .then(|| widgets::fine_print(crate::pack_update::mode_note(clean), cx));
                 v_flex()
                     .gap_3()
                     .child(
@@ -477,6 +499,7 @@ impl Render for VersionsView {
                             .when(no_server, |r| {
                                 r.child(widgets::caption("No server files yet", cx).text_xs())
                             })
+                            .when_some(mode, |r, m| r.child(div().flex_1()).child(m))
                             .when_some(latest, |r, f| {
                                 r.child(
                                     Button::new("update-latest")
@@ -491,6 +514,7 @@ impl Render for VersionsView {
                                 )
                             }),
                     )
+                    .children(mode_note)
                     .children(cards)
                     .when(self.all.len() > shown_len(entries), |r| {
                         r.child(widgets::caption("Other versions", cx).text_xs().pt_2())

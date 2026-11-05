@@ -50,6 +50,14 @@ pub struct Settings {
     /// picked one) opens the comparison first. Off: it installs straight
     /// away, only stopping to ask when your own settings clash.
     pub compare_before_switch: bool,
+    /// Pack updates and roll backs are clean by default: every pack mod and
+    /// pack file becomes the pack's, like the CurseForge app (your own mods
+    /// and settings stay; History undoes the rest). Off: "Keep my changes",
+    /// which compares first.
+    pub clean_pack_updates: bool,
+    /// The choice per instance (or server) folder, once picked there:
+    /// true = clean update, false = keep my changes.
+    pub pack_update_clean: HashMap<String, bool>,
     /// How each non-mods folder syncs, per server root.
     pub folder_rules: crate::folderrules::Rules,
     /// Peer sync with other PCs running Hopper.
@@ -477,6 +485,8 @@ impl Default for Settings {
             theme: 0,
             auto_update_servers: false,
             compare_before_switch: false,
+            clean_pack_updates: true,
+            pack_update_clean: HashMap::new(),
             folder_rules: Default::default(),
             peer_sync: false,
             datapack_dest: HashMap::new(),
@@ -558,6 +568,15 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Whether pack updates of the instance (or server) at `root` are clean
+    /// updates: its own pick, else the default.
+    pub fn clean_update(&self, root: &std::path::Path) -> bool {
+        self.pack_update_clean
+            .get(&*root.to_string_lossy())
+            .copied()
+            .unwrap_or(self.clean_pack_updates)
+    }
+
     /// [`Settings::web_downloads`], kept to 1..=8 (an old or hand-edited
     /// file may hold 0 or more).
     pub fn web_downloads(&self) -> usize {

@@ -71,6 +71,12 @@ pub struct Config {
     /// first. Off: it updates straight away, stopping only when something
     /// needs the owner's say (as in Hopper desktop's setting).
     pub compare_before_switch: bool,
+    /// Pack updates are clean by default: every pack mod and file becomes
+    /// the server pack's, like the CurseForge app (as in Hopper desktop).
+    /// Off: "Keep the server's changes", which previews first.
+    pub clean_pack_updates: bool,
+    /// The choice per server id, once picked there (true = clean).
+    pub pack_update_clean: std::collections::HashMap<String, bool>,
     /// How long each server's `.hopper-backups` keeps the files behind Undo.
     pub backup_retention: hopper_core::retention::Retention,
 }
@@ -102,6 +108,8 @@ impl Default for Config {
             auto_update: true,
             skip_auto_up_to: None,
             compare_before_switch: false,
+            clean_pack_updates: true,
+            pack_update_clean: Default::default(),
             backup_retention: Default::default(),
         }
     }

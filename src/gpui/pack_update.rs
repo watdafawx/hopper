@@ -181,6 +181,9 @@ pub struct UpdatePreview {
     /// Compare with your changes (downloads the installed version too).
     /// Off: a quick update, like the CurseForge app.
     compare: bool,
+    /// A clean update, like the CurseForge app: every pack mod and pack
+    /// file becomes the pack's. Off: "Keep my changes" (pick per file).
+    clean: bool,
     /// The pack version updated to (instance mode), to compare again.
     file: Option<cf::File>,
     /// Instance mode: the comparison job, while it runs (the button shows
@@ -258,6 +261,7 @@ impl UpdatePreview {
             backup_worlds: false,
             reinstall: false,
             compare: false,
+            clean: false,
             file: None,
             plan_job: None,
             update: None,
@@ -346,7 +350,7 @@ impl UpdatePreview {
                     .iter()
                     .filter(|f| match f.action {
                         FileAction::Add | FileAction::Update | FileAction::Merge => true,
-                        FileAction::Conflict => self.take.contains(&f.rel),
+                        FileAction::Conflict | FileAction::KeepYours | FileAction::KeepDropped => self.take.contains(&f.rel),
                         _ => false,
                     })
                     .count();
@@ -429,6 +433,7 @@ impl UpdatePreview {
                 let to = if server { "the server pack".to_string() } else { p.file.display_name.clone() };
                 let mine = if server { "The server's own mods and files stay." } else { "Your own mods and files stay." };
                 let what = match self.bulk {
+                    _ if self.clean => format!("Every pack mod and pack file becomes {to}'s, like the CurseForge app."),
                     Bulk::Mine => format!("Mods update to {to}'s; your edited files stay as they are."),
                     Bulk::Review => format!("Mods update to {to}'s; files as you picked them."),
                     _ if p.base_known => format!("Mods and the pack's files update to {to}'s, keeping your edits as picked."),
@@ -474,6 +479,125 @@ impl UpdatePreview {
         self.compare = p.compared;
         self.keep_needed.clear();
         self.want_icons(p, cx);
+        if self.clean {
+            self.clean_picks(p, cx);
+        }
+    }
+
+    /// A clean update's picks: every pack file that differs takes the
+    /// pack's copy, mods turned off or removed come back, and on a server
+    /// the mods on other versions take the pack's.
+    fn clean_picks(&mut self, p: &UpdatePlan, cx: &mut Context<Self>) {
+        self.take = p.clean_take();
+        self.both.clear();
+        self.turn_on = p.clean_choices();
+        self.keep_needed.clear();
+        self.open.clear();
+        if self.server.is_some() && !self.reset_versions {
+            self.pick_versions(true, cx);
+        }
+    }
+
+    /// Switches between a clean update and keeping your changes, and
+    /// remembers it for this instance (or server).
+    fn set_clean(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.clean == on {
+            return;
+        }
+        self.clean = on;
+        let key = self.root.to_string_lossy().to_string();
+        self.store.update(cx, |s, cx| {
+            s.update_settings(
+                |st| {
+                    st.pack_update_clean.insert(key, on);
+                },
+                cx,
+            )
+        });
+        self.section = None;
+        // A server's clean update starts from the quick comparison: its
+        // edits all give way.
+        if on && self.server.is_some() && matches!(&self.plan, Some(Ok(p)) if p.compared) {
+            self.set_compare(false, cx);
+            return;
+        }
+        if self.server.is_some() && !on && self.reset_versions {
+            self.pick_versions(false, cx);
+        }
+        if let Some(Ok(p)) = self.plan.clone() {
+            self.loaded(&p, cx);
+        }
+        cx.notify();
+    }
+
+    /// "Clean update | Keep my changes", beside the versions line.
+    fn mode_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        mode_tabs("update-mode", self.clean)
+            .on_click(cx.listener(|this, ix: &usize, _, cx| this.set_clean(*ix == 0, cx)))
+            .into_any_element()
+    }
+
+    /// A clean update in one card, in place of the per-file choices.
+    fn clean_card(&self, plan: &UpdatePlan, cx: &mut Context<Self>) -> AnyElement {
+        let server = self.server.is_some();
+        let to = if server { "the server pack".to_string() } else { plan.file.display_name.clone() };
+        let replaced = self.take.len();
+        // "A mod … comes" / "3 mods … come".
+        let count = |n: usize, one: &str, many: &str, verb1: &str, verbn: &str| {
+            if n == 1 { format!("{one} {verb1}") } else { format!("{n} {many} {verbn}") }
+        };
+        let mut what = vec![format!("Every pack mod and pack file becomes {to}'s.")];
+        if replaced > 0 {
+            what.push(format!("{} the pack's copy.", count(replaced, "A file that differs", "files that differ", "takes", "take")));
+        }
+        let off = plan.off.len() + plan.still_off.len();
+        if off > 0 {
+            what.push(format!("{} back on.", count(off, "A mod you turned off", "mods you turned off", "comes", "come")));
+        }
+        if !plan.removed.is_empty() {
+            what.push(format!("{} back.", count(plan.removed.len(), "A pack mod you removed", "pack mods you removed", "comes", "come")));
+        }
+        if !plan.updated.is_empty() {
+            what.push(format!("{} the pack's version.", count(plan.updated.len(), "A mod you updated", "mods you updated", "takes", "take")));
+        }
+        if let Some(n) = self.server.as_ref().and_then(|t| t.splan.as_ref()).map(|p| p.kept_versions.len()).filter(|n| *n > 0) {
+            what.push(format!("{} the pack's.", count(n, "A mod on another version", "mods on other versions", "takes", "take")));
+        }
+        if !plan.needed.is_empty() {
+            what.push(format!("{}, though a mod you added needs it.", count(plan.needed.len(), "A mod the pack drops", "mods the pack drops", "goes", "go")));
+        }
+        let yours = plan.your_mods.len();
+        let stays = if server {
+            "Stays: the server's own mods and their files, worlds, server.properties.".to_string()
+        } else if yours == 1 {
+            "Stays: the mod you added and its files, worlds, screenshots, options.txt, servers.".to_string()
+        } else if yours > 1 {
+            format!("Stays: the {yours} mods you added and their files, worlds, screenshots, options.txt, servers.")
+        } else {
+            "Stays: worlds, screenshots, options.txt, servers.".to_string()
+        };
+        let theme = cx.theme();
+        let (primary, radius) = (theme.primary, theme.radius);
+        v_flex()
+            .gap_1p5()
+            .px_3()
+            .py_2p5()
+            .rounded(radius)
+            .border_1()
+            .border_color(primary.opacity(widgets::alpha::LINE))
+            .bg(primary.opacity(0.04))
+            .child(div().text_sm().font_semibold().child("Clean update, like the CurseForge app"))
+            .child(div().text_sm().child(what.join(" ")))
+            .child(div().text_sm().child(stays))
+            .child(widgets::fine_print(
+                if server {
+                    "Anything replaced can be undone from History. Pick Keep my changes to keep the server's edits."
+                } else {
+                    "Anything replaced can be undone from History. Pick Keep my changes to keep your edits."
+                },
+                cx,
+            ))
+            .into_any_element()
     }
 
     /// Switches between the quick update and comparing with your changes,
@@ -1240,9 +1364,14 @@ impl UpdatePreview {
         let Some(Ok(plan)) = &v.plan else {
             return false;
         };
-        let mut overrides = plan.decisions_with(&v.take, &v.turn_on);
-        plan.apply_both(&mut overrides, &v.both);
-        overrides.keep_dropped = v.keep_needed.clone();
+        let overrides = if v.clean {
+            plan.clean_decisions()
+        } else {
+            let mut o = plan.decisions_with(&v.take, &v.turn_on);
+            plan.apply_both(&mut o, &v.both);
+            o.keep_dropped = v.keep_needed.clone();
+            o
+        };
         let (store, root, file) = (v.store.clone(), v.root.clone(), plan.file.clone());
         let backup = v.backup_worlds;
         if let Ok(mut g) = REVIEWS.lock()
@@ -2337,9 +2466,12 @@ impl Render for UpdatePreview {
                 let backup = self.backup_worlds;
                 let (warning, muted, border) = (theme.warning, theme.muted_foreground, theme.border);
                 let radius = theme.radius;
-                let versions = self.versions_card(cx);
-                let choice = self.choice_card(&plan, cx);
-                let mine = self.your_choices(&plan, cx);
+                let clean = self.clean.then(|| self.clean_card(&plan, cx));
+                let (versions, choice, mine) = if self.clean {
+                    (None, None, None)
+                } else {
+                    (self.versions_card(cx), self.choice_card(&plan, cx), self.your_choices(&plan, cx))
+                };
                 let changes = self.changes(&plan, cx);
                 let stays = self.stays(&plan, cx);
                 v_flex()
@@ -2372,6 +2504,7 @@ impl Render for UpdatePreview {
                                 ),
                         )
                     })
+                    .children(clean)
                     .children(versions)
                     .children(choice)
                     .children(mine)
@@ -2434,7 +2567,15 @@ impl Render for UpdatePreview {
                     (_, Some(f)) => format!("{}  →  {}", self.from, f.file_name),
                     _ => self.from.clone(),
                 };
-                (!caption.is_empty()).then(|| widgets::caption(caption, cx))
+                // The choice is fixed once the update runs.
+                let bar = (self.update.is_none() && self.server.as_ref().is_none_or(|t| t.apply.is_none()))
+                    .then(|| self.mode_bar(cx));
+                (!caption.is_empty() || bar.is_some()).then(|| {
+                    h_flex()
+                        .gap_3()
+                        .child(widgets::caption(caption, cx).flex_1().min_w_0().truncate())
+                        .children(bar)
+                })
             })
             .children(notes)
             .child(tabs)
@@ -2453,6 +2594,26 @@ impl Render for UpdatePreview {
                 body
             });
         h_flex().items_start().gap_4().child(main).children(peek)
+    }
+}
+
+/// "Clean update | Keep my changes": how a pack update treats your changes
+/// (index 0 is clean). Shared by this dialog and Versions and changelogs.
+pub(crate) fn mode_tabs(id: &'static str, clean: bool) -> TabBar {
+    TabBar::new(id)
+        .segmented()
+        .small()
+        .selected_index(if clean { 0 } else { 1 })
+        .child(Tab::new().label("Clean update"))
+        .child(Tab::new().label("Keep my changes"))
+}
+
+/// What the choice does, in one line under it.
+pub(crate) fn mode_note(clean: bool) -> &'static str {
+    if clean {
+        "Like the CurseForge app: every pack mod and pack file becomes the new version's. Mods you added, worlds and options.txt stay. Undo from History."
+    } else {
+        "Update and Roll back open a preview first, to pick which of your edits and turned-off mods stay."
     }
 }
 
@@ -2507,19 +2668,17 @@ pub fn open(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut Wi
     show(store, root, file, None, window, cx)
 }
 
-/// Moves an instance's modpack to a picked version (a roll back, or an
-/// update to a version other than the newest). By default it installs
-/// straight away: only the new version is downloaded, with the quick
-/// update's choices. The comparison dialog still opens first when the
-/// setting asks for it, or when something needs your say: settings you
-/// changed that the version also changes, or a mod of yours the version
-/// drops.
+/// Moves an instance's modpack to a picked version (an update or a roll
+/// back) from Versions and changelogs. A clean update (the instance's
+/// choice, else the default in Settings) installs straight away: only the
+/// new version is downloaded and everything becomes the pack's, like the
+/// CurseForge app. "Keep my changes" opens the dialog to pick what stays.
 pub fn switch(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut Window, cx: &mut App) {
     let Some(inst) = store.read(cx).instance(&root).cloned() else {
         return;
     };
     let reinstall = inst.pack.as_ref().is_some_and(|p| hopper::packdiff::is_reinstall(p, &file));
-    if store.read(cx).settings().compare_before_switch || reinstall || inst.pack.is_none() {
+    if !store.read(cx).settings().clean_update(&root) || reinstall || inst.pack.is_none() {
         return open(store, root, file, window, cx);
     }
     let job = store
@@ -2539,8 +2698,8 @@ pub fn switch(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut 
                 })
                 .await;
             cx.update(|window, cx| match r {
-                Ok(p) if !p.needs_say() => {
-                    let overrides = p.decisions_with(&p.default_take(), &p.default_choices());
+                Ok(p) => {
+                    let overrides = p.clean_decisions();
                     store.update(cx, |s, cx| {
                         s.update_pack(&root, file, Some(overrides), false);
                         cx.notify();
@@ -2583,8 +2742,10 @@ fn show(
     // Opt-in only: no automatic backups.
     let backup_worlds = false;
     let reinstall = inst.pack.as_ref().is_some_and(|p| hopper::packdiff::is_reinstall(p, &file));
+    let clean = store.read(cx).settings().clean_update(&root);
     let view = cx.new(|cx| {
         let mut v = UpdatePreview::new(store, root, None, from, window, cx);
+        v.clean = clean;
         v.mc_change = mc_change;
         v.backup_worlds = backup_worlds;
         v.reinstall = reinstall;
@@ -2660,10 +2821,12 @@ pub fn open_server(store: Entity<Store>, server: ServerInfo, inst: Instance, win
 fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: &mut Window, cx: &mut App) {
     let server = t.server.clone();
     let title = format!("Update {} from the server pack", server.name);
+    let clean = store.read(cx).settings().clean_update(&server.root);
     let view = cx.new(|cx| {
         let applying = t.apply.is_some();
         let job = if applying { t.job } else { job };
         let mut v = UpdatePreview::new(store, server.root.clone(), Some(ServerTarget { job, ..t }), String::new(), window, cx);
+        v.clean = clean;
         if applying {
             // Shows the plan being applied, without comparing again.
             let t = v.server.as_ref().and_then(|t| {
