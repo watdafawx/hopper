@@ -280,11 +280,17 @@ pub fn activity(doing: &Doing, prefs: &Prefs, times: Times) -> Option<Activity> 
         Doing::Configs { pack } => {
             a.details = "Editing configs".into();
             a.state = pack_name(pack);
+            if let Some(n) = &a.state.clone() {
+                pack_art(&mut a, pack, n);
+            }
             small(&mut a, "configs", "Config editor");
         }
         Doing::Crash { pack } => {
             a.details = "Fixing a crash".into();
             a.state = pack_name(pack);
+            if let Some(n) = &a.state.clone() {
+                pack_art(&mut a, pack, n);
+            }
             small(&mut a, "crash", "Crash help");
         }
     }
@@ -529,6 +535,19 @@ mod tests {
     }
 
     #[test]
+    fn pack_icon_with_action_badge() {
+        for (d, badge) in [
+            (Doing::Configs { pack: atm() }, "configs"),
+            (Doing::Crash { pack: atm() }, "crash"),
+            (Doing::Installing { pack: atm(), update: true, percent: None }, "installing"),
+        ] {
+            let a = act(&d);
+            assert!(a.large_image.starts_with("https://"), "{d:?}");
+            assert_eq!(a.small_image.as_deref(), Some(badge));
+        }
+    }
+
+    #[test]
     fn hidden_pack_says_minecraft() {
         let p = Prefs { show_pack: false, ..Prefs::default() };
         let a = activity(&Doing::Playing { pack: atm(), game_version: "1.20.1".into(), loader: "forge".into() }, &p, T).unwrap();
@@ -537,6 +556,7 @@ mod tests {
         assert_eq!(a.buttons.len(), 1);
         let a = activity(&Doing::Configs { pack: atm() }, &p, T).unwrap();
         assert_eq!(a.state, None);
+        assert_eq!(a.large_image, "hopper");
     }
 
     #[test]
