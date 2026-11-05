@@ -1971,17 +1971,47 @@ impl Store {
         }
     }
 
+    /// Keeps the image cache to the size picked in Settings, after `delay`:
+    /// the pictures used longest ago go, never an installed mod's icon.
+    pub fn prune_images(&self, delay: Duration) {
+        let Some(max) = hopper::imgcache::limit_bytes(self.settings.image_cache_gb) else {
+            return;
+        };
+        let keep = hopper::imgcache::keep_set(
+            self.instances.iter().flat_map(|i| i.addons.iter()).map(|a| a.icon.as_str()),
+        );
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            hopper::imgcache::prune(max, &keep);
+        });
+    }
+
+    /// Forgets the images found so far (the cache was cleared): lists ask
+    /// for them again and they download anew.
+    pub fn forget_images(&mut self) {
+        self.images.retain(|_, v| matches!(v, Image::Loading));
+        self.anims.clear();
+        // Packs' logos and account heads show everywhere and are asked for
+        // once, when read: ask again. Lists ask again when they show.
+        let icons: Vec<String> = self.instances.iter().filter_map(|i| i.icon.clone()).collect();
+        for url in icons {
+            self.want_image(&url);
+        }
+        for a in self.accounts.list.clone() {
+            match &a.skin_url {
+                Some(u) => self.want_image(u),
+                None => self.want_image(&a.fallback_avatar()),
+            }
+        }
+    }
+
     /// A few threads fetch images from a queue, rather than a thread (and a
     /// connection) per image when a big pack opens. What's on screen goes
     /// first (see [`Lane`]).
     fn start_image_workers(&self) {
-        // The cache is kept to a size: the pictures used longest ago go.
         // A minute in: by then the lists on screen have marked their icons
         // as used, and none is cleared while the list is looking it up.
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            hopper::imgcache::prune(hopper::imgcache::MAX_BYTES)
-        });
+        self.prune_images(Duration::from_secs(60));
         for _ in 0..IMAGE_WORKERS {
             let (q, tx, wake) = (self.image_queue.clone(), self.tx.clone(), self.wake.clone());
             std::thread::spawn(move || {

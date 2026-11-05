@@ -1,7 +1,8 @@
 //! Remote images (mod and pack icons, galleries) cached on disk, so a UI can
 //! show them from a local file. Picture URLs on CurseForge's and Modrinth's
 //! CDNs never change what they serve, so a cached file is never asked
-//! again; the cache is kept to [`MAX_BYTES`] instead (see [`prune`]).
+//! again; the cache is kept to the size picked in Settings instead (see
+//! [`prune`]).
 
 use std::path::{Path, PathBuf};
 
@@ -225,9 +226,14 @@ fn open(path: &Path) -> anyhow::Result<image::DynamicImage> {
     Ok(image::ImageReader::open(path)?.with_guessed_format()?.decode()?)
 }
 
-/// How big the cache may get before [`prune`] clears the pictures used
-/// longest ago.
-pub const MAX_BYTES: u64 = 1 << 30;
+/// The image cache size picked in Settings when none is: 4 GB.
+pub const DEFAULT_GB: u32 = 4;
+
+/// The most the image cache may hold for the Settings value `gb`; `None`
+/// (for 0) is no limit.
+pub fn limit_bytes(gb: u32) -> Option<u64> {
+    (gb > 0).then(|| u64::from(gb) << 30)
+}
 
 /// Marks the cached file `path` as just used, so [`prune`] keeps it. Its
 /// access time is set (not its modified time: scaled copies are keyed by
@@ -266,30 +272,67 @@ pub const KEEP_RECENT: std::time::Duration = std::time::Duration::from_secs(2 * 
 
 /// Keeps the image cache under `max` bytes: when it's over, pictures used
 /// longest ago go first, then icons used longest ago, until it's at four
-/// fifths; nothing used in the last [`KEEP_RECENT`] goes. Half-written
-/// downloads left by a run that stopped go too.
-pub fn prune(max: u64) {
+/// fifths. Nothing in `keep` (the icons of installed mods, see
+/// [`keep_set`]) and nothing used in the last [`KEEP_RECENT`] goes.
+/// Half-written downloads left by a run that stopped go too.
+pub fn prune(max: u64, keep: &Keep) {
     if let Some(d) = dir() {
-        let (n, bytes) = prune_dir(&d, max);
+        let (n, bytes) = prune_dir_at(&d, max, keep, std::time::SystemTime::now());
         if n > 0 {
             log::info!("image cache: cleared {n} old pictures ({} MB)", bytes >> 20);
         }
     }
 }
 
-/// [`prune`] on folder `dir` (and the folders in it): how many files went
-/// and how many bytes they held.
-pub fn prune_dir(dir: &Path, max: u64) -> (usize, u64) {
-    prune_dir_at(dir, max, std::time::SystemTime::now())
+/// Cached files [`prune`] never clears, as [`keep_key`] makes them.
+pub type Keep = std::collections::HashSet<String>;
+
+/// The cached files of these image URLs (or local paths), and the still
+/// copies of animated ones, for [`prune`] to keep.
+pub fn keep_set<'a>(urls: impl IntoIterator<Item = &'a str>) -> Keep {
+    let mut keep = Keep::new();
+    for u in urls {
+        if let Some(p) = path_for(split_width(u).0) {
+            if maybe_animated(&p) {
+                keep.insert(keep_key(&p.with_extension("still.png")));
+            }
+            keep.insert(keep_key(&p));
+        }
+    }
+    keep
 }
 
-/// [`prune_dir`] as if it were `now`.
-fn prune_dir_at(dir: &Path, max: u64, now: std::time::SystemTime) -> (usize, u64) {
-    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+/// `path` the same way however it was spelled (case, slashes).
+fn keep_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
+/// How many files the image cache holds and how many bytes.
+pub fn usage() -> (usize, u64) {
+    dir().map_or((0, 0), |d| {
+        let f = walk(&d);
+        (f.len(), f.iter().map(|f| f.1).sum())
+    })
+}
+
+/// Empties the image cache, icons too: they download again when shown.
+/// Returns the bytes freed.
+pub fn clear() -> u64 {
+    dir().map_or(0, |d| clear_dir(&d))
+}
+
+fn clear_dir(dir: &Path) -> u64 {
+    walk(dir)
+        .into_iter()
+        .filter(|(p, ..)| std::fs::remove_file(p).is_ok())
+        .map(|f| f.1)
+        .sum()
+}
+
+/// (path, bytes, last used) of every file under `dir`.
+fn walk(dir: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+    let mut files = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
-    let day_ago = now - std::time::Duration::from_secs(24 * 3600);
-    let recent = now - KEEP_RECENT;
-    let (mut gone, mut freed) = (0, 0);
     while let Some(d) = stack.pop() {
         let Ok(list) = std::fs::read_dir(&d) else { continue };
         for e in list.flatten() {
@@ -300,16 +343,29 @@ fn prune_dir_at(dir: &Path, max: u64, now: std::time::SystemTime) -> (usize, u64
                 continue;
             }
             let used = meta.accessed().or_else(|_| meta.modified()).unwrap_or(std::time::UNIX_EPOCH);
-            let stale_part = path.extension().is_some_and(|x| x == "part") && used < day_ago;
-            if stale_part {
-                if std::fs::remove_file(&path).is_ok() {
-                    gone += 1;
-                    freed += meta.len();
-                }
-                continue;
-            }
             files.push((path, meta.len(), used));
         }
+    }
+    files
+}
+
+/// [`prune`] on folder `dir` (and the folders in it) as if it were `now`:
+/// how many files went and how many bytes they held.
+fn prune_dir_at(dir: &Path, max: u64, keep: &Keep, now: std::time::SystemTime) -> (usize, u64) {
+    let day_ago = now - std::time::Duration::from_secs(24 * 3600);
+    let recent = now - KEEP_RECENT;
+    let (mut gone, mut freed) = (0, 0);
+    let mut files = Vec::new();
+    for (path, len, used) in walk(dir) {
+        let stale_part = path.extension().is_some_and(|x| x == "part") && used < day_ago;
+        if stale_part {
+            if std::fs::remove_file(&path).is_ok() {
+                gone += 1;
+                freed += len;
+            }
+            continue;
+        }
+        files.push((path, len, used));
     }
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     if total <= max {
@@ -322,7 +378,7 @@ fn prune_dir_at(dir: &Path, max: u64, now: std::time::SystemTime) -> (usize, u64
         if total <= goal {
             break;
         }
-        if used >= recent {
+        if used >= recent || keep.contains(&keep_key(&path)) {
             continue;
         }
         if std::fs::remove_file(&path).is_ok() {
@@ -418,9 +474,9 @@ mod tests {
             set_used(&dir.join(n), 100, now - days(8 - i as u64));
         }
         // Under the limit: nothing goes.
-        assert_eq!(prune_dir(&dir, 1000), (0, 0));
+        assert_eq!(prune_dir_at(&dir, 1000, &Keep::new(), now), (0, 0));
         // Over it: down to four fifths of 300, so the two oldest go.
-        assert_eq!(prune_dir(&dir, 300), (2, 200));
+        assert_eq!(prune_dir_at(&dir, 300, &Keep::new(), now), (2, 200));
         assert!(!dir.join("a.png").exists() && !dir.join("b.png").exists());
         assert!(dir.join("thumbs/c.png").exists() && dir.join("d.png").exists());
         std::fs::remove_dir_all(dir).ok();
@@ -462,7 +518,7 @@ mod tests {
         // Over the limit by about three pictures.
         let total = 50 * (10 << 10) + 6 * BIG_FILE;
         let max = total - 2 * BIG_FILE;
-        let (gone, _) = prune_dir_at(&dir, max, now);
+        let (gone, _) = prune_dir_at(&dir, max, &Keep::new(), now);
         assert!(gone >= 3, "cleared {gone}");
         for i in 0..50 {
             assert!(dir.join(format!("icon{i}.png")).exists(), "icon{i} was cleared");
@@ -475,8 +531,36 @@ mod tests {
         for i in 0..5 {
             set_used(&dir2.join(format!("r{i}.png")), 10 << 10, now - std::time::Duration::from_secs(3600));
         }
-        assert_eq!(prune_dir_at(&dir2, 1, now), (0, 0));
+        assert_eq!(prune_dir_at(&dir2, 1, &Keep::new(), now), (0, 0));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Installed mods' icons are never cleared, however old or far over the
+    /// limit; Clear empties everything.
+    #[test]
+    fn prune_never_clears_installed_icons_but_clear_does() {
+        let dir = std::env::temp_dir().join(format!("hopper-prune-keep-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let now = std::time::SystemTime::now();
+        let (icon, anim, other) = (dir.join("icon.png"), dir.join("anim.gif"), dir.join("other.png"));
+        for p in [&icon, &anim, &dir.join("anim.still.png"), &other] {
+            set_used(p, 1000, now - days(60));
+        }
+        // Spelled with other slashes and case, as an addon's icon may be.
+        let icon_url = icon.to_string_lossy().to_uppercase().replace('\\', "/");
+        let keep = keep_set([icon_url.as_str(), anim.to_str().unwrap()]);
+        assert_eq!(prune_dir_at(&dir, 1, &keep, now), (1, 1000));
+        assert!(!other.exists());
+        assert!(icon.exists() && anim.exists() && dir.join("anim.still.png").exists());
+        assert_eq!(clear_dir(&dir), 3000);
+        assert!(!icon.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn cache_limits() {
+        assert_eq!(limit_bytes(0), None);
+        assert_eq!(limit_bytes(4), Some(4 << 30));
     }
 
     #[test]

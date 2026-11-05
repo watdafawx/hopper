@@ -286,6 +286,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Advanced, "mcp-window", "Let assistants see and use the window", "Screenshots, clicks and typing in Hopper, for debugging Hopper itself.", "mcp screenshot click debug"),
     e(C::Advanced, "mcp-connect", "Connect an assistant", "Copies what to paste into your assistant's settings.", "mcp claude desktop code config json"),
     e(C::Advanced, "pack-cache", "Downloaded packs", "Kept so comparing and installing an update doesn't download the pack again.", "cache disk space clear delete zip modpack server pack keep days"),
+    e(C::Advanced, "image-cache", "Image cache size", "Mod icons and pictures from mod pages, kept so they show at once. When it's full, the pictures used longest ago go; icons of installed mods always stay.", "cache disk space clear delete images icons logos pictures gallery size"),
     e(C::Advanced, "data-folder", "Hopper's folder", "Settings, accounts, downloads and caches Hopper keeps. New copies of Hopper keep them in a Hopper Data folder next to hopper.exe.", "appdata settings.json files data folder portable move drive"),
 ];
 
@@ -499,6 +500,9 @@ pub struct SettingsPage {
     java: Entity<JavaForm>,
     launchers: Entity<crate::launchers_list::LaunchersList>,
     mc: minecraft::Mc,
+    /// The image cache's files and bytes, and when they were counted.
+    img_usage: Option<(usize, u64, std::time::Instant)>,
+    img_counting: std::rc::Rc<std::cell::Cell<bool>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -712,6 +716,8 @@ impl SettingsPage {
             launchers,
             java,
             mc: minecraft::Mc::new(&s, cx),
+            img_usage: None,
+            img_counting: Default::default(),
             _subscriptions: subs,
         }
     }
@@ -2619,6 +2625,7 @@ impl SettingsPage {
                             }),
                       )),
                 self.pack_cache_row(s, rem, cx),
+                self.image_cache_row(s, rem, cx),
             ],
         )]
     }
@@ -2672,6 +2679,87 @@ impl SettingsPage {
                                 };
                                 window.push_notification(n, cx);
                                 cx.notify();
+                            })),
+                    ),
+            )
+    }
+
+    /// The image cache: its size limit, what it holds now, and Clear.
+    fn image_cache_row(&self, s: &hopper::settings::Settings, rem: Pixels, cx: &mut Context<Self>) -> Row {
+        const SIZES: [(u32, &str); 6] =
+            [(1, "1 GB"), (2, "2 GB"), (4, "4 GB"), (8, "8 GB"), (16, "16 GB"), (0, "No limit")];
+        // Counted off the UI thread (thousands of files), again once it's
+        // half a minute old.
+        let stale = self.img_usage.is_none_or(|u| u.2.elapsed() > Duration::from_secs(30));
+        if stale && !self.img_counting.replace(true) {
+            let counting = self.img_counting.clone();
+            cx.spawn(async move |this, cx| {
+                let (n, bytes) = cx.background_spawn(async { hopper::imgcache::usage() }).await;
+                counting.set(false);
+                this.update(cx, |this, cx| {
+                    this.img_usage = Some((n, bytes, std::time::Instant::now()));
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        let used = match self.img_usage {
+            None => "Counting…".to_string(),
+            Some((0, ..)) => "Empty now.".to_string(),
+            Some((_, bytes, _)) => format!("Using {} now.", hopper::instance_ops::human_bytes(bytes)),
+        };
+        let label = SIZES
+            .iter()
+            .find(|(g, _)| *g == s.image_cache_gb)
+            .map_or_else(|| format!("{} GB", s.image_cache_gb), |(_, l)| l.to_string());
+        let store = self.store.clone();
+        let picker = widgets::picker(
+            "image-cache",
+            label,
+            SIZES.iter().map(|(g, l)| (l.to_string(), *g == s.image_cache_gb)).collect(),
+            rem,
+            Rc::new(move |ix, _, cx| {
+                let gb = SIZES[ix.min(SIZES.len() - 1)].0;
+                store.update(cx, |s, cx| {
+                    s.update_settings(|st| st.image_cache_gb = gb, cx);
+                    // A smaller size applies now, not at the next start.
+                    s.prune_images(Duration::ZERO);
+                });
+            }),
+        );
+        let store = self.store.clone();
+        Row::new("image-cache")
+            .desc(format!("{} {used}", entry("image-cache").desc))
+            .control(
+                h_flex()
+                    .gap_2()
+                    .child(div().w(rems(10.)).child(picker))
+                    .child(
+                        Button::new("image-cache-clear")
+                            .small()
+                            .outline()
+                            .label("Clear")
+                            .disabled(matches!(self.img_usage, Some((0, ..))))
+                            .tooltip("Removes every cached icon and picture now. They download again when shown.")
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                let store = store.clone();
+                                cx.spawn_in(window, async move |this, cx| {
+                                    let freed = cx.background_spawn(async { hopper::imgcache::clear() }).await;
+                                    // Shown again, they download anew.
+                                    store.update(cx, |s, cx| {
+                                        s.forget_images();
+                                        cx.notify();
+                                    });
+                                    this.update_in(cx, |this, window, cx| {
+                                        this.img_usage = None;
+                                        let freed = hopper::instance_ops::human_bytes(freed);
+                                        window.push_notification(Notification::success(format!("Freed {freed}")), cx);
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                })
+                                .detach();
                             })),
                     ),
             )

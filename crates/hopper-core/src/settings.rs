@@ -170,6 +170,10 @@ pub struct Settings {
     /// Days a downloaded pack (kept to compare and install updates without
     /// downloading it again) stays after it was last used; 0 keeps them.
     pub pack_keep_days: u32,
+    /// Gigabytes the image cache (icons, gallery and description pictures)
+    /// may hold before the pictures used longest ago go; 0 is no limit.
+    /// Installed mods' icons always stay.
+    pub image_cache_gb: u32,
     /// How many website-only CurseForge files Hopper's download window
     /// gets at once (1 to 8), each in its own page.
     pub web_downloads: u8,
@@ -523,6 +527,7 @@ impl Default for Settings {
             last_sort: String::new(),
             dependents: String::new(),
             pack_keep_days: 30,
+            image_cache_gb: crate::imgcache::DEFAULT_GB,
             web_downloads: 4,
             delete_permanently: true,
             allow_sources: false,
