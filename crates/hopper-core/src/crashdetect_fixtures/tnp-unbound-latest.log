@@ -1,0 +1,120 @@
+[06Nov2026 00:07:57.006] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: ModLauncher running: args [--version, neoforge-21.1.265, --launchTarget, forgeclient]
+[06Nov2026 00:12:35.605] [modloading-sync-worker/ERROR] [net.neoforged.fml.javafmlmod.FMLModContainer/]: Exception caught during firing event: null
+	Index: 0
+	Listeners:
+		0: de.cadentem.additional_attributes.AA$$Lambda/0x0000019c026a7448@6301bcfb
+java.lang.ExceptionInInitializerError
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.entity.ai.attributes.DefaultAttributes.<clinit>(DefaultAttributes.java:150)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.NeoForgeRegistryCallbacks$AttributeCallbacks.onBake(NeoForgeRegistryCallbacks.java:100)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.lambda$freeze$7(MappedRegistry.java:372)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.freeze(MappedRegistry.java:372)
+	at TRANSFORMER/additional_attributes@1.2.2/de.cadentem.additional_attributes.compat.irons_spellbooks.ISEvents.registerAttributes(ISEvents.java:135)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:342)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:177)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.mddd41af$modernfix$lambda$postWithProgressBar$0$0(GameData.java:1037)
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.redirect$zme000$modernfix$postWithProgressBar(GameData.java:1033)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.postRegisterEvents(GameData.java:92)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.internal.CommonModLoader.lambda$begin$0(CommonModLoader.java:54)
+	at java.base/java.util.concurrent.CompletableFuture$AsyncRun.run(CompletableFuture.java:1804)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.lang.NullPointerException: Trying to access unbound value: ResourceKey[neoforge:entity_data_serializers / sussysniffers:sniffer_variant]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.DeferredHolder.value(DeferredHolder.java:103)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.DeferredHolder.get(DeferredHolder.java:117)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.entity.animal.sniffer.Sniffer.<clinit>(Sniffer.java:75)
+	... 20 more
+
+[06Nov2026 00:12:35.605] [modloading-sync-worker/ERROR] [net.neoforged.fml.ModContainer/LOADING]: Caught exception during event net.neoforged.neoforge.registries.RegisterEvent@4c4c79a6 dispatch for modid additional_attributes
+java.lang.ExceptionInInitializerError: null
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.entity.ai.attributes.DefaultAttributes.<clinit>(DefaultAttributes.java:150) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.NeoForgeRegistryCallbacks$AttributeCallbacks.onBake(NeoForgeRegistryCallbacks.java:100) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.lambda$freeze$7(MappedRegistry.java:372) ~[?:?]
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.freeze(MappedRegistry.java:372) ~[?:?]
+	at TRANSFORMER/additional_attributes@1.2.2/de.cadentem.additional_attributes.compat.irons_spellbooks.ISEvents.registerAttributes(ISEvents.java:135) ~[?:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:342) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:177) ~[loader-4.0.45.jar%23107!/:4.0]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.mddd41af$modernfix$lambda$postWithProgressBar$0$0(GameData.java:1037) ~[?:?]
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75) ~[?:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174) ~[loader-4.0.45.jar%23107!/:4.0]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.redirect$zme000$modernfix$postWithProgressBar(GameData.java:1033) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.postRegisterEvents(GameData.java:92) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.internal.CommonModLoader.lambda$begin$0(CommonModLoader.java:54) ~[?:?]
+	at java.base/java.util.concurrent.CompletableFuture$AsyncRun.run(CompletableFuture.java:1804) ~[?:?]
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144) ~[?:?]
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642) ~[?:?]
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?]
+Caused by: java.lang.NullPointerException: Trying to access unbound value: ResourceKey[neoforge:entity_data_serializers / sussysniffers:sniffer_variant]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.DeferredHolder.value(DeferredHolder.java:103) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.DeferredHolder.get(DeferredHolder.java:117) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.entity.animal.sniffer.Sniffer.<clinit>(Sniffer.java:75) ~[?:?]
+	... 20 more
+[06Nov2026 00:12:35.623] [modloading-sync-worker/ERROR] [net.neoforged.fml.javafmlmod.FMLModContainer/]: Exception caught during firing event: Could not initialize class net.minecraft.world.entity.ai.attributes.DefaultAttributes
+	Index: 0
+	Listeners:
+		0: de.cadentem.additional_attributes.AA$$Lambda/0x0000019c026a7448@6301bcfb
+java.lang.NoClassDefFoundError: Could not initialize class net.minecraft.world.entity.ai.attributes.DefaultAttributes
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.NeoForgeRegistryCallbacks$AttributeCallbacks.onBake(NeoForgeRegistryCallbacks.java:100)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.lambda$freeze$7(MappedRegistry.java:372)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.freeze(MappedRegistry.java:372)
+	at TRANSFORMER/additional_attributes@1.2.2/de.cadentem.additional_attributes.compat.irons_spellbooks.ISEvents.registerAttributes(ISEvents.java:123)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360)
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:342)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:177)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.mddd41af$modernfix$lambda$postWithProgressBar$0$0(GameData.java:1037)
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75)
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.redirect$zme000$modernfix$postWithProgressBar(GameData.java:1033)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.postRegisterEvents(GameData.java:92)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.internal.CommonModLoader.lambda$begin$0(CommonModLoader.java:54)
+	at java.base/java.util.concurrent.CompletableFuture$AsyncRun.run(CompletableFuture.java:1804)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.lang.ExceptionInInitializerError: Exception java.lang.ExceptionInInitializerError [in thread "modloading-sync-worker"]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.entity.ai.attributes.DefaultAttributes.<clinit>(DefaultAttributes.java:150)
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.NeoForgeRegistryCallbacks$AttributeCallbacks.onBake(NeoForgeRegistryCallbacks.java:100)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.lambda$freeze$7(MappedRegistry.java:372)
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596)
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.freeze(MappedRegistry.java:372)
+	at TRANSFORMER/additional_attributes@1.2.2/de.cadentem.additional_attributes.compat.irons_spellbooks.ISEvents.registerAttributes(ISEvents.java:135)
+	... 14 more
+
+[06Nov2026 00:12:35.623] [modloading-sync-worker/ERROR] [net.neoforged.fml.ModContainer/LOADING]: Caught exception during event net.neoforged.neoforge.registries.RegisterEvent@3bcadaf2 dispatch for modid additional_attributes
+java.lang.NoClassDefFoundError: Could not initialize class net.minecraft.world.entity.ai.attributes.DefaultAttributes
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.NeoForgeRegistryCallbacks$AttributeCallbacks.onBake(NeoForgeRegistryCallbacks.java:100) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.lambda$freeze$7(MappedRegistry.java:372) ~[?:?]
+	at java.base/java.util.ArrayList.forEach(ArrayList.java:1596) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.freeze(MappedRegistry.java:372) ~[?:?]
+	at TRANSFORMER/additional_attributes@1.2.2/de.cadentem.additional_attributes.compat.irons_spellbooks.ISEvents.registerAttributes(ISEvents.java:123) ~[?:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.ConsumerEventHandler.invoke(ConsumerEventHandler.java:27) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:360) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:342) ~[bus-8.0.5.jar%23110!/:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModContainer.acceptEvent(ModContainer.java:177) ~[loader-4.0.45.jar%23107!/:4.0]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.mddd41af$modernfix$lambda$postWithProgressBar$0$0(GameData.java:1037) ~[?:?]
+	at java.base/java.lang.Iterable.forEach(Iterable.java:75) ~[?:?]
+	at MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModList.forEachModInOrder(ModList.java:174) ~[loader-4.0.45.jar%23107!/:4.0]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.redirect$zme000$modernfix$postWithProgressBar(GameData.java:1033) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.GameData.postRegisterEvents(GameData.java:92) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.internal.CommonModLoader.lambda$begin$0(CommonModLoader.java:54) ~[?:?]
+	at java.base/java.util.concurrent.CompletableFuture$AsyncRun.run(CompletableFuture.java:1804) ~[?:?]
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144) ~[?:?]
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642) ~[?:?]
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?]
+Caused by: java.lang.ExceptionInInitializerError: Exception java.lang.ExceptionInInitializerError [in thread "modloading-sync-worker"]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.world.entity.ai.attributes.DefaultAttributes.<clinit>(DefaultAttributes.java:150) ~[?:?]
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.NeoForgeRegistryCallbacks$AttributeCallbacks.onBake(NeoForgeRegistryCallbacks.java:100) ~[?:?]
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.core.MappedRegistry.lambda$freeze$7(MappedRegistry.java:372) ~[?:?]
+[06Nov2026 00:12:39.888] [Render thread/FATAL] [net.neoforged.fml.ModLoader/LOADING]: Failed to wait for future Registry initialization, 1 errors found
+[06Nov2026 00:12:41.439] [Render thread/ERROR] [net.neoforged.fml.ModLoader/]: Cowardly refusing to send event net.neoforged.neoforge.client.event.sound.SoundEngineLoadEvent to a broken mod state
+[06Nov2026 00:12:41.517] [Render thread/ERROR] [net.neoforged.fml.ModLoader/]: Cowardly refusing to send event net.neoforged.neoforge.client.event.RegisterColorHandlersEvent$Block to a broken mod state

@@ -1668,7 +1668,12 @@ fn analyze(
             r.why = known.clone();
         }
     }
-    knock_on(&mut raws, loading);
+    // Which installed jars have a mod id: one, several or none.
+    let owns = |ns: &str| {
+        let n = mods.iter().filter(|f| f.ends_with(".jar") && ids(f).iter().any(|i| i.eq_ignore_ascii_case(ns))).count();
+        (n > 0).then_some(n == 1)
+    };
+    knock_on_by(&mut raws, loading, &owns);
     // The log's loader list names the mod again as certain: the report's
     // failed mixin still explains it.
     blame_the_mixin(&mut raws, text);
@@ -1722,7 +1727,7 @@ fn analyze(
     // undid the registries, what the report alone names only followed.
     // (A load failure the rules put down to the computer, a file another
     // program held, isn't a cause the rest follows from.)
-    let (_, all_failed, _) = loading_failures_all(loading);
+    let (_, all_failed, _) = loading_failures_by(loading, &owns);
     let failed: Vec<&(Raw, String)> = all_failed
         .iter()
         .filter(|(f, _)| suspects.iter().any(|s| s.mod_id.eq_ignore_ascii_case(&f.mod_id) && s.certainty <= Certainty::Likely))
@@ -1781,7 +1786,15 @@ fn analyze(
     for s in suspects.iter_mut().filter(|s| s.certainty == Certainty::Certain) {
         s.changed = what_changed(root, s, mods, &sets);
     }
-    let stopped = stopped(root, loading, &suspects, mods, ids);
+    // The mod that owns an unbound value: say what to do about it.
+    for s in suspects.iter_mut().filter(|s| s.why.starts_with(UNBOUND_OWNER_WHY) && s.steps.is_empty()) {
+        let name = jar_name(&root.join("mods"), &s.file_name);
+        s.steps = vec![
+            format!("Update {name}: a broken version, or one that doesn't match your other mods, usually causes this."),
+            format!("Or turn off {name} and start again (mods that need it go too)."),
+        ];
+    }
+    let stopped = stopped(root, loading, &suspects, mods, ids, &owns);
     let dir = root.join("mods");
     for s in suspects.iter_mut().filter(|s| s.steps.is_empty()) {
         s.steps = default_steps(s, &jar_name(&dir, &s.file_name));
@@ -1872,8 +1885,8 @@ static SKIPPED: LazyLock<Regex> =
 /// The first mod the loader says failed, as a story for the card, with
 /// the mods skipped because of it. Those lines are only in `debug.log`
 /// (of the same run as `latest.log`).
-fn stopped(root: &Path, loading: &str, suspects: &[Suspect], mods: &[String], ids: &impl Fn(&str) -> Vec<String>) -> Option<Stopped> {
-    let (_, failed) = loading_failures(loading);
+fn stopped(root: &Path, loading: &str, suspects: &[Suspect], mods: &[String], ids: &impl Fn(&str) -> Vec<String>, owns: Owns) -> Option<Stopped> {
+    let (_, failed, _) = loading_failures_by(loading, owns);
     let (raw, error) = failed.into_iter().next()?;
     let s = suspects.iter().find(|s| s.certainty == Certainty::Certain && s.mod_id.eq_ignore_ascii_case(&raw.mod_id))?;
     let logs = root.join("logs");
@@ -2008,6 +2021,32 @@ static NOT_REGISTERED: LazyLock<Regex> =
 /// are (mod, its error) and never the cause. A later failure whose error
 /// only says something wasn't registered drops to likely.
 fn loading_failures_all(text: &str) -> (bool, Vec<(Raw, String)>, Vec<(Raw, String)>) {
+    loading_failures_by(text, &|_| None)
+}
+
+/// Which installed mod has this id: `Some(true)` when one jar does,
+/// `Some(false)` when several do, `None` when none. Used to tell who owns
+/// a namespace the loader's error names.
+pub(crate) type Owns<'a> = &'a dyn Fn(&str) -> Option<bool>;
+
+/// How the reason starts for the mod an unbound value belongs to, and for
+/// the mod that was only reading it ([`loading_failures_by`]).
+const UNBOUND_OWNER_WHY: &str = "The error is about";
+pub const UNBOUND_READER_WHY: &str = "It was reading";
+
+/// Whether the loader named this mod only because it read another mod's
+/// unbound value: not a knock-on, not the cause.
+pub fn only_read(s: &Suspect) -> bool {
+    s.certainty == Certainty::Possible && s.why.starts_with(UNBOUND_READER_WHY)
+}
+
+/// [`loading_failures_all`], knowing which mods are installed (`owns`).
+/// `Trying to access unbound value: ResourceKey[<registry> / <ns>:<path>]`
+/// names a value mod `<ns>` declared but never registered. The loader
+/// blames whichever mod's event was running when something read it (often
+/// one that just walks a registry), so the namespace's mod is the cause
+/// and the one the loader named only read it.
+fn loading_failures_by(text: &str, owns: Owns) -> (bool, Vec<(Raw, String)>, Vec<(Raw, String)>) {
     let lines: Vec<&str> = text.lines().collect();
     let broken = lines.iter().any(|l| BROKEN.is_match(l));
     let mut out: Vec<(Raw, String)> = Vec::new();
@@ -2042,6 +2081,22 @@ fn loading_failures_all(text: &str) -> (bool, Vec<(Raw, String)>, Vec<(Raw, Stri
             undo.push((Raw { mod_id: id, jar: String::new(), certainty: Certainty::Possible, why: String::new(), class: String::new(), needs: Vec::new() }, msg));
             continue;
         }
+        if let Some((ns, full)) = crate::crashengine::unbound_id(&msg)
+            && !ns.eq_ignore_ascii_case(&id)
+            && !NOT_MODS.contains(&ns.as_str())
+            && let Some(single) = owns(&ns)
+        {
+            if !out.iter().any(|(r, _)| r.mod_id.eq_ignore_ascii_case(&ns)) {
+                let why = format!(
+                    "{UNBOUND_OWNER_WHY} {full}, which is its own: it set it up but never registered it, so the game failed when {id} read it. A broken version, or one that doesn't match your other mods, usually causes this."
+                );
+                let certainty = if single { Certainty::Certain } else { Certainty::Likely };
+                out.push((Raw { mod_id: ns.clone(), jar: String::new(), certainty, why, class: String::new(), needs: Vec::new() }, msg.clone()));
+            }
+            let why = format!("{UNBOUND_READER_WHY} {full} when it failed. That belongs to {ns}, which never registered it; the loader names whichever mod was running.");
+            out.push((Raw { mod_id: id, jar: String::new(), certainty: Certainty::Possible, why, class: String::new(), needs: Vec::new() }, msg));
+            continue;
+        }
         let after = out.first().map(|(r, _)| r.mod_id.clone());
         let (certainty, why) = match &after {
             Some(first) if NOT_REGISTERED.is_match(&msg) => (
@@ -2062,7 +2117,12 @@ fn loading_failures_all(text: &str) -> (bool, Vec<(Raw, String)>, Vec<(Raw, Stri
 /// drops to possible. If the log only says loading was broken, the trace
 /// still drops to possible (the cause is earlier in the log).
 fn knock_on(raws: &mut Vec<Raw>, loading: &str) {
-    let (broken, failed, undo) = loading_failures_all(loading);
+    knock_on_by(raws, loading, &|_| None);
+}
+
+/// [`knock_on`], knowing which mods are installed ([`Owns`]).
+fn knock_on_by(raws: &mut Vec<Raw>, loading: &str, owns: Owns) {
+    let (broken, failed, undo) = loading_failures_by(loading, owns);
     let failed: Vec<Raw> = failed.into_iter().map(|(r, _)| r).collect();
     if failed.is_empty() && !broken {
         return;
@@ -2090,8 +2150,9 @@ fn knock_on(raws: &mut Vec<Raw>, loading: &str) {
     }
     for f in failed {
         // A later failure that only says something wasn't there is less
-        // sure than the log's own line for it says.
-        if f.certainty == Certainty::Likely
+        // sure than the log's own line for it says, and a mod that only
+        // read another's unbound value is less sure still.
+        if f.certainty != Certainty::Certain
             && let Some(e) = raws.iter_mut().find(|e| same(e, &f.mod_id, &f.jar))
         {
             e.certainty = Certainty::Likely;
@@ -3189,6 +3250,55 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         assert_eq!(c.suspects[0].why, MIXIN_ERROR_WHY);
         assert!(c.suspects[1].why.contains("micsable's change failed"), "{}", c.suspects[1].why);
         assert!(c.stopped.is_none(), "the game had loaded: nothing stopped it from loading");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    const TNP_UNBOUND_REPORT: &str = include_str!("crashdetect_fixtures/tnp-unbound-crash.txt");
+    const TNP_UNBOUND_LOG: &str = include_str!("crashdetect_fixtures/tnp-unbound-latest.log");
+
+    /// TNP Limitless 8's client, 2026-11-06, cut down: registering failed
+    /// with `Trying to access unbound value: ResourceKey[... /
+    /// sussysniffers:sniffer_variant]`, and the loader put it down to
+    /// Additional Attributes, whose event happened to read the value. The
+    /// value is Sussy Sniffers' own (it never registered it). The report's
+    /// own error, in Screenshot Viewer, only followed.
+    #[test]
+    fn an_unbound_value_blames_its_namespace_not_the_reader() {
+        // Without knowing the mods, the loader's word stands.
+        let (_, failed) = loading_failures(TNP_UNBOUND_LOG);
+        assert_eq!(failed.iter().map(|(r, _)| (r.mod_id.as_str(), r.certainty)).collect::<Vec<_>>(), [("additional_attributes", Certainty::Certain)]);
+        // The game's own namespace isn't a mod to blame.
+        let vanilla = TNP_UNBOUND_LOG.replace("sussysniffers:sniffer_variant", "minecraft:sniffer_state");
+        let (_, failed, _) = loading_failures_by(&vanilla, &|_| Some(true));
+        assert_eq!(failed.iter().map(|(r, _)| r.mod_id.as_str()).collect::<Vec<_>>(), ["additional_attributes"]);
+
+        let root = std::env::temp_dir().join(format!("hopper-crash-unbound-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["crash-reports", "logs", "mods"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let dir = root.join("mods");
+        fake_jar(&dir.join("additional_attributes-1.21.1-1.2.2.jar"), "additional_attributes", "Additional Attributes", "1.2.2");
+        fake_jar(&dir.join("sussysniffers-1.21.1-0.1.3.jar"), "sussysniffers", "Sussy Sniffers", "1.21.1-0.1.3");
+        fake_jar(&dir.join("screenshot_viewer-1.3.4-neoforge-mc1.21.1.jar"), "screenshot_viewer", "Screenshot Viewer", "1.3.4");
+        fake_jar(&dir.join("scc-1.6.1.jar"), "scc", "SCC - Super Cool Calculator", "1.6.1");
+        let report = root.join("crash-reports/crash-2026-11-06_00.12.42-client.txt");
+        fs::write(&report, TNP_UNBOUND_REPORT).unwrap();
+        fs::write(root.join("logs/latest.log"), TNP_UNBOUND_LOG).unwrap();
+        let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let c = from_report(&root, &report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
+        let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.file_name.as_str(), s.certainty)).collect();
+        assert_eq!(got[0], ("sussysniffers-1.21.1-0.1.3.jar", Certainty::Certain), "{got:?}");
+        let reader = c.suspects.iter().find(|s| s.mod_id == "additional_attributes").expect("the reader is still named");
+        assert_eq!(reader.certainty, Certainty::Possible, "{reader:?}");
+        assert!(reader.why.starts_with(UNBOUND_READER_WHY), "{}", reader.why);
+        assert!(!to_turn_off(&c).iter().any(|s| s.mod_id == "additional_attributes"));
+        assert!(c.suspects[0].steps[0].starts_with("Update Sussy Sniffers"), "{:?}", c.suspects[0].steps);
+        let st = c.stopped.as_ref().expect("a story: Sussy Sniffers stopped loading");
+        assert_eq!(st.file_name, "sussysniffers-1.21.1-0.1.3.jar");
+        assert!(st.error.contains("sussysniffers:sniffer_variant"), "{}", st.error);
+        let sv = c.suspects.iter().find(|s| s.mod_id == "screenshot_viewer").expect("the report's own error");
+        assert!(sv.knock_on, "{sv:?}");
         let _ = fs::remove_dir_all(&root);
     }
 
