@@ -2,6 +2,8 @@
 .env
 /hopper.json
 /dist
-/.claude
+/.claude/*
+!/.claude/skills/
 /mockups
-/CLAUDE.md
+/CLAUDE.local.md
+/AGENTS.local.md
