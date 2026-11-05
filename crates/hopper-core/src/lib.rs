@@ -75,6 +75,7 @@ pub mod panel;
 pub mod paths;
 pub mod msauth;
 pub mod peer;
+pub mod proc;
 pub mod perf;
 pub mod richtext;
 pub mod revert;

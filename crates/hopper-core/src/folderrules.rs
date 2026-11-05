@@ -252,7 +252,7 @@ pub fn link(from: &Path, to: &Path, backup_root: &Path) -> anyhow::Result<Option
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)?;
     }
-    let out = std::process::Command::new("cmd")
+    let out = crate::proc::command("cmd")
         .args(["/C", "mklink", "/J"])
         // cmd reads a forward slash as a switch.
         .arg(to.to_string_lossy().replace('/', "\\"))
