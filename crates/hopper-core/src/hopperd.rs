@@ -1208,6 +1208,13 @@ pub fn execute(ops: Vec<SyncOp>, remote: &Remote, root: &Path, local_root: &Path
                 Some(rel) => client.trash(&remote.id, &[rel]),
                 None => Err(anyhow::anyhow!("{} isn't on this server", path.display())),
             },
+            // Through the panel's own switch, so its mod list stays right.
+            SyncOp::Disable { path } if is_remote_root(path) => match remote_rel(root, path).as_deref().and_then(|r| r.strip_prefix("mods/")) {
+                Some(file) if !file.contains('/') => client
+                    .post(&Client::server_path(&remote.id, "/mods/toggle"), serde_json::json!({ "file": file, "enabled": false }))
+                    .map(|_| ()),
+                _ => Err(anyhow::anyhow!("{} isn't in the server's mods folder", path.display())),
+            },
             // Local-only operations (removing the client's old jar on a pull).
             _ => {
                 let res = crate::sync::execute_local(vec![op.clone()], local_root);

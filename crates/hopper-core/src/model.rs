@@ -25,6 +25,10 @@ pub struct ModInfo {
     /// Why this mod should stay off servers, if it should.
     #[serde(default)]
     pub wont_sync: Option<String>,
+    /// Turned off in the pack (a `.jar.disabled` file; `file_name` is the
+    /// jar's name without `.disabled`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +49,8 @@ pub enum DiffAction {
     Skip,
     CopyToServer,
     DeleteFromServer,
+    /// Turned off in the pack: turn the server's copy off too.
+    DisableOnServer,
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +68,8 @@ pub struct DiffEntry {
 pub enum SyncOp {
     Copy { src: PathBuf, dst: PathBuf },
     Delete { path: PathBuf },
+    /// Turns a jar off (renames it to `<name>.disabled`).
+    Disable { path: PathBuf },
 }
 
 #[derive(Clone, Debug)]

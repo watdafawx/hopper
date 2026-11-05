@@ -107,6 +107,9 @@ pub fn record(server: &Path, side: &str, root: &Path, results: &[SyncResult]) {
                     (Action::Copied, Some(src.clone()), Some(dst.clone()), dst)
                 }
                 SyncOp::Delete { path } => (Action::Removed, Some(path.clone()), None, path),
+                // A jar turned off stays where it was: nothing to undo here
+                // (it's turned back on like any other mod).
+                SyncOp::Disable { .. } => continue,
             };
             log.changes.insert(
                 0,

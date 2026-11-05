@@ -182,6 +182,8 @@ pub struct Report {
     pub loader: Option<(String, String)>,
     pub copied: usize,
     pub removed: usize,
+    /// Mods turned off on the server (they're off in the pack).
+    pub turned_off: usize,
     pub failed: Vec<String>,
     /// What happened to the panel's own launch command, if anything.
     pub panel: Option<String>,
@@ -193,10 +195,11 @@ impl Report {
         if let Some((from, to)) = &self.loader {
             parts.push(format!("NeoForge {from} » {to}"));
         }
-        parts.push(format!(
-            "{} mods copied, {} removed",
-            self.copied, self.removed
-        ));
+        let mut mods = vec![format!("{} mods copied", self.copied), format!("{} removed", self.removed)];
+        if self.turned_off > 0 {
+            mods.push(format!("{} turned off", self.turned_off));
+        }
+        parts.push(mods.join(", "));
         if !self.failed.is_empty() {
             parts.push(format!("{} failed", self.failed.len()));
         }
@@ -348,13 +351,21 @@ pub fn update_server(
 
     // Mods.
     job.detail("Comparing mods");
-    let mut client = crate::scan::scan_folder(&inst.mods_dir())?;
+    // The same comparison the banner and the Sync tab show.
+    let (client, _) = crate::rigsync::client_mods(inst, sync_anyway)?;
     // Read by the panel when the server is on a Hopper Server.
     let theirs = crate::rigsync::server_mods(server)?;
-    crate::serverpack::annotate(&mut client, inst, sync_anyway);
-    let mut diff = crate::diff::compute_diff(&client, &theirs);
+    let mut diff = crate::rigsync::diff_mods(&client, &theirs);
     // "Never sync" mods: neither copied nor removed.
     diff.retain(|d| !crate::rigsync::is_hidden(d, hidden));
+    // Mods only the server has that keep the pack from joining go too (to
+    // the backups or Hopper Server's trash); ones turned off in the pack
+    // are turned off there.
+    for d in &mut diff {
+        if crate::rigsync::blocks_join(d, hidden) {
+            d.action = crate::model::DiffAction::DeleteFromServer;
+        }
+    }
     let ops = crate::sync::plan(&diff, &inst.mods_dir(), &server.mods_dir());
     job.detail(format!("Syncing {} files", ops.len()));
     let results = crate::sync::execute(ops, &server.root);
@@ -363,6 +374,7 @@ pub fn update_server(
         match (&r.op, r.ok) {
             (crate::model::SyncOp::Copy { .. }, true) => report.copied += 1,
             (crate::model::SyncOp::Delete { .. }, true) => report.removed += 1,
+            (crate::model::SyncOp::Disable { .. }, true) => report.turned_off += 1,
             (op, false) => report
                 .failed
                 .push(format!("{op:?}: {}", r.error.unwrap_or_default())),

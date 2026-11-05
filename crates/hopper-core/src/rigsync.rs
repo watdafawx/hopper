@@ -55,11 +55,61 @@ pub fn compare(
     server: &ServerInfo,
     sync_anyway: &HashSet<u64>,
 ) -> Result<(Vec<DiffEntry>, Annotation), String> {
-    let mut client =
-        crate::scan::scan_folder(&inst.mods_dir()).map_err(|e| format!("client: {e:#}"))?;
+    let (client, note) = client_mods(inst, sync_anyway).map_err(|e| format!("client: {e:#}"))?;
     let theirs = server_mods(server).map_err(|e| format!("server: {e:#}"))?;
+    Ok((diff_mods(&client, &theirs), note))
+}
+
+/// Why a mod turned off in the pack stays off the server.
+pub const TURNED_OFF: &str = "Turned off in this pack";
+
+/// The pack's mods, the ones turned off included (`off`, held back from the
+/// server), marked with what shouldn't sync.
+pub fn client_mods(inst: &Instance, sync_anyway: &HashSet<u64>) -> anyhow::Result<(Vec<ModInfo>, Annotation)> {
+    let dir = inst.mods_dir();
+    let mut client = crate::scan::scan_folder(&dir)?;
+    for e in std::fs::read_dir(&dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(jar) = name.strip_suffix(".disabled").filter(|j| j.to_ascii_lowercase().ends_with(".jar")) else { continue };
+        // Both copies there: the one that's on wins.
+        if client.iter().any(|m| m.file_name.eq_ignore_ascii_case(jar)) || !e.path().is_file() {
+            continue;
+        }
+        let mut m = crate::scan::scan_file(&e.path());
+        m.file_name = jar.to_string();
+        if m.mod_name.is_empty() || m.mod_name.to_ascii_lowercase().contains(".disabled") {
+            m.mod_name = crate::scan::strip_version_suffix(jar);
+        }
+        m.off = true;
+        client.push(m);
+    }
     let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
-    Ok((crate::diff::compute_diff(&client, &theirs), note))
+    for m in client.iter_mut().filter(|m| m.off) {
+        m.wont_sync = Some(TURNED_OFF.into());
+    }
+    Ok((client, note))
+}
+
+/// Compares the pack's mods ([`client_mods`]) with the server's. A mod
+/// turned off in the pack that the server still runs isn't "only on the
+/// server": its row asks to turn the server's copy off too.
+pub fn diff_mods(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {
+    let mut diff = crate::diff::compute_diff(client, server);
+    for d in &mut diff {
+        if d.client.as_ref().is_some_and(|c| c.off) && d.server.is_some() {
+            d.mod_name = d.client.as_ref().map_or(d.mod_name.clone(), |c| c.mod_name.clone());
+            d.client = None;
+            d.status = DiffStatus::OnlyServer;
+            d.action = DiffAction::DisableOnServer;
+            d.skip_reason = Some(TURNED_OFF.into());
+        }
+    }
+    diff
+}
+
+/// A server mod the pack has turned off: syncing turns it off there too.
+pub fn is_off_here(d: &DiffEntry) -> bool {
+    d.action == DiffAction::DisableOnServer
 }
 
 /// The server's mods; a Hopper Server reads its own jars and sends the
@@ -119,6 +169,7 @@ pub fn explain(d: &DiffEntry) -> String {
     let v = |m: &Option<ModInfo>| m.as_ref().map_or("?".to_string(), |m| m.version.clone());
     match d.status {
         DiffStatus::OnlyClient => "In the pack but not on the server. Click to copy it to the server.".into(),
+        DiffStatus::OnlyServer if is_off_here(d) => "Turned off in this pack but still on on the server. Turn it off there too, so both match.".into(),
         DiffStatus::OnlyServer => "On the server but not in the pack. Click to copy it down to the pack, or select it and Remove.".into(),
         DiffStatus::ServerStale => "An older copy left on the server; the client has this mod under a newer file. Click the chip to remove the leftover.".into(),
         DiffStatus::ClientNewer | DiffStatus::ServerNewer => format!(
@@ -143,6 +194,8 @@ pub enum Group {
     Add,
     /// The server has another build.
     Update,
+    /// Turned off in the pack, still on on the server.
+    TurnOff,
     /// Only the server has it (or an old copy left behind).
     ServerOnly,
     /// Missing on the server on purpose: client-only or left out.
@@ -152,9 +205,10 @@ pub enum Group {
 }
 
 impl Group {
-    pub const ALL: [Group; 5] = [
+    pub const ALL: [Group; 6] = [
         Group::Add,
         Group::Update,
+        Group::TurnOff,
         Group::ServerOnly,
         Group::KeptOff,
         Group::InSync,
@@ -165,6 +219,7 @@ impl Group {
             DiffStatus::OnlyClient if is_wont(d) => Group::KeptOff,
             DiffStatus::OnlyClient => Group::Add,
             DiffStatus::ClientNewer | DiffStatus::ServerNewer => Group::Update,
+            DiffStatus::OnlyServer if is_off_here(d) => Group::TurnOff,
             DiffStatus::OnlyServer | DiffStatus::ServerStale => Group::ServerOnly,
             DiffStatus::Same => Group::InSync,
         }
@@ -174,6 +229,7 @@ impl Group {
         match self {
             Group::Add => "Will be added",
             Group::Update => "Updates",
+            Group::TurnOff => "Turned off in the pack",
             Group::ServerOnly => "Only on the server",
             Group::KeptOff => "Kept off the server",
             Group::InSync => "In sync",
@@ -185,6 +241,7 @@ impl Group {
         match self {
             Group::Add => "to add",
             Group::Update => "updates",
+            Group::TurnOff => "to turn off",
             Group::ServerOnly => "only on server",
             Group::KeptOff => "kept off",
             Group::InSync => "in sync",
@@ -195,15 +252,16 @@ impl Group {
         match self {
             Group::Add => "In the pack, not on the server",
             Group::Update => "The server has another version",
+            Group::TurnOff => "Still on on the server",
             Group::ServerOnly => "Not in the pack",
-            Group::KeptOff => "Client-only, or left out by the pack author",
+            Group::KeptOff => "Client-only, turned off in the pack, or left out by its author",
             Group::InSync => "Same file on both",
         }
     }
 
     /// Whether its rows can be picked for Apply.
     pub fn pickable(self) -> bool {
-        matches!(self, Group::Add | Group::Update | Group::ServerOnly)
+        matches!(self, Group::Add | Group::Update | Group::TurnOff | Group::ServerOnly)
     }
 }
 
@@ -354,13 +412,15 @@ pub struct JoinCheck {
     pub only_pack: Vec<String>,
     /// Mods on the server the pack lacks (names).
     pub only_server: Vec<String>,
+    /// Mods turned off in the pack the server still runs (names).
+    pub off_here: Vec<String>,
     /// (name, the pack's version, the server's).
     pub versions: Vec<(String, String, String)>,
 }
 
 impl JoinCheck {
     pub fn is_empty(&self) -> bool {
-        self.loader.is_none() && self.only_pack.is_empty() && self.only_server.is_empty() && self.versions.is_empty()
+        self.loader.is_none() && self.only_pack.is_empty() && self.only_server.is_empty() && self.off_here.is_empty() && self.versions.is_empty()
     }
 
     /// The one-line summary, for the banner.
@@ -376,6 +436,9 @@ impl JoinCheck {
         if !self.only_server.is_empty() {
             parts.push(format!("{} only on the server", n(self.only_server.len(), "mod", "mods")));
         }
+        if !self.off_here.is_empty() {
+            parts.push(format!("{} turned off here but on on the server", n(self.off_here.len(), "mod", "mods")));
+        }
         if !self.versions.is_empty() {
             parts.push(format!("{} at another version", n(self.versions.len(), "mod", "mods")));
         }
@@ -389,7 +452,7 @@ impl JoinCheck {
     /// A short, stable fingerprint, so a closed banner stays closed until
     /// something else differs.
     pub fn signature(&self) -> String {
-        format!("{:?}|{}|{}|{}", self.loader, self.only_pack.join(","), self.only_server.join(","), self.versions.iter().map(|v| format!("{}:{}:{}", v.0, v.1, v.2)).collect::<Vec<_>>().join(","))
+        format!("{:?}|{}|{}|{}|{}", self.loader, self.only_pack.join(","), self.only_server.join(","), self.off_here.join(","), self.versions.iter().map(|v| format!("{}:{}:{}", v.0, v.1, v.2)).collect::<Vec<_>>().join(","))
     }
 }
 
@@ -412,8 +475,9 @@ pub fn join_check(diff: &[DiffEntry], blacklist: &HashSet<String>, pack_nf: Opti
         }
         let side = |m: &Option<ModInfo>| m.as_ref().map_or("", |m| m.side.as_str()).to_string();
         match d.status {
+            DiffStatus::OnlyServer if is_off_here(d) => c.off_here.push(name(d)),
             DiffStatus::OnlyClient if side(&d.client) != "client" => c.only_pack.push(name(d)),
-            DiffStatus::OnlyServer if side(&d.server) != "server" => c.only_server.push(name(d)),
+            DiffStatus::OnlyServer if blocks_join(d, blacklist) => c.only_server.push(name(d)),
             DiffStatus::ClientNewer | DiffStatus::ServerNewer if side(&d.client) != "client" => {
                 let v = |m: &Option<ModInfo>| m.as_ref().map_or(String::new(), |m| m.version.clone());
                 c.versions.push((name(d), v(&d.client), v(&d.server)));
@@ -423,8 +487,18 @@ pub fn join_check(diff: &[DiffEntry], blacklist: &HashSet<String>, pack_nf: Opti
     }
     c.only_pack.sort();
     c.only_server.sort();
+    c.off_here.sort();
     c.versions.sort();
     c
+}
+
+/// A server-only mod that keeps the pack from joining (what the banner calls
+/// "only on the server"): not tagged server-only, not on "Never sync".
+pub fn blocks_join(d: &DiffEntry, blacklist: &HashSet<String>) -> bool {
+    d.status == DiffStatus::OnlyServer
+        && !is_off_here(d)
+        && !is_hidden(d, blacklist)
+        && d.server.as_ref().is_some_and(|m| m.side != "server")
 }
 
 /// Everything a [`join_check`] is worked out from, short of reading the
@@ -574,7 +648,7 @@ impl Ops {
 pub fn push(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<SyncOp> {
     let rows: Vec<DiffEntry> = rows
         .iter()
-        .filter(|d| d.client.is_some() && row_action(d.status) == Some(RowAct::Push))
+        .filter(|d| d.client.as_ref().is_some_and(|c| !c.off) && row_action(d.status) == Some(RowAct::Push))
         .cloned()
         .map(|mut d| {
             d.action = DiffAction::CopyToServer;
@@ -592,6 +666,7 @@ pub fn pull(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<Syn
     for d in rows {
         let Some(s) = &d.server else { continue };
         match d.status {
+            DiffStatus::OnlyServer if is_off_here(d) => continue,
             DiffStatus::OnlyServer => {}
             DiffStatus::ServerNewer | DiffStatus::ClientNewer => {
                 if let Some(c) = &d.client
@@ -616,9 +691,10 @@ pub fn pull(rows: &[DiffEntry], inst: &Instance, server: &ServerInfo) -> Vec<Syn
 pub fn remove(rows: &[DiffEntry], server: &ServerInfo) -> Vec<SyncOp> {
     rows.iter()
         .filter(|d| matches!(d.status, DiffStatus::OnlyServer | DiffStatus::ServerStale))
-        .filter_map(|d| d.server.as_ref())
-        .map(|m| SyncOp::Delete {
-            path: server.mods_dir().join(&m.file_name),
+        .filter_map(|d| Some((d, d.server.as_ref()?)))
+        .map(|(d, m)| {
+            let path = server.mods_dir().join(&m.file_name);
+            if is_off_here(d) { SyncOp::Disable { path } } else { SyncOp::Delete { path } }
         })
         .collect()
 }
@@ -872,6 +948,58 @@ mod tests {
         assert!(!w.stale(2));
         // An old answer is refreshed even when nothing says it changed.
         assert!(w.want(2, Duration::ZERO));
+    }
+
+    /// A mod turned off in the pack isn't "only on the server": while the
+    /// server still runs it, it's to turn off there (and syncing turns it
+    /// off, not deletes it); once it's off there, it's kept off.
+    #[test]
+    fn mod_turned_off_in_the_pack_is_turned_off_on_the_server() {
+        use crate::model::ModInfo;
+        let root = std::env::temp_dir().join(format!("hopper-test-offpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let pack = Instance { name: "P".into(), root: root.join("pack"), ..Default::default() };
+        std::fs::create_dir_all(pack.mods_dir()).unwrap();
+        std::fs::write(pack.mods_dir().join("MysticalAgriculturePlus-2.0.2.jar.disabled"), b"x").unwrap();
+        let (client, _) = client_mods(&pack, &HashSet::new()).unwrap();
+        let off = client.iter().find(|m| m.off).expect("the turned-off jar is listed");
+        assert_eq!(off.file_name, "MysticalAgriculturePlus-2.0.2.jar");
+        assert_eq!(off.wont_sync.as_deref(), Some(TURNED_OFF));
+
+        let m = |file: &str| ModInfo { file_name: file.into(), mod_name: file.into(), side: "both".into(), ..Default::default() };
+        let server_info = ServerInfo {
+            name: "S".into(),
+            root: root.join("srv"),
+            manager: crate::server::Manager::Unknown,
+            properties: Default::default(),
+            loader: None,
+            java: None,
+            max_memory: None,
+            remote: None,
+        };
+        // Still on on the server.
+        let diff = diff_mods(&client, &[m("MysticalAgriculturePlus-2.0.2.jar")]);
+        let row = diff.iter().find(|d| d.server.as_ref().is_some_and(|s| s.file_name.starts_with("Mystical"))).unwrap();
+        assert_eq!(Group::of(row), Group::TurnOff);
+        assert!(Group::of(row).pickable());
+        let c = join_check(&diff, &HashSet::new(), None, None);
+        assert!(c.only_server.is_empty(), "{c:?}");
+        assert_eq!(c.off_here.len(), 1);
+        assert!(!c.is_empty());
+        let rows = std::slice::from_ref(row);
+        assert!(matches!(&remove(rows, &server_info)[..], [SyncOp::Disable { path }] if path.ends_with("MysticalAgriculturePlus-2.0.2.jar")));
+        assert!(pull(rows, &pack, &server_info).is_empty());
+        assert!(push(rows, &pack, &server_info).is_empty());
+        assert!(matches!(&crate::sync::plan(&diff, &pack.mods_dir(), &server_info.mods_dir())[..], [SyncOp::Disable { .. }]));
+
+        // Turned off there too: kept off, nothing to do, nothing to send.
+        let diff = diff_mods(&client, &[]);
+        let row = diff.iter().find(|d| d.client.as_ref().is_some_and(|c| c.off)).unwrap();
+        assert_eq!(Group::of(row), Group::KeptOff);
+        assert!(join_check(&diff, &HashSet::new(), None, None).is_empty());
+        assert!(crate::sync::plan(&diff, &pack.mods_dir(), &server_info.mods_dir()).is_empty());
+        assert!(push(&diff, &pack, &server_info).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn inst(n: &str) -> Instance {

@@ -38,6 +38,8 @@ pub struct Joins {
     checks: HashMap<PathBuf, JoinWatch<Option<PreJoin>>>,
     /// Bumped when Hopper changed a server's files (by server root).
     server_files: HashMap<PathBuf, u64>,
+    /// The last "Update server" job of each server (by server root).
+    updating: HashMap<PathBuf, u64>,
 }
 
 impl Store {
@@ -69,6 +71,16 @@ impl Store {
     /// The pack compared with its paired server, when something differs.
     /// The last answer stays while a new comparison runs (see
     /// [`Self::pre_join_checking`]).
+    /// Remembers the "Update server" job for `server_root`, for the banner.
+    pub fn track_server_update(&mut self, server_root: &Path, job: u64) {
+        self.joins.updating.insert(server_root.to_path_buf(), job);
+    }
+
+    /// The last "Update server" job of `server_root`, while it runs or after.
+    pub fn server_update_job(&self, server_root: &Path) -> Option<hopper::jobs::JobState> {
+        self.job_state(*self.joins.updating.get(server_root)?)
+    }
+
     pub fn pre_join(&self, root: &Path) -> Option<&PreJoin> {
         self.joins.checks.get(root)?.value()?.as_ref().filter(|p| !p.check.is_empty())
     }
@@ -405,6 +417,7 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
     let p = s.pre_join(root)?.clone();
     // The pack or server changed since: its old numbers would mislead.
     let checking = s.pre_join_checking(root);
+    let job = s.server_update_job(&p.server_root);
     let pack_nf = s.instance(root).and_then(|i| i.loader.strip_prefix("neoforge-").map(str::to_string));
     let theme = cx.theme().clone();
     let color = theme.warning;
@@ -431,6 +444,9 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
         if !c.only_server.is_empty() {
             lines.push(format!("Only on the server: {}", list(&c.only_server)));
         }
+        if !c.off_here.is_empty() {
+            lines.push(format!("Turned off here, still on on the server: {}", list(&c.off_here)));
+        }
         if !c.versions.is_empty() {
             let names: Vec<String> = c.versions.iter().map(|(n, a, b)| format!("{n} ({a} here, {b} there)")).collect();
             lines.push(format!("Other versions: {}", list(&names)));
@@ -438,14 +454,25 @@ pub fn pre_join_bar<V: 'static>(store: &Entity<Store>, root: &Path, cx: &mut Con
         if checking {
             lines = vec![format!("Checking {} again…", p.server)];
         }
+        match &job {
+            Some(j) if !j.done => lines = vec![format!("Updating {}…", p.server)],
+            Some(j) if j.error.is_some() => {
+                lines.push(format!("The update didn't finish: {}", j.error.clone().unwrap_or_default()));
+            }
+            // Done, and the server still differs: say what it did.
+            Some(j) if !checking && !j.detail.is_empty() => lines.push(format!("Last update: {}.", j.detail)),
+            _ => {}
+        }
         lines
     };
+    let updating = job.as_ref().is_some_and(|j| !j.done);
     let (st, r, sr) = (store.clone(), root.to_path_buf(), p.server_root.clone());
     let update = Button::new("prejoin-update")
         .small()
         .primary()
         .icon(IconName::ServerCog)
-        .label("Update server")
+        .label(if updating { "Updating…" } else { "Update server" })
+        .loading(updating)
         .tooltip("Gives the server this pack's NeoForge and mods (it asks first)")
         .on_click(move |_, window, cx| update_server(&st, &r, &sr, window, cx));
     let matcher = p.check.loader.as_ref().filter(|_| pack_nf.is_some()).map(|(_, snf)| {

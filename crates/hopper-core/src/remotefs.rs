@@ -326,7 +326,7 @@ pub fn push(m: &Mirror, results: &mut [SyncResult]) {
 fn server_rel(m: &Mirror, op: &SyncOp) -> Option<String> {
     match op {
         SyncOp::Copy { dst, .. } => rel_in(m, dst),
-        SyncOp::Delete { path } => rel_in(m, path),
+        SyncOp::Delete { path } | SyncOp::Disable { path } => rel_in(m, path),
     }
 }
 
@@ -348,6 +348,22 @@ pub fn push_with(r: &mut dyn Remote, m: &Mirror, results: &mut [SyncResult]) {
         let remote = join(&m.folder, &rel);
         let dir = rel.rsplit_once('/').map(|d| d.0.to_string()).unwrap_or_default();
         let step = (|| -> anyhow::Result<()> {
+            // Turned off: the jar stays, renamed; an old `.disabled` copy in
+            // the way goes to the backups.
+            if let SyncOp::Disable { .. } = &x.op {
+                let off = format!("{rel}.disabled");
+                if idx.contains_key(&off) {
+                    if !made_backups {
+                        r.mkdirs(&backups)?;
+                        made_backups = true;
+                    }
+                    r.rename(&join(&m.folder, &off), &join(&backups, &off.replace('/', "_"))).with_context(|| format!("keeping a backup of {off}"))?;
+                    idx.remove(&off);
+                }
+                r.rename(&remote, &join(&m.folder, &off)).with_context(|| format!("turning off {rel}"))?;
+                idx.remove(&rel);
+                return Ok(());
+            }
             // What's there now goes to the server's backups first.
             if idx.contains_key(&rel) {
                 if !made_backups {

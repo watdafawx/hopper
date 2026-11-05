@@ -37,6 +37,13 @@ pub fn plan(diff: &[DiffEntry], client_mods: &Path, server_mods: &Path) -> Vec<S
                     });
                 }
             }
+            DiffAction::DisableOnServer => {
+                if let Some(s) = &d.server {
+                    ops.push(SyncOp::Disable {
+                        path: server_mods.join(&s.file_name),
+                    });
+                }
+            }
         }
     }
     ops
@@ -47,7 +54,7 @@ pub fn execute(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
     // A server on a Hopper Server: its side goes over the panel's API.
     let remote = ops.iter().find_map(|op| match op {
         SyncOp::Copy { src, dst } => crate::hopperd::remote_of(dst).or_else(|| crate::hopperd::remote_of(src)),
-        SyncOp::Delete { path } => crate::hopperd::remote_of(path),
+        SyncOp::Delete { path } | SyncOp::Disable { path } => crate::hopperd::remote_of(path),
     });
     if let Some((root, r)) = remote {
         // Local backups (a pull replacing a client file) stay local.
@@ -79,6 +86,7 @@ pub fn execute_local(ops: Vec<SyncOp>, server_root: &Path) -> Vec<SyncResult> {
             let r = match &op {
                 SyncOp::Copy { src, dst } => copy(src, dst, &backup_dir),
                 SyncOp::Delete { path } => backup(path, &backup_dir),
+                SyncOp::Disable { path } => disable(path, &backup_dir),
             };
             match r {
                 Ok(backup) => SyncResult {
@@ -156,6 +164,22 @@ fn backup(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
 
 /// Copies through a temp file and a rename, so a crash never leaves a
 /// half-written jar in `mods`.
+/// `<jar>.disabled` path for a jar.
+pub fn disabled_path(path: &Path) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(".disabled");
+    PathBuf::from(p)
+}
+
+/// Renames a jar to `<jar>.disabled`; an older `.disabled` copy in the way
+/// goes to the backups. Nothing to back up for the jar itself: it stays.
+fn disable(path: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let to = disabled_path(path);
+    let saved = backup(&to, backup_dir)?;
+    fs::rename(path, &to)?;
+    Ok(saved)
+}
+
 fn copy(src: &Path, dst: &Path, backup_dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
@@ -205,6 +229,22 @@ mod tests {
         assert!(r[0].ok, "{:?}", r[0].error);
         assert_eq!(fs::read(server.join("a.jar")).unwrap(), b"new");
         assert_eq!(fs::read(r[0].backup.as_ref().unwrap()).unwrap(), b"old");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disable_renames_the_jar_and_keeps_an_old_off_copy() {
+        let root = std::env::temp_dir().join(format!("hopper-test-off-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mods = root.join("mods");
+        fs::create_dir_all(&mods).unwrap();
+        fs::write(mods.join("a.jar"), b"now").unwrap();
+        fs::write(mods.join("a.jar.disabled"), b"older").unwrap();
+        let r = execute(vec![SyncOp::Disable { path: mods.join("a.jar") }], &root);
+        assert!(r[0].ok, "{:?}", r[0].error);
+        assert!(!mods.join("a.jar").exists());
+        assert_eq!(fs::read(mods.join("a.jar.disabled")).unwrap(), b"now");
+        assert_eq!(fs::read(r[0].backup.as_ref().unwrap()).unwrap(), b"older");
         let _ = fs::remove_dir_all(&root);
     }
 }
