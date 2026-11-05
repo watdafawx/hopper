@@ -1420,6 +1420,8 @@ impl UpdatePreview {
                 out = out.child(
                     v_flex().child(
                         h_flex()
+                            .id(SharedString::from(format!("frow:{rel}")))
+                            .hover(|s| widgets::row_hover(s, cx))
                             .gap_2()
                             .pl_6()
                             .pr_2()
@@ -1573,18 +1575,17 @@ impl UpdatePreview {
             .border_1()
             .border_color(border)
             .children(rows.into_iter().take(LIST_CAP).map(|(m, (label, color), detail)| {
-                widgets::row_hover(
-                    h_flex()
-                        .gap_3()
-                        .px_2()
-                        .py_0p5()
-                        .border_b_1()
-                        .border_color(border.opacity(0.5))
-                        .child(self.mod_cell(format!("{id}:{}:{}:{}", m.name, m.from, m.to), &m.name, &m.icon, m.project, cx))
-                        .child(widgets::caption(detail, cx).text_xs().flex_1().min_w_0().truncate())
-                        .child(widgets::chip(color).xsmall().child(label)),
-                    cx,
-                )
+                h_flex()
+                    .id(SharedString::from(format!("mrow:{id}:{}:{}:{}", m.name, m.from, m.to)))
+                    .hover(|s| widgets::row_hover(s, cx))
+                    .gap_3()
+                    .px_2()
+                    .py_0p5()
+                    .border_b_1()
+                    .border_color(border.opacity(0.5))
+                    .child(self.mod_cell(format!("{id}:{}:{}:{}", m.name, m.from, m.to), &m.name, &m.icon, m.project, cx))
+                    .child(widgets::caption(detail, cx).text_xs().flex_1().min_w_0().truncate())
+                    .child(widgets::chip(color).xsmall().child(label))
             }))
             .when(more > 0, |c| {
                 c.child(widgets::caption(format!("…{more} more: search to narrow"), cx).text_xs().px_2().py_1())
@@ -2066,7 +2067,8 @@ impl UpdatePreview {
                         crate::drag_pick::paint_option(Tab::new().label(label), paint, title, ix, move |v, w, cx| set(v, w, cx))
                     };
                     let row_set = set.clone();
-                    crate::drag_pick::paint_row(h_flex(), paint, title, move |v, w, cx| row_set(v, w, cx))
+                    crate::drag_pick::paint_row(h_flex().id(SharedString::from(format!("lrow:{}", m.key))), paint, title, move |v, w, cx| row_set(v, w, cx))
+                        .hover(|s| widgets::row_hover(s, cx))
                         .gap_3()
                         .py_0p5()
                         .child(this.mod_cell(format!("cell:{}", m.key), &m.name, &m.icon, m.project, cx))
@@ -2168,7 +2170,8 @@ impl UpdatePreview {
                 let theme = cx.theme().clone();
                 v_flex()
                     .child(
-                        crate::drag_pick::paint_row(h_flex(), paint, "conflicts", move |v, w, cx| row_set(v, w, cx))
+                        crate::drag_pick::paint_row(h_flex().id(SharedString::from(format!("crow:{rel}"))), paint, "conflicts", move |v, w, cx| row_set(v, w, cx))
+                            .hover(|s| widgets::row_hover(s, cx))
                             .gap_2()
                             .py_0p5()
                             .child(
