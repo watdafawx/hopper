@@ -7,9 +7,9 @@
 //! this button, never the whole header.
 
 use crate::store::Store;
-use crate::widgets::Clickable as _;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::{ActiveTheme as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashMap;
@@ -108,45 +108,29 @@ impl HistoryButton {
 }
 
 impl Render for HistoryButton {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dialog = window.has_active_dialog(cx);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (count, pulse, primary) = (self.count, self.pulse, theme.primary);
         let tip = if count > 0 { format!("History ({count} new)") } else { "History".to_string() };
-        let icon = Icon::new(IconName::RotateCcwClock).small();
+        let store = self.store.clone();
+        let root = self.root.clone();
         div()
             .id("history-button")
             .relative()
-            .size(rems(2.0))
             .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(theme.radius)
-            .clickable(cx)
-            .text_color(theme.muted_foreground)
-            .hover(|s| s.bg(theme.list_hover).text_color(theme.foreground))
-            // None under a dialog, where it could stay stuck.
-            .when(!dialog, |d| {
-                d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
-            })
-            .on_click(cx.listener(|this, _, window, cx| {
-                mark_seen(&this.root);
-                this.count = 0;
-                cx.notify();
-                crate::backups_view::open(this.store.clone(), this.root.clone(), window, cx);
-            }))
-            .child(if pulse > 0 {
-                // Turns back once and settles: counter-clockwise, like the icon.
-                icon.with_animation(
-                    ElementId::Name(format!("history-turn-{pulse}").into()),
-                    Animation::new(PULSE).with_easing(ease_out_quint()),
-                    |i, t| i.transform(Transformation::rotate(percentage(-t))),
-                )
-                .into_any_element()
-            } else {
-                icon.into_any_element()
-            })
+            // The same outline icon button as the more menu beside it.
+            .child(
+                Button::new("history")
+                    .outline()
+                    .icon(IconName::RotateCcwClock)
+                    .tooltip(tip)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        mark_seen(&root);
+                        this.count = 0;
+                        cx.notify();
+                        crate::backups_view::open(store.clone(), root.clone(), window, cx);
+                    })),
+            )
             .when(count > 0, |d| {
                 let label = if count > 99 { "99+".to_string() } else { count.to_string() };
                 d.child(
