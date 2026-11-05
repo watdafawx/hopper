@@ -1235,6 +1235,11 @@ pub struct Found {
 
 /// Looks for Hopper Servers on the LAN for up to `wait`.
 pub fn discover(wait: Duration) -> Vec<Found> {
+    // Test copies skip the multicast socket: Windows asks for firewall
+    // access for it.
+    if crate::paths::loopback_only() {
+        return Vec::new();
+    }
     let Ok(mdns) = mdns_sd::ServiceDaemon::new() else { return Vec::new() };
     let Ok(rx) = mdns.browse(SERVICE) else { return Vec::new() };
     let end = std::time::Instant::now() + wait;

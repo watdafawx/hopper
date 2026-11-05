@@ -6,6 +6,7 @@
 //! hopperd --portable              the same (Windows: no first-run dialog)
 //! hopperd --servers-root <dir>    set the servers folder and run
 //! hopperd --port <n>              set the port and run
+//! hopperd --bind <addr>           listen on <addr> (0.0.0.0 = every network)
 //! hopperd --data <dir>            keep config and accounts in <dir>
 //! hopperd service install         run in the background with the machine
 //! hopperd service uninstall|status
@@ -167,10 +168,12 @@ struct Args {
     servers_root: Option<PathBuf>,
     /// The panel folder (normally picked at setup).
     home: Option<PathBuf>,
+    /// Address to listen on (`--bind`).
+    bind: Option<String>,
 }
 
 fn parse_args() -> anyhow::Result<Option<Args>> {
-    let mut a = Args { service: false, data: None, port: None, servers_root: None, home: None };
+    let mut a = Args { service: false, data: None, port: None, servers_root: None, home: None, bind: None };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut val = || it.next().with_context(|| format!("{arg} needs a value"));
@@ -186,8 +189,9 @@ fn parse_args() -> anyhow::Result<Option<Args>> {
             "--port" => a.port = Some(val()?.parse().context("--port takes a number")?),
             "--servers-root" => a.servers_root = Some(val()?.into()),
             "--home" => a.home = Some(val()?.into()),
+            "--bind" => a.bind = Some(val()?),
             "--help" | "-h" => {
-                println!("{}", include_str!("main.rs").lines().skip(4).take(8).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
+                println!("{}", include_str!("main.rs").lines().skip(4).take(9).map(|l| l.trim_start_matches("//! ")).collect::<Vec<_>>().join("\n"));
                 return Ok(None);
             }
             other => anyhow::bail!("Unknown argument {other}. Try --help."),
@@ -272,8 +276,22 @@ pub(crate) fn run_main(shutdown: Shutdown) -> anyhow::Result<()> {
         cfg.servers_root = Some(absolute(&r));
         changed = true;
     }
+    if let Some(b) = &args.bind {
+        cfg.bind = b.clone();
+        changed = true;
+    }
     if changed {
         cfg.save(&data_dir)?;
+    }
+    // A scratch copy (--home, or HOPPER_LOOPBACK=1) listens on this PC only
+    // unless --bind says otherwise: Windows asks for firewall access for
+    // every new program that listens on all networks. Not saved, so the
+    // config's own address still counts for a real run.
+    let scratch = args.home.is_some() && hopper_core::paths::loopback_env() != Some(false) || hopper_core::paths::loopback_env() == Some(true);
+    if args.bind.is_none() && scratch && matches!(cfg.bind.as_str(), "0.0.0.0" | "::" | "") {
+        cfg.bind = "127.0.0.1".into();
+        cfg.discovery = false;
+        log::info!("scratch run: listening on 127.0.0.1 only (use --bind to change)");
     }
 
     if !cfg.curseforge_key.trim().is_empty() {

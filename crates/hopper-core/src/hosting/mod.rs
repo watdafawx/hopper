@@ -97,8 +97,21 @@ pub fn write_eula(root: &Path, accepted: bool) -> anyhow::Result<()> {
 }
 
 /// Whether a server could listen on `port` (nothing else has it).
+///
+/// Never listens on all networks (that makes Windows ask for firewall
+/// access): binds 127.0.0.1 (a listener on every network blocks that too),
+/// then tries to connect on this PC's LAN address for one on that alone.
 pub fn port_free(port: u16) -> bool {
-    TcpListener::bind(("0.0.0.0", port)).is_ok()
+    if TcpListener::bind(("127.0.0.1", port)).is_err() {
+        return false;
+    }
+    if let Some(ip) = ports::lan_ip().and_then(|s| s.parse::<std::net::IpAddr>().ok()) {
+        let addr = std::net::SocketAddr::new(ip, port);
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
+            return false;
+        }
+    }
+    true
 }
 
 /// A port for a new server under `servers_root`: 25565, or the next one
@@ -127,7 +140,7 @@ mod tests {
         write_eula(&dir, true).unwrap();
         assert!(eula_accepted(&dir));
 
-        let l = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = l.local_addr().unwrap().port();
         assert!(!port_free(port));
         drop(l);

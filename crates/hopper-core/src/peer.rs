@@ -471,10 +471,11 @@ pub struct Hub {
 impl Hub {
     /// Starts the transport, discovery and Tailscale probing.
     pub fn start(ctx: crate::waker::Waker) -> anyhow::Result<Arc<Hub>> {
-        Self::start_as(ctx, self_id(), false)
+        Self::start_as(ctx, self_id(), crate::paths::loopback_only())
     }
 
-    /// `local_only` (tests) listens on 127.0.0.1 without LAN discovery.
+    /// `local_only` (tests, scratch runs) listens on 127.0.0.1 without LAN
+    /// discovery, so Windows doesn't ask for firewall access.
     fn start_as(
         ctx: crate::waker::Waker,
         id: String,

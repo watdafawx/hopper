@@ -124,6 +124,23 @@ pub fn forced_root() -> Option<PathBuf> {
     std::env::var_os("HOPPER_DATA_DIR").filter(|p| !p.is_empty()).map(PathBuf::from)
 }
 
+/// `HOPPER_LOOPBACK` asks for listeners on this PC only: `1` on, `0` off.
+/// Windows asks "allow access?" for every new program that listens on all
+/// networks, which a test copy of Hopper would do on every build.
+pub fn loopback_env() -> Option<bool> {
+    std::env::var("HOPPER_LOOPBACK").ok().map(|v| !matches!(v.trim(), "" | "0" | "false"))
+}
+
+/// A test or scratch run (HOPPER_LOOPBACK=1, HOPPER_DATA_DIR or `--mcp`)
+/// listens on 127.0.0.1 only and skips LAN discovery.
+pub fn loopback_only() -> bool {
+    loopback_env().unwrap_or_else(|| {
+        forced_root().is_some()
+            || std::env::var_os("HOPPER_MCP").is_some()
+            || std::env::args().any(|a| a == "--mcp")
+    })
+}
+
 fn resolve() -> Option<Dirs> {
     if let Some(p) = forced_root() {
         return Some(Dirs::portable(p));
