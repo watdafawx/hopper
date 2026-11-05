@@ -25,13 +25,24 @@
   // rather than shrink to icons. Sized images (badges) keep their size.
   const shots = (cells) => cells.every((c) => c.every((s) => s.img || !s.t.trim())) && cells.some((c) => c.some((s) => s.img));
   const fill = (s, grid) => grid && !s.w && !s.h;
+
+  // A picture never grows past its own size, and a small one (a row of link
+  // icons) stays that size and lines up with its neighbours instead of
+  // filling the cell. Sizes are known once it has loaded.
+  const SMALL = 160;
+  function loaded(e) {
+    const el = e.currentTarget;
+    if (!el.classList.contains('fill')) return;
+    if (el.naturalWidth < SMALL) el.dataset.small = '';
+    else el.style.maxWidth = `${el.naturalWidth}px`;
+  }
 </script>
 
 {#snippet spans(list, grid = false)}
   {#each list as s, i (i)}
     {#if s.img}
-      {#if s.href}<a href={s.href} class:fill={fill(s, grid)} target="_blank" rel="noreferrer noopener" onclick={(e) => click(e, s.href)}><img src={s.img} alt={s.t} loading="lazy" class:fill={fill(s, grid)} style:max-width={imgW(s)} style:height={imgH(s)} /></a>
-      {:else}<img src={s.img} alt={s.t} loading="lazy" class:fill={fill(s, grid)} style:max-width={imgW(s)} style:height={imgH(s)} />{/if}
+      {#if s.href}<a href={s.href} class:fill={fill(s, grid)} target="_blank" rel="noreferrer noopener" onclick={(e) => click(e, s.href)}><img src={s.img} alt={s.t} loading="lazy" onload={loaded} class:fill={fill(s, grid)} style:max-width={imgW(s)} style:height={imgH(s)} /></a>
+      {:else}<img src={s.img} alt={s.t} loading="lazy" onload={loaded} class:fill={fill(s, grid)} style:max-width={imgW(s)} style:height={imgH(s)} />{/if}
     {:else if s.href}
       <a href={s.href} target="_blank" rel="noreferrer noopener" class:b={s.b} class:i={s.i} onclick={(e) => click(e, s.href)}>{s.t}</a>
     {:else if s.c}<code>{s.t}</code>
@@ -82,8 +93,10 @@
   img { max-width: 100%; height: auto; border-radius: var(--radius-sm); vertical-align: middle; }
   hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
   .fill { display: block; width: 100%; }
+  img.fill:global([data-small]), a.fill:has(> :global(img[data-small])) { display: inline-block; width: auto; }
   .tr { display: grid; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
   .tr.shots { border-bottom: 0; }
+  .tr.shots > div { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
   .video { display: inline-flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; }
   .video img { max-width: 360px; }
 </style>
