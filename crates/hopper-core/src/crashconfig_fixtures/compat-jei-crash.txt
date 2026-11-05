@@ -1,0 +1,30 @@
+---- Minecraft Crash Report ----
+// Who set us up the TNT?
+
+Time: 2026-11-03 18:40:51
+Description: Unexpected error
+
+java.lang.NullPointerException: Cannot invoke "net.minecraft.world.item.crafting.RecipeHolder.value()" because "holder" is null
+	at TRANSFORMER/examplebags@3.20.5/com.example.examplebags.compat.jei.UpgradeRecipesMaker.lambda$getRecipes$0(UpgradeRecipesMaker.java:44) ~[examplebags-1.21.1-3.20.5.jar%23412!/:3.20.5] {re:classloading}
+	at java.base/java.util.stream.ReferencePipeline$3$1.accept(ReferencePipeline.java:197) ~[?:?] {}
+	at java.base/java.util.ArrayList$ArrayListSpliterator.forEachRemaining(ArrayList.java:1708) ~[?:?] {}
+	at TRANSFORMER/examplebags@3.20.5/com.example.examplebags.compat.jei.UpgradeRecipesMaker.getRecipes(UpgradeRecipesMaker.java:40) ~[examplebags-1.21.1-3.20.5.jar%23412!/:3.20.5] {re:classloading}
+	at TRANSFORMER/examplebags@3.20.5/com.example.examplebags.compat.jei.JeiCompat.registerRecipes(JeiCompat.java:61) ~[examplebags-1.21.1-3.20.5.jar%23412!/:3.20.5] {re:classloading}
+	at TRANSFORMER/jei@19.21.0.247/mezz.jei.library.load.PluginCaller.callOnPlugins(PluginCaller.java:29) ~[jei-1.21.1-neoforge-19.21.0.247.jar%23398!/:?] {re:classloading}
+	at TRANSFORMER/jei@19.21.0.247/mezz.jei.library.load.PluginLoader.registerRecipes(PluginLoader.java:160) ~[jei-1.21.1-neoforge-19.21.0.247.jar%23398!/:?] {re:classloading}
+	at TRANSFORMER/jei@19.21.0.247/mezz.jei.library.startup.JeiStarter.start(JeiStarter.java:126) ~[jei-1.21.1-neoforge-19.21.0.247.jar%23398!/:?] {re:classloading}
+	at TRANSFORMER/jei@19.21.0.247/mezz.jei.neoforge.startup.StartEventObserver.transitionToState(StartEventObserver.java:134) ~[jei-1.21.1-neoforge-19.21.0.247.jar%23398!/:?] {re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.multiplayer.ClientPacketListener.handleUpdateRecipes(ClientPacketListener.java:1772) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?] {re:classloading,pl:mixin:APP:examplebags.mixins.json:ClientPacketListenerMixin from mod examplebags,pl:mixin:A}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1161) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?] {re:mixin}
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {}
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Mod List:
+		examplebags-1.21.1-3.20.5.jar                     |Example Bags                  |examplebags                   |3.20.5              |Manifest: NOSIGNATURE
+		jei-1.21.1-neoforge-19.21.0.247.jar               |Just Enough Items             |jei                           |19.21.0.247         |Manifest: NOSIGNATURE

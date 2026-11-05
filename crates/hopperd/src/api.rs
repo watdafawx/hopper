@@ -146,6 +146,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/servers/{id}/crash", get(crash))
         .route("/api/v1/servers/{id}/crash/put-back", post(crash_put_back))
         .route("/api/v1/servers/{id}/crash/switch-off", post(crash_switch_off))
+        .route("/api/v1/servers/{id}/crash/switch-on", post(crash_switch_on))
         .route("/api/v1/servers/{id}/neoforge", get(neoforge))
         .route("/api/v1/servers/{id}", get(server))
         .route("/api/v1/servers/{id}/power", post(power))
@@ -646,7 +647,10 @@ async fn crash(
         .map(|p| p.to_string_lossy().replace('\\', "/"));
     // Java kept running after the crash until the watchdog ended it.
     let lingered = c.as_ref().and_then(|c| c.lingered_note());
-    Ok(Json(json!({ "crash": c, "report": report, "lingered": lingered })))
+    // What Hopper changed for each setting turned off since: the card's diff.
+    let changes: Vec<Vec<(bool, String)>> =
+        c.as_ref().map(|c| c.switched_off.iter().map(|s| hopper_core::configswitch::applied_diff(&e.root, s)).collect()).unwrap_or_default();
+    Ok(Json(json!({ "crash": c, "report": report, "lingered": lingered, "changes": changes })))
 }
 
 #[derive(serde::Deserialize)]
@@ -655,11 +659,46 @@ struct SwitchBody {
     key: String,
 }
 
-/// Turns off the setting for the item the last crash names (`fe_seed =
-/// true` → false), keeping the mod. The config as it was goes to
-/// `.hopper-backups` first. Read again here, so only a setting this crash
-/// names can be changed this way.
+/// Changes the setting the last crash points at (an item's `fe_seed = true`
+/// → false, a mixin option, a mod's support for another mod, a limit),
+/// keeping the mod. The config as it was goes to `.hopper-backups` first.
+/// Read again here, so only a setting this crash names can be changed this
+/// way. `{ ok, diff }`: the lines that changed.
 async fn crash_switch_off(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Json(b): Json<SwitchBody>,
+) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    if e.server.state().is_alive() {
+        return Err(bad("Stop the server first: it may write its config back when it stops."));
+    }
+    let root = e.root.clone();
+    let what = format!("{} in {}", b.key, b.file);
+    let diff = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(bool, String)>> {
+        let c = hopper_core::crashdetect::server(&root).ok_or_else(|| anyhow::anyhow!("The server's last start didn't crash."))?;
+        let sw = c
+            .switches
+            .iter()
+            .find(|s| s.file == b.file && s.key == b.key)
+            .ok_or_else(|| anyhow::anyhow!("The crash doesn't name {} in {}.", b.key, b.file))?;
+        let (before, after) = hopper_core::configswitch::turn_off(&root, sw)?;
+        Ok(hopper_core::configswitch::diff(&before, &after))
+    })
+    .await
+    .map_err(bad)?
+    .map_err(|e| bad(format!("{e:#}")))?;
+    log::info!("{}: changed {what} after a crash", e.name);
+    Ok(Json(json!({ "ok": true, "diff": diff })))
+}
+
+/// Undoes [`crash_switch_off`]: the setting goes back to what it was at the
+/// crash (the config as it is now goes to `.hopper-backups` first). Only a
+/// setting this crash names, changed since, can be put back this way.
+async fn crash_switch_on(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
     method: Method,
@@ -676,16 +715,16 @@ async fn crash_switch_off(
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let c = hopper_core::crashdetect::server(&root).ok_or_else(|| anyhow::anyhow!("The server's last start didn't crash."))?;
         let sw = c
-            .switches
+            .switched_off
             .iter()
             .find(|s| s.file == b.file && s.key == b.key)
-            .ok_or_else(|| anyhow::anyhow!("The crash doesn't name {} in {}.", b.key, b.file))?;
-        hopper_core::configswitch::turn_off(&root, sw)
+            .ok_or_else(|| anyhow::anyhow!("{} in {} isn't changed from the crash.", b.key, b.file))?;
+        hopper_core::configswitch::turn_on(&root, sw).map(|_| ())
     })
     .await
     .map_err(bad)?
     .map_err(|e| bad(format!("{e:#}")))?;
-    log::info!("{}: turned off {what} after a crash", e.name);
+    log::info!("{}: put {what} back as it was at the crash", e.name);
     Ok(Json(json!({ "ok": true })))
 }
 

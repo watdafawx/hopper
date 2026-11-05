@@ -61,9 +61,13 @@ impl LogsView {
         let versions = crate::crash_view::versions;
         let title = crate::crash_view::story_title(c, st, &link, cx);
 
-        // The fix: put the changed mod back, or turn this one off.
+        // The fix: put the changed mod back, or turn this one off. A setting
+        // that keeps the mod and loses nothing comes first when there is one
+        // (after putting back an update the crash followed).
+        let first = super::crash_switch::settings_first(c) && changed.is_none();
         let actions = self.crash_actions(root, c, cx);
         let fix = crate::crash_view::fix_box(cx)
+            .when(first, |d| d.children(self.config_switches(root, c, Some(false), cx)))
             .when_some(changed.clone().zip(changed_file.clone()), |d, (ch, file)| {
                 let when = hopper::time::relative_secs(ch.when);
                 d.child(
@@ -113,10 +117,11 @@ impl LogsView {
                         .into_any_element()
                 })
             })
-            .when(changed.is_none(), |d| d.children(self.crash_actions(root, c, cx)))
-            .children({
+            .when(changed.is_none() && first, |d| d.children(self.or_actions(root, c, cx)))
+            .when(changed.is_none() && !first, |d| d.children(self.crash_actions(root, c, cx)))
+            .when(!first, |d| {
                 let above = changed.is_some() || self.crash_actions(root, c, cx).is_some();
-                self.config_switches(root, c, Some(above), cx)
+                d.children(self.config_switches(root, c, Some(above), cx))
             });
         // A box with nothing to offer (all turned off and played) isn't shown.
         let has_fix = changed.is_some() || self.crash_actions(root, c, cx).is_some() || !c.switches.is_empty() || !c.switched_off.is_empty();

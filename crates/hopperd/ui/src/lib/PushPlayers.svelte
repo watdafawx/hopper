@@ -3,20 +3,28 @@
   // differs from the server's (untick to leave one out) and the paired
   // Hopper clients to send them to. Each client shows a notice and applies
   // them on one click; one that's offline gets it when it next connects.
+  import { untrack } from 'svelte';
   import { X, ArrowRight } from '@lucide/svelte';
   import { post, api } from './api.js';
-  import { cfg, shortRel } from './configs.svelte.js';
+  import { cfg, shortRel, loadPlayers } from './configs.svelte.js';
   import { say } from './toast.svelte.js';
   import { ago } from './browse.js';
 
-  let { server, onClose } = $props();
+  // `items`: settings to send instead of the players' copy compare (the
+  // crash card's change), in the same shape: [{ rel, client_rel, diffs }].
+  let { server, onClose, items = null } = $props();
 
-  const files = $derived((cfg.players?.files || []).filter((f) => f.diffs.length));
+  const files = $derived((items || cfg.players?.files || []).filter((f) => f.diffs.length));
   const kid = (f, d) => `${f.rel}\u0000${(d.path || []).join('.')}\u0000${d.key}`;
-  let picked = $state(new Set((cfg.players?.files || []).flatMap((f) => f.diffs.map((d) => kid(f, d)))));
+  // The dialog opens fresh each time: what it starts with is read once.
+  const start = untrack(() => ({ items, sid: server.id }));
+  let picked = $state(new Set((start.items || cfg.players?.files || []).flatMap((f) => f.diffs.map((d) => kid(f, d)))));
   const devices = $derived(cfg.players?.devices || []);
   // Clients that sent a copy are ticked to start with.
-  let to = $state(new Set((cfg.players?.devices || []).filter((d) => d.snapshot_at).map((d) => d.id)));
+  const ticked = () => new Set((cfg.players?.devices || []).filter((d) => d.snapshot_at).map((d) => d.id));
+  let to = $state(ticked());
+  // Opened from outside the Configs page: the paired clients aren't loaded yet.
+  if (start.items && !cfg.players) loadPlayers(start.sid).then(() => (to = ticked()));
   let sending = $state(false);
   let sent = $state(null);
 

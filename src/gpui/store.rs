@@ -1571,7 +1571,7 @@ impl Store {
     /// Turns off the config switch `s` of the crash (its old config goes to
     /// backups) and drops it from the card.
     pub fn crash_switch_off(&mut self, root: &Path, s: &hopper::configswitch::Switch) -> Result<(), String> {
-        hopper::configswitch::turn_off(root, s).map_err(|e| e.to_string())?;
+        hopper::configswitch::turn_off(root, s).map_err(|e| format!("{e:#}"))?;
         if let Some(mut c) = self.crash(root).cloned() {
             c.switches.retain(|x| x != s);
             if !c.switched_off.contains(s) {
@@ -1586,7 +1586,7 @@ impl Store {
     /// Undoes [`crash_switch_off`]: the setting goes back to true and the
     /// card offers it again.
     pub fn crash_switch_on(&mut self, root: &Path, s: &hopper::configswitch::Switch) -> Result<(), String> {
-        hopper::configswitch::turn_on(root, s).map_err(|e| e.to_string())?;
+        hopper::configswitch::turn_on(root, s).map_err(|e| format!("{e:#}"))?;
         if let Some(mut c) = self.crash(root).cloned() {
             c.switched_off.retain(|x| x != s);
             if !c.switches.contains(s) {

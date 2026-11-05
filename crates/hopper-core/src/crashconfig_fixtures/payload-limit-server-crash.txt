@@ -1,0 +1,25 @@
+---- Minecraft Crash Report ----
+// Surprise! Haha. Well, this is awkward.
+
+Time: 2026-11-04 09:12:33
+Description: Exception in server tick loop
+
+java.lang.IllegalArgumentException: Payload may not be larger than 1048576 bytes
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.network.protocol.common.custom.DiscardedPayload.<init>(DiscardedPayload.java:9) ~[server-1.21.1-20240808.144430-srg.jar%23150!/:?] {re:classloading}
+	at TRANSFORMER/neoforge@21.1.209/net.neoforged.neoforge.network.PacketDistributor.sendToPlayer(PacketDistributor.java:61) ~[neoforge-21.1.209-universal.jar%23155!/:?] {re:classloading}
+	at TRANSFORMER/somenet@2.4.0/com.example.somenet.sync.ChunkDataSync.send(ChunkDataSync.java:88) ~[somenet-2.4.0.jar%23101!/:2.4.0] {re:classloading}
+	at TRANSFORMER/somenet@2.4.0/com.example.somenet.sync.ChunkDataSync.onWatch(ChunkDataSync.java:52) ~[somenet-2.4.0.jar%23101!/:2.4.0] {re:classloading}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.tickServer(MinecraftServer.java:907) ~[server-1.21.1-20240808.144430-srg.jar%23150!/:?] {re:classloading,pl:accesstransformer:B}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.server.MinecraftServer.runServer(MinecraftServer.java:707) ~[server-1.21.1-20240808.144430-srg.jar%23150!/:?] {re:classloading,pl:accesstransformer:B}
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {}
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Memory: 3221225472 bytes (3072 MiB) / 8589934592 bytes (8192 MiB) up to 8589934592 bytes (8192 MiB)
+	Mod List:
+		somenet-2.4.0.jar                                 |Some Net                      |somenet                       |2.4.0               |Manifest: NOSIGNATURE

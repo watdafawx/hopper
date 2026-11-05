@@ -1,0 +1,46 @@
+---- Minecraft Crash Report ----
+// Oops.
+
+Time: 2026-11-02 21:14:09
+Description: Initializing game
+
+org.spongepowered.asm.mixin.transformer.throwables.MixinTransformerError: An unexpected critical error was encountered
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:381) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%23121!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:253) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%23121!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/cpw.mods.modlauncher@11.0.5/cpw.mods.modlauncher.ClassTransformer.transform(ClassTransformer.java:120) ~[modlauncher-11.0.5.jar:?] {}
+	at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadClass(ModuleClassLoader.java:214) ~[securejarhandler-3.0.8.jar:?] {}
+	at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:526) ~[?:?] {re:mixin}
+	at TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.<init>(Minecraft.java:542) ~[client-1.21.1-20240808.144430-srg.jar%231297!/:?] {re:mixin,pl:accesstransformer:B,pl:runtimedistcleaner:A,re:classloading,pl:mixin:APP:modernfix-modernfix.mixins.json:bugfix.world_leaks.MinecraftMixin from mod modernfix,pl:mixin:APP:konkrete.mixins.json:client.MixinMinecraft from mod konkrete,pl:mixin:A}
+	at TRANSFORMER/neoforge@21.1.209/net.neoforged.neoforge.client.loading.ClientModLoader.begin(ClientModLoader.java:57) ~[neoforge-21.1.209-universal.jar%231302!/:?] {re:classloading}
+	at java.base/java.lang.Thread.run(Thread.java:1583) [?:?] {}
+Caused by: org.spongepowered.asm.mixin.throwables.MixinApplyError: Mixin [modernfix-modernfix.mixins.json:perf.dynamic_resources.ModelBakeryMixin from mod modernfix] from phase [DEFAULT] in config [modernfix-modernfix.mixins.json] FAILED during APPLY
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.handleMixinError(MixinProcessor.java:686) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%23121!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:368) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%23121!/:0.16.4+mixin.0.8.7] {}
+	... 7 more
+Caused by: org.spongepowered.asm.mixin.injection.throwables.InjectionError: Critical injection failure: @Inject annotation on onBakeModels could not find any targets matching 'bakeModels' in net.minecraft.client.resources.model.ModelBakery. Using refmap modernfix-common-refmap.json [PREINJECT Applicator Phase -> modernfix-modernfix.mixins.json:perf.dynamic_resources.ModelBakeryMixin from mod modernfix -> Prepare Injections -> handler$zza000$modernfix$onBakeModels(Ljava/util/function/BiFunction;Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V -> Parse]
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.struct.InjectionInfo.validateTargets(InjectionInfo.java:656) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%23121!/:0.16.4+mixin.0.8.7] {}
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.injection.struct.InjectionInfo.prepare(InjectionInfo.java:463) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%23121!/:0.16.4+mixin.0.8.7] {}
+	... 9 more
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: Render thread
+Stacktrace:
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:381) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%23121!/:0.16.4+mixin.0.8.7] {}
+
+-- System Details --
+Details:
+	Minecraft Version: 1.21.1
+	Minecraft Version ID: 1.21.1
+	Operating System: Windows 11 (amd64) version 10.0
+	Java Version: 21.0.8, Microsoft
+	Memory: 1402982400 bytes (1337 MiB) / 4294967296 bytes (4096 MiB) up to 12884901888 bytes (12288 MiB)
+	Loaded Shaderpack: (off)
+	ModLauncher: 11.0.5+main.901c6ea8
+	Mod List:
+		modernfix-neoforge-5.25.1+mc1.21.1.jar            |ModernFix                     |modernfix                     |5.25.1+mc1.21.1     |Manifest: NOSIGNATURE
+		konkrete_neoforge_1.9.9_MC_1.21.jar               |Konkrete                      |konkrete                      |1.9.9               |Manifest: NOSIGNATURE
+		somemod-1.0.jar                                   |Some Mod                      |somemod                       |1.0                 |Manifest: NOSIGNATURE
