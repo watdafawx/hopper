@@ -262,6 +262,12 @@ fn rate(rows: &[Row]) -> (usize, usize, usize) {
 
 #[test]
 fn crash_corpus() {
+    // ~50 s: runs on CI (which sets CI) or when asked with CORPUS=1, so local
+    // test runs stay quick.
+    if std::env::var_os("CI").is_none() && std::env::var_os("CORPUS").is_none() {
+        println!("crash corpus skipped locally; set CORPUS=1 to run it");
+        return;
+    }
     let before = run(false);
     let rows = run(true);
     let mark = |r: &Row| if !r.case.scored { "-" } else if r.hit() { "yes" } else { "NO" };

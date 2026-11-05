@@ -119,6 +119,14 @@ strip = true
 # Local test builds: release speed at runtime, but parallel codegen, no LTO
 # and incremental, so a small change rebuilds in seconds, not minutes.
 # CI and shipped builds keep using `release`.
+# The exe that replaces G:\Games\Minecraft\hopper.exe after a release: release
+# speed for players, but builds in a few minutes (parallel codegen,
+# incremental). GitHub's downloads still use `release`.
+[profile.local]
+inherits = "release"
+codegen-units = 16
+incremental = true
+
 [profile.fast]
 inherits = "release"
 lto = false
