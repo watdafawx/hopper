@@ -2105,7 +2105,9 @@ impl BrowseView {
         let into = target.as_ref().filter(|_| !pack).map(|t| t.root.clone());
         let project = m.id;
         let pack_name = m.name.clone();
-        let work = move |job: &hopper::jobs::Job| {
+        // Into a server on a Hopper Server: its panel installs the best file.
+        let remote = into.as_ref().and_then(|r| crate::store::on_hopper_server(r).map(|h| (r.clone(), h)));
+        let local = move |job: &hopper::jobs::Job| {
             if pack {
                 job.announce();
                 job.presence(pack_name.clone(), false);
@@ -2122,6 +2124,17 @@ impl BrowseView {
             let (changed, line) = hopper::browse::install_project(&m, file, browsing, place, job)?;
             job.detail(line);
             Ok(Msg::installed(changed, &before, Some(project)))
+        };
+        type Work = Box<dyn FnOnce(&hopper::jobs::Job) -> anyhow::Result<Msg> + Send>;
+        let work: Work = match remote {
+            Some((at, h)) => Box::new(move |job: &hopper::jobs::Job| {
+                let c = hopper::hopperd::Client::for_remote(&h)?;
+                let v = c.run_job(&hopper::hopperd::Client::server_path(&h.id, "/mods/install"), serde_json::json!({ "project_id": project.to_string() }), job)?;
+                let added: Vec<&str> = v["added"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).collect();
+                job.detail(format!("Added {}", added.join(", ")));
+                Ok(Msg::InstanceChanged(at))
+            }),
+            None => Box::new(local),
         };
         let store = self.store.read(cx);
         match &into {

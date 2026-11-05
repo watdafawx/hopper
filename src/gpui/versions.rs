@@ -869,9 +869,20 @@ pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, f
         return;
     };
     let name = addon.name.clone();
+    // On a Hopper Server the panel finds and moves the files.
+    let remote = crate::store::on_hopper_server(&root).is_some();
+    let jar = addon.file_name.clone();
     let view = cx.new(|cx| {
         cx.spawn(async move |this, cx| {
-            let files = cx.background_spawn(async move { hopper::modconfig::files(&inst, &addon) }).await;
+            let files = cx
+                .background_spawn(async move {
+                    if remote {
+                        crate::store::remote_config_files(&inst.root, &addon.file_name).unwrap_or_default()
+                    } else {
+                        hopper::modconfig::files(&inst, &addon)
+                    }
+                })
+                .await;
             this.update(cx, |this: &mut ResetConfig, cx| {
                 this.files = Some(files);
                 cx.notify();
@@ -884,7 +895,7 @@ pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, f
     let title = format!("Reset {name}'s config");
     window.open_dialog(cx, move |dialog, window, cx| {
         let files = view.read(cx).files.clone().unwrap_or_default();
-        let (root, store, name) = (root.clone(), store.clone(), view.read(cx).name.clone());
+        let (root, store, name, jar) = (root.clone(), store.clone(), view.read(cx).name.clone(), jar.clone());
         dialog
             .title(title.clone())
             .w(rems(40.).to_pixels(window.rem_size()))
@@ -903,7 +914,7 @@ pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, f
                             .label("Remove")
                             .disabled(files.is_empty())
                             .on_click(move |_, window, cx| {
-                                let (root, files, name) = (root.clone(), files.clone(), name.clone());
+                                let (root, files, name, jar) = (root.clone(), files.clone(), name.clone(), jar.clone());
                                 let store = store.clone();
                                 window.close_dialog(cx);
                                 window
@@ -913,7 +924,11 @@ pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, f
                                             .background_spawn(async move {
                                                 // The files go to .hopper-backups; no snapshot
                                                 // (backups are the player's to make).
-                                                hopper::modconfig::reset(&r2, &files)
+                                                if remote {
+                                                    crate::store::remote_config_reset(&r2, &jar)
+                                                } else {
+                                                    hopper::modconfig::reset(&r2, &files)
+                                                }
                                             })
                                             .await;
                                         cx.update(|window, cx| {

@@ -616,12 +616,21 @@ async fn mods(
     headers: HeaderMap,
     method: Method,
     Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
     require(&app, &headers, &method)?;
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let dir = e.root.join("mods");
+    // `off=1`: the jars turned off too (marked `off`), for Hopper's Sync.
+    let off = q.get("off").is_some_and(|v| v == "1");
     let mods = tokio::task::spawn_blocking(move || {
-        if dir.is_dir() { hopper_core::scan::scan_folder(&dir) } else { Ok(Vec::new()) }
+        if !dir.is_dir() {
+            Ok(Vec::new())
+        } else if off {
+            hopper_core::rigsync::mods_with_off(&dir)
+        } else {
+            hopper_core::scan::scan_folder(&dir)
+        }
     })
     .await
     .map_err(bad)?

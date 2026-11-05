@@ -865,6 +865,8 @@
                 {/if}
                 {#if m.source === 'modrinth'}<span class="chip tag mr">Modrinth</span>{/if}
                 {#if m.src_label}<span class="chip tag info">{m.src_label}</span>{/if}
+                <!-- An older copy kept turned off beside this one: the mod used to list twice. -->
+                {#if m.extra_files?.length}<button class="chip tag warnc" title={`Also here, turned off: ${m.extra_files.join(', ')}. It's an older copy of this mod, so the list showed the mod twice. Click to remove ${m.extra_files.length === 1 ? 'it' : 'them'}.`} onclick={async (e) => { e.stopPropagation(); if (await drop(m.extra_files.map((f) => ({ file: f, name: `${m.name} (old copy)` })))) changed(true); }}>{m.extra_files.length === 1 ? 'Old copy' : `${m.extra_files.length} old copies`}</button>{/if}
                 {#if srcOn && !m.source && !m.from_pack}<button class="srcp" onclick={(e) => { e.stopPropagation(); sourceFor = { follow: m }; }}>Add a source to get updates</button>{/if}
                 {#if srcOn && m.src_trusted === false}<button class="srcp" onclick={(e) => { e.stopPropagation(); trustSource(m); }}>Turn on updates from {m.src_publisher}</button>{/if}
                 {#if up?.changed}<span class="chip tag bad" title="The file of the installed release was replaced at its source without a new release. Hopper won't install it on its own; install it from Versions if you trust the change.">Changed at source</span>{/if}
@@ -926,7 +928,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
 
     {#if selMods.length}
       <!-- Floats over the table, bottom centre, so the list doesn't jump. -->
-      <SelectionBar n={selMods.length} onDelete={() => bulk('remove')} deleteLabel="Remove" deleteTitle="Kept in .hopper-backups (Mods › Backups)" onClear={() => (selected = new Set())}>
+      <SelectionBar n={selMods.length} onDelete={() => bulk('remove')} deleteLabel="Remove" deleteTitle="Kept in .hopper-backups (Mods › History)" onClear={() => (selected = new Set())}>
         <button class="btn sm ghost" onclick={() => bulk('on')}><CircleCheck size={13} />Enable</button>
         <button class="btn sm ghost" onclick={() => bulk('off')}><CircleOff size={13} />Disable</button>
         {#if selMods.some((m) => m.source)}<button class="btn sm ghost" title={allLocked ? 'Allow updates again' : 'Keep this version: updates are ignored'} onclick={() => bulk('lock')}>{#if allLocked}<LockOpen size={13} />Unlock{:else}<Lock size={13} />Lock{/if}</button>{/if}

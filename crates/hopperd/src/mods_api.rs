@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, Method};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use hopper_core::cf::{self, Loader};
-use hopper_core::instances::{self, Addon, Instance};
+use hopper_core::instances::{Addon, Instance};
 use hopper_core::modpack::PackMods;
 use hopper_core::{install, modrinth};
 use serde::Deserialize;
@@ -71,52 +71,6 @@ pub(crate) fn entry(app: &App, headers: &HeaderMap, method: &Method, id: &str) -
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
     tokio::task::spawn_blocking(f).await.map_err(bad)?.map_err(|e| bad(format!("{e:#}")))
-}
-
-/// Minecraft version for a NeoForge version: 21.1.259 → 1.21.1,
-/// 21.0.167 → 1.21, 26.3.0.95 → 26.3.
-pub fn mc_for_neoforge(v: &str) -> Option<String> {
-    let p: Vec<&str> = v.split('.').collect();
-    match p.as_slice() {
-        [a, b, _, _] => Some(if *b == "0" { a.to_string() } else { format!("{a}.{b}") }).map(|s| {
-            // 26.1.2.x: the third part is Minecraft's patch.
-            if p[2] != "0" { format!("{}.{}.{}", p[0], p[1], p[2]) } else { s }
-        }),
-        [a, b, _] => Some(if *b == "0" { format!("1.{a}") } else { format!("1.{a}.{b}") }),
-        _ => None,
-    }
-}
-
-/// What the server runs, from what Hopper recorded when making it, else
-/// its run script and console.
-fn detect(e: &Entry) -> (String, String) {
-    if let Some(m) = hopper_core::hosting::HostedMeta::load(&e.root) {
-        let l = m.loader.to_lowercase();
-        let loader = if let Some(v) = l.strip_prefix("neoforge ") {
-            format!("neoforge-{v}")
-        } else if l.starts_with("fabric") {
-            "fabric".into()
-        } else if l.starts_with("quilt") {
-            "quilt".into()
-        } else {
-            String::new()
-        };
-        if !m.minecraft.is_empty() {
-            return (m.minecraft, loader);
-        }
-    }
-    if let Some(v) = hopper_core::server_update::server_neoforge(&e.root) {
-        return (mc_for_neoforge(&v).unwrap_or_default(), format!("neoforge-{v}"));
-    }
-    let console_version = e.server.tracker().version;
-    let loader = if e.root.join("fabric-server-launch.jar").is_file() {
-        "fabric"
-    } else if e.root.join("quilt-server-launch.jar").is_file() {
-        "quilt"
-    } else {
-        ""
-    };
-    (console_version, loader.into())
 }
 
 /// The server as an instance, made the first time.
@@ -302,72 +256,11 @@ pub(crate) fn cached_updates(id: &str) -> Option<Vec<Value>> {
     (now_secs().saturating_sub(*at) < UPDATES_FOR).then(|| v.clone())
 }
 
-/// Fixes entries older panels saved wrong: a jar that was off saved as
-/// "x.jar.disabled" and marked on, and the second entry identifying it again
-/// added for the same jar. The jar on disk says whether it's on. True when
-/// anything changed.
-fn heal(i: &mut Instance) -> bool {
-    let dir = i.mods_dir();
-    let mut changed = false;
-    for a in i.addons.iter_mut().filter(|a| a.folder() == "mods") {
-        if let Some(base) = a.file_name.strip_suffix(".disabled") {
-            a.file_name = base.to_string();
-            changed = true;
-        }
-        let on = dir.join(&a.file_name).is_file();
-        let off = dir.join(format!("{}.disabled", a.file_name)).is_file();
-        if on != off && a.enabled != on {
-            a.enabled = on;
-            changed = true;
-        }
-    }
-    let mut seen = std::collections::HashSet::new();
-    let before = i.addons.len();
-    i.addons.retain(|a| a.folder() != "mods" || seen.insert(a.file_name.to_lowercase()));
-    changed || i.addons.len() != before
-}
-
 pub(crate) fn instance(e: &Entry) -> anyhow::Result<Instance> {
-    if e.root.join(instances::HOPPER_FILE).is_file()
-        && let Some(mut i) = instances::load(&e.root)
-    {
-        if heal(&mut i) {
-            log::info!("{}: fixed the mod list's entries for jars that are off", e.name);
-            i.save()?;
-            forget_updates(&e.id);
-        }
-        // Saved before the version was known (a new server that hadn't run):
-        // fill it in now if it can be found.
-        if i.game_version.is_empty() {
-            let (game_version, loader) = detect(e);
-            if !game_version.is_empty() {
-                i.game_version = game_version;
-                if i.loader.is_empty() {
-                    i.loader = loader;
-                }
-                i.save()?;
-            }
-        }
-        return Ok(i);
+    let (i, healed) = hopper_core::server_mods::load(&e.root, &e.name, &e.server.tracker().version)?;
+    if healed {
+        forget_updates(&e.id);
     }
-    let (game_version, loader) = detect(e);
-    let pack = hopper_core::server_pack_update::recorded(&e.root).map(|m| instances::PackRef {
-        project_id: m.project_id,
-        file_id: m.pack_file_id,
-        name: m.server_pack.clone(),
-        server_pack_file_id: m.server_pack_file_id,
-        ..Default::default()
-    });
-    let i = Instance {
-        name: e.name.clone(),
-        root: e.root.clone(),
-        game_version,
-        loader,
-        pack,
-        format: instances::FORMAT,
-        ..Default::default()
-    };
-    i.save()?;
     Ok(i)
 }
 
@@ -415,8 +308,22 @@ async fn list(
             .flatten()
             .map(|f| f.file_name().to_string_lossy().to_lowercase().trim_end_matches(".disabled").to_string())
             .collect();
+        // A mod in twice with one copy on: one row, the old copies listed on
+        // it (the web UI and desktop offer to remove them).
+        let present: Vec<Addon> = inst
+            .addons
+            .iter()
+            .filter(|a| on_disk.contains(a.file_name.to_lowercase().trim_end_matches(".disabled")))
+            .cloned()
+            .collect();
+        let extra = install::off_copies(&present);
+        let hidden: std::collections::HashSet<&String> = extra.values().flatten().collect();
         for a in &inst.addons {
             if a.folder() != "mods" {
+                continue;
+            }
+            if hidden.contains(&a.file_name) {
+                known.insert(a.file_name.to_lowercase());
                 continue;
             }
             // An entry whose jar is gone isn't a mod on the server (and
@@ -445,6 +352,7 @@ async fn list(
                 "short_version": hopper_core::scan::short_version(&a.file_name),
                 "mr_project": if !a.mr_project.is_empty() { a.mr_project.clone() } else if modrinth::is_mr(a.project_id) { modrinth::real_id(a.project_id).unwrap_or_default() } else { String::new() },
                 "locked_version": a.locked_version,
+                "extra_files": extra.get(&a.file_name).cloned().unwrap_or_default(),
             }));
         }
         // Jars Hopper doesn't know yet.
@@ -897,7 +805,7 @@ async fn set_cf_key(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
 
 #[cfg(test)]
 mod tests {
-    use super::mc_for_neoforge;
+    use hopper_core::server_mods::mc_for_neoforge;
 
     #[test]
     fn neoforge_to_minecraft() {
@@ -925,10 +833,10 @@ mod tests {
             addons: vec![mk("dh-3.2.0.jar.disabled", 1, true), mk("dh-3.2.0.jar", 2, false), mk("jei.jar", 3, true)],
             ..Default::default()
         };
-        assert!(super::heal(&mut i));
+        assert!(hopper_core::server_mods::heal(&mut i));
         let files: Vec<(&str, u64, bool)> = i.addons.iter().map(|a| (a.file_name.as_str(), a.project_id, a.enabled)).collect();
         assert_eq!(files, vec![("dh-3.2.0.jar", 1, false), ("jei.jar", 3, true)]);
-        assert!(!super::heal(&mut i));
+        assert!(!hopper_core::server_mods::heal(&mut i));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

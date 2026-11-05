@@ -646,6 +646,12 @@ impl Client {
         Ok(serde_json::from_value(v["mods"].clone())?)
     }
 
+    /// [`Client::mods`] with the jars turned off (`off` set).
+    pub fn mods_with_off(&self, id: &str) -> anyhow::Result<Vec<ModInfo>> {
+        let v = self.get(&format!("/servers/{}/mods?off=1", enc(id)))?;
+        Ok(serde_json::from_value(v["mods"].clone())?)
+    }
+
     /// The server's last crash, read by the panel from its logs.
     pub fn crash(&self, id: &str) -> anyhow::Result<Option<crate::crashdetect::Crash>> {
         let v = self.get(&format!("/servers/{}/crash", enc(id)))?["crash"].clone();
@@ -931,6 +937,19 @@ impl Client {
         let start = self.post(&format!("/fs/{}/uploads", enc(id)), json!({ "path": rel, "size": size, "overwrite": true }))?;
         let up = start["id"].as_str().context("no upload id")?.to_string();
         self.send_chunks(local, CHUNK, |offset| format!("/fs/{}/uploads/{up}?offset={offset}", enc(id)), |_| {})
+    }
+
+    /// Adds jar `local` to the server's mods, as a jar dropped on its Mods
+    /// tab: another version of a mod it has replaces that one (kept in the
+    /// panel's backups). Answers whether one was replaced.
+    pub fn upload_mod(&self, id: &str, local: &Path) -> anyhow::Result<bool> {
+        let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).context("no file name")?;
+        let body = std::fs::read(local).with_context(|| format!("opening {}", local.display()))?;
+        let url = self.url(&format!("/servers/{}/mods/upload?name={}&conflict=replace", enc(id), enc(&name)));
+        let v = reply(self.send_via(true, |slow| {
+            slow.post(&url).header("Authorization", &self.auth()).content_type("application/octet-stream").send(&body[..])
+        }))?;
+        Ok(v["replaced"].as_bool().unwrap_or(false))
     }
 
     /// Uploads zip `local` to the panel's incoming folder, where its zip

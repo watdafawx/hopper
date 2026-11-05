@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 mod disk_sync;
 mod panel_events;
+mod server_mods;
+pub use server_mods::{RemoteLoose, remote as on_hopper_server, remote_config_files, remote_config_reset, remote_remove, remote_undo_remove};
 
 /// Results from worker threads.
 /// Hopper's own update, as far as it has got.
@@ -130,6 +132,13 @@ pub enum Msg {
     TrDownloaded(&'static str),
     /// A job that reports only through its own progress line.
     Nothing,
+    /// A server's mod list, read from its folder or fetched from its panel.
+    ServerMods(PathBuf, Result<Box<server_mods::Fetched>, String>),
+    /// A change on a Hopper Server failed: why (the list is fetched again).
+    RemoteFailed(PathBuf, String),
+    /// A Hopper Server's update offers: the list, archived files, and what
+    /// each update would break.
+    RemoteUpdates(PathBuf, Vec<Update>, std::collections::HashSet<u64>, HashMap<u64, Vec<(String, String)>>),
 }
 
 impl Msg {
@@ -178,6 +187,8 @@ pub enum StoreEvent {
     /// Something about a server on a Hopper Server changed elsewhere: its
     /// open tab loads again. The areas are hopperd's (`mods`, `files`…).
     PanelChanged(PathBuf, Vec<String>),
+    /// Something to tell the user in a notice: (text, is a problem).
+    Notice(String, bool),
 }
 
 impl EventEmitter<StoreEvent> for Store {}
@@ -342,6 +353,16 @@ struct StartedWith {
 pub struct Store {
     settings: Settings,
     instances: Vec<Instance>,
+    /// Servers' mod lists shown in the Mods table (see `server_mods.rs`):
+    /// found by `instance` like the Library's, never listed with them.
+    server_insts: Vec<Instance>,
+    /// Why a Hopper Server's list couldn't be fetched, by root.
+    server_mods_err: HashMap<PathBuf, String>,
+    /// A Hopper Server's untracked jars, by root.
+    remote_loose: HashMap<PathBuf, Vec<RemoteLoose>>,
+    /// Hopper Server lists being fetched, and those to fetch again after.
+    server_fetching: std::collections::HashSet<PathBuf>,
+    server_refetch: std::collections::HashSet<PathBuf>,
     running: HashMap<PathBuf, Running>,
     /// Each instance's last game crash, read from its file once asked for.
     crashes: HashMap<PathBuf, Option<hopper::crashdetect::Crash>>,
@@ -550,6 +571,11 @@ impl Store {
             saved_settings: serde_json::to_string(&settings).unwrap_or_default(),
             settings,
             instances: Vec::new(),
+            server_insts: Vec::new(),
+            server_mods_err: HashMap::new(),
+            remote_loose: HashMap::new(),
+            server_fetching: Default::default(),
+            server_refetch: Default::default(),
             running: HashMap::new(),
             crashes: HashMap::new(),
             live_told: HashMap::new(),
@@ -991,6 +1017,7 @@ impl Store {
                     cx.open_url(u);
                 }
             }
+            Msg::InstanceChanged(root) if server_mods::remote(&root).is_some() => self.refetch_server_mods(&root),
             Msg::InstanceChanged(root) => {
                 if let Some(new) = instances::load(&root) {
                     self.put_instance(new);
@@ -1188,7 +1215,7 @@ impl Store {
                 });
                 // What each update would stop loading, read from the other
                 // mods' own requirements in the background.
-                if let (Ok(u), Some(inst)) = (&result, self.instance(&root)) {
+                if let (Ok(u), Some(inst)) = (&result, self.instance(&root).filter(|_| server_mods::remote(&root).is_none())) {
                     let (dir, r2) = (inst.mods_dir(), root.clone());
                     let list: Vec<(u64, String, String, String)> = u
                         .iter()
@@ -1212,7 +1239,7 @@ impl Store {
                 // keeps the old one. Files changed while it ran drop out.
                 let state = self.updates.entry(root.clone()).or_default();
                 state.finish(result);
-                if let Some(inst) = self.instances.iter().find(|i| i.root == root) {
+                if let Some(inst) = self.instances.iter().chain(&self.server_insts).find(|i| i.root == root) {
                     state.keep_current(&inst.addons);
                 }
                 self.save_updates(&root);
@@ -1315,6 +1342,17 @@ impl Store {
             }
             Msg::SessionSaved(root) => cx.emit(StoreEvent::SessionSaved(root)),
             Msg::Nothing => {}
+            Msg::ServerMods(root, res) => self.server_mods_arrived(root, res),
+            Msg::RemoteFailed(root, why) => self.remote_failed(root, why, cx),
+            Msg::RemoteUpdates(root, list, archived, breaks) => {
+                self.archived.insert(root.clone(), archived);
+                self.breaks.insert(root.clone(), breaks);
+                let state = self.updates.entry(root.clone()).or_default();
+                state.finish(Ok(list));
+                if let Some(inst) = self.server_insts.iter().find(|i| i.root == root) {
+                    state.keep_current(&inst.addons);
+                }
+            }
         }
     }
 
@@ -1328,16 +1366,20 @@ impl Store {
         let dropped = self.updates.get_mut(&root).is_some_and(|u| u.keep_current(&new.addons));
         // A mod rolled back from its newest file has an update now; only a
         // check can say which, so ask at once rather than on a refresh.
-        let recheck = self.instances.iter().find(|i| i.root == root).is_some_and(|old| {
+        let recheck = self.instance(&root).is_some_and(|old| {
             let offers = self.updates.get(&root).and_then(|u| u.ready()).map(Vec::as_slice);
             hopper::update_list::rolled_back_unlisted(&old.addons, &new.addons, offers)
         });
         let icon = new.icon.clone();
-        match self.instances.iter_mut().find(|i| i.root == root) {
-            Some(slot) => *slot = new,
-            None => {
-                self.instances.push(new);
-                self.sync_watched();
+        if let Some(slot) = self.server_insts.iter_mut().find(|i| i.root == root) {
+            *slot = new;
+        } else {
+            match self.instances.iter_mut().find(|i| i.root == root) {
+                Some(slot) => *slot = new,
+                None => {
+                    self.instances.push(new);
+                    self.sync_watched();
+                }
             }
         }
         if dropped {
@@ -1521,7 +1563,13 @@ impl Store {
     }
 
     pub fn instance(&self, root: &Path) -> Option<&Instance> {
-        self.instances.iter().find(|i| i.root == root)
+        self.instances.iter().chain(&self.server_insts).find(|i| i.root == root)
+    }
+
+    /// [`Store::instance`], to change (a Library instance or a server's
+    /// list).
+    fn inst_mut(&mut self, root: &Path) -> Option<&mut Instance> {
+        self.instances.iter_mut().chain(&mut self.server_insts).find(|i| i.root == root)
     }
 
     /// What keeps Hopper from restarting by itself now: running tasks.
@@ -2545,6 +2593,13 @@ impl Store {
     /// Looks for newer files of everything in the instance when the last
     /// look is stale (again anyway, with `force`).
     pub fn check_updates(&mut self, root: &Path, force: bool) {
+        // A Hopper Server looks with its own key.
+        if let Some(r) = server_mods::remote(root) {
+            if force || self.updates_stale(root) {
+                self.check_remote_updates(root, r, force);
+            }
+            return;
+        }
         if hopper::cf::api_key().is_none() || (!force && !self.updates_stale(root)) {
             return;
         }
@@ -2617,6 +2672,10 @@ impl Store {
             .filter(|u| !inst.addons.iter().any(|a| a.project_id == u.project_id && a.locked))
             .collect();
         if updates.is_empty() {
+            return;
+        }
+        if server_mods::remote(root).is_some() {
+            self.run_remote_updates(root, updates);
             return;
         }
         let mut q = self.update_queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -2923,11 +2982,11 @@ impl Store {
 
     /// Switches files on or off (renames to and from `.disabled`).
     pub fn set_enabled(&mut self, root: &Path, files: &[String], on: bool) -> Result<(), String> {
-        let inst = self
-            .instances
-            .iter_mut()
-            .find(|i| i.root == root)
-            .ok_or("That instance is gone.")?;
+        if server_mods::remote(root).is_some() {
+            self.remote_set_enabled(root, files, on);
+            return Ok(());
+        }
+        let inst = self.inst_mut(root).ok_or("That instance is gone.")?;
         for f in files {
             if let Some(i) = inst.addons.iter().position(|a| &a.file_name == f) {
                 install::set_enabled(inst, i, on).map_err(|e| format!("{:#}", install::explain_locked(e)))?;
@@ -2939,11 +2998,7 @@ impl Store {
     /// Removes files for good; History keeps where to download each again
     /// (or a copy of one nothing else has), for Undo.
     pub fn remove_files(&mut self, root: &Path, files: &[String]) -> Result<(), String> {
-        let inst = self
-            .instances
-            .iter_mut()
-            .find(|i| i.root == root)
-            .ok_or("That instance is gone.")?;
+        let inst = self.inst_mut(root).ok_or("That instance is gone.")?;
         // The projects these files are, to drop from the update list.
         let ids: Vec<u64> = inst
             .addons
@@ -2964,21 +3019,21 @@ impl Store {
 
     /// Remembers which mods are disabled now as a named profile.
     pub fn save_profile(&mut self, root: &Path, name: &str) -> Result<(), String> {
-        let inst = self
-            .instances
-            .iter_mut()
-            .find(|i| i.root == root)
-            .ok_or("That instance is gone.")?;
+        if server_mods::remote(root).is_some() {
+            self.remote_profile(root, "/mods/profiles/save", name);
+            return Ok(());
+        }
+        let inst = self.inst_mut(root).ok_or("That instance is gone.")?;
         install::save_profile(inst, name).map_err(|e| format!("{e:#}"))
     }
 
     /// Forgets a saved profile (no mod changes).
     pub fn delete_profile(&mut self, root: &Path, name: &str) -> Result<(), String> {
-        let inst = self
-            .instances
-            .iter_mut()
-            .find(|i| i.root == root)
-            .ok_or("That instance is gone.")?;
+        if server_mods::remote(root).is_some() {
+            self.remote_profile(root, "/mods/profiles/delete", name);
+            return Ok(());
+        }
+        let inst = self.inst_mut(root).ok_or("That instance is gone.")?;
         install::delete_profile(inst, name).map(|_| ()).map_err(|e| format!("{e:#}"))
     }
 
@@ -2997,11 +3052,11 @@ impl Store {
     /// Locks one update's file out (`Some(file name)`) or lifts it (`None`):
     /// the update stays listed but is only installed on purpose.
     pub fn set_version_lock(&mut self, root: &Path, file: &str, version: Option<String>) -> Result<(), String> {
-        let inst = self
-            .instances
-            .iter_mut()
-            .find(|i| i.root == root)
-            .ok_or("That instance is gone.")?;
+        if server_mods::remote(root).is_some() {
+            self.remote_version_lock(root, file, version);
+            return Ok(());
+        }
+        let inst = self.inst_mut(root).ok_or("That instance is gone.")?;
         let a = inst.addons.iter_mut().find(|a| a.file_name == file).ok_or("That mod is gone.")?;
         a.locked_version = version.unwrap_or_default();
         inst.save().map_err(|e| format!("{e:#}"))
@@ -3014,11 +3069,11 @@ impl Store {
         files: &[String],
         locked: bool,
     ) -> Result<(), String> {
-        let inst = self
-            .instances
-            .iter_mut()
-            .find(|i| i.root == root)
-            .ok_or("That instance is gone.")?;
+        if server_mods::remote(root).is_some() {
+            self.remote_set_locked(root, files, locked);
+            return Ok(());
+        }
+        let inst = self.inst_mut(root).ok_or("That instance is gone.")?;
         let mut ids = Vec::new();
         for a in inst.addons.iter_mut().filter(|a| files.contains(&a.file_name)) {
             a.locked = locked;
@@ -3044,6 +3099,11 @@ impl Store {
 
     /// Matches jars that aren't tracked to CurseForge projects.
     pub fn identify(&self, root: &Path) {
+        if server_mods::remote(root).is_some() {
+            let name = self.instance(root).map(|i| i.name.clone()).unwrap_or_default();
+            self.remote_job(root, format!("Identifying jars in {name}"), "/mods/identify", serde_json::json!({}), |root, _| Msg::Reidentified(root));
+            return;
+        }
         if let Some(mut inst) = self.instance(root).cloned() {
             self.spawn_instance_job(&inst.root.clone(), format!("Identifying jars in {}", inst.name), move |job| {
                 let n = install::identify_loose(&mut inst, job)?;
@@ -3075,6 +3135,11 @@ impl Store {
 
     /// Replaces a file with the same project from the other site.
     pub fn switch_source(&self, root: &Path, file: String) {
+        if server_mods::remote(root).is_some() {
+            let body = serde_json::json!({ "file": file.trim_end_matches(".disabled") });
+            self.remote_job(root, format!("Switching source of {file}"), "/mods/switch", body, |root, _| Msg::InstanceChanged(root));
+            return;
+        }
         if let Some(mut inst) = self.instance(root).cloned() {
             self.spawn_instance_job(&inst.root.clone(), format!("Switching source of {file}"), move |job| {
                 let done = install::switch_source(&mut inst, &file, job)?;

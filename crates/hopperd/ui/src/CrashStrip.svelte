@@ -81,7 +81,7 @@
     busy = true;
     try {
       await post(`${base}/crash/put-back`, { file: changed.file_name });
-      say(`${changed.from || 'The older version'} is back. ${changed.to || 'The newer one'} is in Mods › Backups. Start the server to try again.`);
+      say(`${changed.from || 'The older version'} is back. ${changed.to || 'The newer one'} is in Mods › History. Start the server to try again.`);
       back = true;
       await load();
     } catch (e) {
@@ -103,7 +103,7 @@
     </span>
     <span class="grow"></span>
     {#if changed && !back}
-      <button class="btn sm pri" disabled={busy || alive} title={alive ? 'Stop the server first' : 'Swaps in the older copy. The newer one goes to Mods › Backups.'} onclick={putBack}><Undo2 size={13} />{changed.from ? `Put ${changed.from} back` : 'Put the older version back'}</button>
+      <button class="btn sm pri" disabled={busy || alive} title={alive ? 'Stop the server first' : 'Swaps in the older copy. The newer one goes to Mods › History.'} onclick={putBack}><Undo2 size={13} />{changed.from ? `Put ${changed.from} back` : 'Put the older version back'}</button>
     {/if}
     <button class="btn sm" onclick={() => seeWhy(reportOf(crash))}>See why →</button>
     <button class="btn sm ghost icon" title="Hide this notice" onclick={close}><X size={13} /></button>

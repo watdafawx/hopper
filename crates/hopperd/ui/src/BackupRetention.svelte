@@ -35,7 +35,7 @@
     try {
       show(await api('/settings/backup-retention', { method: 'PUT', body }));
       dirty = false;
-      say('Saved. They apply from the next backup; Clean up in Mods › Backups applies them now.');
+      say('Saved. They apply from the next backup; Clean up in Mods › History applies them now.');
     } catch (e) {
       say(e.message, true);
     }
@@ -45,7 +45,7 @@
 <div class="card">
   <h3><Archive size={14} />Backups<span class="sp"></span>{#if dirty}<button class="btn sm pri" onclick={save}>Save</button>{/if}</h3>
   {#if r}
-    <p class="small subtle">Old files from updates, removals and syncs, kept in each server's .hopper-backups so you can undo. After each new backup the oldest past these rules go to the server's trash; backups from before wait for Clean up in Mods › Backups. World backups stay until you delete them.</p>
+    <p class="small subtle">Old files from updates, removals and syncs, kept in each server's .hopper-backups so you can undo. After each new backup the oldest past these rules go to the server's trash; backups from before wait for Clean up in Mods › History. World backups stay until you delete them.</p>
     <div class="f"><div class="l">Keep the last<small>Always kept, however old</small></div>
       <div class="input w"><input type="number" min="0" value={r.keep_actions} oninput={(e) => set('keep_actions', e.target.value)} /></div><span class="u muted small">actions</span></div>
     <div class="f"><div class="l">And anything newer than<small>Kept, however many</small></div>

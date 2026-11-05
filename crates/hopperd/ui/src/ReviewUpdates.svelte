@@ -71,7 +71,7 @@
 <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onClose()}>
   <div class="box popover col">
     <h3 class="row">Review {updates.length} update{updates.length === 1 ? '' : 's'}<span class="sp"></span><button class="btn sm ghost icon" title="Close" disabled={!!busy} onclick={onClose}><X size={14} /></button></h3>
-    <div class="small subtle">The jars they replace go to Mods › Backups, so each one can be put back.{server.state === 'running' ? ' Restart the server afterwards to load them.' : ''}</div>
+    <div class="small subtle">The jars they replace go to Mods › History, so each one can be put back.{server.state === 'running' ? ' Restart the server afterwards to load them.' : ''}</div>
     <div class="row wrap small">
       {#each groups as g (g.k)}<span class="row gap4"><span class="chip {g.tint}">{g.label}</span><span class="muted">{g.rows.filter((u) => picked.has(u.project_id)).length} of {g.rows.length}</span></span>{/each}
     </div>
