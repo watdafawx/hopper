@@ -127,6 +127,12 @@ pub fn exact_full(t: i64) -> String {
     format!("{} {}", date(t + crate::hosting::schedule::utc_offset_secs()), clock(t))
 }
 
+/// Seconds since the epoch for a date and time on this PC's clock (as game
+/// logs write them).
+pub fn local_secs(y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64) -> i64 {
+    days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60 + s - crate::hosting::schedule::utc_offset_secs()
+}
+
 /// Seconds since the epoch, now.
 pub fn now() -> i64 {
     now_secs()

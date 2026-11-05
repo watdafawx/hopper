@@ -81,6 +81,8 @@ pub mod perf;
 pub mod richtext;
 pub mod revert;
 pub mod rigsync;
+pub mod runlog;
+pub mod stuckfile;
 pub mod scan;
 pub mod server;
 pub mod server_update;

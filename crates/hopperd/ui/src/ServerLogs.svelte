@@ -1,6 +1,8 @@
 <script>
-  // A server's Logs & crashes tab, as desktop's: its crash reports, newest
-  // first with Hopper's one-line verdict, and the picked one read like the
+  // A server's Logs & crashes tab, as desktop's (an instance's and a
+  // server's are the same there): its crash reports, newest first with
+  // Hopper's one-line verdict (the same failure again and its follow-up
+  // reports fold under one row), and the picked one read like the
   // crash card (ServerCrash with `given`, with its fixes for the newest); then latest.log and debug.log,
   // followed while the server runs (LogText).
   import { FileWarning, RefreshCw, FileText, Share2, ChevronRight, Trash2 } from '@lucide/svelte';
@@ -44,7 +46,7 @@
     try {
       const r = await api(`${base}/crashes`);
       list = r.crashes || [];
-      if (!list.some((c) => c.path === picked)) picked = (list.some((c) => c.path === want) ? want : '') || list[0]?.path || '';
+      if (!list.some((c) => c.path === picked)) picked = (list.some((c) => c.path === want) ? want : '') || list.find((c) => !c.lead)?.path || '';
       sel.retain(list.map((c) => c.path));
       if (picked && !sel.has(picked) && !sel.many) sel.setOne(picked);
       if (r.pending && view === 'crashes') more = setTimeout(loadList, 200);
@@ -115,11 +117,11 @@
     await loadList();
     await loadOld();
   }
-  // A report that explains a start takes its follow-up reports with it.
-  const groupOf = (c) => [c.path, ...(list || []).filter((f) => f.follow_up && f.lead === c.path).map((f) => f.path)];
+  // A row takes what folds under it (follow-ups, earlier times) with it.
+  const groupOf = (c) => [c.path, ...(c.group || [])];
   function delReport(c) {
     const g = groupOf(c);
-    removeFiles(g, g.length > 1 ? `Delete these ${g.length} crash reports?` : 'Delete this crash report?', g.length > 1 ? "They are the report and its follow-up reports; they go to the server's trash (Files › Trash), where you can get them back." : "It goes to the server's trash (Files › Trash), where you can get it back.");
+    removeFiles(g, g.length > 1 ? `Delete these ${g.length} crash reports?` : 'Delete this crash report?', g.length > 1 ? "They are the report and the ones folded under it; they go to the server's trash (Files › Trash), where you can get them back." : "It goes to the server's trash (Files › Trash), where you can get it back.");
   }
   const delLog = (f) => delLogs([f.path]);
   function delLogs(paths) {
@@ -144,7 +146,7 @@
       const c = list?.find((x) => x.path === g[0]);
       return c && delReport(c);
     }
-    removeFiles(g, `Delete these ${g.length} crash reports?`, "They (with the follow-up reports of the ones picked) go to the server's trash (Files › Trash), where you can get them back.");
+    removeFiles(g, `Delete these ${g.length} crash reports?`, "They (with the reports folded under the ones picked) go to the server's trash (Files › Trash), where you can get them back.");
   }
   function repClick(c, e) {
     if (sel.click(c.path, e, order)) picked = c.path;
@@ -176,12 +178,18 @@
     if (view === 'older') loadOld();
   });
 
-  // Follow-up reports sit folded under the report that explains them, unless
-  // that fold is open or one of them is the picked report.
+  // Folded reports (follow-ups, earlier times of the same failure) show
+  // under their row only when it is open, or one of them is the picked one.
   let opened = $state({});
   const rows = $derived(
-    (list || []).filter((c) => !(c.follow_up && c.lead) || picked === c.path || opened[c.lead]),
+    (list || []).filter((c) => !c.lead || picked === c.path || opened[c.lead]),
   );
+  const pickedRow = $derived(list?.find((c) => c.path === picked));
+  // The card's "4 times since 03:49": the row's, or the row it folds under.
+  const timesOf = (c) => {
+    const row = c?.lead ? list?.find((x) => x.path === c.lead) : c;
+    return row?.times > 1 ? { n: row.times, first: row.first } : null;
+  };
   const toggle = (p) => (opened = { ...opened, [p]: !opened[p] });
 </script>
 
@@ -205,16 +213,16 @@
           {#each rows as c (c.path)}
             {@const on = sel.many ? sel.has(c.path) : picked === c.path}
             <div class="repw" role="presentation" oncontextmenu={(e) => { e.preventDefault(); sel.many && sel.has(c.path) ? delPicked() : delReport(c); }}>
-              <button class="rep row-hover" class:fu={c.follow_up} class:row-sel={on} role="option" aria-selected={on} data-sel-key={c.path} title={c.path} onclick={(e) => repClick(c, e)}>
-                <span class="small t" title={fullDate(c.modified)}>{exactLabel(c.modified)}</span>
-                <span class="tiny v" class:muted={!c.verdict || c.follow_up}>{c.follow_up ? c.title : c.verdict || fileOf(c.path)}</span>
+              <button class="rep row-hover" class:fu={c.lead} class:row-sel={on} role="option" aria-selected={on} data-sel-key={c.path} title={c.path} onclick={(e) => repClick(c, e)}>
+                <span class="small v" class:muted={!c.verdict || c.lead}>{c.follow_up ? c.title : c.verdict || fileOf(c.path)}{#if c.times > 1}<span class="chip crashed times" title={`The same crash ${c.times} times in a row`}>×{c.times}</span>{/if}</span>
+                <span class="tiny muted" title={fullDate(c.modified)}>{exactLabel(c.modified)}</span>
               </button>
-              <button class="btn sm ghost icon del" title={c.follow_ups ? 'Delete this report and its follow-ups' : 'Delete this report'} onclick={() => delReport(c)}><Trash2 size={13} /></button>
+              <button class="btn sm ghost icon del" title={c.group?.length ? 'Delete this report and the ones folded under it' : 'Delete this report'} onclick={() => delReport(c)}><Trash2 size={13} /></button>
             </div>
-            {#if c.follow_ups}
+            {#if c.fold}
               <button class="fold row-hover" aria-expanded={!!opened[c.path]} onclick={() => toggle(c.path)}>
                 <ChevronRight size={12} class={opened[c.path] ? 'open' : ''} />
-                <span class="tiny muted">{opened[c.path] ? 'Hide follow-up reports' : c.follow_ups === 1 ? '+1 follow-up report' : `+${c.follow_ups} follow-up reports`}</span>
+                <span class="tiny muted">{opened[c.path] ? 'Hide them' : c.fold}</span>
               </button>
             {/if}
           {/each}
@@ -227,7 +235,7 @@
         {:else if picked && !read}
           <div class="muted small row"><span class="spinner"></span>Reading the report…</div>
         {:else if read?.crash}
-          <ServerCrash {server} given={read} fixes={picked === list?.[0]?.path && settled} onPeek={(m) => (peek = m)} {onShare} {openFile} />
+          <ServerCrash {server} given={read} times={timesOf(pickedRow)} fixes={picked === list?.[0]?.path && settled} onPeek={(m) => (peek = m)} {onShare} {openFile} />
         {:else if read}
           <div class="card col">
             <b class="small">Hopper couldn't read this report</b>
@@ -276,7 +284,6 @@
   .lh { padding: 0 4px 6px; }
   .lh b { font-size: 13px; font-weight: 600; }
   .rep { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px 8px 6px 10px; border-radius: var(--radius); text-align: left; color: var(--text); width: 100%; }
-  .t { font-weight: 500; }
   .repw { display: flex; align-items: center; gap: 2px; }
   .repw .del { opacity: 0; flex: none; }
   .repw:hover .del, .repw:focus-within .del { opacity: 1; }
@@ -290,8 +297,9 @@
   .fu { padding-left: 22px; }
   .fold { display: flex; align-items: center; gap: 4px; padding: 4px 8px 4px 22px; border-radius: var(--radius); width: 100%; color: var(--muted); text-align: left; }
   .fold :global(.open) { transform: rotate(90deg); }
-  .v { white-space: normal; overflow-wrap: anywhere; color: var(--subtle); }
+  .v { white-space: normal; overflow-wrap: anywhere; font-weight: 500; color: var(--text); }
   .v.muted { color: var(--muted); }
+  .times { margin-left: 6px; height: 18px; vertical-align: 1px; }
   .read { flex: 1; min-width: 0; max-height: 100%; overflow: auto; }
   .col { display: flex; flex-direction: column; gap: 6px; }
   .acts { gap: 6px; flex-wrap: wrap; }

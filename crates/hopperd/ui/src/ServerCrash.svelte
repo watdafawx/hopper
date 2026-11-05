@@ -8,7 +8,7 @@
   // With `given` (a report picked in Logs & crashes: {crash, report, names,
   // lingered}) it shows that one instead, read-only: no fixes from an old
   // report.
-  import { AlertTriangle, FileText, Share2, RefreshCw, Undo2, PowerOff, Trash2, Check, ChevronDown, ChevronRight } from '@lucide/svelte';
+  import { AlertTriangle, FileText, Share2, RefreshCw, Undo2, PowerOff, Trash2, Check, ChevronDown, ChevronRight, Info } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { removeMods, setOn } from './lib/modops.js';
   import { relative } from './lib/worlds.js';
@@ -18,7 +18,8 @@
   import CrashTurnOff from './CrashTurnOff.svelte';
   import PushPlayers from './lib/PushPlayers.svelte';
 
-  let { server, onPeek, onShare, openFile, given = null, fixes = false } = $props();
+  // times: {n, first} when the picked report's failure came more than once.
+  let { server, onPeek, onShare, openFile, given = null, fixes = false, times = null } = $props();
   // Fixes (put back, turn off) are for the crash the server last had: a
   // picked report shows them only when it is that one (`fixes`).
   const canFix = $derived(!given || fixes);
@@ -349,7 +350,7 @@
 {#if crash && (settled || given)}
   <div class="crash">
     <div class="row head">
-      <AlertTriangle size={15} /><b>The server crashed</b><span class="muted when" title={fullDate(crash.when)}>{exactLabel(crash.when)}</span>
+      <AlertTriangle size={15} /><b>{crash.stuck ? 'The server got stuck starting' : 'The server crashed'}</b><span class="muted when" title={fullDate(crash.when)}>{exactLabel(crash.when)}</span>{#if times}<span class="chip crashed" title={fullDate(times.first)}>{times.n} times since {exactLabel(times.first).replace('Today · ', '')}</span>{/if}
       <span class="grow"></span>
       {#if report}<button class="btn sm" title="Opens the crash report file" onclick={() => openFile(report)}><FileText size={13} />Open report</button>{/if}
       {#if !given}<button class="btn sm ghost icon" title="Look again" disabled={checking} onclick={load}><RefreshCw size={13} /></button>{/if}
@@ -438,6 +439,7 @@
     {/if}
 
     {#if lingered}<div class="tiny muted">{lingered}</div>{/if}
+    {#if given?.follow_note}<div class="tiny muted follow"><Info size={12} />{given.follow_note}</div>{/if}
     {#if report || crash.source}
       <div class="row acts share"><button class="btn sm" onclick={() => onShare(report || crash.source)}><Share2 size={13} />Share on mclo.gs</button></div>
     {/if}
@@ -448,6 +450,8 @@
   .crash { container-type: inline-size; display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; margin-bottom: 10px; border: 1px solid #ef444499; border-radius: var(--radius-lg); background: #ef44440f; }
   .head { gap: 8px; color: var(--red); }
   .head b { font-weight: 600; font-size: 14px; }
+  .follow { display: flex; gap: 6px; align-items: flex-start; }
+  .follow :global(svg) { flex: none; margin-top: 2px; }
   .when { font-size: 12.5px; }
   .grow { flex: 1; min-width: 0; }
   /* Words and mod names flow as one sentence that wraps anywhere. */

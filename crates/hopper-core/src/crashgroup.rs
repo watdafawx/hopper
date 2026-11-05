@@ -4,7 +4,9 @@
 //! the registries after it ("knock-on" reports). A follow-up says nothing
 //! the explaining report doesn't, so lists fold it under that report, and
 //! nothing ever picks it as the report to show while an explaining one
-//! exists for the same start.
+//! exists for the same start. The same failure over and over (a server
+//! restarted into the same broken mod) folds the same way: one row, with
+//! how many times.
 
 /// Reports written this close together (seconds) belong to one start.
 pub const WINDOW_SECS: i64 = 15 * 60;
@@ -40,16 +42,81 @@ pub struct Item<'a> {
 pub enum Role {
     /// Shown as it is.
     Plain,
-    /// Explains its start; these (indexes into the list) followed from it.
+    /// Explains its start; these (indexes into the list) fold under it:
+    /// its follow-ups, and earlier times the same failure came (with
+    /// theirs).
     Lead(Vec<usize>),
     /// A follow-up of the report at this index (folded under it), or of one
     /// we can't find (stays in the list, with a plain title).
     FollowUp(Option<usize>),
+    /// An earlier time of the same failure as the (newer) report at this
+    /// index, folded under it.
+    Repeat(usize),
 }
 
 /// The role of each report. A follow-up joins the nearest explaining report
-/// within [`WINDOW_SECS`] (the nearer in time, the newer on a tie).
+/// within [`WINDOW_SECS`] (the nearer in time, the newer on a tie). Then
+/// reports next to each other in the list with the same verdict are the
+/// same failure again: the older ones fold under the newest, with their
+/// follow-ups.
 pub fn group(items: &[Item]) -> Vec<Role> {
+    let mut roles = group_follow_ups(items);
+    let head = |r: &Role| matches!(r, Role::Plain | Role::Lead(_));
+    let same = |a: usize, b: usize| {
+        let v = |i: usize| items[i].verdict.map(str::trim).filter(|v| !v.is_empty() && !is_follow_up_verdict(v));
+        v(a).is_some() && v(a) == v(b)
+    };
+    let mut newest: Option<usize> = None;
+    for i in 0..items.len() {
+        if !head(&roles[i]) {
+            continue;
+        }
+        match newest {
+            Some(h) if same(h, i) => {
+                let mut moved = vec![i];
+                if let Role::Lead(f) = std::mem::replace(&mut roles[i], Role::Repeat(h)) {
+                    for &j in &f {
+                        roles[j] = Role::FollowUp(Some(h));
+                    }
+                    moved.extend(f);
+                }
+                match &mut roles[h] {
+                    Role::Lead(v) => v.extend(moved),
+                    r => *r = Role::Lead(moved),
+                }
+            }
+            _ => newest = Some(i),
+        }
+    }
+    roles
+}
+
+/// How many times the failure of the report at `i` came: itself and the
+/// earlier times folded under it.
+pub fn times(roles: &[Role], i: usize) -> usize {
+    match &roles[i] {
+        Role::Lead(f) => 1 + f.iter().filter(|&&j| matches!(roles.get(j), Some(Role::Repeat(_)))).count(),
+        _ => 1,
+    }
+}
+
+/// The fold under a report: "3 earlier times · 4 follow-up reports".
+pub fn fold_text(roles: &[Role], i: usize) -> Option<String> {
+    let Role::Lead(f) = &roles[i] else { return None };
+    let repeats = times(roles, i) - 1;
+    let follow = f.len() - repeats;
+    let mut parts = Vec::new();
+    if repeats > 0 {
+        parts.push(if repeats == 1 { "1 earlier time".to_string() } else { format!("{repeats} earlier times") });
+    }
+    if follow > 0 {
+        parts.push(if follow == 1 { "1 follow-up report".to_string() } else { format!("{follow} follow-up reports") });
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// [`group`] without folding repeats.
+fn group_follow_ups(items: &[Item]) -> Vec<Role> {
     let follow = |i: usize| items[i].follow_up || items[i].verdict.is_some_and(is_follow_up_verdict);
     let lead = |i: usize| !follow(i) && items[i].verdict.is_some_and(|v| !v.is_empty());
     let mut roles: Vec<Role> = items.iter().map(|_| Role::Plain).collect();
@@ -103,28 +170,6 @@ pub fn follow_up_title(lead_verdict: Option<&str>) -> String {
         .min()
         .map_or(v, |i| &v[..i]);
     format!("Follow-up error (after {})", cause.trim())
-}
-
-/// The roles of report files (newest first), read from the files
-/// themselves: a report is a follow-up when its error came while the loader
-/// undid the registries. For lists that have no verdicts (a game's).
-pub fn group_files(reports: &[std::path::PathBuf]) -> Vec<Role> {
-    let read: Vec<(i64, bool)> = reports
-        .iter()
-        .map(|p| {
-            let t = std::fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
-            let follow = p.extension().is_some_and(|e| e == "txt") && is_follow_up_text(&crate::logs::tail(p, 200_000));
-            (t.map_or(0, |d| d.as_secs() as i64), follow)
-        })
-        .collect();
-    let items: Vec<Item> =
-        read.iter().map(|&(modified, follow)| Item { modified, follow_up: follow, verdict: Some(if follow { FOLLOW_UP_VERDICT } else { "report" }) }).collect();
-    group(&items)
-}
-
-/// "+4 follow-up reports" for the fold under an explaining report.
-pub fn fold_label(n: usize) -> String {
-    if n == 1 { "+1 follow-up report".into() } else { format!("+{n} follow-up reports") }
 }
 
 #[cfg(test)]
@@ -196,6 +241,32 @@ mod tests {
     }
 
     #[test]
+    fn the_same_failure_again_folds_under_the_newest_time() {
+        // The TNP-LL8 morning: four starts an hour apart, each leaving only a
+        // follow-up report; read with each start's own log, each names the
+        // same mod. Then an older, different crash.
+        let mut list = items(&[(14_000, Some(LEAD)), (10_000, Some(LEAD)), (6_000, Some(LEAD)), (2_000, Some(LEAD)), (1_000, Some("likely Create"))]);
+        for i in 0..4 {
+            list[i].follow_up = true;
+        }
+        let roles = group(&list);
+        assert_eq!(roles[0], Role::Lead(vec![1, 2, 3]));
+        assert_eq!(roles[2], Role::Repeat(0));
+        assert_eq!(roles[4], Role::Plain);
+        assert_eq!(times(&roles, 0), 4);
+        assert_eq!(fold_text(&roles, 0).unwrap(), "3 earlier times");
+        // A repeat takes its own follow-ups along.
+        let list = items(&[(10_000, Some(LEAD)), (9_990, Some(FOLLOW)), (5_000, Some(LEAD)), (4_990, Some(FOLLOW))]);
+        let roles = group(&list);
+        assert_eq!(roles[0], Role::Lead(vec![1, 2, 3]));
+        assert_eq!(roles[3], Role::FollowUp(Some(0)));
+        assert_eq!(fold_text(&roles, 0).unwrap(), "1 earlier time · 2 follow-up reports");
+        // Another crash between them: not the same run of failures.
+        let list = items(&[(3, Some(LEAD)), (2, Some("likely Create")), (1, Some(LEAD))]);
+        assert_eq!(group(&list), [Role::Plain, Role::Plain, Role::Plain]);
+    }
+
+    #[test]
     fn reports_without_a_verdict_stay_plain() {
         let list = items(&[(10_000, None), (9_999, Some(FOLLOW))]);
         assert_eq!(group(&list), [Role::Plain, Role::FollowUp(None)]);
@@ -207,7 +278,5 @@ mod tests {
         assert_eq!(follow_up_title(Some("A, B and C failed to load")), "Follow-up error (after A, B and C)");
         assert_eq!(follow_up_title(Some("likely Create")), "Follow-up error (after Create)");
         assert_eq!(follow_up_title(None), "Follow-up error");
-        assert_eq!(fold_label(4), "+4 follow-up reports");
-        assert_eq!(fold_label(1), "+1 follow-up report");
     }
 }

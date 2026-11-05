@@ -99,6 +99,12 @@ fn harmless_ip(ip: &str) -> bool {
 /// `text` cleaned for sharing, and what was hidden. `root` is the server's
 /// folder, written as `<server>` instead.
 pub fn redact(text: &str, root: Option<&Path>) -> (String, Hidden) {
+    redact_as(text, root, false)
+}
+
+/// [`redact`], keeping user names and folders when `keep_names` (IPs and
+/// secrets always go).
+pub fn redact_as(text: &str, root: Option<&Path>, keep_names: bool) -> (String, Hidden) {
     let mut h = Hidden::default();
     let mut s = text.to_string();
     for re in SECRETS.iter() {
@@ -108,7 +114,7 @@ pub fn redact(text: &str, root: Option<&Path>) -> (String, Hidden) {
             s = re.replace_all(&s, "<hidden>").into_owned();
         }
     }
-    if let Some(root) = root {
+    if let Some(root) = root.filter(|_| !keep_names) {
         let full = root.to_string_lossy().into_owned();
         for form in [full.clone(), full.replace('\\', "/")] {
             // Windows paths ignore case: "E:\Dev" and "e:\dev" are one folder.
@@ -123,7 +129,7 @@ pub fn redact(text: &str, root: Option<&Path>) -> (String, Hidden) {
             }
         }
     }
-    let n = WIN_USER.find_iter(&s).count();
+    let n = if keep_names { 0 } else { WIN_USER.find_iter(&s).count() };
     if n > 0 {
         h.users += n;
         s = WIN_USER.replace_all(&s, "${1}<user>").into_owned();
@@ -157,9 +163,26 @@ pub fn redact(text: &str, root: Option<&Path>) -> (String, Hidden) {
     (s, h)
 }
 
+/// A game's or server's log or crash report as it goes to mclo.gs: IPs and
+/// secrets hidden, and unless `keep_names`, the user folder, the folder it
+/// is in and the player's name (`player`) too. Both apps share this way.
+pub fn for_share(text: &str, root: Option<&Path>, keep_names: bool, player: Option<&str>) -> String {
+    let (s, _) = redact_as(text, root, keep_names);
+    if keep_names { s } else { crate::mclogs::scrub(&s, player) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keep_names_keeps_user_folders_but_never_ips() {
+        let t = r"C:\Users\mikey\server at 203.0.113.5 by Steve";
+        let off = for_share(t, None, false, Some("Steve"));
+        assert!(off.contains("<user>") && off.contains("<ip>") && off.contains("<player>"), "{off}");
+        let on = for_share(t, None, true, Some("Steve"));
+        assert!(on.contains("mikey") && on.contains("<ip>") && on.contains("Steve"), "{on}");
+    }
 
     #[test]
     fn hides_what_should_not_be_public() {
