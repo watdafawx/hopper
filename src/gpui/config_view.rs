@@ -1401,14 +1401,13 @@ impl InstIndex {
         let files = hopper::configindex::index(root, &owners);
         let rels: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
         let (mut changed, mut settings) = (HashMap::new(), HashMap::new());
-        for (rel, p) in hopper::configindex::read_all(root, &rels) {
-            let (c, n) = match &*p {
-                Ok((_, s)) => (hopper::configindex::changed_count(s), s.iter().map(|x| x.entries.len()).sum()),
-                Err(_) => (0, 0),
-            };
-            changed.insert(rel.clone(), c);
-            settings.insert(rel, n);
+        for (rel, s) in hopper::configindex::summaries(root, &rels) {
+            changed.insert(rel.clone(), s.changed);
+            settings.insert(rel, s.settings);
         }
+        // The counts come from a cache; read the files for search behind the list.
+        let warm_root = root.to_path_buf();
+        std::thread::spawn(move || hopper::configindex::warm(&warm_root, &rels));
         let mut by_owner: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for f in &files {
             if let Some(o) = &f.owner {

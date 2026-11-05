@@ -232,7 +232,10 @@ pub(crate) fn build_index(root: &std::path::Path) -> Value {
     let owners = Owners::new(refs);
     let files = files_of(root, &owners);
     let rels: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
-    let parsed: HashMap<String, _> = configindex::read_all(root, &rels).into_iter().collect();
+    let sums: HashMap<String, configindex::Summary> = configindex::summaries(root, &rels).into_iter().collect();
+    // The counts come from a cache; read the files for search behind the page.
+    let warm_root = root.to_path_buf();
+    std::thread::spawn(move || configindex::warm(&warm_root, &rels));
     let mut total = 0;
     let mut by_mod: BTreeMap<String, (Vec<String>, usize)> = BTreeMap::new();
     let mut unmatched = Vec::new();
@@ -240,12 +243,7 @@ pub(crate) fn build_index(root: &std::path::Path) -> Value {
     let rows: Vec<Value> = files
         .iter()
         .map(|f| {
-            let p = parsed.get(&f.rel);
-            let (changed, settings, error) = match p.map(|p| &**p) {
-                Some(Ok((_, s))) => (configindex::changed_count(s), s.iter().map(|s| s.entries.len()).sum::<usize>(), None),
-                Some(Err(e)) => (0, 0, Some(e.clone())),
-                None => (0, 0, None),
-            };
+            let (changed, settings, error) = sums.get(&f.rel).map_or((0, 0, None), |s| (s.changed, s.settings, s.error.clone()));
             total += settings;
             match &f.owner {
                 Some(k) => {
@@ -630,5 +628,28 @@ mod tests {
         assert_eq!((x["side_label"].as_str(), x["format"].as_str(), x["changed"].as_u64()), (Some("Both"), Some("toml"), Some(0)));
         assert_eq!(v["settings"], 4);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Times the Configs page on a real server folder (read only):
+    /// `HOPPERD_BENCH_ROOT=<folder> cargo test -p hopperd configs_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn configs_timing() {
+        let Some(root) = std::env::var_os("HOPPERD_BENCH_ROOT").map(std::path::PathBuf::from) else { return };
+        for run in ["first", "again"] {
+            let t = std::time::Instant::now();
+            let v = build_index(&root);
+            println!("{run}: index {:?}, {} files, {} settings", t.elapsed(), v["files"].as_array().map_or(0, Vec::len), v["settings"]);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        for q in ["spawn rate", "max"] {
+            // What the search route does on each query.
+            let t = std::time::Instant::now();
+            let (refs, _) = mod_refs(&root);
+            let owners = Owners::new(refs);
+            let rels: Vec<String> = files_of(&root, &owners).iter().map(|f| f.rel.clone()).collect();
+            let hits = configindex::search(&root, &rels, q, false, 200);
+            println!("search {q:?}: {:?}, {} hits", t.elapsed(), hits.len());
+        }
     }
 }

@@ -69,21 +69,26 @@ pub struct ModRef {
 impl ModRef {
     /// A jar's own ids and name (cached by `deps`).
     pub fn of_jar(key: String, path: &Path, name: &str) -> ModRef {
-        let (ids, jar_name) = crate::deps::own_ids(path);
+        Self::of_ids(key, crate::deps::own_ids(path), name)
+    }
+
+    fn of_ids(key: String, (ids, jar_name): (Vec<String>, String), name: &str) -> ModRef {
         ModRef { key, ids, name: if name.is_empty() { jar_name } else { name.to_string() } }
     }
 }
 
-/// Reads many jars on a few threads (first time; `deps` caches them).
+/// Reads many jars on a few threads (first time; `deps` caches them, in
+/// memory and on disk, so later opens only check each jar's size and time).
 pub fn of_jars(jars: Vec<(String, PathBuf, String)>) -> Vec<ModRef> {
-    let chunk = jars.len().div_ceil(8).max(1);
-    std::thread::scope(|s| {
-        let parts: Vec<_> = jars
-            .chunks(chunk)
-            .map(|c| s.spawn(move || c.iter().map(|(k, p, n)| ModRef::of_jar(k.clone(), p, n)).collect::<Vec<_>>()))
-            .collect();
-        parts.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-    })
+    let paths: Vec<PathBuf> = jars.iter().map(|(_, p, _)| p.clone()).collect();
+    let stamps = crate::stampcache::by_folder(&paths);
+    let items: Vec<_> = jars.iter().zip(stamps).collect();
+    let out = crate::configindex::par_map(&items, |((k, p, n), st)| match st {
+        Some(st) => ModRef::of_ids(k.clone(), crate::deps::own_ids_at(p, *st), n),
+        None => ModRef::of_jar(k.clone(), p, n),
+    });
+    crate::deps::save_own_ids();
+    out
 }
 
 /// The matcher, built once per mod list.

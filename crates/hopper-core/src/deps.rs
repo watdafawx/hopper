@@ -407,7 +407,36 @@ pub fn provides(path: &Path) -> Vec<String> {
 /// The mod ids a jar itself is, without the ones nested inside it, and
 /// its display name (empty when it has none).
 pub fn own_ids(path: &Path) -> (Vec<String>, String) {
-    jar(path).map(|j| (j.own.clone(), j.name.clone())).unwrap_or_default()
+    let Ok(meta) = std::fs::metadata(path) else { return Default::default() };
+    own_ids_at(path, crate::stampcache::stamp(&meta))
+}
+
+/// [`own_ids`] with the jar's size and time already known (from its
+/// folder's listing: [`crate::stampcache::by_folder`]).
+pub fn own_ids_at(path: &Path, stamp: crate::stampcache::Stamp) -> (Vec<String>, String) {
+    let key = crate::stampcache::key(path);
+    if let Some(hit) = own_cache().get(&key, stamp) {
+        return hit;
+    }
+    let Some(j) = jar(path) else { return Default::default() };
+    let got = (j.own.clone(), j.name.clone());
+    own_cache().put(key, stamp, got.clone());
+    got
+}
+
+/// Each jar's own ids and name, kept on disk. Opening 1,100 jars to read
+/// their mods.toml takes seconds; the Configs tab needs only these two
+/// things, so after the first time it reads them from this file instead.
+static OWN: LazyLock<Mutex<crate::stampcache::StampCache<(Vec<String>, String)>>> =
+    LazyLock::new(|| Mutex::new(crate::stampcache::StampCache::named("jar-ids.json", 20_000)));
+
+fn own_cache() -> std::sync::MutexGuard<'static, crate::stampcache::StampCache<(Vec<String>, String)>> {
+    OWN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Saves what [`own_ids`] read new since the last save.
+pub fn save_own_ids() {
+    own_cache().save();
 }
 
 /// The version of the jar's own (first) mod, empty when it doesn't say.

@@ -99,6 +99,7 @@ pub mod skinrender;
 pub mod snapshots;
 pub mod source;
 pub mod sources;
+pub mod stampcache;
 pub mod sync;
 pub mod time;
 pub mod tls;
