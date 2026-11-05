@@ -436,6 +436,7 @@ impl UpdatePlan {
     pub fn clean_decisions(&self) -> Overrides {
         let take = self.clean_take();
         let mut o = self.decisions_with(&take, &self.clean_choices());
+        o.clean = true;
         o.enable.extend(self.still_off.iter().map(|m| m.project));
         for f in self.files.iter().filter(|f| take.contains(&f.rel)) {
             match f.action {

@@ -586,5 +586,7 @@ fn change_color(c: Change, same: bool, cx: &App) -> Hsla {
         Change::Updated => t.info,
         Change::RolledBack => t.warning,
         Change::Edited | Change::Switched | Change::Replaced => t.primary,
+        Change::TurnedOn => t.success,
+        Change::TurnedOff => t.muted_foreground,
     }
 }

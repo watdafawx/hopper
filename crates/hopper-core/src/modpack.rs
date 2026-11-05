@@ -89,6 +89,8 @@ pub struct Overrides {
     /// Mods the pack drops that you keep (file names, lower case): one of
     /// your mods needs them. They become yours.
     pub keep_dropped: HashSet<String>,
+    /// A clean update: History marks what it set aside "by Clean update".
+    pub clean: bool,
 }
 
 /// Pack mods leaving with an update that you chose to keep (see
