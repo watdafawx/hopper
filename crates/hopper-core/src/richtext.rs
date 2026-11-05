@@ -1631,6 +1631,25 @@ mod tests {
 
     /// Trimmed from Snappy Blocks' description: a 2x2 table of screenshots.
     #[test]
+    fn link_icon_table_is_one_grid_of_small_unsized_images() {
+        // Disrobe Sounds: an avatar and six pixel-art link icons, none with
+        // a size, in a table of flex divs. The view shows them at their own
+        // size, side by side; the parse must keep them apart from the text.
+        let html = include_str!("richtext_fixtures/disrobe-sounds.html");
+        let segs = to_segments(&parse(html));
+        let Some(Segment::Grid(rows)) = segs.first() else { panic!("{:?}", segs.first()) };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].len(), 1, "the avatar is its own cell");
+        let icons = &rows[0][1];
+        assert_eq!(icons.len(), 6);
+        assert!(icons.iter().all(|b| b.width.is_none() && b.height.is_none() && b.link.is_some()));
+        assert!(icons[0].link.as_deref().unwrap().contains("github.com"));
+        // The banner below keeps its page-given "100%" (no pixel width), so
+        // the view treats it as a hero.
+        assert!(segs.iter().skip(1).any(|s| matches!(s, Segment::Markdown(m) if m.contains("banner.png"))));
+    }
+
+    #[test]
     fn image_table_is_one_grid() {
         let html = r#"<p>Intro</p><table><tbody>
 <tr><td><img src="https://media.forgecdn.net/a.png" alt="a"></td><td><img src="https://media.forgecdn.net/b.png" alt="b"></td></tr>

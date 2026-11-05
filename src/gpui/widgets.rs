@@ -1530,9 +1530,10 @@ pub fn description_view(
                 }))
                 .into_any_element(),
             // A table of screenshots: cells share the width evenly, each
-            // image fills its cell (at its shape, never past a width the
-            // page gave it) and cells wrap onto their own lines rather
-            // than shrink to icons. Small images keep their size.
+            // image fills its cell (at its shape, never past its own size
+            // or a width the page gave it) and cells wrap onto their own
+            // lines rather than shrink to icons. Small images keep their
+            // size and line up side by side, wrapping like text.
             Segment::Grid(rows) => {
                 const MIN_CELL: f32 = 160.;
                 v_flex()
@@ -1559,18 +1560,25 @@ pub fn description_view(
                                             _ => 16. / 9.,
                                         };
                                         // The widest it may get: the page's width,
-                                        // or its height at its shape; else the cell.
+                                        // or its height at its shape, else its own
+                                        // size (a picture never grows past it).
                                         let cap = match (b.width, b.height) {
                                             (Some(w), _) => Some(w as f32),
                                             (None, Some(h)) => Some(h as f32 * ratio),
-                                            _ => natural.map(|n| n.0 as f32).filter(|w| *w <= 48.),
+                                            _ => natural.map(|n| n.0 as f32),
                                         };
+                                        // A small picture the page gave no size
+                                        // (a row of link icons) stays that size and
+                                        // sits in a line with its neighbours; a big
+                                        // one fills the cell.
+                                        let small = cap.is_some_and(|w| w < MIN_CELL);
                                         let target = b.link.clone().unwrap_or_else(|| b.url.clone());
                                         let frame = clips.get(&b.key).map(|c| c.frame_now());
                                         let open = open.clone();
                                         let tile = div()
                                             .id(ElementId::NamedInteger(format!("{id}:{i}:{r}:{c}").into(), j as u64))
-                                            .w_full()
+                                            .when(!small, |d| d.w_full())
+                                            .when(small, |d| d.flex_none().w(px(cap.unwrap_or(1.).max(1.))).max_w_full())
                                             .when_some(cap, |d, w| d.max_w(px(w.max(1.))))
                                             .aspect_ratio(ratio)
                                             .clickable(cx)
@@ -1589,9 +1597,11 @@ pub fn description_view(
                                     .collect();
                                 // A cell of small images doesn't hold out for a wide column.
                                 let min = tiles.iter().map(|t| t.1).fold(MIN_CELL, f32::min);
-                                v_flex()
+                                gpui_kit::component::h_flex()
                                     .flex_1()
                                     .min_w(px(min))
+                                    .flex_wrap()
+                                    .items_start()
                                     .gap_2()
                                     .children(tiles.into_iter().map(|t| t.0))
                             }))
