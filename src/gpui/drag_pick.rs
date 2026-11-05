@@ -412,9 +412,13 @@ pub fn paint_option<E: InteractiveElement>(
     set: impl Fn(usize, &mut Window, &mut App) + 'static,
 ) -> E {
     let (p, g) = (paint.clone(), group.into());
-    el.on_mouse_down(MouseButton::Left, move |_, window, cx| {
-        p.start(&g, value);
-        set(value, window, cx);
+    // Captured, not bubbled: a tab's label swallows the bubbling press, so
+    // the plain listener never ran and only the click (no drag) got through.
+    el.capture_any_mouse_down(move |e: &MouseDownEvent, window, cx| {
+        if e.button == MouseButton::Left {
+            p.start(&g, value);
+            set(value, window, cx);
+        }
     })
 }
 
