@@ -2944,6 +2944,25 @@ impl AddonsView {
         let now = hopper::time::parse_iso(&hopper::time::now_iso()).unwrap_or(0);
         let cursor = self.cursor.filter(|_| self.focus.is_focused(window));
         let start = range.start.min(rows.len());
+        // Icons on screen still downloading jump the queue: the tab asks for
+        // all of them at once (`want_images`), in the instance's order, not
+        // the list's.
+        let waiting: Vec<String> = {
+            let store = self.store.read(cx);
+            rows[start..range.end.min(rows.len())]
+                .iter()
+                .filter_map(|r| match r {
+                    Row::Addon(i) => inst.addons.get(*i),
+                    _ => None,
+                })
+                .filter(|a| a.icon.starts_with("http") && store.image(&a.icon).is_none())
+                .map(|a| a.icon.clone())
+                .collect()
+        };
+        if !waiting.is_empty() {
+            let store = self.store.clone();
+            cx.defer(move |cx| store.update(cx, |s, _| waiting.iter().for_each(|u| s.want_image_now(u))));
+        }
         rows[start..range.end.min(rows.len())]
             .iter()
             .enumerate()

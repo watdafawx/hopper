@@ -254,9 +254,20 @@ pub fn touch(path: &Path) {
     }
 }
 
-/// Keeps the image cache under `max` bytes: when it's over, the files used
-/// longest ago go until it's at four fifths. Half-written downloads left by
-/// a run that stopped go too.
+/// Files this big or bigger are pictures (galleries, description images);
+/// smaller ones are mostly icons. Pictures go first when the cache is
+/// over: a few of them free as much room as a whole pack's icons, and
+/// icons are what every list shows.
+pub const BIG_FILE: u64 = 256 << 10;
+
+/// Files used this recently are never cleared, so the icons of a pack
+/// opened today survive however many gallery pictures came after them.
+pub const KEEP_RECENT: std::time::Duration = std::time::Duration::from_secs(2 * 24 * 3600);
+
+/// Keeps the image cache under `max` bytes: when it's over, pictures used
+/// longest ago go first, then icons used longest ago, until it's at four
+/// fifths; nothing used in the last [`KEEP_RECENT`] goes. Half-written
+/// downloads left by a run that stopped go too.
 pub fn prune(max: u64) {
     if let Some(d) = dir() {
         let (n, bytes) = prune_dir(&d, max);
@@ -269,9 +280,15 @@ pub fn prune(max: u64) {
 /// [`prune`] on folder `dir` (and the folders in it): how many files went
 /// and how many bytes they held.
 pub fn prune_dir(dir: &Path, max: u64) -> (usize, u64) {
+    prune_dir_at(dir, max, std::time::SystemTime::now())
+}
+
+/// [`prune_dir`] as if it were `now`.
+fn prune_dir_at(dir: &Path, max: u64, now: std::time::SystemTime) -> (usize, u64) {
     let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
-    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+    let day_ago = now - std::time::Duration::from_secs(24 * 3600);
+    let recent = now - KEEP_RECENT;
     let (mut gone, mut freed) = (0, 0);
     while let Some(d) = stack.pop() {
         let Ok(list) = std::fs::read_dir(&d) else { continue };
@@ -298,11 +315,15 @@ pub fn prune_dir(dir: &Path, max: u64) -> (usize, u64) {
     if total <= max {
         return (gone, freed);
     }
-    files.sort_by_key(|f| f.2);
+    // Pictures before icons, each oldest first.
+    files.sort_by_key(|f| (f.1 < BIG_FILE, f.2));
     let goal = max / 5 * 4;
-    for (path, len, _) in files {
+    for (path, len, used) in files {
         if total <= goal {
             break;
+        }
+        if used >= recent {
+            continue;
         }
         if std::fs::remove_file(&path).is_ok() {
             total -= len;
@@ -391,14 +412,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hopper-prune-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("thumbs")).unwrap();
         let now = std::time::SystemTime::now();
-        // Four 100-byte files, used 4, 3, 2 and 1 hours ago (one in a sub-folder).
+        // Four 100-byte files, used 8, 7, 6 and 5 days ago (one in a sub-folder).
         let names = ["a.png", "b.png", "thumbs/c.png", "d.png"];
         for (i, n) in names.iter().enumerate() {
-            let p = dir.join(n);
-            std::fs::write(&p, [0u8; 100]).unwrap();
-            let used = now - std::time::Duration::from_secs((4 - i as u64) * 3600);
-            let t = std::fs::FileTimes::new().set_accessed(used).set_modified(used);
-            std::fs::File::options().write(true).open(&p).unwrap().set_times(t).unwrap();
+            set_used(&dir.join(n), 100, now - days(8 - i as u64));
         }
         // Under the limit: nothing goes.
         assert_eq!(prune_dir(&dir, 1000), (0, 0));
@@ -406,6 +423,59 @@ mod tests {
         assert_eq!(prune_dir(&dir, 300), (2, 200));
         assert!(!dir.join("a.png").exists() && !dir.join("b.png").exists());
         assert!(dir.join("thumbs/c.png").exists() && dir.join("d.png").exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn days(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(n * 24 * 3600)
+    }
+
+    /// Writes a `len`-byte file at `p`, last used at `used`.
+    fn set_used(p: &Path, len: usize, used: std::time::SystemTime) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, vec![0u8; len]).unwrap();
+        let t = std::fs::FileTimes::new().set_accessed(used).set_modified(used);
+        std::fs::File::options().write(true).open(p).unwrap().set_times(t).unwrap();
+    }
+
+    /// 0.40.0 cleared a big pack's icons (the oldest files) on every start
+    /// once gallery pictures pushed the cache over its limit, so the Mods
+    /// list downloaded them all again. Icons must outlive pictures, and
+    /// anything used lately must stay.
+    #[test]
+    fn prune_keeps_icons_and_recent_files() {
+        let dir = std::env::temp_dir().join(format!("hopper-prune-icons-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let now = std::time::SystemTime::now();
+        let big = BIG_FILE as usize;
+        // 50 icons of 10 KB, last used 30 days ago (older than any picture).
+        for i in 0..50 {
+            set_used(&dir.join(format!("icon{i}.png")), 10 << 10, now - days(30));
+        }
+        // Four old gallery pictures and two seen today.
+        for i in 0..4 {
+            set_used(&dir.join(format!("old{i}.jpg")), big, now - days(10 - i as u64));
+        }
+        for i in 0..2 {
+            set_used(&dir.join(format!("new{i}.jpg")), big, now);
+        }
+        // Over the limit by about three pictures.
+        let total = 50 * (10 << 10) + 6 * BIG_FILE;
+        let max = total - 2 * BIG_FILE;
+        let (gone, _) = prune_dir_at(&dir, max, now);
+        assert!(gone >= 3, "cleared {gone}");
+        for i in 0..50 {
+            assert!(dir.join(format!("icon{i}.png")).exists(), "icon{i} was cleared");
+        }
+        assert!(dir.join("new0.jpg").exists() && dir.join("new1.jpg").exists());
+        assert!(!dir.join("old0.jpg").exists());
+
+        // Everything recent: nothing goes even far over the limit.
+        let dir2 = dir.join("recent");
+        for i in 0..5 {
+            set_used(&dir2.join(format!("r{i}.png")), 10 << 10, now - std::time::Duration::from_secs(3600));
+        }
+        assert_eq!(prune_dir_at(&dir2, 1, now), (0, 0));
         std::fs::remove_dir_all(dir).ok();
     }
 

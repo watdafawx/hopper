@@ -1976,7 +1976,12 @@ impl Store {
     /// first (see [`Lane`]).
     fn start_image_workers(&self) {
         // The cache is kept to a size: the pictures used longest ago go.
-        std::thread::spawn(|| hopper::imgcache::prune(hopper::imgcache::MAX_BYTES));
+        // A minute in: by then the lists on screen have marked their icons
+        // as used, and none is cleared while the list is looking it up.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            hopper::imgcache::prune(hopper::imgcache::MAX_BYTES)
+        });
         for _ in 0..IMAGE_WORKERS {
             let (q, tx, wake) = (self.image_queue.clone(), self.tx.clone(), self.wake.clone());
             std::thread::spawn(move || {
