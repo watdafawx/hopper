@@ -19,6 +19,8 @@
   let busy = $state(false);
   let url = $state('');
   let showText = $state(false);
+  // As desktop: user folders hidden unless kept (IPs and passwords always go).
+  let keep = $state(false);
 
   const label = (f) => f.path.replace(/^logs\//, '').replace(/^crash-reports\//, 'crash report: ');
   const total = $derived(info ? info.hidden.ips + info.hidden.tokens + info.hidden.paths + info.hidden.users : 0);
@@ -42,7 +44,7 @@
     showText = false;
     if (!pick) return;
     try {
-      const r = await api(`${base}/logs/preview?path=${encodeURIComponent(pick)}`);
+      const r = await api(`${base}/logs/preview?path=${encodeURIComponent(pick)}&keep_names=${keep}`);
       if (n === lookSeq) info = r;
     } catch (e) {
       if (n === lookSeq) err = e.message;
@@ -53,7 +55,7 @@
     busy = true;
     err = '';
     try {
-      url = (await post(`${base}/logs/share`, { path: pick })).url;
+      url = (await post(`${base}/logs/share`, { path: pick, keep_names: keep })).url;
     } catch (e) {
       err = e.message;
     } finally {
@@ -76,6 +78,7 @@
   });
   $effect(() => {
     pick;
+    keep;
     look();
   });
 </script>
@@ -112,6 +115,7 @@
             {#if info.hidden.users}<span class="chip acc">Windows user name</span>{/if}
             {#if !total}<span class="tiny muted">Nothing found to hide.</span>{/if}
           </div>
+          <label class="row small"><input type="checkbox" bind:checked={keep} disabled={busy} />Keep user and folder names</label>
           <div class="tiny muted">Player names stay; they help read the log. <button class="lnk" onclick={() => (showText = !showText)}>{showText ? 'Hide' : 'Preview'}</button></div>
           {#if showText}<pre class="pre mono">{info.cut ? '…(start not shown)\n' : ''}{info.text}</pre>{/if}
         </div>

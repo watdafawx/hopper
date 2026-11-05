@@ -169,16 +169,31 @@ impl Render for CrashHelp {
                     .text_color(crate::widgets::site_color(false))
                     .on_click(|_, _, cx| cx.open_url(CURSEFORGE)),
             );
-        let body = callout(color, cx)
+        // One line above the crash reports: it is a pointer, not the news.
+        let theme = cx.theme();
+        let body = h_flex()
+            .id("crash-assistant")
+            .gap_3()
+            .px_3()
+            .py_1p5()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(color.opacity(0.4))
+            .bg(color.opacity(0.04))
+            .child(Icon::new(IconName::Stethoscope).small().text_color(color))
+            .child(div().flex_none().text_sm().font_semibold().text_color(color).child(title))
             .child(
-                h_flex()
-                    .gap_2()
-                    .text_color(color)
-                    .child(Icon::new(IconName::Stethoscope).small())
-                    .child(div().font_semibold().child(title)),
+                div()
+                    .id("crash-assistant-text")
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .child(text)
+                    .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(text).build(w, cx)),
             )
-            .child(div().text_sm().text_color(cx.theme().foreground).child(text))
-            .child(links);
+            .child(links.flex_none());
         let place = self.root.as_ref().map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
         let key = hopper::settings::notice_key(&place, "crash-assistant", title);
         v_flex()

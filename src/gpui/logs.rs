@@ -1,26 +1,24 @@
-//! An instance's Logs & crashes tab: tabs for crash help, the game's
-//! live log, debug.log and crash reports, each log with search and sharing
-//! on mclo.gs.
+//! An instance's Logs & crashes tab: its crash reports, each read the way
+//! the crash card reads the last one, the game's live log and debug.log,
+//! each with search and sharing on mclo.gs, and the older logs. The tabs,
+//! the list and the card's frame are the same as a server's
+//! (crash_list.rs); the instance adds its own notices above the list
+//! (Crash Assistant, a failed join, mixins that failed while playing).
 
-use crate::widgets::Clickable as _;
 use crate::crash_help::{CrashHelp, callout};
+use crate::crash_list::{self, CrashList, Pane};
 use crate::line_select::{LineSelect, Lines};
-use crate::log_files;
 use crate::store::{Store, open_path};
-use crate::selection::{self, KeyAct, Selection};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hopper::logs::{Level, crash_reports, crash_summary, is_problem, level, tail};
+use hopper::logs::{Level, is_problem, level};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -131,25 +129,6 @@ fn read_new(path: &Path, from: u64) -> Chunk {
     }
 }
 
-/// The Logs tab's own tabs.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LogTab {
-    /// Crash Assistant and the latest crash.
-    Help,
-    /// latest.log, followed.
-    Game,
-    /// debug.log, followed.
-    Debug,
-    Crashes,
-}
-
-/// The newest crash report, read once per file and change.
-struct Crash {
-    path: PathBuf,
-    mtime: Option<std::time::SystemTime>,
-    summary: Vec<String>,
-}
-
 pub struct LogsView {
     store: Entity<Store>,
     root: Option<PathBuf>,
@@ -157,30 +136,21 @@ pub struct LogsView {
     /// The file shown and its lines.
     log: Option<LogFile>,
     errors_only: bool,
-    keep_names: bool,
-    /// mclo.gs links by file; `None` while uploading.
-    shared: HashMap<PathBuf, Option<Result<String, String>>>,
-    /// The latest crash report of the instance, if any.
-    crash: Option<Crash>,
+    /// The crash reports, the older logs and sharing (shared with a
+    /// server's tab).
+    crashes: CrashList,
+    /// Reports read so far (`None` while reading; inside, `None` when
+    /// Hopper couldn't tell what went wrong).
+    cards: HashMap<String, Option<Option<hopper::crashdetect::Crash>>>,
+    /// The newest report as last told to the store (it rereads the saved
+    /// crash when a newer report came).
+    newest_told: Option<String>,
     /// The crash card's mods (jars) whose "Why?" list is open.
     why_open: std::collections::HashSet<String>,
     /// "Turn off…" asked: the jars ticked in its list (nothing is turned
     /// off until its confirm).
     turn_off_pick: Option<std::collections::HashSet<String>>,
-    /// Every crash report, newest first.
-    crashes: Vec<PathBuf>,
-    /// What each of `crashes` is: explaining report, follow-up of one, or
-    /// neither (follow-ups fold under the report that explains them).
-    crash_roles: Vec<hopper::crashgroup::Role>,
-    /// The follow-up reports under the older ones are shown.
-    folds_open: bool,
-    /// The older reports picked with Ctrl / Shift, by path.
-    older_sel: Selection,
-    /// The older reports' list, for its keys.
-    older_focus: FocusHandle,
-    /// The newest report file and its time as last looked at.
-    newest_seen: Option<(PathBuf, Option<std::time::SystemTime>)>,
-    tab: LogTab,
+    pane: Pane,
     /// The user picked a tab for this instance; it stays.
     tab_picked: bool,
     query: Entity<InputState>,
@@ -190,8 +160,46 @@ pub struct LogsView {
     /// The log's lines on screen, with text picking.
     lines: LineSelect,
     _follow: Option<Task<()>>,
-    _crash_watch: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+impl crash_list::Host for LogsView {
+    fn list(&self) -> &CrashList {
+        &self.crashes
+    }
+
+    fn list_mut(&mut self) -> &mut CrashList {
+        &mut self.crashes
+    }
+
+    fn root(&self) -> Option<PathBuf> {
+        self.root.clone()
+    }
+
+    fn pick(&mut self, rel: String, cx: &mut Context<Self>) {
+        self.pick_report(rel, cx);
+    }
+
+    fn running(&self, cx: &App) -> bool {
+        self.root.as_ref().is_some_and(|r| self.store.read(cx).running(r).is_some())
+    }
+
+    fn after_delete(&mut self, rels: &[String], cx: &mut Context<Self>) {
+        for r in rels {
+            self.cards.remove(r);
+        }
+        self.crashes.forget(rels);
+        if self.pane == Pane::Older {
+            crash_list::load_old(self, cx);
+        }
+        crash_list::watch(self, cx);
+        cx.notify();
+    }
+
+    fn player(&self, cx: &App) -> Option<String> {
+        let s = self.store.read(cx).settings();
+        s.signed_in_as.clone().or_else(|| hopper::account::active(Path::new(&s.launcher_dir)).map(|a| a.name))
+    }
 }
 
 impl LogsView {
@@ -212,24 +220,17 @@ impl LogsView {
             help,
             log: None,
             errors_only: false,
-            keep_names: false,
-            shared: HashMap::new(),
-            crash: None,
+            crashes: CrashList::new(false, cx),
+            cards: HashMap::new(),
+            newest_told: None,
             why_open: Default::default(),
             turn_off_pick: None,
-            crashes: Vec::new(),
-            crash_roles: Vec::new(),
-            folds_open: false,
-            older_sel: Selection::new(),
-            older_focus: cx.focus_handle(),
-            newest_seen: None,
-            tab: LogTab::Game,
+            pane: Pane::Latest,
             tab_picked: false,
             query,
             visible: None,
             lines: LineSelect::new(cx),
             _follow: None,
-            _crash_watch: None,
             _subscriptions: subs,
         }
     }
@@ -243,84 +244,24 @@ impl LogsView {
             self.log = None;
             self.lines.clear();
             self._follow = None;
-            self.crash = None;
-            self.crashes.clear();
-            self.crash_roles.clear();
-            self.newest_seen = None;
-            self.folds_open = false;
-            self.older_sel.clear();
+            self.crashes.reset();
+            self.cards.clear();
+            self.newest_told = None;
+            self.why_open.clear();
+            self.turn_off_pick = None;
             self.tab_picked = false;
         }
         self.root = Some(root.clone());
         if new_root {
             // Opens on the game's log; after a crash, render switches to
-            // Crash help.
-            self.select(LogTab::Game, cx);
+            // the crash reports.
+            self.select(Pane::Latest, cx);
         }
-        self.watch_crashes(root.clone(), cx);
+        crash_list::watch(self, cx);
         self.help.update(cx, |h, cx| h.show(root, cx));
         cx.notify();
     }
 
-    /// Looks for a newer crash report now and every few seconds, off the
-    /// UI thread; reads a report only when it is new or changed.
-    fn watch_crashes(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        self._crash_watch = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let Ok(known) = this.update(cx, |this, _| this.newest_seen.clone()) else {
-                    return;
-                };
-                let r = root.clone();
-                let found = cx
-                    .background_spawn(async move {
-                        let all = crash_reports(&r);
-                        let newest = all.first()?.clone();
-                        let mtime = std::fs::metadata(&newest).and_then(|m| m.modified()).ok();
-                        if known.as_ref() == Some(&(newest.clone(), mtime)) {
-                            return Some(None);
-                        }
-                        // The newest report can be a follow-up of the start's
-                        // real crash: the card and the tab open on the one
-                        // that names the cause.
-                        let roles = hopper::crashgroup::group_files(&all[..all.len().min(20)]);
-                        let shown = match roles.first() {
-                            Some(hopper::crashgroup::Role::FollowUp(Some(j))) => all[*j].clone(),
-                            _ => newest.clone(),
-                        };
-                        let shown_mtime = std::fs::metadata(&shown).and_then(|m| m.modified()).ok();
-                        let summary = crash_summary(&tail(&shown, 200_000));
-                        Some(Some((Crash { path: shown, mtime: shown_mtime, summary }, all, roles, (newest, mtime))))
-                    })
-                    .await;
-                let alive = this.update(cx, |this, cx| {
-                    if this.root.as_ref() != Some(&root) {
-                        return;
-                    }
-                    match found {
-                        None if this.crash.is_some() => {
-                            this.crash = None;
-                            this.crashes.clear();
-                            this.crash_roles.clear();
-                            this.newest_seen = None;
-                        }
-                        Some(Some((c, all, roles, seen))) => {
-                            this.store.update(cx, |s, _| s.newest_crash_report(&root, &c.path));
-                            this.crash = Some(c);
-                            this.crashes = all;
-                            this.crash_roles = roles;
-                            this.newest_seen = Some(seen);
-                        }
-                        _ => return,
-                    }
-                    cx.notify();
-                });
-                if alive.is_err() {
-                    return;
-                }
-                cx.background_executor().timer(Duration::from_secs(5)).await;
-            }
-        }));
-    }
 
     /// Shows a log, read off the UI thread. With `follow`, reads what the
     /// game appends every second and keeps the view at the bottom while it
@@ -448,257 +389,57 @@ impl LogsView {
         )
     }
 
-    /// Shows tab `tab`, opening its log.
-    fn select(&mut self, tab: LogTab, cx: &mut Context<Self>) {
-        self.tab = tab;
+    /// Shows pane `pane`, opening its log.
+    fn select(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        self.pane = pane;
         let Some(root) = self.root.clone() else { return };
-        let want = match tab {
-            LogTab::Help => None,
-            LogTab::Game => Some((root.join("logs").join("latest.log"), true)),
-            LogTab::Debug => Some((root.join("logs").join("debug.log"), true)),
-            LogTab::Crashes => self.crash.as_ref().map(|c| c.path.clone()).or_else(|| self.crashes.first().cloned()).map(|p| (p, false)),
-        };
-        if let Some((path, follow)) = want
-            && self.log.as_ref().map(|l| &l.path) != Some(&path)
-        {
-            self.open_log(path, follow, cx);
+        if pane == Pane::Older {
+            crash_list::load_old(self, cx);
         }
-        cx.notify();
-    }
-
-    /// Shows crash report `p` in the Crash reports tab.
-    fn open_crash(&mut self, p: PathBuf, cx: &mut Context<Self>) {
-        self.tab = LogTab::Crashes;
-        self.tab_picked = true;
-        if self.log.as_ref().map(|l| &l.path) != Some(&p) {
-            self.open_log(p, false, cx);
-        }
-        cx.notify();
-    }
-
-    /// The report at `p` and, when it explains a start, its follow-up
-    /// reports (they go together). As paths under the instance folder.
-    fn report_group(&self, p: &Path) -> Vec<String> {
-        let Some(root) = self.root.as_ref() else { return Vec::new() };
-        let rel = |q: &Path| format!("crash-reports/{}", q.file_name().unwrap_or_default().to_string_lossy());
-        let mut out = vec![rel(p)];
-        let at = self.crashes.iter().position(|c| c == p);
-        if let Some(hopper::crashgroup::Role::Lead(f)) = at.and_then(|i| self.crash_roles.get(i)) {
-            out.extend(f.iter().filter_map(|&j| self.crashes.get(j)).map(|q| rel(q)));
-        }
-        let _ = root;
-        out
-    }
-
-    /// The delete buttons of the toolbar: the shown crash report (and its
-    /// follow-ups) and "Clear all" on the Crash reports tab; "Clear old
-    /// logs" on the game's logs.
-    fn delete_buttons(&self, shown: &Path, cx: &mut Context<Self>) -> AnyElement {
-        if self.tab == LogTab::Crashes {
-            let group = self.report_group(shown);
-            return h_flex()
-                .gap_1()
-                .child(
-                    Button::new("crash-del")
-                        .small()
-                        .ghost()
-                        .icon(IconName::Trash)
-                        .tooltip("Delete this crash report")
-                        .on_click(cx.listener(move |this, _, window, cx| this.ask_delete(group.clone(), window, cx))),
-                )
-                .child(
-                    Button::new("crash-clear")
-                        .small()
-                        .ghost()
-                        .label("Clear all")
-                        .tooltip("Deletes every crash report of this instance")
-                        .on_click(cx.listener(|this, _, window, cx| this.ask_clear(hopper::crashfiles::Kind::Crashes, window, cx))),
-                )
-                .into_any_element();
-        }
-        Button::new("logs-clear-old")
-            .small()
-            .ghost()
-            .icon(IconName::Trash)
-            .label("Clear old logs")
-            .tooltip("Deletes the older logs; the current latest.log and debug.log stay")
-            .on_click(cx.listener(|this, _, window, cx| this.ask_clear(hopper::crashfiles::Kind::Logs, window, cx)))
-            .into_any_element()
-    }
-
-    /// "Delete" on crash reports `rels` (one, or a report with its follow-ups).
-    fn ask_delete(&mut self, rels: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        self.ask_delete_as(rels, false, window, cx)
-    }
-
-    /// "Delete" on crash reports `rels`; `picked` when they are the reports
-    /// picked in the list (with their follow-ups), not one report's group.
-    fn ask_delete_as(&mut self, rels: Vec<String>, picked: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
-        let n = rels.len();
-        let (title, what) = if n == 1 {
-            ("Delete this crash report?".to_string(), "It".to_string())
-        } else if picked {
-            (format!("Delete these {n} crash reports?"), "They (with the follow-up reports of the ones picked)".to_string())
-        } else {
-            (format!("Delete these {n} crash reports?"), "They are the report and its follow-up reports; they".to_string())
-        };
-        let body = format!("{what} go to {}, where you can get {} back.", log_files::trash_name(&root), if n == 1 { "it" } else { "them" });
-        let running = self.store.read(cx).running(&root).is_some();
-        let view = cx.entity();
-        log_files::confirm(window, cx, title, body, move |window, cx| {
-            let r = log_files::delete(&root, &rels, running);
-            let ok = r.is_ok();
-            log_files::report(window, cx, r);
-            if ok {
-                view.update(cx, |this, cx| this.after_delete(&rels, cx));
+        match pane.log() {
+            Some(rel) => {
+                let path = root.join(rel);
+                if self.log.as_ref().map(|l| &l.path) != Some(&path) {
+                    self.open_log(path, true, cx);
+                }
             }
-        });
+            None => {
+                self.log = None;
+                self._follow = None;
+                self.lines.clear();
+            }
+        }
+        cx.notify();
     }
 
-    /// "Clear all" for crash reports, or "Clear old logs".
-    fn ask_clear(&mut self, kind: hopper::crashfiles::Kind, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
-        let crashes = kind == hopper::crashfiles::Kind::Crashes;
-        let n = hopper::crashfiles::clearable(&root, kind).len();
-        if n == 0 {
-            window.push_notification(gpui_kit::component::notification::Notification::info(if crashes { "No crash reports to delete." } else { "No older logs to delete." }), cx);
+    /// Shows report `rel` beside the list, reading it off the UI thread the
+    /// first time (the crash Hopper saw the game end with is read already).
+    fn pick_report(&mut self, rel: String, cx: &mut Context<Self>) {
+        if !self.crashes.sel.contains(&rel) {
+            self.crashes.sel.set_one(rel.clone());
+        }
+        self.crashes.picked = Some(rel.clone());
+        self.turn_off_pick = None;
+        cx.notify();
+        if self.cards.contains_key(&rel) {
             return;
         }
-        let (title, what) = if crashes {
-            (format!("Delete all {n} crash reports?"), "They")
-        } else {
-            (format!("Delete {n} older logs?"), "They (not latest.log or debug.log)")
-        };
-        let body = format!("{what} go to {}, where you can get them back.", log_files::trash_name(&root));
-        let view = cx.entity();
-        log_files::confirm(window, cx, title, body, move |window, cx| {
-            let r = log_files::clear(&root, kind);
-            let ok = r.is_ok();
-            log_files::report(window, cx, r);
-            if ok {
-                view.update(cx, |this, cx| this.after_delete(&[], cx));
-            }
-        });
-    }
-
-    /// Files went: look at the folders again, and leave a deleted file.
-    fn after_delete(&mut self, rels: &[String], cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
-        self.older_sel.clear();
-        self.newest_seen = None;
-        let gone = |p: &Path| rels.iter().any(|r| root.join(r) == p) || !p.exists();
-        if self.log.as_ref().is_some_and(|l| gone(&l.path)) {
-            self.log = None;
-            self.lines.clear();
-            self._follow = None;
-            self.tab_picked = false;
-            self.crash = None;
-            self.crashes.clear();
-            self.crash_roles.clear();
-            self.select(LogTab::Game, cx);
-        }
-        self.watch_crashes(root, cx);
-        cx.notify();
-    }
-
-    fn share(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.shared.insert(path.clone(), None);
-        let keep = self.keep_names;
-        let s = self.store.read(cx).settings();
-        let player = s
-            .signed_in_as
-            .clone()
-            .or_else(|| hopper::account::active(Path::new(&s.launcher_dir)).map(|a| a.name));
+        self.cards.insert(rel.clone(), None);
         cx.spawn(async move |this, cx| {
-            let p = path.clone();
-            let r = cx
-                .background_spawn(async move {
-                    let b = std::fs::read(&p)?;
-                    let text = String::from_utf8_lossy(&b).into_owned();
-                    let text = if keep {
-                        text
-                    } else {
-                        hopper::mclogs::scrub(&text, player.as_deref())
-                    };
-                    hopper::mclogs::upload(&text)
-                })
-                .await
-                .map_err(|e| format!("{e:#}"));
+            let (r, p) = (root.clone(), root.join(&rel));
+            let c = cx.background_spawn(async move { hopper::crashdetect::game_report(&r, &p) }).await;
             this.update(cx, |this, cx| {
-                this.shared.insert(path, Some(r));
-                cx.notify();
+                if this.root.as_ref() == Some(&root) {
+                    this.cards.insert(rel, Some(c));
+                    cx.notify();
+                }
             })
             .ok();
         })
         .detach();
-        cx.notify();
     }
 
-    fn share_row(&self, path: &Path, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        match self.shared.get(path) {
-            Some(None) => h_flex()
-                .gap_2()
-                .child(Spinner::new().small())
-                .child(widgets::caption("Uploading to mclo.gs", cx))
-                .into_any_element(),
-            Some(Some(Ok(url))) => {
-                let (u1, u2) = (url.clone(), url.clone());
-                h_flex()
-                    .gap_2()
-                    .child(widgets::caption("Shared:", cx))
-                    .child(
-                        Button::new("shared-link")
-                            .link()
-                            .small()
-                            .label(url.clone())
-                            .on_click(move |_, _, cx| cx.open_url(&u1)),
-                    )
-                    .child(
-                        Button::new("shared-copy")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Copy)
-                            .tooltip("Copy link")
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(u2.clone()))
-                            }),
-                    )
-                    .into_any_element()
-            }
-            Some(Some(Err(e))) => div()
-                .text_sm()
-                .text_color(theme.danger)
-                .child(e.clone())
-                .into_any_element(),
-            None => {
-                let p = path.to_path_buf();
-                h_flex()
-                    .gap_3()
-                    .child(
-                        Button::new("share-log")
-                            .outline()
-                            .small()
-                            .icon(IconName::Share2)
-                            .label("Share on mclo.gs")
-                            .tooltip("Upload this log and get a link for Discord or a bug report. The log becomes public.")
-                            .on_click(cx.listener(move |this, _, _, cx| this.share(p.clone(), cx))),
-                    )
-                    .child(
-                        Checkbox::new("keep-names")
-                            .label("Keep my user and player name")
-                            .tooltip("Off: Windows user folders become <user> and your player name becomes <player> before upload")
-                            .checked(self.keep_names)
-                            .on_change(cx.listener(|this, v: &bool, _, cx| {
-                                this.keep_names = *v;
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element()
-            }
-        }
-    }
 }
 
 impl Render for LogsView {
@@ -707,350 +448,111 @@ impl Render for LogsView {
             return div().into_any_element();
         };
         self.visible = self.filter(cx);
-        let theme = cx.theme().clone();
         let running = self.store.read(cx).running(&root).is_some();
-        // After a crash the tab opens on Crash help, with the crash on top.
-        // So does a crash Hopper caught while the game is still open (on its
-        // error screen).
+        // A newer report than the crash Hopper saved: the store reads it.
+        if let Some(Ok(l)) = &self.crashes.reports
+            && let Some(first) = l.first().map(|r| r.rel.clone())
+            && self.newest_told.as_ref() != Some(&first)
+        {
+            self.store.update(cx, |s, _| s.newest_crash_report(&root, &root.join(&first)));
+            self.newest_told = Some(first);
+        }
+        // After a crash the tab opens on the crash reports. So does a crash
+        // Hopper caught while the game is still open (on its error screen),
+        // and a game that couldn't join a server or open a world.
         let caught = self.store.update(cx, |s, _| {
             let started = s.running(&root).map_or(i64::MAX, |r| r.started as i64);
             s.crash(&root).is_some_and(|c| c.when >= started)
         });
-        // So does a game that couldn't join a server or open a world.
         let join_failed = !running && self.store.update(cx, |s, _| s.join_problem(&root).is_some());
-        if !self.tab_picked && self.tab == LogTab::Game && ((!running && self.crash.is_some()) || caught || join_failed) {
-            self.select(LogTab::Help, cx);
+        let crashed = !running && self.crashes.count() > 0 && self.store.update(cx, |s, _| s.crash(&root).is_some());
+        if !self.tab_picked && self.pane == Pane::Latest && (crashed || caught || join_failed) {
+            self.select(Pane::Crashes, cx);
         }
-        let tab_ix = match self.tab {
-            LogTab::Help => 0,
-            LogTab::Game => 1,
-            LogTab::Debug => 2,
-            LogTab::Crashes => 3,
+        let tabs = crash_list::tabs("log-tabs", self.pane, self.crashes.count(), running, cx, |this, p, cx| {
+            this.tab_picked = true;
+            this.select(p, cx);
+        });
+        let body = match self.pane {
+            Pane::Crashes => self.crashes_pane(&root, cx),
+            Pane::Older => crash_list::older_pane(self, "The game keeps its last start in latest.log. Older ones show up here.", cx),
+            _ => self.log_body(&root, window, cx),
         };
-        let tabs = TabBar::new("log-tabs")
-            .underline()
-            .small()
-            .selected_index(tab_ix)
-            .child(Tab::new().label("Crash help"))
-            .child(Tab::new().label(if running { "Game log · live" } else { "Game log" }))
-            .child(Tab::new().label("debug.log"))
-            .child(Tab::new().label(match self.crashes.len() {
-                0 => "Crash reports".to_string(),
-                n => format!("Crash reports ({n})"),
-            }))
-            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                let t = [LogTab::Help, LogTab::Game, LogTab::Debug, LogTab::Crashes][*ix];
-                this.tab_picked = true;
-                this.select(t, cx);
-            }));
-
-        let body: AnyElement = if self.tab == LogTab::Help {
-            // What Hopper read from the last crash, when it was one of
-            // Hopper's games; else the newest crash report as it is.
-            let detected = self.store.update(cx, |s, _| {
-                // "Revert X" for a mod an older version of it fixes.
-                if let Some(i) = s.instance(&root).cloned() {
-                    s.want_reverts(&i.root, &i.loader, &i.game_version, &i.addons, true);
-                }
-                s.crash(&root).cloned()
-            });
-            let card_source = detected.as_ref().map(|c| c.source.clone());
-            let card = detected.map(|c| self.crash_card(&root, &c, cx));
-            // No crash, but the game couldn't join a server or open a world.
-            let join = self
-                .store
-                .update(cx, |s, _| s.join_problem(&root).cloned())
-                .filter(|_| card.is_none())
-                .map(|p| crate::join_help::card(&self.store.clone(), &root, &p, cx));
-            let warned = self.warnings_card(&root, cx);
-            let crash = self.crash.as_ref().filter(|_| card.is_none()).and_then(|c| {
-                let name = c.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                let report = c.path.clone();
-                // The lead: the error line under the description, and the
-                // mods the report suspects.
-                let error = c
-                    .summary
-                    .iter()
-                    .find(|l| !l.starts_with("Description:") && !l.starts_with("Suspected Mod") && !l.starts_with("  "))
-                    .or(c.summary.first())
-                    .map(|l| l.trim_start_matches("java.lang.").to_string());
-                let suspects: Vec<String> = c
-                    .summary
-                    .iter()
-                    .filter_map(|l| l.strip_prefix("  "))
-                    .take(3)
-                    .map(str::to_string)
-                    .collect();
-                let share = self.share_row(&c.path, cx);
-                // When, so an old crash doesn't read as today's.
-                let secs = c.mtime.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
-                let when = secs.map(hopper::time::exact);
-                let when_full = secs.map(hopper::time::exact_full).unwrap_or_default();
-                let body = callout(theme.danger, cx)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().font_semibold().text_color(theme.danger).child("Latest crash"))
-                            .child(
-                                widgets::caption(
-                                    match when {
-                                        Some(w) => format!("{w} · {name}"),
-                                        None => name,
-                                    },
-                                    cx,
-                                )
-                                .id("latest-crash-when")
-                                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(when_full.clone()).build(w, cx)),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Button::new("show-crash")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::FileText)
-                                    .label("Open report")
-                                    .tooltip("Opens the crash report file")
-                                    .on_click(move |_, _, _| open_path(&report)),
-                            ),
-                    )
-                    .children(error.map(|e| div().text_sm().font_medium().line_clamp(2).child(e)))
-                    .when(!suspects.is_empty(), |d| {
-                        d.child(
-                            h_flex()
-                                .gap_1p5()
-                                .text_sm()
-                                .child(widgets::caption("The report suspects:", cx))
-                                .child(div().font_semibold().child(suspects.join(", "))),
-                        )
-                    })
-                    .child(
-                        v_flex()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .children(c.summary.clone()),
-                    )
-                    .child(div().pt_1().child(share));
-                let key = hopper::settings::notice_key(&root.to_string_lossy(), "latest-crash", &c.path.to_string_lossy());
-                widgets::closable_notice(body, key, widgets::Closed::Chip, "Latest crash", theme.danger, &self.store, cx)
-            });
-            // No crash: say so, rather than leave the space blank.
-            let calm = (card.is_none() && crash.is_none() && join.is_none()).then(|| {
-                widgets::empty_state(
-                    IconName::CircleCheck,
-                    "No crashes",
-                    Some("This instance hasn't crashed. If it does, what went wrong shows up here.".into()),
-                    cx,
-                )
-            });
-            // Older reports, past the one shown above.
-            let featured = card_source.or_else(|| self.crash.as_ref().map(|c| c.path.clone()));
-            // Follow-up reports fold under the report that explains them.
-            let role_of = |p: &PathBuf| self.crashes.iter().position(|c| c == p).and_then(|i| self.crash_roles.get(i));
-            let is_folded = |p: &PathBuf| matches!(role_of(p), Some(hopper::crashgroup::Role::FollowUp(Some(_))));
-            let folded = self.crashes.iter().filter(|p| Some(*p) != featured.as_ref() && is_folded(p)).count();
-            let folds_open = self.folds_open;
-            let older: Vec<PathBuf> = self
-                .crashes
-                .iter()
-                .filter(|p| Some(*p) != featured.as_ref())
-                .filter(|p| folds_open || !is_folded(p))
-                .take(8)
-                .cloned()
-                .collect();
-            let more = self.crashes.len().saturating_sub(older.len() + usize::from(featured.is_some()) + if folds_open { 0 } else { folded });
-            let order: Vec<String> = older.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-            self.older_sel.retain(&order);
-            let many = self.older_sel.many();
-            // The picked reports with their follow-ups, each once.
-            let groups: Vec<(String, Vec<String>)> = older.iter().map(|p| (p.to_string_lossy().into_owned(), self.report_group(p))).collect();
-            let picked_rels = move |sel: &Selection| {
-                let mut out: Vec<String> = Vec::new();
-                for (k, g) in &groups {
-                    if sel.contains(k) {
-                        out.extend(g.iter().filter(|r| !out.contains(r)).cloned().collect::<Vec<_>>());
-                    }
-                }
-                out
-            };
-            let older_bar = many.then(|| {
-                let pr = picked_rels.clone();
-                let del = cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    let rels = pr(&this.older_sel);
-                    this.ask_delete_as(rels, true, window, cx)
-                });
-                let bar = selection::bar(
-                    "older-crash-bulk",
-                    self.older_sel.len(),
-                    Vec::new(),
-                    Some(("Delete".into(), Box::new(del))),
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.older_sel.clear();
-                        cx.notify();
-                    }),
-                    cx,
-                );
-                selection::floating("older-crash-bulk", bar)
-            });
-            let key_order = order.clone();
-            let key_rels = picked_rels.clone();
-            let older_list = (!older.is_empty() || folded > 0).then(|| {
-                v_flex()
-                    .relative()
-                    .gap_1()
-                    .when(many, |d| d.pb(rems(4.)))
-                    .track_focus(&self.older_focus)
-                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
-                        match selection::on_key(&mut this.older_sel, e, &key_order, cx) {
-                            KeyAct::None => return,
-                            KeyAct::Delete => {
-                                let rels = key_rels(&this.older_sel);
-                                let many = this.older_sel.many();
-                                this.ask_delete_as(rels, many, window, cx)
-                            }
-                            KeyAct::Changed | KeyAct::Moved(_) => {}
-                        }
-                        cx.notify();
-                    }))
-                    .child(div().text_sm().font_semibold().child("Older crash reports"))
-                    .children(older.into_iter().enumerate().map(|(i, p)| {
-                        let key = p.to_string_lossy().into_owned();
-                        let sel = self.older_sel.contains(&key) && (many || self.older_sel.cursor() == Some(key.as_str()));
-                        let menu_pick = (many && sel).then(|| picked_rels(&self.older_sel));
-                        let click_order = order.clone();
-                        let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                        let name = if is_folded(&p) { format!("Follow-up error · {name}") } else { name };
-                        let secs = std::fs::metadata(&p)
-                            .and_then(|m| m.modified())
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map_or(0, |d| d.as_secs() as i64);
-                        let group = self.report_group(&p);
-                        let menu_many = menu_pick.is_some();
-                        let (menu_group, btn_group, menu_view) = (menu_pick.unwrap_or_else(|| group.clone()), group, cx.entity());
-                        h_flex()
-                            .id(("older-crash", i))
-                            .gap_2()
-                            .px_2()
-                            .py_1()
-                            .rounded(theme.radius)
-                            .clickable(cx)
-                            .map(|d| if sel { widgets::row_selected(d, cx) } else { d.hover(|s| widgets::row_hover(s, cx)) })
-                            .child(Icon::new(IconName::FileText).small().text_color(theme.muted_foreground))
-                            .child(div().text_sm().truncate().child(name))
-                            .child(div().flex_1())
-                            .child(
-                                widgets::caption(log_files::when(secs), cx)
-                                    .id(("older-crash-when", i))
-                                    .tooltip({
-                                        let full = hopper::time::exact_full(secs);
-                                        move |w, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(w, cx)
-                                    })
-                                    .text_xs(),
-                            )
-                            .child(
-                                Button::new(("older-crash-del", i))
-                                    .xsmall()
-                                    .ghost()
-                                    .icon(IconName::Trash)
-                                    .tooltip("Delete this report")
-                                    .on_click(cx.listener(move |this, _, window, cx| this.ask_delete(btn_group.clone(), window, cx))),
-                            )
-                            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                                window.focus(&this.older_focus, cx);
-                                // A plain click opens the report, as before;
-                                // Ctrl / Shift pick several.
-                                if this.older_sel.click(&key, e.modifiers(), &click_order) {
-                                    this.open_crash(p.clone(), cx);
-                                }
-                                cx.notify();
-                            }))
-                            .context_menu(move |m, _, _| {
-                                let (v, g) = (menu_view.clone(), menu_group.clone());
-                                let label = if menu_many {
-                                    format!("Delete {} reports…", g.len())
-                                } else if g.len() > 1 {
-                                    format!("Delete with its {} follow-ups…", g.len() - 1)
-                                } else {
-                                    "Delete report…".to_string()
-                                };
-                                m.item(PopupMenuItem::new(label).icon(IconName::Trash).on_click(move |_, window, cx| {
-                                    let g = g.clone();
-                                    v.update(cx, |this, cx| this.ask_delete_as(g, menu_many, window, cx));
-                                }))
-                            })
-                    }))
-                    .when(more > 0, |c| {
-                        c.child(widgets::caption(format!("{more} more in Crash reports"), cx).text_xs().px_2())
-                    })
-                    .when(folded > 0, |c| {
-                        c.child(
-                            h_flex()
-                                .id("older-fold")
-                                .gap_1()
-                                .px_2()
-                                .py_1()
-                                .rounded(theme.radius)
-                                .clickable(cx)
-                                .hover(|s| s.bg(theme.foreground.opacity(widgets::alpha::HOVER)))
-                                .child(Icon::new(if folds_open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(theme.muted_foreground))
-                                .child(widgets::caption(if folds_open { "Hide follow-up reports".to_string() } else { hopper::crashgroup::fold_label(folded) }, cx).text_xs())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.folds_open = !this.folds_open;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .children(older_bar)
-            });
-            div()
-                .id("logs-diagnosis")
-                .flex_1()
-                .min_h_0()
-                // Capped like a page of text: on wide windows the cards'
-                // buttons stay near their titles.
-                .child(
-                    v_flex()
-                        .max_w(rems(64.))
-                        .gap_4()
-                        .pb_2()
-                        .children(card)
-                        .children(join)
-                        .children(warned)
-                        .children(crash)
-                        .children(calm)
-                        .child(self.help.clone())
-                        .children(older_list),
-                )
-                .overflow_y_scrollbar()
-                .into_any_element()
-        } else if self.tab == LogTab::Crashes && self.crashes.is_empty() {
-            widgets::empty_state(
-                IconName::CircleCheck,
-                "No crash reports",
-                Some("The game writes one here when it crashes.".into()),
-                cx,
-            )
-            .into_any_element()
-        } else {
-            self.log_body(&root, window, cx)
-        };
-
-        v_flex()
-            .size_full()
-            .px_6()
-            .pb_4()
-            .gap_3()
-            .child(tabs)
-            .child(body)
-            .into_any_element()
+        v_flex().size_full().px_6().pb_4().gap_3().child(tabs).child(body).into_any_element()
     }
 }
 
 impl LogsView {
-    /// The last game crash, as Hopper read it: what happened, and which mods
-    /// it names, each with how sure Hopper is and why.
-    fn crash_card(&mut self, root: &Path, c: &hopper::crashdetect::Crash, cx: &mut Context<Self>) -> AnyElement {
+    /// The crash reports: the instance's notices on top, then the list with
+    /// the picked report's card beside it.
+    fn crashes_pane(&mut self, root: &Path, cx: &mut Context<Self>) -> AnyElement {
+        // What Hopper read from the last crash, when it was one of Hopper's
+        // games ("Revert X" for a mod an older version of it fixes).
+        let detected = self.store.update(cx, |s, _| {
+            if let Some(i) = s.instance(root).cloned() {
+                s.want_reverts(&i.root, &i.loader, &i.game_version, &i.addons, true);
+            }
+            s.crash(root).cloned()
+        });
+        let rel_of = |p: &Path| p.strip_prefix(root).ok().map(|r| r.to_string_lossy().replace('\\', "/"));
+        // A crash with no report of its own (Java's own crash file, or the
+        // log) has no row: its card sits above the list.
+        let unlisted = detected.clone().filter(|c| rel_of(&c.source).is_none_or(|r| self.crashes.report(&r).is_none()));
+        let mut notices: Vec<AnyElement> = Vec::new();
+        if let Some(c) = unlisted.filter(|_| self.crashes.reports.is_some()) {
+            notices.push(self.crash_card(root, &c, true, cx));
+        }
+        // No crash, but the game couldn't join a server or open a world.
+        if detected.is_none()
+            && let Some(p) = self.store.update(cx, |s, _| s.join_problem(root).cloned())
+        {
+            notices.push(crate::join_help::card(&self.store.clone(), root, &p, cx));
+        }
+        notices.extend(self.warnings_card(root, cx));
+        let theme = cx.theme().clone();
+        let card = match self.crashes.picked.clone() {
+            None => div().into_any_element(),
+            Some(rel) => {
+                let path = root.join(&rel);
+                let saved = detected.as_ref().filter(|c| c.source == path).cloned();
+                match (saved, self.cards.get(&rel).cloned()) {
+                    (Some(c), _) => self.crash_card(root, &c, true, cx),
+                    (None, Some(Some(Some(c)))) => self.crash_card(root, &c, false, cx),
+                    (None, Some(Some(None))) => {
+                        let when = self.crashes.report(&rel).map_or(0, |r| r.modified);
+                        let times = self.crashes.times(&rel);
+                        callout(theme.danger, cx)
+                            .child(crash_list::card_head("The game crashed", when, times, vec![crash_list::open_button(path)], cx))
+                            .child(widgets::caption("Hopper couldn't tell what went wrong. The report has the details.", cx))
+                            .child(div().pt_1().child(crash_list::share_row(self, &rel, cx)))
+                            .into_any_element()
+                    }
+                    _ => {
+                        let when = self.crashes.report(&rel).map_or(0, |r| r.modified);
+                        callout(theme.danger, cx)
+                            .child(crash_list::card_head("The game crashed", when, None, vec![crash_list::open_button(path)], cx))
+                            .child(h_flex().gap_2().child(Spinner::new().small()).child(widgets::caption("Reading the report", cx)))
+                            .into_any_element()
+                    }
+                }
+            }
+        };
+        let split = crash_list::split(self, card, "This instance hasn't crashed. If it does, the report and what Hopper makes of it show up here.", cx);
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap_3()
+            .when(!notices.is_empty(), |d| d.child(v_flex().max_w(rems(76.)).gap_3().children(notices)))
+            .child(self.help.clone())
+            .child(split)
+            .into_any_element()
+    }
+
+    /// A game crash, as Hopper read it: what happened, and which mods it
+    /// names, each with how sure Hopper is and why. `latest`: the crash
+    /// Hopper saw the game end with (it can be dismissed, and the game can
+    /// still be on its error screen).
+    fn crash_card(&mut self, root: &Path, c: &hopper::crashdetect::Crash, latest: bool, cx: &mut Context<Self>) -> AnyElement {
         use hopper::crashdetect::Certainty;
         let theme = cx.theme().clone();
         let store = self.store.read(cx);
@@ -1182,7 +684,7 @@ impl LogsView {
             .collect();
         let has_report = c.source.extension().is_some_and(|e| e == "txt") && c.source.starts_with(root.join("crash-reports"));
         // Caught while this game runs: it's sitting on its error screen.
-        let still_open = self.store.read(cx).running(root).is_some_and(|r| c.when >= r.started as i64);
+        let still_open = latest && self.store.read(cx).running(root).is_some_and(|r| c.when >= r.started as i64);
         let source = c.source.clone();
         let root_d = root.to_path_buf();
         // A mod failed while loading and the crash followed: tell that story
@@ -1194,66 +696,49 @@ impl LogsView {
             .map(|st| self.crash_story(root, c, st, cx));
         let listed = story.is_none();
         let first = crash_switch::settings_first(c);
-        callout(theme.danger, cx)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.danger))
-                    .child(div().font_semibold().text_color(theme.danger).child(if still_open {
-                        "The game crashed and is showing its error screen"
-                    } else {
-                        "The game crashed"
+        let rel = source.strip_prefix(root).ok().map(|r| r.to_string_lossy().replace('\\', "/"));
+        let times = rel.as_deref().and_then(|r| self.crashes.times(r));
+        let mut buttons: Vec<AnyElement> = Vec::new();
+        if still_open {
+            let root_s = root.to_path_buf();
+            buttons.push(
+                Button::new("crash-close-game")
+                    .small()
+                    .danger()
+                    .icon(IconName::X)
+                    .label("Close game")
+                    .tooltip("It can't go further than its error screen")
+                    .on_click(cx.listener(move |this, _, _, cx| this.store.read(cx).stop(&root_s)))
+                    .into_any_element(),
+            );
+        }
+        if has_report {
+            buttons.push(crash_list::open_button(source.clone()));
+        } else if source.is_file() {
+            let p = source.clone();
+            buttons.push(Button::new("crash-open-file").small().outline().label("Open file").on_click(move |_, _, _| open_path(&p)).into_any_element());
+        }
+        if latest {
+            buttons.push(
+                Button::new("crash-dismiss")
+                    .small()
+                    .ghost()
+                    .icon(IconName::X)
+                    .tooltip("Dismiss")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.store.update(cx, |s, cx| {
+                            s.dismiss_crash(&root_d);
+                            cx.notify();
+                        });
                     }))
-                    .child(widgets::caption(hopper::time::relative_secs(c.when), cx))
-                    .child(div().flex_1())
-                    .when(still_open, |r| {
-                        let root_s = root.to_path_buf();
-                        r.child(
-                            Button::new("crash-close-game")
-                                .small()
-                                .danger()
-                                .icon(IconName::X)
-                                .label("Close game")
-                                .tooltip("It can't go further than its error screen")
-                                .on_click(cx.listener(move |this, _, _, cx| this.store.read(cx).stop(&root_s))),
-                        )
-                    })
-                    .when(has_report, |r| {
-                        let p = source.clone();
-                        r.child(
-                            Button::new("crash-open-report")
-                                .small()
-                                .outline()
-                                .icon(IconName::FileText)
-                                .label("Open report")
-                                .tooltip("Opens the crash report file")
-                                .on_click(move |_, _, _| open_path(&p)),
-                        )
-                    })
-                    .when(!has_report && source.is_file(), |r| {
-                        let p = source.clone();
-                        r.child(
-                            Button::new("crash-open-file")
-                                .small()
-                                .outline()
-                                .label("Open file")
-                                .on_click(move |_, _, _| open_path(&p)),
-                        )
-                    })
-                    .child(
-                        Button::new("crash-dismiss")
-                            .small()
-                            .ghost()
-                            .icon(IconName::X)
-                            .tooltip("Dismiss")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.store.update(cx, |s, cx| {
-                                    s.dismiss_crash(&root_d);
-                                    cx.notify();
-                                });
-                            })),
-                    ),
-            )
+                    .into_any_element(),
+            );
+        }
+        let title = if still_open { "The game crashed and is showing its error screen" } else { "The game crashed" };
+        let share = rel.filter(|_| source.is_file()).map(|r| crash_list::share_row(self, &r, cx));
+        let follow = crash_list::follow_up_note(c, cx);
+        callout(theme.danger, cx)
+            .child(crash_list::card_head(title, c.when, times, buttons, cx))
             .when(listed && !c.headline.is_empty(), |d| {
                 d.child(div().text_sm().font_medium().line_clamp(2).child(c.headline.clone()))
             })
@@ -1276,7 +761,8 @@ impl LogsView {
             .when(listed && first, |d| d.children(self.config_switches(root, c, None, cx)).children(self.or_actions(root, c, cx)))
             .when(listed && !first, |d| d.children(self.crash_actions(root, c, cx)))
             .when(listed && !first, |d| d.children(self.config_switches(root, c, None, cx)))
-            .when(source.is_file(), |d| d.child(div().pt_1().child(self.share_row(&source, cx))))
+            .children(follow)
+            .when_some(share, |d, s| d.child(div().pt_1().child(s)))
             .into_any_element()
     }
 
@@ -1532,34 +1018,14 @@ impl LogsView {
         let (path, loading, total) = (log.path.clone(), log.loading, log.lines.len());
         let n = self.line_count();
         let filtered = self.visible.is_some();
-        let share = self.share_row(&path, cx);
-        // The folder of the file shown: logs/, or crash-reports/ on that tab.
+        let rel = path.strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+        let share = crash_list::share_row(self, &rel, cx);
+        // The folder of the file shown.
         let shown_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| root.join("logs"));
-        // Older reports: a picker in the Crash reports tab.
-        let crash_pick = (self.tab == LogTab::Crashes && self.crashes.len() > 1).then(|| {
-            let items = self
-                .crashes
-                .iter()
-                .map(|p| (p.file_name().unwrap_or_default().to_string_lossy().into_owned(), *p == path))
-                .collect();
-            let (list, view) = (self.crashes.clone(), cx.entity());
-            widgets::picker(
-                "crash-pick",
-                path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
-                items,
-                window.rem_size(),
-                std::rc::Rc::new(move |ix: usize, _: &mut Window, cx: &mut App| {
-                    if let Some(p) = list.get(ix).cloned() {
-                        view.update(cx, |this, cx| this.open_log(p, false, cx));
-                    }
-                }),
-            )
-        });
         let toolbar = h_flex()
             .flex_wrap()
             .items_center()
             .gap_2()
-            .children(crash_pick)
             .child(div().w(rems(16.)).child(widgets::search_input(&self.query).small().cleanable(true)))
             .child(
                 Checkbox::new("errors-only")
@@ -1577,7 +1043,6 @@ impl LogsView {
             .when(loading, |r| r.child(Spinner::new().xsmall()))
             .child(div().flex_1())
             .child(share)
-            .child(self.delete_buttons(&path, cx))
             .child(
                 Button::new("logs-folder")
                     .small()

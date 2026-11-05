@@ -135,20 +135,34 @@ async fn crashes(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
             })
             .collect::<Vec<_>>();
         // Follow-up reports (their error only came while the loader undid
-        // the registries after the start's real one) point at the report
-        // that explains them, so the list can fold them under it.
+        // the registries after the start's real one) and earlier times of
+        // the same failure fold under one row: `lead` names that row, and
+        // the row has `group` (what goes with it on delete), `times` and
+        // `fold` ("3 earlier times · 4 follow-up reports").
         let mut list = list;
         let extra: Vec<(usize, Value)> = {
-            use hopper_core::crashgroup::{Item, Role, follow_up_title, group};
+            use hopper_core::crashgroup::{Item, Role, fold_text, follow_up_title, group, times};
             let items: Vec<Item> = list
                 .iter()
                 .map(|v| Item { modified: v["modified"].as_i64().unwrap_or(0), follow_up: v["follow"].as_bool().unwrap_or(false), verdict: v["verdict"].as_str() })
                 .collect();
-            group(&items)
-                .into_iter()
+            let roles = group(&items);
+            roles
+                .iter()
                 .enumerate()
                 .filter_map(|(i, r)| match r {
-                    Role::Lead(n) => Some((i, json!({ "follow_ups": n.len() }))),
+                    Role::Lead(f) => {
+                        let first = f.iter().filter(|&&j| matches!(roles[j], Role::Repeat(_))).filter_map(|&j| list[j]["modified"].as_i64()).min();
+                        Some((
+                            i,
+                            json!({
+                                "group": f.iter().map(|&j| list[j]["path"].clone()).collect::<Vec<_>>(),
+                                "times": times(&roles, i),
+                                "first": first,
+                                "fold": fold_text(&roles, i),
+                            }),
+                        ))
+                    }
                     Role::FollowUp(lead) => Some((
                         i,
                         json!({
@@ -157,6 +171,7 @@ async fn crashes(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
                             "title": follow_up_title(lead.and_then(|j| list[j]["verdict"].as_str())),
                         }),
                     )),
+                    Role::Repeat(lead) => Some((i, json!({ "repeat": true, "lead": list[*lead]["path"].clone() }))),
                     Role::Plain => None,
                 })
                 .collect()
@@ -194,7 +209,8 @@ async fn crash_read(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
             }
         }
         let lingered = c.as_ref().and_then(|c| c.lingered_note());
-        Ok(json!({ "crash": c, "report": rel, "names": names, "lingered": lingered }))
+        let follow_note = c.as_ref().and_then(hopper_core::crashdetect::follow_up_note);
+        Ok(json!({ "crash": c, "report": rel, "names": names, "lingered": lingered, "follow_note": follow_note }))
     })
     .await
     .map_err(bad)?
@@ -212,6 +228,9 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, P
 #[derive(Deserialize)]
 struct PathQ {
     path: String,
+    /// Sharing: leave user folders and names in (IPs and secrets always go).
+    #[serde(default)]
+    keep_names: bool,
 }
 
 async fn preview(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Query(q): Query<PathQ>) -> ApiResult<Json<Value>> {
@@ -219,7 +238,7 @@ async fn preview(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let v = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
         let text = logshare::read(&e.root, &q.path)?;
-        let (clean, hidden) = logshare::redact(&text, Some(&e.root));
+        let (clean, hidden) = logshare::redact_as(&text, Some(&e.root), q.keep_names);
         let cut = clean.len() > PREVIEW;
         let shown = if cut { clean[clean.ceil_char_boundary(clean.len() - PREVIEW)..].to_string() } else { clean };
         Ok(json!({ "hidden": hidden, "size": text.len(), "text": shown, "cut": cut }))
@@ -237,7 +256,7 @@ async fn share(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, 
     let path = q.path.clone();
     let (url, hidden) = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, logshare::Hidden)> {
         let text = logshare::read(&e.root, &q.path)?;
-        let (clean, hidden) = logshare::redact(&text, Some(&e.root));
+        let (clean, hidden) = logshare::redact_as(&text, Some(&e.root), q.keep_names);
         Ok((hopper_core::mclogs::upload(&clean)?, hidden))
     })
     .await

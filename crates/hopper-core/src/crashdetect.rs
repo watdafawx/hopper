@@ -199,6 +199,29 @@ pub struct Crash {
     /// (the wrong Java, a graphics driver, a world entry whose mod is gone).
     #[serde(default)]
     pub advice: String,
+    /// The older log of the report's start the findings were read from
+    /// ("logs/2026-11-05-7.log.gz"), when it wasn't the current latest.log.
+    #[serde(default)]
+    pub log_file: Option<String>,
+    /// The report's own error only followed from an earlier one (it came
+    /// while the loader undid the registries): it isn't the cause.
+    #[serde(default)]
+    pub follow_up: bool,
+}
+
+/// The quiet line under a crash card whose report only has a follow-up
+/// error, saying where the cause shown came from. `None` when the report
+/// isn't one, or nothing better than it was found (its advice says so).
+pub fn follow_up_note(c: &Crash) -> Option<String> {
+    if !c.follow_up || c.suspects.is_empty() {
+        return None;
+    }
+    let what = if c.server { "server" } else { "game" };
+    let first = format!("This report only has a follow-up error, from when the loader undid the {what}'s registries.");
+    Some(match &c.log_file {
+        Some(f) => format!("{first} The cause above comes from the log of that start ({f})."),
+        None => format!("{first} The cause above comes from the log of that start."),
+    })
 }
 
 impl Crash {
@@ -974,7 +997,7 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         _ => String::new(),
     };
     let (switches, switched_off) = switches(root, &text, &log, &suspects, false);
-    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice })
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice, ..Default::default() })
 }
 
 /// A saved crash read again from its report with today's rules (which mods
@@ -1031,16 +1054,28 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
 /// write (the game ran from another launcher, or Hopper was closed).
 /// The game log counts only when it is from the same run.
 pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&str) -> Vec<String>) -> Option<Crash> {
+    from_report_as(root, report, mods, &ids, false)
+}
+
+/// [`from_report`] for a game or (`server`) a dedicated server. The log is
+/// the one of the report's own start, found by time: latest.log, or an
+/// older one the next start packed away. A report whose error only followed
+/// from an earlier one names the cause only there.
+fn from_report_as(root: &Path, report: &Path, mods: &[String], ids: &impl Fn(&str) -> Vec<String>, server: bool) -> Option<Crash> {
     let written = modified_secs(report)?;
     let text = tail(report, 2 << 20);
     if headline(&text).is_empty() {
         return None;
     }
-    let log_path = root.join("logs").join("latest.log");
-    let same_run = modified_secs(&log_path).is_some_and(|t| (t - written).abs() < 300);
-    let (log, loading) =
-        if same_run { (before_crash(&tail(&log_path, 2 << 20)).to_string(), loading_lines(&log_path)) } else { (String::new(), String::new()) };
-    let (suspects, stopped) = analyze(root, &text, &log, &loading, written, mods, &ids);
+    let run = crate::runlog::for_report(root, written);
+    let (log, loading) = match &run {
+        Some(r) => {
+            let end = r.text.floor_char_boundary(r.text.len().saturating_sub(2 << 20));
+            (before_crash(&r.text[end..]).to_string(), loading_lines_text(&r.text))
+        }
+        None => (String::new(), String::new()),
+    };
+    let (suspects, stopped) = analyze(root, &text, &log, &loading, written, mods, ids);
     let kind = if !suspects.is_empty() {
         CrashKind::Mods
     } else if text.contains("OutOfMemoryError") {
@@ -1048,9 +1083,25 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
     } else {
         CrashKind::Unknown
     };
-    let (switches, switched_off) = switches(root, &text, &log, &suspects, false);
-    let advice = crate::crashsigs::advice(&text, &log, "", false);
-    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice })
+    let (switches, switched_off) = switches(root, &text, &log, &suspects, server);
+    let advice = crate::crashsigs::advice(&text, &log, "", server);
+    let log_file = run.filter(|r| !r.is_latest() && !log.is_empty()).map(|r| r.rel);
+    let follow_up = text.contains(UNDO_FRAME);
+    Some(Crash {
+        when: written,
+        source: report.to_path_buf(),
+        headline: headline(&text),
+        kind,
+        suspects,
+        stopped,
+        switches,
+        switched_off,
+        server,
+        advice,
+        log_file,
+        follow_up,
+        ..Default::default()
+    })
 }
 
 /// What crash help makes of the newest crash in an instance or server
@@ -1243,7 +1294,7 @@ pub fn server(root: &Path) -> Option<Crash> {
     let (switches, switched_off) = switches(root, &text, log, &suspects, true);
     let advice = crate::crashsigs::advice(&text, log, &native.as_deref().map(|n| tail(n, 64 << 10)).unwrap_or_default(), true);
     let source = report.or(native).unwrap_or_default();
-    Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true, lingered, advice })
+    Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true, lingered, advice, ..Default::default() })
 }
 
 /// Any crash report of a dedicated server, read like [`server`] reads the
@@ -1262,7 +1313,23 @@ pub fn server_report(root: &Path, report: &Path) -> Option<Crash> {
     report_only(root, report)
 }
 
-/// A server's report read from the report alone (no log).
+/// Any crash report of a game (an instance), read with the log of its own
+/// start when that is still there. For the lists of reports; the crash
+/// Hopper saw the game end with has its own reading ([`detect`]).
+pub fn game_report(root: &Path, report: &Path) -> Option<Crash> {
+    let dir = root.join("mods");
+    let mods: Vec<String> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+        .collect();
+    from_report_as(root, report, &mods, &|f: &str| crate::deps::own_ids(&dir.join(f)).0, false)
+}
+
+/// A server's report read from the report and its start's log, when that
+/// log is still there.
 fn report_only(root: &Path, report: &Path) -> Option<Crash> {
     let dir = root.join("mods");
     let mods: Vec<String> = fs::read_dir(&dir)
@@ -1272,12 +1339,10 @@ fn report_only(root: &Path, report: &Path) -> Option<Crash> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
         .collect();
-    let mut c = from_report(root, report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0)?;
-    c.server = true;
+    let mut c = from_report_as(root, report, &mods, &|f: &str| crate::deps::own_ids(&dir.join(f)).0, true)?;
     for s in &mut c.suspects {
         s.why = s.why.replace("while the game was loading", "while the server was loading").replace("the game ran its", "the server ran its");
     }
-    c.advice = crate::crashsigs::advice(&tail(report, 2 << 20), "", "", true);
     Some(c)
 }
 
@@ -1872,9 +1937,17 @@ const LOADING_MARKS: [&str; 6] = [
 /// the rest of the scan reads, so the whole file (up to 64 MB) is read
 /// line by line and only these are kept.
 pub fn loading_lines(p: &Path) -> String {
-    use std::io::{BufRead, Read};
+    use std::io::Read;
     let Ok(f) = fs::File::open(p) else { return String::new() };
-    let mut r = std::io::BufReader::new(f.take(64 << 20));
+    loading_lines_in(std::io::BufReader::new(f.take(64 << 20)))
+}
+
+/// [`loading_lines`] of a log already read.
+pub fn loading_lines_text(text: &str) -> String {
+    loading_lines_in(text.as_bytes())
+}
+
+fn loading_lines_in(mut r: impl std::io::BufRead) -> String {
     let (mut out, mut buf, mut keep) = (String::new(), Vec::new(), 0usize);
     while r.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
         let l = String::from_utf8_lossy(&buf);
