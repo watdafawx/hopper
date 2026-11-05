@@ -2608,8 +2608,16 @@ pub(crate) fn mode_tabs(id: &'static str, clean: bool) -> TabBar {
         .child(Tab::new().label("Keep my changes"))
 }
 
-/// What the choice does, in one line under it.
-pub(crate) fn mode_note(clean: bool) -> &'static str {
+/// What the choice does, in one line under it: for an instance, or a
+/// server updated from server packs.
+pub(crate) fn mode_note_for(clean: bool, server: bool) -> &'static str {
+    if server {
+        return if clean {
+            "Like the CurseForge app: every pack mod and pack file becomes the server pack's. The server's own mods, worlds and server.properties stay. Undo from History."
+        } else {
+            "Update and Roll back show a preview first, to pick which of the server's edits stay."
+        };
+    }
     if clean {
         "Like the CurseForge app: every pack mod and pack file becomes the new version's. Mods you added, worlds and options.txt stay. Undo from History."
     } else {
@@ -2777,6 +2785,19 @@ fn show(
 /// Previews updating `server` (which runs `inst`) from the pack's server
 /// pack, then updates it.
 pub fn open_server(store: Entity<Store>, server: ServerInfo, inst: Instance, window: &mut Window, cx: &mut App) {
+    open_server_to(store, server, inst, None, window, cx)
+}
+
+/// [`open_server`] for one pack version picked in Versions and changelogs
+/// (`None`: the newest, or the instance's).
+pub fn open_server_to(
+    store: Entity<Store>,
+    server: ServerInfo,
+    inst: Instance,
+    file: Option<cf::File>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     // A comparison for this server still running: show that one rather
     // than downloading again. A finished one may be stale: compare anew.
     let running = server_reviews(|m| {
@@ -2799,7 +2820,7 @@ pub fn open_server(store: Entity<Store>, server: ServerInfo, inst: Instance, win
         server,
         inst,
         latest,
-        targets: Vec::new(),
+        targets: file.into_iter().collect(),
         pick: 0,
         splan: None,
         via: None,
