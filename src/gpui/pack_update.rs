@@ -2678,7 +2678,10 @@ pub fn switch(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut 
         return;
     };
     let reinstall = inst.pack.as_ref().is_some_and(|p| hopper::packdiff::is_reinstall(p, &file));
-    if !store.read(cx).settings().clean_update(&root) || reinstall || inst.pack.is_none() {
+    // A Minecraft change converts worlds, which History can't undo: the
+    // dialog asks about backing them up first.
+    let mc = hopper::packdiff::mc_change(&inst, &file).is_some();
+    if !store.read(cx).settings().clean_update(&root) || reinstall || mc || inst.pack.is_none() {
         return open(store, root, file, window, cx);
     }
     let job = store
@@ -2729,16 +2732,7 @@ fn show(
         .as_ref()
         .map(|p| if p.file_name.is_empty() { p.version.clone() } else { p.file_name.clone() })
         .unwrap_or_default();
-    // Minecraft versions look like 1.21.1 or 26.3; the file's list also
-    // names loaders.
-    let to_mc = file
-        .game_versions
-        .iter()
-        .find(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()))
-        .cloned();
-    let mc_change = to_mc
-        .filter(|to| !inst.game_version.is_empty() && *to != inst.game_version)
-        .map(|to| (inst.game_version.clone(), to));
+    let mc_change = hopper::packdiff::mc_change(&inst, &file);
     // Opt-in only: no automatic backups.
     let backup_worlds = false;
     let reinstall = inst.pack.as_ref().is_some_and(|p| hopper::packdiff::is_reinstall(p, &file));
@@ -2865,3 +2859,4 @@ fn show_server(store: Entity<Store>, t: ServerTarget, job: Option<u64>, window: 
             .on_ok(move |_, _, cx| UpdatePreview::apply_server(&v2, cx))
     });
 }
+

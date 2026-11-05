@@ -204,6 +204,29 @@ pub(crate) fn note_instead(path: &Path, dest: &Path, c: &Cand) -> anyhow::Result
     Ok(())
 }
 
+/// Notes in History that the mod at `path` (one CurseForge or Modrinth
+/// knows, turned off) is about to be turned on, without moving it: Undo
+/// puts its entry back as it was, off. Nothing for a jar with no known
+/// source.
+pub fn note_before_switch(root: &Path, path: &Path) -> anyhow::Result<()> {
+    let Some(c) = ids_for(root, path) else { return Ok(()) };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let dir = root.join(crate::sync::BACKUP_DIR).join(stamp.to_string());
+    fs::create_dir_all(&dir)?;
+    let dest = dir.join(&c.file_name);
+    let r = c.to_ref(sha1_of(path)?, fs::metadata(path)?.len());
+    fs::write(ref_path(&dest), serde_json::to_vec_pretty(&r)?)?;
+    // Undo reads "off" from the place it goes back to.
+    if let Some(a) = &c.addon {
+        let off = if a.enabled { "" } else { ".disabled" };
+        record(&dir, &dest, &format!("{}/{}{off}", a.folder(), a.file_name));
+    }
+    crate::retention::schedule(root);
+    Ok(())
+}
+
 /// Backups younger than this keep their copies, so an Undo right after an
 /// action never has to download anything.
 const SLIM_AFTER_SECS: i64 = 10 * 60;
@@ -573,6 +596,9 @@ fn walk(
         let rel = p.strip_prefix(base).unwrap_or(&p).to_string_lossy().replace('\\', "/");
         let restore_to = match origins.get(&name).and_then(|v| v.as_str()) {
             Some(o) => o.to_string(),
+            // A pack update keeps its copies under "pack-update/", with the
+            // instance's folders below that.
+            None if rel.starts_with("pack-update/") => rel["pack-update/".len()..].to_string(),
             // Kept under its folder ("mods/x.jar") by drag and drop and sync.
             None if rel.contains('/') => rel.clone(),
             None => guess(&p, &name),
@@ -1056,6 +1082,20 @@ mod tests {
         let back = restore(&root, &list(&root)[0].files[0]).unwrap();
         assert_eq!(back, root.join("mods/jei (restored).jar"));
         assert_eq!(fs::read_to_string(root.join("mods/jei.jar")).unwrap(), "newer");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pack_update_copies_go_back_to_their_folder() {
+        let root = std::env::temp_dir().join(format!("hopper-backups-pu-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join(crate::sync::BACKUP_DIR).join("1000").join("pack-update").join("config");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.json"), "mine").unwrap();
+        let sets = list(&root);
+        assert_eq!(sets[0].files[0].restore_to, "config/a.json");
+        let back = restore(&root, &sets[0].files[0]).unwrap();
+        assert_eq!(back, root.join("config/a.json"));
         fs::remove_dir_all(&root).unwrap();
     }
 }

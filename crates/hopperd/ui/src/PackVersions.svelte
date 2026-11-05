@@ -140,4 +140,7 @@
   .chip.xs { font-size: 10.5px; height: 18px; padding: 0 6px 2px; }
   .notes { padding: 4px 4px 4px 22px; overflow-wrap: anywhere; }
   .icon { padding: 3px 5px; }
+  .seg { display: inline-flex; background: var(--base); border-radius: var(--radius); padding: 2px; gap: 2px; flex: none; }
+  .seg button { padding: 3px 10px; font-size: 12.5px; color: var(--subtle); border-radius: var(--radius-sm); }
+  .seg button.on { background: var(--raise); color: var(--text); box-shadow: 0 0 0 1px var(--line2); }
 </style>

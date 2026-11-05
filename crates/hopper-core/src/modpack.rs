@@ -2440,6 +2440,13 @@ pub fn update_any(
     if !overrides.enable.is_empty() {
         for pid in &overrides.enable {
             if let Some(i) = inst.addons.iter().position(|a| a.project_id == *pid && !a.enabled) {
+                // History notes it was off, so Undo turns it off again.
+                let a = &inst.addons[i];
+                let jar = inst.root.join(a.folder()).join(&a.file_name);
+                let jar = if jar.exists() { jar } else { crate::sync::disabled_path(&jar) };
+                if let Err(e) = crate::backups::note_before_switch(&inst.root, &jar) {
+                    log::warn!("noting {} before turning it on: {e:#}", a.file_name);
+                }
                 crate::install::set_enabled(inst, i, true)?;
             }
         }

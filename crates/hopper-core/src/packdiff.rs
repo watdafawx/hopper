@@ -690,6 +690,17 @@ pub fn plan_files_by(
     (changes, same)
 }
 
+/// (Minecraft now, Minecraft after) when moving `inst` to `file` changes
+/// it. Minecraft versions look like 1.21.1 or 26.3; the file's list also
+/// names loaders.
+pub fn mc_change(inst: &Instance, file: &cf::File) -> Option<(String, String)> {
+    file.game_versions
+        .iter()
+        .find(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .filter(|to| !inst.game_version.is_empty() && **to != inst.game_version)
+        .map(|to| (inst.game_version.clone(), to.clone()))
+}
+
 /// Whether "updating" to `file` is reinstalling the version the instance has.
 pub fn is_reinstall(pack: &crate::instances::PackRef, file: &cf::File) -> bool {
     pack.file_id != 0 && pack.file_id == file.id
@@ -1742,6 +1753,16 @@ mod tests {
         assert!(!o.skip.contains("a") && !o.skip.contains("d"));
         assert_eq!(o.backup, vec!["d".to_string()]);
         assert_eq!(o.remove, vec!["e".to_string()]);
+    }
+
+    #[test]
+    fn a_minecraft_change_is_seen_from_the_files_versions() {
+        let inst = Instance { game_version: "26.1.2".into(), ..Default::default() };
+        let file = |v: &[&str]| cf::File { game_versions: v.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        assert_eq!(mc_change(&inst, &file(&["Fabric", "26.2"])), Some(("26.1.2".into(), "26.2".into())));
+        assert_eq!(mc_change(&inst, &file(&["Fabric", "26.1.2"])), None);
+        assert_eq!(mc_change(&inst, &file(&["Fabric"])), None);
+        assert_eq!(mc_change(&Instance::default(), &file(&["26.2"])), None);
     }
 
     #[test]
