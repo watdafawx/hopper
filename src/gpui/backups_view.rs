@@ -773,7 +773,9 @@ impl Render for BackupsView {
             )
             .child(widgets::caption(intro, cx))
             .children(banner)
-            .child(div().id("backups-list").flex_1().min_h_0().overflow_y_scrollbar().child(body))
+            // Empty, it shows its empty state at its own height (a flex_1 scroll
+            // area has none without a set height).
+            .child(if filled { div().id("backups-list").flex_1().min_h_0().overflow_y_scrollbar().child(body).into_any_element() } else { body })
             .child(self.usage_line(cx));
         h_flex().items_start().gap_4().child(main).children(peek)
     }

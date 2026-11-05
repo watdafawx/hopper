@@ -417,7 +417,10 @@ pub fn is_text(name: &str) -> bool {
 /// Judges each file against the instance now.
 fn judge(root: &Path, inst: Option<&crate::instances::Instance>, f: &mut Saved) {
     let here = root.join(&f.restore_to).exists();
-    let same = f.src.as_ref().and_then(|r| inst?.addons.iter().find(|a| a.project_id == r.project_id));
+    let same = f.src.as_ref().and_then(|r| {
+        let addons = &inst?.addons;
+        addons.iter().find(|a| a.project_id == r.project_id).or_else(|| addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(&r.file_name)))
+    });
     f.now = same.map(|a| a.file_name.clone());
     f.change = match (f.src.as_ref(), same) {
         (Some(r), Some(a)) => {
@@ -520,7 +523,7 @@ fn walk(
     for e in fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
-        if name == ORIGINS || name == IDS {
+        if name == ORIGINS || name == IDS || name == CHECKED {
             continue;
         }
         if p.is_dir() {
@@ -579,7 +582,7 @@ pub fn restore(root: &Path, f: &Saved) -> anyhow::Result<PathBuf> {
 
 /// Removes a History folder that holds nothing but its own notes.
 pub(crate) fn drop_if_empty(dir: &Path) {
-    if fs::read_dir(dir).is_ok_and(|mut d| d.all(|e| e.is_ok_and(|e| e.file_name() == ORIGINS || e.file_name() == IDS))) {
+    if fs::read_dir(dir).is_ok_and(|mut d| d.all(|e| e.is_ok_and(|e| e.file_name() == ORIGINS || e.file_name() == IDS || e.file_name() == CHECKED))) {
         let _ = fs::remove_dir_all(dir);
     }
 }
@@ -589,14 +592,25 @@ fn is_jar(name: &str) -> bool {
     l.ends_with(".jar") || l.ends_with(".jar.disabled")
 }
 
-/// Every jar copy History holds (not notes), with its size.
+/// Beside a History folder's files: jar copies [`free_space`] looked up and
+/// found no download for, so the offer doesn't come back for them.
+const CHECKED: &str = ".checked.json";
+
+fn checked(dir: &Path) -> std::collections::BTreeSet<String> {
+    fs::read(dir.join(CHECKED)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Every jar copy History holds (not notes) that hasn't been looked up
+/// yet, with its size.
 fn jar_copies(root: &Path) -> Vec<(PathBuf, u64)> {
     fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) {
+        let done = checked(dir);
         for e in fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
             if p.is_dir() {
                 walk(&p, out);
-            } else if is_jar(&e.file_name().to_string_lossy()) {
+            } else if is_jar(&name) && !done.contains(&name) {
                 out.push((p, e.metadata().map_or(0, |m| m.len())));
             }
         }
@@ -623,32 +637,11 @@ type Identify = fn(&[(PathBuf, String, u32)]) -> std::collections::HashMap<PathB
 
 fn identify_online(jars: &[(PathBuf, String, u32)]) -> std::collections::HashMap<PathBuf, Ref> {
     let mut out = std::collections::HashMap::new();
-    // Modrinth by sha1.
-    let hashes: Vec<String> = jars.iter().map(|(_, h, _)| h.clone()).collect();
-    for chunk in hashes.chunks(500) {
-        let Ok(found) = crate::modrinth::versions_by_sha1(chunk) else { continue };
-        for (p, sha1, _) in jars {
-            let Some(v) = found.get(sha1) else { continue };
-            let Some(vf) = v.files.iter().find(|f| f.hashes.get("sha1") == Some(sha1)) else { continue };
-            let f = crate::modrinth::version_to_file(v);
-            out.insert(p.clone(), Ref {
-                project_id: crate::modrinth::num_id(&v.project_id),
-                file_id: f.id,
-                file_name: vf.filename.clone(),
-                sha1: sha1.clone(),
-                size: vf.size,
-                mr_version: v.id.clone(),
-                mr_project: v.project_id.clone(),
-                name: String::new(),
-                addon: None,
-            });
-        }
-    }
-    // CurseForge by fingerprint, for the rest.
-    let rest: Vec<&(PathBuf, String, u32)> = jars.iter().filter(|(p, _, _)| !out.contains_key(p)).collect();
-    let fps: Vec<u32> = rest.iter().map(|(_, _, fp)| *fp).collect();
+    // CurseForge first, by fingerprint: most instances track their mods
+    // there, so Undo puts the same entry back.
+    let fps: Vec<u32> = jars.iter().map(|(_, _, fp)| *fp).collect();
     if let Ok(matches) = crate::cf::match_fingerprints(&fps) {
-        for (p, sha1, fp) in rest {
+        for (p, sha1, fp) in jars {
             let Some(m) = matches.iter().find(|m| m.file.file_fingerprint == *fp as u64) else { continue };
             // Only files CurseForge lets launchers download, byte for byte.
             if m.file.sha1().is_none_or(|h| h != *sha1) || crate::cf::download_url(&m.file).is_err() {
@@ -662,6 +655,28 @@ fn identify_online(jars: &[(PathBuf, String, u32)]) -> std::collections::HashMap
                 size: m.file.file_length,
                 mr_version: String::new(),
                 mr_project: String::new(),
+                name: String::new(),
+                addon: None,
+            });
+        }
+    }
+    // Modrinth by sha1, for the rest.
+    let rest: Vec<&(PathBuf, String, u32)> = jars.iter().filter(|(p, _, _)| !out.contains_key(p)).collect();
+    let hashes: Vec<String> = rest.iter().map(|(_, h, _)| h.clone()).collect();
+    for chunk in hashes.chunks(500) {
+        let Ok(found) = crate::modrinth::versions_by_sha1(chunk) else { continue };
+        for (p, sha1, _) in &rest {
+            let Some(v) = found.get(sha1) else { continue };
+            let Some(vf) = v.files.iter().find(|f| f.hashes.get("sha1") == Some(sha1)) else { continue };
+            let f = crate::modrinth::version_to_file(v);
+            out.insert(p.clone(), Ref {
+                project_id: crate::modrinth::num_id(&v.project_id),
+                file_id: f.id,
+                file_name: vf.filename.clone(),
+                sha1: sha1.clone(),
+                size: vf.size,
+                mr_version: v.id.clone(),
+                mr_project: v.project_id.clone(),
                 name: String::new(),
                 addon: None,
             });
@@ -701,8 +716,18 @@ pub fn free_space(root: &Path) -> (u64, u64) {
         })
         .collect();
     let found = identify(&jars);
+    let mut kept = 0;
     for (p, _, _) in &jars {
-        let Some(r) = found.get(p) else { continue };
+        let Some(r) = found.get(p) else {
+            // Nothing hands it out: it stays, and isn't offered again.
+            if let (Some(dir), Some(name)) = (p.parent(), p.file_name()) {
+                let mut done = checked(dir);
+                done.insert(name.to_string_lossy().into_owned());
+                let _ = fs::write(dir.join(CHECKED), serde_json::to_vec(&done).unwrap_or_default());
+            }
+            kept += fs::metadata(p).map_or(0, |m| m.len());
+            continue;
+        };
         let note = ref_path(p);
         if fs::write(&note, serde_json::to_vec_pretty(r).unwrap_or_default()).is_ok() {
             if fs::remove_file(p).is_ok() {
@@ -712,7 +737,7 @@ pub fn free_space(root: &Path) -> (u64, u64) {
             }
         }
     }
-    (freed, copies_size(root))
+    (freed, kept)
 }
 
 /// Sends a whole backup to the Recycle Bin (or deletes it on a network
@@ -929,6 +954,9 @@ mod tests {
         let (freed, kept) = free_space(&root);
         assert_eq!((freed, kept), (6, 9));
         assert!(is_ref(&old.join("c.jar")) && old.join("mine.jar").is_file());
+        // Looked up once: the copy left isn't offered again.
+        assert_eq!(copies_size(&root), 0);
+        assert_eq!(list(&root)[0].files.len(), 2);
         fs::remove_dir_all(&root).unwrap();
     }
     #[test]
