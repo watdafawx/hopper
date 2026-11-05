@@ -723,11 +723,17 @@ use crate::widgets::DIALOG_TOP;
 impl Render for BackupsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let n_snaps = self.snaps.as_ref().map_or(0, Vec::len);
-        let snaps_mode = self.mode == Mode::Snapshots;
+        // A server on this PC opens the same History on its folder; its
+        // own Backups tab stands in for snapshots.
+        let server = self.store.read(cx).server(&self.root).is_some();
+        let snaps_mode = self.mode == Mode::Snapshots && !server;
         let filled = if snaps_mode { n_snaps > 0 } else { !self.sets.is_empty() };
         let intro = match (&self.busy, snaps_mode) {
             (Some(b), _) => b.clone(),
             (None, true) => "Mods, configs and hopper.json at one moment, made by you or on a schedule, to compare with now and put back. They stay until you delete them.".to_string(),
+            (None, false) if server => {
+                "What changed in this server's files, newest first. Undo puts a mod back by downloading it again; configs come back from the text Hopper kept.".into()
+            }
             (None, false) => {
                 "What changed in this instance, newest first. Undo puts a mod back by downloading it again; configs come back from the text Hopper kept.".into()
             }
@@ -747,10 +753,14 @@ impl Render for BackupsView {
                     .gap_2()
                     .child(widgets::underline_tabs(
                         "backups-mode",
-                        vec![
-                            ("History".into(), self.sets_loaded.then_some(self.sets.len())),
-                            ("Snapshots".into(), self.snaps.as_ref().map(|_| n_snaps)),
-                        ],
+                        if server {
+                            vec![("History".into(), self.sets_loaded.then_some(self.sets.len()))]
+                        } else {
+                            vec![
+                                ("History".into(), self.sets_loaded.then_some(self.sets.len())),
+                                ("Snapshots".into(), self.snaps.as_ref().map(|_| n_snaps)),
+                            ]
+                        },
                         if snaps_mode { 1 } else { 0 },
                         cx.listener(|this, ix: &usize, _, cx| {
                             this.mode = if *ix == 0 { Mode::History } else { Mode::Snapshots };

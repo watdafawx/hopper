@@ -789,6 +789,8 @@ pub struct ServersView {
     sync: Entity<SyncPanel>,
     /// The Logs & crashes tab.
     logs: Entity<crate::server_logs::ServerLogsView>,
+    /// The Configs tab: the instance's config editor, on the server's files.
+    configs: Entity<crate::configs_tab::ConfigsTab>,
     /// The one-line crash notice above every tab but Logs & crashes.
     strip: Entity<crate::server_crash::CrashStrip>,
     /// The tabs only a Hopper Server's servers have.
@@ -831,14 +833,15 @@ const TAB_FILES: usize = 6;
 const TAB_PLAYERS: usize = 7;
 const TAB_SCHEDULE: usize = 8;
 const TAB_LOGS: usize = 9;
+const TAB_CONFIGS: usize = 10;
 
 /// A server's tabs, in order, as codes: a Hopper Server's servers have the
 /// panel's tabs (in the panel's order), others the ones Hopper reads itself.
 fn tabs_for(remote: bool) -> &'static [usize] {
     if remote {
-        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_FILES, TAB_MODS, TAB_PLAYERS, TAB_BACKUPS, TAB_SCHEDULE, TAB_SETTINGS, TAB_SYNC]
+        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_FILES, TAB_MODS, TAB_CONFIGS, TAB_PLAYERS, TAB_BACKUPS, TAB_SCHEDULE, TAB_SETTINGS, TAB_SYNC]
     } else {
-        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_BACKUPS, TAB_SETTINGS, TAB_MODS, TAB_SYNC]
+        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_BACKUPS, TAB_SETTINGS, TAB_MODS, TAB_CONFIGS, TAB_SYNC]
     }
 }
 
@@ -853,6 +856,8 @@ fn tab_icon(code: usize) -> IconName {
         TAB_PLAYERS => IconName::Users,
         TAB_SCHEDULE => IconName::Clock,
         TAB_LOGS => IconName::Stethoscope,
+        // The same icon as an instance's Configs tab.
+        TAB_CONFIGS => IconName::FileCog,
         _ => IconName::ArrowLeftRight,
     }
 }
@@ -868,6 +873,7 @@ fn tab_name(code: usize) -> &'static str {
         TAB_PLAYERS => "Players",
         TAB_SCHEDULE => "Schedule",
         TAB_LOGS => "Logs & crashes",
+        TAB_CONFIGS => "Configs",
         _ => "Sync",
     }
 }
@@ -936,6 +942,7 @@ impl ServersView {
         ];
         let pack_desc = cx.new(|cx| widgets::DescView::new(store.clone(), window, cx));
         let logs = cx.new(|cx| crate::server_logs::ServerLogsView::new(store.clone(), window, cx));
+        let configs = cx.new(|cx| crate::configs_tab::ConfigsTab::new(store.clone(), window, cx));
         let p_files = cx.new(|cx| panel_tabs::files::FilesTab::new(store.clone(), window, cx));
         let p_mods = cx.new(|cx| panel_tabs::mods::ModsTab::new(store.clone(), window, cx));
         let p_players = cx.new(|cx| panel_tabs::players::PlayersTab::new(store.clone(), window, cx));
@@ -955,6 +962,7 @@ impl ServersView {
             settings_view,
             sync,
             logs,
+            configs,
             strip,
             p_files,
             p_mods,
@@ -1257,8 +1265,21 @@ impl ServersView {
     }
 
     /// The header's History button for the picked server, made once per
-    /// server; None without a panel to ask. It opens Mods on History.
+    /// server. A Hopper Server's opens Mods on History; a server on this
+    /// PC opens the same History dialog as an instance, on its folder
+    /// (config saves and mod changes there keep their old copies).
     fn history_button(&self, cx: &mut Context<Self>) -> Option<Entity<crate::history_button::HistoryButton>> {
+        let root = self.picked.clone()?;
+        if self.store.read(cx).server(&root).is_some_and(|s| s.remote.is_none()) {
+            let mut slot = self.history_btn.borrow_mut();
+            if let Some(b) = slot.as_ref().filter(|b| b.read(cx).is_for(&root)) {
+                return Some(b.clone());
+            }
+            let store = self.store.clone();
+            let b = cx.new(|cx| crate::history_button::HistoryButton::new(store, root, cx));
+            *slot = Some(b.clone());
+            return Some(b);
+        }
         let Some(Ok(t)) = self.target.clone() else { return None };
         let mut slot = self.history_btn.borrow_mut();
         if let Some(b) = slot.as_ref().filter(|b| b.read(cx).is_panel(&t)) {
@@ -1769,6 +1790,29 @@ impl ServersView {
             })
             .when(self.tab == TAB_CONSOLE, |c| {
                 c.child(self.control.update(cx, |ctl, cx| ctl.console_view(window, cx)))
+            })
+            .when(self.tab == TAB_CONFIGS, |c| {
+                // Read from the folder here, or through the panel of the
+                // Hopper Server the server runs on.
+                let source = match (&s.remote, &self.target) {
+                    (None, _) => Some(crate::config_view::Source::Local),
+                    (Some(_), Some(Ok(t))) => Some(crate::config_view::Source::Panel(t.clone())),
+                    _ => None,
+                };
+                let running = pstats.as_ref().is_some_and(|p| p.running || p.starting) || self.store.read(cx).status(&s.root).is_some_and(|st| st.ms().is_some());
+                let body: AnyElement = match source {
+                    Some(source) => {
+                        let root = s.root.clone();
+                        self.configs.update(cx, |v, cx| v.show_server(root, crate::config_view::ServerSide { source, running }, cx));
+                        self.configs.clone().into_any_element()
+                    }
+                    None => match &self.target {
+                        Some(Err(e)) => widgets::empty_state(IconName::TriangleAlert, "Can't reach this panel", Some(e.clone().into()), cx).into_any_element(),
+                        _ => widgets::skeleton_rows(6, rems(2.5), cx).into_any_element(),
+                    },
+                };
+                // The editor runs to the page's edges, as on an instance.
+                c.child(div().flex_1().min_h_0().mx(rems(-1.5)).mb(rems(-1.25)).child(body))
             })
             .when(self.tab == TAB_LOGS, |c| {
                 let root = s.root.clone();

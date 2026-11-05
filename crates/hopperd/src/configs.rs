@@ -50,34 +50,9 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 /// `.disabled`, as the Mods list keys its rows.
 pub(crate) fn mod_refs(root: &std::path::Path) -> (Vec<ModRef>, HashMap<String, String>) {
     let Ok(dir) = crate::files::resolve(root, "mods") else { return Default::default() };
-    // Read only: the Mods tab makes and heals hopper.json, not this page.
-    let addons: HashMap<String, (String, String)> = if root.join(hopper_core::instances::HOPPER_FILE).is_file() {
-        hopper_core::instances::load(root)
-            .map(|i| i.addons.into_iter().map(|a| (a.file_name.trim_end_matches(".disabled").to_lowercase(), (a.name, a.icon))).collect())
-            .unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
-    let mut seen = std::collections::HashSet::new();
-    let mut jars = Vec::new();
-    let mut icons = HashMap::new();
-    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let lower = name.to_lowercase();
-        if !(lower.ends_with(".jar") || lower.ends_with(".jar.disabled")) || !e.file_type().is_ok_and(|t| t.is_file()) {
-            continue;
-        }
-        let key = name.trim_end_matches(".disabled").to_string();
-        if !seen.insert(key.to_lowercase()) {
-            continue;
-        }
-        let (shown, icon) = addons.get(&key.to_lowercase()).cloned().unwrap_or_default();
-        if !icon.is_empty() {
-            icons.insert(key.clone(), icon);
-        }
-        jars.push((key, e.path(), shown));
-    }
-    (configowner::of_jars(jars), icons)
+    let (refs, known) = configowner::folder_mods(root, &dir);
+    let icons = known.into_iter().filter(|(_, (_, i))| !i.is_empty()).map(|(k, (_, i))| (k, i)).collect();
+    (refs, icons)
 }
 
 /// The config files Hopper reads as settings, each in a folder that stays

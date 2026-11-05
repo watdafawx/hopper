@@ -47,6 +47,24 @@ pub enum Host {
     Tab,
 }
 
+/// Where the files are: on this PC (an instance, or a server on This PC),
+/// or on a Hopper Server, read and saved through its panel (the panel's
+/// Configs routes, which check every path and back up before writing).
+#[derive(Clone)]
+pub enum Source {
+    Local,
+    Panel(crate::panel_tabs::Target),
+}
+
+/// The view is a server's (its Configs tab): saves say when the server
+/// picks them up, and the files may be on a Hopper Server.
+#[derive(Clone)]
+pub struct ServerSide {
+    pub source: Source,
+    /// The server is running right now.
+    pub running: bool,
+}
+
 pub enum ConfigViewEvent {
     /// The panel's close button.
     Close,
@@ -71,6 +89,20 @@ struct FileState {
 }
 
 impl FileState {
+    /// A file whose text was read already (here, or by a server's panel),
+    /// or why it couldn't be.
+    fn of_text(rel: &str, text: Result<String, String>) -> FileState {
+        let (text, problem) = match text {
+            Ok(t) => (t, None),
+            Err(e) => (String::new(), Some(e)),
+        };
+        let sections = match Format::of(rel) {
+            Some(f) if problem.is_none() => configedit::parse_as(f, &text),
+            _ => Err(String::new()),
+        };
+        FileState { base: text.clone(), edits: Vec::new(), text, sections, typed: false, problem }
+    }
+
     fn load(root: &Path, rel: &str) -> FileState {
         let path = root.join(rel);
         let mut problem = None;
@@ -224,6 +256,12 @@ pub struct ConfigView {
     hit_counts: HashMap<String, usize>,
     hit_counts_for: Option<(String, bool, bool, usize)>,
     scrolled: bool,
+    /// A server's Configs tab: where its files are and whether it runs.
+    pub server: Option<ServerSide>,
+    /// A Hopper Server's files as its panel last sent them, by path.
+    remote: HashMap<String, Result<String, String>>,
+    /// A save to the panel is on its way.
+    saving: bool,
     _mark: Option<RangeDecorationCollection>,
     _subs: Vec<Subscription>,
 }
@@ -302,6 +340,9 @@ impl ConfigView {
             hit_counts: HashMap::new(),
             hit_counts_for: None,
             scrolled: false,
+            server: None,
+            remote: HashMap::new(),
+            saving: false,
             _mark: None,
             _subs: subs,
         };
@@ -314,6 +355,51 @@ impl ConfigView {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// A server's view: `remote` holds the files' text when they're on a
+    /// Hopper Server (read before the view opens; the first file shows
+    /// from it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_server(
+        store: Entity<Store>,
+        root: PathBuf,
+        server: ServerSide,
+        remote: HashMap<String, Result<String, String>>,
+        title: String,
+        icon: Option<PathBuf>,
+        files: Vec<String>,
+        rel: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // `new` opens the first file: the text has to be there first, so
+        // the view starts with no files and is given them after.
+        let mut v = Self::new(store, root, Host::Tab, title, icon, Vec::new(), None, None, window, cx);
+        v.server = Some(server);
+        v.remote = remote;
+        let first = rel.filter(|r| files.contains(r)).or_else(|| files.iter().find(|f| Format::of(f).is_some()).or(files.first()).cloned()).unwrap_or_default();
+        v.files = files;
+        if !first.is_empty() {
+            v.load(first, window, cx);
+        }
+        v
+    }
+
+    fn on_panel(&self) -> Option<&crate::panel_tabs::Target> {
+        match &self.server {
+            Some(ServerSide { source: Source::Panel(t), .. }) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// A file as read now: from disk, or from what the panel sent.
+    fn read_state(&self, rel: &str) -> FileState {
+        if self.on_panel().is_some() {
+            let text = self.remote.get(rel).cloned().unwrap_or_else(|| Err("The panel didn't send this file.".into()));
+            return FileState::of_text(rel, text);
+        }
+        FileState::load(&self.root, rel)
     }
 
     /// Puts `q` in this mod's own search: a mod opened from the tab's
@@ -344,7 +430,7 @@ impl ConfigView {
         if !q.is_empty() {
             for f in self.files.clone() {
                 if Format::of(&f).is_some() && !self.states.contains_key(&f) {
-                    let st = FileState::load(&self.root, &f);
+                    let st = self.read_state(&f);
                     self.states.insert(f, st);
                 }
             }
@@ -385,7 +471,8 @@ impl ConfigView {
     fn load(&mut self, rel: String, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_edit(window, cx);
         if !self.states.contains_key(&rel) {
-            self.states.insert(rel.clone(), FileState::load(&self.root, &rel));
+            let st = self.read_state(&rel);
+            self.states.insert(rel.clone(), st);
         }
         self.rel = rel;
         self.editing = None;
@@ -582,7 +669,8 @@ impl ConfigView {
         }
         let rels: Vec<String> = self.states.keys().cloned().collect();
         for rel in rels {
-            self.states.insert(rel.clone(), FileState::load(&self.root, &rel));
+            let st = self.read_state(&rel);
+            self.states.insert(rel.clone(), st);
         }
         let rel = self.rel.clone();
         if !rel.is_empty() {
@@ -609,7 +697,15 @@ impl ConfigView {
                 st.text = t;
             }
         }
-        let running = self.store.read(cx).running(&self.root).is_some();
+        if self.saving {
+            return;
+        }
+        if let Some(t) = self.on_panel().cloned() {
+            self.save_panel(t, window, cx);
+            return;
+        }
+        // The game of this instance; a server's own state says for a server.
+        let running = self.server.is_none() && self.store.read(cx).running(&self.root).is_some();
         let (mut saved, mut failed, mut reapplied) = (Vec::new(), Vec::new(), false);
         let mut moved_watch: Vec<(String, Vec<Edit>)> = Vec::new();
         let rels: Vec<String> = self.states.iter().filter(|(_, s)| s.dirty()).map(|(r, _)| r.clone()).collect();
@@ -648,7 +744,8 @@ impl ConfigView {
             }
         }
         for rel in &saved {
-            self.states.insert(rel.clone(), FileState::load(&self.root, rel));
+            let st = self.read_state(rel);
+            self.states.insert(rel.clone(), st);
             self.errors.retain(|k, _| !k.starts_with(&format!("{rel}\u{1}")));
         }
         self.review = false;
@@ -666,13 +763,14 @@ impl ConfigView {
             invalidate(&root, cx);
             let names: Vec<String> = saved.iter().map(|r| file_name(r)).collect();
             let what = if names.len() == 1 { names[0].clone() } else { format!("{} files", names.len()) };
-            let mut msg = format!("Saved {what}. Undo it from ⋯ › History.");
+            let mut msg = if self.server.is_some() { format!("Saved {what}. Undo it from the server's History.") } else { format!("Saved {what}. Undo it from ⋯ › History.") };
             if reapplied {
                 msg.push_str(" The game had changed the file meanwhile: your changes went onto its newer copy.");
             }
             if running {
                 msg.push_str(" Most mods pick this up live; some need a restart.");
             }
+            msg.push_str(self.server_note());
             window.push_notification(Notification::success(msg), cx);
         }
         for f in failed {
@@ -684,6 +782,112 @@ impl ConfigView {
         }
         cx.emit(ConfigViewEvent::Changed);
         cx.notify();
+    }
+
+    /// What a server's save adds: a running server reads it on restart.
+    fn server_note(&self) -> &'static str {
+        match &self.server {
+            Some(s) if s.running => " The server is running: this applies when it restarts.",
+            _ => "",
+        }
+    }
+
+    /// Saves every file with edits on a Hopper Server, through its panel:
+    /// each file's settings checked there together, the old copy to the
+    /// server's History first.
+    fn save_panel(&mut self, t: crate::panel_tabs::Target, window: &mut Window, cx: &mut Context<Self>) {
+        let mut jobs: Vec<(String, String, Vec<Edit>, Option<String>)> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+        for (rel, st) in self.states.iter().filter(|(_, s)| s.dirty()) {
+            if st.typed {
+                if let Some(f) = Format::of(rel)
+                    && let Err(e) = configedit::parse_as(f, &st.text)
+                {
+                    failed.push(format!("{}: the text has a mistake. {e}", file_name(rel)));
+                    continue;
+                }
+                // The panel only ever sends a password or token hidden:
+                // saving that text would write the dots over it.
+                if st.base.contains(MASK) {
+                    failed.push(format!("{} holds a password or token, so it can't be saved as text from here. Change its settings in the Settings view instead.", file_name(rel)));
+                    continue;
+                }
+                jobs.push((rel.clone(), st.base.clone(), Vec::new(), Some(st.text.clone())));
+            } else {
+                let edits: Vec<Edit> = st.edits.iter().filter(|e| !self.review_off.contains(&key_of(rel, &e.path, &e.key))).cloned().collect();
+                if !edits.is_empty() {
+                    jobs.push((rel.clone(), st.base.clone(), edits, None));
+                }
+            }
+        }
+        for f in failed {
+            window.push_notification(Notification::error(format!("Not saved: {f}")), cx);
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        self.saving = true;
+        cx.notify();
+        let id = t.id().to_string();
+        crate::panel_tabs::call_in(
+            window,
+            cx,
+            &t,
+            move |c| {
+                Ok(jobs
+                    .into_iter()
+                    .map(|(rel, base, edits, typed)| {
+                        let r = match typed {
+                            Some(text) => save_text_on_panel(c, &id, &rel, &base, &text).map(|()| (text, false)),
+                            None => c.configs_batch(&id, &rel, &base, &edits).map(|s| (s.text, s.reapplied)),
+                        };
+                        (rel, r.map_err(|e| format!("{e:#}")))
+                    })
+                    .collect::<Vec<_>>())
+            },
+            |this, r, window, cx| {
+                this.saving = false;
+                let results = match r {
+                    Ok(r) => r,
+                    Err(e) => {
+                        window.push_notification(Notification::error(format!("Not saved: {e}")), cx);
+                        return;
+                    }
+                };
+                let (mut saved, mut reapplied) = (Vec::new(), false);
+                for (rel, r) in results {
+                    match r {
+                        Ok((text, re)) => {
+                            reapplied |= re;
+                            this.remote.insert(rel.clone(), Ok(text));
+                            let st = this.read_state(&rel);
+                            this.states.insert(rel.clone(), st);
+                            this.errors.retain(|k, _| !k.starts_with(&format!("{rel}\u{1}")));
+                            saved.push(rel);
+                        }
+                        Err(e) => window.push_notification(Notification::error(format!("Not saved: {}: {e}", file_name(&rel))), cx),
+                    }
+                }
+                this.review = false;
+                this.review_off.clear();
+                if !saved.is_empty() {
+                    invalidate(&this.root, cx);
+                    let names: Vec<String> = saved.iter().map(|r| file_name(r)).collect();
+                    let what = if names.len() == 1 { names[0].clone() } else { format!("{} files", names.len()) };
+                    let mut msg = format!("Saved {what}. Undo it from the server's History.");
+                    if reapplied {
+                        msg.push_str(" The file had changed on the server meanwhile: your changes went onto its newer copy.");
+                    }
+                    msg.push_str(this.server_note());
+                    window.push_notification(Notification::success(msg), cx);
+                }
+                let rel = this.rel.clone();
+                if !rel.is_empty() {
+                    this.load(rel, window, cx);
+                }
+                cx.emit(ConfigViewEvent::Changed);
+            },
+        );
     }
 
     fn visible_files(&self) -> Vec<String> {
@@ -1234,6 +1438,7 @@ impl Render for ConfigView {
         let readable = self.cur().is_some_and(|s| s.sections.is_ok());
         let has_format = Format::of(&self.rel).is_some();
         let problem = self.cur().and_then(|s| s.problem.clone());
+        let on_panel = self.on_panel().is_some();
         let files = self.visible_files();
 
         // The files: chips with who reads each. The names and labels come from
@@ -1252,7 +1457,7 @@ impl Render for ConfigView {
                 let tip = if world_copies.is_empty() {
                     "The game reads a world's serverconfig copy when there is one, else this file.".to_string()
                 } else {
-                    format!("{} has its own copy, which wins in that world.", world_copies.iter().map(|r| r.split('/').nth(1).unwrap_or("A world")).collect::<Vec<_>>().join(", "))
+                    format!("{} has its own copy, which wins in that world.", world_copies.iter().map(|r| if r.starts_with("saves/") { r.split('/').nth(1).unwrap_or("A world") } else { r.split('/').next().unwrap_or("The world") }).collect::<Vec<_>>().join(", "))
                 };
                 (l.to_string(), SharedString::from(tip))
             });
@@ -1314,7 +1519,8 @@ impl Render for ConfigView {
                 .gap_2()
                 .p_4()
                 .child(widgets::caption(p, cx).whitespace_normal())
-                .child(Button::new("cfg-open-outside").outline().small().icon(IconName::ExternalLink).label("Open in my editor").on_click(move |_, _, _| crate::store::open_path(&path)))
+                // A Hopper Server's file isn't on this PC: Files opens it there.
+                .when(!on_panel, |d| d.child(Button::new("cfg-open-outside").outline().small().icon(IconName::ExternalLink).label("Open in my editor").on_click(move |_, _, _| crate::store::open_path(&path))))
                 .into_any_element()
         } else if self.review {
             div().id("cfg-review").size_full().overflow_y_scroll().child(self.review_list(cx)).into_any_element()
@@ -1397,10 +1603,12 @@ impl Render for ConfigView {
                                 .child(widgets::thumb(self.icon.as_deref(), rems(1.75), cx))
                                 .child(div().text_base().font_semibold().truncate().child(self.title.clone()))
                                 .child(div().flex_1())
-                                .child(Button::new("cfg-outside").ghost().small().icon(IconName::ExternalLink).label("Open in my editor").on_click({
-                                    let p = path.clone();
-                                    move |_, _, _| crate::store::open_path(&p)
-                                })),
+                                .when(!on_panel, |d| {
+                                    d.child(Button::new("cfg-outside").ghost().small().icon(IconName::ExternalLink).label("Open in my editor").on_click({
+                                        let p = path.clone();
+                                        move |_, _, _| crate::store::open_path(&p)
+                                    }))
+                                }),
                         )
                     })
                     .when(!files.is_empty(), |d| d.child(chips))
@@ -1427,6 +1635,25 @@ fn search_panel(search: &Entity<InputState>, show: bool) -> Option<gpui_kit::com
     show.then(|| widgets::search_input(search).small().cleanable(true))
 }
 
+/// What a Hopper Server's panel sends in place of a password or token.
+const MASK: &str = "••••••";
+
+/// Writes a whole file on a Hopper Server, as typed in the text view, when
+/// the panel's copy is still the one it was typed on.
+fn save_text_on_panel(c: &hopper::hopperd::Client, id: &str, rel: &str, base: &str, text: &str) -> anyhow::Result<()> {
+    let now = c.configs_parse(id, &[rel.to_string()])?.remove(rel).unwrap_or_else(|| Err("The panel didn't send it.".into()));
+    match now {
+        Ok(t) if t == base => {}
+        Ok(_) => anyhow::bail!("it changed on the server since you opened it (the server may have written it). Copy your text, then Discard to see the new file."),
+        Err(e) => anyhow::bail!("{e}"),
+    }
+    let v = c.put(&hopper::hopperd::Client::fs_path(id, "/text"), serde_json::json!({ "path": rel, "content": text, "force": true }))?;
+    if let Some(e) = v["error"].as_str() {
+        anyhow::bail!("{e}");
+    }
+    Ok(())
+}
+
 // ---- the instance's config index -----------------------------------------------------
 
 /// An instance's settings files, which mod each belongs to and how many of
@@ -1438,6 +1665,12 @@ pub struct InstIndex {
     pub changed: HashMap<String, usize>,
     /// Files by owner (the jar's file name).
     pub by_owner: BTreeMap<String, Vec<String>>,
+    /// A server's mods' names and icons (an image the store fetches), by
+    /// key, for the ones its hopper.json knows. An instance's come from
+    /// the instance itself.
+    pub names: HashMap<String, (String, String)>,
+    /// A server's (names come from `names`, not an instance).
+    pub server: bool,
 }
 
 impl InstIndex {
@@ -1471,13 +1704,68 @@ impl InstIndex {
                 by_owner.entry(o.clone()).or_default().push(f.rel.clone());
             }
         }
-        InstIndex { files, changed, by_owner }
+        InstIndex { files, changed, by_owner, names: HashMap::new(), server: false }
+    }
+
+    /// A server on this PC: its jars are the ones in its `mods/` folder.
+    fn of_server_folder(root: &Path) -> InstIndex {
+        let (refs, known) = hopper::configowner::folder_mods(root, &root.join("mods"));
+        // The name hopper.json gives, else the jar's own; the icon only Hopper knows.
+        let names = refs.iter().map(|m| (m.key.clone(), (m.name.clone(), known.get(&m.key).map(|(_, i)| i.clone()).unwrap_or_default()))).collect();
+        let owners = hopper::configowner::Owners::new(refs);
+        let mut idx = Self::of_owners(root, owners);
+        idx.names = names;
+        idx.server = true;
+        idx
+    }
+
+    fn of_owners(root: &Path, owners: hopper::configowner::Owners) -> InstIndex {
+        let files = hopper::configindex::index(root, &owners);
+        let rels: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
+        let mut changed = HashMap::new();
+        for (rel, s) in hopper::configindex::summaries(root, &rels) {
+            changed.insert(rel, s.changed);
+        }
+        let warm_root = root.to_path_buf();
+        std::thread::spawn(move || hopper::configindex::warm(&warm_root, &rels));
+        let mut by_owner: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for f in &files {
+            if let Some(o) = &f.owner {
+                by_owner.entry(o.clone()).or_default().push(f.rel.clone());
+            }
+        }
+        InstIndex { files, changed, by_owner, names: HashMap::new(), server: false }
+    }
+
+    /// A server on a Hopper Server, from its panel's Configs index (the
+    /// same rule picks each file's mod there).
+    pub fn of_panel(v: &serde_json::Value) -> InstIndex {
+        let st = |v: &serde_json::Value, k: &str| v[k].as_str().unwrap_or("").to_string();
+        let files: Vec<CfgFile> = v["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|f| {
+                let rel = st(f, "rel");
+                CfgFile { format: Format::of(&rel), side: hopper::configindex::side_of(&rel), size: f["size"].as_u64().unwrap_or(0), owner: f["owner"].as_str().map(str::to_string), rel }
+            })
+            .collect();
+        let changed = v["files"].as_array().into_iter().flatten().map(|f| (st(f, "rel"), f["changed"].as_u64().unwrap_or(0) as usize)).collect();
+        let mut by_owner: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for f in &files {
+            if let Some(o) = &f.owner {
+                by_owner.entry(o.clone()).or_default().push(f.rel.clone());
+            }
+        }
+        let names = v["mods"].as_array().into_iter().flatten().map(|m| (st(m, "key"), (st(m, "name"), st(m, "icon")))).collect();
+        InstIndex { files, changed, by_owner, names, server: true }
     }
 }
 
 enum Slot {
     Loading,
     Ready(Arc<InstIndex>),
+    Failed(String),
 }
 
 /// Every instance's index, loaded when first asked for.
@@ -1504,7 +1792,7 @@ impl ConfigIndexes {
         match self.map.get(root) {
             Some(Slot::Ready(i)) => return Some(i.clone()),
             Some(Slot::Loading) => return None,
-            None => {}
+            Some(Slot::Failed(_)) | None => {}
         }
         let inst = store.read(cx).instance(root)?.clone();
         let mods: Vec<(String, PathBuf, String)> = inst
@@ -1513,18 +1801,48 @@ impl ConfigIndexes {
             .filter(|a| a.class_id == hopper::cf::CLASS_MODS || a.file_name.to_lowercase().ends_with(".jar"))
             .map(|a| (a.file_name.clone(), inst.addon_path(a), a.name.clone()))
             .collect();
+        self.start(root, cx, move |r| Ok(InstIndex::build(r, mods)));
+        None
+    }
+
+    /// A server's index (see [`Source`]), starting it if it isn't there.
+    pub fn get_server(&mut self, root: &Path, source: &Source, cx: &mut Context<Self>) -> Option<Arc<InstIndex>> {
+        match self.map.get(root) {
+            Some(Slot::Ready(i)) => return Some(i.clone()),
+            Some(Slot::Loading) => return None,
+            Some(Slot::Failed(_)) | None => {}
+        }
+        match source.clone() {
+            Source::Local => self.start(root, cx, |r| Ok(InstIndex::of_server_folder(r))),
+            Source::Panel(t) => self.start(root, cx, move |_| {
+                let v = t.client.configs_index(t.id()).map_err(|e| format!("{e:#}"))?;
+                Ok(InstIndex::of_panel(&v))
+            }),
+        }
+        None
+    }
+
+    /// Why the index at `root` couldn't be read (a panel out of reach).
+    pub fn failed(&self, root: &Path) -> Option<String> {
+        match self.map.get(root) {
+            Some(Slot::Failed(e)) => Some(e.clone()),
+            _ => None,
+        }
+    }
+
+    /// Builds the index at `root` off the UI thread.
+    fn start(&mut self, root: &Path, cx: &mut Context<Self>, build: impl FnOnce(&Path) -> Result<InstIndex, String> + Send + 'static) {
         self.map.insert(root.to_path_buf(), Slot::Loading);
         let r = root.to_path_buf();
         cx.spawn(async move |this, cx| {
             let r2 = r.clone();
-            let idx = cx.background_spawn(async move { InstIndex::build(&r2, mods) }).await;
+            let idx = cx.background_spawn(async move { build(&r2) }).await;
             let _ = this.update(cx, |this, cx| {
-                this.map.insert(r, Slot::Ready(Arc::new(idx)));
+                this.map.insert(r, idx.map_or_else(Slot::Failed, |i| Slot::Ready(Arc::new(i))));
                 cx.notify();
             });
         })
         .detach();
-        None
     }
 
     /// The index right now, without starting one.
@@ -1537,7 +1855,7 @@ impl ConfigIndexes {
 
     fn drop_root(&mut self, root: &Path, cx: &mut Context<Self>) {
         // A save keeps the old index until the new one is ready.
-        if matches!(self.map.get(root), Some(Slot::Ready(_))) {
+        if matches!(self.map.get(root), Some(Slot::Ready(_) | Slot::Failed(_))) {
             self.map.remove(root);
             cx.notify();
         }
