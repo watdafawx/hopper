@@ -1,8 +1,13 @@
 //! The instance's Configs tab and the side panel a mod's config button
 //! opens. Both show the shared config view; the tab adds the list of mods
 //! with config files ("Changed by you", "All mods", "Not matched to a
-//! mod"), a search across every setting, filters, and (for an instance
-//! linked to a server) a compare with the server's copies.
+//! mod"), filters, and (for an instance linked to a server) a compare with
+//! the server's copies.
+//!
+//! Search works like the game's own config menus: the box on top finds
+//! mods by name, and the open mod has its own box for its settings.
+//! Settings of other mods that mention the words wait in a folded group
+//! under the mods, for "which mod changes X" questions.
 
 use crate::config_view::{self, ConfigView, ConfigViewEvent, Host, InstIndex};
 use crate::store::Store;
@@ -10,7 +15,7 @@ use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::configindex::Side;
@@ -108,8 +113,11 @@ pub struct ConfigsTab {
     desc: bool,
     filter: Filter,
     side: Option<Side>,
-    /// Search hits per entry of the list, and the files they're in.
+    /// Settings of every mod that match the top search, per entry of the
+    /// list, and the files they're in (the folded "other mods" group).
     hits: Option<HashMap<Pick, (usize, Vec<String>)>>,
+    /// That group is unfolded.
+    others_open: bool,
     search_serial: u64,
     picked: Option<Pick>,
     /// Open views by entry, so edits survive picking another mod.
@@ -132,6 +140,10 @@ pub struct ConfigsTab {
 enum Item {
     Head(SharedString),
     Row(Pick),
+    /// The folded group's title: how many mods, how many settings.
+    Others(usize, usize),
+    /// A mod in that group.
+    Hit(Pick),
 }
 
 /// Height of every line of the mod list, so only the visible ones are built.
@@ -141,21 +153,24 @@ struct ListCache {
     /// What it was built from: the index it read (by address) and `ver`.
     key: (usize, u64),
     items: Rc<Vec<Item>>,
-    total: usize,
     changed_n: usize,
     unsaved_n: usize,
 }
 
 impl ConfigsTab {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings in every mod"));
+        let search = cx.new(|cx| InputState::new(window, cx).clean_on_escape().placeholder("Search mods"));
         let idx = config_view::indexes(cx);
         let subs = vec![
-            cx.subscribe(&search, |this, s, e: &InputEvent, cx| {
-                if let InputEvent::Change = e {
+            cx.subscribe_in(&search, window, |this, s, e: &InputEvent, window, cx| match e {
+                InputEvent::Change => {
                     this.query = s.read(cx).value().to_string();
+                    this.ver += 1;
                     this.run_search(cx);
                 }
+                // Enter opens the first mod that matches, ready to search its settings.
+                InputEvent::PressEnter { .. } => this.open_first(window, cx),
+                _ => {}
             }),
             cx.observe(&idx, |this, _, cx| this.refresh_index(cx)),
         ];
@@ -169,6 +184,7 @@ impl ConfigsTab {
             filter: Filter::All,
             side: None,
             hits: None,
+            others_open: false,
             search_serial: 0,
             picked: None,
             views: HashMap::new(),
@@ -222,10 +238,6 @@ impl ConfigsTab {
         self.search_serial += 1;
         let serial = self.search_serial;
         let q = self.query.trim().to_string();
-        for v in self.views.values() {
-            let q = q.clone();
-            v.update(cx, |v, cx| v.set_query(&q, cx));
-        }
         if q.is_empty() {
             self.hits = None;
             self.ver += 1;
@@ -303,13 +315,12 @@ impl ConfigsTab {
             }
             Pick::File(r) => (r.rsplit('/').next().unwrap_or(r).to_string(), None),
         };
-        // A search hit opens the file it's in.
-        let first = self.hits.as_ref().and_then(|h| h.get(p)).and_then(|(_, f)| f.first().cloned());
-        let (q, desc, changed, side) = (self.query.trim().to_string(), self.desc, self.filter == Filter::Changed, self.side);
+        // Opened from the "other mods" group: on the file the hits are in.
+        let first = self.hits.as_ref().and_then(|h| h.get(p)).and_then(|(_, f)| f.first().cloned()).filter(|_| self.is_other(p, cx));
+        let (desc, changed, side) = (self.desc, self.filter == Filter::Changed, self.side);
         let all_files: Vec<String> = self.index.as_ref().map(|i| i.files.iter().map(|f| f.rel.clone()).collect()).unwrap_or_default();
         let view = cx.new(|cx| {
             let mut v = ConfigView::new(self.store.clone(), root, Host::Tab, title, icon, files, first, None, window, cx);
-            v.set_query(&q, cx);
             v.desc = desc;
             v.changed_only = changed;
             v.side = side;
@@ -325,6 +336,63 @@ impl ConfigsTab {
         self._subs.push(sub);
         self.views.insert(p.clone(), view.clone());
         Some(view)
+    }
+
+    /// The top search's words, lower-case.
+    fn words(&self) -> Vec<String> {
+        widgets::search_words(&self.query)
+    }
+
+    /// Whether `p`'s name (or its jar's file name) has every word of the top search.
+    fn name_hit(&self, p: &Pick, names: &HashMap<&str, &str>) -> bool {
+        let words = self.words();
+        let hay = match p {
+            Pick::Mod(k) => format!("{} {k}", names.get(k.as_str()).copied().unwrap_or("")).to_lowercase(),
+            Pick::File(r) => r.to_lowercase(),
+        };
+        words.iter().all(|w| hay.contains(w.as_str()))
+    }
+
+    /// `p` is listed only because its settings mention the search.
+    fn is_other(&self, p: &Pick, cx: &App) -> bool {
+        if self.words().is_empty() {
+            return false;
+        }
+        let names = self.names(cx);
+        !self.name_hit(p, &names)
+    }
+
+    /// Every mod's name by its jar's file name.
+    fn names<'a>(&self, cx: &'a App) -> HashMap<&'a str, &'a str> {
+        let root = self.root.as_deref().unwrap_or(Path::new(""));
+        self.store.read(cx).instance(root).map(|i| i.addons.iter().map(|a| (a.file_name.as_str(), a.name.as_str())).collect()).unwrap_or_default()
+    }
+
+    /// Opens `p`; one from the "other mods" group opens on the settings
+    /// that mention the search, in its own search box.
+    fn open(&mut self, p: Pick, window: &mut Window, cx: &mut Context<Self>) {
+        let other = self.is_other(&p, cx);
+        self.picked = Some(p.clone());
+        if other
+            && let Some(v) = self.view_for(&p, window, cx)
+        {
+            let q = self.query.trim().to_string();
+            v.update(cx, |v, cx| v.set_search(&q, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Enter in the top search: the first mod the list shows, with the
+    /// cursor in its own search.
+    fn open_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(idx) = self.index.clone() else { return };
+        self.sync_list(&idx, cx);
+        let first = self.cache.as_ref().and_then(|c| c.items.iter().find_map(|i| if let Item::Row(p) = i { Some(p.clone()) } else { None }));
+        let Some(p) = first else { return };
+        self.open(p.clone(), window, cx);
+        if let Some(v) = self.view_for(&p, window, cx) {
+            v.update(cx, |v, cx| v.focus_search(window, cx));
+        }
     }
 
     fn set_filter(&mut self, f: Filter, cx: &mut Context<Self>) {
@@ -353,19 +421,16 @@ impl ConfigsTab {
     }
 
     /// The entries of the list, grouped, as the filters and search leave them.
-    fn groups(&self, cx: &App) -> Vec<(&'static str, Vec<Pick>)> {
-        let Some(idx) = &self.index else { return Vec::new() };
-        let root = self.root.as_deref().unwrap_or(Path::new(""));
-        let store = self.store.read(cx);
+    /// With a search, the mods whose name matches come first; the ones
+    /// whose settings mention it are the last group, "other mods".
+    fn groups(&self, cx: &App) -> (Vec<(&'static str, Vec<Pick>)>, Vec<Pick>) {
+        let Some(idx) = &self.index else { return (Vec::new(), Vec::new()) };
+        let names = self.names(cx);
+        let searching = !self.words().is_empty();
         let side_ok = |files: &[String]| self.side.is_none_or(|s| files.iter().any(|f| hopper::configindex::side_of(f) == s));
         let keep = |p: &Pick| {
             let files = self.files_of(p);
             if !side_ok(&files) {
-                return false;
-            }
-            if let Some(h) = &self.hits
-                && !h.contains_key(p)
-            {
                 return false;
             }
             match self.filter {
@@ -374,14 +439,25 @@ impl ConfigsTab {
                 Filter::Unsaved => self.unsaved_of(p, cx) > 0,
             }
         };
-        let mut mods: Vec<Pick> = idx.by_owner.keys().map(|k| Pick::Mod(k.clone())).filter(keep).collect();
-        mods.sort_by_cached_key(|p| match p {
-            Pick::Mod(k) => mod_info(store, root, k).0.to_lowercase(),
+        let sort_key = |p: &Pick| match p {
+            Pick::Mod(k) => names.get(k.as_str()).map_or_else(|| k.trim_end_matches(".jar").to_lowercase(), |n| n.to_lowercase()),
             Pick::File(r) => r.clone(),
-        });
-        let (changed, rest): (Vec<Pick>, Vec<Pick>) = mods.into_iter().partition(|p| self.changed_of(p) > 0 || self.unsaved_of(p, cx) > 0);
-        let unmatched: Vec<Pick> = idx.unmatched().into_iter().map(Pick::File).filter(keep).collect();
-        vec![("Changed", changed), ("All mods", rest), ("Not matched to a mod", unmatched)].into_iter().filter(|(_, v)| !v.is_empty()).collect()
+        };
+        let mut mods: Vec<Pick> = idx.by_owner.keys().map(|k| Pick::Mod(k.clone())).filter(|p| keep(p) && (!searching || self.name_hit(p, &names))).collect();
+        mods.sort_by_cached_key(sort_key);
+        let unmatched: Vec<Pick> = idx.unmatched().into_iter().map(Pick::File).filter(|p| keep(p) && (!searching || self.name_hit(p, &names))).collect();
+        let groups: Vec<(&'static str, Vec<Pick>)> = if searching {
+            vec![("Mods", mods), ("Not matched to a mod", unmatched)]
+        } else {
+            let (changed, rest): (Vec<Pick>, Vec<Pick>) = mods.into_iter().partition(|p| self.changed_of(p) > 0 || self.unsaved_of(p, cx) > 0);
+            vec![("Changed", changed), ("All mods", rest), ("Not matched to a mod", unmatched)]
+        };
+        let groups = groups.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+        // Most matches first: the mod that's most about it.
+        let mut others: Vec<Pick> = self.hits.as_ref().map(|h| h.keys().filter(|p| keep(p) && !self.name_hit(p, &names)).cloned().collect()).unwrap_or_default();
+        let count = |p: &Pick| self.hits.as_ref().and_then(|h| h.get(p)).map_or(0, |h| h.0);
+        others.sort_by_cached_key(|p| (std::cmp::Reverse(count(p)), sort_key(p)));
+        (groups, others)
     }
 
     /// Rebuilds the mod list when what it shows changed since the last frame.
@@ -390,24 +466,39 @@ impl ConfigsTab {
         if self.cache.as_ref().is_some_and(|c| c.key == key) {
             return;
         }
-        let groups = self.groups(cx);
-        let all: Vec<Pick> = groups.iter().flat_map(|(_, v)| v.iter().cloned()).collect();
-        // The first entry when nothing is picked (or the pick is filtered out).
-        if self.picked.as_ref().is_none_or(|p| !all.contains(p) && self.hits.is_some()) {
-            self.picked = all.first().cloned();
+        let (groups, others) = self.groups(cx);
+        // The first entry when nothing is picked. Typing doesn't move the
+        // pick: the open mod stays open until another is clicked (or Enter).
+        if self.picked.is_none() {
+            self.picked = groups.iter().flat_map(|(_, v)| v.first()).next().cloned();
         }
         let mut items = Vec::new();
-        for (title, picks) in &groups {
+        let mut others = Some(others).filter(|o| !o.is_empty());
+        for (i, (title, picks)) in groups.iter().enumerate() {
+            // The other mods come right under the mods, above loose files.
+            if *title != "Mods" || i > 0 {
+                self.push_others(&mut items, &mut others);
+            }
             items.push(Item::Head(format!("{} · {}", title.to_uppercase(), picks.len()).into()));
             items.extend(picks.iter().take(1500).cloned().map(Item::Row));
         }
+        self.push_others(&mut items, &mut others);
         self.cache = Some(ListCache {
             key,
             items: Rc::new(items),
-            total: idx.total_settings(),
             changed_n: idx.changed.values().sum(),
             unsaved_n: self.views.values().map(|v| v.read(cx).unsaved()).sum(),
         });
+    }
+
+    /// The folded "other mods" group, once, where `sync_list` puts it.
+    fn push_others(&self, items: &mut Vec<Item>, others: &mut Option<Vec<Pick>>) {
+        let Some(others) = others.take() else { return };
+        let n: usize = others.iter().filter_map(|p| self.hits.as_ref()?.get(p)).map(|h| h.0).sum();
+        items.push(Item::Others(others.len(), n));
+        if self.others_open {
+            items.extend(others.into_iter().take(1500).map(Item::Hit));
+        }
     }
 
     /// Lines `range` of the mod list.
@@ -418,12 +509,43 @@ impl ConfigsTab {
             .filter_map(|i| items.get(i).cloned())
             .map(|it| match it {
                 Item::Head(t) => div().w_full().h(rems(LINE_H)).flex_none().px_2().pb_1().flex().items_end().text_xs().font_semibold().text_color(theme.muted_foreground).child(t).into_any_element(),
-                Item::Row(p) => self.list_row(&p, cx),
+                Item::Row(p) => self.list_row(&p, false, cx),
+                Item::Hit(p) => self.list_row(&p, true, cx),
+                Item::Others(mods, n) => self.others_head(mods, n, cx),
             })
             .collect()
     }
 
-    fn list_row(&self, p: &Pick, cx: &mut Context<Self>) -> AnyElement {
+    /// "Settings in other mods mentioning …": click to unfold.
+    fn others_head(&self, mods: usize, n: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let open = self.others_open;
+        let tip = format!("{} setting{} in {mods} other mod{} mention “{}”", fmt_n(n), if n == 1 { "" } else { "s" }, if mods == 1 { "" } else { "s" }, self.query.trim());
+        h_flex()
+            .id("cfg-others")
+            .gap_1p5()
+            .px_2()
+            .w_full()
+            .h(rems(LINE_H))
+            .flex_none()
+            .rounded(theme.radius)
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .clickable(cx)
+            .hover(|s| widgets::row_hover(s, cx))
+            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().flex_none())
+            .child(div().flex_1().min_w_0().truncate().child("Settings in other mods"))
+            .child(div().flex_none().child(fmt_n(n)))
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.others_open = !this.others_open;
+                this.ver += 1;
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn list_row(&self, p: &Pick, other: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let root = self.root.clone().unwrap_or_default();
         let (name, icon, unmatched) = match p {
@@ -435,7 +557,7 @@ impl ConfigsTab {
         };
         let files = self.files_of(p);
         let (changed, unsaved) = (self.changed_of(p), self.unsaved_of(p, cx));
-        let hits = self.hits.as_ref().and_then(|h| h.get(p)).map(|h| h.0);
+        let hits = self.hits.as_ref().and_then(|h| h.get(p)).map(|h| h.0).filter(|_| other);
         let right = match (hits, unsaved, changed) {
             (Some(h), _, _) => format!("{h} match{}", if h == 1 { "" } else { "es" }),
             (_, u, _) if u > 0 => format!("{u} unsaved"),
@@ -446,7 +568,7 @@ impl ConfigsTab {
         let selected = self.picked.as_ref() == Some(p);
         let pick = p.clone();
         let row = h_flex()
-            .id(SharedString::from(format!("cfg-mod:{p:?}")))
+            .id(SharedString::from(format!("cfg-mod:{}{p:?}", if other { "o:" } else { "" })))
             .gap_2()
             .px_2()
             .w_full()
@@ -460,13 +582,10 @@ impl ConfigsTab {
             } else {
                 widgets::thumb(icon.as_deref(), rems(1.25), cx)
             })
-            .child(div().flex_1().min_w_0().truncate().when(unmatched, |d| d.text_color(theme.muted_foreground)).child(name))
+            .child(div().flex_1().min_w_0().truncate().when(unmatched, |d| d.text_color(theme.muted_foreground)).child(if other { StyledText::new(name) } else { widgets::marked(name, &self.words(), cx) }))
             .when(changed > 0 || unsaved > 0, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(theme.primary)))
             .child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(right))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.picked = Some(pick.clone());
-                cx.notify();
-            }));
+            .on_click(cx.listener(move |this, _, window, cx| this.open(pick.clone(), window, cx)));
         let row = if selected { widgets::row_selected(row, cx) } else { row.hover(|s| widgets::row_hover(s, cx)) };
         row.into_any_element()
     }
@@ -488,10 +607,11 @@ impl Render for ConfigsTab {
         self.sync_list(&idx, cx);
         let picked = self.picked.clone();
         let view = picked.as_ref().and_then(|p| self.view_for(p, window, cx));
-        let (total, changed_n, unsaved_n) = self.cache.as_ref().map_or((0, 0, 0), |c| (c.total, c.changed_n, c.unsaved_n));
-        if self.placeholder_total != Some(total) {
-            self.placeholder_total = Some(total);
-            self.search.update(cx, |s, cx| s.set_placeholder(format!("Search {} settings in every mod", fmt_n(total)), window, cx));
+        let (changed_n, unsaved_n) = self.cache.as_ref().map_or((0, 0), |c| (c.changed_n, c.unsaved_n));
+        let mods_n = idx.by_owner.len();
+        if self.placeholder_total != Some(mods_n) {
+            self.placeholder_total = Some(mods_n);
+            self.search.update(cx, |s, cx| s.set_placeholder(format!("Search {} mods", fmt_n(mods_n)), window, cx));
         }
         let linked = self.store.read(cx).server_of(&root).cloned();
 
@@ -521,7 +641,7 @@ impl Render for ConfigsTab {
             .child(div().w(rems(24.)).child(widgets::search_input(&self.search).small().cleanable(true)))
             .child(
                 widgets::toggle_chip("cfg-desc", "Also in descriptions", self.desc, cx)
-                    .tooltip("Look in each setting's description too")
+                    .tooltip("Look in each setting's description too, in the open mod and in other mods")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.desc = !this.desc;
                         let d = this.desc;
@@ -554,8 +674,8 @@ impl Render for ConfigsTab {
                 .p_2()
                 .child(widgets::empty_state(
                     IconName::FileCog,
-                    if self.hits.is_some() { "No settings match" } else if self.filter != Filter::All { "Nothing here" } else { "No config files yet" },
-                    (self.hits.is_none() && self.filter == Filter::All).then(|| "Most mods write theirs on the first launch.".into()),
+                    if !self.words().is_empty() { "No mods match" } else if self.filter != Filter::All { "Nothing here" } else { "No config files yet" },
+                    if !self.words().is_empty() { Some("No mod's name or settings have those words.".into()) } else { (self.filter == Filter::All).then(|| "Most mods write theirs on the first launch.".into()) },
                     cx,
                 ))
                 .into_any_element()

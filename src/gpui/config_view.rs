@@ -219,6 +219,10 @@ pub struct ConfigView {
     /// once (the label scans every config file of the instance).
     chip_info: HashMap<String, ChipInfo>,
     chip_info_for: usize,
+    /// Settings matching the search in each file (the chips show it), and
+    /// what they were counted for.
+    hit_counts: HashMap<String, usize>,
+    hit_counts_for: Option<(String, bool, bool, usize)>,
     scrolled: bool,
     _mark: Option<RangeDecorationCollection>,
     _subs: Vec<Subscription>,
@@ -238,12 +242,13 @@ impl ConfigView {
         cx: &mut Context<Self>,
     ) -> Self {
         let editor = cx.new(|cx| EditorState::new(window, cx).line_number(true).searchable(true).soft_wrap(false));
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder(if title.is_empty() { "Search settings".to_string() } else { format!("Search {title}'s settings") }));
+        let search = cx.new(|cx| InputState::new(window, cx).clean_on_escape().placeholder(if title.is_empty() { "Search settings".to_string() } else { format!("Search {title}'s settings") }));
         let edit_input = cx.new(|cx| InputState::new(window, cx));
         let subs = vec![
-            cx.subscribe(&search, |this, s, e: &InputEvent, cx| {
+            cx.subscribe_in(&search, window, |this, s, e: &InputEvent, window, cx| {
                 if let InputEvent::Change = e {
                     this.query = s.read(cx).value().to_string();
+                    this.follow_hits(window, cx);
                     cx.notify();
                 }
             }),
@@ -294,6 +299,8 @@ impl ConfigView {
             rows_key: None,
             chip_info: HashMap::new(),
             chip_info_for: 0,
+            hit_counts: HashMap::new(),
+            hit_counts_for: None,
             scrolled: false,
             _mark: None,
             _subs: subs,
@@ -309,11 +316,62 @@ impl ConfigView {
         &self.root
     }
 
-    /// The tab's search, applied here too.
-    pub fn set_query(&mut self, q: &str, cx: &mut Context<Self>) {
-        if self.query != q {
-            self.query = q.to_string();
-            cx.notify();
+    /// Puts `q` in this mod's own search: a mod opened from the tab's
+    /// "Settings in other mods" list opens on the settings that mention it.
+    pub fn set_search(&mut self, q: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.query == q {
+            return;
+        }
+        self.search.update(cx, |s, cx| s.set_value(q.to_string(), window, cx));
+        self.query = q.to_string();
+        self.follow_hits(window, cx);
+        cx.notify();
+    }
+
+    pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    /// Counts the search's matches in every file of the mod (reading the
+    /// ones not opened yet), once per search.
+    fn count_hits(&mut self) {
+        let q = self.query.trim().to_lowercase();
+        let key = (q.clone(), self.desc, self.changed_only, self.unsaved());
+        if self.hit_counts_for.as_ref() == Some(&key) {
+            return;
+        }
+        self.hit_counts.clear();
+        if !q.is_empty() {
+            for f in self.files.clone() {
+                if Format::of(&f).is_some() && !self.states.contains_key(&f) {
+                    let st = FileState::load(&self.root, &f);
+                    self.states.insert(f, st);
+                }
+            }
+            let counts: HashMap<String, usize> = self
+                .files
+                .iter()
+                .filter_map(|f| {
+                    let secs = self.states.get(f)?.sections.as_ref().ok()?;
+                    Some((f.clone(), secs.iter().flat_map(|s| &s.entries).filter(|e| self.matches(f, e, &q)).count()))
+                })
+                .collect();
+            self.hit_counts = counts;
+        }
+        self.hit_counts_for = Some(key);
+    }
+
+    /// When the open file has no match but another of the mod's files has,
+    /// opens that one: the search covers the whole mod, not one file.
+    fn follow_hits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.count_hits();
+        if self.query.trim().is_empty() || self.text_view || self.hit_counts.get(&self.rel).copied().unwrap_or(0) > 0 {
+            return;
+        }
+        let best = self.visible_files().into_iter().filter_map(|f| Some((self.hit_counts.get(&f).copied()?, f))).filter(|(n, _)| *n > 0).max_by_key(|(n, _)| *n);
+        if let Some((_, f)) = best {
+            self.focus = None;
+            self.load(f, window, cx);
         }
     }
 
@@ -982,11 +1040,12 @@ impl ConfigView {
                 let error = self.errors.get(&k).cloned();
                 let control = self.control(&e, &id, rem, window, cx);
                 let theme = cx.theme().clone();
+                let words = widgets::search_words(&self.query);
                 let name = h_flex()
                     .gap_1p5()
                     .min_w_0()
                     .when(not_default || edited, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(theme.primary)))
-                    .child(div().min_w_0().truncate().text_sm().font_semibold().child(e.label()))
+                    .child(div().min_w_0().truncate().text_sm().font_semibold().child(widgets::marked(e.label(), &words, cx)))
                     .when_some(restart, |d, r| d.child(widgets::chip(theme.warning).child(r)))
                     .when(e.guessed, |d| d.child(widgets::chip(theme.muted_foreground).child("guessed")));
                 let info = v_flex()
@@ -994,8 +1053,8 @@ impl ConfigView {
                     .min_w_0()
                     .gap_0p5()
                     .child(name)
-                    .child(div().text_xs().font_family("Consolas").text_color(theme.muted_foreground).truncate().child(if e.path.is_empty() { e.key.clone() } else { format!("{}.{}", e.path.join("."), e.key) }))
-                    .when(!e.comment.is_empty(), |d| d.child(div().text_xs().text_color(theme.muted_foreground).whitespace_normal().child(e.comment.clone())))
+                    .child(div().text_xs().font_family("Consolas").text_color(theme.muted_foreground).truncate().child(widgets::marked(if e.path.is_empty() { e.key.clone() } else { format!("{}.{}", e.path.join("."), e.key) }, &words, cx)))
+                    .when(!e.comment.is_empty(), |d| d.child(div().text_xs().text_color(theme.muted_foreground).whitespace_normal().child(widgets::marked(e.comment.clone(), if self.desc { &words } else { &[] }, cx))))
                     .when(!limits.is_empty(), |d| d.child(widgets::caption(limits.join(" · "), cx).text_xs()))
                     .when_some(error, |d, err| d.child(div().text_xs().text_color(theme.danger).child(err)))
                     .when_some(note, |d, n| {
@@ -1199,8 +1258,11 @@ impl Render for ConfigView {
             });
             self.chip_info.insert(f.clone(), ChipInfo { short: short_name(f, &self.files), live });
         }
+        self.count_hits();
+        let searching = !self.query.trim().is_empty();
         let chips = h_flex().gap_1p5().flex_wrap().children(files.iter().map(|f| {
             let on = *f == self.rel;
+            let hits = self.hit_counts.get(f).copied().filter(|n| searching && *n > 0);
             let side = hopper::configindex::side_of(f);
             let dirty = self.states.get(f).is_some_and(FileState::dirty);
             let rel = f.clone();
@@ -1226,6 +1288,7 @@ impl Render for ConfigView {
                 .child(info.short.clone())
                 .when(!side.label().is_empty(), |d| d.child(widgets::chip(side_color).child(side.label())))
                 .when_some(live.clone(), |d, (l, tip)| d.child(div().id(SharedString::from(format!("cfg-live:{f}"))).child(widgets::chip(if l.starts_with("Not used") { theme.muted_foreground } else { theme.success }).child(l)).tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))))
+                .when_some(hits, |d, n| d.child(widgets::chip(theme.primary).child(format!("{n} match{}", if n == 1 { "" } else { "es" }))))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.focus = None;
                     this.load(rel.clone(), window, cx)
@@ -1303,7 +1366,7 @@ impl Render for ConfigView {
 
         let path = self.root.join(&self.rel);
         let narrow = self.host == Host::Panel;
-        let search = (!self.text_view && readable && self.host != Host::Tab).then(|| widgets::search_input(&self.search).small().cleanable(true));
+        let search = (!self.text_view && readable).then(|| widgets::search_input(&self.search).small().cleanable(true));
         v_flex()
             .size_full()
             .min_h_0()
@@ -1341,7 +1404,7 @@ impl Render for ConfigView {
                         )
                     })
                     .when(!files.is_empty(), |d| d.child(chips))
-                    .child(h_flex().gap_3().child(tabs).child(div().flex_1()).when(!narrow, |d| d.children(search.map(|s| div().w(rems(16.)).child(s))))),
+                    .child(h_flex().gap_3().child(tabs).child(div().flex_1()).when(!narrow, |d| d.children(search.map(|s| div().w(rems(if self.host == Host::Tab { 20. } else { 16. })).child(s))))),
             )
             .when(narrow, |d| d.when_some(search_panel(&self.search, !self.text_view && readable), |d, s| d.child(div().px_3().pb_2().child(s))))
             .child(div().flex_1().min_h_0().border_t_1().border_color(theme.border).child(body))
@@ -1373,8 +1436,6 @@ pub struct InstIndex {
     pub files: Vec<CfgFile>,
     /// Settings not at their default, per file.
     pub changed: HashMap<String, usize>,
-    /// Settings per file (0 when it doesn't read as settings).
-    pub settings: HashMap<String, usize>,
     /// Files by owner (the jar's file name).
     pub by_owner: BTreeMap<String, Vec<String>>,
 }
@@ -1392,22 +1453,17 @@ impl InstIndex {
         self.files.iter().filter(|f| f.owner.is_none()).map(|f| f.rel.clone()).collect()
     }
 
-    pub fn total_settings(&self) -> usize {
-        self.settings.values().sum()
-    }
-
     fn build(root: &Path, mods: Vec<(String, PathBuf, String)>) -> InstIndex {
         let owners = hopper::configowner::Owners::new(hopper::configowner::of_jars(mods));
         let files = hopper::configindex::index(root, &owners);
         let rels: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
-        let (mut changed, mut settings) = (HashMap::new(), HashMap::new());
+        let mut changed = HashMap::new();
         for (rel, p) in hopper::configindex::read_all(root, &rels) {
-            let (c, n) = match &*p {
-                Ok((_, s)) => (hopper::configindex::changed_count(s), s.iter().map(|x| x.entries.len()).sum()),
-                Err(_) => (0, 0),
+            let c = match &*p {
+                Ok((_, s)) => hopper::configindex::changed_count(s),
+                Err(_) => 0,
             };
-            changed.insert(rel.clone(), c);
-            settings.insert(rel, n);
+            changed.insert(rel, c);
         }
         let mut by_owner: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for f in &files {
@@ -1415,7 +1471,7 @@ impl InstIndex {
                 by_owner.entry(o.clone()).or_default().push(f.rel.clone());
             }
         }
-        InstIndex { files, changed, settings, by_owner }
+        InstIndex { files, changed, by_owner }
     }
 }
 

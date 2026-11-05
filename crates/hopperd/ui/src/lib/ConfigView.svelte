@@ -7,8 +7,10 @@
   import { cfg, loadFiles, edited, eid, same, sideChip, shortRel, fileRow, playersOf, playersDiffer } from './configs.svelte.js';
   import { say } from './toast.svelte.js';
   import { untrack } from 'svelte';
+  import { searchWords } from './mark.js';
 
-  let { server, rels = [], filter = 'all', side = 'all', query = '', stacked = false, onEditText, pick = $bindable('') } = $props();
+  // `query` searches the mod's settings (names and keys; descriptions too with `desc`).
+  let { server, rels = [], filter = 'all', side = 'all', query = '', desc = false, stacked = false, onEditText, pick = $bindable('') } = $props();
 
   const shownRels = $derived(rels.filter((r) => side === 'all' || (cfg.files[r]?.side || fileRow(r)?.side) === side));
   let loading = $state(false);
@@ -32,16 +34,28 @@
   });
   const file = $derived(cfg.files[current]);
 
-  const words = $derived(query.trim().toLowerCase().split(/\s+/).filter(Boolean));
-  function keep(e) {
-    if (filter === 'unsaved' && !edited(current, e)) return false;
-    if (filter === 'players' && !playersOf(current, e)) return false;
-    if (filter === 'changed' && !(edited(current, e) || (e.default_value != null ? !same(e.value, e.default_value) : e.is_default === false))) return false;
+  const words = $derived(searchWords(query));
+  function keepIn(rel, e) {
+    if (filter === 'unsaved' && !edited(rel, e)) return false;
+    if (filter === 'players' && !playersOf(rel, e)) return false;
+    if (filter === 'changed' && !(edited(rel, e) || (e.default_value != null ? !same(e.value, e.default_value) : e.is_default === false))) return false;
     if (!words.length) return true;
-    const hay = `${e.label} ${e.key} ${(e.path || []).join(' ')} ${e.comment}`.toLowerCase();
+    const hay = `${e.label} ${e.key} ${(e.path || []).join(' ')}${desc ? ` ${e.comment}` : ''}`.toLowerCase();
     return words.every((w) => hay.includes(w));
   }
+  const keep = (e) => keepIn(current, e);
   const sections = $derived((file?.sections || []).map((s) => ({ s, rows: s.entries.filter(keep) })).filter((x) => x.rows.length));
+  // The search covers the whole mod: matches per file show on its chip, and
+  // when the open file has none but another has, that one opens.
+  const hitsIn = $derived(words.length ? Object.fromEntries(shownRels.map((r) => [r, (cfg.files[r]?.sections || []).reduce((n, s) => n + s.entries.filter((e) => keepIn(r, e)).length, 0)])) : {});
+  $effect(() => {
+    const h = hitsIn;
+    untrack(() => {
+      if (!words.length || h[current]) return;
+      const best = shownRels.filter((r) => h[r] > 0).sort((a, b) => h[b] - h[a])[0];
+      if (best) pick = best;
+    });
+  });
   const unsavedIn = (r) => Object.keys(cfg.edits[r] || {}).length;
   const label = (path) => path.map((p) => p.replace(/[_-]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase())).join(' › ');
 </script>
@@ -57,7 +71,8 @@
           {#if sc}<span class="chip sc {sc[1]}">{sc[0]}</span>{/if}
           {#if fileRow(r)?.live}{@const lv = fileRow(r).live}<span class="chip sc" class:running={lv.used} class:warn={!lv.used} title="Which copy the server reads">{lv.label}</span>{/if}
           {#if playersDiffer(r)}<span class="chip lan sc" title="Players' copy differs in {playersDiffer(r)} settings">≠ {playersDiffer(r)}</span>{/if}
-          {#if n}<span class="chip acc sc">{n}</span>{/if}
+          {#if n}<span class="chip acc sc" title="Not saved yet">{n}</span>{/if}
+          {#if hitsIn[r]}<span class="chip sc hitc">{hitsIn[r]} match{hitsIn[r] === 1 ? '' : 'es'}</span>{/if}
         </button>
       {/each}
     </div>
@@ -84,7 +99,7 @@
           <div class="sec">{label(s.path)}{#if s.comment}<span class="cap"> · {s.comment.split('\n')[0]}</span>{/if}</div>
         {/if}
         {#each rows as e (eid(e))}
-          <ConfigRow rel={current} {e} {stacked} {onEditText} />
+          <ConfigRow rel={current} {e} {stacked} {onEditText} {words} {desc} />
         {/each}
       {:else}
         <div class="empty-state">
@@ -114,6 +129,7 @@
   .fchip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 6px 3px 9px; border-radius: var(--radius); border: 1px solid var(--line2); font-size: 12px; color: var(--subtle); min-height: 28px; }
   .fchip:hover { background: var(--hover); color: var(--text); }
   .fchip.on { border-color: var(--acc); color: var(--text); background: var(--acc-dim); }
+  .hitc { color: var(--text); background: color-mix(in srgb, var(--acc) 30%, transparent); }
   .sc { height: 18px; font-size: 11px; padding: 0 6px 1px; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .fhead { display: flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; }
