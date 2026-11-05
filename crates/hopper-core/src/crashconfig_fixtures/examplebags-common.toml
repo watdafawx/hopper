@@ -1,0 +1,14 @@
+
+#Common settings
+[common]
+	#Whether bags can be opened while riding
+	openWhileRiding = true
+	#Range: 1 ~ 64
+	maxUpgrades = 8
+
+#Support for other mods
+[compat]
+	#Enable or disable the JEI integration (recipe transfer, bag contents)
+	jeiCompat = true
+	#Enable or disable the Curios slot
+	curios = true

@@ -1113,6 +1113,7 @@ impl LogsView {
             .filter(|st| c.suspects.iter().any(|s| s.file_name == st.file_name))
             .map(|st| self.crash_story(root, c, st, cx));
         let listed = story.is_none();
+        let first = crash_switch::settings_first(c);
         callout(theme.danger, cx)
             .child(
                 h_flex()
@@ -1191,8 +1192,10 @@ impl LogsView {
             })
             .children(story)
             .when_some(note, |d, n| d.child(div().text_sm().child(n)))
-            .when(listed, |d| d.children(self.crash_actions(root, c, cx)))
-            .when(listed, |d| d.children(self.config_switches(root, c, None, cx)))
+            // A setting that keeps the mod comes first when there is one.
+            .when(listed && first, |d| d.children(self.config_switches(root, c, None, cx)).children(self.or_actions(root, c, cx)))
+            .when(listed && !first, |d| d.children(self.crash_actions(root, c, cx)))
+            .when(listed && !first, |d| d.children(self.config_switches(root, c, None, cx)))
             .when(source.is_file(), |d| d.child(div().pt_1().child(self.share_row(&source, cx))))
             .into_any_element()
     }

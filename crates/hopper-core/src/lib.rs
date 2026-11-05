@@ -18,6 +18,7 @@ pub mod configedit;
 pub mod configindex;
 pub mod configowner;
 pub mod configswitch;
+pub mod crashconfig;
 pub mod crashdetect;
 pub mod crashengine;
 pub mod crashfiles;

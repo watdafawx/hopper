@@ -217,20 +217,15 @@ impl Crash {
     }
 }
 
-/// The config switches for the items the crash names, of its Certain and
-/// Likely mods: those still on, and those turned off since (the crash is
-/// worked around until the next game says otherwise).
-fn switches(root: &Path, text: &str, suspects: &[Suspect]) -> (Vec<crate::configswitch::Switch>, Vec<crate::configswitch::Switch>) {
-    let (mut on, mut off): (Vec<crate::configswitch::Switch>, Vec<crate::configswitch::Switch>) = (Vec::new(), Vec::new());
-    for s in suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.mod_id.is_empty()) {
-        for (sw, is_on) in crate::configswitch::find_all(root, &s.mod_id, text) {
-            let list = if is_on { &mut on } else { &mut off };
-            if !list.contains(&sw) {
-                list.push(sw);
-            }
-        }
-    }
-    (on, off)
+/// Settings in the crash's mods' configs that work around it (see
+/// crashconfig.rs): those still as the crash had them, and those changed
+/// since (the crash is worked around until the next game says otherwise).
+/// Only the Certain and Likely mods' configs are read for what the crash
+/// names; a mixin whose failure is the error points at its own mod.
+fn switches(root: &Path, text: &str, log: &str, suspects: &[Suspect], server: bool) -> (Vec<crate::configswitch::Switch>, Vec<crate::configswitch::Switch>) {
+    let ids: Vec<String> =
+        suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.mod_id.is_empty()).map(|s| s.mod_id.clone()).collect();
+    crate::crashconfig::suggest(root, text, log, &ids, server)
 }
 
 fn re(p: &str) -> Regex {
@@ -957,7 +952,7 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         (None, Some(n)) => native_line(&tail(n, 64 << 10)),
         _ => String::new(),
     };
-    let (switches, switched_off) = switches(root, &text, &suspects);
+    let (switches, switched_off) = switches(root, &text, &log, &suspects, false);
     Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice })
 }
 
@@ -985,7 +980,7 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
     let before = modified_secs(&saved.source).unwrap_or(saved.when);
     let text = tail(&saved.source, 2 << 20);
     let (mut suspects, stopped) = analyze(root, &text, &log, &loading, before, mods, &ids);
-    let (switches, switched_off) = switches(root, &text, &suspects);
+    let (switches, switched_off) = switches(root, &text, &log, &suspects, saved.server);
     let advice = crate::crashsigs::advice(&text, &log, "", saved.server);
     // A change already put back (its older copy left backups for the mods
     // folder) stays on the card, to say so.
@@ -1032,7 +1027,7 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
     } else {
         CrashKind::Unknown
     };
-    let (switches, switched_off) = switches(root, &text, &suspects);
+    let (switches, switched_off) = switches(root, &text, &log, &suspects, false);
     let advice = crate::crashsigs::advice(&text, &log, "", false);
     Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice })
 }
@@ -1224,7 +1219,7 @@ pub fn server(root: &Path) -> Option<Crash> {
         (None, Some(n)) => native_line(&tail(n, 64 << 10)),
         _ => String::new(),
     };
-    let (switches, switched_off) = switches(root, &text, &suspects);
+    let (switches, switched_off) = switches(root, &text, log, &suspects, true);
     let advice = crate::crashsigs::advice(&text, log, &native.as_deref().map(|n| tail(n, 64 << 10)).unwrap_or_default(), true);
     let source = report.or(native).unwrap_or_default();
     Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true, lingered, advice })
@@ -3548,11 +3543,16 @@ java.lang.IllegalArgumentException: No model for layer victim:shield#main\n\
                 let text = fs::read_to_string(&p).unwrap_or_default();
                 println!("{} / {}", inst.name, p.file_name().unwrap().to_string_lossy());
                 println!("   {}", headline(&text));
+                let mut ids = Vec::new();
                 for r in signals(&text) {
                     println!("   {:?} {} [{}] {}", r.certainty, r.mod_id, r.jar, r.why);
-                    for sw in crate::configswitch::find(&inst.root, &r.mod_id, &text) {
-                        println!("      switch: {} = true ({}) at {}:{}", sw.key, sw.label, sw.file, sw.line);
+                    if r.certainty <= Certainty::Likely {
+                        ids.push(r.mod_id.clone());
                     }
+                }
+                let (on, off) = crate::crashconfig::suggest(&inst.root, &text, "", &ids, false);
+                for sw in on.iter().chain(&off) {
+                    println!("      setting ({}): {} = {} -> {} ({}) at {}:{}", sw.score, sw.key, sw.from_text(), sw.to_text(), sw.label, sw.file, sw.line);
                 }
             }
         }

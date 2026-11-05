@@ -16,6 +16,7 @@
   import { confirmIt } from './lib/dialog.svelte.js';
   import { exactLabel, fullDate } from './lib/worlds.js';
   import CrashTurnOff from './CrashTurnOff.svelte';
+  import PushPlayers from './lib/PushPlayers.svelte';
 
   let { server, onPeek, onShare, openFile, given = null, fixes = false } = $props();
   // Fixes (put back, turn off) are for the crash the server last had: a
@@ -32,6 +33,10 @@
   // Looked at again when the server stops or crashes (a new start's result).
   const settled = $derived(server.state === 'crashed' || server.state === 'stopped');
   let crash = $state(null);
+  // What Hopper changed for each setting turned off since (lines: [isNew, text]).
+  let changes = $state([]);
+  // A changed setting being sent to players (the push dialog's items).
+  let pushing = $state(null);
   let report = $state(null);
   let lingered = $state(null);
   let mods = $state([]);
@@ -60,6 +65,7 @@
       crash = r.crash;
       report = r.report;
       lingered = r.lingered || null;
+      changes = r.changes || [];
       mods = m;
     } catch {
       if (n === seq) crash = null;
@@ -148,21 +154,36 @@
     busy = false;
   }
 
-  // Settings for the item the crash names that can turn just that off.
+  // Settings in the crash's mods' configs that work around it, keeping the
+  // mod (hopper-core crashconfig.rs). A mixin option, a mod's support for
+  // another mod or a limit comes first and changes on one click, then shows
+  // the change and can be undone; turning off an item deletes the ones in
+  // worlds, so that one asks first.
   const switches = $derived(crash?.switches || []);
   const switchedOff = $derived(crash?.switched_off || []);
-  const fileOfMod = (id) => suspects.find((s) => s.mod_id === id)?.file_name;
+  const isItem = (sw) => !sw.kind || sw.kind === 'item';
+  // A changed one keeps its place, so the card doesn't jump after the click.
+  const first = $derived([...switches, ...switchedOff].some((sw) => !isItem(sw)));
+  const sq = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const fileOfMod = (id) => suspects.find((s) => s.mod_id === id)?.file_name || mods.find((m) => sq(m.file).startsWith(sq(id)))?.file;
+  const fileName = (sw) => sw.file.split('/').pop();
+  const fromText = (sw) => sw.from || 'true';
+  const toText = (sw) => sw.to || 'false';
+  const action = (sw) => (sw.kind === 'limit' ? `Raise ${sw.label} to ${toText(sw)}` : `Turn off ${sw.label}`);
+  const doneText = (sw) => (sw.kind === 'limit' ? `${sw.label} is ${toText(sw)}` : `${sw.label} is off`);
 
   async function switchOff(sw) {
-    const ok = await confirmIt(`Turn off ${sw.label}?`, {
-      body: `Sets ${sw.key} to false in ${sw.file}, line ${sw.line}. The config as it was goes to Mods › Backups.`,
-      ok: 'Turn off',
-    });
-    if (!ok) return;
+    if (isItem(sw)) {
+      const ok = await confirmIt(`Turn off ${sw.label}?`, {
+        body: `Sets ${sw.key} to false in ${sw.file}, line ${sw.line}. Every ${sw.label} already in the worlds goes away. The config as it was goes to Mods › Backups.`,
+        ok: 'Turn off',
+      });
+      if (!ok) return;
+    }
     busy = true;
     try {
       await post(`${base}/crash/switch-off`, { file: sw.file, key: sw.key });
-      say(`Turned off ${sw.label}. The old config is in Mods › Backups. Start the server to try again.`);
+      say(`${doneText(sw)}. The old config is in Mods › Backups. Start the server to try again.`);
       await load();
     } catch (e) {
       say(e.message, true);
@@ -170,6 +191,22 @@
       busy = false;
     }
   }
+
+  async function switchOn(sw) {
+    busy = true;
+    try {
+      await post(`${base}/crash/switch-on`, { file: sw.file, key: sw.key });
+      say(`${sw.kind === 'limit' ? `${sw.label} is ${fromText(sw)}` : `${sw.label} is on`} again. The config as it was is in Mods › Backups.`);
+      await load();
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // The change as the push dialog takes it: players' Hopper applies it.
+  const pushItems = (sw) => [{ rel: sw.file, client_rel: sw.file, diffs: [{ path: sw.path || [], key: sw.key, label: sw.label, client: fromText(sw), server: toText(sw) }] }];
 
   async function putBack(ch) {
     busy = true;
@@ -269,19 +306,45 @@
 {#snippet switchRows()}
   {#each switches as sw, i (sw.file + sw.key)}
     <div class="sw">
-      <div class="line">
-        <span>{i === 0 && (toTurnOff.length || changed) ? 'Or keep' : 'Keep'}</span>{#if fileOfMod(sw.mod_id)}{@render mod(fileOfMod(sw.mod_id))}{:else}<b>{sw.mod_id}</b>{/if}<span>and turn off only the item that broke:</span><code>{sw.key} = true</code><span class="tiny muted">in {sw.file}, line {sw.line}</span>
-      </div>
+      {#if isItem(sw)}
+        <div class="line">
+          <span>{(i === 0 && !first && (toTurnOff.length || changed)) || (first && i > 0) ? 'Or keep' : 'Keep'}</span>{#if fileOfMod(sw.mod_id)}{@render mod(fileOfMod(sw.mod_id))}{:else}<b>{sw.mod_id}</b>{/if}<span>and turn off only the item that broke:</span><code>{sw.key} = true</code><span class="tiny muted">in {sw.file}, line {sw.line}</span>
+        </div>
+        <div class="row acts">
+          <button class="btn sm" disabled={busy || alive} title={alive ? 'Stop the server first: it may write its config back when it stops.' : 'Sets it to false after you confirm. The old config goes to Backups.'} onclick={() => switchOff(sw)}><PowerOff size={13} />Turn off {sw.label}…</button>
+          <button class="btn sm ghost" title="Opens the file in the editor" onclick={() => openFile(sw.file)}><FileText size={13} />Open config</button>
+        </div>
+        <div class="tiny warnline"><b>Existing {sw.label} will be deleted.</b> Every {sw.label} already in the worlds goes away the next time they load.</div>
+      {:else}
+        <div class="line strong">
+          <span>{sw.kind === 'limit' ? `Raise ${sw.label} in` : `Turn off ${sw.label} in`}</span>{#if fileOfMod(sw.mod_id)}{@render mod(fileOfMod(sw.mod_id))}{:else}<b>{sw.mod_id}</b>{/if}{#if sw.kind === 'limit'}<span>to {toText(sw)}</span>{/if}<span class="tiny muted">({sw.file} · {sw.key})</span>
+        </div>
+        {#if sw.why}<div class="tiny muted">{sw.why}</div>{/if}
+        <div class="row acts">
+          <button class="btn sm" class:pri={i === 0} disabled={busy || alive} title={alive ? 'Stop the server first: it may write its config back when it stops.' : 'Changes this one setting. The old file goes to Backups, and Undo puts it back.'} onclick={() => switchOff(sw)}><PowerOff size={13} />{action(sw)}</button>
+          <button class="btn sm ghost" title="Opens the file in the editor" onclick={() => openFile(sw.file)}><FileText size={13} />Open config</button>
+        </div>
+      {/if}
+    </div>
+  {/each}
+  {#each switchedOff as sw, i (sw.file + sw.key)}
+    <div class="sw">
+      <div class="line"><span class="done"><Check size={13} />{doneText(sw)}</span><span class="tiny muted">{changes[i]?.length ? 'Start the server to try again. The old file is in Mods › Backups.' : `${sw.key} = ${toText(sw)} in ${fileName(sw)}. Start the server to try again.`}</span></div>
+      {#if changes[i]?.length}
+        <div class="diff">
+          <div class="tiny muted">{sw.file}</div>
+          {#each changes[i] as [isNew, text], k (k)}<div class="dl" class:add={isNew} class:del={!isNew}>{isNew ? '+' : '-'} {text.trim()}</div>{/each}
+        </div>
+      {/if}
       <div class="row acts">
-        <button class="btn sm" disabled={busy || alive} title={alive ? 'Stop the server first: it may write its config back when it stops.' : 'Sets it to false after you confirm. The old config goes to Backups.'} onclick={() => switchOff(sw)}><PowerOff size={13} />Turn off {sw.label}…</button>
-        <button class="btn sm ghost" title="Opens the file in the editor" onclick={() => openFile(sw.file)}><FileText size={13} />Open config</button>
+        {#if sw.shared}<button class="btn sm" disabled={busy} title="Players' Hopper shows the change and applies it on one click" onclick={() => (pushing = sw)}>Send to players…</button>{/if}
+        <button class="btn sm ghost" disabled={busy || alive} title={alive ? 'Stop the server first' : `Sets ${sw.key} = ${fromText(sw)} again. The config as it is now goes to Backups.`} onclick={() => switchOn(sw)}><Undo2 size={13} />{isItem(sw) ? 'Turn it back on' : 'Undo'}</button>
       </div>
     </div>
   {/each}
-  {#each switchedOff as sw (sw.file + sw.key)}
-    <div class="line"><span class="done"><Check size={13} />{sw.label} is off</span><span class="tiny muted">{sw.key} = false in {sw.file}. Start the server to try again.</span></div>
-  {/each}
 {/snippet}
+
+{#if pushing}<PushPlayers {server} items={pushItems(pushing)} onClose={() => (pushing = null)} />{/if}
 
 {#if crash && (settled || given)}
   <div class="crash">
@@ -310,11 +373,14 @@
               {/if}
             </div>
             {@render picker()}
+          {:else if first}
+            {@render switchRows()}
+            {#if toTurnOff.length || offAlready.length}<div class="row acts or"><span class="tiny muted">Or</span>{@render actions()}</div>{@render picker()}{/if}
           {:else if toTurnOff.length || offAlready.length}
             <div class="row acts">{@render actions()}</div>
             {@render picker()}
           {/if}
-          {@render switchRows()}
+          {#if changed || !first}{@render switchRows()}{/if}
         </div>
       {/if}
       <b class="what">What happened</b>
@@ -362,8 +428,13 @@
         {@render moreBtn(suspects.length)}
       {/if}
       {#if note}<div class="note">{note}</div>{/if}
-      {#if canFix && (toTurnOff.length || offAlready.length)}<div class="row acts">{@render actions()}</div>{@render picker()}{/if}
-      {#if canFix && (switches.length || switchedOff.length)}<div class="switches">{@render switchRows()}</div>{/if}
+      {#if canFix && first}
+        <div class="switches fixfirst"><b class="tiny muted">What to do</b>{@render switchRows()}</div>
+        {#if toTurnOff.length || offAlready.length}<div class="row acts or"><span class="tiny muted">Or</span>{@render actions()}</div>{@render picker()}{/if}
+      {:else}
+        {#if canFix && (toTurnOff.length || offAlready.length)}<div class="row acts">{@render actions()}</div>{@render picker()}{/if}
+        {#if canFix && (switches.length || switchedOff.length)}<div class="switches">{@render switchRows()}</div>{/if}
+      {/if}
     {/if}
 
     {#if lingered}<div class="tiny muted">{lingered}</div>{/if}
@@ -411,6 +482,13 @@
   .mark.down { color: var(--red); }
   .note { font-size: 13px; }
   .switches, .sw { display: flex; flex-direction: column; gap: 6px; }
+  .fixfirst { padding: 10px 12px; border-radius: var(--radius); border: 1px solid #f9731659; background: #f9731612; }
+  .or { align-items: center; }
+  .warnline { color: var(--gold); white-space: normal; }
+  .diff { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: var(--radius); border: 1px solid var(--line, #27272a); background: var(--bg, #0a0a0b); font-family: var(--mono, Consolas, monospace); font-size: 12px; }
+  .dl { padding: 1px 4px; border-radius: var(--radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .dl.add { color: var(--green); background: #22c55e14; }
+  .dl.del { color: var(--red); background: #ef444414; }
   code { font-family: var(--mono, Consolas, monospace); font-size: 12px; color: var(--gold); }
   .mod { display: inline-flex; align-items: center; gap: 7px; flex: none; color: var(--text); padding: 0; max-width: 100%; }
   button.mod:hover b { color: var(--acc); }
