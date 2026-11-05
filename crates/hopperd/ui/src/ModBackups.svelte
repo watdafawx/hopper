@@ -11,8 +11,6 @@
   import { confirmIt } from './lib/dialog.svelte.js';
   import { bytes } from './lib/format.js';
   import { ago, dateOf } from './lib/modops.js';
-  import SelectionBar from './lib/SelectionBar.svelte';
-  import { Selection } from './lib/selection.svelte.js';
 
   let { server, onChanged = () => {} } = $props();
   const sid = $derived(server.id);
@@ -28,7 +26,6 @@
   async function load() {
     try {
       data = await api(`${base}/mod-backups`);
-      sel.retain(data.sets.map((s) => s.when));
     } catch (e) {
       say(e.message, true);
     }
@@ -78,17 +75,6 @@
     }
   }
 
-  // The backups picked with Ctrl / Shift (lib/selection); a plain click
-  // opens one, as before.
-  const sel = new Selection();
-  const order = $derived((data?.sets || []).map((s) => s.when));
-  function removePicked(whens = sel.inOrder(order)) {
-    const sets = (data?.sets || []).filter((s) => whens.includes(s.when));
-    if (!sets.length || busy) return;
-    remove(sets, sets.length === 1 ? 'Delete this backup?' : `Delete these ${sets.length} backups?`);
-  }
-  const listKey = (e) => sel.onKey(e, order, { el: e.currentTarget, onDelete: removePicked });
-
   function flip(w) {
     const s = new Set(open);
     s.has(w) ? s.delete(w) : s.add(w);
@@ -125,11 +111,11 @@
   {:else if !data.sets.length}
     <div class="empty-state"><span class="es-ic"><Archive size={20} /></span><b>Nothing set aside yet</b><p>Jars that updates replace and mods you remove land here.</p></div>
   {:else}
-    <div class="list" role="presentation" onkeydown={listKey}>
+    <div class="list">
       {#each data.sets as s (s.when)}
-        <div class="set" class:row-sel={sel.many && sel.has(s.when)}>
+        <div class="set">
           <div class="row">
-            <button class="nm grow row-hover" aria-expanded={open.has(s.when)} data-sel-key={s.when} onclick={(e) => sel.click(s.when, e, order) && flip(s.when)}>{#if open.has(s.when)}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}<span class="w">{when(s.when)}</span><span class="ell">{summary(s)}</span></button>
+            <button class="nm grow row-hover" onclick={() => flip(s.when)}>{#if open.has(s.when)}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}<span class="w">{when(s.when)}</span><span class="ell">{summary(s)}</span></button>
             <span class="tiny muted">{bytes(s.size)}</span>
             <button class="btn sm" disabled={busy} onclick={() => restore(s)}><Undo2 size={13} />{s.files.length === 1 ? 'Restore' : 'Restore all'}</button>
             <button class="btn sm ghost icon" title="Delete this backup" disabled={busy} onclick={() => remove([s], 'Delete this backup?')}><Trash2 size={13} /></button>
@@ -143,7 +129,6 @@
         </div>
       {/each}
     </div>
-    {#if sel.many}<SelectionBar n={sel.size} {busy} onDelete={() => removePicked()} onClear={() => sel.clear()} />{/if}
   {/if}
 </div>
 
@@ -152,7 +137,7 @@
   .list { border: 1px solid var(--line); border-radius: var(--radius-lg); }
   .set { padding: 6px 10px; border-bottom: 1px solid var(--line); }
   .set:last-child { border: 0; }
-  .nm { user-select: none; display: flex; align-items: center; gap: 8px; text-align: left; min-width: 0; padding: 3px 6px; margin-left: -6px; border-radius: var(--radius); }
+  .nm { display: flex; align-items: center; gap: 8px; text-align: left; min-width: 0; padding: 3px 6px; margin-left: -6px; border-radius: var(--radius); }
   .w { white-space: nowrap; color: var(--subtle); font-variant-numeric: tabular-nums; width: 190px; flex: none; }
   .grow { flex: 1; min-width: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
