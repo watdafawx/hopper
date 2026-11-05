@@ -130,6 +130,19 @@ pub(crate) fn set_test_hooks(check: Check, fetch: Fetch) {
 /// Beside a backup's files: the CurseForge / Modrinth file each jar was,
 /// to turn the copy into a note later ([`slim`]).
 const IDS: &str = ".ids.json";
+/// Beside a History folder's files: what set them aside, when not the user.
+const REASON: &str = ".reason";
+
+/// Marks every History folder made since `since` (unix seconds) as set
+/// aside by `reason` ("Clean update").
+pub fn mark_reason(root: &Path, since: u64, reason: &str) {
+    for d in fs::read_dir(root.join(crate::sync::BACKUP_DIR)).into_iter().flatten().flatten() {
+        let Some(stamp) = d.file_name().to_str().and_then(|s| s.parse::<u64>().ok()) else { continue };
+        if stamp >= since {
+            let _ = fs::write(d.path().join(REASON), reason);
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Cand {
@@ -359,6 +372,10 @@ pub struct Saved {
     /// The file of the same project in the instance now (the version it was
     /// updated or rolled back to).
     pub now: Option<String>,
+    /// "CurseForge" or "Modrinth" for the file in `now`.
+    pub now_site: &'static str,
+    /// What set it aside, when not the user ("Clean update").
+    pub reason: String,
 }
 
 impl Saved {
@@ -385,17 +402,31 @@ impl Saved {
     /// where a config goes back to.
     pub fn detail(&self) -> String {
         let base = self.name.trim_end_matches(".disabled");
-        match (self.change, &self.now, &self.src) {
+        let line = match (self.change, &self.now, &self.src) {
+            // Only turned on or off: the same file, so no "X → X".
+            (Change::TurnedOn | Change::TurnedOff, _, Some(_)) => format!("{} · {}", crate::undo::version_of(base), self.site()),
             (Change::Updated | Change::RolledBack | Change::Switched, Some(now), _) => {
                 let (old, new) = crate::install::version_change(base, now);
-                format!("{old} → {new} · {}", self.site())
+                let moved = !self.now_site.is_empty() && self.site() != self.now_site;
+                if old != new {
+                    format!("{old} → {new} · {}", self.site())
+                } else if base != now.as_str() {
+                    // The same version text: say what differs instead.
+                    let site = if moved { format!("{} → {}", self.site(), self.now_site) } else { self.site().to_string() };
+                    format!("{base} → {now} · {site}")
+                } else if moved {
+                    format!("{} · {} → {}", crate::undo::version_of(base), self.site(), self.now_site)
+                } else {
+                    format!("{} · {}", crate::undo::version_of(base), self.site())
+                }
             }
             (_, _, Some(_)) => format!("{} · {}", crate::undo::version_of(base), self.site()),
             (_, _, None) if is_jar(&self.name) => {
                 format!("No download source · copy kept ({})", crate::instance_ops::human_bytes(self.size))
             }
             (_, _, None) => self.restore_to.clone(),
-        }
+        };
+        if self.reason.is_empty() { line } else { format!("{line} · by {}", self.reason) }
     }
 }
 
@@ -410,6 +441,10 @@ pub enum Change {
     RolledBack,
     /// Another file of the same mod (or the same file again) is there now.
     Switched,
+    /// The same file, now on (it was off when set aside).
+    TurnedOn,
+    /// The same file, now off.
+    TurnedOff,
     /// A text file (a config, options.txt) whose earlier text this is.
     Edited,
     /// Something else of the same name is there now.
@@ -423,6 +458,8 @@ impl Change {
             Change::Updated => "Updated",
             Change::RolledBack => "Rolled back",
             Change::Switched => "Switched",
+            Change::TurnedOn => "Turned on",
+            Change::TurnedOff => "Turned off",
             Change::Edited => "Changed",
             Change::Replaced => "Replaced",
         }
@@ -445,6 +482,7 @@ fn judge(root: &Path, inst: Option<&crate::instances::Instance>, f: &mut Saved) 
         addons.iter().find(|a| a.project_id == r.project_id).or_else(|| addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(&r.file_name)))
     });
     f.now = same.map(|a| a.file_name.clone());
+    f.now_site = same.map_or("", |a| if a.mr_version.is_empty() { "CurseForge" } else { "Modrinth" });
     f.change = match (f.src.as_ref(), same) {
         (Some(r), Some(a)) => {
             let old_date = r.addon.as_ref().map(|o| o.file_date.as_str()).unwrap_or("");
@@ -458,7 +496,16 @@ fn judge(root: &Path, inst: Option<&crate::instances::Instance>, f: &mut Saved) 
             match newer {
                 std::cmp::Ordering::Greater => Change::Updated,
                 std::cmp::Ordering::Less => Change::RolledBack,
-                std::cmp::Ordering::Equal => Change::Switched,
+                std::cmp::Ordering::Equal => {
+                    // The very same file, only on or off now.
+                    let was_on = r.addon.as_ref().map_or(!f.name.ends_with(".disabled"), |o| o.enabled);
+                    let same_file = r.file_name == a.file_name && r.file_id == a.file_id && r.mr_version == a.mr_version;
+                    match (same_file, was_on, a.enabled) {
+                        (true, false, true) => Change::TurnedOn,
+                        (true, true, false) => Change::TurnedOff,
+                        _ => Change::Switched,
+                    }
+                }
             }
         }
         (Some(_), None) => Change::Removed,
@@ -519,7 +566,7 @@ pub fn count_since(root: &Path, since: i64) -> (usize, i64) {
             .into_iter()
             .flatten()
             .flatten()
-            .any(|f| !matches!(f.file_name().to_string_lossy().as_ref(), ORIGINS | IDS | CHECKED));
+            .any(|f| !matches!(f.file_name().to_string_lossy().as_ref(), ORIGINS | IDS | CHECKED | REASON));
         if !has_file {
             continue;
         }
@@ -550,7 +597,9 @@ pub fn list(root: &Path) -> Vec<Set> {
                 fs::read(dir.join(IDS)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
             let mut files = Vec::new();
             walk(&dir, &dir, &origins, &ids, &mut files);
+            let reason = fs::read_to_string(dir.join(REASON)).unwrap_or_default();
             for f in &mut files {
+                f.reason = reason.clone();
                 judge(root, inst.as_ref(), f);
             }
             files.sort_by_key(|f| f.name.to_lowercase());
@@ -571,7 +620,7 @@ fn walk(
     for e in fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
-        if name == ORIGINS || name == IDS || name == CHECKED {
+        if name == ORIGINS || name == IDS || name == CHECKED || name == REASON {
             continue;
         }
         if p.is_dir() {
@@ -603,7 +652,7 @@ fn walk(
             None if rel.contains('/') => rel.clone(),
             None => guess(&p, &name),
         };
-        out.push(Saved { size, name, path: p, restore_to, download, src, change: Change::Removed, now: None });
+        out.push(Saved { size, name, path: p, restore_to, download, src, change: Change::Removed, now: None, now_site: "", reason: String::new() });
     }
 }
 
@@ -633,7 +682,7 @@ pub fn restore(root: &Path, f: &Saved) -> anyhow::Result<PathBuf> {
 
 /// Removes a History folder that holds nothing but its own notes.
 pub(crate) fn drop_if_empty(dir: &Path) {
-    if fs::read_dir(dir).is_ok_and(|mut d| d.all(|e| e.is_ok_and(|e| e.file_name() == ORIGINS || e.file_name() == IDS || e.file_name() == CHECKED))) {
+    if fs::read_dir(dir).is_ok_and(|mut d| d.all(|e| e.is_ok_and(|e| e.file_name() == ORIGINS || e.file_name() == IDS || e.file_name() == CHECKED || e.file_name() == REASON))) {
         let _ = fs::remove_dir_all(dir);
     }
 }
@@ -1051,6 +1100,48 @@ mod tests {
             assert_eq!(&after, before);
         }
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn saved_of(name: &str, now: &str, change: Change) -> Saved {
+        let src = Ref {
+            project_id: 1,
+            file_id: 2,
+            file_name: name.into(),
+            sha1: String::new(),
+            size: 1,
+            mr_version: String::new(),
+            mr_project: String::new(),
+            name: "Brewin".into(),
+            addon: None,
+        };
+        Saved {
+            path: PathBuf::new(),
+            name: name.into(),
+            size: 1,
+            restore_to: format!("mods/{name}"),
+            download: true,
+            src: Some(src),
+            change,
+            now: Some(now.into()),
+            now_site: "CurseForge",
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn detail_never_shows_the_same_version_twice() {
+        // Only on or off: one version, no arrow.
+        let mut f = saved_of("brewin-1.21.1.jar.disabled", "brewin-1.21.1.jar", Change::TurnedOn);
+        f.reason = "Clean update".into();
+        assert_eq!(f.detail(), "1.21.1 · CurseForge · by Clean update");
+        // A real swap shows what differs.
+        let f = saved_of("brewin-1.21.1.jar", "brewin-1.21.1-fixed.jar", Change::Switched);
+        assert_eq!(f.detail(), "1.21.1 → 1.21.1-fixed · CurseForge");
+        // Another site says so.
+        let mut f = saved_of("brewin-1.21.1.jar", "brewin-1.21.1.jar", Change::Switched);
+        f.now_site = "Modrinth";
+        assert_eq!(f.detail(), "1.21.1 · CurseForge → Modrinth");
+        assert_eq!(Change::TurnedOn.label(), "Turned on");
     }
 
     #[test]

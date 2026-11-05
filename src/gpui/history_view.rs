@@ -64,6 +64,120 @@ impl BackupsView {
         col.into_any_element()
     }
 
+    /// Row keys in display order (what Shift-click ranges run over).
+    fn order(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (i, set) in self.sets.iter().enumerate() {
+            match set.files.as_slice() {
+                [_] => out.push((i * 10_000).to_string()),
+                files if self.open.contains(&set.dir) => out.extend((0..files.len()).map(|j| (i * 10_000 + j + 1).to_string())),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The picked files, newest first (open or folded).
+    fn picked_files(&self) -> Vec<Saved> {
+        let mut out = Vec::new();
+        for (i, set) in self.sets.iter().enumerate() {
+            for (j, f) in set.files.iter().enumerate() {
+                let key = if set.files.len() == 1 { i * 10_000 } else { i * 10_000 + j + 1 };
+                if self.sel.contains(&key.to_string()) {
+                    out.push(f.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// A drag over a row: the row it started on and this one get picked.
+    fn sweep_over(&mut self, keys: &[String], cx: &mut Context<Self>) {
+        let Some(start) = self.hstart.clone() else { return };
+        if start == keys {
+            return;
+        }
+        let set = self.sel.keys_mut();
+        let before = set.len();
+        set.extend(start);
+        set.extend(keys.iter().cloned());
+        if self.sel.len() != before {
+            cx.notify();
+        }
+    }
+
+    /// "3 selected · Undo 3 · ✕", over the bottom of the list.
+    pub(crate) fn history_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let n = self.sel.len();
+        let undo = Button::new("hist-sel-undo")
+            .small()
+            .outline()
+            .label(format!("Undo {n}"))
+            .disabled(self.busy.is_some())
+            .on_click(cx.listener(|this, _, window, cx| {
+                let files = this.picked_files();
+                this.sel.clear();
+                this.undo(files, window, cx);
+            }))
+            .into_any_element();
+        let bar = crate::selection::bar(
+            "hist-sel",
+            n,
+            vec![undo],
+            None,
+            {
+                let view = cx.entity();
+                move |_, _, cx| {
+                    view.update(cx, |this, cx| {
+                        this.sel.clear();
+                        cx.notify();
+                    })
+                }
+            },
+            cx,
+        );
+        crate::selection::floating("hist-sel", bar)
+    }
+
+    /// Makes a row take part in picking: Ctrl / Shift click picks, and a press
+    /// followed by a drag over other rows picks them all.
+    fn pickable(&self, el: Stateful<Div>, keys: Vec<String>, plain: Option<Rc<dyn Fn(&mut Self, &mut Context<Self>)>>, cx: &mut Context<Self>) -> Stateful<Div> {
+        let view = cx.entity();
+        let k2 = keys.clone();
+        let k3 = keys.clone();
+        let el = crate::drag_pick::paint_row(el, &self.hpaint, "hist", move |_, _, cx| {
+            view.update(cx, |this, cx| this.sweep_over(&k2, cx))
+        });
+        el.capture_any_mouse_down(cx.listener(move |this, e: &MouseDownEvent, _, _| {
+            let m = e.modifiers;
+            if e.button == MouseButton::Left && !(m.control || m.platform || m.shift) {
+                this.hpaint.start(&"hist".into(), 1);
+                this.hstart = Some(k3.clone());
+            }
+        }))
+        .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+            let m = e.modifiers();
+            if m.control || m.platform || m.shift {
+                let order = this.order();
+                if keys.len() == 1 {
+                    this.sel.click(&keys[0], m, &order);
+                } else if keys.iter().all(|k| this.sel.contains(k)) {
+                    for k in &keys {
+                        this.sel.keys_mut().remove(k);
+                    }
+                } else {
+                    this.sel.keys_mut().extend(keys.iter().cloned());
+                }
+                cx.notify();
+            } else if let Some(f) = &plain {
+                f(this, cx);
+            } else {
+                this.sel.set_one(keys[0].clone());
+                cx.notify();
+            }
+        }))
+    }
+
     /// One action: a row, or a fold of rows when it touched several files.
     fn set_rows(&self, i: usize, set: &Set, cx: &mut Context<Self>) -> AnyElement {
         if let [f] = set.files.as_slice() {
@@ -79,22 +193,31 @@ impl BackupsView {
         let same = set.files.iter().all(|f| f.change == set.files[0].change);
         let label = if same { set.files[0].change.label() } else { "Changed" };
         let busy = self.busy.is_some();
+        let kids: Vec<String> = (0..n).map(|j| (i * 10_000 + j + 1).to_string()).collect();
+        let all_picked = kids.iter().all(|k| self.sel.contains(k));
+        let head = h_flex()
+            .id(("hist-set", i))
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded(cx.theme().radius)
+            .hover(|s| widgets::row_hover(s, cx))
+            .clickable(cx);
+        let head = self.pickable(
+            head,
+            kids,
+            Some(Rc::new(move |this: &mut Self, cx: &mut Context<Self>| {
+                if !this.open.remove(&dir) {
+                    this.open.insert(dir.clone());
+                }
+                cx.notify();
+            })),
+            cx,
+        );
+        let head = if all_picked { widgets::row_selected(head, cx) } else { head };
         v_flex()
             .child(
-                h_flex()
-                    .id(("hist-set", i))
-                    .gap_2()
-                    .px_2()
-                    .py_1p5()
-                    .rounded(cx.theme().radius)
-                    .hover(|s| widgets::row_hover(s, cx))
-                    .clickable(cx)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.open.remove(&dir) {
-                            this.open.insert(dir.clone());
-                        }
-                        cx.notify();
-                    }))
+                head
                     .child(
                         div()
                             .size(rems(1.5))
@@ -159,7 +282,8 @@ impl BackupsView {
         };
         let file = f.clone();
         let busy = self.busy.is_some();
-        h_flex()
+        let picked = self.sel.contains(&key.to_string());
+        let row = h_flex()
             .id(("hist-row", key))
             .gap_2()
             .px_2()
@@ -167,6 +291,10 @@ impl BackupsView {
             .when(nested, |r| r.pl_8())
             .rounded(cx.theme().radius)
             .hover(|s| widgets::row_hover(s, cx))
+            .clickable(cx);
+        let row = self.pickable(row, vec![key.to_string()], None, cx);
+        let row = if picked { widgets::row_selected(row, cx) } else { row };
+        row
             .child(
                 v_flex()
                     .flex_1()
@@ -458,5 +586,7 @@ fn change_color(c: Change, same: bool, cx: &App) -> Hsla {
         Change::Updated => t.info,
         Change::RolledBack => t.warning,
         Change::Edited | Change::Switched | Change::Replaced => t.primary,
+        Change::TurnedOn => t.success,
+        Change::TurnedOff => t.muted_foreground,
     }
 }

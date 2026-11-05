@@ -12,6 +12,9 @@
   import { confirmIt } from './lib/dialog.svelte.js';
   import { bytes } from './lib/format.js';
   import { ago, dateOf } from './lib/modops.js';
+  import { Selection } from './lib/selection.svelte.js';
+  import SelectionBar from './lib/SelectionBar.svelte';
+  import { paintDown, paintOver } from './lib/dragpick.svelte.js';
 
   let { server, onChanged = () => {} } = $props();
   const sid = $derived(server.id);
@@ -30,6 +33,8 @@
   async function load() {
     try {
       data = await api(`${base}/mod-backups`);
+      // Rows are keyed by time and name: let go of ones that are gone.
+      sel.retain(order);
     } catch (e) {
       say(e.message, true);
     }
@@ -50,6 +55,89 @@
       }
       await load();
       if (r.restored.length) onChanged();
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Rows picked by click, Ctrl / Shift click, or press and drag across rows,
+  // as desktop's History tab. Keys are "<when>:<file name>".
+  const sel = new Selection();
+  const keyOf = (s, f) => `${s.when}:${f.name}`;
+  // The rows shown, in order (a fold's files count once it is open).
+  const order = $derived.by(() => {
+    const out = [];
+    for (const s of data?.sets ?? []) {
+      if (s.files.length === 1) out.push(keyOf(s, s.files[0]));
+      else if (open.has(s.when)) for (const f of s.files) out.push(keyOf(s, f));
+    }
+    return out;
+  });
+  // A press that started on a row, until the button is let go.
+  let held = false;
+  let start = null;
+  const addKeys = (keys) => {
+    const next = new Set(sel.keys);
+    for (const k of keys) next.add(k);
+    if (next.size !== sel.keys.size) sel.keys = next;
+  };
+  function setAt(i) {
+    const k = order[i];
+    if (k) addKeys(start && start !== k ? [start, k] : []);
+  }
+  function down(e, i) {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    held = true;
+    start = order[i];
+    window.addEventListener('pointerup', () => { held = false; start = null; }, { once: true, capture: true });
+    paintDown(e, 'hist', i, true, () => {});
+  }
+  function rowClick(e, k) {
+    sel.click(k, e, order);
+  }
+  // A fold: Ctrl / Shift click picks or lets go of its files; a drag over it picks them.
+  const kidsOf = (s) => s.files.map((f) => keyOf(s, f));
+  function headClick(e, s) {
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      const kids = kidsOf(s);
+      const all = kids.every((k) => sel.has(k));
+      const next = new Set(sel.keys);
+      for (const k of kids) all ? next.delete(k) : next.add(k);
+      sel.keys = next;
+    } else flip(s.when);
+  }
+  function headEnter(e, s) {
+    if (held && start && e.buttons & 1) addKeys([start, ...kidsOf(s)]);
+  }
+  const headPicked = (s) => s.files.every((f) => sel.has(keyOf(s, f)));
+  // Undoes the picked rows, newest first, one after the other.
+  async function undoPicked() {
+    const rows = [];
+    for (const s of data?.sets ?? []) for (const f of s.files) if (sel.has(keyOf(s, f))) rows.push([s, f]);
+    sel.clear();
+    busy = true;
+    const restored = [];
+    let restart = false;
+    try {
+      for (const [s, f] of rows) {
+        const r = await post(`${base}/mod-backups/undo`, { when: s.when, name: s.files.length > 1 ? f.name : null });
+        restored.push(...r.restored);
+        restart ||= r.restart_needed;
+        for (const e of r.errors) say(e, true);
+        if (r.gone) {
+          if (!r.gone.choices.length) say(`${r.gone.title}: ${r.gone.message}. It has no other version for this Minecraft and loader, so it can't be put back.`, true);
+          else {
+            picked = r.gone.closest;
+            pick = { when: s.when, ...r.gone };
+            break;
+          }
+        }
+      }
+      if (restored.length) say(`Put back ${restored.length} file${restored.length === 1 ? '' : 's'}.${restart ? ' Restart the server to load it.' : ''}`);
+      await load();
+      if (restored.length) onChanged();
     } catch (e) {
       say(e.message, true);
     } finally {
@@ -119,7 +207,7 @@
     return days <= 0 ? 'Today' : days === 1 ? 'Yesterday' : dateOf(iso(t));
   }
   const hm = (t) => new Date(t * 1000).toTimeString().slice(0, 5);
-  const tone = (c) => ({ Removed: 'red', Updated: 'blue', 'Rolled back': 'warn' })[c] ?? 'pri';
+  const tone = (c) => ({ Removed: 'red', Updated: 'blue', 'Rolled back': 'warn', 'Turned on': 'green', 'Turned off': 'muted' })[c] ?? 'pri';
   // Sets grouped under their day.
   const days = $derived.by(() => {
     const out = [];
@@ -142,7 +230,9 @@
 </script>
 
 {#snippet entry(s, f, nested)}
-  <div class="row ent row-hover" class:nested>
+  {@const k = keyOf(s, f)}
+  {@const i = order.indexOf(k)}
+  <div class="row ent row-hover" class:nested class:row-sel={sel.has(k)} role="presentation" onpointerdown={(e) => down(e, i)} onpointerenter={(e) => paintOver(e, 'hist', i, setAt)} onclick={(e) => rowClick(e, k)}>
     <div class="col grow">
       <div class="row t">
         <span class="ch {tone(f.change)}">{f.change}</span>
@@ -175,8 +265,8 @@
           {#if s.files.length === 1}
             {@render entry(s, s.files[0], false)}
           {:else}
-            <div class="row ent row-hover">
-              <button class="nm grow" onclick={() => flip(s.when)}>
+            <div class="row ent row-hover" class:row-sel={headPicked(s)} role="presentation" onpointerdown={(e) => { if (e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey) { held = true; start = null; window.addEventListener('pointerup', () => { held = false; start = null; }, { once: true, capture: true }); } }} onpointerenter={(e) => headEnter(e, s)}>
+              <button class="nm grow" onclick={(e) => headClick(e, s)}>
                 {#if open.has(s.when)}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
                 <span class="col grow">
                   <span class="row t"><span class="ch {same(s) ? tone(s.files[0].change) : 'muted'}">{same(s) ? s.files[0].change : 'Changed'}</span>{s.files.length} {s.files.every((f) => f.project_id) ? 'mods' : 'files'}</span>
@@ -193,6 +283,11 @@
         {/each}
       {/each}
     </div>
+  {/if}
+  {#if sel.many}
+    <SelectionBar n={sel.size} onClear={() => sel.clear()}>
+      <button class="btn sm" disabled={busy} onclick={undoPicked}>Undo {sel.size}</button>
+    </SelectionBar>
   {/if}
   <div class="row small foot">
     {#if u}
@@ -230,6 +325,7 @@
 
 <style>
   .bk { gap: 8px; }
+  .ent { user-select: none; }
   .list { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 6px; }
   .day { padding: 8px 8px 4px; color: var(--subtle); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   .ent { gap: 10px; padding: 6px 8px; border-radius: var(--radius); }
@@ -241,6 +337,7 @@
   .ch.warn { color: var(--amber, #e0b04a); }
   .ch.pri { color: var(--accent); }
   .ch.muted { color: var(--subtle); }
+  .ch.green { color: var(--green, #6cc788); }
   .nm { display: flex; align-items: center; gap: 8px; text-align: left; min-width: 0; }
   .grow { flex: 1; min-width: 0; }
   .col { display: flex; flex-direction: column; }

@@ -2491,7 +2491,15 @@ impl Store {
                     job.note(format!("{} backed up to {}", w.name, p.display()));
                 }
             }
-            if let Err(e) = hopper::modpack::update_any(&mut full, pid, &file, overrides.as_ref(), job) {
+            let clean_since = overrides
+                .as_ref()
+                .is_some_and(|o| o.clean)
+                .then(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
+            let updated = hopper::modpack::update_any(&mut full, pid, &file, overrides.as_ref(), job);
+            if let Some(since) = clean_since {
+                hopper::backups::mark_reason(&full.root, since, "Clean update");
+            }
+            if let Err(e) = updated {
                 // Offer the update again.
                 let _ = tx.send(Msg::RecheckPacks);
                 return Err(e);
