@@ -41,6 +41,12 @@ pub struct BackupsView {
     projects: HashMap<String, (u64, String)>,
     /// Multi-file entries shown open (by folder).
     pub(crate) open: HashSet<PathBuf>,
+    /// History rows picked (click, Ctrl / Shift, or press and drag across rows).
+    pub(crate) sel: crate::selection::Selection,
+    /// The shared drag-across-rows paint, and the keys the pressed row stands
+    /// for (a group stands for its children).
+    pub(crate) hpaint: crate::drag_pick::Paint,
+    pub(crate) hstart: Option<Vec<String>>,
     mode: Mode,
     /// `None` while loading.
     snaps: Option<Vec<Snapshot>>,
@@ -76,6 +82,8 @@ impl BackupsView {
                 .await;
             this.update(cx, |this, cx| {
                 this.sets = sets;
+                // Row keys are positions: they mean other rows now.
+                this.sel.clear();
                 this.copies = Some(copies);
                 this.projects = projects;
                 this.sets_loaded = true;
@@ -785,7 +793,18 @@ impl Render for BackupsView {
             .children(banner)
             // Empty, it shows its empty state at its own height (a flex_1 scroll
             // area has none without a set height).
-            .child(if filled { div().id("backups-list").flex_1().min_h_0().overflow_y_scrollbar().child(body).into_any_element() } else { body })
+            .child(if filled {
+                let bar = (!snaps_mode && self.sel.many()).then(|| self.history_bar(cx));
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(div().id("backups-list").size_full().overflow_y_scrollbar().child(body))
+                    .children(bar)
+                    .into_any_element()
+            } else {
+                body
+            })
             .child(self.usage_line(cx));
         h_flex().items_start().gap_4().child(main).children(peek)
     }
@@ -810,6 +829,9 @@ pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window
             store,
             root,
             open: HashSet::new(),
+            sel: Default::default(),
+            hpaint: Default::default(),
+            hstart: None,
             mode: if snap.is_some() { Mode::Snapshots } else { Mode::History },
             snaps: None,
             usage: None,
