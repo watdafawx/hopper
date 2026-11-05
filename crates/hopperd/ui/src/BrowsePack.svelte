@@ -53,6 +53,32 @@
   let author = $state(null); // 'loading', { name, url, projects }, { error }
   let menu = $state(null); // a listed project's right-click menu: { r, x, y }
 
+  // The compact bar, as on desktop: pinned once the install card (or the
+  // header, without one) has scrolled away. The observer fires only when
+  // that line is crossed, so scrolling itself costs nothing; the bar lies
+  // over the page, so showing it moves nothing.
+  let fold = $state(null);
+  let tabsEl = $state(null);
+  let barEl = $state(null);
+  let stuck = $state(false);
+  $effect(() => {
+    if (!fold) return;
+    const io = new IntersectionObserver(([e]) => {
+      stuck = !e.isIntersecting && e.boundingClientRect.top < (e.rootBounds?.top ?? 0);
+    });
+    io.observe(fold);
+    return () => io.disconnect();
+  });
+  function pickTab(t) {
+    tab = t;
+    // Past the page's own tabs, tuck them under the bar so the new tab
+    // reads from its start.
+    if (stuck && tabsEl && barEl && tabsEl.getBoundingClientRect().bottom < barEl.getBoundingClientRect().bottom) {
+      tabsEl.style.scrollMarginTop = `${barEl.offsetHeight - tabsEl.offsetHeight}px`;
+      tabsEl.scrollIntoView({ block: 'start' });
+    }
+  }
+
   const filterText = $derived([mc, LOADER_NAME[loader]].filter(Boolean).join(' · '));
   const have = $derived(p?.installed || null);
   const sameFile = (v) => !!have && have.same_project && have.file_id === v.id;
@@ -294,6 +320,14 @@
   </button>
 {/snippet}
 
+<!-- The install card's button; the compact bar shows the same one. -->
+{#snippet act()}
+  {#if busy}<span class="busy small"><span class="spinner"></span><span class="ell">{busy}</span></span>
+  {:else if have?.update}<button class="btn pri {p.source}" title={have.enabled === false ? 'A newer file is out; replaces the installed one, which stays disabled' : 'A newer file is out; replaces the installed one'} onclick={() => install()}><Download size={14} />Update</button>
+  {:else if have}<span class="chip running"><Check size={11} />Installed</span>
+  {:else if target}<button class="btn pri {p.source}" disabled={!canInstall || p.distribution === false} onclick={() => install()}><Download size={14} />Install</button>{/if}
+{/snippet}
+
 <div class="pack">
   <div class="row"><button class="btn sm ghost" onclick={goBack}><ArrowLeft size={14} />{onBack ? (trail.length ? `Back to ${trail[trail.length - 1].name}` : 'Close') : 'Browse'}</button>
     <span class="tiny muted">{T.label}{filterText ? ` · ${filterText}` : ''}{target && !packs ? ` · into ${target.name}` : ''}</span></div>
@@ -304,6 +338,24 @@
     <div class="hd"><div class="ico sk"></div><div class="col grow"><div class="sk line" style:width="40%"></div><div class="sk line" style:width="25%"></div><div class="sk line" style:width="60%"></div></div></div>
     <div class="sk block"></div>
   {:else}
+    {#if !author}
+      <div class="pkbar-pin">
+        <div class="pkbar" class:on={stuck} bind:this={barEl} inert={!stuck}>
+          <div class="row pkbr">
+            {#if p.icon}<img src={p.icon} alt="" width="28" height="28" />{:else}<span class="pico"></span>{/if}
+            <div class="col grow"><b class="small ell">{p.name}</b>{#if p.author}<span class="tiny muted ell">by {p.author}</span>{/if}</div>
+            <span class="dl tiny sdl"><Download size={11} />{count(p.downloads)}</span>
+            {#if !packs && target}{@render act()}{/if}
+          </div>
+          <div class="tabs stabs">
+            <button class:tab-sel={tab === 'description'} onclick={() => pickTab('description')}>Description</button>
+            <button class:tab-sel={tab === 'versions'} onclick={() => pickTab('versions')}>Versions{versions ? ` ${versions.length}` : ''}</button>
+            {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => pickTab('deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
+            {#if p.gallery.length}<button class:tab-sel={tab === 'gallery'} onclick={() => pickTab('gallery')}>Gallery {p.gallery.length}</button>{/if}
+          </div>
+        </div>
+      </div>
+    {/if}
     <div class="hd">
       {#if p.icon}<img class="ico" src={p.icon} alt="" width="72" height="72" />{:else}<span class="ico"></span>{/if}
       <div class="col grow info">
@@ -373,10 +425,7 @@
               {:else}<span class="small muted row"><Layers size={13} />Also downloads {plan.extra.length} required mod{plan.extra.length === 1 ? '' : 's'} · {size(plan.total)} total</span>{/if}
             {/if}
           </div>
-          {#if busy}<span class="busy small"><span class="spinner"></span><span class="ell">{busy}</span></span>
-          {:else if have?.update}<button class="btn pri {p.source}" title={have.enabled === false ? 'A newer file is out; replaces the installed one, which stays disabled' : 'A newer file is out; replaces the installed one'} onclick={() => install()}><Download size={14} />Update</button>
-          {:else if have}<span class="chip running"><Check size={11} />Installed</span>
-          {:else if target}<button class="btn pri {p.source}" disabled={!canInstall || p.distribution === false} onclick={() => install()}><Download size={14} />Install</button>{/if}
+          {@render act()}
         </div>
         {#if target && !have && plan && plan !== 'loading' && !plan.error}
           {@const on = plan.kept.filter((k) => k.on)}
@@ -405,6 +454,8 @@
         {/if}
       </div>
     {/if}
+    <!-- Where the compact bar starts: under the install card, or the header. -->
+    <div class="fold" bind:this={fold}></div>
 
     {#if p.gallery.length}
       <div class="strip">
@@ -435,7 +486,7 @@
         {/if}
       </div>
     {:else}
-      <div class="tabs">
+      <div class="tabs" bind:this={tabsEl}>
         <button class:tab-sel={tab === 'description'} onclick={() => (tab = 'description')}>Description</button>
         <button class:tab-sel={tab === 'versions'} onclick={() => (tab = 'versions')}>Versions{versions ? ` ${versions.length}` : ''}</button>
         {#if !packs}<button class:tab-sel={tab === 'deps'} onclick={() => (tab = 'deps')}>Dependencies{Array.isArray(deps) ? ` ${deps.length}` : ''}</button>{/if}
@@ -581,6 +632,20 @@
   .shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .shot:hover { border-color: var(--line2); }
   .shot.more { width: 64px; color: var(--subtle); }
+  /* The compact bar: a zero-height sticky pin, so the page doesn't move
+     when it shows; the bar fades and slides in over it. */
+  .pkbar-pin { position: sticky; top: 0; height: 0; margin-bottom: -16px; z-index: 20; }
+  .pkbar { position: absolute; top: 0; left: -18px; right: -18px; padding: 8px 18px 0; background: var(--surface); border-bottom: 1px solid var(--line); box-shadow: 0 6px 14px #0006; container-type: inline-size; opacity: 0; transform: translateY(-6px); pointer-events: none; transition: opacity 120ms ease-out, transform 120ms ease-out; }
+  .pkbar.on { opacity: 1; transform: none; pointer-events: auto; }
+  .pkbr { gap: 10px; align-items: center; }
+  .pkbr img, .pkbr .pico { width: 28px; height: 28px; border-radius: var(--radius); flex: none; background: var(--raise); }
+  .pkbr .col { gap: 0; min-width: 0; }
+  .sdl { display: inline-flex; align-items: center; gap: 4px; color: var(--blue); flex: none; }
+  .stabs { border-bottom: 0; margin-top: 2px; }
+  /* Narrow: the downloads go first; name and author truncate. */
+  @container (max-width: 460px) { .sdl { display: none; } }
+  @media (prefers-reduced-motion: reduce) { .pkbar { transition: none; } }
+  .fold { height: 0; margin-top: -16px; }
   .tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); }
   .tabs button { padding: 7px 0; color: var(--subtle); }
   .tabs button:hover { color: var(--text); }
