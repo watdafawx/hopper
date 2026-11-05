@@ -2524,6 +2524,7 @@ pub fn switch(store: Entity<Store>, root: PathBuf, file: cf::File, window: &mut 
         .jobs()
         .start(format!("Preparing {} → {}", inst.name, file.display_name));
     job.announce();
+    job.presence(inst.name.clone(), true);
     window
         .spawn(cx, async move |cx| {
             let f2 = file.clone();

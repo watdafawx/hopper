@@ -62,6 +62,8 @@ pub struct Settings {
     pub links_enabled: bool,
     /// Minimize Hopper while a game runs, and bring it back after.
     pub minimize_while_playing: bool,
+    /// What Discord shows of what you're doing (Settings › Discord).
+    pub discord: crate::discord::Prefs,
     /// Record FPS, frame times, CPU, RAM, GPU and GC of each game run, to
     /// compare Java argument presets.
     pub record_sessions: bool,
@@ -478,6 +480,7 @@ impl Default for Settings {
             links_prev_handler: None,
             links_enabled: false,
             minimize_while_playing: false,
+            discord: Default::default(),
             record_sessions: true,
             mods_server_column: true,
             content_hidden_cols: Vec::new(),

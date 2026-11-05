@@ -30,6 +30,9 @@ pub struct JobState {
     pub waits_failed: usize,
     /// Its work ended fine while [`JobState::waits`] remained.
     held: bool,
+    /// A modpack being installed (false) or updated (true), by name, for
+    /// what Discord shows (see [`Job::presence`]).
+    pub presence: Option<(String, bool)>,
 }
 
 #[derive(Clone, Default)]
@@ -96,6 +99,7 @@ impl Jobs {
             waited: 0,
             waits_failed: 0,
             held: false,
+            presence: None,
         });
         drop(g);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -273,6 +277,13 @@ impl Job {
             Some(done as f32 / total as f32)
         };
         self.jobs.tick(self.id, |j| j.progress = p);
+    }
+
+    /// Marks the job as installing (or updating) the named modpack, which
+    /// Discord shows while it runs.
+    pub fn presence(&self, pack: impl Into<String>, update: bool) {
+        let pack = pack.into();
+        self.jobs.update(self.id, |j| j.presence = Some((pack, update)));
     }
 
     /// Asks for a Windows notification when it finishes fine too.

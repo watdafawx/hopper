@@ -1704,6 +1704,17 @@ impl Store {
         self.running.get(root)
     }
 
+    /// Every instance with a game running.
+    pub fn running_games(&self) -> impl Iterator<Item = (&PathBuf, &Running)> {
+        self.running.iter()
+    }
+
+    /// Whether the instance's last game crashed, as far as already read
+    /// (no disk access, unlike [`Store::crash`]).
+    pub fn crashed(&self, root: &Path) -> bool {
+        self.crashes.get(root).is_some_and(|c| c.is_some())
+    }
+
     /// Whether mods or packs changed while the game runs, so the content
     /// tabs say they apply on its next start. Not shown just because the
     /// game runs: players know that; only once something changed.
@@ -2460,6 +2471,7 @@ impl Store {
         let native = self.settings.launch_native;
         let id = self.spawn_instance_job_id(&full.root.clone(), format!("{} → {}", full.name, file.display_name), move |job| {
             job.announce();
+            job.presence(full.name.clone(), true);
             let loader_before = (full.loader.clone(), full.game_version.clone());
             if backup_worlds {
                 for w in hopper::instance_ops::worlds(&full) {

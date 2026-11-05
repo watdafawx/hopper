@@ -930,6 +930,31 @@ impl BrowseView {
         self.selected.as_ref().map(|m| m.id)
     }
 
+    /// What Discord shows for this Browse (or peek): the type listed and
+    /// site, or the project open. Never the search text.
+    pub(crate) fn presence(&self) -> hopper::discord::Doing {
+        use hopper::discord::{Doing, Kind};
+        let kind = |c: u32| match c {
+            cf::CLASS_MODPACKS => Kind::Modpacks,
+            cf::CLASS_RESOURCE_PACKS => Kind::ResourcePacks,
+            cf::CLASS_SHADERS => Kind::Shaders,
+            cf::CLASS_DATAPACKS => Kind::DataPacks,
+            cf::CLASS_WORLDS => Kind::Worlds,
+            _ => Kind::Mods,
+        };
+        match &self.selected {
+            Some(m) => Doing::Project {
+                kind: kind(m.class_id.unwrap_or(self.class)),
+                modrinth: m.modrinth.is_some(),
+                name: m.name.clone(),
+                version: String::new(),
+                icon_url: m.logo.as_ref().and_then(|l| l.icon()).map(str::to_string),
+                page_url: Some(m.page()),
+            },
+            None => Doing::Browsing { kind: kind(self.class), modrinth: self.modrinth },
+        }
+    }
+
     /// Where Browse is, for back and forward: the type shown and the
     /// project open.
     pub(crate) fn nav_loc(&self) -> (u32, Option<&cf::Mod>) {
@@ -2079,9 +2104,11 @@ impl BrowseView {
         // changes it meanwhile. A modpack makes a new instance.
         let into = target.as_ref().filter(|_| !pack).map(|t| t.root.clone());
         let project = m.id;
+        let pack_name = m.name.clone();
         let work = move |job: &hopper::jobs::Job| {
             if pack {
                 job.announce();
+                job.presence(pack_name.clone(), false);
             }
             let place = hopper::browse::Placement {
                 instances_root: &root,
