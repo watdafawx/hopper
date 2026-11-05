@@ -17,6 +17,7 @@
   import { say } from './lib/toast.svelte.js';
   import Changelog from './lib/Changelog.svelte';
   import BrowseMenu from './BrowseMenu.svelte';
+  import { packQuery, packPage, preloadNow, warm, cancelWarm } from './lib/prefetch.js';
 
   // `target`: the server mods and data packs install into (Browse's
   // "Install into"); `busy`: what its install of this project is doing.
@@ -101,12 +102,11 @@
     menu = null;
   }
 
-  async function load() {
+  /** The page, from Browse's hover fetch when it's there; `fresh` asks again (after an install). */
+  async function load(fresh = false) {
     const my = cur;
     try {
-      const u = new URLSearchParams({ source: my.source, id: my.id, type: my.type });
-      if (target && my.type !== 'modpacks') u.set('into', target.id);
-      const r = await api(`/browse/pack?${u}`);
+      const r = await packPage(packQuery(my.source, my.id, my.type, target?.id || ''), { fresh });
       if (my !== cur) return;
       p = r;
       loadPlan();
@@ -243,7 +243,7 @@
   /** Installs the newest fitting file, or `v`; then shows what's there now. */
   async function install(v = null) {
     const r = await onInstall?.(p, v);
-    if (r) load();
+    if (r) load(true);
   }
 
   function make(v = null) {
@@ -261,6 +261,26 @@
   onMount(() => {
     load();
     loadVersions();
+  });
+
+  // The viewer's next and previous pictures load as it opens, so the
+  // arrows show them at once.
+  $effect(() => {
+    const g = p?.gallery;
+    if (viewer < 0 || !g?.length) return;
+    const n = g.length;
+    for (const i of [(viewer + 1) % n, (viewer - 1 + n) % n]) preloadNow(g[i].url);
+  });
+
+  // While the page is open, its gallery's full-size pictures warm up in the
+  // background (a couple at a time, the first dozen), so a click on the
+  // strip opens a sharp picture. Leaving the page stops them.
+  $effect(() => {
+    const g = p?.gallery;
+    if (!g?.length) return;
+    const group = {};
+    const t = setTimeout(() => warm(g.slice(0, 12).map((x) => x.url), group), 500);
+    return () => (clearTimeout(t), cancelWarm(group));
   });
 </script>
 
@@ -388,7 +408,7 @@
 
     {#if p.gallery.length}
       <div class="strip">
-        {#each p.gallery.slice(0, 5) as g, i (g.url)}<button class="shot" title={g.title} onclick={() => (viewer = i)}><img src={g.thumb} alt={g.title} loading="lazy" /></button>{/each}
+        {#each p.gallery.slice(0, 5) as g, i (g.url)}<button class="shot" title={g.title} onclick={() => (viewer = i)}><img src={g.thumb} alt={g.title} fetchpriority="high" /></button>{/each}
         {#if p.gallery.length > 5}<button class="shot more" onclick={() => (tab = 'gallery')}>+{p.gallery.length - 5}</button>{/if}
       </div>
     {/if}

@@ -9,6 +9,7 @@ mod args_editor;
 mod backups_view;
 mod data_move;
 mod image_viewer;
+mod img_log;
 mod drop_conflicts;
 mod incoming_sources;
 mod anim;

@@ -210,6 +210,82 @@ enum Image {
     Failed,
 }
 
+/// How soon a wanted image is fetched: what is on screen first, then what
+/// is about to be, then guesses at what will be opened next.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lane {
+    /// On screen now: a peek's gallery strip, the picture in the viewer.
+    Now,
+    /// Shows soon: a description's pictures, icons in lists.
+    Soon,
+    /// Warmed ahead in case it's opened (full-size gallery images): only
+    /// [`LATER_WORKERS`] at a time, so they never hold up the others.
+    Later,
+}
+
+/// Image workers; at most [`LATER_WORKERS`] of them on [`Lane::Later`].
+const IMAGE_WORKERS: usize = 6;
+const LATER_WORKERS: usize = 2;
+
+/// Images waiting for a worker, by lane.
+#[derive(Default)]
+struct ImageQueue {
+    lanes: [std::collections::VecDeque<String>; 3],
+    later_running: usize,
+}
+
+impl ImageQueue {
+    fn lane_ix(l: Lane) -> usize {
+        match l {
+            Lane::Now => 0,
+            Lane::Soon => 1,
+            Lane::Later => 2,
+        }
+    }
+
+    /// The next image a free worker takes, and whether it's a warm-up.
+    fn take(&mut self) -> Option<(String, bool)> {
+        for i in 0..2 {
+            if let Some(u) = self.lanes[i].pop_front() {
+                return Some((u, false));
+            }
+        }
+        if self.later_running < LATER_WORKERS {
+            let u = self.lanes[2].pop_front()?;
+            self.later_running += 1;
+            return Some((u, true));
+        }
+        None
+    }
+
+    /// Moves `url`, still waiting in a slower lane, up to `lane`.
+    fn promote(&mut self, url: &str, lane: Lane) {
+        let to = Self::lane_ix(lane);
+        for i in to + 1..3 {
+            if let Some(at) = self.lanes[i].iter().position(|u| u == url) {
+                self.lanes[i].remove(at);
+                self.lanes[to].push_back(url.to_string());
+                return;
+            }
+        }
+    }
+
+    /// Takes the waiting ones of `urls` off the queue; returns those taken.
+    fn cancel(&mut self, urls: &std::collections::HashSet<&str>) -> Vec<String> {
+        let mut gone = Vec::new();
+        for lane in &mut self.lanes {
+            lane.retain(|u| {
+                let keep = !urls.contains(u.as_str());
+                if !keep {
+                    gone.push(u.clone());
+                }
+                keep
+            });
+        }
+        gone
+    }
+}
+
 /// An image key wanted animated (see [`Store::want_anim`]).
 enum Anim {
     /// Waiting for the image itself to be cached.
@@ -349,7 +425,7 @@ pub struct Store {
     /// the buttons waiting on them ([`Store::fetch_view`]).
     fetching: Arc<Mutex<Vec<crate::fetch_progress::FetchFile>>>,
     /// Image URLs waiting for the download workers.
-    image_queue: Arc<(std::sync::Mutex<std::collections::VecDeque<String>>, std::sync::Condvar)>,
+    image_queue: Arc<(std::sync::Mutex<ImageQueue>, std::sync::Condvar)>,
     /// Hopper's own update, once checked.
     self_update: Option<SelfUpdate>,
     _panel_poll: Option<Task<()>>,
@@ -1035,6 +1111,7 @@ impl Store {
             }
             Msg::Image { url, path } => {
                 let ok = path.is_some();
+                crate::img_log::mark(if ok { "ready" } else { "failed" }, &url);
                 self.images
                     .insert(url.clone(), path.map_or(Image::Failed, Image::Ready));
                 for key in [view_key(&url), url] {
@@ -1750,23 +1827,37 @@ impl Store {
     /// Like [`Self::want_image`], and if it's an animated GIF or WebP also
     /// decodes its frames to play (others show a still, see the workers).
     pub fn want_anim(&mut self, key: &str) {
-        if key.is_empty() || self.anims.contains_key(key) {
-            return;
+        self.want_anim_in(key, Lane::Soon);
+    }
+
+    /// [`Self::want_anim`] in `lane`; true when it queued the download (see
+    /// [`Self::want_image_in`]).
+    pub fn want_anim_in(&mut self, key: &str, lane: Lane) -> bool {
+        if key.is_empty() {
+            return false;
+        }
+        if self.anims.contains_key(key) {
+            // Asked before: it may still be waiting, and is wanted sooner now.
+            return self.want_image_in(key, lane);
         }
         let base = hopper::imgcache::split_width(key).0;
         let animated = hopper::imgcache::path_for(base)
             .is_some_and(|p| hopper::imgcache::maybe_animated(&p));
         if !animated {
             self.anims.insert(key.to_string(), Anim::Still);
-            return self.want_image(key);
+            return self.want_image_in(key, lane);
         }
         self.anims.insert(key.to_string(), Anim::Waiting);
         match self.images.get(key) {
-            Some(Image::Ready(_)) => self.decode_anim(key.to_string()),
+            Some(Image::Ready(_)) => {
+                self.decode_anim(key.to_string());
+                false
+            }
             Some(Image::Failed) => {
                 self.anims.insert(key.to_string(), Anim::Still);
+                false
             }
-            _ => self.want_image(key),
+            _ => self.want_image_in(key, lane),
         }
     }
 
@@ -1821,32 +1912,80 @@ impl Store {
 
     /// Starts caching `url` unless it is cached or on its way.
     pub fn want_image(&mut self, url: &str) {
-        if url.is_empty() || self.images.contains_key(url) {
-            return;
+        self.want_image_in(url, Lane::Soon);
+    }
+
+    /// [`Self::want_image`] ahead of everything else: it's on screen now.
+    pub fn want_image_now(&mut self, url: &str) {
+        self.want_image_in(url, Lane::Now);
+    }
+
+    /// Caches `url` in `lane`; one already waiting in a slower lane moves
+    /// up. True when this queued it (so it can be called off, see
+    /// [`Self::cancel_images`]).
+    pub fn want_image_in(&mut self, url: &str, lane: Lane) -> bool {
+        if url.is_empty() {
+            return false;
+        }
+        if let Some(had) = self.images.get(url) {
+            if matches!(had, Image::Loading) && lane != Lane::Later {
+                let (queue, _) = &*self.image_queue;
+                queue.lock().unwrap_or_else(|e| e.into_inner()).promote(url, lane);
+            }
+            return false;
         }
         let still = hopper::imgcache::cached(url).filter(|p| !hopper::imgcache::maybe_animated(p));
         if let Some(p) = still {
+            crate::img_log::mark("disk", url);
+            hopper::imgcache::touch(&p);
             self.images.insert(url.to_string(), Image::Ready(p));
-            return;
+            return false;
         }
+        crate::img_log::want("want", url);
         self.images.insert(url.to_string(), Image::Loading);
         let (queue, ready) = &*self.image_queue;
-        queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(url.to_string());
+        queue.lock().unwrap_or_else(|e| e.into_inner()).lanes[ImageQueue::lane_ix(lane)].push_back(url.to_string());
         ready.notify_one();
+        true
+    }
+
+    /// Calls off those of `urls` not being fetched yet (a peek that was
+    /// closed): they're forgotten, so asking again starts over.
+    pub fn cancel_images(&mut self, urls: &[String]) {
+        if urls.is_empty() {
+            return;
+        }
+        let set: std::collections::HashSet<&str> = urls.iter().map(String::as_str).collect();
+        let gone = {
+            let (queue, _) = &*self.image_queue;
+            queue.lock().unwrap_or_else(|e| e.into_inner()).cancel(&set)
+        };
+        for u in gone {
+            crate::img_log::mark("cancel", &u);
+            self.images.remove(&u);
+            for key in [view_key(&u), u] {
+                if matches!(self.anims.get(&key), Some(Anim::Waiting)) {
+                    self.anims.remove(&key);
+                }
+            }
+        }
     }
 
     /// A few threads fetch images from a queue, rather than a thread (and a
-    /// connection) per image when a big pack opens.
+    /// connection) per image when a big pack opens. What's on screen goes
+    /// first (see [`Lane`]).
     fn start_image_workers(&self) {
-        for _ in 0..6 {
+        // The cache is kept to a size: the pictures used longest ago go.
+        std::thread::spawn(|| hopper::imgcache::prune(hopper::imgcache::MAX_BYTES));
+        for _ in 0..IMAGE_WORKERS {
             let (q, tx, wake) = (self.image_queue.clone(), self.tx.clone(), self.wake.clone());
             std::thread::spawn(move || {
                 let (queue, ready) = &*q;
                 loop {
-                    let url = {
+                    let (url, later) = {
                         let mut list = queue.lock().unwrap_or_else(|e| e.into_inner());
                         loop {
-                            if let Some(u) = list.pop_front() {
+                            if let Some(u) = list.take() {
                                 break u;
                             }
                             list = ready.wait(list).unwrap_or_else(|e| e.into_inner());
@@ -1872,6 +2011,11 @@ impl Store {
                         })
                         .inspect_err(|e| warn_once(&url, "download", e))
                         .ok();
+                    if later {
+                        queue.lock().unwrap_or_else(|e| e.into_inner()).later_running -= 1;
+                        // A warm-up slot is free: a worker waiting on it can go.
+                        ready.notify_one();
+                    }
                     if tx.send(Msg::Image { url, path }).is_err() {
                         return;
                     }

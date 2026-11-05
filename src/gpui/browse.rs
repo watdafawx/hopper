@@ -71,8 +71,31 @@ struct Detail {
     segments: Rc<Vec<hopper::richtext::Segment>>,
     /// Every image the description shows, in order (cached by the store).
     images: Rc<Vec<String>>,
-    files: Vec<cf::File>,
 }
+
+/// A project's page as asked for (see [`BrowseView::want_page`]): its
+/// description and, from Modrinth, its full gallery.
+struct Page {
+    segments: Rc<Vec<hopper::richtext::Segment>>,
+    images: Rc<Vec<String>>,
+    shots: Option<Vec<cf::Screenshot>>,
+}
+
+enum PageLoad {
+    Pending,
+    Ready(Rc<Page>),
+    Failed(String),
+}
+
+/// How long a page asked for ahead (a hovered result) is shown as it is.
+const PAGE_FRESH: Duration = Duration::from_secs(5 * 60);
+
+/// How long the mouse rests on a result before its page and pictures are
+/// asked for, so they're there when it's clicked.
+const PREFETCH_DWELL: Duration = Duration::from_millis(150);
+
+/// The most full-size pictures an open peek loads ahead for the viewer.
+const WARM_MAX: usize = 12;
 
 /// How long an ended install keeps its button busy, unless the instance
 /// shows the project sooner.
@@ -290,6 +313,16 @@ pub struct BrowseView {
     /// to pick once it arrives.
     key_want: Option<usize>,
     detail: HashMap<u64, Load<Detail>>,
+    /// Each project's files, asked apart from its page (there can be a
+    /// thousand, 50 a request), so the description doesn't wait for them.
+    file_lists: HashMap<u64, Load<Vec<cf::File>>>,
+    /// Pages asked for, by project, with when (see [`Self::want_page`]).
+    pages: HashMap<u64, (std::time::Instant, PageLoad)>,
+    /// Pictures the open peek queued, called off when it closes or moves on.
+    peek_images: Vec<String>,
+    /// The peek whose full-size pictures were queued ahead, and whether its
+    /// page was in by then.
+    warmed: Option<(u64, bool)>,
     deps: HashMap<u64, Vec<(cf::Mod, u32)>>,
     /// What installing a project into an instance also downloads.
     plans: HashMap<PlanKey, Load<Rc<Plan>>>,
@@ -470,6 +503,10 @@ impl BrowseView {
             list_focus: cx.focus_handle(),
             key_want: None,
             detail: HashMap::new(),
+            file_lists: HashMap::new(),
+            pages: HashMap::new(),
+            peek_images: Vec::new(),
+            warmed: None,
             deps: HashMap::new(),
             plans: HashMap::new(),
             author: None,
@@ -1228,10 +1265,8 @@ impl BrowseView {
         if m.class_id.is_some_and(|c| c != cf::CLASS_MODPACKS) {
             return None;
         }
-        hopper::browse::curse_server_files(m).or_else(|| match self.detail.get(&m.id) {
-            Some(Load::Ready(d)) => {
-                hopper::browse::curse_server_files_in(m.id, m.main_file_id, &d.files)
-            }
+        hopper::browse::curse_server_files(m).or_else(|| match self.file_lists.get(&m.id) {
+            Some(Load::Ready(files)) => hopper::browse::curse_server_files_in(m.id, m.main_file_id, files),
             _ => None,
         })
     }
@@ -1598,9 +1633,11 @@ impl BrowseView {
 
     fn open_detail(&mut self, m: cf::Mod, cx: &mut Context<Self>) {
         let id = m.id;
+        crate::img_log::want("peek", &format!("peek:{id}"));
         self.opening = None;
         let back = self.restore_spot.take().filter(|r| *r == id).and_then(|r| self.peek_spots.get(&r).copied());
         if self.selected_id() != Some(id) {
+            self.drop_peek_images(cx);
             // Another project: the one left keeps its scroll and tab for
             // Back; the new one starts at its top, unless Back or Forward
             // is bringing it back to where it was.
@@ -1626,8 +1663,16 @@ impl BrowseView {
             .map(|s| s.thumb().to_string())
             .chain(m.icon().map(str::to_string))
             .collect();
-        self.store
-            .update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
+        // The strip and icon show first, ahead of everything else queued.
+        let mut mine = Vec::new();
+        self.store.update(cx, |s, _| {
+            for u in &urls {
+                if s.want_image_in(u, crate::store::Lane::Now) {
+                    mine.push(u.clone());
+                }
+            }
+        });
+        self.peek_images.extend(mine);
         self.want_plan(&m, cx);
         if m.modrinth.is_some()
             && m.class_id == Some(cf::CLASS_MODPACKS)
@@ -1656,10 +1701,16 @@ impl BrowseView {
         if !matches!(self.detail.get(&id), Some(Load::Ready(_))) {
             self.detail.insert(id, Load::Loading);
         }
+        if !matches!(self.file_lists.get(&id), Some(Load::Ready(_))) {
+            self.file_lists.insert(id, Load::Loading);
+        }
+        // The description and gallery show as soon as they're in (at once
+        // when a hover asked for them); the files follow on their own.
+        self.want_page(id, cx);
+        self.show_page(id, cx);
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
-                    let (desc, shots) = hopper::source::page(id)?;
                     let files = hopper::source::files(id, &gv, loader)?;
                     // Dependencies of the newest release that fits, like
                     // CurseForge's Relations tab.
@@ -1669,33 +1720,17 @@ impl BrowseView {
                         .or(files.first())
                         .map(dependencies)
                         .unwrap_or_default();
-                    let images = hopper::richtext::images(&desc);
-                    anyhow::Ok((hopper::richtext::to_segments(&desc), images, files, deps, shots))
+                    anyhow::Ok((files, deps))
                 })
                 .await;
             this.update(cx, |this, cx| {
                 match r {
-                    Ok((segments, images, files, deps, shots)) => {
-                        // Modrinth's search hits carry 350px copies of the
-                        // gallery; the project brings the full images.
-                        if let Some(shots) = shots.filter(|s| !s.is_empty()) {
-                            if let Some(m) = this.selected.as_mut().filter(|m| m.id == id) {
-                                m.screenshots = shots.clone();
-                            }
-                            if let Some(m) = this.hist_projects.get_mut(&id) {
-                                m.screenshots = shots.clone();
-                            }
-                            this.store.update(cx, |s, _| shots.iter().for_each(|x| s.want_image(x.thumb())));
-                        }
+                    Ok((files, deps)) => {
                         let urls: Vec<String> = deps
                             .iter()
                             .filter_map(|(d, _)| d.icon().map(str::to_string))
                             .collect();
-                        // The description's GIFs play (see `anim_tick`).
-                        this.store.update(cx, |s, _| {
-                            urls.iter().for_each(|u| s.want_image(u));
-                            images.iter().for_each(|u| s.want_anim(u));
-                        });
+                        this.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
                         this.deps.insert(id, deps);
                         // A newer file here that the update check missed
                         // (CurseForge's project index can lag a fresh file)
@@ -1716,22 +1751,10 @@ impl BrowseView {
                                 }
                             });
                         }
-                        this.detail.insert(
-                            id,
-                            Load::Ready(Detail {
-                                segments: Rc::new(segments),
-                                images: Rc::new(images),
-                                files,
-                            }),
-                        );
-                        if this.selected_id() == Some(id)
-                            && let Some(at) = this.peek_scroll_after.take()
-                        {
-                            this.detail_scroll.set_offset(at);
-                        }
+                        this.file_lists.insert(id, Load::Ready(files));
                     }
                     Err(e) => {
-                        this.detail.insert(id, Load::Failed(format!("{e:#}")));
+                        this.file_lists.insert(id, Load::Failed(format!("{e:#}")));
                     }
                 }
                 cx.notify();
@@ -1740,6 +1763,165 @@ impl BrowseView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Asks for project `id`'s page (description and gallery), unless it's
+    /// here and fresh or already on its way. A hover asks ahead of the
+    /// click; opening it then shows the page at once.
+    fn want_page(&mut self, id: u64, cx: &mut Context<Self>) {
+        match self.pages.get(&id) {
+            Some((_, PageLoad::Pending)) => return,
+            Some((at, PageLoad::Ready(_))) if at.elapsed() < PAGE_FRESH => return,
+            _ => {}
+        }
+        if self.pages.len() > 64 {
+            self.pages
+                .retain(|_, (at, p)| matches!(p, PageLoad::Pending) || at.elapsed() < PAGE_FRESH);
+        }
+        self.pages.insert(id, (std::time::Instant::now(), PageLoad::Pending));
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    let (desc, shots) = hopper::source::page(id)?;
+                    let images = hopper::richtext::images(&desc);
+                    anyhow::Ok((hopper::richtext::to_segments(&desc), images, shots))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let load = match r {
+                    Ok((segments, images, shots)) => PageLoad::Ready(Rc::new(Page {
+                        segments: Rc::new(segments),
+                        images: Rc::new(images),
+                        shots,
+                    })),
+                    Err(e) => PageLoad::Failed(format!("{e:#}")),
+                };
+                this.pages.insert(id, (std::time::Instant::now(), load));
+                if this.selected_id() == Some(id) {
+                    this.show_page(id, cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Puts project `id`'s page into the open peek once it's in: the full
+    /// gallery (Modrinth's search hits carry 350px copies), the description
+    /// and its pictures, the first few with the strip.
+    fn show_page(&mut self, id: u64, cx: &mut Context<Self>) {
+        let page = match self.pages.get(&id) {
+            Some((_, PageLoad::Ready(p))) => p.clone(),
+            Some((_, PageLoad::Failed(e))) => {
+                // Shown before: what it had stays.
+                if !matches!(self.detail.get(&id), Some(Load::Ready(_))) {
+                    self.detail.insert(id, Load::Failed(e.clone()));
+                }
+                return;
+            }
+            _ => return,
+        };
+        let mut mine = Vec::new();
+        if let Some(shots) = page.shots.as_ref().filter(|s| !s.is_empty()) {
+            if let Some(m) = self.selected.as_mut().filter(|m| m.id == id) {
+                m.screenshots = shots.clone();
+            }
+            if let Some(m) = self.hist_projects.get_mut(&id) {
+                m.screenshots = shots.clone();
+            }
+            self.store.update(cx, |s, _| {
+                for x in shots {
+                    if s.want_image_in(x.thumb(), crate::store::Lane::Now) {
+                        mine.push(x.thumb().to_string());
+                    }
+                }
+            });
+        }
+        // In page order, so what's on screen first comes first. The
+        // description's GIFs play (see `anim_tick`).
+        self.store.update(cx, |s, _| {
+            for (i, k) in page.images.iter().enumerate() {
+                let lane = if i < 4 { crate::store::Lane::Now } else { crate::store::Lane::Soon };
+                if s.want_anim_in(k, lane) {
+                    mine.push(k.clone());
+                }
+            }
+        });
+        self.peek_images.extend(mine);
+        self.detail.insert(
+            id,
+            Load::Ready(Detail {
+                segments: page.segments.clone(),
+                images: page.images.clone(),
+            }),
+        );
+        // The gallery may have changed: its full-size pictures are queued again.
+        self.warmed = None;
+        if self.selected_id() == Some(id)
+            && let Some(at) = self.peek_scroll_after.take()
+        {
+            self.detail_scroll.set_offset(at);
+        }
+    }
+
+    /// A hovered result: its page, icon and gallery strip load ahead.
+    fn prefetch(&mut self, m: &cf::Mod, cx: &mut Context<Self>) {
+        self.want_page(m.id, cx);
+        let urls: Vec<String> = m
+            .screenshots
+            .iter()
+            .map(|s| s.thumb().to_string())
+            .chain(m.icon().map(str::to_string))
+            .collect();
+        self.store.update(cx, |s, _| urls.iter().for_each(|u| s.want_image(u)));
+    }
+
+    /// While a peek is open its gallery's full-size pictures load in the
+    /// background, a couple at a time behind everything on screen (see
+    /// `Lane::Later`), so the viewer opens on a sharp picture. The first
+    /// [`WARM_MAX`] only; animated ones play from the whole file, which can
+    /// be huge, so they wait to be opened.
+    fn warm_viewer(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(m) = self.selected.as_ref() else { return };
+        let ready = matches!(self.detail.get(&m.id), Some(Load::Ready(_)));
+        if self.warmed == Some((m.id, ready)) {
+            return;
+        }
+        self.warmed = Some((m.id, ready));
+        // A Modrinth hit's gallery is the small copies until its page is in.
+        if m.modrinth.is_some() && !ready {
+            return;
+        }
+        let cap = crate::image_viewer::cap(window);
+        let keys: Vec<String> = m
+            .screenshots
+            .iter()
+            .map(|s| s.url.as_str())
+            .filter(|u| !hopper::imgcache::path_for(u).is_some_and(|p| hopper::imgcache::maybe_animated(&p)))
+            .take(WARM_MAX)
+            .map(|u| crate::image_viewer::still_key(u, cap))
+            .collect();
+        let mut mine = Vec::new();
+        self.store.update(cx, |s, _| {
+            for k in &keys {
+                if s.want_image_in(k, crate::store::Lane::Later) {
+                    mine.push(k.clone());
+                }
+            }
+        });
+        self.peek_images.extend(mine);
+    }
+
+    /// Calls off the pictures the peek queued that haven't started: it
+    /// closed or moved to another project.
+    fn drop_peek_images(&mut self, cx: &mut Context<Self>) {
+        self.warmed = None;
+        if self.peek_images.is_empty() {
+            return;
+        }
+        let gone = std::mem::take(&mut self.peek_images);
+        self.store.update(cx, |s, _| s.cancel_images(&gone));
     }
 
     /// Lists everything by the author of `m` in the panel.
@@ -2742,7 +2924,9 @@ impl BrowseView {
                 if *over {
                     let m = hovered.clone();
                     let wait = cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(PLAN_DWELL).await;
+                        cx.background_executor().timer(PREFETCH_DWELL).await;
+                        this.update(cx, |this, cx| this.prefetch(&m, cx)).ok();
+                        cx.background_executor().timer(PLAN_DWELL - PREFETCH_DWELL).await;
                         this.update(cx, |this, cx| {
                             this.hover_plan = None;
                             this.want_plan(&m, cx);
@@ -3438,6 +3622,12 @@ impl BrowseView {
                 )
             })
             .collect();
+        if !shots.is_empty() {
+            crate::img_log::once("strip-first", &format!("peek:{}", m.id));
+        }
+        if !m.screenshots.is_empty() && shots.len() == m.screenshots.len() {
+            crate::img_log::once(&format!("strip-all({})", shots.len()), &format!("peek:{}", m.id));
+        }
 
         let header = h_flex()
             .relative()
@@ -3609,7 +3799,13 @@ impl BrowseView {
                 .text_color(theme.danger)
                 .child(e.clone())
                 .into_any_element(),
-            Some(Load::Ready(d)) => {
+            Some(Load::Ready(_)) => {
+                let file_list = self.file_lists.get(&m.id);
+                let no_files = Vec::new();
+                let all_files = match file_list {
+                    Some(Load::Ready(f)) => f,
+                    _ => &no_files,
+                };
                 let installed = target
                     .as_ref()
                     .and_then(|t| t.addons.iter().find(|a| a.project_id == m.id));
@@ -3637,15 +3833,14 @@ impl BrowseView {
                 };
                 // The newest file that would update the installed one gets
                 // the filled button; other newer ones say Update outlined.
-                let newest = d
-                    .files
+                let newest = all_files
                     .iter()
                     .filter(|f| f.id != installed_file.unwrap_or(0) && age(f) == Some(std::cmp::Ordering::Greater) && fits_target(f))
                     .max_by(|a, b| a.file_date.cmp(&b.file_date).then(a.id.cmp(&b.id)))
                     .map(|f| f.id);
                 let files = v_flex()
                     .gap_0p5()
-                    .children(d.files.iter().take(40).map(|f| {
+                    .children(all_files.iter().take(40).map(|f| {
                         let fits = fits_target(f);
                         let versions = f
                             .game_versions
@@ -3800,8 +3995,26 @@ impl BrowseView {
                                 r.child(widgets::chip(cx.theme().success).xsmall().child("Installed"))
                             })
                     }));
-                let n_files = d.files.len();
+                let files_label = match file_list {
+                    Some(Load::Ready(f)) => format!("Files {}", f.len()),
+                    _ => "Files".to_string(),
+                };
                 let n_deps = self.deps.get(&m.id).map_or(0, |d| d.len());
+                // Files (and the dependencies read from them) still coming,
+                // or failed: say so in their tabs.
+                let files_state: Option<AnyElement> = match file_list {
+                    Some(Load::Ready(_)) => None,
+                    Some(Load::Failed(e)) => {
+                        Some(div().text_sm().text_color(theme.danger).child(e.clone()).into_any_element())
+                    }
+                    _ => Some(
+                        h_flex()
+                            .gap_2()
+                            .child(Spinner::new().small())
+                            .child(widgets::caption("Loading", cx))
+                            .into_any_element(),
+                    ),
+                };
                 let tab = self.detail_tab;
                 v_flex()
                     .gap_4()
@@ -3810,17 +4023,18 @@ impl BrowseView {
                             .underline()
                             .selected_index(tab)
                             .child(Tab::new().label("Description"))
-                            .child(Tab::new().label(format!("Files {n_files}")))
+                            .child(Tab::new().label(files_label))
                             .child(Tab::new().label(format!("Dependencies {n_deps}")))
                             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                                 this.detail_tab = *ix;
                                 cx.notify();
                             })),
                     )
-                    .map(|c| match tab {
-                        1 => c.child(files),
-                        2 if n_deps == 0 => c.child(widgets::caption("No dependencies.", cx)),
-                        2 => c.child(dep_rows),
+                    .map(|c| match (tab, files_state) {
+                        (1 | 2, Some(wait)) => c.child(wait),
+                        (1, _) => c.child(files),
+                        (2, _) if n_deps == 0 => c.child(widgets::caption("No dependencies.", cx)),
+                        (2, _) => c.child(dep_rows),
                         _ => c.child(self.desc.clone()),
                     })
                     .into_any_element()
@@ -4725,6 +4939,13 @@ fn placeholder(modrinth: bool) -> &'static str {
 
 impl Render for BrowseView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // An open peek warms its full-size pictures; a closed one lets go
+        // of what it hadn't fetched yet.
+        if self.selected.is_some() {
+            self.warm_viewer(window, cx);
+        } else if !self.peek_images.is_empty() {
+            self.drop_peek_images(cx);
+        }
         if self.peek {
             // Its logos are marked again as it lays out (played by the
             // page it's docked in, if that page has a logo layer).
@@ -4939,6 +5160,18 @@ impl BrowseView {
         if let Some(m) = self.selected.clone() {
             if let (0, Some(Load::Ready(d))) = (self.detail_tab, self.detail.get(&m.id)) {
                 let (id, segments, images) = (m.id, d.segments.clone(), d.images.clone());
+                if crate::img_log::on() {
+                    let key = format!("peek:{id}");
+                    crate::img_log::once("desc-ready", &key);
+                    let store = self.store.read(cx);
+                    let have = images.iter().filter(|k| store.image(k).is_some()).count();
+                    if have > 0 {
+                        crate::img_log::once("desc-first", &key);
+                    }
+                    if have == images.len() {
+                        crate::img_log::once(&format!("desc-all({have})"), &key);
+                    }
+                }
                 self.desc.update(cx, |v, _| v.show(id, segments, images));
             }
             let body = self.detail(&m, target, cx);
