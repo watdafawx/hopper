@@ -252,6 +252,16 @@ static MIXIN_FAILED: LazyLock<Regex> = LazyLock::new(|| re(r"Mixin apply for mod
 /// `MixinApplyError: Mixin [x.mixins.json:AMixin from mod x] from phase [DEFAULT] in config [x.mixins.json] FAILED during APPLY`
 static MIXIN_ERROR: LazyLock<Regex> =
     LazyLock::new(|| re(r"Mixin \[[^\]]*? from mod ([\w.-]+)\] from phase \[\w+\] in config \[[^\]]+\] FAILED during \w+"));
+/// A mixin whose own code points at something that isn't there, found while
+/// the game loads the class it changes:
+/// `MixinPreProcessorException: Attach error for x.mixins.json:AMixin from mod x during activity: […]`
+/// (with `ClassNotFoundException` below it).
+static MIXIN_ATTACH: LazyLock<Regex> =
+    LazyLock::new(|| re(r"Attach error for [\w.-]+\.json:[\w.$]+ from mod ([\w.-]+)"));
+/// What a mod gets when mixin only logged that its change failed to apply.
+const MIXIN_WARNED_WHY: &str = "Its changes to the game's code (a mixin) failed to apply.";
+/// What a mod gets whose mixin uses a part that isn't there.
+const MIXIN_ATTACH_WHY: &str = "Its change to another mod (a mixin) uses a part that isn't there: the mod that has it is missing or is a different version.";
 /// What a mod whose mixin threw gets.
 pub(crate) const MIXIN_ERROR_WHY: &str = "Its change to the code of the game or another mod (a mixin) didn't fit, so the game stopped. It was likely made for a different version of the mod it changes.";
 /// A mixin that couldn't fit because another mod's mixin had already
@@ -376,13 +386,23 @@ pub fn signals(text: &str) -> Vec<Raw> {
     let mut mixin_named = false;
     let merged_by = lines.iter().find_map(|l| MERGED_BY.captures(l)).map(|m| m[1].to_string());
     for l in &lines {
-        let Some(m) = MIXIN_ERROR.captures(l) else { continue };
+        let (m, attach) = match (MIXIN_ERROR.captures(l), MIXIN_ATTACH.captures(l)) {
+            (Some(m), _) => (m, false),
+            (None, Some(m)) => (m, true),
+            (None, None) => continue,
+        };
         let id = m[1].to_string();
         if !mixin_named {
             named = id.clone();
             mixin_named = true;
         }
-        let why = if merged_by.is_some() { MIXIN_CLASH_WHY } else { MIXIN_ERROR_WHY };
+        let why = if attach {
+            MIXIN_ATTACH_WHY
+        } else if merged_by.is_some() {
+            MIXIN_CLASH_WHY
+        } else {
+            MIXIN_ERROR_WHY
+        };
         add(&mut out, Raw { mod_id: id, jar: String::new(), certainty: Certainty::Certain, why: why.into(), class: String::new(), needs: Vec::new() });
     }
     // The mod whose mixin got to the method first is the other half of the
@@ -411,7 +431,7 @@ pub fn signals(text: &str) -> Vec<Raw> {
                     mod_id: m[1].to_string(),
                     jar: String::new(),
                     certainty: Certainty::Likely,
-                    why: "Its changes to the game's code (a mixin) failed to apply.".into(),
+                    why: MIXIN_WARNED_WHY.into(),
                     class: String::new(),
                     needs: Vec::new(),
                 },
@@ -600,6 +620,7 @@ fn mixin_culprit(lines: &[&str]) -> Option<String> {
     lines
         .iter()
         .find_map(|l| MIXIN_ERROR.captures(l))
+        .or_else(|| lines.iter().find_map(|l| MIXIN_ATTACH.captures(l)))
         .or_else(|| lines.iter().find_map(|l| MIXIN_FAILED.captures(l)))
         .map(|m| m[1].to_string())
 }
@@ -1525,7 +1546,18 @@ fn analyze(
     // earlier error: the loop's own reading below takes the log instead.
     let looped = crate::crashloop::truncated(text).filter(|_| !log.is_empty());
     if looped.is_none() {
-        for r in signals(log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
+        // The report names a mixin that stopped the game: a mixin the log
+        // only warned about (the game went on) is another mod's side note.
+        let report_mixin = mixin_culprit(&text.lines().collect::<Vec<_>>());
+        for mut r in signals(log).into_iter().filter(|r| r.certainty != Certainty::Possible) {
+            if let Some(c) = &report_mixin
+                && r.certainty == Certainty::Likely
+                && r.why == MIXIN_WARNED_WHY
+                && !r.mod_id.eq_ignore_ascii_case(c)
+            {
+                r.certainty = Certainty::Possible;
+                r.why = format!("One of its changes to the game's code (a mixin) didn't fit earlier, but the game went on. {c}'s mixin is what stopped it.");
+            }
             add(&mut raws, r);
         }
     }
@@ -3124,6 +3156,44 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         assert!(c.suspects[1].why.contains("securitycraft's change couldn't fit"), "{}", c.suspects[1].why);
         assert!(c.suspects[2].why.contains("securitycraft's change"), "{}", c.suspects[2].why);
         assert!(c.stopped.is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    const ATTACH_REPORT: &str = include_str!("crashdetect_fixtures/tnp-server-mixin-attach-crash.txt");
+
+    /// TNP Limitless 8's server, 2026-11-05, cut down: Data Energistics'
+    /// mixin into Expanded AE's menu class uses a class of ExtendedAE Plus,
+    /// which isn't installed. The loader names Expanded AE (it only loaded
+    /// the menu class); it was called certain and Data Energistics never
+    /// named.
+    #[test]
+    fn a_mixin_using_a_missing_class_beats_the_mod_that_loaded_the_class() {
+        let raws = signals(ATTACH_REPORT);
+        let got: Vec<(&str, Certainty)> = raws.iter().take(2).map(|r| (r.mod_id.as_str(), r.certainty)).collect();
+        assert_eq!(got, [("data_energistics", Certainty::Certain), ("expandedae", Certainty::Possible)], "{raws:#?}");
+
+        let root = server_root(
+            "mixinattach",
+            &[
+                ("expandedae-2.1.4.jar", "expandedae", "Expanded AE"),
+                ("data_energistics-1.21.1-3.4.0.jar", "data_energistics", "Data_Energistics"),
+                ("scc-1.6.1.jar", "scc", "SCC - Super Cool Calculator"),
+            ],
+            ("crash-2026-11-05_16.10.54-fml.txt", ATTACH_REPORT),
+            // An earlier warning in the log: SCC's mixin into Effortless Building
+            // didn't fit, and the game went on.
+            "[05Nov2026 16:10:39.330] [modloading-worker-0/WARN] [mixin/]: Mixin apply for mod scc failed scc.mixins.json:EffortlessAe2Mixin from mod scc -> nl.requios.effortlessbuilding.compat.ae2.AE2Integration: org.spongepowered.asm.mixin.injection.throwables.InvalidInjectionException: Invalid descriptor
+",
+        );
+        let c = server(&root).unwrap();
+        let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.file_name.as_str(), s.certainty)).collect();
+        assert_eq!(
+            got,
+            [("data_energistics-1.21.1-3.4.0.jar", Certainty::Certain), ("expandedae-2.1.4.jar", Certainty::Possible), ("scc-1.6.1.jar", Certainty::Possible)]
+        );
+        assert_eq!(c.suspects[0].why, MIXIN_ATTACH_WHY);
+        assert!(c.suspects[2].why.contains("the game went on"), "{}", c.suspects[2].why);
+        assert!(c.suspects[1].why.contains("data_energistics's change"), "{}", c.suspects[1].why);
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -1,0 +1,54 @@
+---- Minecraft Crash Report ----
+
+// ooprs
+Please make sure this issue is not caused by Sable before reporting it to other mod authors.
+If you cannot reproduce it without Sable, file a report on the issue tracker
+https://github.com/ryanhcode/sable/issues
+
+// Daisy, daisy...
+
+Time: 2026-11-05 16:10:54
+Description: Mod loading failures have occurred; consult the issue messages for more details
+
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: main
+Stacktrace:
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.transformMemberReference(MixinPreProcessorStandard.java:791) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+-- Mod loading issue for: expandedae --
+Details:
+	Caused by 0: org.spongepowered.asm.mixin.transformer.throwables.MixinTransformerError: An unexpected critical error was encountered
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinProcessor.applyMixins(MixinProcessor.java:381) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinTransformer.transformClass(MixinTransformer.java:253) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at TRANSFORMER/libjf_unsafe_v0@3.17.6+forge/io.gitlab.jfronny.libjf.unsafe.asm.AsmTransformer.transformClass(AsmTransformer.java:127) ~[libjf-unsafe-v0-3.17.4+forge.jar%232491!/:?] {re:classloading}
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.service.modlauncher.MixinTransformationHandler.processClass(MixinTransformationHandler.java:131) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+		at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:526) ~[?:?] {re:mixin}
+		at java.base/java.lang.ClassLoader.defineClass1(Native Method) ~[?:?] {re:mixin}
+		at java.base/java.lang.ClassLoader.defineClass(ClassLoader.java:1027) ~[?:?] {re:mixin}
+		at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.readerToClass(ModuleClassLoader.java:196) ~[securejarhandler-3.0.8.jar:?] {}
+		at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.lambda$findClass$20(ModuleClassLoader.java:298) ~[securejarhandler-3.0.8.jar:?] {}
+		at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadFromModule(ModuleClassLoader.java:311) ~[securejarhandler-3.0.8.jar:?] {}
+		at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.findClass(ModuleClassLoader.java:298) ~[securejarhandler-3.0.8.jar:?] {}
+		at cpw.mods.securejarhandler/cpw.mods.cl.ModuleClassLoader.loadClass(ModuleClassLoader.java:214) ~[securejarhandler-3.0.8.jar:?] {}
+		at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:526) ~[?:?] {re:mixin}
+		at TRANSFORMER/expandedae@2.1.4/lu.kolja.expandedae.definition.ExpMenus.<clinit>(ExpMenus.java:38) ~[expandedae-2.1.4.jar%231446!/:?] {re:classloading}
+		at TRANSFORMER/expandedae@2.1.4/lu.kolja.expandedae.Expandedae.<init>(Expandedae.java:38) ~[expandedae-2.1.4.jar%231446!/:?] {re:classloading}
+
+	Caused by 1: org.spongepowered.asm.mixin.transformer.throwables.MixinPreProcessorException: Attach error for data_energistics.mixins.json:ae.extendedaeplus.EaepPatternEncodingTermMenuMixin from mod data_energistics during activity: [Transform -> Method data_energistics$beginEaepEncodeHandoff(Z)V -> INVOKEINTERFACE -> com/extendedae_plus/api/upload/IPatternEncodeRequestSync::eap$consumeEncodeRequest:()Lcom/extendedae_plus/api/upload/IPatternEncodeRequestSync$EncodeRequest;]
+		at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.attach(MixinPreProcessorStandard.java:313) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
+
+	Caused by 2: java.lang.RuntimeException: java.lang.ClassNotFoundException: com.extendedae_plus.api.upload.IPatternEncodeRequestSync
+
+	Mod file: /<server>/mods/expandedae-2.1.4.jar
+	Failure message: Expanded AE (expandedae) has failed to load correctly
+		org.spongepowered.asm.mixin.transformer.throwables.MixinTransformerError: An unexpected critical error was encountered
+	Mod version: 2.1.4
+	Mod issues URL: <No issues URL found>
+	Exception message: java.lang.ClassNotFoundException: com.extendedae_plus.api.upload.IPatternEncodeRequestSync
+Stacktrace:
+	at MC-BOOTSTRAP/org.spongepowered.mixin@0.16.4+mixin.0.8.7/org.spongepowered.asm.mixin.transformer.MixinPreProcessorStandard.transformMemberReference(MixinPreProcessorStandard.java:791) ~[sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/:0.16.4+mixin.0.8.7] {}
