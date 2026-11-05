@@ -2330,6 +2330,47 @@ pub fn search_input(
     })
 }
 
+/// The words of a search box, lower-case, for `marked`.
+pub fn search_words(q: &str) -> Vec<String> {
+    q.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// `text` with every place a search word appears tinted, so a hit shows why
+/// it matched. Plain text when nothing matches.
+pub fn marked(text: impl Into<SharedString>, words: &[String], cx: &App) -> StyledText {
+    let text: SharedString = text.into();
+    let mut at: Vec<std::ops::Range<usize>> = Vec::new();
+    let lower = text.to_lowercase();
+    // Lower-casing can change byte lengths outside ASCII; then the offsets
+    // wouldn't line up, and the text shows unmarked.
+    if lower.len() == text.len() {
+        for w in words.iter().filter(|w| !w.is_empty()) {
+            let mut from = 0;
+            while let Some(i) = lower[from..].find(w.as_str()) {
+                let (s, e) = (from + i, from + i + w.len());
+                if text.is_char_boundary(s) && text.is_char_boundary(e) {
+                    at.push(s..e);
+                }
+                from = e;
+            }
+        }
+    }
+    if at.is_empty() {
+        return StyledText::new(text);
+    }
+    at.sort_by_key(|r| r.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for r in at {
+        match merged.last_mut() {
+            Some(m) if r.start <= m.end => m.end = m.end.max(r.end),
+            _ => merged.push(r),
+        }
+    }
+    let theme = cx.theme();
+    let style = HighlightStyle { background_color: Some(theme.primary.opacity(0.28)), color: Some(theme.foreground), ..Default::default() };
+    StyledText::new(text).with_highlights(merged.into_iter().map(|r| (r, style)).collect::<Vec<_>>())
+}
+
 /// Empties a search field the way deleting the text by hand would: the
 /// field's change event fires, so whatever filters on it refreshes, and
 /// Ctrl+Z brings the text back.

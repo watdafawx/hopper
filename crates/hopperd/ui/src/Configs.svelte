@@ -2,19 +2,21 @@
   import { followConfigs } from './lib/configs.svelte.js';
   // A server's Configs page, like desktop's Configs tab: mods with config
   // files on the left (changed ones first, then all, then files no mod
-  // matched), a search across every setting, filters and a side picker on
-  // top, and the picked mod's files as settings on the right. Edits wait in
-  // the unsaved bar until Save.
+  // matched), filters and a side picker on top, and the picked mod's files
+  // as settings on the right. Edits wait in the unsaved bar until Save.
+  // Search works like the game's config menus: the box on top finds mods by
+  // name, the open mod has its own box for its settings, and settings of
+  // other mods that mention the words wait in a folded group.
   import { onMount } from 'svelte';
-  import { Search, X, Funnel, ArrowLeft, SlidersHorizontal, FileQuestion, Users, Send } from '@lucide/svelte';
+  import { Search, X, Funnel, ArrowLeft, SlidersHorizontal, FileQuestion, Users, Send, ChevronRight, ChevronDown } from '@lucide/svelte';
   import ConfigView from './lib/ConfigView.svelte';
-  import ConfigRow from './lib/ConfigRow.svelte';
   import ConfigBar from './lib/ConfigBar.svelte';
   import PushPlayers from './lib/PushPlayers.svelte';
   import { ago } from './lib/browse.js';
   import { api } from './lib/api.js';
-  import { cfg, loadIndex, loadPlayers, playersDiffer, pendingList, eid, SIDES, sideChip, shortRel, fileRow } from './lib/configs.svelte.js';
+  import { cfg, loadIndex, loadPlayers, playersDiffer, pendingList, SIDES, shortRel, fileRow } from './lib/configs.svelte.js';
   import { configOwners } from './lib/files-config.js';
+  import { marks, searchWords } from './lib/mark.js';
   import { jump } from './lib/files.svelte.js';
   import { rightClear } from './lib/rightclear.js';
   import { say } from './lib/toast.svelte.js';
@@ -23,6 +25,10 @@
 
   let error = $state('');
   let query = $state('');
+  /** The open mod's own search. */
+  let modQuery = $state('');
+  let modInput = $state();
+  let othersOpen = $state(false);
   let desc = $state(false);
   let filter = $state('all');
   let side = $state('all');
@@ -45,6 +51,9 @@
   };
   const unsavedRels = $derived(new Set(pendingList().map((x) => x.rel)));
   const sideOk = (rels) => side === 'all' || rels.some((r) => fileRow(r)?.side === side);
+  const words = $derived(searchWords(query));
+  // A mod's name, or its jar's file name, has every word.
+  const nameHit = (name, key = '') => words.every((w) => `${name} ${key}`.toLowerCase().includes(w));
   const modRows = $derived(
     (index?.mods || [])
       .filter((m) => sideOk(m.files))
@@ -52,9 +61,10 @@
       .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())),
   );
   const changedRows = $derived(modRows.filter((m) => m.changed || m.unsaved));
-  const loose = $derived((index?.unmatched || []).filter((r) => sideOk([r])));
+  const loose = $derived((index?.unmatched || []).filter((r) => sideOk([r]) && (!words.length || nameHit(r))));
   const keepRel = (r) => (filter === 'unsaved' ? unsavedRels.has(r) : filter === 'players' ? playersDiffer(r) > 0 : fileRow(r)?.changed || unsavedRels.has(r));
-  const shownAll = $derived(filter === 'all' ? modRows : modRows.filter((m) => m.files.some(keepRel)));
+  const named = $derived(words.length ? modRows.filter((m) => nameHit(m.name, m.key)) : modRows);
+  const shownAll = $derived(filter === 'all' ? named : named.filter((m) => m.files.some(keepRel)));
   const shownLoose = $derived(filter === 'all' ? loose : loose.filter(keepRel));
   const players = $derived(cfg.sid === server.id ? cfg.players : null);
   let pushing = $state(false);
@@ -66,12 +76,34 @@
   const selRels = $derived(selMod ? selMod.files : selLoose ? [selLoose] : []);
   const selLooks = $derived(selMod ? looks(selMod) : null);
 
-  function pick(key) {
+  /** Opens a mod; `q` puts words in its own search (a mod from the other-mods group). */
+  function pick(key, q = '') {
     filePick = '';
+    modQuery = q;
     go(key);
   }
 
-  // ---- search across every mod -------------------------------------------------------
+  /** Enter in the top search: the first mod listed, with the cursor in its own search. */
+  function openFirst() {
+    const first = shownAll[0]?.key || shownLoose[0];
+    if (!first) return;
+    pick(first);
+    focusMod = true;
+  }
+  // Right after the mod's page is drawn, so typing goes on in its box.
+  let focusMod = $state(false);
+  $effect(() => {
+    if (focusMod && modInput && sel) {
+      modInput.focus();
+      focusMod = false;
+    }
+  });
+  function topKeys(ev) {
+    if (ev.key === 'Enter') openFirst();
+    else if (ev.key === 'Escape') query = '';
+  }
+
+  // ---- settings of other mods that mention the search ----------------------------------
   let hits = $state(null);
   let searching = $state(false);
   let timer;
@@ -95,19 +127,22 @@
       }
     }, 250);
   });
-  const hitGroups = $derived.by(() => {
-    if (!hits) return [];
+  /** Mods (and loose files) whose settings match but whose name doesn't, most matches first. */
+  const others = $derived.by(() => {
+    if (!hits || !words.length) return [];
     const by = new Map();
     for (const h of hits) {
       if (side !== 'all' && fileRow(h.rel)?.side !== side) continue;
-      if (!by.has(h.rel)) by.set(h.rel, []);
-      by.get(h.rel).push(h.entry);
+      const owner = fileRow(h.rel)?.owner;
+      const m = owner ? modRows.find((x) => x.key === owner) : null;
+      if (m ? nameHit(m.name, m.key) : nameHit(h.rel)) continue;
+      const key = m ? m.key : h.rel;
+      if (!by.has(key)) by.set(key, { key, mod: m, n: 0 });
+      by.get(key).n++;
     }
-    return [...by].map(([rel, entries]) => {
-      const m = fileRow(rel)?.owner ? index?.mods.find((x) => x.key === fileRow(rel).owner) : null;
-      return { rel, entries, mod: m ? looks(m) : null };
-    });
+    return [...by.values()].sort((a, b) => b.n - a.n || (a.mod?.name || a.key).localeCompare(b.mod?.name || b.key));
   });
+  const othersN = $derived(others.reduce((n, o) => n + o.n, 0));
 
   function editText(rel, line) {
     jump.path = rel;
@@ -123,8 +158,8 @@
 
 <div class="cfgp">
   <div class="tools">
-    <label class="input find"><Search size={13} /><input use:rightClear placeholder={index ? `Search ${index.settings.toLocaleString()} settings in every mod` : 'Search settings'} bind:value={query} />{#if searching}<span class="spinner"></span>{:else if query}<button class="clr" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</label>
-    <button class="chip dchip" class:on={desc} aria-pressed={desc} title="Also look in each setting's description" onclick={() => (desc = !desc)}>Also in descriptions</button>
+    <label class="input find"><Search size={13} /><input use:rightClear placeholder={index ? `Search ${index.mods.length.toLocaleString()} mods` : 'Search mods'} bind:value={query} onkeydown={topKeys} title="Enter opens the first mod" />{#if searching}<span class="spinner"></span>{:else if query}<button class="clr" title="Clear" onclick={() => (query = '')}><X size={12} /></button>{/if}</label>
+    <button class="chip dchip" class:on={desc} aria-pressed={desc} title="Look in each setting's description too, in the open mod and in other mods" onclick={() => (desc = !desc)}>Also in descriptions</button>
     <div class="grow"></div>
     <div class="row fgroup">
       <span class="glabel"><Funnel size={12} />Filter</span>
@@ -153,22 +188,35 @@
   {#if error}
     <div class="empty-state"><span class="es-ic"><SlidersHorizontal size={18} /></span><b>Can't read the configs</b><p class="err">{error}</p></div>
   {:else}
-    <div class="body" class:picked={!!selRels.length || !!hits}>
+    <div class="body" class:picked={!!selRels.length}>
       <nav class="mods" aria-label="Mods with config files">
         {#if !index}
           <div class="skels">{#each [0, 1, 2, 3, 4, 5, 6] as i (i)}<div class="skel"><i></i></div>{/each}</div>
         {:else}
-          {#if changedRows.length && filter === 'all'}
+          {#if changedRows.length && filter === 'all' && !words.length}
             <div class="grp">Changed · {changedRows.length}</div>
             {#each changedRows as m (m.key)}{@render modRow(m)}{/each}
           {/if}
-          <div class="grp">{filter === 'all' ? 'All mods' : filter === 'changed' ? 'Changed' : filter === 'players' ? 'Differs from players' : 'Unsaved'} · {shownAll.length}</div>
-          {#each shownAll as m (m.key)}{@render modRow(m)}{:else}<div class="small muted pad">None here.</div>{/each}
+          <div class="grp">{words.length ? 'Mods' : filter === 'all' ? 'All mods' : filter === 'changed' ? 'Changed' : filter === 'players' ? 'Differs from players' : 'Unsaved'} · {shownAll.length}</div>
+          {#each shownAll as m (m.key)}{@render modRow(m)}{:else}<div class="small muted pad">{words.length ? 'No mod is called that.' : 'None here.'}</div>{/each}
+          {#if others.length}
+            <button class="mrow row-hover ofold" aria-expanded={othersOpen} title="{othersN.toLocaleString()} setting{othersN === 1 ? '' : 's'} in {others.length} other mod{others.length === 1 ? '' : 's'} mention “{query.trim()}”" onclick={() => (othersOpen = !othersOpen)}>
+              {#if othersOpen}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}<span class="ell">Settings in other mods</span><span class="c">{othersN >= 300 ? '300+' : othersN}</span>
+            </button>
+            {#if othersOpen}
+              {#each others as o (o.key)}
+                <button class="mrow row-hover" class:row-sel={sel === o.key} onclick={() => pick(o.key, query.trim())} title={o.mod?.name || o.key}>
+                  {#if o.mod}{#if o.mod.icon}<img src={o.mod.icon} alt="" width="20" height="20" loading="lazy" />{:else}<span class="sic ph">{initials(o.mod.name)}</span>{/if}<span class="ell">{o.mod.name}</span>{:else}<span class="sic q"><FileQuestion size={12} /></span><span class="ell mono small">{shortRel(o.key)}</span>{/if}
+                  <span class="c">{o.n} match{o.n === 1 ? '' : 'es'}</span>
+                </button>
+              {/each}
+            {/if}
+          {/if}
           {#if shownLoose.length}
             <div class="grp">Not matched to a mod · {shownLoose.length}</div>
             {#each shownLoose as r (r)}
-              <button class="mrow row-hover" class:row-sel={sel === r && !hits} onclick={() => pick(r)} title={r}>
-                <span class="sic q"><FileQuestion size={12} /></span><span class="ell mono small">{shortRel(r)}</span>
+              <button class="mrow row-hover" class:row-sel={sel === r} onclick={() => pick(r)} title={r}>
+                <span class="sic q"><FileQuestion size={12} /></span><span class="ell mono small">{@render hl(shortRel(r))}</span>
                 {#if unsavedRels.has(r)}<span class="c"><span class="udot"></span></span>{:else if fileRow(r)?.changed}<span class="c">{fileRow(r).changed}</span>{/if}
               </button>
             {/each}
@@ -177,20 +225,7 @@
       </nav>
 
       <section class="main">
-        {#if hits}
-          <div class="phone-back"><button class="btn sm ghost" onclick={() => (query = '')}><ArrowLeft size={13} />All mods</button></div>
-          <div class="small muted hh">{hits.length >= 300 ? 'The first 300 settings that match' : `${hits.length} setting${hits.length === 1 ? '' : 's'} match`}{desc ? ', descriptions included' : ''}.</div>
-          {#each hitGroups as g (g.rel)}
-            {@const sc = sideChip(fileRow(g.rel)?.side)}
-            <div class="hg">
-              {#if g.mod}{#if g.mod.icon}<img src={g.mod.icon} alt="" width="18" height="18" />{:else}<span class="sic ph">{initials(g.mod.name)}</span>{/if}<b>{g.mod.name}</b>{/if}
-              <span class="mono small subtle ell">{g.rel}</span>{#if sc}<span class="chip sc {sc[1]}">{sc[0]}</span>{/if}
-            </div>
-            {#each g.entries as e (eid(e))}<ConfigRow rel={g.rel} {e} onEditText={editText} />{/each}
-          {:else}
-            <div class="empty-state"><span class="es-ic"><Search size={18} /></span><b>No settings match</b><p>{desc ? 'Try another word.' : 'Try another word, or tick Search descriptions.'}</p></div>
-          {/each}
-        {:else if selRels.length}
+        {#if selRels.length}
           <div class="phone-back"><button class="btn sm ghost" onclick={() => pick('')}><ArrowLeft size={13} />All mods</button></div>
           <div class="mh">
             {#if selLooks}
@@ -200,13 +235,14 @@
               <span class="sic big q"><FileQuestion size={16} /></span>
               <div class="grow"><div class="nm mono">{shortRel(selLoose)}</div><div class="tiny muted">No mod's name matches this file.</div></div>
             {/if}
+            <label class="input find msearch"><Search size={13} /><input bind:this={modInput} use:rightClear placeholder={selLooks ? `Search ${selLooks.name}'s settings` : "Search this file's settings"} bind:value={modQuery} onkeydown={(ev) => ev.key === 'Escape' && (modQuery = '')} />{#if modQuery}<button class="clr" title="Clear" onclick={() => (modQuery = '')}><X size={12} /></button>{/if}</label>
           </div>
-          {#key sel}<ConfigView {server} rels={selRels} {filter} {side} bind:pick={filePick} onEditText={editText} />{/key}
+          {#key sel}<ConfigView {server} rels={selRels} {filter} {side} query={modQuery} {desc} bind:pick={filePick} onEditText={editText} />{/key}
         {:else if index}
           <div class="empty-state">
             <span class="es-ic"><SlidersHorizontal size={18} /></span>
             <b>{index.files.length ? 'Pick a mod' : 'No config files yet'}</b>
-            <p>{index.files.length ? `${index.files.length} config files with ${index.settings.toLocaleString()} settings. Pick a mod on the left, or search them all.` : 'Mods write their config files the first time the server starts.'}</p>
+            <p>{index.files.length ? `${index.files.length} config files with ${index.settings.toLocaleString()} settings. Pick a mod on the left, or search for one by name.` : 'Mods write their config files the first time the server starts.'}</p>
           </div>
         {/if}
       </section>
@@ -216,10 +252,12 @@
 </div>
 {#if pushing}<PushPlayers {server} onClose={() => (pushing = false)} />{/if}
 
+{#snippet hl(text)}{#each marks(text, words) as p, i (i)}{#if p.hit}<mark class="hit">{p.t}</mark>{:else}{p.t}{/if}{/each}{/snippet}
+
 {#snippet modRow(m)}
   <button class="mrow row-hover" class:row-sel={sel === m.key && !hits} onclick={() => pick(m.key)} title={m.name}>
     {#if m.icon}<img src={m.icon} alt="" width="20" height="20" loading="lazy" />{:else}<span class="sic ph">{initials(m.name)}</span>{/if}
-    <span class="ell">{m.name}</span>
+    <span class="ell">{@render hl(m.name)}</span>
     {#if m.unsaved}<span class="c" title="Not saved yet"><span class="udot"></span></span>{:else if m.changed}<span class="c" title="{m.changed} not at the default the file states">{m.changed}</span>{:else if m.files.length > 1}<span class="c">{m.files.length} files</span>{/if}
   </button>
 {/snippet}
@@ -249,10 +287,9 @@
   .mh { display: flex; align-items: center; gap: 10px; padding: 2px 4px 10px; }
   .nm { font-weight: 600; font-size: 14px; }
   .grow { flex: 1; min-width: 0; }
-  .hh { padding: 0 12px 4px; }
-  .hg { display: flex; align-items: center; gap: 8px; padding: 14px 12px 4px; min-width: 0; }
-  .hg img { border-radius: var(--radius-sm); flex: none; }
-  .sc { height: 18px; font-size: 11px; padding: 0 6px 1px; }
+  .msearch { width: 300px; padding: 5px 9px; flex: none; }
+  .msearch input { flex: 1; min-width: 0; }
+  .ofold { margin-top: 6px; color: var(--muted); font-size: 12px; gap: 6px; }
   .skels { display: flex; flex-direction: column; padding-top: 4px; }
   .phone-back { display: none; }
   .pnote { flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; background: var(--blue-dim); border-bottom: 1px solid var(--line); color: var(--text); }
@@ -263,6 +300,7 @@
     .cfgp { flex: none; overflow: visible; }
     .main { overflow: visible; }
     .find { width: 100%; }
+    .mh { flex-wrap: wrap; }
     .find, .sidesel { min-height: 44px; }
     .body { grid-template-columns: minmax(0, 1fr); }
     .mods { border-right: 0; }

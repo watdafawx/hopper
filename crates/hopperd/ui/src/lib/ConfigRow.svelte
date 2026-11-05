@@ -7,8 +7,10 @@
   // colour, text, or "Edit as text" for what can't be a setting).
   import { RotateCcw, X, Plus, Minus, FileText } from '@lucide/svelte';
   import { valueOf, edited, errorOf, setEdit, same, playersOf, limits, check, listText, listItems, swatchOf, colorText } from './configs.svelte.js';
+  import { marks } from './mark.js';
 
-  let { rel, e, stacked = false, onEditText } = $props();
+  /** `words`: the search, marked in the name and key; in the description too with `desc`. */
+  let { rel, e, stacked = false, onEditText, words = [], desc = false } = $props();
 
   const value = $derived(valueOf(rel, e));
   const dirty = $derived(edited(rel, e));
@@ -88,16 +90,18 @@
   const restartText = $derived(e.restart && e.restart !== 'none' ? 'Next restart' : '');
 </script>
 
+{#snippet hl(text, ws)}{#each marks(text, ws) as p, i (i)}{#if p.hit}<mark class="hit">{p.t}</mark>{:else}{p.t}{/if}{/each}{/snippet}
+
 <div class="cr" class:stacked class:dirty class:bad={!!error} data-line={e.line}>
   <div class="txt">
     <div class="k">
       {#if changed || dirty}<span class="cdot" class:unsaved={dirty} title={dirty ? 'Not saved yet' : 'Differs from the default'}></span>{/if}
-      <span class="nm">{e.label || e.key}</span>
+      <span class="nm">{@render hl(e.label || e.key, words)}</span>
       {#if restartText}<span class="chip warn tc" title={e.restart === 'game' ? 'The file says this needs a restart' : 'The file says this needs the world reloaded: restart the server'}>{restartText}</span>{/if}
       {#if e.guessed}<span class="chip tc" title="This kind of file doesn't say what a setting takes: Hopper went by the value.">guessed</span>{/if}
     </div>
-    <div class="raw mono" title={key}>{key}</div>
-    {#if e.comment}<div class="d">{e.comment}</div>{/if}
+    <div class="raw mono" title={key}>{@render hl(key, words)}</div>
+    {#if e.comment}<div class="d">{@render hl(e.comment, desc ? words : [])}</div>{/if}
     {#if lim}<div class="cap">{lim}</div>{/if}
     {#if players}<div class="cap pc" title="From {players.client_rel} on a paired Hopper">Players' copy: <span class="mono">{players.client === '' ? '(empty)' : players.client}</span></div>{/if}
     {#if error}<div class="cap err">{error}{localError ? ' Not kept.' : ''}</div>{/if}

@@ -79,6 +79,8 @@ a.btn { color: var(--text); }
 .chip.crashed { color: var(--red); border-color: transparent; background: var(--red-dim); }
 .chip.lan { color: var(--blue); border-color: transparent; background: var(--blue-dim); }
 .chip.ts { color: var(--violet); border-color: transparent; background: var(--violet-dim); }
+/* A search word inside a hit (lib/mark.js), as desktop tints it. */
+mark.hit { background: color-mix(in srgb, var(--acc) 30%, transparent); color: var(--text); border-radius: 2px; }
 .chip.acc, .chip.on { color: var(--acc); border-color: transparent; background: var(--acc-dim); }
 /* A status pill (widgets::pill): coloured text on its tint, semibold, with a glowing dot. */
 .pill { display: inline-flex; align-items: center; gap: 6px; flex: none; box-sizing: border-box; height: 20px; line-height: 1; padding: 0 9px 2px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--muted); background: #9a9aa31a; }
