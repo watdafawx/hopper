@@ -116,6 +116,8 @@ pub enum Msg {
     LiveCrash(PathBuf, hopper::crashdetect::Crash),
     /// Mods whose mixins failed while a game runs.
     LiveWarnings(PathBuf, Vec<hopper::crashdetect::Suspect>),
+    /// A game looks stuck while it starts (see `crate::stuck`).
+    Stuck(PathBuf, hopper::stuckstart::StuckReport),
     /// Why the game that just ended couldn't join a server or open a
     /// world (`None`: it could). See `join_help`.
     JoinChecked(PathBuf, Option<hopper::joinfail::JoinProblem>),
@@ -345,6 +347,8 @@ pub struct Store {
     crashes: HashMap<PathBuf, Option<hopper::crashdetect::Crash>>,
     /// Crash reports already told while their game was still open.
     live_told: HashMap<PathBuf, PathBuf>,
+    /// Games that look stuck while starting (`crate::stuck`).
+    pub(crate) stuck: crate::stuck::StuckState,
     /// Join problems and the pre-join comparison (`join_help`).
     pub(crate) joins: crate::join_help::Joins,
     /// Mixin failures of each instance's current or last game.
@@ -492,12 +496,15 @@ impl Store {
             Arc::new(move || ticked.store(true, Ordering::Relaxed))
         };
         let watched = Arc::new(Mutex::new(Vec::new()));
+        let stuck = crate::stuck::StuckState::default();
+        hopper::stuckstart::set_secs(settings.stuck_start_secs);
         {
             let (watched, tx, wake) = (watched.clone(), tx.clone(), wake.clone());
             let (tx2, wake2) = (tx.clone(), wake.clone());
             // Running games' files: a crash report while the game is still
             // open, and mixin failures as they're logged.
             let live = Mutex::new(hopper::crashdetect::LiveWatch::default());
+            let stuck_games = stuck.games.clone();
             hopper::game::watch(
                 move || watched.lock().map(|w| w.clone()).unwrap_or_default(),
                 move |r| {
@@ -505,6 +512,7 @@ impl Store {
                     wake();
                 },
                 move |running| {
+                    crate::stuck::look(&stuck_games, running, &tx2, &wake2);
                     let mut live = live.lock().unwrap_or_else(|e| e.into_inner());
                     live.retain(&running.keys().cloned().collect::<Vec<_>>());
                     for (root, r) in running {
@@ -545,6 +553,7 @@ impl Store {
             running: HashMap::new(),
             crashes: HashMap::new(),
             live_told: HashMap::new(),
+            stuck,
             joins: Default::default(),
             warnings: HashMap::new(),
             jobs: Jobs::with_ticker(wake.clone(), tick),
@@ -1016,6 +1025,7 @@ impl Store {
                     .map(|(k, v)| (k.clone(), v.started))
                     .collect();
                 self.running = now;
+                self.stuck_ended(&ended.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>(), cx);
                 let secs_now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs());
@@ -1071,6 +1081,7 @@ impl Store {
             }
             Msg::JoinChecked(root, j) => self.join_checked(root, j, cx),
             Msg::PreJoin(root, key, p) => self.pre_join_done(root, key, p, cx),
+            Msg::Stuck(root, r) => self.stuck_found(root, r, cx),
             Msg::LiveWarnings(root, w) => {
                 let list = self.warnings.entry(root).or_default();
                 list.extend(w);

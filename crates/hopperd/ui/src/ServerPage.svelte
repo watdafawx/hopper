@@ -15,6 +15,7 @@
   import { askPower, askKickOrBan, playerAct, head } from './lib/consoleKit.js';
   import ConsoleView from './ConsoleView.svelte';
   import CrashStrip from './CrashStrip.svelte';
+  import StuckStrip from './StuckStrip.svelte';
   import { unseen, markSeen } from './lib/crashseen.svelte.js';
   import ServerLogs from './ServerLogs.svelte';
   import ModPeek from './ModPeek.svelte';
@@ -288,6 +289,7 @@
   </nav>
 
   <CrashStrip server={s} hidden={tab === 'logs'} seeWhy={(rel) => nav('logs', rel)} />
+  <StuckStrip server={s} hidden={tab === 'logs'} seeWhy={(rel) => nav('logs', rel)} />
 
   {#if tab === 'files'}
     <div class="full"><Files server={s} {path} go={(p) => nav('files', p)} openFile={(p) => nav('edit', p)} openTrash={() => nav('trash')} /></div>

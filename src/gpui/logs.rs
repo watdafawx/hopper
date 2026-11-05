@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod crash_story;
+pub(crate) use crash_story::mod_ref;
 mod crash_switch;
 
 /// How much of a log to show when it opens.
@@ -413,9 +414,8 @@ impl LogsView {
     }
 
     /// Opens the crash reports on `rel` (a crash report or a stuck start's
-    /// dump, under the instance folder): where "See why" lands. The stuck
-    /// start's strip calls it once that branch is merged.
-    #[allow(dead_code)]
+    /// dump, under the instance folder): where the stuck start's strip's
+    /// "See why" lands.
     pub fn open_report(&mut self, rel: String, cx: &mut Context<Self>) {
         self.tab_picked = true;
         self.select(Pane::Crashes, cx);

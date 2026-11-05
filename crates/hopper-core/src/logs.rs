@@ -75,6 +75,8 @@ pub fn crash_reports(root: &Path) -> Vec<PathBuf> {
         .flatten()
         .flatten()
         .map(|e| e.path())
+        // Hopper's stuck-start thread dumps sit here too; they aren't crashes.
+        .filter(|p| !crate::stuckfile::is_stuck(p))
         .collect();
     crashes.sort();
     crashes.reverse();

@@ -14,7 +14,7 @@ use hopper::crashdetect::{Crash, Stopped};
 use std::path::Path;
 
 /// A mod by its jar: icon and name, opening the mod peek on click.
-pub(super) fn mod_ref(store: &Entity<Store>, root: &Path, file: &str, key: &str, cx: &App) -> AnyElement {
+pub(crate) fn mod_ref(store: &Entity<Store>, root: &Path, file: &str, key: &str, cx: &App) -> AnyElement {
     let s = store.read(cx);
     let bare = file.trim_end_matches(".disabled");
     let a = s.instance(root).and_then(|i| i.addons.iter().find(|a| a.file_name.eq_ignore_ascii_case(bare)));

@@ -133,6 +133,15 @@ pub fn local_secs(y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64) -> i64 {
     days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60 + s - crate::hosting::schedule::utc_offset_secs()
 }
 
+/// Local date and time for a file name, the way Minecraft names crash
+/// reports: "2026-11-05_17.33.04".
+pub fn file_stamp(t: i64) -> String {
+    let local = t + crate::hosting::schedule::utc_offset_secs();
+    let (y, m, d) = civil_from_days(local.div_euclid(86_400));
+    let s = local.rem_euclid(86_400);
+    format!("{y:04}-{m:02}-{d:02}_{:02}.{:02}.{:02}", s / 3600, s % 3600 / 60, s % 60)
+}
+
 /// Seconds since the epoch, now.
 pub fn now() -> i64 {
     now_secs()

@@ -254,6 +254,10 @@ struct Shared {
     finished: Option<(Finished, Instant)>,
     /// A restart is under way: the stop, then the start.
     restarting: bool,
+    /// The start looks stuck (see [`crate::stuckstart`]).
+    stuck: Option<crate::stuckstart::StuckReport>,
+    /// The player chose to wait this many more seconds before being asked again.
+    stuck_snooze: Option<i64>,
 }
 
 impl Shared {
@@ -496,6 +500,23 @@ impl LocalServer {
     #[doc(hidden)]
     pub fn set_stop_wait(&self, w: StopWait) {
         self.lock().stop_wait = Some(w);
+    }
+
+    /// The start looks stuck: what the thread dump showed. Gone when it
+    /// gets going again, stops, or the player chose to wait.
+    pub fn stuck(&self) -> Option<crate::stuckstart::StuckReport> {
+        let g = self.lock();
+        if g.tracker.done || g.stop_requested || g.proc.is_none() {
+            return None;
+        }
+        g.stuck.clone()
+    }
+
+    /// Hides the stuck notice and asks again after `secs` more quiet seconds.
+    pub fn snooze_stuck(&self, secs: i64) {
+        let mut g = self.lock();
+        g.stuck = None;
+        g.stuck_snooze = Some(secs);
     }
 
     pub fn started_at(&self) -> Option<SystemTime> {
@@ -957,6 +978,10 @@ fn tail(path: PathBuf, shared: Arc<Mutex<Shared>>, run: u64) {
             };
             let mut pending = Vec::new();
             let mut chunk = vec![0u8; 64 * 1024];
+            // Stuck-start watch: fed the same lines, looked at every 5 s.
+            let mut watch = crate::stuckstart::Watch::new(&path, true, crate::time::now(), true);
+            let mut looked = Instant::now();
+            shared.lock().unwrap_or_else(|e| e.into_inner()).stuck = None;
             loop {
                 let mut got = false;
                 while let Ok(n @ 1..) = f.read(&mut chunk) {
@@ -970,6 +995,7 @@ fn tail(path: PathBuf, shared: Arc<Mutex<Shared>>, run: u64) {
                 let mut start = 0;
                 while let Some(i) = pending[start..].iter().position(|&b| b == b'\n') {
                     let line = String::from_utf8_lossy(&pending[start..start + i]);
+                    watch.feed_line(line.trim_end_matches('\r'), crate::time::now());
                     g.tracker.push(line.trim_end_matches('\r').to_string());
                     start += i + 1;
                 }
@@ -993,13 +1019,51 @@ fn tail(path: PathBuf, shared: Arc<Mutex<Shared>>, run: u64) {
                     g.tracker.push(msg);
                     return;
                 }
+                if let Some(secs) = g.stuck_snooze.take() {
+                    watch.snooze(crate::time::now(), secs);
+                    g.stuck = None;
+                }
+                let starting = g.proc.is_some() && !g.stop_requested && !g.tracker.done && g.stuck.is_none();
+                let pid = g.pid;
+                let root = g.root.clone();
                 drop(g);
+                if starting
+                    && looked.elapsed() >= Duration::from_secs(5)
+                    && let Some(pid) = pid
+                {
+                    looked = Instant::now();
+                    let now = crate::time::now();
+                    if let Some(stall) = watch.check(now, crate::stuckstart::cpu_time_ms(pid), crate::stuckstart::settings()) {
+                        look_stuck(root, pid, stall, shared.clone(), run);
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(200));
             }
         });
     if let Err(e) = spawned {
         log::warn!("no reader for the server's console: {e}");
     }
+}
+
+/// Takes and reads a thread dump of a stuck start, off the console thread,
+/// and keeps what it found for the panel.
+fn look_stuck(root: PathBuf, pid: u32, stall: crate::stuckstart::Stall, shared: Arc<Mutex<Shared>>, run: u64) {
+    let _ = std::thread::Builder::new().name("server-stuck".into()).spawn(move || {
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let report = crate::stuckstart::investigate(&root, &name, pid, &stall, crate::time::now());
+        let mut g = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if g.run != run || g.tracker.done || g.stop_requested {
+            return;
+        }
+        let saved = report
+            .dump
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| format!(" Thread dump saved: crash-reports/{} (Logs & crashes).", n.to_string_lossy()))
+            .unwrap_or_default();
+        g.note(&format!("[Hopper] {}.{saved}", report.headline));
+        g.stuck = Some(report);
+    });
 }
 
 /// The server's process by handle, so a restarted Hopper can watch, stop

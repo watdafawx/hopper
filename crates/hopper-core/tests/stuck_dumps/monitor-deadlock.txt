@@ -1,0 +1,33 @@
+2026-11-05 18:00:00
+Full thread dump OpenJDK 64-Bit Server VM (21.0.5+11-LTS mixed mode, sharing):
+
+"Server thread" #40 [1200] prio=5 os_prio=0 cpu=900.00ms elapsed=200.00s tid=0x1 nid=1200 waiting for monitor entry  [0x1]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at com.alpha.registry.AlphaRegistry.register(alpha@1.0/AlphaRegistry.java:40)
+	- waiting to lock <0x00000000c0000002> (a com.beta.cache.BetaCache)
+	at com.alpha.registry.AlphaRegistry.init(alpha@1.0/AlphaRegistry.java:20)
+	- locked <0x00000000c0000001> (a com.alpha.registry.AlphaRegistry)
+	at net.minecraft.server.MinecraftServer.runServer(minecraft@1.21.1/MinecraftServer.java:700)
+
+"Beta Worker" #55 [1300] prio=5 os_prio=0 cpu=100.00ms elapsed=190.00s tid=0x2 nid=1300 waiting for monitor entry  [0x2]
+   java.lang.Thread.State: BLOCKED (on object monitor)
+	at com.beta.cache.BetaCache.fill(beta@2.0/BetaCache.java:88)
+	- waiting to lock <0x00000000c0000001> (a com.alpha.registry.AlphaRegistry)
+	at com.beta.cache.BetaCache.load(beta@2.0/BetaCache.java:60)
+	- locked <0x00000000c0000002> (a com.beta.cache.BetaCache)
+	at java.lang.Thread.run(java.base@21.0.5/Thread.java:1583)
+
+"Watchdog" #60 [1400] prio=5 os_prio=0 cpu=1.00ms elapsed=190.00s tid=0x3 nid=1400 waiting on condition  [0x3]
+   java.lang.Thread.State: TIMED_WAITING (sleeping)
+	at java.lang.Thread.sleep0(java.base@21.0.5/Native Method)
+
+Found one Java-level deadlock:
+=============================
+"Server thread":
+  waiting to lock monitor 0x1 (object 0x00000000c0000002, a com.beta.cache.BetaCache),
+  which is held by "Beta Worker"
+"Beta Worker":
+  waiting to lock monitor 0x2 (object 0x00000000c0000001, a com.alpha.registry.AlphaRegistry),
+  which is held by "Server thread"
+
+Found 1 deadlock.

@@ -1685,6 +1685,12 @@ impl ServersView {
                 self.strip.update(cx, |st, cx| st.show(s.root.clone(), cx));
                 if self.strip.read(cx).crash().is_some() { c.child(self.strip.clone()) } else { c }
             })
+            .children({
+                let view = cx.entity().downgrade();
+                crate::stuck::server_stuck_bar(&self.store, &s.root, pstats.as_ref(), &self.control, move |rel, _, cx| {
+                    view.update(cx, |this, cx| this.see_crash(rel, cx)).ok();
+                }, cx)
+            })
             .when(remote && matches!(self.tab, TAB_FILES | TAB_MODS | TAB_PLAYERS | TAB_BACKUPS | TAB_SCHEDULE | TAB_SETTINGS), |c| {
                 let body: AnyElement = match &self.target {
                     Some(Err(e)) => widgets::empty_state(IconName::TriangleAlert, "Can't reach this panel", Some(e.clone().into()), cx)

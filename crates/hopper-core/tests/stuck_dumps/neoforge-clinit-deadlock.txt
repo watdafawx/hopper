@@ -1,0 +1,165 @@
+31812:
+2026-11-05 17:33:21
+Full thread dump Java HotSpot(TM) 64-Bit Server VM (21.0.9+7-LTS-jvmci-23.1-b79 mixed mode, sharing):
+"Render thread" #163 [90176] prio=5 os_prio=0 cpu=13656.25ms elapsed=1027.86s tid=0x000001a8189e2170 nid=90176 runnable  [0x0000002d656fe000]
+   java.lang.Thread.State: TIMED_WAITING (parking)
+	at jdk.internal.misc.Unsafe.park(java.base@21.0.9/Native Method)
+	- parking to wait for  <0x00000005af4be718> (a java.util.concurrent.CompletableFuture$Signaller)
+	at java.util.concurrent.locks.LockSupport.parkNanos(java.base@21.0.9/LockSupport.java:269)
+	at java.util.concurrent.CompletableFuture$Signaller.block(java.base@21.0.9/CompletableFuture.java:1866)
+	at java.util.concurrent.ForkJoinPool.unmanagedBlock(java.base@21.0.9/ForkJoinPool.java:3778)
+	at java.util.concurrent.ForkJoinPool.managedBlock(java.base@21.0.9/ForkJoinPool.java:3723)
+	at java.util.concurrent.CompletableFuture.timedGet(java.base@21.0.9/CompletableFuture.java:1939)
+	at java.util.concurrent.CompletableFuture.get(java.base@21.0.9/CompletableFuture.java:2095)
+	at net.neoforged.fml.ModLoader.waitForFuture(fml_loader@4.0.45/ModLoader.java:254)
+	at net.neoforged.fml.ModLoader.dispatchParallelTask(fml_loader@4.0.45/ModLoader.java:244)
+	at net.neoforged.fml.ModLoader.constructMods(fml_loader@4.0.45/ModLoader.java:152)
+	at net.neoforged.fml.ModLoader.gatherAndInitializeMods(fml_loader@4.0.45/ModLoader.java:142)
+	at net.neoforged.neoforge.internal.CommonModLoader.begin(neoforge@21.1.265/CommonModLoader.java:49)
+	at net.neoforged.neoforge.client.loading.ClientModLoader.begin(neoforge@21.1.265/ClientModLoader.java:60)
+	at net.minecraft.client.Minecraft.<init>(minecraft@1.21.1/Minecraft.java:486)
+	at me.decce.ixeris.RenderThreadStarter/0x0000019fce8e8000.tryCreateMinecraft(ixeris@4.6.11+1.21.1-neoforge/RenderThreadStarter.java:66)
+	at me.decce.ixeris.RenderThreadStarter/0x0000019fce8e8000.run(ixeris@4.6.11+1.21.1-neoforge/RenderThreadStarter.java:35)
+	at java.lang.Thread.runWith(java.base@21.0.9/Thread.java:1596)
+	at java.lang.Thread.run(java.base@21.0.9/Thread.java:1583)
+
+   Locked ownable synchronizers:
+	- None
+
+"modloading-worker-0" #172 [8064] daemon prio=5 os_prio=0 cpu=5671.88ms elapsed=1026.11s tid=0x000001a819f97c50 nid=8064 waiting on condition  [0x0000002d5dffe000]
+   java.lang.Thread.State: WAITING (parking)
+	at jdk.internal.misc.Unsafe.park(java.base@21.0.9/Native Method)
+	- parking to wait for  <0x000000047f7390f8> (a java.util.concurrent.ForkJoinPool)
+	at java.util.concurrent.locks.LockSupport.park(java.base@21.0.9/LockSupport.java:371)
+	at java.util.concurrent.ForkJoinPool.awaitWork(java.base@21.0.9/ForkJoinPool.java:1891)
+	at java.util.concurrent.ForkJoinPool.runWorker(java.base@21.0.9/ForkJoinPool.java:1807)
+	at java.util.concurrent.ForkJoinWorkerThread.run(java.base@21.0.9/ForkJoinWorkerThread.java:188)
+
+   Locked ownable synchronizers:
+	- None
+
+"modloading-worker-0" #181 [29904] daemon prio=5 os_prio=0 cpu=1265.62ms elapsed=1026.11s tid=0x000001a81f4fa8a0 nid=29904 in Object.wait()  [0x0000002d639fd000]
+   java.lang.Thread.State: RUNNABLE
+	at com.qurenie.jei.FlamesJeiPlugin.<clinit>(relics_thirteenflames@0.1.7.5/FlamesJeiPlugin.java:26)
+	- waiting on the Class initialization monitor for com.qurenie.relics_thirteenflames.ThirteenFlames
+	at jdk.internal.misc.Unsafe.ensureClassInitialized0(java.base@21.0.9/Native Method)
+	at jdk.internal.misc.Unsafe.ensureClassInitialized(java.base@21.0.9/Unsafe.java:1160)
+	at jdk.internal.reflect.MethodHandleAccessorFactory.ensureClassInitialized(java.base@21.0.9/MethodHandleAccessorFactory.java:300)
+	at jdk.internal.reflect.MethodHandleAccessorFactory.newConstructorAccessor(java.base@21.0.9/MethodHandleAccessorFactory.java:103)
+	at jdk.internal.reflect.ReflectionFactory.newConstructorAccessor(java.base@21.0.9/ReflectionFactory.java:200)
+	at java.lang.reflect.Constructor.acquireConstructorAccessor(java.base@21.0.9/Constructor.java:549)
+	at java.lang.reflect.Constructor.newInstanceWithCaller(java.base@21.0.9/Constructor.java:499)
+	at java.lang.reflect.Constructor.newInstance(java.base@21.0.9/Constructor.java:486)
+	at dev.nolij.toomanyrecipeviewers.plugin.JEIPluginManager.<clinit>(toomanyrecipeviewers@0.9.2+mc.21.1/JEIPluginManager.java:97)
+	at dev.nolij.toomanyrecipeviewers.TooManyRecipeViewersMod.<init>(toomanyrecipeviewers@0.9.2+mc.21.1/TooManyRecipeViewersMod.java:58)
+	at java.lang.invoke.DirectMethodHandle$Holder.newInvokeSpecial(java.base@21.0.9/DirectMethodHandle$Holder)
+	at java.lang.invoke.LambdaForm$MH/0x0000019fcd012800.invoke(java.base@21.0.9/LambdaForm$MH)
+	at java.lang.invoke.Invokers$Holder.invokeExact_MT(java.base@21.0.9/Invokers$Holder)
+	at jdk.internal.reflect.DirectConstructorHandleAccessor.invokeImpl(java.base@21.0.9/DirectConstructorHandleAccessor.java:87)
+	at jdk.internal.reflect.DirectConstructorHandleAccessor.newInstance(java.base@21.0.9/DirectConstructorHandleAccessor.java:62)
+	at java.lang.reflect.Constructor.newInstanceWithCaller(java.base@21.0.9/Constructor.java:502)
+	at java.lang.reflect.Constructor.newInstance(java.base@21.0.9/Constructor.java:486)
+	at net.neoforged.fml.javafmlmod.FMLModContainer.constructMod(fml_loader@4.0.45/FMLModContainer.java:122)
+	at net.neoforged.fml.ModLoader.lambda$constructMods$3(fml_loader@4.0.45/ModLoader.java:153)
+	at net.neoforged.fml.ModLoader$$Lambda/0x0000019fcea972b0.accept(fml_loader@4.0.45/Unknown Source)
+	at net.neoforged.fml.ModLoader.lambda$dispatchParallelTask$7(fml_loader@4.0.45/ModLoader.java:231)
+	at net.neoforged.fml.ModLoader$$Lambda/0x0000019fceb68210.apply(fml_loader@4.0.45/Unknown Source)
+	at java.util.concurrent.CompletableFuture.uniHandle(java.base@21.0.9/CompletableFuture.java:934)
+	at java.util.concurrent.CompletableFuture$UniHandle.tryFire(java.base@21.0.9/CompletableFuture.java:911)
+	at java.util.concurrent.CompletableFuture$Completion.exec(java.base@21.0.9/CompletableFuture.java:483)
+	at java.util.concurrent.ForkJoinTask.doExec(java.base@21.0.9/ForkJoinTask.java:387)
+	at java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(java.base@21.0.9/ForkJoinPool.java:1310)
+	at java.util.concurrent.ForkJoinPool.scan(java.base@21.0.9/ForkJoinPool.java:1841)
+	at java.util.concurrent.ForkJoinPool.runWorker(java.base@21.0.9/ForkJoinPool.java:1806)
+	at java.util.concurrent.ForkJoinWorkerThread.run(java.base@21.0.9/ForkJoinWorkerThread.java:188)
+
+   Locked ownable synchronizers:
+	- None
+
+"modloading-worker-0" #184 [64824] daemon prio=5 os_prio=0 cpu=1875.00ms elapsed=1026.11s tid=0x000001a81f4e5550 nid=64824 in Object.wait()  [0x0000002d63cfd000]
+   java.lang.Thread.State: RUNNABLE
+	at org.zeith.hammerlib.proxy.HLConstants.<clinit>(hammerlib@21.0.17/HLConstants.java:19)
+	- waiting on the Class initialization monitor for org.zeith.hammerlib.util.CommonMessages
+	at com.qurenie.relics_thirteenflames.ThirteenFlames.<clinit>(relics_thirteenflames@0.1.7.5/ThirteenFlames.java:38)
+	at jdk.internal.misc.Unsafe.ensureClassInitialized0(java.base@21.0.9/Native Method)
+	at jdk.internal.misc.Unsafe.ensureClassInitialized(java.base@21.0.9/Unsafe.java:1160)
+	at jdk.internal.reflect.MethodHandleAccessorFactory.ensureClassInitialized(java.base@21.0.9/MethodHandleAccessorFactory.java:300)
+	at jdk.internal.reflect.MethodHandleAccessorFactory.newConstructorAccessor(java.base@21.0.9/MethodHandleAccessorFactory.java:103)
+	at jdk.internal.reflect.ReflectionFactory.newConstructorAccessor(java.base@21.0.9/ReflectionFactory.java:200)
+	at java.lang.reflect.Constructor.acquireConstructorAccessor(java.base@21.0.9/Constructor.java:549)
+	at java.lang.reflect.Constructor.newInstanceWithCaller(java.base@21.0.9/Constructor.java:499)
+	at java.lang.reflect.Constructor.newInstance(java.base@21.0.9/Constructor.java:486)
+	at net.neoforged.fml.javafmlmod.FMLModContainer.constructMod(fml_loader@4.0.45/FMLModContainer.java:122)
+	at net.neoforged.fml.ModLoader.lambda$constructMods$3(fml_loader@4.0.45/ModLoader.java:153)
+	at net.neoforged.fml.ModLoader$$Lambda/0x0000019fcea972b0.accept(fml_loader@4.0.45/Unknown Source)
+	at net.neoforged.fml.ModLoader.lambda$dispatchParallelTask$7(fml_loader@4.0.45/ModLoader.java:231)
+	at net.neoforged.fml.ModLoader$$Lambda/0x0000019fceb68210.apply(fml_loader@4.0.45/Unknown Source)
+	at java.util.concurrent.CompletableFuture.uniHandle(java.base@21.0.9/CompletableFuture.java:934)
+	at java.util.concurrent.CompletableFuture$UniHandle.tryFire(java.base@21.0.9/CompletableFuture.java:911)
+	at java.util.concurrent.CompletableFuture$Completion.exec(java.base@21.0.9/CompletableFuture.java:483)
+	at java.util.concurrent.ForkJoinTask.doExec(java.base@21.0.9/ForkJoinTask.java:387)
+	at java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(java.base@21.0.9/ForkJoinPool.java:1310)
+	at java.util.concurrent.ForkJoinPool.scan(java.base@21.0.9/ForkJoinPool.java:1841)
+	at java.util.concurrent.ForkJoinPool.runWorker(java.base@21.0.9/ForkJoinPool.java:1806)
+	at java.util.concurrent.ForkJoinWorkerThread.run(java.base@21.0.9/ForkJoinWorkerThread.java:188)
+
+   Locked ownable synchronizers:
+	- None
+
+"modloading-worker-0" #186 [73464] daemon prio=5 os_prio=0 cpu=3625.00ms elapsed=1026.11s tid=0x000001a8137f9a00 nid=73464 in Object.wait()  [0x0000002d63efe000]
+   java.lang.Thread.State: RUNNABLE
+	at org.zeith.hammeranims.HammerAnimations.<init>(hammeranims@21.1.57.1/HammerAnimations.java:31)
+	- waiting on the Class initialization monitor for org.zeith.hammerlib.util.CommonMessages
+	at java.lang.invoke.DirectMethodHandle$Holder.newInvokeSpecial(java.base@21.0.9/DirectMethodHandle$Holder)
+	at java.lang.invoke.LambdaForm$MH/0x0000019fcd012800.invoke(java.base@21.0.9/LambdaForm$MH)
+	at java.lang.invoke.Invokers$Holder.invokeExact_MT(java.base@21.0.9/Invokers$Holder)
+	at jdk.internal.reflect.DirectConstructorHandleAccessor.invokeImpl(java.base@21.0.9/DirectConstructorHandleAccessor.java:87)
+	at jdk.internal.reflect.DirectConstructorHandleAccessor.newInstance(java.base@21.0.9/DirectConstructorHandleAccessor.java:62)
+	at java.lang.reflect.Constructor.newInstanceWithCaller(java.base@21.0.9/Constructor.java:502)
+	at java.lang.reflect.Constructor.newInstance(java.base@21.0.9/Constructor.java:486)
+	at net.neoforged.fml.javafmlmod.FMLModContainer.constructMod(fml_loader@4.0.45/FMLModContainer.java:122)
+	at net.neoforged.fml.ModLoader.lambda$constructMods$3(fml_loader@4.0.45/ModLoader.java:153)
+	at net.neoforged.fml.ModLoader$$Lambda/0x0000019fcea972b0.accept(fml_loader@4.0.45/Unknown Source)
+	at net.neoforged.fml.ModLoader.lambda$dispatchParallelTask$7(fml_loader@4.0.45/ModLoader.java:231)
+	at net.neoforged.fml.ModLoader$$Lambda/0x0000019fceb68210.apply(fml_loader@4.0.45/Unknown Source)
+	at java.util.concurrent.CompletableFuture.uniHandle(java.base@21.0.9/CompletableFuture.java:934)
+	at java.util.concurrent.CompletableFuture$UniHandle.tryFire(java.base@21.0.9/CompletableFuture.java:911)
+	at java.util.concurrent.CompletableFuture$Completion.exec(java.base@21.0.9/CompletableFuture.java:483)
+	at java.util.concurrent.ForkJoinTask.doExec(java.base@21.0.9/ForkJoinTask.java:387)
+	at java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(java.base@21.0.9/ForkJoinPool.java:1310)
+	at java.util.concurrent.ForkJoinPool.scan(java.base@21.0.9/ForkJoinPool.java:1841)
+	at java.util.concurrent.ForkJoinPool.runWorker(java.base@21.0.9/ForkJoinPool.java:1806)
+	at java.util.concurrent.ForkJoinWorkerThread.run(java.base@21.0.9/ForkJoinWorkerThread.java:188)
+
+   Locked ownable synchronizers:
+	- None
+
+"modloading-worker-0" #187 [35564] daemon prio=5 os_prio=0 cpu=1515.62ms elapsed=1026.11s tid=0x000001a81f4e4830 nid=35564 in Object.wait()  [0x0000002d63ffd000]
+   java.lang.Thread.State: RUNNABLE
+	at org.zeith.hammerlib.util.CommonMessages.<clinit>(hammerlib@21.0.17/CommonMessages.java:17)
+	- waiting on the Class initialization monitor for org.zeith.hammerlib.proxy.HLConstants
+	at org.zeith.hammerlib.HammerLib.<init>(hammerlib@21.0.17/HammerLib.java:60)
+	at java.lang.invoke.DirectMethodHandle$Holder.newInvokeSpecial(java.base@21.0.9/DirectMethodHandle$Holder)
+	at java.lang.invoke.LambdaForm$MH/0x0000019fcd012800.invoke(java.base@21.0.9/LambdaForm$MH)
+	at java.lang.invoke.Invokers$Holder.invokeExact_MT(java.base@21.0.9/Invokers$Holder)
+	at jdk.internal.reflect.DirectConstructorHandleAccessor.invokeImpl(java.base@21.0.9/DirectConstructorHandleAccessor.java:87)
+	at jdk.internal.reflect.DirectConstructorHandleAccessor.newInstance(java.base@21.0.9/DirectConstructorHandleAccessor.java:62)
+	at java.lang.reflect.Constructor.newInstanceWithCaller(java.base@21.0.9/Constructor.java:502)
+	at java.lang.reflect.Constructor.newInstance(java.base@21.0.9/Constructor.java:486)
+	at net.neoforged.fml.javafmlmod.FMLModContainer.constructMod(fml_loader@4.0.45/FMLModContainer.java:122)
+	at net.neoforged.fml.ModLoader.lambda$constructMods$3(fml_loader@4.0.45/ModLoader.java:153)
+	at net.neoforged.fml.ModLoader$$Lambda/0x0000019fcea972b0.accept(fml_loader@4.0.45/Unknown Source)
+	at net.neoforged.fml.ModLoader.lambda$dispatchParallelTask$7(fml_loader@4.0.45/ModLoader.java:231)
+	at net.neoforged.fml.ModLoader$$Lambda/0x0000019fceb68210.apply(fml_loader@4.0.45/Unknown Source)
+	at java.util.concurrent.CompletableFuture.uniHandle(java.base@21.0.9/CompletableFuture.java:934)
+	at java.util.concurrent.CompletableFuture$UniHandle.tryFire(java.base@21.0.9/CompletableFuture.java:911)
+	at java.util.concurrent.CompletableFuture$Completion.exec(java.base@21.0.9/CompletableFuture.java:483)
+	at java.util.concurrent.ForkJoinTask.doExec(java.base@21.0.9/ForkJoinTask.java:387)
+	at java.util.concurrent.ForkJoinPool$WorkQueue.topLevelExec(java.base@21.0.9/ForkJoinPool.java:1310)
+	at java.util.concurrent.ForkJoinPool.scan(java.base@21.0.9/ForkJoinPool.java:1841)
+	at java.util.concurrent.ForkJoinPool.runWorker(java.base@21.0.9/ForkJoinPool.java:1806)
+	at java.util.concurrent.ForkJoinWorkerThread.run(java.base@21.0.9/ForkJoinWorkerThread.java:188)
+
+   Locked ownable synchronizers:
+	- None
+

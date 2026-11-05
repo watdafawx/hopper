@@ -1,0 +1,23 @@
+2026-11-05 18:00:00
+Full thread dump OpenJDK 64-Bit Server VM (21.0.5+11-LTS mixed mode, sharing):
+
+"Render thread" #163 [100] prio=5 os_prio=0 cpu=13656.25ms elapsed=300.00s tid=0x1 nid=100 waiting on condition  [0x1]
+   java.lang.Thread.State: TIMED_WAITING (parking)
+	at jdk.internal.misc.Unsafe.park(java.base@21.0.9/Native Method)
+	- parking to wait for  <0x00000005af4be718> (a java.util.concurrent.CompletableFuture$Signaller)
+	at net.neoforged.fml.ModLoader.waitForFuture(fml_loader@4.0.45/ModLoader.java:254)
+	at net.neoforged.fml.ModLoader.constructMods(fml_loader@4.0.45/ModLoader.java:152)
+
+"modloading-worker-0" #181 [200] daemon prio=5 os_prio=0 cpu=95000.00ms elapsed=290.00s tid=0x2 nid=200 runnable  [0x2]
+   java.lang.Thread.State: RUNNABLE
+	at java.util.zip.Inflater.inflateBytesBytes(java.base@21.0.9/Native Method)
+	at java.util.zip.Inflater.inflate(java.base@21.0.9/Inflater.java:376)
+	at org.zeith.hammerlib.util.JarScanner.scan(hammerlib@21.0.17/JarScanner.java:91)
+	at org.zeith.hammerlib.HammerLib.<init>(hammerlib@21.0.17/HammerLib.java:60)
+	at net.neoforged.fml.javafmlmod.FMLModContainer.constructMod(fml_loader@4.0.45/FMLModContainer.java:122)
+
+"modloading-worker-0" #182 [300] daemon prio=5 os_prio=0 cpu=4687.50ms elapsed=290.00s tid=0x3 nid=300 waiting on condition  [0x3]
+   java.lang.Thread.State: WAITING (parking)
+	at jdk.internal.misc.Unsafe.park(java.base@21.0.9/Native Method)
+	- parking to wait for  <0x000000047f7390f8> (a java.util.concurrent.ForkJoinPool)
+	at java.util.concurrent.ForkJoinPool.awaitWork(java.base@21.0.9/ForkJoinPool.java:1891)

@@ -73,6 +73,7 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
     let bytes = v["mem_bytes"].as_u64().unwrap_or(0);
     let players: Vec<String> = v["players"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(str::to_string)).collect();
     PanelStats {
+        stuck: v.get("stuck").and_then(|s| serde_json::from_value(s.clone()).ok()),
         running: matches!(state, "running" | "starting" | "stopping"),
         crashed: state == "crashed",
         starting: state == "starting",

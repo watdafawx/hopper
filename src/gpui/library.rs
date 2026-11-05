@@ -2741,6 +2741,26 @@ impl LibraryView {
         let cf_change = self.cf_change_bar(&inst, cx);
         let pending = self.pending_banner(&inst, cx);
         let pre_join = crate::join_help::pre_join_bar(&self.store, &inst.root, cx);
+        let stuck = {
+            let view = cx.entity().downgrade();
+            let root = inst.root.clone();
+            crate::stuck::stuck_bar(
+                &self.store,
+                &inst.root,
+                move |dump, _, cx| {
+                    view.update(cx, |this, cx| {
+                        this.set_tab(InstTab::Logs, cx);
+                        // The dump as the crash list names it: under the instance, with "/".
+                        let rel = dump.and_then(|p| p.strip_prefix(&root).ok().map(|r| r.to_string_lossy().replace('\\', "/")));
+                        if let Some(rel) = rel {
+                            this.logs.update(cx, |l, cx| l.open_report(rel, cx));
+                        }
+                    })
+                    .ok();
+                },
+                cx,
+            )
+        };
         let tabs = self.tabs(&inst, cx);
         let pack_tabs = self.pack_tabs(&inst, cx);
         let body = self.tab_body(&inst, cx);
@@ -2751,6 +2771,7 @@ impl LibraryView {
                 id("detail", &inst.root),
                 div().flex_none().child(header),
             ))
+            .children(stuck)
             .children(hint)
             .children(cf_change)
             .children(pending)
