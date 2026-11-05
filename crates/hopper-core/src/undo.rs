@@ -42,19 +42,33 @@ fn site(r: &Ref) -> &'static str {
     if r.mr_version.is_empty() { "CurseForge" } else { "Modrinth" }
 }
 
-/// The version a file name says ("jei-1.21.1-19.21.0.247.jar" → the part
-/// that differs from another file of the same mod, else the name).
+/// The version a file name says, without the Minecraft version and loader
+/// most names carry too ("jei-1.21.1-neoforge-19.21.0.247.jar" → "19.21.0.247").
 pub fn version_of(file_name: &str) -> String {
     let base = file_name.strip_suffix(".disabled").unwrap_or(file_name);
     let base = base.strip_suffix(".jar").or_else(|| base.strip_suffix(".zip")).unwrap_or(base);
-    // From the first dash or underscore followed by a digit.
-    let b = base.as_bytes();
-    for i in 0..b.len().saturating_sub(1) {
-        if (b[i] == b'-' || b[i] == b'_' || b[i] == b' ') && b[i + 1].is_ascii_digit() {
-            return base[i + 1..].to_string();
-        }
+    let parts: Vec<&str> = base.split(['-', '_', '+', ' ']).filter(|p| !p.is_empty()).collect();
+    let numeric = |p: &str| {
+        let p = p.trim_start_matches(['v', 'V']);
+        p.starts_with(|c: char| c.is_ascii_digit())
+    };
+    let loader = |p: &str| matches!(p.to_lowercase().as_str(), "neoforge" | "forge" | "fabric" | "quilt" | "mc");
+    // "1.21.1", "mc1.21": the game's version, not the mod's.
+    let game = |p: &str| {
+        let p = p.to_lowercase();
+        let p = p.strip_prefix("mc").unwrap_or(&p);
+        let mut it = p.split('.');
+        it.next() == Some("1") && it.next().is_some_and(|m| m.parse::<u32>().is_ok_and(|m| (7..=30).contains(&m))) && it.all(|x| x.parse::<u32>().is_ok())
+    };
+    let start = parts.iter().position(|p| numeric(p) || p.to_lowercase().starts_with("mc1"));
+    let Some(start) = start else { return base.to_string() };
+    let tail: Vec<&str> = parts[start..].iter().copied().filter(|p| !loader(p)).collect();
+    let own: Vec<&str> = tail.iter().copied().filter(|p| !game(p)).collect();
+    match (own.is_empty(), tail.is_empty()) {
+        (false, _) => own.join("-"),
+        (true, false) => tail.join("-"),
+        _ => base.to_string(),
     }
-    base.to_string()
 }
 
 type Choices = fn(&Ref) -> anyhow::Result<Vec<cf::File>>;
@@ -193,7 +207,14 @@ pub fn undo(inst: &mut Instance, f: &Saved) -> anyhow::Result<PathBuf> {
 /// Puts `new` (its file downloaded to `tmp`) in place of whatever file of
 /// the same project the instance has now, on or off as `on` says.
 fn put_entry(inst: &mut Instance, new: Addon, tmp: &Path, on: bool) -> anyhow::Result<()> {
-    let old = inst.addons.iter().position(|a| a.project_id == new.project_id).map(|i| inst.addons.remove(i));
+    // The same project, or the same file tracked from the other site (a
+    // note made from a copy can name either): replaced, never doubled.
+    let old = inst
+        .addons
+        .iter()
+        .position(|a| a.project_id == new.project_id)
+        .or_else(|| inst.addons.iter().position(|a| a.file_name.eq_ignore_ascii_case(&new.file_name)))
+        .map(|i| inst.addons.remove(i));
     let mut new = new;
     if old.is_none() {
         new.enabled = on;
@@ -248,7 +269,12 @@ mod tests {
 
     #[test]
     fn versions_from_file_names() {
-        assert_eq!(version_of("jei-1.21.1-neoforge-19.21.0.247.jar"), "1.21.1-neoforge-19.21.0.247");
+        assert_eq!(version_of("jei-1.21.1-neoforge-19.21.0.247.jar"), "19.21.0.247");
+        assert_eq!(version_of("appleskin-neoforge-mc1.21-3.0.9.jar"), "3.0.9");
+        assert_eq!(version_of("JadeAddons-1.21.1-NeoForge-6.1.2.jar"), "6.1.2");
+        assert_eq!(version_of("effortlessbuilding-4.2.37+neoforge-1.21.1.jar"), "4.2.37");
+        assert_eq!(version_of("forgified-fabric-api-0.116.15+2.3.6+1.21.1.jar"), "0.116.15-2.3.6");
+        assert_eq!(version_of("create-1.21.1.jar"), "1.21.1");
         assert_eq!(version_of("ExtendedAE-Plus-1.6.3.jar.disabled"), "1.6.3");
         assert_eq!(version_of("Jade_15.10.4.jar"), "15.10.4");
         assert_eq!(version_of("nothing.jar"), "nothing");

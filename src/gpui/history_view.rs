@@ -385,16 +385,19 @@ impl BackupsView {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .text_sm()
                         .child(format!("Older History keeps full copies of mods ({size}). Most can be downloaded again instead.")),
                 )
                 .child(
-                    Button::new("hist-free")
-                        .small()
-                        .primary()
-                        .label("Free up space")
-                        .disabled(self.busy.is_some())
-                        .on_click(cx.listener(|this, _, window, cx| this.ask_free(window, cx))),
+                    div().flex_none().child(
+                        Button::new("hist-free")
+                            .small()
+                            .primary()
+                            .label("Free up space")
+                            .disabled(self.busy.is_some())
+                            .on_click(cx.listener(|this, _, window, cx| this.ask_free(window, cx))),
+                    ),
                 )
                 .into_any_element(),
         )
