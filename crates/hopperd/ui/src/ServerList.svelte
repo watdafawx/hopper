@@ -6,7 +6,7 @@
   // becomes a rail of tiles (desktop's server_rail). Right-click a server
   // for desktop's row menu: Open, Start / Stop / Restart, Open folder.
   import { tick } from 'svelte';
-  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy } from '@lucide/svelte';
+  import { Plus, RefreshCw, PanelLeftClose, PanelLeftOpen, Server, Play, Square, RotateCw, FolderOpen, Copy, Compass } from '@lucide/svelte';
   import { power } from './lib/power.js';
   import { say } from './lib/toast.svelte.js';
   import { live } from './lib/live.svelte.js';
@@ -181,6 +181,7 @@
     <div class="hd">
       <span class="title">Servers</span>
       {#if owner}<button class="btn ghost icon" title="Look for new server folders" onclick={onRescan}><RefreshCw size={14} /></button>{/if}
+      <a class="btn ghost icon" title="Browse modpacks to make a server from" href="#/browse"><Compass size={15} /></a>
       <button class="btn ghost icon" title="New server" onclick={onNew}><Plus size={15} /></button>
       <button class="btn ghost icon" title="Hide server list" onclick={toggle}><PanelLeftClose size={15} /></button>
     </div>
@@ -208,6 +209,7 @@
           <b>No servers yet</b>
           <p>Make one with New server{owner ? ', or put server folders in the panel folder' : ''}.</p>
           <button class="btn sm pri" onclick={onNew}><Plus size={13} />New server</button>
+          <a class="btn sm" href="#/browse"><Compass size={13} />Browse modpacks</a>
         </div>
       {/if}
     {/each}

@@ -338,6 +338,11 @@ impl AppView {
             }),
             cx.subscribe(&servers, |this, _, event, cx| match event {
                 ServersEvent::OpenSettings(id) => this.open_settings_at(id, cx),
+                ServersEvent::BrowsePacks(place) => {
+                    let place = place.clone();
+                    this.browse.update(cx, |b, cx| b.browse_packs_for_server(place, cx));
+                    this.go(Page::Browse, cx);
+                }
                 // "Not now" on the servers intro: back where the user was.
                 ServersEvent::Leave => {
                     if this.history.can_step(true) {
