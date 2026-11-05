@@ -36,11 +36,11 @@ impl Offer {
         match &self.backup {
             Some(ch) if !ch.from.is_empty() => (
                 format!("Revert {name} to {}", ch.from),
-                format!("Puts back {}, the copy Hopper kept, which works with your {other}. The newer one goes to Backups, so you can undo this there.", ch.from),
+                format!("Puts back {}, the copy Hopper kept, which works with your {other}. The newer one goes to History, so you can undo this there.", ch.from),
             ),
             Some(_) => (
                 format!("Revert {name}"),
-                format!("Puts back the copy Hopper kept, which works with your {other}. The newer one goes to Backups, so you can undo this there."),
+                format!("Puts back the copy Hopper kept, which works with your {other}. The newer one goes to History, so you can undo this there."),
             ),
             None => (format!("Revert {name}"), format!("Installs the newest older version of {name} that works with your {other}.")),
         }

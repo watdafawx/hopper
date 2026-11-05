@@ -107,6 +107,7 @@ pub mod time;
 pub mod tls;
 #[cfg(feature = "translate")]
 pub mod translate;
+pub mod undo;
 pub mod update_list;
 pub mod waker;
 pub mod webfetch;

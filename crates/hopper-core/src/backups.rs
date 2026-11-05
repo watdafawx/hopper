@@ -1,12 +1,13 @@
-//! What Hopper set aside in an instance's `.hopper-backups`: removed mods,
-//! packs and replaced files, by when, with where each came from, to look
-//! through, restore or delete for good.
+//! An instance's History (kept in its `.hopper-backups` folder): what was
+//! removed, updated, switched or edited, by when, with where each file came
+//! from, to undo.
 //!
-//! A mod jar that CurseForge or Modrinth can hand out again byte for byte
-//! isn't copied: a small `<name>.hopper-ref` note of which file it was takes
-//! its place, and [`materialize`] downloads it again (hash-checked) when
-//! it's restored or undone. Everything else (unknown jars, files their
-//! authors keep off other launchers, configs) is kept as a real copy.
+//! A mod jar CurseForge or Modrinth knows isn't copied: it's deleted, and a
+//! small `<name>.hopper-ref` note of which file it was (project, file, hash,
+//! name, its entry) takes its place. Undo downloads it again (hash-checked,
+//! [`crate::undo`]). Only what can't be downloaded again is kept as a copy:
+//! jars with no known source, and the small text files Hopper changes
+//! (configs, options.txt).
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -29,9 +30,20 @@ pub struct Ref {
     /// while this run has seen it.
     #[serde(default)]
     pub mr_version: String,
+    /// The Modrinth project (slug or id), to list its other versions when
+    /// this one is gone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mr_project: String,
+    /// The mod's name, for History.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// Its entry in the instance as it was (on or off, from the pack, when
+    /// added), put back by Undo. Absent in notes made before 0.40.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addon: Option<crate::instances::Addon>,
 }
 
-fn ref_path(jar: &Path) -> PathBuf {
+pub(crate) fn ref_path(jar: &Path) -> PathBuf {
     let mut s = jar.as_os_str().to_owned();
     s.push(REF_EXT);
     PathBuf::from(s)
@@ -47,11 +59,11 @@ pub fn is_ref(jar: &Path) -> bool {
     !jar.exists() && ref_path(jar).is_file()
 }
 
-fn read_ref(jar: &Path) -> Option<Ref> {
+pub(crate) fn read_ref(jar: &Path) -> Option<Ref> {
     serde_json::from_slice(&fs::read(ref_path(jar)).ok()?).ok()
 }
 
-fn sha1_of(p: &Path) -> std::io::Result<String> {
+pub(crate) fn sha1_of(p: &Path) -> std::io::Result<String> {
     use std::io::Read as _;
     let mut f = fs::File::open(p)?;
     let mut h = sha1_smol::Sha1::new();
@@ -72,7 +84,7 @@ type Check = fn(r: &Ref) -> bool;
 type Fetch = fn(r: &Ref, dest: &Path) -> anyhow::Result<()>;
 
 /// The note's file as CurseForge or Modrinth lists it now.
-fn remote_file(r: &Ref) -> anyhow::Result<crate::cf::File> {
+pub(crate) fn remote_file(r: &Ref) -> anyhow::Result<crate::cf::File> {
     if r.mr_version.is_empty() {
         crate::source::file(r.project_id, r.file_id)
     } else {
@@ -105,7 +117,7 @@ thread_local! {
     static HOOKS: std::cell::Cell<Option<(Check, Fetch)>> = const { std::cell::Cell::new(None) };
 }
 
-fn hooks() -> (Check, Fetch) {
+pub(crate) fn hooks() -> (Check, Fetch) {
     let default: (Check, Fetch) = if cfg!(test) { (offline_check, offline_fetch) } else { (check_online, fetch_online) };
     HOOKS.with(|h| h.get()).unwrap_or(default)
 }
@@ -129,6 +141,28 @@ pub(crate) struct Cand {
     /// Looked up already and kept as a copy (not downloadable as it is).
     #[serde(default)]
     keep: bool,
+    #[serde(default)]
+    mr_project: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    addon: Option<crate::instances::Addon>,
+}
+
+impl Cand {
+    fn to_ref(&self, sha1: String, size: u64) -> Ref {
+        Ref {
+            project_id: self.project_id,
+            file_id: self.file_id,
+            file_name: self.file_name.clone(),
+            sha1,
+            size,
+            mr_version: self.mr_version.clone(),
+            mr_project: self.mr_project.clone(),
+            name: self.name.clone(),
+            addon: self.addon.clone(),
+        }
+    }
 }
 
 /// Which CurseForge / Modrinth file `path` (a jar in `root` about to be
@@ -142,17 +176,32 @@ pub(crate) fn ids_for(root: &Path, path: &Path) -> Option<Cand> {
     }
     let inst = crate::instances::load(root)?;
     let a = inst.addons.iter().find(|a| a.project_id != 0 && a.file_id != 0 && a.file_name.eq_ignore_ascii_case(base))?;
-    Some(Cand { project_id: a.project_id, file_id: a.file_id, file_name: a.file_name.clone(), mr_version: a.mr_version.clone(), keep: false })
+    Some(Cand {
+        project_id: a.project_id,
+        file_id: a.file_id,
+        file_name: a.file_name.clone(),
+        mr_version: a.mr_version.clone(),
+        keep: false,
+        mr_project: a.mr_project.clone(),
+        name: a.name.clone(),
+        addon: Some(a.clone()),
+    })
 }
 
-/// Notes `c` beside `saved` (the jar's copy in its backup folder), so the
-/// copy can become a note later ([`slim`]).
-pub(crate) fn note_ids(saved: &Path, c: Cand) {
-    let (Some(dir), Some(saved_name)) = (saved.parent(), saved.file_name()) else { return };
-    let p = dir.join(IDS);
-    let mut map: std::collections::BTreeMap<String, Cand> = fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    map.insert(saved_name.to_string_lossy().into_owned(), c);
-    let _ = fs::write(&p, serde_json::to_vec_pretty(&map).unwrap_or_default());
+/// Deletes `path` (a jar CurseForge or Modrinth knows, per `c`) and leaves
+/// only a note of which file it was at `dest`, its place in a History
+/// folder: Undo downloads it again. The note is written first, so there's
+/// never neither.
+pub(crate) fn note_instead(path: &Path, dest: &Path, c: &Cand) -> anyhow::Result<()> {
+    let size = fs::metadata(path)?.len();
+    let r = c.to_ref(sha1_of(path)?, size);
+    let note = ref_path(dest);
+    fs::write(&note, serde_json::to_vec_pretty(&r)?)?;
+    if let Err(e) = fs::remove_file(path) {
+        let _ = fs::remove_file(&note);
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 /// Backups younger than this keep their copies, so an Undo right after an
@@ -185,14 +234,7 @@ fn slim_older_than(root: &Path, age: i64) -> u64 {
                 c.keep = true;
                 continue;
             };
-            let r = Ref {
-                project_id: c.project_id,
-                file_id: c.file_id,
-                file_name: c.file_name.clone(),
-                sha1,
-                size: md.len(),
-                mr_version: c.mr_version.clone(),
-            };
+            let r = c.to_ref(sha1, md.len());
             if !check(&r) {
                 c.keep = true;
                 continue;
@@ -227,7 +269,7 @@ pub fn materialize(jar: &Path) -> anyhow::Result<()> {
     }
     let r = read_ref(jar).ok_or_else(|| anyhow::anyhow!("{}: its backup note can't be read", jar.display()))?;
     let (_, fetch) = hooks();
-    fetch(&r, jar).map_err(|e| anyhow::anyhow!("{}: the backup keeps only where to download it, and downloading it again failed: {e:#}", r.file_name))?;
+    fetch(&r, jar).map_err(|e| anyhow::anyhow!("{}: History keeps only where to download it, and downloading it again failed: {e:#}", r.file_name))?;
     let _ = fs::remove_file(ref_path(jar));
     Ok(())
 }
@@ -286,6 +328,118 @@ pub struct Saved {
     pub restore_to: String,
     /// Kept as a note: restoring downloads it again.
     pub download: bool,
+    /// Which CurseForge / Modrinth file it was, when known (`sha1` is empty
+    /// for a kept copy).
+    pub src: Option<Ref>,
+    /// What happened to it, judged against the instance now.
+    pub change: Change,
+    /// The file of the same project in the instance now (the version it was
+    /// updated or rolled back to).
+    pub now: Option<String>,
+}
+
+impl Saved {
+    /// The mod's name when History knows it, else the file's.
+    pub fn title(&self) -> String {
+        match &self.src {
+            Some(r) if !r.name.is_empty() => r.name.clone(),
+            _ => self.name.trim_end_matches(".disabled").to_string(),
+        }
+    }
+
+    /// "CurseForge" or "Modrinth", where Undo downloads it from; empty for
+    /// a kept copy.
+    pub fn site(&self) -> &'static str {
+        match &self.src {
+            Some(r) if !r.mr_version.is_empty() => "Modrinth",
+            Some(_) => "CurseForge",
+            None => "",
+        }
+    }
+
+    /// The line under an entry in History: "1.6.3 → 1.6.4 · CurseForge",
+    /// "0.116.15 · Modrinth", "No download source · copy kept (2 MB)" or
+    /// where a config goes back to.
+    pub fn detail(&self) -> String {
+        let base = self.name.trim_end_matches(".disabled");
+        match (self.change, &self.now, &self.src) {
+            (Change::Updated | Change::RolledBack | Change::Switched, Some(now), _) => {
+                let (old, new) = crate::install::version_change(base, now);
+                format!("{old} → {new} · {}", self.site())
+            }
+            (_, _, Some(_)) => format!("{} · {}", crate::undo::version_of(base), self.site()),
+            (_, _, None) if is_jar(&self.name) => {
+                format!("No download source · copy kept ({})", crate::instance_ops::human_bytes(self.size))
+            }
+            (_, _, None) => self.restore_to.clone(),
+        }
+    }
+}
+
+/// What a History entry was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// Gone from the instance.
+    Removed,
+    /// A newer file of the same mod is there now.
+    Updated,
+    /// An older file of the same mod is there now.
+    RolledBack,
+    /// Another file of the same mod (or the same file again) is there now.
+    Switched,
+    /// A text file (a config, options.txt) whose earlier text this is.
+    Edited,
+    /// Something else of the same name is there now.
+    Replaced,
+}
+
+impl Change {
+    pub fn label(self) -> &'static str {
+        match self {
+            Change::Removed => "Removed",
+            Change::Updated => "Updated",
+            Change::RolledBack => "Rolled back",
+            Change::Switched => "Switched",
+            Change::Edited => "Changed",
+            Change::Replaced => "Replaced",
+        }
+    }
+}
+
+/// Small text files Hopper edits: their earlier text is the History entry.
+pub fn is_text(name: &str) -> bool {
+    let l = name.to_lowercase();
+    [".toml", ".json", ".json5", ".cfg", ".txt", ".properties", ".yml", ".yaml", ".ini", ".snbt", ".conf"]
+        .iter()
+        .any(|e| l.ends_with(e))
+}
+
+/// Judges each file against the instance now.
+fn judge(root: &Path, inst: Option<&crate::instances::Instance>, f: &mut Saved) {
+    let here = root.join(&f.restore_to).exists();
+    let same = f.src.as_ref().and_then(|r| inst?.addons.iter().find(|a| a.project_id == r.project_id));
+    f.now = same.map(|a| a.file_name.clone());
+    f.change = match (f.src.as_ref(), same) {
+        (Some(r), Some(a)) => {
+            let old_date = r.addon.as_ref().map(|o| o.file_date.as_str()).unwrap_or("");
+            let newer = if !old_date.is_empty() && !a.file_date.is_empty() && r.mr_version.is_empty() == a.mr_version.is_empty() {
+                a.file_date.as_str().cmp(old_date)
+            } else if r.mr_version.is_empty() && a.mr_version.is_empty() {
+                a.file_id.cmp(&r.file_id)
+            } else {
+                std::cmp::Ordering::Equal
+            };
+            match newer {
+                std::cmp::Ordering::Greater => Change::Updated,
+                std::cmp::Ordering::Less => Change::RolledBack,
+                std::cmp::Ordering::Equal => Change::Switched,
+            }
+        }
+        (Some(_), None) => Change::Removed,
+        (None, _) if here && is_text(&f.name) => Change::Edited,
+        (None, _) if here => Change::Replaced,
+        (None, _) => Change::Removed,
+    };
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -329,6 +483,7 @@ fn guess(path: &Path, name: &str) -> String {
 /// Everything set aside in an instance, newest first.
 pub fn list(root: &Path) -> Vec<Set> {
     let base = root.join(crate::sync::BACKUP_DIR);
+    let inst = crate::instances::load(root);
     let mut out: Vec<Set> = fs::read_dir(&base)
         .into_iter()
         .flatten()
@@ -340,8 +495,13 @@ pub fn list(root: &Path) -> Vec<Set> {
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
                 .unwrap_or_default();
+            let ids: std::collections::BTreeMap<String, Cand> =
+                fs::read(dir.join(IDS)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
             let mut files = Vec::new();
-            walk(&dir, &dir, &origins, &mut files);
+            walk(&dir, &dir, &origins, &ids, &mut files);
+            for f in &mut files {
+                judge(root, inst.as_ref(), f);
+            }
             files.sort_by_key(|f| f.name.to_lowercase());
             (!files.is_empty()).then_some(Set { dir, when, files })
         })
@@ -350,7 +510,13 @@ pub fn list(root: &Path) -> Vec<Set> {
     out
 }
 
-fn walk(base: &Path, dir: &Path, origins: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<Saved>) {
+fn walk(
+    base: &Path,
+    dir: &Path,
+    origins: &serde_json::Map<String, serde_json::Value>,
+    ids: &std::collections::BTreeMap<String, Cand>,
+    out: &mut Vec<Saved>,
+) {
     for e in fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
@@ -358,20 +524,22 @@ fn walk(base: &Path, dir: &Path, origins: &serde_json::Map<String, serde_json::V
             continue;
         }
         if p.is_dir() {
-            walk(base, &p, origins, out);
+            walk(base, &p, origins, ids, out);
             continue;
         }
         // A note stands for its jar: listed under the jar's name and size.
-        let (p, name, size, download) = match name.strip_suffix(REF_EXT) {
+        let (p, name, size, download, src) = match name.strip_suffix(REF_EXT) {
             Some(jar) => {
                 let jp = p.with_file_name(jar);
-                let size = read_ref(&jp).map_or(0, |r| r.size);
+                let r = read_ref(&jp);
+                let size = r.as_ref().map_or(0, |r| r.size);
                 let jar = jar.to_string();
-                (jp, jar, size, true)
+                (jp, jar, size, true, r)
             }
             None => {
                 let size = e.metadata().map_or(0, |m| m.len());
-                (p, name, size, false)
+                let src = ids.get(&name).map(|c| c.to_ref(String::new(), size));
+                (p, name, size, false, src)
             }
         };
         let rel = p.strip_prefix(base).unwrap_or(&p).to_string_lossy().replace('\\', "/");
@@ -381,7 +549,7 @@ fn walk(base: &Path, dir: &Path, origins: &serde_json::Map<String, serde_json::V
             None if rel.contains('/') => rel.clone(),
             None => guess(&p, &name),
         };
-        out.push(Saved { size, name, path: p, restore_to, download });
+        out.push(Saved { size, name, path: p, restore_to, download, src, change: Change::Removed, now: None });
     }
 }
 
@@ -403,12 +571,148 @@ pub fn restore(root: &Path, f: &Saved) -> anyhow::Result<PathBuf> {
         fs::remove_file(&f.path)?;
     }
     // An emptied backup folder goes.
-    if let Some(dir) = f.path.parent()
-        && fs::read_dir(dir).is_ok_and(|mut d| d.all(|e| e.is_ok_and(|e| e.file_name() == ORIGINS || e.file_name() == IDS)))
-    {
-        let _ = fs::remove_dir_all(dir);
+    if let Some(dir) = f.path.parent() {
+        drop_if_empty(dir);
     }
     Ok(dest)
+}
+
+/// Removes a History folder that holds nothing but its own notes.
+pub(crate) fn drop_if_empty(dir: &Path) {
+    if fs::read_dir(dir).is_ok_and(|mut d| d.all(|e| e.is_ok_and(|e| e.file_name() == ORIGINS || e.file_name() == IDS))) {
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+fn is_jar(name: &str) -> bool {
+    let l = name.to_lowercase();
+    l.ends_with(".jar") || l.ends_with(".jar.disabled")
+}
+
+/// Every jar copy History holds (not notes), with its size.
+fn jar_copies(root: &Path) -> Vec<(PathBuf, u64)> {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) {
+        for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if is_jar(&e.file_name().to_string_lossy()) {
+                out.push((p, e.metadata().map_or(0, |m| m.len())));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for d in fs::read_dir(root.join(crate::sync::BACKUP_DIR)).into_iter().flatten().flatten() {
+        // Only action folders (named by the second): not snapshots or worlds.
+        if d.file_name().to_str().is_some_and(|n| n.parse::<u64>().is_ok()) {
+            walk(&d.path(), &mut out);
+        }
+    }
+    out
+}
+
+/// Bytes of mod jars History keeps as full copies (from before 0.40, or
+/// with no known source). [`free_space`] turns the ones CurseForge or
+/// Modrinth still hands out into notes.
+pub fn copies_size(root: &Path) -> u64 {
+    jar_copies(root).iter().map(|(_, n)| n).sum()
+}
+
+/// Identified online by hash: which CurseForge / Modrinth file a copy is.
+type Identify = fn(&[(PathBuf, String, u32)]) -> std::collections::HashMap<PathBuf, Ref>;
+
+fn identify_online(jars: &[(PathBuf, String, u32)]) -> std::collections::HashMap<PathBuf, Ref> {
+    let mut out = std::collections::HashMap::new();
+    // Modrinth by sha1.
+    let hashes: Vec<String> = jars.iter().map(|(_, h, _)| h.clone()).collect();
+    for chunk in hashes.chunks(500) {
+        let Ok(found) = crate::modrinth::versions_by_sha1(chunk) else { continue };
+        for (p, sha1, _) in jars {
+            let Some(v) = found.get(sha1) else { continue };
+            let Some(vf) = v.files.iter().find(|f| f.hashes.get("sha1") == Some(sha1)) else { continue };
+            let f = crate::modrinth::version_to_file(v);
+            out.insert(p.clone(), Ref {
+                project_id: crate::modrinth::num_id(&v.project_id),
+                file_id: f.id,
+                file_name: vf.filename.clone(),
+                sha1: sha1.clone(),
+                size: vf.size,
+                mr_version: v.id.clone(),
+                mr_project: v.project_id.clone(),
+                name: String::new(),
+                addon: None,
+            });
+        }
+    }
+    // CurseForge by fingerprint, for the rest.
+    let rest: Vec<&(PathBuf, String, u32)> = jars.iter().filter(|(p, _, _)| !out.contains_key(p)).collect();
+    let fps: Vec<u32> = rest.iter().map(|(_, _, fp)| *fp).collect();
+    if let Ok(matches) = crate::cf::match_fingerprints(&fps) {
+        for (p, sha1, fp) in rest {
+            let Some(m) = matches.iter().find(|m| m.file.file_fingerprint == *fp as u64) else { continue };
+            // Only files CurseForge lets launchers download, byte for byte.
+            if m.file.sha1().is_none_or(|h| h != *sha1) || crate::cf::download_url(&m.file).is_err() {
+                continue;
+            }
+            out.insert(p.clone(), Ref {
+                project_id: m.id,
+                file_id: m.file.id,
+                file_name: m.file.file_name.clone(),
+                sha1: sha1.clone(),
+                size: m.file.file_length,
+                mr_version: String::new(),
+                mr_project: String::new(),
+                name: String::new(),
+                addon: None,
+            });
+        }
+    }
+    out
+}
+
+fn identify_offline(_: &[(PathBuf, String, u32)]) -> std::collections::HashMap<PathBuf, Ref> {
+    Default::default()
+}
+
+thread_local! {
+    static IDENTIFY: std::cell::Cell<Option<Identify>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_identify(f: Identify) {
+    IDENTIFY.with(|h| h.set(Some(f)));
+}
+
+/// The one-time clean up the user starts from History: turns every jar
+/// copy CurseForge or Modrinth still hands out byte for byte into a note,
+/// so Undo downloads it instead. Copies nothing knows stay. Returns (bytes
+/// freed, bytes still kept as copies). Asks online: run it in the
+/// background.
+pub fn free_space(root: &Path) -> (u64, u64) {
+    // Copies whose ids History noted when they were set aside.
+    let mut freed = slim_older_than(root, 0);
+    let identify = IDENTIFY.with(|h| h.get()).unwrap_or(if cfg!(test) { identify_offline } else { identify_online });
+    let jars: Vec<(PathBuf, String, u32)> = jar_copies(root)
+        .into_iter()
+        .filter_map(|(p, _)| {
+            let bytes = fs::read(&p).ok()?;
+            let sha1 = sha1_smol::Sha1::from(&bytes).digest().to_string();
+            Some((p, sha1, crate::cf::fingerprint(&bytes)))
+        })
+        .collect();
+    let found = identify(&jars);
+    for (p, _, _) in &jars {
+        let Some(r) = found.get(p) else { continue };
+        let note = ref_path(p);
+        if fs::write(&note, serde_json::to_vec_pretty(r).unwrap_or_default()).is_ok() {
+            if fs::remove_file(p).is_ok() {
+                freed += r.size;
+            } else {
+                let _ = fs::remove_file(&note);
+            }
+        }
+    }
+    (freed, copies_size(root))
 }
 
 /// Sends a whole backup to the Recycle Bin (or deletes it on a network
@@ -463,44 +767,112 @@ mod tests {
     }
 
     #[test]
-    fn a_downloadable_jar_is_kept_as_a_note_and_downloads_again() {
+    fn a_known_jar_leaves_only_a_note_and_undo_downloads_it() {
         set_test_hooks(fake_check, fake_fetch);
         let root = instance("note");
         fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
         fs::write(root.join("mods/b.jar"), "unknown jar").unwrap();
-        let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
+        let mut inst = crate::instances::load(&root).unwrap();
+        crate::install::remove(&mut inst, 0).unwrap();
+        let a = find(&root, &root.join("mods/a.jar"), 0).unwrap();
         let b = crate::sync::backup_into(&root, &root.join("mods/b.jar")).unwrap().unwrap();
-        // A fresh backup keeps its copy (an Undo now needs no download)...
-        assert!(a.is_file());
-        assert_eq!(slim(&root), 0);
-        assert!(a.is_file());
-        // ...until it's older: then a is only a note; b (unknown) stays a copy.
-        assert_eq!(slim_older_than(&root, 0), REMOTE.len() as u64);
-        assert!(!root.join("mods/a.jar").exists() && !a.exists() && is_ref(&a) && exists(&a));
+        // a is deleted at once, a note in its place; b (unknown) is a copy.
+        assert!(!root.join("mods/a.jar").exists() && !a.exists() && is_ref(&a));
         assert!(b.is_file() && !is_ref(&b));
+        let r = read_ref(&a).unwrap();
+        assert_eq!((r.project_id, r.file_id, r.sha1.as_str(), r.name.as_str()), (5, 9, sha(REMOTE).as_str(), "A"));
+        assert!(r.addon.is_some_and(|x| x.enabled));
         let sets = list(&root);
         let files: Vec<&Saved> = sets.iter().flat_map(|s| &s.files).collect();
         let fa = files.iter().find(|f| f.name == "a.jar").unwrap();
         assert!(fa.download && fa.size == REMOTE.len() as u64 && fa.restore_to == "mods/a.jar");
-        assert!(!files.iter().find(|f| f.name == "b.jar").unwrap().download);
-        // The Undo lookup finds it by the jar's name.
+        assert_eq!(fa.change, Change::Removed);
+        let fb = files.iter().find(|f| f.name == "b.jar").unwrap();
+        assert!(!fb.download && fb.src.is_none());
+        // The remove's Undo toast finds it by the jar's name.
         assert_eq!(find(&root, &root.join("mods/a.jar"), 0), Some(a.clone()));
-        // Restoring downloads it again and drops the note.
-        let back = restore(&root, fa).unwrap();
+        // Undo from History downloads it again and puts its entry back.
+        let back = crate::undo::undo(&mut inst, fa).unwrap();
         assert_eq!(fs::read(&back).unwrap(), REMOTE);
         assert!(!exists(&a));
+        let inst = crate::instances::load(&root).unwrap();
+        assert!(inst.addons.iter().any(|x| x.project_id == 5 && x.file_name == "a.jar" && x.enabled));
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
-    fn a_jar_that_differs_from_the_download_keeps_a_real_copy() {
+    fn undo_puts_a_disabled_mod_back_disabled() {
         set_test_hooks(fake_check, fake_fetch);
-        let root = instance("changed");
-        // Same name and ids, but not the bytes CurseForge hands out.
-        fs::write(root.join("mods/a.jar"), "patched by hand").unwrap();
+        let root = instance("off");
+        let mut inst = crate::instances::load(&root).unwrap();
+        inst.addons[0].enabled = false;
+        inst.save().unwrap();
+        fs::write(root.join("mods/a.jar.disabled"), REMOTE).unwrap();
+        crate::install::remove(&mut inst, 0).unwrap();
+        assert!(!root.join("mods/a.jar.disabled").exists() && inst.addons.is_empty());
+        let f = list(&root).remove(0).files.remove(0);
+        assert_eq!(f.restore_to, "mods/a.jar.disabled");
+        crate::undo::undo(&mut inst, &f).unwrap();
+        assert_eq!(fs::read(root.join("mods/a.jar.disabled")).unwrap(), REMOTE);
+        assert!(inst.addons.iter().any(|x| x.file_name == "a.jar" && !x.enabled));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn undoing_an_update_rolls_back() {
+        set_test_hooks(fake_check, fake_fetch);
+        let root = instance("update");
+        fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
+        // The update: a.jar (file 9) set aside, a2.jar (file 10) in.
+        crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap();
+        let mut inst = crate::instances::load(&root).unwrap();
+        inst.addons[0].file_id = 10;
+        inst.addons[0].file_name = "a2.jar".into();
+        inst.save().unwrap();
+        fs::write(root.join("mods/a2.jar"), "v2").unwrap();
+        let f = list(&root).remove(0).files.remove(0);
+        assert_eq!((f.change, f.now.as_deref()), (Change::Updated, Some("a2.jar")));
+        // Folders are named by the second: the roll back gets its own.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        crate::undo::undo(&mut inst, &f).unwrap();
+        assert_eq!(fs::read(root.join("mods/a.jar")).unwrap(), REMOTE);
+        assert!(!root.join("mods/a2.jar").exists());
+        assert_eq!(inst.addons.len(), 1);
+        assert_eq!(inst.addons[0].file_id, 9);
+        // The newer file is History now, as a roll back to undo in turn.
+        let f = list(&root).remove(0).files.remove(0);
+        assert_eq!((f.name.as_str(), f.change), ("a2.jar", Change::RolledBack));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn not_found(_: &Ref, _: &Path) -> anyhow::Result<()> {
+        anyhow::bail!("404")
+    }
+
+    fn two_others(_: &Ref) -> anyhow::Result<Vec<crate::cf::File>> {
+        Ok(vec![
+            crate::cf::File { id: 11, file_name: "a-1.1.jar".into(), ..Default::default() },
+            crate::cf::File { id: 8, file_name: "a-0.9.jar".into(), ..Default::default() },
+        ])
+    }
+
+    #[test]
+    fn a_version_gone_upstream_offers_the_others() {
+        set_test_hooks(fake_check, not_found);
+        crate::undo::set_test_choices(two_others);
+        let root = instance("gone");
+        fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
         let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
-        assert_eq!(slim_older_than(&root, 0), 0);
-        assert!(a.is_file() && !is_ref(&a));
+        let f = list(&root).remove(0).files.remove(0);
+        let mut inst = crate::instances::load(&root).unwrap();
+        let e = crate::undo::undo(&mut inst, &f).unwrap_err();
+        let gone = e.downcast_ref::<crate::undo::Gone>().unwrap();
+        assert_eq!(gone.to_string(), "Version a is no longer on CurseForge");
+        assert_eq!(gone.choices.len(), 2);
+        // The newest not newer than file 9.
+        assert_eq!(gone.choices[gone.closest].id, 8);
+        // Nothing changed: the note stays, nothing half-downloaded.
+        assert!(is_ref(&a) && !root.join("mods/a.jar.hopper-tmp").exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -510,7 +882,6 @@ mod tests {
         let root = instance("offline");
         fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
         let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
-        slim_older_than(&root, 0);
         let e = materialize(&a).unwrap_err().to_string();
         assert!(e.contains("a.jar") && e.contains("downloading it again failed") && e.contains("no connection"), "{e}");
         assert!(is_ref(&a));
@@ -518,19 +889,48 @@ mod tests {
     }
 
     #[test]
-    fn offline_by_default_in_tests_keeps_copies() {
-        let root = instance("default");
-        fs::write(root.join("mods/a.jar"), REMOTE).unwrap();
-        let a = crate::sync::backup_into(&root, &root.join("mods/a.jar")).unwrap().unwrap();
-        slim_older_than(&root, 0);
-        assert!(a.is_file());
+    fn undoing_a_config_edit_puts_the_old_text_back() {
+        let root = instance("config");
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("config/a.toml"), "old = 1").unwrap();
+        crate::sync::backup_into(&root, &root.join("config/a.toml")).unwrap();
+        fs::write(root.join("config/a.toml"), "new = 2").unwrap();
+        let f = list(&root).remove(0).files.remove(0);
+        assert_eq!(f.change, Change::Edited);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let mut inst = crate::instances::load(&root).unwrap();
+        crate::undo::undo(&mut inst, &f).unwrap();
+        assert_eq!(fs::read_to_string(root.join("config/a.toml")).unwrap(), "old = 1");
+        // The text it had is History now, so the undo can be undone.
+        let f = list(&root).remove(0).files.remove(0);
+        assert_eq!(fs::read_to_string(&f.path).unwrap(), "new = 2");
         fs::remove_dir_all(&root).unwrap();
     }
 
-    /// One CurseForge jar and one Modrinth jar, downloaded into a throwaway
-    /// instance under `HOPPER_REF_TEST_ROOT`, set aside, turned into notes,
-    /// then downloaded again from the real sites: the sha1 must match.
-    /// Needs the network and a CurseForge key (Settings or `CF_API_KEY`).
+    fn knows_c(jars: &[(PathBuf, String, u32)]) -> std::collections::HashMap<PathBuf, Ref> {
+        jars.iter()
+            .filter(|(p, _, _)| p.ends_with("c.jar"))
+            .map(|(p, sha1, _)| {
+                (p.clone(), Ref { project_id: 7, file_id: 3, file_name: "c.jar".into(), sha1: sha1.clone(), size: 6, mr_version: String::new(), mr_project: String::new(), name: String::new(), addon: None })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn freeing_space_turns_old_copies_into_notes() {
+        set_test_identify(knows_c);
+        let root = instance("free");
+        // Copies from before notes: one the sites know, one they don't.
+        let old = root.join(crate::sync::BACKUP_DIR).join("1000");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("c.jar"), "c jar!").unwrap();
+        fs::write(old.join("mine.jar"), "hand made").unwrap();
+        assert_eq!(copies_size(&root), 15);
+        let (freed, kept) = free_space(&root);
+        assert_eq!((freed, kept), (6, 9));
+        assert!(is_ref(&old.join("c.jar")) && old.join("mine.jar").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
     #[test]
     #[ignore]
     fn real_sites_round_trip() {

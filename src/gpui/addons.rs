@@ -472,9 +472,33 @@ fn peek_links(key: &str, lead: String, mods: &[(String, u64)], cap: usize, peek:
         })
 }
 
+/// What removing `n` files does, for the remove dialogs: deleted for good,
+/// undone from History by downloading again; `unknown` (no download
+/// source) are the only ones History keeps a copy of.
+pub(crate) fn remove_intro(n: usize, unknown: &[String]) -> String {
+    let known = n - unknown.len().min(n);
+    let mut s = match known {
+        0 => String::new(),
+        1 if n == 1 => "The file is deleted from this PC. Undo it any time from History: Hopper downloads the same version again.".to_string(),
+        _ => "The files are deleted from this PC. Undo it any time from History: Hopper downloads the same versions again.".to_string(),
+    };
+    let copy = match unknown {
+        [] => String::new(),
+        [one] => format!("{one} has no download source, so History keeps a copy of it for Undo."),
+        many => format!("{} files have no download source, so History keeps copies of them for Undo.", many.len()),
+    };
+    if !copy.is_empty() {
+        if !s.is_empty() {
+            s.push(' ');
+        }
+        s.push_str(&copy);
+    }
+    s
+}
+
 /// The intro, then "X is required by A, B" for each mod being removed that
 /// others need, wrapping so a long list stays inside the dialog.
-fn warning_list(intro: &'static str, warnings: &[Dependent], peek: &Peek, cx: &App) -> Div {
+fn warning_list(intro: String, warnings: &[Dependent], peek: &Peek, cx: &App) -> Div {
     let color = cx.theme().warning;
     v_flex().gap_2().child(intro).children(warnings.iter().enumerate().map(|(i, d)| {
         h_flex()
@@ -557,11 +581,11 @@ pub(crate) fn undo_remove(store: &Entity<Store>, root: PathBuf, items: Vec<Remov
         let mut back = 0;
         for it in &items {
             if it.original.exists() {
-                job.note(format!("{} is back already; left the backup alone", it.original.display()));
+                job.note(format!("{} is back already; left it alone", it.original.display()));
                 continue;
             }
             if !hopper::backups::exists(&it.backup) {
-                job.note(format!("{}: its copy isn't in backups any more", it.original.display()));
+                job.note(format!("{}: it isn't in History any more", it.original.display()));
                 continue;
             }
             // Kept as a note of where to get it: download it again first.
@@ -1778,8 +1802,10 @@ impl AddonsView {
                 .unwrap_or_default(),
         );
         let single = (files.len() == 1).then(|| pids.get(&files[0]).copied().unwrap_or(0));
-        // Focus inside the dialog's body, so Shift going down or up reaches
-        // its listener (they're called along the focused element's path).
+        // Files with no download source: History keeps a copy of only these,
+        // so Undo works for everything.
+        let unknown: Vec<String> = files.iter().filter(|f| pids.get(*f).is_none_or(|p| *p == 0)).cloned().collect();
+        let intro = remove_intro(files.len(), &unknown);
         let body_focus = cx.focus_handle();
         let peek: Peek = {
             let view = view.clone();
@@ -1813,9 +1839,6 @@ impl AddonsView {
                 }
             };
             let (files, view, w2) = (with(), view.clone(), what.clone());
-            let (f2, v2, w3) = (with(), view.clone(), what.clone());
-            // Shift turns Delete into deleting for good.
-            let shift = window.modifiers().shift;
             // With a mod open in the panel, the page isn't dimmed so it reads.
             let peeking = view.read(cx).peek().read(cx).is_open();
             let libs = (!orphans.is_empty()).then(|| {
@@ -1895,15 +1918,7 @@ impl AddonsView {
                 .w(rems(30.).to_pixels(window.rem_size()))
                 .margin_top(rems(crate::widgets::DIALOG_TOP).to_pixels(window.rem_size()))
                 .overlay(!peeking)
-                .child(
-                    // Redraws as Shift goes down or up, for the Delete button.
-                    div().track_focus(&body_focus).on_modifiers_changed(|_, window, _| window.refresh()).child(warning_list(
-                        "Move to backups keeps a copy in .hopper-backups in the instance folder, with Undo. Delete sends the files to the Recycle Bin; hold Shift to delete them for good.",
-                        &warnings,
-                        &peek,
-                        cx,
-                    )),
-                )
+                .child(div().track_focus(&body_focus).child(warning_list(intro.clone(), &warnings, &peek, cx)))
                 .children(libs)
                 .child(match &*breaks.borrow() {
                     None => h_flex()
@@ -1955,21 +1970,7 @@ impl AddonsView {
                 .footer(
                     DialogFooter::new()
                         .child(DialogClose::new().child(Button::new("remove-cancel").ghost().label("Cancel")))
-                        .child(
-                            Button::new("remove-delete")
-                                .when(shift, |b| b.danger())
-                                .when(!shift, |b| b.outline().danger())
-                                .icon(IconName::Trash)
-                                .label(if shift { "Delete permanently" } else { "Delete" })
-                                .on_click(move |_, window, cx| {
-                                    let permanent = window.modifiers().shift;
-                                    v2.update(cx, |v, cx| v.delete(f2.clone(), w3.clone(), permanent, window, cx));
-                                    window.close_dialog(cx);
-                                }),
-                        )
-                        .child(DialogAction::new().child(
-                            Button::new("remove-backup").primary().icon(IconName::Archive).label("Move to backups"),
-                        )),
+                        .child(DialogAction::new().child(Button::new("remove-ok").danger().icon(IconName::Trash).label("Remove"))),
                 )
                 .on_ok(move |_, window, cx| {
                     view.update(cx, |v, cx| v.remove(files.clone(), w2.clone(), window, cx));
@@ -1979,26 +1980,8 @@ impl AddonsView {
         window.defer(cx, move |window, cx| window.focus(&focus_later, cx));
     }
 
-    /// Deletes files (to the Recycle Bin, or for good with `permanent`),
-    /// no backup kept.
-    fn delete(&mut self, files: Vec<String>, what: String, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(root) = self.root.clone() else { return };
-        let r = self.store.update(cx, |s, cx| {
-            let r = s.delete_files(&root, &files, permanent);
-            cx.notify();
-            r
-        });
-        let n = match r {
-            Ok(()) if permanent && files.len() == 1 => Notification::success(format!("Deleted {what} for good")),
-            Ok(()) if permanent => Notification::success(format!("Deleted {} files for good", files.len())),
-            Ok(()) if files.len() == 1 => Notification::success(format!("Deleted {what} (it's in the Recycle Bin)")),
-            Ok(()) => Notification::success(format!("Deleted {} files (they're in the Recycle Bin)", files.len())),
-            Err(e) => Notification::error(e),
-        };
-        window.push_notification(n, cx);
-    }
-
-    /// Moves files to `.hopper-backups`, then offers to put them back.
+    /// Removes files for good (History keeps where to download each again,
+    /// or a copy when there's nowhere), then offers to put them back.
     pub(crate) fn remove(&mut self, files: Vec<String>, what: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else {
             return;
@@ -2047,9 +2030,9 @@ impl AddonsView {
             let n = moved.len();
             let undone = Rc::new(std::cell::Cell::new(false));
             let note = Notification::success(if n == 1 {
-                format!("Removed {what}. It's in ⋯ › Backups.")
+                format!("Removed {what}. Undo here or in ⋯ › History.")
             } else {
-                format!("Removed {n} files. They're in ⋯ › Backups.")
+                format!("Removed {n} files. Undo here or in ⋯ › History.")
             })
             .action(move |_, _, cx| {
                 let (store, root, moved, undone) =
@@ -2064,7 +2047,7 @@ impl AddonsView {
                         note.dismiss(window, cx);
                     }))
             })
-            // The undo stays in Backups; the toast shouldn't cover the header.
+            // The undo stays in History; the toast shouldn't cover the header.
             .autohide(true);
             window.push_notification(note, cx);
         }
@@ -3170,7 +3153,7 @@ impl AddonsView {
                                     .ghost()
                                     .xsmall()
                                     .icon(IconName::Trash)
-                                    .tooltip("Remove (kept in .hopper-backups)")
+                                    .tooltip("Remove (undo from History)")
                                     .on_click(cx.listener(move |this, _, w, cx| {
                                         this.ask_remove(vec![file.clone()], w, cx)
                                     })),
@@ -4183,7 +4166,7 @@ Change version", a.file_name).into()
                             .ghost()
                             .xsmall()
                             .icon(IconName::Trash)
-                            .tooltip("Remove (kept in .hopper-backups)")
+                            .tooltip("Remove (undo from History)")
                             .on_click(cx.listener(move |this, _, w, cx| {
                                 this.ask_remove(vec![f_rm.clone()], w, cx)
                             })),
@@ -5086,7 +5069,7 @@ impl Render for UpdateReview {
                 v_flex()
                     .gap_2()
                     .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
-                        "Old files go to .hopper-backups, and you can undo when it's done.",
+                        "You can undo it from History when it's done.",
                     ))
                     .child(summary)
                     .children(bad_note),
@@ -5196,7 +5179,7 @@ fn undo_update(store: &Entity<Store>, root: PathBuf, items: Vec<Replaced>, windo
         let mut back = 0;
         for it in &items {
             if !hopper::backups::exists(&it.backup) {
-                job.note(format!("{}: its old file isn't in backups any more", it.old.name));
+                job.note(format!("{}: it isn't in History any more", it.old.name));
                 continue;
             }
             // Kept as a note of where to get it: download it again first.
@@ -5216,7 +5199,7 @@ fn undo_update(store: &Entity<Store>, root: PathBuf, items: Vec<Replaced>, windo
                 inst.addons.remove(i);
             }
             if it.original.exists() {
-                job.note(format!("{} is back already; left the backup alone", it.original.display()));
+                job.note(format!("{} is back already; left it alone", it.original.display()));
             } else if std::fs::rename(&it.backup, &it.original).is_err() {
                 std::fs::copy(&it.backup, &it.original)?;
                 std::fs::remove_file(&it.backup)?;

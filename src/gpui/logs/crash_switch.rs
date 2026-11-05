@@ -141,7 +141,7 @@ impl LogsView {
                                         .tooltip(if running {
                                             "Close the game first: it may write its config back when it closes."
                                         } else {
-                                            "Changes this one setting. The old file goes to Backups, and Undo puts it back."
+                                            "Changes this one setting. Undo it from History."
                                         })
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             turn_off(this.store.clone(), r_off.clone(), s_off.clone(), window, cx)
@@ -188,7 +188,7 @@ impl LogsView {
                                     .tooltip(if running {
                                         "Close the game first: it may write its config back when it closes."
                                     } else {
-                                        "Sets it to false after you confirm. The old config goes to Backups."
+                                        "Sets it to false after you confirm. Undo it from History."
                                     })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         confirm_off(this.store.clone(), r_off.clone(), s_off.clone(), window, cx)
@@ -235,7 +235,7 @@ impl LogsView {
                                     if changed.is_empty() {
                                         format!("{} = {} in {}. Play to check the crash is gone.", sw.key, sw.to_text(), sw.file_name())
                                     } else {
-                                        "Play to check the crash is gone. The old file is in Backups.".to_string()
+                                        "Play to check the crash is gone. Undo it from History.".to_string()
                                     },
                                     cx,
                                 )
@@ -271,7 +271,7 @@ impl LogsView {
                                     .icon(IconName::Undo2)
                                     .label(if item { "Turn it back on" } else { "Undo" })
                                     .disabled(running)
-                                    .tooltip(format!("Sets {} = {} again. The config as it is now goes to Backups.", s_on.key, s_on.from_text()))
+                                    .tooltip(format!("Sets {} = {} again. Undo it from History.", s_on.key, s_on.from_text()))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         let r = this.store.update(cx, |s, cx| {
                                             let r = s.crash_switch_on(&r_on, &s_on);
@@ -343,7 +343,7 @@ fn confirm_off(store: Entity<crate::store::Store>, root: std::path::PathBuf, sw:
         alert
             .title(format!("Turn off {}?", sw.label))
             .description(format!(
-                "Sets {} = false in {file}. {} The config as it was is kept in Backups, so you can undo this.",
+                "Sets {} = false in {file}. {} You can undo this from History.",
                 sw.key,
                 deletes(&sw.label)
             ))

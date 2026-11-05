@@ -163,7 +163,7 @@ fn undo_one(c: &mut Change) -> anyhow::Result<()> {
             // say so before touching anything.
             if let Some(b) = &c.backup {
                 if !crate::backups::exists(b) {
-                    anyhow::bail!("{}: its old copy was cleaned up from backups", c.label);
+                    anyhow::bail!("{}: its old copy was cleaned up from History", c.label);
                 }
                 crate::backups::materialize(b)?;
             }
@@ -181,13 +181,13 @@ fn undo_one(c: &mut Change) -> anyhow::Result<()> {
             let b = c
                 .backup
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("no backup was kept for {}", c.label))?;
+                .ok_or_else(|| anyhow::anyhow!("no copy was kept for {}", c.label))?;
             let from = c
                 .from
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("original location unknown"))?;
             if !crate::backups::exists(b) {
-                anyhow::bail!("{}: its copy was cleaned up from backups", c.label);
+                anyhow::bail!("{}: its copy was cleaned up from History", c.label);
             }
             crate::backups::materialize(b)?;
             copy_over(b, from)?;

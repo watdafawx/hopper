@@ -1,9 +1,10 @@
-//! An instance's backups: snapshots (the whole instance at one moment, to
-//! compare with now and restore) and loose files (what was removed or
-//! replaced, by when, to restore or delete for good).
+//! An instance's History dialog: History (what was removed, updated or
+//! edited, with Undo; see `history_view`) and Snapshots (the whole
+//! instance at one moment, made by the user or on a schedule, to compare
+//! with now and restore).
 
 use crate::widgets::Clickable as _;
-use crate::store::{Msg, Store, open_path};
+use crate::store::{Msg, Store};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -12,31 +13,34 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hopper::backups::{Saved, Set};
+use hopper::backups::Set;
 use hopper::snapshots::{Changes, Kind, Reason, Snapshot};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
+    History,
     Snapshots,
-    Loose,
 }
 
 /// Changes listed under an open snapshot before "Show all".
 const SHOWN: usize = 6;
 
 pub struct BackupsView {
-    store: Entity<Store>,
-    root: PathBuf,
-    sets: Vec<Set>,
-    /// The loose files are read (they're read in the background: a big
-    /// pack has hundreds of sets).
-    sets_loaded: bool,
+    pub(crate) store: Entity<Store>,
+    pub(crate) root: PathBuf,
+    pub(crate) sets: Vec<Set>,
+    /// History is read (in the background: a big pack has hundreds of
+    /// entries).
+    pub(crate) sets_loaded: bool,
+    /// Bytes of full mod copies History holds from before notes, for the
+    /// "Free up space" offer; `None` while reading.
+    pub(crate) copies: Option<u64>,
     /// Projects the instance has had, by file name, for backed-up files.
     projects: HashMap<String, (u64, String)>,
-    /// Backups shown open (by folder).
-    open: HashSet<PathBuf>,
+    /// Multi-file entries shown open (by folder).
+    pub(crate) open: HashSet<PathBuf>,
     mode: Mode,
     /// `None` while loading.
     snaps: Option<Vec<Snapshot>>,
@@ -50,7 +54,7 @@ pub struct BackupsView {
     changes: HashMap<String, Result<Changes, String>>,
     comparing: HashSet<String>,
     /// What's running (a snapshot or restore), shown instead of the intro.
-    busy: Option<String>,
+    pub(crate) busy: Option<String>,
     /// The snapshot to show open the first time the list loads, instead of
     /// the newest (a task's "View snapshot").
     focus: Option<String>,
@@ -62,24 +66,17 @@ pub struct BackupsView {
 }
 
 impl BackupsView {
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
-            let (sets, projects) = cx
-                .background_spawn(async move { (hopper::backups::list(&root), hopper::snapshots::projects_seen(&root)) })
+            let (sets, projects, copies) = cx
+                .background_spawn(async move {
+                    (hopper::backups::list(&root), hopper::snapshots::projects_seen(&root), hopper::backups::copies_size(&root))
+                })
                 .await;
             this.update(cx, |this, cx| {
-                // The newest opens when it's new to the list (the first
-                // read, or something just set aside); after that, what
-                // you fold or unfold stays that way.
-                let fresh = sets
-                    .first()
-                    .filter(|s| !this.sets_loaded || !this.sets.iter().any(|o| o.dir == s.dir))
-                    .map(|s| s.dir.clone());
-                if let Some(dir) = fresh {
-                    this.open.insert(dir);
-                }
                 this.sets = sets;
+                this.copies = Some(copies);
                 this.projects = projects;
                 this.sets_loaded = true;
                 this.reload_usage(cx);
@@ -110,7 +107,7 @@ impl BackupsView {
     /// Runs the clean up rules (Settings › Library & folders) now.
     fn clean_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.root.clone();
-        self.busy = Some("Cleaning up old backups…".into());
+        self.busy = Some("Clearing old History…".into());
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let p = cx.background_spawn(async move { hopper::retention::clean_up(&root) }).await;
@@ -121,8 +118,8 @@ impl BackupsView {
                     "Nothing to clean up".to_string()
                 } else {
                     format!(
-                        "Moved {n} old backup{} to the Recycle Bin ({})",
-                        if n == 1 { "" } else { "s" },
+                        "Cleared {n} old History entr{} ({})",
+                        if n == 1 { "y" } else { "ies" },
                         hopper::instance_ops::human_bytes(p.freed)
                     )
                 };
@@ -135,17 +132,17 @@ impl BackupsView {
         .detach();
     }
 
-    /// "Backups use 4.9 GB · Over the 1 GB limit · Keeps … · Clean up".
+    /// "History uses 4.9 GB · Over the 1 GB limit · Keeps … · Clean up".
     fn usage_line(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let r = hopper::retention::policy();
         let Some((u, would)) = &self.usage else {
-            return widgets::caption("Reading backups…", cx).text_xs().into_any_element();
+            return widgets::caption("Reading History…", cx).text_xs().into_any_element();
         };
         let cap = r.max_mb * 1024 * 1024;
         let over = cap > 0 && u.limited() > cap;
         let gb = |b: u64| hopper::instance_ops::human_bytes(b);
-        let used = if cap > 0 && !over { format!("Backups use {} of {}", gb(u.total()), gb(cap)) } else { format!("Backups use {}", gb(u.total())) };
+        let used = if cap > 0 && !over { format!("History uses {} of {}", gb(u.total()), gb(cap)) } else { format!("History uses {}", gb(u.total())) };
         let rules = format!("Keeps the last {} actions and {} days", r.keep_actions, r.keep_days);
         let label = if would.freed > 0 { format!("Clean up · frees {}", gb(would.freed)) } else { "Clean up".to_string() };
         h_flex()
@@ -162,7 +159,7 @@ impl BackupsView {
                     .small()
                     .outline()
                     .label(label)
-                    .tooltip("Moves old backups to the Recycle Bin, by the rules in Settings › Library & folders. Hopper does this by itself after each new backup, but leaves older ones for you. Snapshots you took and world backups stay.")
+                    .tooltip("Clears History older than the rules in Settings › Library & folders (to the Recycle Bin). Hopper does this by itself as History grows, but leaves older entries for you. Snapshots you took and world backups stay.")
                     .disabled(self.busy.is_some() || would.count() == 0)
                     .on_click(cx.listener(|this, _, window, cx| this.clean_up(window, cx))),
             )
@@ -233,7 +230,7 @@ impl BackupsView {
 
     /// The instance's project and icon for a backed-up file, by its name
     /// (or, for another version of it, its name without the version).
-    fn project_of(&self, file: &str, _: &App) -> Option<(u64, String)> {
+    pub(crate) fn project_of(&self, file: &str, _: &App) -> Option<(u64, String)> {
         let lower = file.to_lowercase();
         let bare = lower.strip_suffix(".disabled").unwrap_or(&lower).to_string();
         if let Some(p) = self.projects.get(&bare) {
@@ -248,7 +245,7 @@ impl BackupsView {
 
     /// A mod's icon and name (or file name) that opens its page, when its
     /// project is known; asks for icons not loaded yet.
-    fn mod_cell(&self, id: ElementId, text: String, project: u64, icon: &str, small: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(crate) fn mod_cell(&self, id: ElementId, text: String, project: u64, icon: &str, small: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let path = self.store.read(cx).image(icon).map(std::path::Path::to_path_buf);
         if path.is_none() && !icon.is_empty() {
             let icon = icon.to_string();
@@ -297,7 +294,7 @@ impl BackupsView {
         .detach();
     }
 
-    fn changed(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn changed(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
         self.store.update(cx, |s, cx| {
             let r = root.clone();
@@ -442,7 +439,7 @@ impl BackupsView {
                         .child(div().text_color(theme.muted_foreground).child(if f2.get() {
                             "Close the game before restoring."
                         } else {
-                            "Without one, mods and configs it takes away go to .hopper-backups. Close the game before restoring."
+                            "Without one, what it takes away can be put back from History. Close the game before restoring."
                         })),
                 )
                 .confirm()
@@ -475,7 +472,7 @@ impl BackupsView {
                     Ok(r) => {
                         let undo = match (&r.safety, &r.aside) {
                             (Some(s), _) => format!(" To undo, restore \"{}\".", s.label()),
-                            (None, Some(_)) => " What it took away is in .hopper-backups.".to_string(),
+                            (None, Some(_)) => " What it took away can be put back from History.".to_string(),
                             (None, None) => String::new(),
                         };
                         window.push_notification(
@@ -527,82 +524,6 @@ impl BackupsView {
                             .ok();
                         })
                         .detach();
-                    });
-                    true
-                })
-        });
-    }
-
-    fn restore(&mut self, files: Vec<Saved>, window: &mut Window, cx: &mut Context<Self>) {
-        let mut ok = 0;
-        let mut renamed = 0;
-        let mut errors = Vec::new();
-        // Mod jars put back: identified, so a mod's record follows its jar.
-        let mut jars = Vec::new();
-        let mods_dir = self.root.join("mods");
-        for f in &files {
-            match hopper::backups::restore(&self.root, f) {
-                Ok(p) => {
-                    ok += 1;
-                    if p.parent() == Some(mods_dir.as_path())
-                        && let Some(n) = p.file_name()
-                    {
-                        jars.push(n.to_string_lossy().into_owned());
-                    }
-                    if !self.root.join(&f.restore_to).eq(&p) {
-                        renamed += 1;
-                    }
-                }
-                Err(e) => errors.push(format!("{}: {e:#}", f.name)),
-            }
-        }
-        let mut msg = match ok {
-            0 => String::new(),
-            1 => format!("Restored {}", files[0].name),
-            n => format!("Restored {n} files"),
-        };
-        if renamed > 0 {
-            msg.push_str(&format!(
-                " ({renamed} already there, so the restored copy has \"(restored)\" in its name)"
-            ));
-        }
-        if !msg.is_empty() {
-            window.push_notification(Notification::success(msg), cx);
-        }
-        for e in errors {
-            window.push_notification(Notification::error(e), cx);
-        }
-        self.changed(cx);
-        let root = self.root.clone();
-        self.store.update(cx, |s, _| s.identify_jars(&root, jars));
-    }
-
-    fn ask_delete(&mut self, set: Set, window: &mut Window, cx: &mut Context<Self>) {
-        let view = cx.entity();
-        let n = set.files.len();
-        let permanent = self.store.read(cx).settings().delete_permanently;
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let (view, set) = (view.clone(), set.clone());
-            alert
-                .title("Delete this backup?")
-                .description(format!(
-                    "Its {n} file{} {}.",
-                    if n == 1 { "" } else { "s" },
-                    if permanent { "are deleted for good" } else { "go to the Recycle Bin" }
-                ))
-                .button_props(
-                    gpui_kit::component::dialog::DialogButtonProps::default()
-                        .ok_text("Delete")
-                        .ok_variant(ButtonVariant::Danger)
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, window, cx| {
-                    let r = hopper::backups::delete(&set, permanent);
-                    view.update(cx, |v, cx| {
-                        if let Err(e) = r {
-                            window.push_notification(Notification::error(format!("{e:#}")), cx);
-                        }
-                        v.reload(cx);
                     });
                     true
                 })
@@ -795,139 +716,6 @@ impl BackupsView {
             .into_any_element()
     }
 
-    /// The loose files list.
-    fn loose_body(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme().clone();
-        let size = hopper::instance_ops::human_bytes;
-        if !self.sets_loaded {
-            return widgets::skeleton_rows(3, rems(3.), cx).into_any_element();
-        }
-        if self.sets.is_empty() {
-            return widgets::empty_state(
-                IconName::Archive,
-                "No backups",
-                Some("Files you remove with Move to backups, and files updates replace, show up here.".into()),
-                cx,
-            )
-            .into_any_element();
-        }
-        v_flex()
-            .gap_3()
-            .children(self.sets.iter().enumerate().map(|(i, set)| {
-                let open = self.open.contains(&set.dir);
-                let (d1, d2, d3) = (set.dir.clone(), set.dir.clone(), set.clone());
-                let all = set.files.clone();
-                let n = set.files.len();
-                v_flex()
-                    .gap_1()
-                    .p_3()
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.border)
-                    .child(
-                        h_flex()
-                            .id(("backup-set", i))
-                            .gap_2()
-                            .clickable(cx)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.open.remove(&d1) {
-                                    this.open.insert(d1.clone());
-                                }
-                                cx.notify();
-                            }))
-                            .child(
-                                gpui_kit::component::Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-                                    .small(),
-                            )
-                            .child(div().font_semibold().child(hopper::time::relative_secs(set.when)))
-                            .child(
-                                widgets::caption(format!("{n} file{} · {}", if n == 1 { "" } else { "s" }, size(set.size())), cx)
-                                    .text_xs(),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                widgets::row_actions(("backup-actions", i))
-                                    .child(
-                                        Button::new(("backup-restore-all", i))
-                                            .small()
-                                            .outline()
-                                            .icon(IconName::Undo2)
-                                            .label(if n == 1 { "Restore" } else { "Restore all" })
-                                            .on_click(cx.listener(move |this, _, window, cx| this.restore(all.clone(), window, cx))),
-                                    )
-                                    .child(
-                                        Button::new(("backup-folder", i))
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::FolderOpen)
-                                            .tooltip("Open this backup's folder")
-                                            .on_click(move |_, _, _| open_path(&d2)),
-                                    )
-                                    .child(
-                                        Button::new(("backup-delete", i))
-                                            .small()
-                                            .ghost()
-                                            .icon(IconName::Trash)
-                                            .tooltip("Delete this backup (to the Recycle Bin)")
-                                            .on_click(cx.listener(move |this, _, window, cx| this.ask_delete(d3.clone(), window, cx))),
-                                    )
-                            ),
-                    )
-                    .when(open, |c| {
-                        c.children(set.files.iter().enumerate().map(|(j, f)| {
-                            let file = f.clone();
-                            // A mod or pack the instance knows: its icon and page.
-                            let (pid, icon) = self.project_of(&f.name, cx).unwrap_or_default();
-                            h_flex()
-                                .id(("backup-file", i * 10_000 + j))
-                                .gap_2()
-                                .pl_6()
-                                .py_1()
-                                .rounded(theme.radius)
-                                .hover(|s| widgets::row_hover(s, cx))
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            self.mod_cell(
-                                                ElementId::Name(format!("backup-mod:{i}:{j}").into()),
-                                                f.name.clone(),
-                                                pid,
-                                                &icon,
-                                                false,
-                                                cx,
-                                            )
-                                            .text_sm(),
-                                        )
-                                        .child(
-                                            widgets::caption(
-                                                format!(
-                                                    "back to {} · {}{}",
-                                                    f.restore_to,
-                                                    size(f.size),
-                                                    if f.download { " · downloads again" } else { "" }
-                                                ),
-                                                cx,
-                                            )
-                                                .text_xs()
-                                                .truncate(),
-                                        ),
-                                )
-                                .child(
-                                    Button::new(("backup-restore", i * 10_000 + j))
-                                        .xsmall()
-                                        .outline()
-                                        .label("Restore")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.restore(vec![file.clone()], window, cx)
-                                        })),
-                                )
-                        }))
-                    })
-            }))
-            .into_any_element()
-    }
 }
 
 use crate::widgets::DIALOG_TOP;
@@ -939,12 +727,13 @@ impl Render for BackupsView {
         let filled = if snaps_mode { n_snaps > 0 } else { !self.sets.is_empty() };
         let intro = match (&self.busy, snaps_mode) {
             (Some(b), _) => b.clone(),
-            (None, true) => "Mods, configs and hopper.json at one moment, to compare with now and put back. Yours stay until you delete them.".to_string(),
+            (None, true) => "Mods, configs and hopper.json at one moment, made by you or on a schedule, to compare with now and put back. They stay until you delete them.".to_string(),
             (None, false) => {
-                "Files Hopper set aside: mods and packs you removed, and files replaced by updates and syncs. Newest first.".into()
+                "What changed in this instance, newest first. Undo puts a mod back by downloading it again; configs come back from the text Hopper kept.".into()
             }
         };
-        let body = if snaps_mode { self.snapshots_body(cx) } else { self.loose_body(cx) };
+        let body = if snaps_mode { self.snapshots_body(cx) } else { self.history_body(cx) };
+        let banner = if snaps_mode { None } else { self.free_banner(cx) };
         let room = widgets::dialog_room(window).max(window.rem_size() * 12.);
         // A mod's page, beside the lists.
         let peek = self.peek.clone().map(|p| v_flex().w(rems(30.)).flex_none().h(room).child(div().flex_1().min_h_0().child(p)));
@@ -959,12 +748,12 @@ impl Render for BackupsView {
                     .child(widgets::underline_tabs(
                         "backups-mode",
                         vec![
+                            ("History".into(), self.sets_loaded.then_some(self.sets.len())),
                             ("Snapshots".into(), self.snaps.as_ref().map(|_| n_snaps)),
-                            ("Loose files".into(), self.sets_loaded.then_some(self.sets.len())),
                         ],
-                        if snaps_mode { 0 } else { 1 },
+                        if snaps_mode { 1 } else { 0 },
                         cx.listener(|this, ix: &usize, _, cx| {
-                            this.mode = if *ix == 0 { Mode::Snapshots } else { Mode::Loose };
+                            this.mode = if *ix == 0 { Mode::History } else { Mode::Snapshots };
                             cx.notify();
                         }),
                         cx,
@@ -983,29 +772,31 @@ impl Render for BackupsView {
                     }),
             )
             .child(widgets::caption(intro, cx))
+            .children(banner)
             .child(div().id("backups-list").flex_1().min_h_0().overflow_y_scrollbar().child(body))
             .child(self.usage_line(cx));
         h_flex().items_start().gap_4().child(main).children(peek)
     }
 }
 
-/// Opens an instance's backups.
+/// Opens an instance's History.
 pub fn open(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut App) {
     open_at(store, root, None, window, cx)
 }
 
-/// Opens an instance's backups on its snapshots, with `snap` open (else
-/// the newest).
+/// Opens an instance's History dialog: on its snapshots with `snap` open,
+/// else on History.
 pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| {
         let mut v = BackupsView {
             sets: Vec::new(),
             sets_loaded: false,
+            copies: None,
             projects: HashMap::new(),
             store,
             root,
             open: HashSet::new(),
-            mode: Mode::Snapshots,
+            mode: if snap.is_some() { Mode::Snapshots } else { Mode::History },
             snaps: None,
             usage: None,
             open_snaps: HashSet::new(),
@@ -1025,7 +816,7 @@ pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window
     });
     window.open_dialog(cx, move |dialog, window, cx| {
         dialog
-            .title("Backups")
+            .title("History")
             .w(rems(if view.read(cx).peek.is_some() { 74. } else { 42. }).to_pixels(window.rem_size()))
             .margin_top(rems(DIALOG_TOP).to_pixels(window.rem_size()))
             .child(view.clone())

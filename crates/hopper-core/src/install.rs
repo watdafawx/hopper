@@ -1071,7 +1071,7 @@ pub fn install_file(
 }
 
 /// The project as `put_file` needs it, from what the instance already knows.
-fn addon_as_mod(a: &crate::instances::Addon) -> cf::Mod {
+pub(crate) fn addon_as_mod(a: &crate::instances::Addon) -> cf::Mod {
     cf::Mod {
         id: a.project_id,
         name: a.name.clone(),

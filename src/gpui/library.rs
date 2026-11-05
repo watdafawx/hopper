@@ -3243,7 +3243,7 @@ fn instance_menu(
     })
     .item({
         let (s, r) = (st(), r.clone());
-        PopupMenuItem::new(if snaps > 0 { format!("Backups ({snaps})…") } else { "Backups…".to_string() })
+        PopupMenuItem::new(if snaps > 0 { format!("History ({snaps} snapshots)…") } else { "History…".to_string() })
             .icon(IconName::Archive)
             .on_click(move |_, window, cx| crate::backups_view::open(s.clone(), r.clone(), window, cx))
     })

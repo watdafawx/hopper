@@ -965,7 +965,7 @@ impl SyncPanel {
         let up = ops.up.clone();
         let down = ops.down.clone();
         let undo = if self.kept_in() == ".hopper-backups" {
-            "Removed and replaced jars go to .hopper-backups, and the change log in History can put them back."
+            "Removed and replaced jars can be put back from History."
         } else {
             "Removed jars go to Hopper Server's trash, where you can restore them."
         };
@@ -1165,7 +1165,7 @@ impl SyncPanel {
             )
         } else {
             format!(
-                "Installs NeoForge {want} in {place} and points run.bat at it{older}. Mods aren't touched. The old run.bat is kept in .hopper-backups."
+                "Installs NeoForge {want} in {place} and points run.bat at it{older}. Mods aren't touched. Undo it from History."
             )
         };
         window.open_alert_dialog(cx, move |alert, _, _| {
@@ -2367,7 +2367,7 @@ impl SyncPanel {
         let pair = self.pair_header(cx);
         let kept = self.kept_in();
         let remove_tip = if kept == ".hopper-backups" {
-            "Moves the jar to the server's .hopper-backups (undo from History)"
+            "Removes the jar (undo from History)"
         } else {
             "Moves the jar to Hopper Server's trash"
         };

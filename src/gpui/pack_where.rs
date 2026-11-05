@@ -1079,7 +1079,7 @@ impl AddonsView {
         }
         if moved > 0 && rest.is_empty() {
             let what = self.describe_packs(&files);
-            window.push_notification(Notification::success(format!("Removed {what}. It's in ⋯ › Backups.")), cx);
+            window.push_notification(Notification::success(format!("Removed {what}. Undo here or in ⋯ › History.")), cx);
         }
         self.selected.clear();
         self.resync(cx);

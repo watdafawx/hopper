@@ -5,7 +5,7 @@
   // to tick several), then "Removed X" with Undo for a few seconds.
   // Put once on a page that removes mods (lib/modops.js asks through it).
   import { onMount } from 'svelte';
-  import { Archive, TriangleAlert, Undo2, X } from '@lucide/svelte';
+  import { Trash2, TriangleAlert, Undo2, X } from '@lucide/svelte';
   import { removing, answerRemove } from './lib/modsremove.svelte.js';
   import { undoRemove } from './lib/modops.js';
   import { toast } from './lib/toast.svelte.js';
@@ -71,7 +71,7 @@
   <div class="dialog-back" role="presentation" onclick={(e) => e.target === e.currentTarget && answerRemove(null)} onkeydown={keys}>
     <form class="box popover" onsubmit={(e) => { e.preventDefault(); answerRemove([...also]); }}>
       <h3>{q.title}</h3>
-      <p class="small subtle">Move to backups keeps a copy in .hopper-backups (Mods › Backups), with Undo.</p>
+      <p class="small subtle">It's deleted from the server. Undo it any time from Mods › History: Hopper downloads the same version again. Mods with no download source keep a copy there.</p>
       {#if q.need.length}
         <div class="need small">
           <div class="row nh"><TriangleAlert size={14} />The server won't start without {q.need.length === 1 ? 'this' : 'these'}:</div>
@@ -96,7 +96,7 @@
       {/if}
       <div class="row end">
         <button type="button" class="btn" onclick={() => answerRemove(null)}>Cancel</button>
-        <button class="btn pri" bind:this={okBtn}><Archive size={13} />Move to backups</button>
+        <button class="btn danger" bind:this={okBtn}><Trash2 size={13} />Remove</button>
       </div>
     </form>
   </div>
