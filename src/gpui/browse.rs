@@ -27,6 +27,7 @@ use hopper::browse::{ServerFiles, dependencies, human_count, installed_as};
 use hopper::cf::{self, Loader, SortField};
 use hopper::install::Plan;
 use hopper::instances::Instance;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -359,6 +360,8 @@ pub struct BrowseView {
     stepping: bool,
     /// The project panel's scroll, kept per history place.
     detail_scroll: ScrollHandle,
+    /// The panel's compact bar, pinned once the Install bar scrolls away.
+    sticky: Sticky,
     /// A history place's panel scroll, put back once its page is drawn.
     peek_scroll_after: Option<Point<Pixels>>,
     /// How each project's panel was left (scroll, tab), for Back and
@@ -527,6 +530,7 @@ impl BrowseView {
             next_place: 1,
             stepping: false,
             detail_scroll: ScrollHandle::new(),
+            sticky: Sticky::default(),
             peek_scroll_after: None,
             peek_spots: HashMap::new(),
             restore_spot: None,
@@ -3573,7 +3577,7 @@ impl BrowseView {
 
     // ---- detail --------------------------------------------------------
 
-    fn detail(&self, m: &cf::Mod, target: Option<&Instance>, cx: &mut Context<Self>) -> AnyElement {
+    fn detail(&self, m: &cf::Mod, target: Option<&Instance>, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let banner = self.link_banner(m, target, cx);
         let store = self.store.read(cx);
         let theme = cx.theme();
@@ -3629,6 +3633,10 @@ impl BrowseView {
             crate::img_log::once(&format!("strip-all({})", shots.len()), &format!("peek:{}", m.id));
         }
 
+        // Whether `install_card` shows (it needs a target, a plan and the
+        // project not installed yet).
+        let has_card =
+            target.is_some_and(|t| installed_as(t, m).is_none()) && self.plan_for(m, target).is_some();
         let header = h_flex()
             .relative()
             .gap_4()
@@ -3748,6 +3756,9 @@ impl BrowseView {
                             }))
                     ),
             )
+            // Without an Install bar the compact bar shows once the
+            // header has scrolled away.
+            .when(!has_card, |h| h.child(page_mark(self.sticky.fold.clone(), true)))
             // Copy id, bookmark and close sit over the name's line only, so
             // the rows under the byline get the panel's whole width.
             .child(
@@ -3788,6 +3799,12 @@ impl BrowseView {
                     ),
             );
 
+        // The tabs' labels, here and in the compact bar.
+        let files_label = match self.file_lists.get(&m.id) {
+            Some(Load::Ready(f)) => format!("Files {}", f.len()),
+            _ => "Files".to_string(),
+        };
+        let n_deps = self.deps.get(&m.id).map_or(0, |d| d.len());
         let body: AnyElement = match self.detail.get(&m.id) {
             None | Some(Load::Loading) => h_flex()
                 .gap_2()
@@ -3813,15 +3830,7 @@ impl BrowseView {
                 // Newer or older than the installed file: CurseForge ids
                 // grow with each upload; Modrinth's are hashes, so its files
                 // go by date.
-                let age = |f: &hopper::cf::File| {
-                    installed.map(|a| {
-                        if hopper::modrinth::is_mr(f.id) || hopper::modrinth::is_mr(a.file_id) {
-                            f.file_date.as_str().cmp(a.file_date.as_str())
-                        } else {
-                            f.id.cmp(&a.file_id)
-                        }
-                    })
-                };
+                let age = |f: &hopper::cf::File| installed.map(|a| file_age(f, a));
                 let locked = installed.is_some_and(|a| a.locked);
                 let is_pack = hopper::browse::is_modpack(m, self.class);
                 let can = is_pack || target.is_some();
@@ -3833,11 +3842,7 @@ impl BrowseView {
                 };
                 // The newest file that would update the installed one gets
                 // the filled button; other newer ones say Update outlined.
-                let newest = all_files
-                    .iter()
-                    .filter(|f| f.id != installed_file.unwrap_or(0) && age(f) == Some(std::cmp::Ordering::Greater) && fits_target(f))
-                    .max_by(|a, b| a.file_date.cmp(&b.file_date).then(a.id.cmp(&b.id)))
-                    .map(|f| f.id);
+                let newest = target.and_then(|t| self.newest_update(m, t)).map(|f| f.id);
                 let files = v_flex()
                     .gap_0p5()
                     .children(all_files.iter().take(40).map(|f| {
@@ -3995,11 +4000,6 @@ impl BrowseView {
                                 r.child(widgets::chip(cx.theme().success).xsmall().child("Installed"))
                             })
                     }));
-                let files_label = match file_list {
-                    Some(Load::Ready(f)) => format!("Files {}", f.len()),
-                    _ => "Files".to_string(),
-                };
-                let n_deps = self.deps.get(&m.id).map_or(0, |d| d.len());
                 // Files (and the dependencies read from them) still coming,
                 // or failed: say so in their tabs.
                 let files_state: Option<AnyElement> = match file_list {
@@ -4019,16 +4019,21 @@ impl BrowseView {
                 v_flex()
                     .gap_4()
                     .child(
-                        TabBar::new("detail-tabs")
-                            .underline()
-                            .selected_index(tab)
-                            .child(Tab::new().label("Description"))
-                            .child(Tab::new().label(files_label))
-                            .child(Tab::new().label(format!("Dependencies {n_deps}")))
-                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                this.detail_tab = *ix;
-                                cx.notify();
-                            })),
+                        div()
+                            .relative()
+                            .child(
+                                TabBar::new("detail-tabs")
+                                    .underline()
+                                    .selected_index(tab)
+                                    .child(Tab::new().label("Description"))
+                                    .child(Tab::new().label(files_label.clone()))
+                                    .child(Tab::new().label(format!("Dependencies {n_deps}")))
+                                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                        this.detail_tab = *ix;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(page_mark(self.sticky.tabs.clone(), true)),
                     )
                     .map(|c| match (tab, files_state) {
                         (1 | 2, Some(wait)) => c.child(wait),
@@ -4043,10 +4048,12 @@ impl BrowseView {
 
         let page = v_flex()
             .id("browse-detail")
+            .relative()
             .w_full()
             .px_5()
             .py_5()
             .gap_4()
+            .child(page_mark(self.sticky.top.clone(), false))
             .child(header)
             // Install and what stops it come first: on screen without
             // scrolling past the screenshots.
@@ -4082,7 +4089,9 @@ impl BrowseView {
                         )),
                 )
             })
-            .children(self.install_card(m, target, cx))
+            .children(self.install_card(m, target, cx).map(|c| {
+                div().relative().child(c).child(page_mark(self.sticky.fold.clone(), true))
+            }))
             .when(!shots.is_empty(), |r| {
                 // A set height: the scroll wrapper otherwise stretches to
                 // fill the column, leaving gaps around the thumbnails.
@@ -4098,6 +4107,16 @@ impl BrowseView {
                 )
             })
             .child(body);
+        // The compact bar, once the project has loaded: scrolling redraws
+        // this panel anyway, so it's one comparison a frame.
+        let fade = match self.detail.get(&m.id) {
+            Some(Load::Ready(_)) => self.sticky.update(m.id, -self.detail_scroll.offset().y),
+            _ => 0.,
+        };
+        let bar = (fade > 0. || self.sticky.shown.get())
+            .then(|| self.sticky_bar(m, target, width, fade, files_label, n_deps, cx));
+        // While it fades, draw the next frame too.
+        let fading = self.sticky.flipped.get().is_some_and(|at| at.elapsed() < STICKY_FADE);
         // A scroll handle of Browse's own, so Back can put the panel's
         // scroll back.
         div()
@@ -4111,6 +4130,10 @@ impl BrowseView {
                     .track_scroll(&self.detail_scroll)
                     .child(page),
             )
+            .children(bar)
+            .when(fading, |d| {
+                d.child(canvas(|_, _, _| {}, |_, _, window, _| window.request_animation_frame()).absolute().size_0())
+            })
             .vertical_scrollbar(&self.detail_scroll)
             .into_any_element()
     }
@@ -4267,6 +4290,149 @@ impl BrowseView {
             .child(header)
             .child(body)
             .overflow_y_scrollbar()
+            .into_any_element()
+    }
+
+    /// The newest file that would update the installed one and fits the
+    /// instance: the Files tab's filled Update.
+    fn newest_update(&self, m: &cf::Mod, t: &Instance) -> Option<&cf::File> {
+        let a = t.addons.iter().find(|a| a.project_id == m.id)?;
+        let Some(Load::Ready(files)) = self.file_lists.get(&m.id) else { return None };
+        files
+            .iter()
+            .filter(|f| {
+                f.id != a.file_id
+                    && file_age(f, a) == std::cmp::Ordering::Greater
+                    && f.fits(&t.game_version, hopper::install::loader_of(t))
+            })
+            .max_by(|x, y| x.file_date.cmp(&y.file_date).then(x.id.cmp(&y.id)))
+    }
+
+    /// The compact bar's button, in the same state as the page's own:
+    /// Install while the Install bar shows, Update when a newer file fits,
+    /// else Installed. Nothing where the page has no such button.
+    fn sticky_action(&self, m: &cf::Mod, target: Option<&Instance>, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = target?;
+        if hopper::browse::is_modpack(m, self.class) {
+            return None;
+        }
+        let (pending, hold, progress, fetch) = self.install_state(m.id, false, cx);
+        let installed = t.addons.iter().find(|a| a.project_id == m.id);
+        let m1 = m.clone();
+        let locked = installed.is_some_and(|a| a.locked);
+        let button = |file: Option<cf::File>, label: &str, cx: &mut Context<Self>| {
+            install_button(
+                site_primary(Button::new("sticky-install"), m.modrinth.is_some(), cx).small().icon(IconName::Download),
+                label,
+                pending,
+                progress,
+                hold,
+                fetch.as_ref(),
+                cx,
+            )
+            .flex_none()
+            .min_w(rems(6.5))
+            .when(locked, |b| b.disabled(true).tooltip("Locked: unlock it in the Mods tab to switch versions"))
+            .on_click(cx.listener(move |this, _, w, cx| this.install(m1.clone(), file.clone(), w, cx)))
+            .into_any_element()
+        };
+        if installed_as(t, m).is_none() {
+            self.plan_for(m, target)?;
+            return Some(button(None, "Install", cx));
+        }
+        if let Some(f) = self.newest_update(m, t).cloned() {
+            return Some(button(Some(f), "Update", cx));
+        }
+        Some(
+            widgets::chip(cx.theme().success)
+                .flex_none()
+                .child(h_flex().gap_1().child(Icon::new(IconName::CircleCheck).xsmall()).child("Installed"))
+                .into_any_element(),
+        )
+    }
+
+    /// The compact bar pinned over the top of the project panel once its
+    /// Install bar has scrolled away: icon, name, author, downloads when
+    /// there's room, the Install button and the tabs. `fade` runs 0 to 1.
+    fn sticky_bar(
+        &self,
+        m: &cf::Mod,
+        target: Option<&Instance>,
+        width: f32,
+        fade: f32,
+        files_label: String,
+        n_deps: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let action = self.sticky_action(m, target, cx);
+        let icon = m.icon().and_then(|u| self.store.read(cx).image(u)).map(Path::to_path_buf);
+        let theme = cx.theme();
+        let author = m.authors.first().map(|a| format!("by {}", a.name));
+        // Narrow panels drop the downloads first; the name and author
+        // truncate; Install and the tabs always stay.
+        let show_downloads = width >= 30.;
+        let e = 1. - (1. - fade).powi(3);
+        let height = self.sticky.height.clone();
+        v_flex()
+            .id("sticky-bar")
+            .absolute()
+            .top(px(-6. * (1. - e)))
+            .left_0()
+            .right_0()
+            .opacity(e)
+            .bg(theme.sidebar)
+            .border_b_1()
+            .border_color(theme.border)
+            .shadow_md()
+            // Clicks and wheel turns on the bar stay on it.
+            .occlude()
+            .child(
+                canvas(move |b, _, _| height.set(b.size.height), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(
+                h_flex()
+                    .gap_2p5()
+                    .px_5()
+                    .pt_2()
+                    .items_center()
+                    .child(crate::logos::thumb(&self.logos, m.icon(), icon.as_deref(), rems(1.75), cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_sm().font_semibold().truncate().child(m.name.clone()))
+                            .children(author.map(|a| widgets::caption(a, cx).text_xs().truncate())),
+                    )
+                    .when(show_downloads, |r| {
+                        r.child(stat(IconName::Download, human_count(m.download_count), cx).text_xs())
+                    })
+                    .children(action),
+            )
+            .child(
+                TabBar::new("sticky-tabs")
+                    .underline()
+                    .px_5()
+                    .selected_index(self.detail_tab)
+                    .child(Tab::new().label("Description"))
+                    .child(Tab::new().label(files_label))
+                    .child(Tab::new().label(format!("Dependencies {n_deps}")))
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        this.detail_tab = *ix;
+                        // Past the page's own tabs, tuck them under the
+                        // bar so the new tab reads from its start.
+                        if let Some(tabs) = this.sticky.down_page(&this.sticky.tabs) {
+                            let under = tabs - this.sticky.height.get();
+                            let mut at = this.detail_scroll.offset();
+                            if -at.y > under {
+                                at.y = -under;
+                                this.detail_scroll.set_offset(at);
+                            }
+                        }
+                        cx.notify();
+                    })),
+            )
             .into_any_element()
     }
 
@@ -4628,6 +4794,86 @@ fn install_button(
         return widgets::busy_button(b.icon(IconName::Hourglass), progress, cx);
     }
     b.disabled(hold.is_some()).when_some(hold, |b, why| b.tooltip(why))
+}
+
+/// The project panel's compact bar (name, Install and the tabs), pinned
+/// at the top once the Install bar has scrolled away.
+///
+/// Scrolling already redraws the panel each frame, so the bar costs one
+/// comparison per frame: the scroll offset against where the Install bar
+/// ends, measured as the page paints. It lies over the page, so showing
+/// it moves nothing.
+#[derive(Default)]
+struct Sticky {
+    /// The project it was worked out for; another one starts hidden.
+    project: Cell<u64>,
+    shown: Cell<bool>,
+    /// When it last showed or hid, for the fade.
+    flipped: Cell<Option<Instant>>,
+    /// Where, on screen, the page's top and the ends of its Install bar
+    /// and tabs were last painted (`page_mark`); and the bar's height.
+    top: Rc<Cell<Option<Pixels>>>,
+    fold: Rc<Cell<Option<Pixels>>>,
+    tabs: Rc<Cell<Option<Pixels>>>,
+    height: Rc<Cell<Pixels>>,
+}
+
+/// Whether file `f` is newer or older than the installed one: CurseForge
+/// ids grow with each upload; Modrinth's are hashes, so its files go by
+/// date.
+fn file_age(f: &cf::File, a: &hopper::instances::Addon) -> std::cmp::Ordering {
+    if hopper::modrinth::is_mr(f.id) || hopper::modrinth::is_mr(a.file_id) {
+        f.file_date.as_str().cmp(a.file_date.as_str())
+    } else {
+        f.id.cmp(&a.file_id)
+    }
+}
+
+/// How long the bar takes to fade and slide in or out.
+const STICKY_FADE: Duration = Duration::from_millis(120);
+/// It shows this far past the fold and hides this far before it, so a
+/// scroll resting on the line doesn't flicker it.
+const STICKY_SLACK: f32 = 12.;
+
+impl Sticky {
+    /// Whether it shows at this scroll, and how far into its fade it is
+    /// (0 hidden, 1 shown).
+    fn update(&self, project: u64, scrolled: Pixels) -> f32 {
+        if self.project.get() != project {
+            self.project.set(project);
+            self.shown.set(false);
+            self.flipped.set(None);
+        }
+        let was = self.shown.get();
+        let now = self.down_page(&self.fold).is_some_and(|f| {
+            if was { scrolled > f - px(STICKY_SLACK) } else { scrolled > f + px(STICKY_SLACK) }
+        });
+        if now != was {
+            self.shown.set(now);
+            self.flipped.set(Some(Instant::now()));
+        }
+        let t = self.flipped.get().map_or(1., |at| (at.elapsed().as_secs_f32() / STICKY_FADE.as_secs_f32()).min(1.));
+        if now { t } else { 1. - t }
+    }
+
+    /// How far a mark sits below the page's top: the same at any scroll.
+    fn down_page(&self, mark: &Cell<Option<Pixels>>) -> Option<Pixels> {
+        Some(mark.get()? - self.top.get()?)
+    }
+}
+
+/// A zero-height mark at the top or bottom of the element it's put in
+/// (which must be `relative`), recording where on screen it was painted.
+/// Measured against the page's own top mark, so the scroll handle isn't
+/// read while its container is laying out.
+fn page_mark(cell: Rc<Cell<Option<Pixels>>>, bottom: bool) -> AnyElement {
+    canvas(move |b, _, _| cell.set(Some(b.origin.y)), |_, _, _, _| {})
+    .absolute()
+    .left_0()
+    .w_full()
+    .h_0()
+    .map(|c| if bottom { c.bottom_0() } else { c.top_0() })
+    .into_any_element()
 }
 
 /// An icon and a value, for a project's stats, colored by what it counts
@@ -5174,7 +5420,7 @@ impl BrowseView {
                 }
                 self.desc.update(cx, |v, _| v.show(id, segments, images));
             }
-            let body = self.detail(&m, target, cx);
+            let body = self.detail(&m, target, width, cx);
             return Some(frame(ElementId::Name(format!("detail:{}", m.id).into()), body));
         }
         // A peek whose project didn't load says why.
