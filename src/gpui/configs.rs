@@ -4,6 +4,7 @@
 //! A folder can also mirror or live-link (Folder rules). History lists and
 //! undoes every sync.
 
+use crate::selection::Selection;
 use crate::store::{Store, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
@@ -212,7 +213,10 @@ pub struct ConfigsPanel {
     running: bool,
     /// (done, total, phase) of the compare.
     progress: Arc<(AtomicUsize, AtomicUsize, AtomicUsize)>,
-    selected: HashSet<String>,
+    /// Ticked files; Ctrl and Shift clicks on rows tick them too.
+    selected: Selection,
+    /// The file list, for Ctrl+A / Esc / Delete.
+    list_focus: FocusHandle,
     filter: Entity<InputState>,
     query: String,
     new_folder: Entity<InputState>,
@@ -271,7 +275,8 @@ impl ConfigsPanel {
             diff: None,
             running: false,
             progress: Arc::new((AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0))),
-            selected: HashSet::new(),
+            selected: Selection::new(),
+            list_focus: cx.focus_handle(),
             filter,
             query: String::new(),
             new_folder,
@@ -566,7 +571,7 @@ impl ConfigsPanel {
         let restart = self.online(cx) && act != Act::Pull;
         self.running = true;
         for f in &files {
-            self.selected.remove(f);
+            self.selected.keys_mut().remove(f);
         }
         cx.spawn(async move |this, cx| {
             let message = cx
@@ -787,6 +792,57 @@ impl ConfigsPanel {
             .into_iter()
             .filter(|f| self.selected.contains(&f.rel))
             .collect()
+    }
+
+    /// The files the list shows, in its order (for Shift ranges).
+    fn tick_order(&self) -> Vec<String> {
+        let Some(diff) = &self.diff else { return Vec::new() };
+        self.items
+            .iter()
+            .filter_map(|it| match it {
+                Item::File(i) => diff.files.get(*i).map(|f| f.rel.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A tick by a click on `rel`: on its own it adds or takes away (as
+    /// Ctrl does), with Shift it ticks from the last one to here.
+    fn tick(&mut self, rel: &str, m: Modifiers, window: &mut Window, cx: &mut Context<Self>) {
+        let order = self.tick_order();
+        self.selected.click(rel, Modifiers { control: true, platform: false, ..m }, &order);
+        // Ctrl+A and Esc then work on the list.
+        window.focus(&self.list_focus, cx);
+        cx.notify();
+    }
+
+    /// The list's keys: Ctrl+A ticks what it shows, Esc unticks, Delete
+    /// moves ticked server-only files off the server (after asking).
+    fn list_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = &e.keystroke.modifiers;
+        match e.keystroke.key.as_str() {
+            "a" if (m.control || m.platform) && !m.shift && !m.alt => {
+                let order = self.tick_order();
+                self.selected.select_all(&order);
+            }
+            "escape" if !self.selected.is_empty() => self.selected.clear(),
+            "delete" if !self.running => {
+                let Some(diff) = self.diff.clone() else { return };
+                let remove: Vec<String> = self
+                    .picked(&diff)
+                    .iter()
+                    .filter(|f| f.status == FileStatus::OnlyServer)
+                    .map(|f| f.rel.clone())
+                    .collect();
+                if remove.is_empty() {
+                    return;
+                }
+                self.confirm(Act::Delete, remove, window, cx);
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     /// The list's rows: per group a heading, then its files, with the open
@@ -1563,9 +1619,9 @@ impl ConfigsPanel {
                                 .on_change(cx.listener(move |this, v: &bool, _, cx| {
                                     for k in &keys {
                                         if *v {
-                                            this.selected.insert(k.clone());
+                                            this.selected.keys_mut().insert(k.clone());
                                         } else {
-                                            this.selected.remove(k);
+                                            this.selected.keys_mut().remove(k);
                                         }
                                     }
                                     cx.notify();
@@ -1663,7 +1719,7 @@ impl ConfigsPanel {
                     }),
             )
         });
-        let (r1, r2, st) = (rel.clone(), rel.clone(), f.status);
+        let (r1, r2, r3, st) = (rel.clone(), rel.clone(), rel.clone(), f.status);
         let (c_dir, s_dir) = (c_dir.to_path_buf(), s_dir.to_path_buf());
         let viewable = !f.binary && !f.rel.to_lowercase().ends_with(".zip") && !f.rel.to_lowercase().ends_with(".jar");
         h_flex()
@@ -1675,16 +1731,22 @@ impl ConfigsPanel {
             .rounded(theme.radius)
             .when(picked, |r| widgets::row_selected(r, cx))
             .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
+            // Ctrl or Shift on the row ticks it, as in a file explorer; a
+            // plain click on the row does nothing, as before.
+            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                let m = e.modifiers();
+                if m.control || m.platform || m.shift {
+                    this.tick(&r3, m, window, cx);
+                }
+            }))
             .child(
                 Checkbox::new(id("cfgsel"))
                     .checked(picked)
-                    .on_change(cx.listener(move |this, v: &bool, _, cx| {
-                        if *v {
-                            this.selected.insert(r1.clone());
-                        } else {
-                            this.selected.remove(&r1);
-                        }
-                        cx.notify();
+                    .on_change(cx.listener(move |this, _: &bool, window, cx| {
+                        // The row's own click would tick it a second time.
+                        cx.stop_propagation();
+                        let m = window.modifiers();
+                        this.tick(&r1, m, window, cx);
                     })),
             )
             .child(
@@ -1851,6 +1913,8 @@ impl Render for ConfigsPanel {
                 .flex_1()
                 .min_h_0()
                 .relative()
+                .track_focus(&self.list_focus)
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| this.list_key(e, window, cx)))
                 .child(
                     list(
                         self.list.clone(),

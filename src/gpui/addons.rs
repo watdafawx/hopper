@@ -72,7 +72,10 @@ pub(crate) enum Row {
 
 gpui_kit::actions!(
     addons,
-    [RowUp, RowDown, RowFirst, RowLast, RowPageUp, RowPageDown, RowToggle, RowOpen]
+    [
+        RowUp, RowDown, RowFirst, RowLast, RowPageUp, RowPageDown, RowToggle, RowOpen, RowPickAll, RowPickNone,
+        RowStretchUp, RowStretchDown, RowRemove
+    ]
 );
 
 /// The table's keys, while it has focus.
@@ -87,6 +90,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("pagedown", RowPageDown, ctx),
         KeyBinding::new("space", RowToggle, ctx),
         KeyBinding::new("enter", RowOpen, ctx),
+        // The file explorer's picking keys, as every list has them
+        // (selection.rs).
+        KeyBinding::new("ctrl-a", RowPickAll, ctx),
+        KeyBinding::new("escape", RowPickNone, ctx),
+        KeyBinding::new("shift-up", RowStretchUp, ctx),
+        KeyBinding::new("shift-down", RowStretchDown, ctx),
+        KeyBinding::new("delete", RowRemove, ctx),
     ]);
 }
 
@@ -2672,7 +2682,7 @@ impl AddonsView {
         if self.selected.is_empty() {
             return None;
         }
-        let files: Vec<String> = self.selected.iter().cloned().collect();
+        let files = self.picked_in_order();
         let ups: Vec<Update> = files
             .iter()
             .filter_map(|f| inst.addon_by_file(f))
@@ -2684,110 +2694,62 @@ impl AddonsView {
             .filter_map(|f| inst.addon_by_file(f))
             .all(|a| a.locked);
         let (f1, f2, f3, f4) = (files.clone(), files.clone(), files.clone(), files);
-        let theme = cx.theme();
-        // Floats over the table, bottom centre, so the list doesn't jump.
-        let bar = h_flex()
-            .id("bulk-bar")
-            .px_2()
-            .py_1p5()
-            .gap_1()
-            .items_center()
-            .rounded(theme.radius_lg)
-            .bg(theme.popover)
-            .text_color(theme.popover_foreground)
-            .border_1()
-            .border_color(theme.border)
-            .shadow_xl()
-            .occlude()
-            .child(
-                div()
-                    .text_sm()
-                    .font_semibold()
-                    .px_2()
-                    .child(format!("{} selected", self.selected.len())),
-            )
-            .child(div().w_px().h_5().bg(theme.border))
-            .child(
-                Button::new("bulk-enable")
-                    .small()
-                    .ghost()
-                    .icon(IconName::CircleCheck)
-                    .label("Enable")
-                    .on_click(
-                        cx.listener(move |this, _, w, cx| this.toggle(f1.clone(), true, w, cx)),
-                    ),
-            )
-            .child(
-                Button::new("bulk-disable")
-                    .small()
-                    .ghost()
-                    .icon(IconName::CircleOff)
-                    .label("Disable")
-                    .on_click(
-                        cx.listener(move |this, _, w, cx| this.toggle(f2.clone(), false, w, cx)),
-                    ),
-            )
-            .child(
-                Button::new("bulk-lock")
-                    .small()
-                    .ghost()
-                    .icon(if all_locked { IconName::LockOpen } else { IconName::Lock })
-                    .label(if all_locked { "Unlock" } else { "Lock" })
-                    .tooltip(if all_locked {
-                        "Allow updates again"
-                    } else {
-                        "Keep this version: updates are ignored"
-                    })
-                    .on_click(cx.listener(move |this, _, w, cx| {
-                        this.set_locks(f4.clone(), !all_locked, w, cx)
-                    })),
-            )
-            .when(!ups.is_empty(), |r| {
-                let n = ups.len();
-                r.child(
-                    Button::new("bulk-update")
-                        .small()
-                        .primary()
-                        .icon(IconName::Download)
-                        .label(format!("Update {n}"))
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.review_updates(ups.clone(), window, cx)),
-                        ),
-                )
-            })
-            .child(
-                Button::new("bulk-remove")
-                    .small()
-                    .ghost()
-                    .danger()
-                    .icon(IconName::Trash)
-                    .label("Remove")
-                    .on_click(
-                        cx.listener(move |this, _, w, cx| this.ask_remove(f3.clone(), w, cx)),
-                    ),
-            )
-            .child(div().w_px().h_5().bg(theme.border))
-            .child(
-                Button::new("bulk-clear")
-                    .small()
-                    .ghost()
-                    .icon(IconName::X)
-                    .tooltip("Clear selection")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.selected.clear();
-                        cx.notify();
-                    })),
-            );
-        Some(
-            h_flex()
-                .absolute()
-                .bottom_6()
-                .left_0()
-                .right_0()
-                .justify_center()
-                .child(widgets::enter("bulk-bar-in", div().child(bar)))
+        let mut extra = vec![
+            Button::new("bulk-enable")
+                .small()
+                .ghost()
+                .icon(IconName::CircleCheck)
+                .label("Enable")
+                .on_click(cx.listener(move |this, _, w, cx| this.toggle(f1.clone(), true, w, cx)))
                 .into_any_element(),
-        )
+            Button::new("bulk-disable")
+                .small()
+                .ghost()
+                .icon(IconName::CircleOff)
+                .label("Disable")
+                .on_click(cx.listener(move |this, _, w, cx| this.toggle(f2.clone(), false, w, cx)))
+                .into_any_element(),
+            Button::new("bulk-lock")
+                .small()
+                .ghost()
+                .icon(if all_locked { IconName::LockOpen } else { IconName::Lock })
+                .label(if all_locked { "Unlock" } else { "Lock" })
+                .tooltip(if all_locked { "Allow updates again" } else { "Keep this version: updates are ignored" })
+                .on_click(cx.listener(move |this, _, w, cx| this.set_locks(f4.clone(), !all_locked, w, cx)))
+                .into_any_element(),
+        ];
+        if !ups.is_empty() {
+            let n = ups.len();
+            extra.push(
+                Button::new("bulk-update")
+                    .small()
+                    .primary()
+                    .icon(IconName::Download)
+                    .label(format!("Update {n}"))
+                    .on_click(cx.listener(move |this, _, window, cx| this.review_updates(ups.clone(), window, cx)))
+                    .into_any_element(),
+            );
+        }
+        let view = cx.entity();
+        let remove: Box<dyn Fn(&ClickEvent, &mut Window, &mut App)> = {
+            let view = view.clone();
+            Box::new(move |_, w, cx| view.update(cx, |this, cx| this.ask_remove(f3.clone(), w, cx)))
+        };
+        // Floats over the table, bottom centre, so the list doesn't jump.
+        let bar = crate::selection::bar(
+            "bulk-bar",
+            self.selected.len(),
+            extra,
+            Some(("Remove".into(), remove)),
+            move |_, _, cx| {
+                view.update(cx, |this, cx| {
+                    this.selected.clear();
+                    cx.notify();
+                })
+            },
+            cx,
+        );
+        Some(crate::selection::floating("bulk-bar", bar))
     }
 
     fn header(
@@ -3376,9 +3338,69 @@ impl AddonsView {
         }
         let ix = ix.clamp(0, n as isize - 1) as usize;
         self.cursor = Some(ix);
+        // Shift+arrows stretch from where the keys are now, as in Explorer.
+        self.anchor = Some(ix);
         self.keys = true;
         self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
         cx.notify();
+    }
+
+    /// Shift+Up / Down: the picks become the rows from the anchor to the
+    /// row the cursor moves to (selection.rs's `step`).
+    fn stretch(&mut self, step: isize, cx: &mut Context<Self>) {
+        let n = self.row_count(cx);
+        if n == 0 {
+            return;
+        }
+        let next = match self.cursor {
+            Some(c) => (c as isize + step).clamp(0, n as isize - 1) as usize,
+            None if step < 0 => n - 1,
+            None => 0,
+        };
+        let from = self.anchor.or(self.cursor).unwrap_or(next);
+        self.select_range(from, next, false);
+        self.anchor = Some(from);
+        self.cursor = Some(next);
+        self.keys = true;
+        self.scroll.scroll_to_item(next, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Ctrl+A: every row the filter shows.
+    fn pick_all(&mut self, cx: &mut Context<Self>) {
+        let n = self.row_count(cx);
+        self.selected = (0..n).filter_map(|ix| self.row_file(ix)).collect();
+        cx.notify();
+    }
+
+    /// The picked files in the order the table shows them (any the filter
+    /// hides now at the end: they're still picked).
+    fn picked_in_order(&self) -> Vec<String> {
+        let mut out: Vec<String> = (0..self.table.rows.len())
+            .filter_map(|ix| self.row_file(ix))
+            .filter(|f| self.selected.contains(f))
+            .collect();
+        let shown: HashSet<String> = out.iter().cloned().collect();
+        let mut rest: Vec<String> = self.selected.iter().filter(|f| !shown.contains(*f)).cloned().collect();
+        rest.sort();
+        out.extend(rest);
+        out
+    }
+
+    /// Delete: the picked rows, else the keys' row, go through the usual
+    /// Remove question (backups with Undo, or the Recycle Bin).
+    fn on_remove_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_rows();
+        let files = if self.selected.is_empty() {
+            self.cursor.and_then(|ix| self.row_file(ix)).into_iter().collect()
+        } else {
+            self.picked_in_order()
+        };
+        if files.is_empty() {
+            cx.propagate();
+            return;
+        }
+        self.ask_remove(files, window, cx);
     }
 
     fn row_count(&mut self, _: &mut Context<Self>) -> usize {
@@ -5447,6 +5469,19 @@ impl Render for AddonsView {
                 .on_action(cx.listener(|this, _: &RowLast, _, cx| this.move_cursor(isize::MAX, cx)))
                 .on_action(cx.listener(Self::on_toggle))
                 .on_action(cx.listener(Self::on_open))
+                .on_action(cx.listener(|this, _: &RowStretchUp, _, cx| this.stretch(-1, cx)))
+                .on_action(cx.listener(|this, _: &RowStretchDown, _, cx| this.stretch(1, cx)))
+                .on_action(cx.listener(|this, _: &RowPickAll, _, cx| this.pick_all(cx)))
+                .on_action(cx.listener(|this, _: &RowRemove, w, cx| this.on_remove_key(w, cx)))
+                .on_action(cx.listener(|this, _: &RowPickNone, _, cx| {
+                    // Nothing picked: Esc goes on to close the panel or page.
+                    if this.selected.is_empty() {
+                        cx.propagate();
+                        return;
+                    }
+                    this.selected.clear();
+                    cx.notify();
+                }))
                 .flex_1()
                 .min_h_0()
                 .relative()

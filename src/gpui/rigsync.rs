@@ -170,6 +170,8 @@ pub struct SyncPanel {
     pick: PickState,
     /// The row a tick box was last pressed on, for Shift.
     pick_anchor: Option<usize>,
+    /// The list, for Ctrl+A and Esc.
+    list_focus: FocusHandle,
     /// The rows a button drag will act on when let go.
     swept: HashSet<String>,
     /// Groups showing their rows.
@@ -303,6 +305,7 @@ impl SyncPanel {
             selected: HashSet::new(),
             pick: PickState::default(),
             pick_anchor: None,
+            list_focus: cx.focus_handle(),
             swept: HashSet::new(),
             open: [Group::Add, Group::Update, Group::ServerOnly, Group::KeptOff].into(),
             show_kept: false,
@@ -1073,6 +1076,39 @@ impl SyncPanel {
             }
         }
         self.pick_anchor = Some(ix);
+        cx.notify();
+    }
+
+    /// A click on a row: ticks or unticks it (with or without Ctrl, as the
+    /// tick box does); Shift ticks the rows from the last one clicked, and
+    /// with Ctrl adds them to the ticks, like a file explorer.
+    fn row_click(&mut self, key: &str, m: Modifiers) {
+        let Some(ix) = (0..self.items.len()).find(|&i| self.line_key(i).as_deref() == Some(key)) else {
+            return;
+        };
+        match self.pick_anchor.filter(|_| m.shift) {
+            Some(a) => {
+                if !(m.control || m.platform) {
+                    self.selected.clear();
+                }
+                for i in a.min(ix)..=a.max(ix) {
+                    if let Some(k) = self.line_key(i) {
+                        self.selected.insert(k);
+                    }
+                }
+            }
+            None => {
+                if !self.selected.remove(key) {
+                    self.selected.insert(key.to_string());
+                }
+                self.pick_anchor = Some(ix);
+            }
+        }
+    }
+
+    /// Ctrl+A: every row the filters show that can be ticked.
+    fn pick_all(&mut self, cx: &mut Context<Self>) {
+        self.selected = (0..self.items.len()).filter_map(|i| self.line_key(i)).collect();
         cx.notify();
     }
 
@@ -2608,14 +2644,13 @@ impl SyncPanel {
             .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
             .when(pickable, |r| {
                 r.clickable(cx).on_click(
-cx.listener(move |this, _, _, cx| {
+cx.listener(move |this, e: &ClickEvent, window, cx| {
                     // A drag let go on this row isn't a click on it.
                     if drag_pick::spreading(this) {
                         return;
                     }
-                    if !this.selected.remove(&k2) {
-                        this.selected.insert(k2.clone());
-                    }
+                    window.focus(&this.list_focus, cx);
+                    this.row_click(&k2, e.modifiers());
                     cx.notify();
                 }))
             })
@@ -2976,6 +3011,19 @@ impl Render for SyncPanel {
                             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                             .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                             .on_hover(cx.listener(|this, h: &bool, _, _| this.settle.pointer_in = *h))
+                            // Ctrl+A ticks every row shown, Esc lets go
+                            // (the instance Mods table's keys).
+                            .track_focus(&self.list_focus)
+                            .key_context("AddonsTable")
+                            .on_action(cx.listener(|this, _: &crate::addons::RowPickAll, _, cx| this.pick_all(cx)))
+                            .on_action(cx.listener(|this, _: &crate::addons::RowPickNone, _, cx| {
+                                if this.selected.is_empty() {
+                                    cx.propagate();
+                                    return;
+                                }
+                                this.selected.clear();
+                                cx.notify();
+                            }))
                             .h(rems(ROW_H * count as f32 + 0.25))
                             .flex_shrink(1.)
                             .min_h_0()

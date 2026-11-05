@@ -2,6 +2,7 @@
 //! look inside one, restore all or some of it, delete it.
 
 use super::{Load, Target, bytes, get, job, load_state, q};
+use crate::selection::{self, KeyAct, Selection};
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
@@ -14,7 +15,7 @@ use gpui_kit::component::{ActiveTheme as _, WindowExt as _, Disableable as _, Ic
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 #[derive(Clone)]
 struct Backup {
@@ -52,7 +53,11 @@ pub struct BackupsTab {
     status: Option<String>,
     open: Option<Backup>,
     items: Load<Vec<Item>>,
-    picked: HashSet<String>,
+    /// The ticked items of the open backup.
+    picked: Selection,
+    /// Backups picked in the list, by name (Ctrl / Shift clicks).
+    sel: Selection,
+    focus: FocusHandle,
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -144,8 +149,24 @@ impl BackupsTab {
             status: None,
             open: None,
             items: Load::Waiting,
-            picked: HashSet::new(),
+            picked: Selection::new(),
+            sel: Selection::new(),
+            focus: cx.focus_handle(),
         }
+    }
+
+    /// The backups' names in the order the list shows them.
+    fn order(&self) -> Vec<String> {
+        self.data.ready().map(|d| d.backups.iter().map(|b| b.name.clone()).collect()).unwrap_or_default()
+    }
+
+    /// The open backup's items in the order they're shown.
+    fn item_order(&self) -> Vec<String> {
+        self.items.ready().map(|l| l.iter().map(|i| i.path.clone()).collect()).unwrap_or_default()
+    }
+
+    fn picked_backups(&self) -> Vec<Backup> {
+        self.data.ready().map(|d| d.backups.iter().filter(|b| self.sel.contains(&b.name)).cloned().collect()).unwrap_or_default()
     }
 
     /// Shows `target`'s Backups (again when it's the same server: a refresh).
@@ -174,6 +195,8 @@ impl BackupsTab {
                 Ok(j) => v.data = Load::Ready(parse(&j)),
                 Err(e) => v.data = Load::Failed(e),
             }
+            let order = v.order();
+            v.sel.retain(&order);
         });
     }
 
@@ -301,18 +324,31 @@ impl BackupsTab {
     }
 
     fn ask_delete(&mut self, b: Backup, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask_delete_all(vec![b], window, cx)
+    }
+
+    /// One question for one backup or several, then each goes the way
+    /// a single Delete does.
+    fn ask_delete_all(&mut self, list: Vec<Backup>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(first) = list.first() else { return };
+        let n = list.len();
+        let title = if n == 1 { format!("Delete the backup from {}?", when(first.at)) } else { format!("Delete {n} backups?") };
         let this = cx.entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
-            let (this, b) = (this.clone(), b.clone());
+            let (this, list) = (this.clone(), list.clone());
             alert
-                .title(format!("Delete the backup from {}?", when(b.at)))
-                .description("It can't be brought back.")
+                .title(title.clone())
+                .description(if n == 1 { "It can't be brought back." } else { "They can't be brought back." })
                 .confirm()
                 .ok_text("Delete")
                 .ok_variant(gpui_kit::component::button::ButtonVariant::Danger)
                 .on_ok(move |_, _, cx| {
-                    let b = b.clone();
-                    this.update(cx, |t, cx| t.delete(b, cx));
+                    let list = list.clone();
+                    this.update(cx, |t, cx| {
+                        for b in list {
+                            t.delete(b, cx);
+                        }
+                    });
                     true
                 })
         });
@@ -380,12 +416,14 @@ impl BackupsTab {
                 .into_any_element();
         }
         let open = self.open.as_ref().map(|o| o.name.clone());
+        let many = self.sel.many();
         let rows: Vec<AnyElement> = d
             .backups
             .iter()
             .enumerate()
             .map(|(i, b)| {
-                let sel = open.as_deref() == Some(b.name.as_str());
+                // Several picked show as picked; else the one open does.
+                let sel = if many { self.sel.contains(&b.name) } else { open.as_deref() == Some(b.name.as_str()) };
                 let (b1, b2, b3) = (b.clone(), b.clone(), b.clone());
                 let row = h_flex()
                     .id(("backup", i))
@@ -395,7 +433,15 @@ impl BackupsTab {
                     .py_2()
                     .rounded(theme.radius)
                     .clickable(cx)
-                    .on_click(cx.listener(move |t, _, _, cx| t.browse(b1.clone(), cx)))
+                    // A click opens it; Ctrl and Shift pick several.
+                    .on_click(cx.listener(move |t, e: &ClickEvent, _, cx| {
+                        let order = t.order();
+                        if t.sel.click(&b1.name, e.modifiers(), &order) {
+                            t.browse(b1.clone(), cx)
+                        } else {
+                            cx.notify()
+                        }
+                    }))
                     .child(
                         Icon::new(if b.full { IconName::Database } else { IconName::Archive })
                             .text_color(theme.muted_foreground),
@@ -443,7 +489,59 @@ impl BackupsTab {
                 if sel { widgets::row_selected(row, cx).into_any_element() } else { widgets::row_hover(row, cx).into_any_element() }
             })
             .collect();
-        v_flex().id("backup-list").size_full().gap_1().overflow_y_scrollbar().children(rows).into_any_element()
+        let bar = many.then(|| {
+            let view = cx.entity();
+            let v2 = view.clone();
+            selection::floating(
+                "backups-bar",
+                selection::bar(
+                    "backups-bar",
+                    self.sel.len(),
+                    Vec::new(),
+                    Some((
+                        "Delete".into(),
+                        Box::new(move |_, window, cx| {
+                            view.update(cx, |t, cx| {
+                                let list = t.picked_backups();
+                                t.ask_delete_all(list, window, cx)
+                            })
+                        }),
+                    )),
+                    move |_, _, cx| {
+                        v2.update(cx, |t, cx| {
+                            t.sel.clear();
+                            cx.notify();
+                        })
+                    },
+                    cx,
+                ),
+            )
+        });
+        div()
+            .relative()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|t, e: &KeyDownEvent, window, cx| {
+                let order = t.order();
+                match selection::on_key(&mut t.sel, e, &order, cx) {
+                    KeyAct::None => return,
+                    KeyAct::Delete => {
+                        let list = t.picked_backups();
+                        t.ask_delete_all(list, window, cx)
+                    }
+                    // The arrows show the backup they land on.
+                    KeyAct::Moved(name) if !t.sel.many() => {
+                        if let Some(b) = t.data.ready().and_then(|d| d.backups.iter().find(|b| b.name == name).cloned()) {
+                            t.browse(b, cx)
+                        }
+                    }
+                    KeyAct::Changed | KeyAct::Moved(_) => {}
+                }
+                cx.notify();
+            }))
+            .child(v_flex().id("backup-list").size_full().gap_1().overflow_y_scrollbar().children(rows))
+            .children(bar)
+            .into_any_element()
     }
 
     fn entries(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -459,21 +557,31 @@ impl BackupsTab {
                     widgets::empty_state(IconName::FolderOpen, "Nothing in this backup", None, cx).into_any_element()
                 } else {
                     let rows = items.into_iter().enumerate().map(|(i, it)| {
-                        let path = it.path.clone();
-                        h_flex()
+                        let (path, p2) = (it.path.clone(), it.path.clone());
+                        let ticked = self.picked.contains(&it.path);
+                        let row = h_flex()
+                            .id(("pick-row", i))
                             .gap_2()
                             .items_center()
                             .px_2()
                             .py_1()
+                            .rounded(theme.radius)
+                            .clickable(cx)
+                            // A tick list: a click ticks or unticks the row,
+                            // Shift ticks the rows from the last one to here.
+                            .on_click(cx.listener(move |t, e: &ClickEvent, _, cx| {
+                                let order = t.item_order();
+                                t.picked.click(&p2, tick_click(e.modifiers()), &order);
+                                cx.notify();
+                            }))
                             .child(
                                 Checkbox::new(("pick", i))
-                                    .checked(self.picked.contains(&it.path))
-                                    .on_click(cx.listener(move |t, v: &bool, _, cx| {
-                                        if *v {
-                                            t.picked.insert(path.clone());
-                                        } else {
-                                            t.picked.remove(&path);
-                                        }
+                                    .checked(ticked)
+                                    .on_click(cx.listener(move |t, _: &bool, window, cx| {
+                                        // The row's own click would tick it a second time.
+                                        cx.stop_propagation();
+                                        let order = t.item_order();
+                                        t.picked.click(&path, tick_click(window.modifiers()), &order);
                                         cx.notify();
                                     })),
                             )
@@ -483,9 +591,30 @@ impl BackupsTab {
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
                                     .child(format!("{} · {}", if it.files == 1 { "1 file".into() } else { format!("{} files", it.files) }, bytes(it.size))),
-                            )
+                            );
+                        if ticked { widgets::row_selected(row, cx) } else { row.hover(|s| widgets::row_hover(s, cx)) }
                     });
-                    v_flex().id("backup-entries").flex_1().min_h_0().overflow_y_scrollbar().children(rows).into_any_element()
+                    v_flex()
+                        .id("backup-entries")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        // Ctrl+A ticks every item, Esc unticks them.
+                        .on_key_down(cx.listener(|t, e: &KeyDownEvent, _, cx| {
+                            let m = &e.keystroke.modifiers;
+                            match e.keystroke.key.as_str() {
+                                "a" if (m.control || m.platform) && !m.shift && !m.alt => {
+                                    let order = t.item_order();
+                                    t.picked.select_all(&order);
+                                }
+                                "escape" if !t.picked.is_empty() => t.picked.clear(),
+                                _ => return,
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .children(rows)
+                        .into_any_element()
                 }
             }
         };
@@ -523,7 +652,7 @@ impl BackupsTab {
                         .label(if picked == 0 { "Restore selected".to_string() } else { format!("Restore selected ({picked})") })
                         .disabled(picked == 0 || busy)
                         .on_click(cx.listener(move |t, _, w, cx| {
-                            let mut paths: Vec<String> = t.picked.iter().cloned().collect();
+                            let mut paths: Vec<String> = t.picked.keys().iter().cloned().collect();
                             paths.sort();
                             t.ask_restore(b2.clone(), paths, w, cx)
                         })),
@@ -532,6 +661,12 @@ impl BackupsTab {
                 .into_any_element(),
         )
     }
+}
+
+/// A click in a tick list adds or takes away (as Ctrl does in a plain
+/// list), and Shift adds the range rather than replacing the ticks.
+fn tick_click(m: Modifiers) -> Modifiers {
+    Modifiers { control: true, platform: false, ..m }
 }
 
 impl Render for BackupsTab {

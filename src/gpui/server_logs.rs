@@ -9,6 +9,7 @@ use crate::crash_help::callout;
 use crate::line_select::{LineSelect, Lines};
 use crate::log_files;
 use crate::store::{Store, StoreEvent, open_path};
+use crate::selection::{self, KeyAct, Selection};
 use crate::widgets;
 use crate::widgets::Clickable as _;
 use gpui_kit::assets::IconName;
@@ -130,6 +131,12 @@ pub struct ServerLogsView {
     verdicts: HashMap<(String, i64), String>,
     /// The report picked in the list.
     picked: Option<String>,
+    /// The reports picked with Ctrl / Shift (the shown one alone else).
+    sel: Selection,
+    /// The older logs picked.
+    old_sel: Selection,
+    /// The lists, for their keys (Ctrl+A, arrows, Delete).
+    list_focus: FocusHandle,
     /// Reports read so far; `None` while reading.
     cards: HashMap<String, Option<Result<Card, String>>>,
     /// The card's mods (jars) whose "Why?" list is open.
@@ -177,6 +184,9 @@ impl ServerLogsView {
             reports: None,
             verdicts: HashMap::new(),
             picked: None,
+            sel: Selection::new(),
+            old_sel: Selection::new(),
+            list_focus: cx.focus_handle(),
             cards: HashMap::new(),
             why_open: HashSet::new(),
             more_open: HashSet::new(),
@@ -209,6 +219,8 @@ impl ServerLogsView {
             self.root = Some(root);
             self.reports = None;
             self.picked = None;
+            self.sel.clear();
+            self.old_sel.clear();
             self.cards.clear();
             self.why_open.clear();
             self.more_open.clear();
@@ -329,12 +341,16 @@ impl ServerLogsView {
         }));
     }
 
-    /// "Delete" on crash reports `rels` (one, or a report with its follow-ups).
-    fn ask_delete(&mut self, rels: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+    /// "Delete" on crash reports `rels` (one, or a report with its
+    /// follow-ups); `picked` when they are the reports
+    /// picked in the list (with their follow-ups), not one report's group.
+    fn ask_delete_as(&mut self, rels: Vec<String>, picked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
         let n = rels.len();
         let (title, what) = if n == 1 {
             ("Delete this crash report?".to_string(), "It".to_string())
+        } else if picked {
+            (format!("Delete these {n} crash reports?"), "They (with the follow-up reports of the ones picked)".to_string())
         } else {
             (format!("Delete these {n} crash reports?"), "They are the report and its follow-up reports; they".to_string())
         };
@@ -397,6 +413,10 @@ impl ServerLogsView {
         if self.picked.as_ref().is_some_and(|p| rels.contains(p)) {
             self.picked = None;
         }
+        for r in rels {
+            self.sel.keys_mut().remove(r);
+            self.old_sel.keys_mut().remove(r);
+        }
         self.old = None;
         if self.pane == Pane::Older {
             self.load_old(cx);
@@ -438,12 +458,16 @@ impl ServerLogsView {
             Some(Ok(l)) => l,
         };
         let radius = cx.theme().radius;
+        let order: Vec<String> = list.iter().map(|f| f.rel.clone()).collect();
+        self.old_sel.retain(&order);
         let rows: Vec<AnyElement> = list
             .iter()
             .enumerate()
             .map(|(i, f)| {
                 let rel = f.rel.clone();
-                let key_rel = f.rel.clone();
+                let click_rel = f.rel.clone();
+                let sel = self.old_sel.contains(&f.rel);
+                let order = order.clone();
                 h_flex()
                     .id(("srv-old-log", i))
                     .gap_3()
@@ -451,11 +475,11 @@ impl ServerLogsView {
                     .py_1p5()
                     .rounded(radius)
                     .clickable(cx)
-                    .hover(|s| widgets::row_hover(s, cx))
-                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
-                        if e.keystroke.key == "delete" {
-                            this.ask_delete_log(key_rel.clone(), window, cx);
-                        }
+                    .map(|d| if sel { widgets::row_selected(d, cx) } else { d.hover(|s| widgets::row_hover(s, cx)) })
+                    .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                        this.old_sel.click(&click_rel, e.modifiers(), &order);
+                        window.focus(&this.list_focus, cx);
+                        cx.notify();
                     }))
                     .child(div().flex_1().min_w_0().truncate().text_sm().child(file_name(&f.rel).to_string()))
                     .child(
@@ -494,17 +518,64 @@ impl ServerLogsView {
                         .on_click(cx.listener(|this, _, window, cx| this.ask_clear(hopper::crashfiles::Kind::Logs, window, cx))),
                 ),
             )
-            .child(div().id("srv-old-logs").flex_1().min_h_0().child(v_flex().gap_0p5().children(rows)).overflow_y_scrollbar())
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .track_focus(&self.list_focus)
+                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                        match selection::on_key(&mut this.old_sel, e, &order, cx) {
+                            KeyAct::None => return,
+                            KeyAct::Delete => this.ask_delete_logs(this.old_sel.in_order(&order), window, cx),
+                            KeyAct::Changed | KeyAct::Moved(_) => {}
+                        }
+                        cx.notify();
+                    }))
+                    .child(div().id("srv-old-logs").size_full().child(v_flex().gap_0p5().children(rows)).overflow_y_scrollbar())
+                    .children(self.old_bar(cx)),
+            )
             .into_any_element()
+    }
+
+    /// The bulk bar of the older logs, with more than one picked.
+    fn old_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.old_sel.many() {
+            return None;
+        }
+        let order: Vec<String> = match &self.old {
+            Some(Ok(l)) => l.iter().map(|f| f.rel.clone()).collect(),
+            _ => return None,
+        };
+        let del = cx.listener(move |this, _: &ClickEvent, window, cx| this.ask_delete_logs(this.old_sel.in_order(&order), window, cx));
+        let bar = selection::bar(
+            "srv-old-bulk",
+            self.old_sel.len(),
+            Vec::new(),
+            Some(("Delete".into(), Box::new(del))),
+            cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.old_sel.clear();
+                cx.notify();
+            }),
+            cx,
+        );
+        Some(selection::floating("srv-old-bulk", bar))
     }
 
     /// "Delete" on one older log.
     fn ask_delete_log(&mut self, rel: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask_delete_logs(vec![rel], window, cx)
+    }
+
+    /// "Delete" on older logs `rels` (the one pressed, or those picked).
+    fn ask_delete_logs(&mut self, rels: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
-        let body = format!("{} goes to {}, where you can get it back.", file_name(&rel), log_files::trash_name(&root));
+        let (title, body) = match rels.as_slice() {
+            [one] => ("Delete this log?".to_string(), format!("{} goes to {}, where you can get it back.", file_name(one), log_files::trash_name(&root))),
+            _ => (format!("Delete these {} logs?", rels.len()), format!("They go to {}, where you can get them back.", log_files::trash_name(&root))),
+        };
         let view = cx.entity();
-        let rels = vec![rel];
-        log_files::confirm(window, cx, "Delete this log?".to_string(), body, move |window, cx| {
+        log_files::confirm(window, cx, title, body, move |window, cx| {
             let r = log_files::delete(&root, &rels, false);
             let ok = r.is_ok();
             log_files::report(window, cx, r);
@@ -516,6 +587,9 @@ impl ServerLogsView {
 
     /// Shows report `rel`, reading it off the UI thread the first time.
     fn pick(&mut self, rel: String, cx: &mut Context<Self>) {
+        if !self.sel.contains(&rel) {
+            self.sel.set_one(rel.clone());
+        }
         self.picked = Some(rel.clone());
         cx.notify();
         if self.cards.get(&rel).is_some_and(|c| !matches!(c, Some(Err(_)))) {
@@ -776,9 +850,22 @@ impl ServerLogsView {
             }
             _ => true,
         };
+        // Each report's group: a report that explains a start takes its
+        // follow-ups with it when deleted.
+        let group_of = |i: usize| {
+            let mut g = vec![list[i].rel.clone()];
+            if let hopper::crashgroup::Role::Lead(f) = &roles[i] {
+                g.extend(f.iter().map(|&j| list[j].rel.clone()));
+            }
+            g
+        };
+        let order: Vec<String> = (0..list.len()).filter(|&i| shown(i)).map(|i| list[i].rel.clone()).collect();
+        let groups: HashMap<String, Vec<String>> = (0..list.len()).map(|i| (list[i].rel.clone(), group_of(i))).collect();
+        self.sel.retain(&order);
+        let many = self.sel.many();
         let mut rows: Vec<AnyElement> = Vec::new();
         for (i, r) in list.iter().enumerate().filter(|(i, _)| shown(*i)) {
-            let sel = picked.as_ref() == Some(&r.rel);
+            let sel = if many { self.sel.contains(&r.rel) } else { picked.as_ref() == Some(&r.rel) };
             let (title, follow) = match &roles[i] {
                 hopper::crashgroup::Role::FollowUp(lead) => (
                     hopper::crashgroup::follow_up_title(lead.and_then(|l| list[l].verdict.as_deref())),
@@ -787,20 +874,13 @@ impl ServerLogsView {
                 _ => (r.verdict.clone().unwrap_or_else(|| file_name(&r.rel).to_string()), false),
             };
             let rel = r.rel.clone();
-            // Deleting a report that explains a start takes its follow-ups too.
-            let mut group = vec![r.rel.clone()];
-            if let hopper::crashgroup::Role::Lead(f) = &roles[i] {
-                group.extend(f.iter().map(|&j| list[j].rel.clone()));
-            }
-            let (menu_view, menu_group, key_group) = (cx.entity(), group.clone(), group);
+            // Right-click on a picked row acts on every picked report.
+            let menu_group = if many && sel { picked_groups(&self.sel.in_order(&order), &groups) } else { group_of(i) };
+            let menu_many = many && sel;
+            let (menu_view, click_order) = (cx.entity(), order.clone());
             rows.push(
                 v_flex()
                     .id(("srv-crash-row", i))
-                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
-                        if e.keystroke.key == "delete" {
-                            this.ask_delete(key_group.clone(), window, cx);
-                        }
-                    }))
                     .gap_0p5()
                     .px_2()
                     .py_1p5()
@@ -818,13 +898,25 @@ impl ServerLogsView {
                             })
                             .text_xs(),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| this.pick(rel.clone(), cx)))
+                    .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                        window.focus(&this.list_focus, cx);
+                        if this.sel.click(&rel, e.modifiers(), &click_order) {
+                            this.pick(rel.clone(), cx);
+                        }
+                        cx.notify();
+                    }))
                     .context_menu(move |m, _, _| {
                         let (v, g) = (menu_view.clone(), menu_group.clone());
-                        let label = if g.len() > 1 { format!("Delete with its {} follow-ups…", g.len() - 1) } else { "Delete report…".to_string() };
+                        let label = if menu_many {
+                            format!("Delete {} reports…", g.len())
+                        } else if g.len() > 1 {
+                            format!("Delete with its {} follow-ups…", g.len() - 1)
+                        } else {
+                            "Delete report…".to_string()
+                        };
                         m.item(PopupMenuItem::new(label).icon(IconName::Trash).on_click(move |_, window, cx| {
                             let g = g.clone();
-                            v.update(cx, |this, cx| this.ask_delete(g, window, cx));
+                            v.update(cx, |this, cx| this.ask_delete_as(g, menu_many, window, cx));
                         }))
                     })
                     .into_any_element(),
@@ -855,11 +947,32 @@ impl ServerLogsView {
                 );
             }
         }
+        let bar = many.then(|| {
+            let (o, g) = (order.clone(), groups.clone());
+            let del = cx.listener(move |this, _: &ClickEvent, window, cx| {
+                let rels = picked_groups(&this.sel.in_order(&o), &g);
+                this.ask_delete_as(rels, true, window, cx)
+            });
+            let bar = selection::bar(
+                "srv-crash-bulk",
+                self.sel.len(),
+                Vec::new(),
+                Some(("Delete".into(), Box::new(del))),
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    match this.picked.clone() {
+                        Some(p) => this.sel.set_one(p),
+                        None => this.sel.clear(),
+                    }
+                    cx.notify();
+                }),
+                cx,
+            );
+            selection::floating("srv-crash-bulk", bar)
+        });
+        let key_order = order.clone();
         let side = div()
             .id("srv-crash-list")
-            .w(rems(20.))
-            .flex_none()
-            .h_full()
+            .size_full()
             .child(
                 v_flex()
                     .gap_0p5()
@@ -875,9 +988,36 @@ impl ServerLogsView {
                                 .on_click(cx.listener(|this, _, window, cx| this.ask_clear(hopper::crashfiles::Kind::Crashes, window, cx))),
                         ),
                     )
-                    .children(rows),
+                    .children(rows)
+                    // Room under the last row for the bulk bar.
+                    .when(many, |d| d.pb(rems(4.))),
             )
             .overflow_y_scrollbar();
+        let side = div()
+            .relative()
+            .w(rems(20.))
+            .flex_none()
+            .h_full()
+            .track_focus(&self.list_focus)
+            .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                match selection::on_key(&mut this.sel, e, &key_order, cx) {
+                    KeyAct::None => return,
+                    KeyAct::Delete => {
+                        let rels = picked_groups(&this.sel.in_order(&key_order), &groups);
+                        let many = this.sel.many();
+                        this.ask_delete_as(rels, many, window, cx)
+                    }
+                    KeyAct::Moved(k) => this.pick(k, cx),
+                    KeyAct::Changed => {
+                        if let Some(c) = this.sel.cursor().map(str::to_string).filter(|c| this.sel.len() == 1 && this.sel.contains(c)) {
+                            this.pick(c, cx);
+                        }
+                    }
+                }
+                cx.notify();
+            }))
+            .child(side)
+            .children(bar);
         let report = picked.and_then(|p| list.iter().find(|r| r.rel == p).cloned());
         let card = match report {
             Some(r) => self.report_card(root, &r, cx),
@@ -1277,6 +1417,19 @@ impl Lines for ServerLogsView {
 }
 
 /// "crash-2026-11-04_14.54.48-server.txt" from its relative path.
+/// The picked reports with their follow-ups, each once, in list order.
+fn picked_groups(picked: &[String], groups: &HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in picked {
+        for r in groups.get(p).cloned().unwrap_or_else(|| vec![p.clone()]) {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
 fn file_name(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
 }

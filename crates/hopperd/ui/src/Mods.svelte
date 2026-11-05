@@ -38,6 +38,8 @@
     setOn, removeMods, problems, setLocked, resetConfig, switchSource, setVersionLock, configFiles, versionLocked, wordsMatch, ago, dateOf,
   } from './lib/modops.js';
   import { pick, startPick, swept, sweeping, clickSwallowed, tickLabel, countLabel } from './lib/dragpick.svelte.js';
+  import { Selection, addKey } from './lib/selection.svelte.js';
+  import SelectionBar from './lib/SelectionBar.svelte';
   import { rightClear } from './lib/rightclear.js';
 
   let { server, openConfigs } = $props();
@@ -77,8 +79,10 @@
   let loaderOpen = $state(false);
   let backupCount = $state(null);
   let selected = $state(new Set());
-  // The last row clicked (Shift+click picks from it to the next one).
-  let anchor = null;
+  // Ctrl / Shift clicks and keys (lib/selection) on the same picks as the
+  // tick boxes and their drag. A plain click on a row doesn't tick it here:
+  // the ticks are the picks, and the row's name opens its peek.
+  const sel = new Selection({ get: () => selected, set: (s) => (selected = s) });
   let menu = $state(null);
   // Add content's menu (Browse, or GitHub and other links), and the
   // GitHub-or-a-link dialog: { follow: the mod to follow a source, or null }.
@@ -464,25 +468,13 @@
   }
   const swSweep = $derived(sweeping('mods'));
 
-  /** Rows a to b picked (Shift+click); without `add` (Ctrl) the others go. */
-  function selectRange(a, b, add) {
-    const s = add ? new Set(selected) : new Set();
-    for (const x of shown.slice(Math.min(a, b), Math.max(a, b) + 1)) s.add(x.file);
-    selected = s;
-  }
+  const order = $derived(shown.map((m) => m.file));
 
   function check(m, ix, e) {
     e.stopPropagation();
     if (clickSwallowed()) return e.preventDefault();
     const box = e.currentTarget;
-    const a = anchor == null ? -1 : shown.findIndex((x) => x.file === anchor);
-    if (e.shiftKey && a >= 0) selectRange(a, ix, true);
-    else {
-      const s = new Set(selected);
-      s.has(m.file) ? s.delete(m.file) : s.add(m.file);
-      selected = s;
-    }
-    anchor = m.file;
+    sel.tick(m.file, e, order);
     cursor = ix;
     // Shift+click on a ticked box keeps it ticked: the box flipped itself,
     // and the state didn't change, so nothing would put it back.
@@ -496,15 +488,10 @@
     cursor = ix;
     keys = false;
     rowsEl?.focus({ preventScroll: true });
-    const a = anchor == null ? -1 : shown.findIndex((x) => x.file === anchor);
-    if (e.shiftKey && a >= 0) selectRange(a, ix, e.ctrlKey || e.metaKey);
+    if (e.shiftKey || addKey(e)) sel.click(m.file, e, order);
     else {
-      anchor = m.file;
-      if (e.ctrlKey || e.metaKey) {
-        const s = new Set(selected);
-        s.has(m.file) ? s.delete(m.file) : s.add(m.file);
-        selected = s;
-      }
+      sel.anchor = m.file;
+      sel.cursor = m.file;
     }
   }
 
@@ -531,6 +518,15 @@
 
   function tableKey(e) {
     if (e.target.closest('input, button, a, label, select')) return;
+    // Shift+Up / Down stretch the picks from the last row clicked.
+    if (e.shiftKey && !addKey(e) && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      sel.cursor = shown[cursor]?.file ?? null;
+      const k = sel.step(e.key === 'ArrowUp' ? -1 : 1, true, order);
+      if (k != null) moveCursor(order.indexOf(k));
+      return e.preventDefault();
+    }
+    // Ctrl+A picks every row shown; Delete removes the picked ones.
+    if ((addKey(e) && e.key.toLowerCase() === 'a') || e.key === 'Delete') return sel.onKey(e, order, { arrows: false, onDelete: () => bulk('remove') });
     const steps = { ArrowUp: -1, ArrowDown: 1, PageUp: -10, PageDown: 10 };
     if (e.key in steps) moveCursor((cursor < 0 ? -1 : cursor) + steps[e.key]);
     else if (e.key === 'Home') moveCursor(0);
@@ -925,19 +921,12 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
 
     {#if selMods.length}
       <!-- Floats over the table, bottom centre, so the list doesn't jump. -->
-      <div class="bulkw">
-        <div class="bulk row">
-          <b>{selMods.length} selected</b>
-          <span class="vr"></span>
-          <button class="btn sm ghost" onclick={() => bulk('on')}><CircleCheck size={13} />Enable</button>
-          <button class="btn sm ghost" onclick={() => bulk('off')}><CircleOff size={13} />Disable</button>
-          {#if selMods.some((m) => m.source)}<button class="btn sm ghost" title={allLocked ? 'Allow updates again' : 'Keep this version: updates are ignored'} onclick={() => bulk('lock')}>{#if allLocked}<LockOpen size={13} />Unlock{:else}<Lock size={13} />Lock{/if}</button>{/if}
-          {#if selUpdates.length}<button class="btn sm pri" disabled={!!busy} onclick={() => bulk('update')}><Download size={13} />Update {selUpdates.length}</button>{/if}
-          <button class="btn sm ghost bad" onclick={() => bulk('remove')}><Trash2 size={13} />Remove</button>
-          <span class="vr"></span>
-          <button class="btn sm ghost icon" title="Clear selection" onclick={() => (selected = new Set())}><X size={13} /></button>
-        </div>
-      </div>
+      <SelectionBar n={selMods.length} onDelete={() => bulk('remove')} deleteLabel="Remove" deleteTitle="Kept in .hopper-backups (Mods › Backups)" onClear={() => (selected = new Set())}>
+        <button class="btn sm ghost" onclick={() => bulk('on')}><CircleCheck size={13} />Enable</button>
+        <button class="btn sm ghost" onclick={() => bulk('off')}><CircleOff size={13} />Disable</button>
+        {#if selMods.some((m) => m.source)}<button class="btn sm ghost" title={allLocked ? 'Allow updates again' : 'Keep this version: updates are ignored'} onclick={() => bulk('lock')}>{#if allLocked}<LockOpen size={13} />Unlock{:else}<Lock size={13} />Lock{/if}</button>{/if}
+        {#if selUpdates.length}<button class="btn sm pri" disabled={!!busy} onclick={() => bulk('update')}><Download size={13} />Update {selUpdates.length}</button>{/if}
+      </SelectionBar>
     {/if}
   {/if}
 </div>
@@ -1034,10 +1023,6 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .banner { display: flex; align-items: center; gap: 8px; border: 1px solid #60a5fa44; background: var(--blue-dim); border-radius: var(--radius-lg); padding: 6px 10px; color: var(--subtle); }
   .busy { display: flex; align-items: center; gap: 8px; color: var(--gold); }
   .spinner.blue { color: var(--blue); }
-  .bulkw { position: sticky; bottom: 16px; display: flex; justify-content: center; z-index: 30; pointer-events: none; animation: rise 0.16s ease-out; }
-  @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
-  .bulk { pointer-events: auto; gap: 4px; background: var(--raise); border: 1px solid var(--line2); border-radius: var(--radius-lg); padding: 6px 8px; flex-wrap: wrap; box-shadow: 0 14px 40px #000c; max-width: 100%; }
-  .bulk b { padding: 0 8px; font-size: 12.5px; }
   .vr { width: 1px; height: 20px; background: var(--line2); margin: 0 2px; }
   .bad { color: var(--red); }
   .split { display: flex; gap: 12px; align-items: flex-start; }

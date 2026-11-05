@@ -7,6 +7,7 @@ use crate::crash_help::{CrashHelp, callout};
 use crate::line_select::{LineSelect, Lines};
 use crate::log_files;
 use crate::store::{Store, open_path};
+use crate::selection::{self, KeyAct, Selection};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -173,6 +174,10 @@ pub struct LogsView {
     crash_roles: Vec<hopper::crashgroup::Role>,
     /// The follow-up reports under the older ones are shown.
     folds_open: bool,
+    /// The older reports picked with Ctrl / Shift, by path.
+    older_sel: Selection,
+    /// The older reports' list, for its keys.
+    older_focus: FocusHandle,
     /// The newest report file and its time as last looked at.
     newest_seen: Option<(PathBuf, Option<std::time::SystemTime>)>,
     tab: LogTab,
@@ -215,6 +220,8 @@ impl LogsView {
             crashes: Vec::new(),
             crash_roles: Vec::new(),
             folds_open: false,
+            older_sel: Selection::new(),
+            older_focus: cx.focus_handle(),
             newest_seen: None,
             tab: LogTab::Game,
             tab_picked: false,
@@ -241,6 +248,7 @@ impl LogsView {
             self.crash_roles.clear();
             self.newest_seen = None;
             self.folds_open = false;
+            self.older_sel.clear();
             self.tab_picked = false;
         }
         self.root = Some(root.clone());
@@ -520,10 +528,18 @@ impl LogsView {
 
     /// "Delete" on crash reports `rels` (one, or a report with its follow-ups).
     fn ask_delete(&mut self, rels: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask_delete_as(rels, false, window, cx)
+    }
+
+    /// "Delete" on crash reports `rels`; `picked` when they are the reports
+    /// picked in the list (with their follow-ups), not one report's group.
+    fn ask_delete_as(&mut self, rels: Vec<String>, picked: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
         let n = rels.len();
         let (title, what) = if n == 1 {
             ("Delete this crash report?".to_string(), "It".to_string())
+        } else if picked {
+            (format!("Delete these {n} crash reports?"), "They (with the follow-up reports of the ones picked)".to_string())
         } else {
             (format!("Delete these {n} crash reports?"), "They are the report and its follow-up reports; they".to_string())
         };
@@ -569,6 +585,7 @@ impl LogsView {
     /// Files went: look at the folders again, and leave a deleted file.
     fn after_delete(&mut self, rels: &[String], cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
+        self.older_sel.clear();
         self.newest_seen = None;
         let gone = |p: &Path| rels.iter().any(|r| root.join(r) == p) || !p.exists();
         if self.log.as_ref().is_some_and(|l| gone(&l.path)) {
@@ -842,11 +859,65 @@ impl Render for LogsView {
                 .cloned()
                 .collect();
             let more = self.crashes.len().saturating_sub(older.len() + usize::from(featured.is_some()) + if folds_open { 0 } else { folded });
+            let order: Vec<String> = older.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            self.older_sel.retain(&order);
+            let many = self.older_sel.many();
+            // The picked reports with their follow-ups, each once.
+            let groups: Vec<(String, Vec<String>)> = older.iter().map(|p| (p.to_string_lossy().into_owned(), self.report_group(p))).collect();
+            let picked_rels = move |sel: &Selection| {
+                let mut out: Vec<String> = Vec::new();
+                for (k, g) in &groups {
+                    if sel.contains(k) {
+                        out.extend(g.iter().filter(|r| !out.contains(r)).cloned().collect::<Vec<_>>());
+                    }
+                }
+                out
+            };
+            let older_bar = many.then(|| {
+                let pr = picked_rels.clone();
+                let del = cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    let rels = pr(&this.older_sel);
+                    this.ask_delete_as(rels, true, window, cx)
+                });
+                let bar = selection::bar(
+                    "older-crash-bulk",
+                    self.older_sel.len(),
+                    Vec::new(),
+                    Some(("Delete".into(), Box::new(del))),
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.older_sel.clear();
+                        cx.notify();
+                    }),
+                    cx,
+                );
+                selection::floating("older-crash-bulk", bar)
+            });
+            let key_order = order.clone();
+            let key_rels = picked_rels.clone();
             let older_list = (!older.is_empty() || folded > 0).then(|| {
                 v_flex()
+                    .relative()
                     .gap_1()
+                    .when(many, |d| d.pb(rems(4.)))
+                    .track_focus(&self.older_focus)
+                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                        match selection::on_key(&mut this.older_sel, e, &key_order, cx) {
+                            KeyAct::None => return,
+                            KeyAct::Delete => {
+                                let rels = key_rels(&this.older_sel);
+                                let many = this.older_sel.many();
+                                this.ask_delete_as(rels, many, window, cx)
+                            }
+                            KeyAct::Changed | KeyAct::Moved(_) => {}
+                        }
+                        cx.notify();
+                    }))
                     .child(div().text_sm().font_semibold().child("Older crash reports"))
                     .children(older.into_iter().enumerate().map(|(i, p)| {
+                        let key = p.to_string_lossy().into_owned();
+                        let sel = self.older_sel.contains(&key) && (many || self.older_sel.cursor() == Some(key.as_str()));
+                        let menu_pick = (many && sel).then(|| picked_rels(&self.older_sel));
+                        let click_order = order.clone();
                         let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
                         let name = if is_folded(&p) { format!("Follow-up error · {name}") } else { name };
                         let secs = std::fs::metadata(&p)
@@ -855,22 +926,16 @@ impl Render for LogsView {
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                             .map_or(0, |d| d.as_secs() as i64);
                         let group = self.report_group(&p);
-                        let (menu_group, key_group, btn_group, menu_view) = (group.clone(), group.clone(), group, cx.entity());
-                        let at = self.crashes.iter().position(|c| *c == p);
-                        let _ = at;
+                        let menu_many = menu_pick.is_some();
+                        let (menu_group, btn_group, menu_view) = (menu_pick.unwrap_or_else(|| group.clone()), group, cx.entity());
                         h_flex()
                             .id(("older-crash", i))
-                            .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
-                                if e.keystroke.key == "delete" {
-                                    this.ask_delete(key_group.clone(), window, cx);
-                                }
-                            }))
                             .gap_2()
                             .px_2()
                             .py_1()
                             .rounded(theme.radius)
                             .clickable(cx)
-                            .hover(|s| s.bg(theme.foreground.opacity(widgets::alpha::HOVER)))
+                            .map(|d| if sel { widgets::row_selected(d, cx) } else { d.hover(|s| widgets::row_hover(s, cx)) })
                             .child(Icon::new(IconName::FileText).small().text_color(theme.muted_foreground))
                             .child(div().text_sm().truncate().child(name))
                             .child(div().flex_1())
@@ -891,13 +956,27 @@ impl Render for LogsView {
                                     .tooltip("Delete this report")
                                     .on_click(cx.listener(move |this, _, window, cx| this.ask_delete(btn_group.clone(), window, cx))),
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_crash(p.clone(), cx)))
+                            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                                window.focus(&this.older_focus, cx);
+                                // A plain click opens the report, as before;
+                                // Ctrl / Shift pick several.
+                                if this.older_sel.click(&key, e.modifiers(), &click_order) {
+                                    this.open_crash(p.clone(), cx);
+                                }
+                                cx.notify();
+                            }))
                             .context_menu(move |m, _, _| {
                                 let (v, g) = (menu_view.clone(), menu_group.clone());
-                                let label = if g.len() > 1 { format!("Delete with its {} follow-ups…", g.len() - 1) } else { "Delete report…".to_string() };
+                                let label = if menu_many {
+                                    format!("Delete {} reports…", g.len())
+                                } else if g.len() > 1 {
+                                    format!("Delete with its {} follow-ups…", g.len() - 1)
+                                } else {
+                                    "Delete report…".to_string()
+                                };
                                 m.item(PopupMenuItem::new(label).icon(IconName::Trash).on_click(move |_, window, cx| {
                                     let g = g.clone();
-                                    v.update(cx, |this, cx| this.ask_delete(g, window, cx));
+                                    v.update(cx, |this, cx| this.ask_delete_as(g, menu_many, window, cx));
                                 }))
                             })
                     }))
@@ -922,6 +1001,7 @@ impl Render for LogsView {
                                 })),
                         )
                     })
+                    .children(older_bar)
             });
             div()
                 .id("logs-diagnosis")

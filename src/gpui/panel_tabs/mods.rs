@@ -7,7 +7,9 @@
 //! updates are checked on their own.
 
 use super::{Load, Target, call, get, job, load_state, q};
+use crate::addons::{RowDown, RowPickAll, RowPickNone, RowRemove, RowStretchDown, RowStretchUp, RowUp};
 use crate::drag_pick::{self, DragPick, PickDrag, PickState, Picks, Sweep};
+use crate::selection::{self, Selection};
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
@@ -274,6 +276,11 @@ pub struct ModsTab {
     pick: PickState,
     /// The files a switch drag will switch when let go.
     swept: HashSet<String>,
+    /// The picked rows, by file: one is the mod in the details panel;
+    /// Ctrl / Shift clicks pick several for the bulk bar.
+    sel: Selection,
+    /// The list, for its keys.
+    focus: FocusHandle,
     updates: Option<Vec<Up>>,
     checking: bool,
     identifying: bool,
@@ -353,6 +360,8 @@ impl ModsTab {
             scroll: UniformListScrollHandle::new(),
             pick: PickState::default(),
             swept: HashSet::new(),
+            sel: Selection::new(),
+            focus: cx.focus_handle(),
             updates: None,
             checking: false,
             identifying: false,
@@ -394,6 +403,7 @@ impl ModsTab {
             self.busy = None;
             self.note = None;
             self.peek = None;
+            self.sel.clear();
             self.adding = false;
             self.results = None;
             self.reviewing = false;
@@ -448,6 +458,9 @@ impl ModsTab {
                 .map(|(i, _)| i)
                 .collect(),
         );
+        // Picks the filter hides, or that are gone, let go.
+        let order = self.order();
+        self.sel.retain(&order);
     }
 
     // ---- loading --------------------------------------------------------------
@@ -777,6 +790,225 @@ impl ModsTab {
         cx.notify();
     }
 
+    /// The shown rows' files, top to bottom: what Shift ranges and Ctrl+A
+    /// go by.
+    fn order(&self) -> Vec<String> {
+        self.shown.iter().filter_map(|&i| self.mods().get(i)).map(|m| m.file.clone()).collect()
+    }
+
+    /// The mod in the details panel is the one picked, so Ctrl or Shift
+    /// start from it (also after its jar was renamed by an update).
+    fn sel_from_peek(&mut self) {
+        if let Some(p) = &self.peek
+            && !self.sel.many()
+            && !self.sel.contains(&p.file)
+        {
+            self.sel.set_one(p.file.clone());
+        }
+    }
+
+    /// One row picked shows it in the details panel; none closes it.
+    fn peek_from_sel(&mut self, cx: &mut Context<Self>) {
+        if self.sel.many() {
+            return;
+        }
+        match self.sel.keys().iter().next().cloned() {
+            Some(k) if self.peek.as_ref().is_none_or(|p| p.file != k) => self.pick(k, cx),
+            Some(_) => {}
+            None => self.peek = None,
+        }
+    }
+
+    /// What the bulk actions and Delete act on, in list order.
+    fn picked_files(&self) -> Vec<String> {
+        if self.sel.many() {
+            self.sel.in_order(&self.order())
+        } else {
+            self.peek.iter().map(|p| p.file.clone()).collect()
+        }
+    }
+
+    /// Up / Down move the pick (and the details panel); with Shift they
+    /// stretch it.
+    fn on_step(&mut self, dir: isize, extend: bool, cx: &mut Context<Self>) {
+        self.sel_from_peek();
+        let order = self.order();
+        if let Some(k) = self.sel.step(dir, extend, &order) {
+            if let Some(ix) = order.iter().position(|f| *f == k) {
+                self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            }
+            self.peek_from_sel(cx);
+        }
+        cx.notify();
+    }
+
+    /// Esc: a group of picks goes back to the row the keys are on; with
+    /// one picked, Esc goes on (closing the panel as before).
+    fn on_pick_none(&mut self, cx: &mut Context<Self>) {
+        if !self.sel.many() {
+            cx.propagate();
+            return;
+        }
+        let keep = self.sel.cursor().map(str::to_string);
+        self.sel.clear();
+        if let Some(k) = keep {
+            self.sel.keys_mut().insert(k);
+        }
+        self.peek_from_sel(cx);
+        cx.notify();
+    }
+
+    fn on_remove_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let files = self.picked_files();
+        match files.len() {
+            0 => cx.propagate(),
+            1 => self.remove(window, cx),
+            _ => self.remove_many(files, window, cx),
+        }
+    }
+
+    /// Removes the picked mods, after one question; they go to Backups.
+    fn remove_many(&mut self, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let n = files.len();
+        self.confirm(
+            format!("Remove {n} mods?"),
+            "They're kept in .hopper-backups (Mods › Backups).".into(),
+            "Remove",
+            window,
+            cx,
+            move |this, cx| {
+                let Some(t) = this.target.clone() else { return };
+                this.busy = Some(format!("Removing {n} mods"));
+                let path = t.sp("/mods/remove");
+                let files = files.clone();
+                call(
+                    cx,
+                    &t,
+                    move |c| {
+                        let mut restart = false;
+                        for f in files {
+                            restart |= bl(&c.post(&path, json!({ "file": f }))?, "restart_needed");
+                        }
+                        Ok(restart)
+                    },
+                    this.fresh(move |this: &mut Self, r: Result<bool, String>, cx| {
+                        this.busy = None;
+                        match r {
+                            Ok(restart) => {
+                                this.peek = None;
+                                this.sel.clear();
+                                this.say(format!(
+                                    "Removed {n} mods. They're in Backups.{}",
+                                    if restart { " Restart the server to apply." } else { "" }
+                                ));
+                                this.check_updates(false, cx);
+                                this.load_backups(cx);
+                            }
+                            Err(e) => this.fail(e),
+                        }
+                        this.load(false, cx);
+                    }),
+                );
+            },
+        );
+    }
+
+    /// Locks or unlocks the picked mods (the bulk bar).
+    fn lock_many(&mut self, files: Vec<String>, locked: bool, cx: &mut Context<Self>) {
+        let Some(t) = self.target.clone() else { return };
+        let n = files.len();
+        let path = t.sp("/mods/lock");
+        call(
+            cx,
+            &t,
+            move |c| {
+                for f in files {
+                    c.post(&path, json!({ "file": f, "locked": locked }))?;
+                }
+                Ok(())
+            },
+            self.fresh(move |this: &mut Self, r: Result<(), String>, cx| {
+                match r {
+                    Ok(()) if locked => this.say(format!("{n} mods stay on their version: update checks skip them.")),
+                    Ok(()) => this.say(format!("{n} mods get updates again.")),
+                    Err(e) => this.fail(e),
+                }
+                this.load(false, cx);
+            }),
+        );
+    }
+
+    /// The floating bar for several picked mods: Enable, Disable, Lock,
+    /// Update and Remove, as on the instance Mods tab.
+    fn bulk_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.sel.many() {
+            return None;
+        }
+        let files = self.picked_files();
+        let rows: Vec<&ModRow> = files.iter().filter_map(|f| self.mods().iter().find(|m| m.file == *f)).collect();
+        let ups: Vec<String> = rows.iter().filter_map(|m| m.update.as_ref()).map(|u| u.project_id.clone()).collect();
+        // Lock unless every picked mod is locked already.
+        let all_locked = rows.iter().all(|m| m.locked);
+        let (f1, f2, f3, f4) = (files.clone(), files.clone(), files.clone(), files);
+        let mut extra = vec![
+            Button::new("mods-bulk-enable")
+                .small()
+                .ghost()
+                .icon(IconName::CircleCheck)
+                .label("Enable")
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_many(f1.clone(), true, cx)))
+                .into_any_element(),
+            Button::new("mods-bulk-disable")
+                .small()
+                .ghost()
+                .icon(IconName::CircleOff)
+                .label("Disable")
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_many(f2.clone(), false, cx)))
+                .into_any_element(),
+            Button::new("mods-bulk-lock")
+                .small()
+                .ghost()
+                .icon(if all_locked { IconName::LockOpen } else { IconName::Lock })
+                .label(if all_locked { "Unlock" } else { "Lock" })
+                .tooltip(if all_locked { "Allow updates again" } else { "Keep this version: updates are ignored" })
+                .on_click(cx.listener(move |this, _, _, cx| this.lock_many(f4.clone(), !all_locked, cx)))
+                .into_any_element(),
+        ];
+        if !ups.is_empty() {
+            let n = ups.len();
+            extra.push(
+                Button::new("mods-bulk-update")
+                    .small()
+                    .primary()
+                    .icon(IconName::Download)
+                    .label(format!("Update {n}"))
+                    .disabled(self.busy.is_some())
+                    // The review, with just these ticked.
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.reviewing = true;
+                        this.review_open = None;
+                        this.review_picked = ups.iter().cloned().collect();
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+        }
+        let remove = cx.listener(move |this, _: &ClickEvent, window, cx| this.remove_many(f3.clone(), window, cx));
+        let bar = selection::bar(
+            "mods-bulk",
+            self.sel.len(),
+            extra,
+            Some(("Remove".into(), Box::new(remove))),
+            cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.sel.clear();
+                this.peek = None;
+                cx.notify();
+            }),
+            cx,
+        );
+        Some(selection::floating("mods-bulk", bar))
+    }
+
     fn load_versions(&mut self, cx: &mut Context<Self>) {
         let (Some(t), Some(p)) = (self.target.clone(), self.peek.as_mut()) else { return };
         p.versions = Some(Load::Waiting);
@@ -1086,11 +1318,14 @@ impl ModsTab {
     fn render_rows(&mut self, range: Range<usize>, _window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let shown = self.shown.clone();
         let picked = self.peek.as_ref().map(|p| p.file.clone());
+        let many = self.sel.many();
         let mut out = Vec::new();
         for ix in range {
             let Some(m) = shown.get(ix).and_then(|i| self.mods().get(*i)).cloned() else { continue };
             let icon = self.store.read(cx).image(&m.icon).map(Path::to_path_buf);
-            out.push(self.mod_row(&m, icon.as_deref(), picked.as_deref() == Some(m.file.as_str()), cx));
+            // Several picked: those; else the one in the details panel.
+            let sel = if many { self.sel.contains(&m.file) } else { picked.as_deref() == Some(m.file.as_str()) };
+            out.push(self.mod_row(&m, icon.as_deref(), sel, cx));
         }
         out
     }
@@ -1129,11 +1364,25 @@ impl ModsTab {
             .clickable(cx)
             .hover(|s| widgets::row_hover(s, cx))
             .when(sel, |d| widgets::row_selected(d, cx))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                 // A drag let go on this row isn't a click on it.
-                if !drag_pick::spreading(this) {
-                    this.pick(f_pick.clone(), cx)
+                if drag_pick::spreading(this) {
+                    return;
                 }
+                window.focus(&this.focus, cx);
+                this.sel_from_peek();
+                // A plain click shows the mod, as before; Ctrl / Shift pick
+                // several, like a file explorer.
+                let order = this.order();
+                if this.sel.click(&f_pick, e.modifiers(), &order) {
+                    this.pick(f_pick.clone(), cx);
+                    if this.peek.is_none() {
+                        this.sel.clear();
+                    }
+                } else {
+                    this.peek_from_sel(cx);
+                }
+                cx.notify();
             }))
             .child(div().when(!on, |d| d.opacity(0.55)).child(widgets::thumb(icon, rems(1.75), cx)))
             .child(
@@ -2180,6 +2429,22 @@ impl Render for ModsTab {
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, w, cx| drag_pick::released(this, w, cx)))
+                    // The instance Mods table's keys (Ctrl+A, Esc, arrows
+                    // with Shift, Delete), bound in its key context.
+                    .track_focus(&self.focus)
+                    .key_context("AddonsTable")
+                    .on_action(cx.listener(|this, _: &RowUp, _, cx| this.on_step(-1, false, cx)))
+                    .on_action(cx.listener(|this, _: &RowDown, _, cx| this.on_step(1, false, cx)))
+                    .on_action(cx.listener(|this, _: &RowStretchUp, _, cx| this.on_step(-1, true, cx)))
+                    .on_action(cx.listener(|this, _: &RowStretchDown, _, cx| this.on_step(1, true, cx)))
+                    .on_action(cx.listener(|this, _: &RowPickAll, _, cx| {
+                        let order = this.order();
+                        this.sel.select_all(&order);
+                        this.peek_from_sel(cx);
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(|this, _: &RowPickNone, _, cx| this.on_pick_none(cx)))
+                    .on_action(cx.listener(|this, _: &RowRemove, w, cx| this.on_remove_key(w, cx)))
                     .child(
                         uniform_list(
                             "panel-mod-rows",
@@ -2188,9 +2453,12 @@ impl Render for ModsTab {
                         )
                         .track_scroll(&self.scroll)
                         .size_full()
-                        .pr_2(),
+                        .pr_2()
+                        // Room for the floating bar under the last row.
+                        .when(self.sel.many(), |l| l.pb_20()),
                     )
                     .vertical_scrollbar(&self.scroll)
+                    .children(self.bulk_bar(cx))
                     .into_any_element()
             };
             let peek = self.picked_mod().cloned().map(|m| {

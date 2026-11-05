@@ -14,6 +14,8 @@
   import { whenLabel, fullDate, plural } from './lib/worlds.js';
   import { rightClear } from './lib/rightclear.js';
   import BackupRestore from './BackupRestore.svelte';
+  import SelectionBar from './lib/SelectionBar.svelte';
+  import { Selection, addKey } from './lib/selection.svelte.js';
 
   let { server, openSchedule } = $props();
   // The live feed hands over a new `server` object every second; effects
@@ -34,7 +36,11 @@
    * name: { data } or { error }; missing while it's compared. */
   let since = $state({});
   let sinceAll = $state(false);
-  let anchor = null;
+  // The backups picked with Ctrl / Shift (lib/selection); a plain click
+  // opens one, as before.
+  const bsel = new Selection();
+  // The ticked files of the open backup, for Ctrl / Shift too.
+  const fsel = new Selection({ get: () => pick, set: (s) => (pick = s) });
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
@@ -46,6 +52,7 @@
   async function load() {
     try {
       data = await api(`${base}/backups`);
+      bsel.retain(data.backups.map((b) => b.name));
     } catch (e) {
       say(e.message, true);
     }
@@ -164,6 +171,40 @@
     }
   }
 
+  const order = $derived((data?.backups || []).map((b) => b.name));
+  /** Deletes the backups picked (the bar, Delete): one question for all. */
+  async function removePicked(names = bsel.inOrder(order)) {
+    const list = (data?.backups || []).filter((b) => names.includes(b.name));
+    if (busy || !list.length) return;
+    if (list.length === 1) return remove(list[0]);
+    if (!(await confirmIt(`Delete these ${list.length} backups?`, { body: "Files only these backups keep are deleted for good. The server itself isn't touched. Off-site copies of them go once a newer backup is copied.", ok: `Delete ${list.length} backups`, danger: true }))) return;
+    busy = `Deleting ${list.length} backups`;
+    let n = 0;
+    try {
+      for (const b of list) {
+        await del(`${base}/backups/${encodeURIComponent(b.name)}`);
+        n++;
+      }
+      say(`Deleted ${plural(n, 'backup')}.`);
+    } catch (e) {
+      say(n ? `Deleted ${plural(n, 'backup')}, then: ${e.message}` : e.message, true);
+    } finally {
+      busy = '';
+      if (browsing && list.some((b) => b.name === browsing.name)) browsing = null;
+      bsel.clear();
+      load();
+    }
+  }
+  function cardClick(b, e) {
+    if (bsel.click(b.name, e, order)) browse(b);
+  }
+  // The list's keys: Ctrl+A, Esc, the arrows (with Shift), Delete, on a
+  // backup's row (not in the files of an open one).
+  function listKey(e) {
+    if (!e.target.closest?.('.b') || e.target.closest('.files')) return;
+    bsel.onKey(e, order, { el: e.currentTarget, onDelete: removePicked });
+  }
+
   async function convert(b) {
     if (!(await confirmIt('Convert to the new format?', { body: 'It then shares its data with the other backups (taking less space) and can be copied off-site. The zip goes once that is done.', ok: 'Convert' }))) return;
     try {
@@ -199,7 +240,7 @@
     pick = new Set();
     filter = '';
     entries = null;
-    anchor = null;
+    fsel.anchor = null;
     sinceAll = false;
     compare(b);
     try {
@@ -210,19 +251,17 @@
     }
   }
 
+  const shownKeys = $derived(shown.map((x) => x[0]));
   function toggle(p, e) {
     if (clickSwallowed()) return e.preventDefault();
-    const s = new Set(pick);
-    const on = !s.has(p);
     // Shift-click ticks the rows between, as in the Mods tab.
-    if (e.shiftKey && anchor) {
-      const a = shown.findIndex((x) => x[0] === anchor);
-      const z = shown.findIndex((x) => x[0] === p);
-      if (a >= 0 && z >= 0) for (const x of shown.slice(Math.min(a, z), Math.max(a, z) + 1)) on ? s.add(x[0]) : s.delete(x[0]);
-    } else on ? s.add(p) : s.delete(p);
-    anchor = p;
-    pick = s;
+    fsel.tick(p, e, shownKeys);
+    // A Shift+click on a ticked box keeps it ticked: put the box back in step.
+    const box = e.currentTarget;
+    setTimeout(() => (box.checked = pick.has(p)));
   }
+  // Ctrl+A in the files ticks every file shown (after the filter).
+  const filesKey = (e) => addKey(e) && e.key.toLowerCase() === 'a' && !e.shiftKey && fsel.onKey(e, shownKeys);
 
   // Drag across the tick boxes to tick (or untick) several, as desktop.
   function tickDown(e, p, ix) {
@@ -308,7 +347,7 @@
       <!-- What's running, else what this is (desktop shows it in the intro's place). -->
       {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>
       {:else}<div class="small muted">The worlds, or everything, saved on the schedule and before resets and restores. Each one stores only what changed. Scheduled ones follow the keep rules; yours stay until you delete them.</div>{/if}
-      <div class="list">
+      <div class="list" role="presentation" onkeydown={listKey}>
         {#if !data}
           {#each [0, 1, 2] as i (i)}<div class="skel"><i></i></div>{/each}
         {:else}
@@ -317,7 +356,7 @@
             {@const open = browsing?.name === b.name}
             {@const auto = b.kind !== 'manual'}
             <div class="bk" class:open>
-              <div class="b row-hover" role="button" tabindex="0" aria-expanded={open} onclick={(e) => !e.target.closest('button, a') && browse(b)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), browse(b))}>
+              <div class="b row-hover" class:row-sel={bsel.many && bsel.has(b.name)} role="button" tabindex="0" aria-expanded={open} aria-pressed={bsel.many ? bsel.has(b.name) : undefined} data-sel-key={b.name} onclick={(e) => !e.target.closest('button, a') && cardClick(b, e)} onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), browse(b))}>
                 {#if open}<ChevronDown size={15} class="chev" />{:else}<ChevronRight size={15} class="chev" />{/if}
                 <div class="nmw">
                   <div class="ell nm">{title(b)}{#if isZip(b)} <span class="chip" title="Made by an older Hopper Server: a full zip">zip</span>{/if}</div>
@@ -364,7 +403,7 @@
                       {#if pick.size}<button class="btn sm ghost" onclick={() => (pick = new Set())}>Clear</button>{/if}
                       <button class="btn sm" disabled={!pick.size || alive || !!busy} title={alive ? 'Stop the server first' : pick.size ? '' : 'Tick files to restore only those'} onclick={() => restore(b, [...pick])}><Undo2 size={13} />Restore {pick.size || ''}</button>
                     </div>
-                    <div class="entries" data-pick-list="backup-files">
+                    <div class="entries" data-pick-list="backup-files" role="presentation" onkeydown={filesKey}>
                       {#each shown as e, ix (e[0])}
                         <label class="ent row-hover" data-pick-ix={ix}><input type="checkbox" checked={pick.has(e[0])} onpointerdown={(ev) => tickDown(ev, e[0], ix)} onclick={(ev) => toggle(e[0], ev)} /><span class="mono ell">{e[0]}</span><span class="sp"></span><span class="tiny muted">{bytes(e[1])}</span></label>
                       {/each}
@@ -382,6 +421,7 @@
             </div>
           {/each}
         {/if}
+        {#if bsel.many}<SelectionBar n={bsel.size} busy={!!busy} onDelete={() => removePicked()} onClear={() => bsel.clear()} />{/if}
       </div>
       {#if data?.backups.length}
         <div class="tiny muted foot">{bytes(data.total_size)} on disk for backups{saved > 0 ? ` (${bytes(data.as_zips)} as zips)` : ''}{data.disk_free ? ` · ${bytes(data.disk_free)} free` : ''}</div>
@@ -488,7 +528,7 @@
   .list { margin-top: 8px; }
   /* One card per backup, as desktop's snapshot rows: click to open its files. */
   .bk { border: 1px solid var(--line); border-radius: var(--radius-lg); margin-bottom: 8px; }
-  .bk .b { padding: 10px 12px; border: 0; cursor: pointer; border-radius: var(--radius-lg); }
+  .bk .b { padding: 10px 12px; border: 0; cursor: pointer; border-radius: var(--radius-lg); user-select: none; }
   .b { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-bottom: 1px solid var(--line); }
   .b:last-child { border-bottom: 0; }
   .b :global(.chev) { flex: none; color: var(--subtle); }
