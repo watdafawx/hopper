@@ -412,6 +412,16 @@ impl LogsView {
         cx.notify();
     }
 
+    /// Opens the crash reports on `rel` (a crash report or a stuck start's
+    /// dump, under the instance folder): where "See why" lands. The stuck
+    /// start's strip calls it once that branch is merged.
+    #[allow(dead_code)]
+    pub fn open_report(&mut self, rel: String, cx: &mut Context<Self>) {
+        self.tab_picked = true;
+        self.select(Pane::Crashes, cx);
+        self.pick_report(rel, cx);
+    }
+
     /// Shows report `rel` beside the list, reading it off the UI thread the
     /// first time (the crash Hopper saw the game end with is read already).
     fn pick_report(&mut self, rel: String, cx: &mut Context<Self>) {
@@ -734,7 +744,13 @@ impl LogsView {
                     .into_any_element(),
             );
         }
-        let title = if still_open { "The game crashed and is showing its error screen" } else { "The game crashed" };
+        let title = if c.stuck {
+            "The game got stuck starting"
+        } else if still_open {
+            "The game crashed and is showing its error screen"
+        } else {
+            "The game crashed"
+        };
         let share = rel.filter(|_| source.is_file()).map(|r| crash_list::share_row(self, &r, cx));
         let follow = crash_list::follow_up_note(c, cx);
         callout(theme.danger, cx)

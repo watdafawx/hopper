@@ -350,7 +350,7 @@
 {#if crash && (settled || given)}
   <div class="crash">
     <div class="row head">
-      <AlertTriangle size={15} /><b>The server crashed</b><span class="muted when" title={fullDate(crash.when)}>{exactLabel(crash.when)}</span>{#if times}<span class="chip crashed" title={fullDate(times.first)}>{times.n} times since {exactLabel(times.first).replace('Today · ', '')}</span>{/if}
+      <AlertTriangle size={15} /><b>{crash.stuck ? 'The server got stuck starting' : 'The server crashed'}</b><span class="muted when" title={fullDate(crash.when)}>{exactLabel(crash.when)}</span>{#if times}<span class="chip crashed" title={fullDate(times.first)}>{times.n} times since {exactLabel(times.first).replace('Today · ', '')}</span>{/if}
       <span class="grow"></span>
       {#if report}<button class="btn sm" title="Opens the crash report file" onclick={() => openFile(report)}><FileText size={13} />Open report</button>{/if}
       {#if !given}<button class="btn sm ghost icon" title="Look again" disabled={checking} onclick={load}><RefreshCw size={13} /></button>{/if}

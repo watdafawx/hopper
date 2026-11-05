@@ -299,7 +299,12 @@ fn list_reports(root: &Path, mut known: HashMap<(String, i64), String>, server: 
     // Over SFTP / FTP: fetch what changed into Hopper's copy first.
     let _ = hopper::remotefs::refresh_path(&root.join("crash-reports"));
     let mods = root.join("mods");
-    let mut reports: Vec<Report> = hopper::logs::crash_reports(root)
+    // Crash reports and stuck starts' saved dumps, each once.
+    let mut files = hopper::logs::crash_reports(root);
+    files.extend(hopper::stuckfile::dumps(root));
+    files.sort();
+    files.dedup();
+    let mut reports: Vec<Report> = files
         .into_iter()
         .filter(|p| p.is_file())
         .map(|p| {

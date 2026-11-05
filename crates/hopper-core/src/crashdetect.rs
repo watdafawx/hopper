@@ -207,6 +207,10 @@ pub struct Crash {
     /// while the loader undid the registries): it isn't the cause.
     #[serde(default)]
     pub follow_up: bool,
+    /// Not a crash: a stuck start's saved thread dump (stuckfile.rs). The
+    /// card says "got stuck starting".
+    #[serde(default)]
+    pub stuck: bool,
 }
 
 /// The quiet line under a crash card whose report only has a follow-up
@@ -1200,7 +1204,7 @@ pub fn server(root: &Path) -> Option<Crash> {
     };
     let mut report = crate::logs::crash_reports(root)
         .into_iter()
-        .find(|p| p.extension().is_some_and(|e| e == "txt"))
+        .find(|p| p.extension().is_some_and(|e| e == "txt") && !crate::stuckfile::is_stuck(p))
         .filter(|p| this_run(p));
     // A watchdog report written after the server had already stopped (Java
     // hung on threads that never ended) isn't the crash: the report before
@@ -1301,9 +1305,12 @@ pub fn server(root: &Path) -> Option<Crash> {
 /// last one: the newest one of the current run gets the full reading (with
 /// its log); an older one is read from the report alone (its log is gone).
 pub fn server_report(root: &Path, report: &Path) -> Option<Crash> {
+    if crate::stuckfile::is_stuck(report) {
+        return crate::stuckfile::read(report, true);
+    }
     // Only the newest report can be the last start's (the full reading
     // costs more: it reads the whole log).
-    let newest = crate::logs::crash_reports(root).into_iter().find(|p| p.extension().is_some_and(|e| e == "txt"));
+    let newest = crate::logs::crash_reports(root).into_iter().find(|p| p.extension().is_some_and(|e| e == "txt") && !crate::stuckfile::is_stuck(p));
     if newest.as_deref() == Some(report)
         && let Some(c) = server(root)
         && c.source == report
@@ -1317,6 +1324,9 @@ pub fn server_report(root: &Path, report: &Path) -> Option<Crash> {
 /// start when that is still there. For the lists of reports; the crash
 /// Hopper saw the game end with has its own reading ([`detect`]).
 pub fn game_report(root: &Path, report: &Path) -> Option<Crash> {
+    if crate::stuckfile::is_stuck(report) {
+        return crate::stuckfile::read(report, false);
+    }
     let dir = root.join("mods");
     let mods: Vec<String> = fs::read_dir(&dir)
         .into_iter()
@@ -1357,6 +1367,11 @@ pub fn to_turn_off(c: &Crash) -> Vec<&Suspect> {
 /// Agriculture Plus failed to load", "A, B and C failed to load", "likely
 /// X", else the report's headline. `name` gives a jar's name for people.
 pub fn verdict(c: &Crash, name: &dyn Fn(&Suspect) -> String) -> String {
+    if c.stuck {
+        // A stuck start isn't a crash: say so first.
+        let likely: Vec<String> = c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.knock_on).map(|s| name(s)).collect();
+        return if likely.is_empty() { "Stuck start".into() } else { format!("Stuck start: likely {}", likely.join(", ")) };
+    }
     let certain: Vec<&Suspect> = c.suspects.iter().filter(|s| s.certainty == Certainty::Certain && !s.knock_on).collect();
     let list = |v: &[&Suspect]| -> String {
         let names: Vec<String> = v.iter().map(|s| name(s)).collect();
@@ -1414,7 +1429,7 @@ fn crash_before_watchdog(root: &Path, watchdog: &Path) -> Option<(PathBuf, i64)>
     let window = max_tick_secs(root) + 300;
     let reports = crate::logs::crash_reports(root);
     let at = reports.iter().position(|p| p == watchdog)?;
-    let prev = reports[at + 1..].iter().find(|p| p.extension().is_some_and(|e| e == "txt"))?;
+    let prev = reports[at + 1..].iter().find(|p| p.extension().is_some_and(|e| e == "txt") && !crate::stuckfile::is_stuck(p))?;
     let t = modified_secs(prev)?;
     (t <= w && w - t <= window).then(|| (prev.clone(), w - t))
 }

@@ -671,7 +671,7 @@ impl ServerLogsView {
         }
         body.extend(crash_list::follow_up_note(&c, cx));
         callout(theme.danger, cx)
-            .child(head("The server crashed", cx))
+            .child(head(if c.stuck { "The server got stuck starting" } else { "The server crashed" }, cx))
             .children(body)
             .child(div().pt_1().child(share))
             .into_any_element()
