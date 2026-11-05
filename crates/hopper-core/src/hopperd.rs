@@ -666,7 +666,7 @@ impl Client {
     /// The server's crash reports, newest first: (path in the server
     /// folder, modified unix seconds, Hopper's one-line verdict when it read
     /// that one).
-    pub fn crashes(&self, id: &str) -> anyhow::Result<Vec<(String, u64, Option<String>)>> {
+    pub fn crashes(&self, id: &str) -> anyhow::Result<Vec<(String, u64, Option<String>, bool)>> {
         let v = self.get(&format!("/servers/{}/crashes", enc(id)))?;
         Ok(v["crashes"]
             .as_array()
@@ -674,11 +674,42 @@ impl Client {
                 a.iter()
                     .map(|c| {
                         let verdict = c["verdict"].as_str().filter(|s| !s.is_empty()).map(str::to_string);
-                        (c["path"].as_str().unwrap_or_default().to_string(), c["modified"].as_u64().unwrap_or(0), verdict)
+                        (c["path"].as_str().unwrap_or_default().to_string(), c["modified"].as_u64().unwrap_or(0), verdict, c["follow"].as_bool().unwrap_or(false))
                     })
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    /// The server's older logs: (path in the server folder, size, modified
+    /// unix seconds), newest first, without the current latest.log / debug.log.
+    pub fn old_logs(&self, id: &str) -> anyhow::Result<Vec<(String, u64, i64)>> {
+        let v = self.get(&format!("/servers/{}/logs", enc(id)))?;
+        let mut out: Vec<(String, u64, i64)> = v["logs"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|f| !f["crash"].as_bool().unwrap_or(false))
+                    .map(|f| (f["path"].as_str().unwrap_or_default().to_string(), f["size"].as_u64().unwrap_or(0), f["modified"].as_i64().unwrap_or(0)))
+                    .filter(|(p, _, _)| p != "logs/latest.log" && p != "logs/debug.log")
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_by(|a, b| b.2.cmp(&a.2).then(b.0.cmp(&a.0)));
+        Ok(out)
+    }
+
+    /// Deletes crash reports / logs (paths under the server folder) to the
+    /// panel's trash. Returns how many went.
+    pub fn delete_logs(&self, id: &str, paths: &[String]) -> anyhow::Result<usize> {
+        let v = self.post(&format!("/servers/{}/logs/delete", enc(id)), serde_json::json!({ "paths": paths }))?;
+        Ok(v["deleted"].as_u64().unwrap_or(0) as usize)
+    }
+
+    /// "Clear all" for `what` ("crashes" or "logs").
+    pub fn clear_logs(&self, id: &str, what: &str) -> anyhow::Result<usize> {
+        let v = self.post(&format!("/servers/{}/logs/clear", enc(id)), serde_json::json!({ "what": what }))?;
+        Ok(v["deleted"].as_u64().unwrap_or(0) as usize)
     }
 
     /// One crash report read like the crash card reads the last one, with

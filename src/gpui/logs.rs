@@ -5,12 +5,14 @@
 use crate::widgets::Clickable as _;
 use crate::crash_help::{CrashHelp, callout};
 use crate::line_select::{LineSelect, Lines};
+use crate::log_files;
 use crate::store::{Store, open_path};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
@@ -166,6 +168,13 @@ pub struct LogsView {
     turn_off_pick: Option<std::collections::HashSet<String>>,
     /// Every crash report, newest first.
     crashes: Vec<PathBuf>,
+    /// What each of `crashes` is: explaining report, follow-up of one, or
+    /// neither (follow-ups fold under the report that explains them).
+    crash_roles: Vec<hopper::crashgroup::Role>,
+    /// The follow-up reports under the older ones are shown.
+    folds_open: bool,
+    /// The newest report file and its time as last looked at.
+    newest_seen: Option<(PathBuf, Option<std::time::SystemTime>)>,
     tab: LogTab,
     /// The user picked a tab for this instance; it stays.
     tab_picked: bool,
@@ -204,6 +213,9 @@ impl LogsView {
             why_open: Default::default(),
             turn_off_pick: None,
             crashes: Vec::new(),
+            crash_roles: Vec::new(),
+            folds_open: false,
+            newest_seen: None,
             tab: LogTab::Game,
             tab_picked: false,
             query,
@@ -226,6 +238,9 @@ impl LogsView {
             self._follow = None;
             self.crash = None;
             self.crashes.clear();
+            self.crash_roles.clear();
+            self.newest_seen = None;
+            self.folds_open = false;
             self.tab_picked = false;
         }
         self.root = Some(root.clone());
@@ -244,29 +259,29 @@ impl LogsView {
     fn watch_crashes(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         self._crash_watch = Some(cx.spawn(async move |this, cx| {
             loop {
-                let Ok(known) = this.update(cx, |this, _| {
-                    this.crash.as_ref().map(|c| (c.path.clone(), c.mtime))
-                }) else {
+                let Ok(known) = this.update(cx, |this, _| this.newest_seen.clone()) else {
                     return;
                 };
                 let r = root.clone();
                 let found = cx
                     .background_spawn(async move {
                         let all = crash_reports(&r);
-                        let latest = all.first()?.clone();
-                        let mtime = std::fs::metadata(&latest).and_then(|m| m.modified()).ok();
-                        if known.as_ref() == Some(&(latest.clone(), mtime)) {
+                        let newest = all.first()?.clone();
+                        let mtime = std::fs::metadata(&newest).and_then(|m| m.modified()).ok();
+                        if known.as_ref() == Some(&(newest.clone(), mtime)) {
                             return Some(None);
                         }
-                        let summary = crash_summary(&tail(&latest, 200_000));
-                        Some(Some((
-                            Crash {
-                                path: latest,
-                                mtime,
-                                summary,
-                            },
-                            all,
-                        )))
+                        // The newest report can be a follow-up of the start's
+                        // real crash: the card and the tab open on the one
+                        // that names the cause.
+                        let roles = hopper::crashgroup::group_files(&all[..all.len().min(20)]);
+                        let shown = match roles.first() {
+                            Some(hopper::crashgroup::Role::FollowUp(Some(j))) => all[*j].clone(),
+                            _ => newest.clone(),
+                        };
+                        let shown_mtime = std::fs::metadata(&shown).and_then(|m| m.modified()).ok();
+                        let summary = crash_summary(&tail(&shown, 200_000));
+                        Some(Some((Crash { path: shown, mtime: shown_mtime, summary }, all, roles, (newest, mtime))))
                     })
                     .await;
                 let alive = this.update(cx, |this, cx| {
@@ -277,11 +292,15 @@ impl LogsView {
                         None if this.crash.is_some() => {
                             this.crash = None;
                             this.crashes.clear();
+                            this.crash_roles.clear();
+                            this.newest_seen = None;
                         }
-                        Some(Some((c, all))) => {
+                        Some(Some((c, all, roles, seen))) => {
                             this.store.update(cx, |s, _| s.newest_crash_report(&root, &c.path));
                             this.crash = Some(c);
                             this.crashes = all;
+                            this.crash_roles = roles;
+                            this.newest_seen = Some(seen);
                         }
                         _ => return,
                     }
@@ -429,7 +448,7 @@ impl LogsView {
             LogTab::Help => None,
             LogTab::Game => Some((root.join("logs").join("latest.log"), true)),
             LogTab::Debug => Some((root.join("logs").join("debug.log"), true)),
-            LogTab::Crashes => self.crashes.first().map(|p| (p.clone(), false)),
+            LogTab::Crashes => self.crash.as_ref().map(|c| c.path.clone()).or_else(|| self.crashes.first().cloned()).map(|p| (p, false)),
         };
         if let Some((path, follow)) = want
             && self.log.as_ref().map(|l| &l.path) != Some(&path)
@@ -446,6 +465,123 @@ impl LogsView {
         if self.log.as_ref().map(|l| &l.path) != Some(&p) {
             self.open_log(p, false, cx);
         }
+        cx.notify();
+    }
+
+    /// The report at `p` and, when it explains a start, its follow-up
+    /// reports (they go together). As paths under the instance folder.
+    fn report_group(&self, p: &Path) -> Vec<String> {
+        let Some(root) = self.root.as_ref() else { return Vec::new() };
+        let rel = |q: &Path| format!("crash-reports/{}", q.file_name().unwrap_or_default().to_string_lossy());
+        let mut out = vec![rel(p)];
+        let at = self.crashes.iter().position(|c| c == p);
+        if let Some(hopper::crashgroup::Role::Lead(f)) = at.and_then(|i| self.crash_roles.get(i)) {
+            out.extend(f.iter().filter_map(|&j| self.crashes.get(j)).map(|q| rel(q)));
+        }
+        let _ = root;
+        out
+    }
+
+    /// The delete buttons of the toolbar: the shown crash report (and its
+    /// follow-ups) and "Clear all" on the Crash reports tab; "Clear old
+    /// logs" on the game's logs.
+    fn delete_buttons(&self, shown: &Path, cx: &mut Context<Self>) -> AnyElement {
+        if self.tab == LogTab::Crashes {
+            let group = self.report_group(shown);
+            return h_flex()
+                .gap_1()
+                .child(
+                    Button::new("crash-del")
+                        .small()
+                        .ghost()
+                        .icon(IconName::Trash)
+                        .tooltip("Delete this crash report")
+                        .on_click(cx.listener(move |this, _, window, cx| this.ask_delete(group.clone(), window, cx))),
+                )
+                .child(
+                    Button::new("crash-clear")
+                        .small()
+                        .ghost()
+                        .label("Clear all")
+                        .tooltip("Deletes every crash report of this instance")
+                        .on_click(cx.listener(|this, _, window, cx| this.ask_clear(hopper::crashfiles::Kind::Crashes, window, cx))),
+                )
+                .into_any_element();
+        }
+        Button::new("logs-clear-old")
+            .small()
+            .ghost()
+            .icon(IconName::Trash)
+            .label("Clear old logs")
+            .tooltip("Deletes the older logs; the current latest.log and debug.log stay")
+            .on_click(cx.listener(|this, _, window, cx| this.ask_clear(hopper::crashfiles::Kind::Logs, window, cx)))
+            .into_any_element()
+    }
+
+    /// "Delete" on crash reports `rels` (one, or a report with its follow-ups).
+    fn ask_delete(&mut self, rels: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let n = rels.len();
+        let (title, what) = if n == 1 {
+            ("Delete this crash report?".to_string(), "It".to_string())
+        } else {
+            (format!("Delete these {n} crash reports?"), "They are the report and its follow-up reports; they".to_string())
+        };
+        let body = format!("{what} go to {}, where you can get {} back.", log_files::trash_name(&root), if n == 1 { "it" } else { "them" });
+        let running = self.store.read(cx).running(&root).is_some();
+        let view = cx.entity();
+        log_files::confirm(window, cx, title, body, move |window, cx| {
+            let r = log_files::delete(&root, &rels, running);
+            let ok = r.is_ok();
+            log_files::report(window, cx, r);
+            if ok {
+                view.update(cx, |this, cx| this.after_delete(&rels, cx));
+            }
+        });
+    }
+
+    /// "Clear all" for crash reports, or "Clear old logs".
+    fn ask_clear(&mut self, kind: hopper::crashfiles::Kind, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let crashes = kind == hopper::crashfiles::Kind::Crashes;
+        let n = hopper::crashfiles::clearable(&root, kind).len();
+        if n == 0 {
+            window.push_notification(gpui_kit::component::notification::Notification::info(if crashes { "No crash reports to delete." } else { "No older logs to delete." }), cx);
+            return;
+        }
+        let (title, what) = if crashes {
+            (format!("Delete all {n} crash reports?"), "They")
+        } else {
+            (format!("Delete {n} older logs?"), "They (not latest.log or debug.log)")
+        };
+        let body = format!("{what} go to {}, where you can get them back.", log_files::trash_name(&root));
+        let view = cx.entity();
+        log_files::confirm(window, cx, title, body, move |window, cx| {
+            let r = log_files::clear(&root, kind);
+            let ok = r.is_ok();
+            log_files::report(window, cx, r);
+            if ok {
+                view.update(cx, |this, cx| this.after_delete(&[], cx));
+            }
+        });
+    }
+
+    /// Files went: look at the folders again, and leave a deleted file.
+    fn after_delete(&mut self, rels: &[String], cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        self.newest_seen = None;
+        let gone = |p: &Path| rels.iter().any(|r| root.join(r) == p) || !p.exists();
+        if self.log.as_ref().is_some_and(|l| gone(&l.path)) {
+            self.log = None;
+            self.lines.clear();
+            self._follow = None;
+            self.tab_picked = false;
+            self.crash = None;
+            self.crashes.clear();
+            self.crash_roles.clear();
+            self.select(LogTab::Game, cx);
+        }
+        self.watch_crashes(root, cx);
         cx.notify();
     }
 
@@ -630,22 +766,25 @@ impl Render for LogsView {
                     .collect();
                 let share = self.share_row(&c.path, cx);
                 // When, so an old crash doesn't read as today's.
-                let when = c
-                    .mtime
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| hopper::time::relative_secs(d.as_secs() as i64));
+                let secs = c.mtime.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+                let when = secs.map(hopper::time::exact);
+                let when_full = secs.map(hopper::time::exact_full).unwrap_or_default();
                 let body = callout(theme.danger, cx)
                     .child(
                         h_flex()
                             .gap_2()
                             .child(div().font_semibold().text_color(theme.danger).child("Latest crash"))
-                            .child(widgets::caption(
-                                match when {
-                                    Some(w) => format!("{w} · {name}"),
-                                    None => name,
-                                },
-                                cx,
-                            ))
+                            .child(
+                                widgets::caption(
+                                    match when {
+                                        Some(w) => format!("{w} · {name}"),
+                                        None => name,
+                                    },
+                                    cx,
+                                )
+                                .id("latest-crash-when")
+                                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(when_full.clone()).build(w, cx)),
+                            )
                             .child(div().flex_1())
                             .child(
                                 Button::new("show-crash")
@@ -689,22 +828,43 @@ impl Render for LogsView {
             });
             // Older reports, past the one shown above.
             let featured = card_source.or_else(|| self.crash.as_ref().map(|c| c.path.clone()));
+            // Follow-up reports fold under the report that explains them.
+            let role_of = |p: &PathBuf| self.crashes.iter().position(|c| c == p).and_then(|i| self.crash_roles.get(i));
+            let is_folded = |p: &PathBuf| matches!(role_of(p), Some(hopper::crashgroup::Role::FollowUp(Some(_))));
+            let folded = self.crashes.iter().filter(|p| Some(*p) != featured.as_ref() && is_folded(p)).count();
+            let folds_open = self.folds_open;
             let older: Vec<PathBuf> = self
                 .crashes
                 .iter()
                 .filter(|p| Some(*p) != featured.as_ref())
+                .filter(|p| folds_open || !is_folded(p))
                 .take(8)
                 .cloned()
                 .collect();
-            let more = self.crashes.len().saturating_sub(older.len() + usize::from(featured.is_some()));
-            let older_list = (!older.is_empty()).then(|| {
+            let more = self.crashes.len().saturating_sub(older.len() + usize::from(featured.is_some()) + if folds_open { 0 } else { folded });
+            let older_list = (!older.is_empty() || folded > 0).then(|| {
                 v_flex()
                     .gap_1()
                     .child(div().text_sm().font_semibold().child("Older crash reports"))
                     .children(older.into_iter().enumerate().map(|(i, p)| {
                         let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        let name = if is_folded(&p) { format!("Follow-up error · {name}") } else { name };
+                        let secs = std::fs::metadata(&p)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map_or(0, |d| d.as_secs() as i64);
+                        let group = self.report_group(&p);
+                        let (menu_group, key_group, btn_group, menu_view) = (group.clone(), group.clone(), group, cx.entity());
+                        let at = self.crashes.iter().position(|c| *c == p);
+                        let _ = at;
                         h_flex()
                             .id(("older-crash", i))
+                            .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                                if e.keystroke.key == "delete" {
+                                    this.ask_delete(key_group.clone(), window, cx);
+                                }
+                            }))
                             .gap_2()
                             .px_2()
                             .py_1()
@@ -713,10 +873,54 @@ impl Render for LogsView {
                             .hover(|s| s.bg(theme.foreground.opacity(widgets::alpha::HOVER)))
                             .child(Icon::new(IconName::FileText).small().text_color(theme.muted_foreground))
                             .child(div().text_sm().truncate().child(name))
+                            .child(div().flex_1())
+                            .child(
+                                widgets::caption(log_files::when(secs), cx)
+                                    .id(("older-crash-when", i))
+                                    .tooltip({
+                                        let full = hopper::time::exact_full(secs);
+                                        move |w, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(w, cx)
+                                    })
+                                    .text_xs(),
+                            )
+                            .child(
+                                Button::new(("older-crash-del", i))
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(IconName::Trash)
+                                    .tooltip("Delete this report")
+                                    .on_click(cx.listener(move |this, _, window, cx| this.ask_delete(btn_group.clone(), window, cx))),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| this.open_crash(p.clone(), cx)))
+                            .context_menu(move |m, _, _| {
+                                let (v, g) = (menu_view.clone(), menu_group.clone());
+                                let label = if g.len() > 1 { format!("Delete with its {} follow-ups…", g.len() - 1) } else { "Delete report…".to_string() };
+                                m.item(PopupMenuItem::new(label).icon(IconName::Trash).on_click(move |_, window, cx| {
+                                    let g = g.clone();
+                                    v.update(cx, |this, cx| this.ask_delete(g, window, cx));
+                                }))
+                            })
                     }))
                     .when(more > 0, |c| {
                         c.child(widgets::caption(format!("{more} more in Crash reports"), cx).text_xs().px_2())
+                    })
+                    .when(folded > 0, |c| {
+                        c.child(
+                            h_flex()
+                                .id("older-fold")
+                                .gap_1()
+                                .px_2()
+                                .py_1()
+                                .rounded(theme.radius)
+                                .clickable(cx)
+                                .hover(|s| s.bg(theme.foreground.opacity(widgets::alpha::HOVER)))
+                                .child(Icon::new(if folds_open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(theme.muted_foreground))
+                                .child(widgets::caption(if folds_open { "Hide follow-up reports".to_string() } else { hopper::crashgroup::fold_label(folded) }, cx).text_xs())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.folds_open = !this.folds_open;
+                                    cx.notify();
+                                })),
+                        )
                     })
             });
             div()
@@ -1290,6 +1494,7 @@ impl LogsView {
             .when(loading, |r| r.child(Spinner::new().xsmall()))
             .child(div().flex_1())
             .child(share)
+            .child(self.delete_buttons(&path, cx))
             .child(
                 Button::new("logs-folder")
                     .small()

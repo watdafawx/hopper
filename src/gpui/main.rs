@@ -60,6 +60,7 @@ mod rigsync;
 mod server_control;
 mod server_delete;
 mod server_crash;
+mod log_files;
 mod server_logs;
 mod server_progress;
 mod server_power;

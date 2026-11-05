@@ -907,9 +907,18 @@ fn tail(p: &Path, max: u64) -> String {
 /// its crash names. `mods` are the jars in the mods folder (file names) and
 /// `ids` gives each jar's own mod ids, to match what the crash says.
 pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> Vec<String>) -> Option<Crash> {
-    let report = crate::logs::crash_reports(root)
+    let mut report = crate::logs::crash_reports(root)
         .into_iter()
         .find(|p| modified_secs(p).is_some_and(|t| t >= started));
+    // The newest report can be a follow-up of the start's real crash (its
+    // error came while the loader undid the registries): the cause is the
+    // report beside it that names the failing mod, and that's the one to show.
+    if let Some(r) = report.clone()
+        && tail(&r, 2 << 20).contains(UNDO_FRAME)
+        && let Some(e) = explaining_report(root, &r)
+    {
+        report = Some(e);
+    }
     let native = fs::read_dir(root)
         .ok()?
         .flatten()
@@ -1142,6 +1151,16 @@ pub fn server(root: &Path) -> Option<Crash> {
             lingered = secs;
         }
     }
+    // The newest report can be a follow-up of the start's real crash (its
+    // error came while the loader undid the registries): the cause is the
+    // report beside it that names the failing mod, and that's the one to show.
+    if lingered == 0
+        && let Some(r) = report.clone()
+        && tail(&r, 2 << 20).contains(UNDO_FRAME)
+        && let Some(e) = explaining_report(root, &r)
+    {
+        report = Some(e);
+    }
     let native = fs::read_dir(root)
         .ok()?
         .flatten()
@@ -1224,6 +1243,11 @@ pub fn server_report(root: &Path, report: &Path) -> Option<Crash> {
     {
         return Some(c);
     }
+    report_only(root, report)
+}
+
+/// A server's report read from the report alone (no log).
+fn report_only(root: &Path, report: &Path) -> Option<Crash> {
     let dir = root.join("mods");
     let mods: Vec<String> = fs::read_dir(&dir)
         .into_iter()
@@ -1312,6 +1336,25 @@ fn crash_before_watchdog(root: &Path, watchdog: &Path) -> Option<(PathBuf, i64)>
     let prev = reports[at + 1..].iter().find(|p| p.extension().is_some_and(|e| e == "txt"))?;
     let t = modified_secs(prev)?;
     (t <= w && w - t <= window).then(|| (prev.clone(), w - t))
+}
+
+/// The report written within a few minutes of follow-up report `r` that
+/// names a mod (read from the report alone), nearest first: the start's
+/// real crash, when `r` only followed from it.
+fn explaining_report(root: &Path, r: &Path) -> Option<PathBuf> {
+    let at = modified_secs(r)?;
+    let mut near: Vec<(i64, PathBuf)> = crate::logs::crash_reports(root)
+        .into_iter()
+        .filter(|p| p != r && p.extension().is_some_and(|e| e == "txt"))
+        .filter_map(|p| Some(((modified_secs(&p)? - at).abs(), p)))
+        .filter(|(d, _)| *d <= crate::crashgroup::WINDOW_SECS)
+        .collect();
+    near.sort();
+    // By the report's own text: read with the current log, every report
+    // beside it would look explained.
+    near.into_iter()
+        .map(|(_, p)| p)
+        .find(|p| !crate::crashgroup::is_follow_up_text(&tail(p, 2 << 20)) && tail(p, 2 << 20).contains("Mod loading"))
 }
 
 /// A watchdog report from a server that hung while running: the mods in its

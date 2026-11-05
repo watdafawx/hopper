@@ -96,6 +96,37 @@ pub fn date(t: i64) -> String {
     format!("{d:02}/{m:02}/{y}")
 }
 
+/// This PC's local time, 24-hour, "14:54:12".
+pub fn clock(t: i64) -> String {
+    let local = t + crate::hosting::schedule::utc_offset_secs();
+    let s = local.rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
+}
+
+/// The exact moment for a list or header, "Today · 14:54:12",
+/// "Yesterday · 23:01:09", else "03/11/2026 · 14:54:12" (local time).
+pub fn exact(t: i64) -> String {
+    if t <= 0 {
+        return String::new();
+    }
+    let off = crate::hosting::schedule::utc_offset_secs();
+    let days = (now_secs() + off).div_euclid(86_400) - (t + off).div_euclid(86_400);
+    let day = match days {
+        i64::MIN..=0 => "Today".to_string(),
+        1 => "Yesterday".to_string(),
+        _ => date(t + off),
+    };
+    format!("{day} · {}", clock(t))
+}
+
+/// The full date and time for a tooltip, "04/11/2026 14:54:12" (local time).
+pub fn exact_full(t: i64) -> String {
+    if t <= 0 {
+        return String::new();
+    }
+    format!("{} {}", date(t + crate::hosting::schedule::utc_offset_secs()), clock(t))
+}
+
 /// Seconds since the epoch, now.
 pub fn now() -> i64 {
     now_secs()
@@ -114,6 +145,18 @@ mod tests {
         assert!(now_iso().ends_with('Z'));
         assert_eq!(relative("0001-01-01T00:00:00"), "");
         assert_eq!(date(days_from_civil(2026, 9, 27) * 86_400 + 5), "27/09/2026");
+    }
+
+    #[test]
+    fn exact_times() {
+        let off = crate::hosting::schedule::utc_offset_secs();
+        // 14:54:12 local on a day long ago, and one a moment ago.
+        let t = days_from_civil(2026, 11, 3) * 86_400 + 14 * 3600 + 54 * 60 + 12 - off;
+        assert_eq!(clock(t), "14:54:12");
+        assert_eq!(exact(t), "03/11/2026 · 14:54:12");
+        assert_eq!(exact_full(t), "03/11/2026 14:54:12");
+        assert!(exact(now() - 5).starts_with("Today · ") || exact(now() - 5).starts_with("Yesterday · "));
+        assert_eq!(exact(0), "");
     }
 }
 

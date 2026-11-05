@@ -7,6 +7,7 @@
 
 use crate::crash_help::callout;
 use crate::line_select::{LineSelect, Lines};
+use crate::log_files;
 use crate::store::{Store, StoreEvent, open_path};
 use crate::widgets;
 use crate::widgets::Clickable as _;
@@ -14,6 +15,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -46,13 +48,15 @@ enum Pane {
     Crashes,
     Latest,
     Debug,
+    /// The older logs in logs/ (rotated files), to delete.
+    Older,
 }
 
 impl Pane {
     /// The log it shows, relative to the server folder.
     fn log(self) -> Option<&'static str> {
         match self {
-            Pane::Crashes => None,
+            Pane::Crashes | Pane::Older => None,
             Pane::Latest => Some("logs/latest.log"),
             Pane::Debug => Some("logs/debug.log"),
         }
@@ -68,6 +72,8 @@ struct Report {
     modified: i64,
     /// Hopper's one line on it (the newest few only).
     verdict: Option<String>,
+    /// Its text says it only followed from the start's real crash.
+    follow_up: bool,
 }
 
 /// A report as Hopper read it, and a name for each jar it names.
@@ -130,6 +136,11 @@ pub struct ServerLogsView {
     why_open: HashSet<String>,
     /// Reports whose whole list of mods shows (else the first two).
     more_open: HashSet<String>,
+    /// Reports whose folded follow-up reports are shown (by the report
+    /// that explains them).
+    folds_open: HashSet<String>,
+    /// The older logs; `None` until the pane first opens.
+    old: Option<Result<Vec<log_files::OldLog>, String>>,
     /// Reports whose older mod was put back from the card.
     fixed: HashSet<String>,
     /// The jars ticked in the open "Turn off these mods?" list.
@@ -169,6 +180,8 @@ impl ServerLogsView {
             cards: HashMap::new(),
             why_open: HashSet::new(),
             more_open: HashSet::new(),
+            folds_open: HashSet::new(),
+            old: None,
             fixed: HashSet::new(),
             turn_off_pick: None,
             fix_busy: false,
@@ -199,6 +212,8 @@ impl ServerLogsView {
             self.cards.clear();
             self.why_open.clear();
             self.more_open.clear();
+            self.folds_open.clear();
+            self.old = None;
             self.fixed.clear();
             self.turn_off_pick = None;
             self.shared.clear();
@@ -314,6 +329,191 @@ impl ServerLogsView {
         }));
     }
 
+    /// "Delete" on crash reports `rels` (one, or a report with its follow-ups).
+    fn ask_delete(&mut self, rels: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let n = rels.len();
+        let (title, what) = if n == 1 {
+            ("Delete this crash report?".to_string(), "It".to_string())
+        } else {
+            (format!("Delete these {n} crash reports?"), "They are the report and its follow-up reports; they".to_string())
+        };
+        let body = format!("{what} go to {}, where you can get {} back.", log_files::trash_name(&root), if n == 1 { "it" } else { "them" });
+        let view = cx.entity();
+        log_files::confirm(window, cx, title, body, move |window, cx| {
+            let r = log_files::delete(&root, &rels, false);
+            let ok = r.is_ok();
+            log_files::report(window, cx, r);
+            if ok {
+                view.update(cx, |this, cx| this.after_delete(&rels, cx));
+            }
+        });
+    }
+
+    /// "Clear all" for crash reports, or the older logs.
+    fn ask_clear(&mut self, kind: hopper::crashfiles::Kind, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let crashes = kind == hopper::crashfiles::Kind::Crashes;
+        let n = if crashes {
+            match &self.reports {
+                Some(Ok(l)) => l.len(),
+                _ => 0,
+            }
+        } else {
+            match &self.old {
+                Some(Ok(l)) => l.len(),
+                _ => 0,
+            }
+        };
+        if n == 0 {
+            return;
+        }
+        let (title, what) = if crashes {
+            (format!("Delete all {n} crash reports?"), "They")
+        } else {
+            (format!("Delete {n} older logs?"), "They (not latest.log or debug.log)")
+        };
+        let body = format!("{what} go to {}, where you can get them back.", log_files::trash_name(&root));
+        let view = cx.entity();
+        log_files::confirm(window, cx, title, body, move |window, cx| {
+            let r = log_files::clear(&root, kind);
+            let ok = r.is_ok();
+            log_files::report(window, cx, r);
+            if ok {
+                view.update(cx, |this, cx| this.after_delete(&[], cx));
+            }
+        });
+    }
+
+    /// Files went: forget them and read the folders again.
+    fn after_delete(&mut self, rels: &[String], cx: &mut Context<Self>) {
+        for r in rels {
+            self.cards.remove(r);
+            self.shared.remove(r);
+        }
+        if let Some(Ok(l)) = &mut self.reports {
+            l.retain(|r| !rels.contains(&r.rel));
+        }
+        if self.picked.as_ref().is_some_and(|p| rels.contains(p)) {
+            self.picked = None;
+        }
+        self.old = None;
+        if self.pane == Pane::Older {
+            self.load_old(cx);
+        }
+        // Reads the list again now; it also picks the newest report when
+        // the one on screen is gone.
+        self.watch_reports(cx);
+        cx.notify();
+    }
+
+    /// Reads the older logs off the UI thread.
+    fn load_old(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        cx.spawn(async move |this, cx| {
+            let r = root.clone();
+            let got = cx.background_spawn(async move { log_files::old_logs(&r) }).await;
+            this.update(cx, |this, cx| {
+                if this.root.as_ref() == Some(&root) {
+                    this.old = Some(got);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The older logs, each with its time and size and a delete.
+    fn older_body(&mut self, _root: &Path, cx: &mut Context<Self>) -> AnyElement {
+        let list = match &self.old {
+            None => return widgets::skeleton_rows(4, rems(2.), cx).into_any_element(),
+            Some(Err(e)) => {
+                return widgets::empty_state(IconName::TriangleAlert, "Can't read the logs", Some(e.clone().into()), cx).into_any_element();
+            }
+            Some(Ok(l)) if l.is_empty() => {
+                return widgets::empty_state(IconName::CircleCheck, "No older logs", Some("The server keeps its last start in latest.log. Older ones show up here.".into()), cx)
+                    .into_any_element();
+            }
+            Some(Ok(l)) => l,
+        };
+        let radius = cx.theme().radius;
+        let rows: Vec<AnyElement> = list
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let rel = f.rel.clone();
+                let key_rel = f.rel.clone();
+                h_flex()
+                    .id(("srv-old-log", i))
+                    .gap_3()
+                    .px_2()
+                    .py_1p5()
+                    .rounded(radius)
+                    .clickable(cx)
+                    .hover(|s| widgets::row_hover(s, cx))
+                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                        if e.keystroke.key == "delete" {
+                            this.ask_delete_log(key_rel.clone(), window, cx);
+                        }
+                    }))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(file_name(&f.rel).to_string()))
+                    .child(
+                        widgets::caption(log_files::when(f.modified), cx)
+                            .id(("srv-old-log-when", i))
+                            .tooltip({
+                                let full = hopper::time::exact_full(f.modified);
+                                move |w, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(w, cx)
+                            })
+                            .text_xs(),
+                    )
+                    .child(widgets::caption(log_files::size(f.size), cx).text_xs().w(rems(5.)))
+                    .child(
+                        Button::new(("srv-old-log-del", i))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Trash)
+                            .tooltip("Delete this log")
+                            .on_click(cx.listener(move |this, _, window, cx| this.ask_delete_log(rel.clone(), window, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap_2()
+            .child(
+                h_flex().child(div().flex_1()).child(
+                    Button::new("srv-old-clear")
+                        .small()
+                        .outline()
+                        .icon(IconName::Trash)
+                        .label("Clear old logs")
+                        .tooltip("Deletes every older log; latest.log and debug.log stay")
+                        .on_click(cx.listener(|this, _, window, cx| this.ask_clear(hopper::crashfiles::Kind::Logs, window, cx))),
+                ),
+            )
+            .child(div().id("srv-old-logs").flex_1().min_h_0().child(v_flex().gap_0p5().children(rows)).overflow_y_scrollbar())
+            .into_any_element()
+    }
+
+    /// "Delete" on one older log.
+    fn ask_delete_log(&mut self, rel: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let body = format!("{} goes to {}, where you can get it back.", file_name(&rel), log_files::trash_name(&root));
+        let view = cx.entity();
+        let rels = vec![rel];
+        log_files::confirm(window, cx, "Delete this log?".to_string(), body, move |window, cx| {
+            let r = log_files::delete(&root, &rels, false);
+            let ok = r.is_ok();
+            log_files::report(window, cx, r);
+            if ok {
+                view.update(cx, |this, cx| this.after_delete(&rels, cx));
+            }
+        });
+    }
+
     /// Shows report `rel`, reading it off the UI thread the first time.
     fn pick(&mut self, rel: String, cx: &mut Context<Self>) {
         self.picked = Some(rel.clone());
@@ -340,6 +540,9 @@ impl ServerLogsView {
     /// Shows pane `pane`, opening its log.
     fn select(&mut self, pane: Pane, cx: &mut Context<Self>) {
         self.pane = pane;
+        if pane == Pane::Older {
+            self.load_old(cx);
+        }
         match pane.log() {
             Some(rel) if self.log.as_ref().map(|l| l.rel) != Some(rel) => self.open_log(rel, cx),
             Some(_) => {}
@@ -517,6 +720,7 @@ impl Render for ServerLogsView {
             Pane::Crashes => 0,
             Pane::Latest => 1,
             Pane::Debug => 2,
+            Pane::Older => 3,
         };
         let tabs = TabBar::new("srv-log-tabs")
             .underline()
@@ -525,12 +729,14 @@ impl Render for ServerLogsView {
             .child(Tab::new().label(if n_reports == 0 { "Crash reports".to_string() } else { format!("Crash reports ({n_reports})") }))
             .child(Tab::new().label(if running { "latest.log · live" } else { "latest.log" }))
             .child(Tab::new().label("debug.log"))
+            .child(Tab::new().label("Older logs"))
             .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                let p = [Pane::Crashes, Pane::Latest, Pane::Debug][*ix];
+                let p = [Pane::Crashes, Pane::Latest, Pane::Debug, Pane::Older][*ix];
                 this.select(p, cx);
             }));
         let body = match self.pane {
             Pane::Crashes => self.crashes_body(&root, cx),
+            Pane::Older => self.older_body(&root, cx),
             _ => self.log_body(&root, window, cx),
         };
         v_flex().size_full().gap_3().child(tabs).child(body).into_any_element()
@@ -559,28 +765,118 @@ impl ServerLogsView {
             Some(Ok(l)) => l.clone(),
         };
         let picked = self.picked.clone();
-        let rows = list.iter().enumerate().map(|(i, r)| {
+        let items: Vec<hopper::crashgroup::Item> =
+            list.iter().map(|r| hopper::crashgroup::Item { modified: r.modified, follow_up: r.follow_up, verdict: r.verdict.as_deref() }).collect();
+        let roles = hopper::crashgroup::group(&items);
+        // Follow-up reports sit folded under the report that explains them,
+        // unless that fold is open or one of them is the picked report.
+        let shown = |i: usize| match &roles[i] {
+            hopper::crashgroup::Role::FollowUp(Some(lead)) => {
+                picked.as_ref() == Some(&list[i].rel) || self.folds_open.contains(&list[*lead].rel)
+            }
+            _ => true,
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (i, r) in list.iter().enumerate().filter(|(i, _)| shown(*i)) {
             let sel = picked.as_ref() == Some(&r.rel);
-            let title = r.verdict.clone().unwrap_or_else(|| file_name(&r.rel).to_string());
+            let (title, follow) = match &roles[i] {
+                hopper::crashgroup::Role::FollowUp(lead) => (
+                    hopper::crashgroup::follow_up_title(lead.and_then(|l| list[l].verdict.as_deref())),
+                    true,
+                ),
+                _ => (r.verdict.clone().unwrap_or_else(|| file_name(&r.rel).to_string()), false),
+            };
             let rel = r.rel.clone();
-            v_flex()
-                .id(("srv-crash-row", i))
-                .gap_0p5()
-                .px_2()
-                .py_1p5()
-                .rounded(theme.radius)
-                .clickable(cx)
-                .map(|d| if sel { widgets::row_selected(d, cx) } else { d.hover(|s| widgets::row_hover(s, cx)) })
-                .child(div().text_sm().font_medium().line_clamp(2).child(title))
-                .child(widgets::caption(when(r.modified), cx).text_xs())
-                .on_click(cx.listener(move |this, _, _, cx| this.pick(rel.clone(), cx)))
-        });
+            // Deleting a report that explains a start takes its follow-ups too.
+            let mut group = vec![r.rel.clone()];
+            if let hopper::crashgroup::Role::Lead(f) = &roles[i] {
+                group.extend(f.iter().map(|&j| list[j].rel.clone()));
+            }
+            let (menu_view, menu_group, key_group) = (cx.entity(), group.clone(), group);
+            rows.push(
+                v_flex()
+                    .id(("srv-crash-row", i))
+                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                        if e.keystroke.key == "delete" {
+                            this.ask_delete(key_group.clone(), window, cx);
+                        }
+                    }))
+                    .gap_0p5()
+                    .px_2()
+                    .py_1p5()
+                    .when(follow, |d| d.pl_5())
+                    .rounded(theme.radius)
+                    .clickable(cx)
+                    .map(|d| if sel { widgets::row_selected(d, cx) } else { d.hover(|s| widgets::row_hover(s, cx)) })
+                    .child(div().text_sm().font_medium().when(follow, |d| d.text_color(theme.muted_foreground)).line_clamp(2).child(title))
+                    .child(
+                        widgets::caption(log_files::when(r.modified), cx)
+                            .id(("srv-crash-when", i))
+                            .tooltip({
+                                let full = hopper::time::exact_full(r.modified);
+                                move |w, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(w, cx)
+                            })
+                            .text_xs(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick(rel.clone(), cx)))
+                    .context_menu(move |m, _, _| {
+                        let (v, g) = (menu_view.clone(), menu_group.clone());
+                        let label = if g.len() > 1 { format!("Delete with its {} follow-ups…", g.len() - 1) } else { "Delete report…".to_string() };
+                        m.item(PopupMenuItem::new(label).icon(IconName::Trash).on_click(move |_, window, cx| {
+                            let g = g.clone();
+                            v.update(cx, |this, cx| this.ask_delete(g, window, cx));
+                        }))
+                    })
+                    .into_any_element(),
+            );
+            if let hopper::crashgroup::Role::Lead(follow_ups) = &roles[i] {
+                let open = self.folds_open.contains(&r.rel);
+                let lead = r.rel.clone();
+                let label = hopper::crashgroup::fold_label(follow_ups.len());
+                rows.push(
+                    h_flex()
+                        .id(("srv-crash-fold", i))
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .pl_5()
+                        .rounded(theme.radius)
+                        .clickable(cx)
+                        .hover(|s| widgets::row_hover(s, cx))
+                        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).xsmall().text_color(theme.muted_foreground))
+                        .child(widgets::caption(if open { "Hide follow-up reports".to_string() } else { label }, cx).text_xs())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.folds_open.remove(&lead) {
+                                this.folds_open.insert(lead.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
         let side = div()
             .id("srv-crash-list")
             .w(rems(20.))
             .flex_none()
             .h_full()
-            .child(v_flex().gap_0p5().pr_2().children(rows))
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .pr_2()
+                    .child(
+                        h_flex().px_2().pb_1().child(div().flex_1()).child(
+                            Button::new("srv-crash-clear")
+                                .xsmall()
+                                .ghost()
+                                .icon(IconName::Trash)
+                                .label("Clear all")
+                                .tooltip("Deletes every crash report of this server")
+                                .on_click(cx.listener(|this, _, window, cx| this.ask_clear(hopper::crashfiles::Kind::Crashes, window, cx))),
+                        ),
+                    )
+                    .children(rows),
+            )
             .overflow_y_scrollbar();
         let report = picked.and_then(|p| list.iter().find(|r| r.rel == p).cloned());
         let card = match report {
@@ -619,7 +915,14 @@ impl ServerLogsView {
                 .gap_2()
                 .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.danger))
                 .child(div().font_semibold().text_color(theme.danger).child(title))
-                .child(widgets::caption(when(r.modified), cx))
+                .child(
+                    widgets::caption(log_files::when(r.modified), cx)
+                        .id("srv-crash-head-when")
+                        .tooltip({
+                            let full = hopper::time::exact_full(r.modified);
+                            move |w, cx| gpui_kit::component::tooltip::Tooltip::new(full.clone()).build(w, cx)
+                        }),
+                )
                 .child(div().flex_1())
                 .child(
                     Button::new("srv-crash-open")
@@ -978,14 +1281,6 @@ fn file_name(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
 }
 
-/// "3 hours ago · 04/11/2026"
-fn when(t: i64) -> String {
-    if t <= 0 {
-        return String::new();
-    }
-    format!("{} · {}", hopper::time::relative_secs(t), hopper::time::date(t))
-}
-
 /// A jar's name for people and the pack's copy of it (for its icon and
 /// page): the same file, else the same name stem with the same name (a
 /// stem alone can match another mod). Else the name the server side gave
@@ -1014,7 +1309,7 @@ fn list_reports(root: &Path, mut known: HashMap<(String, i64), String>) -> Resul
     if let Some(l) = hopper::hopperd::locate(root) {
         let (c, id, _) = l.map_err(|e| format!("{e:#}"))?;
         let list = c.crashes(&id).map_err(|e| format!("{e:#}"))?;
-        let reports = list.into_iter().map(|(rel, modified, verdict)| Report { rel, modified: modified as i64, verdict }).collect();
+        let reports = list.into_iter().map(|(rel, modified, verdict, follow_up)| Report { rel, modified: modified as i64, verdict, follow_up }).collect();
         return Ok((reports, known));
     }
     // Over SFTP / FTP: fetch what changed into Hopper's copy first.
@@ -1029,7 +1324,7 @@ fn list_reports(root: &Path, mut known: HashMap<(String, i64), String>) -> Resul
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs() as i64);
-            Report { rel: format!("crash-reports/{}", p.file_name().unwrap_or_default().to_string_lossy()), modified, verdict: None }
+            Report { rel: format!("crash-reports/{}", p.file_name().unwrap_or_default().to_string_lossy()), modified, verdict: None, follow_up: false }
         })
         .collect();
     reports.sort_by(|a, b| b.modified.cmp(&a.modified).then(b.rel.cmp(&a.rel)));
@@ -1037,6 +1332,7 @@ fn list_reports(root: &Path, mut known: HashMap<(String, i64), String>) -> Resul
     // The first pass only lists them (the first verdict reads every jar).
     let mut budget = if known.is_empty() { 0 } else { VERDICTS_PER_PASS };
     for r in reports.iter_mut().take(WITH_VERDICT) {
+        r.follow_up = r.rel.ends_with(".txt") && hopper::crashgroup::is_follow_up_text(&hopper::logs::tail(&root.join(&r.rel), 2 << 20));
         let key = (r.rel.clone(), r.modified);
         let v = match known.get(&key) {
             Some(v) => v.clone(),

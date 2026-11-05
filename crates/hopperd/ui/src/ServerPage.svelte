@@ -285,7 +285,7 @@
     {/each}
   </nav>
 
-  <CrashStrip server={s} hidden={tab === 'logs'} seeWhy={() => nav('logs')} />
+  <CrashStrip server={s} hidden={tab === 'logs'} seeWhy={(rel) => nav('logs', rel)} />
 
   {#if tab === 'files'}
     <div class="full"><Files server={s} {path} go={(p) => nav('files', p)} openFile={(p) => nav('edit', p)} openTrash={() => nav('trash')} /></div>

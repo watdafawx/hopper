@@ -45,6 +45,14 @@
     }
   });
 
+  // The report the notice describes, by its path under the server folder, so
+  // "See why" opens Logs & crashes on exactly that one.
+  function reportOf(c) {
+    const s = String(c?.source || '').replaceAll('\\', '/');
+    const i = s.lastIndexOf('crash-reports/');
+    return i < 0 ? '' : s.slice(i);
+  }
+
   const key = $derived(crash ? `hopper.crash-strip.${server.id}.${crash.when}` : '');
   let closed = $state(false);
   $effect(() => {
@@ -97,7 +105,7 @@
     {#if changed && !back}
       <button class="btn sm pri" disabled={busy || alive} title={alive ? 'Stop the server first' : 'Swaps in the older copy. The newer one goes to Mods › Backups.'} onclick={putBack}><Undo2 size={13} />{changed.from ? `Put ${changed.from} back` : 'Put the older version back'}</button>
     {/if}
-    <button class="btn sm" onclick={seeWhy}>See why →</button>
+    <button class="btn sm" onclick={() => seeWhy(reportOf(crash))}>See why →</button>
     <button class="btn sm ghost icon" title="Hide this notice" onclick={close}><X size={13} /></button>
   </div>
 {/if}

@@ -153,7 +153,7 @@ impl LocalTime {
 
 /// Local time minus UTC, from what Windows says both are now.
 #[cfg(windows)]
-fn utc_offset_secs() -> i64 {
+pub(crate) fn utc_offset_secs() -> i64 {
     #[repr(C)]
     #[derive(Default)]
     struct SystemTimeRaw {
@@ -194,7 +194,7 @@ fn utc_offset_secs() -> i64 {
 }
 
 #[cfg(not(windows))]
-fn utc_offset_secs() -> i64 {
+pub(crate) fn utc_offset_secs() -> i64 {
     0
 }
 

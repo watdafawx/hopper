@@ -24,6 +24,8 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/logs/text", get(text))
         .route("/api/v1/servers/{id}/crashes", get(crashes))
         .route("/api/v1/servers/{id}/crashes/read", get(crash_read))
+        .route("/api/v1/servers/{id}/logs/delete", post(delete))
+        .route("/api/v1/servers/{id}/logs/clear", post(clear))
 }
 
 /// A log's text: its last [`TAIL`] bytes (whole lines), or what was
@@ -127,9 +129,43 @@ async fn crashes(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
                     }
                     None => None,
                 };
-                json!({ "path": f.path, "size": f.size, "modified": f.modified, "verdict": verdict })
+                // Read from the report's own text (the verdict can't tell).
+                let follow = i < WITH_VERDICT && f.path.ends_with(".txt") && hopper_core::crashgroup::is_follow_up_text(&hopper_core::logs::tail(&p, 2 << 20));
+                json!({ "path": f.path, "size": f.size, "modified": f.modified, "verdict": verdict, "follow": follow })
             })
             .collect::<Vec<_>>();
+        // Follow-up reports (their error only came while the loader undid
+        // the registries after the start's real one) point at the report
+        // that explains them, so the list can fold them under it.
+        let mut list = list;
+        let extra: Vec<(usize, Value)> = {
+            use hopper_core::crashgroup::{Item, Role, follow_up_title, group};
+            let items: Vec<Item> = list
+                .iter()
+                .map(|v| Item { modified: v["modified"].as_i64().unwrap_or(0), follow_up: v["follow"].as_bool().unwrap_or(false), verdict: v["verdict"].as_str() })
+                .collect();
+            group(&items)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, r)| match r {
+                    Role::Lead(n) => Some((i, json!({ "follow_ups": n.len() }))),
+                    Role::FollowUp(lead) => Some((
+                        i,
+                        json!({
+                            "follow_up": true,
+                            "lead": lead.map(|j| list[j]["path"].clone()),
+                            "title": follow_up_title(lead.and_then(|j| list[j]["verdict"].as_str())),
+                        }),
+                    )),
+                    Role::Plain => None,
+                })
+                .collect()
+        };
+        for (i, e) in extra {
+            if let (Some(o), Some(add)) = (list[i].as_object_mut(), e.as_object()) {
+                o.extend(add.clone());
+            }
+        }
         (list, pending)
     })
     .await
@@ -209,4 +245,42 @@ async fn share(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, 
     .map_err(|e| bad(format!("{e:#}")))?;
     log::info!("{name}: shared {path} on mclo.gs ({url}); hid {} IPs, {} tokens", hidden.ips, hidden.tokens);
     Ok(Json(json!({ "url": url, "hidden": hidden })))
+}
+
+#[derive(Deserialize)]
+struct DeleteBody {
+    paths: Vec<String>,
+}
+
+/// Deletes crash reports or logs (to the server's trash): only plain files
+/// directly in `crash-reports/` and `logs/`, and never the log a running
+/// server is writing.
+async fn delete(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<DeleteBody>) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let running = e.server.state().is_alive();
+    let n = tokio::task::spawn_blocking(move || hopper_core::crashfiles::delete(&e.root, &b.paths, running))
+        .await
+        .map_err(bad)?
+        .map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({ "deleted": n })))
+}
+
+#[derive(Deserialize)]
+struct ClearBody {
+    /// "crashes" or "logs".
+    what: String,
+}
+
+/// "Clear all": every crash report, or every log but the current
+/// latest.log and debug.log.
+async fn clear(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<ClearBody>) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let kind = hopper_core::crashfiles::Kind::parse(&b.what).ok_or_else(|| bad("Say what to clear: crashes or logs."))?;
+    let n = tokio::task::spawn_blocking(move || hopper_core::crashfiles::clear(&e.root, kind))
+        .await
+        .map_err(bad)?
+        .map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!({ "deleted": n })))
 }

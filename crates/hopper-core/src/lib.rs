@@ -20,6 +20,8 @@ pub mod configowner;
 pub mod configswitch;
 pub mod crashdetect;
 pub mod crashengine;
+pub mod crashfiles;
+pub mod crashgroup;
 pub mod crashloop;
 pub mod crashscan;
 pub mod crashsigs;

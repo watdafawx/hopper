@@ -73,6 +73,12 @@ pub fn set_disposer(f: Dispose) {
     *DISPOSE.write().unwrap_or_else(|e| e.into_inner()) = Some(f);
 }
 
+/// Sends `paths` (inside `root`) where deleted things go: the Recycle Bin,
+/// or Hopper Server's trash. Never deletes for good.
+pub fn dispose(root: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
+    disposer()(root, paths)
+}
+
 fn disposer() -> Dispose {
     DISPOSE.read().unwrap_or_else(|e| e.into_inner()).unwrap_or(recycle)
 }

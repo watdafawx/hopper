@@ -1,0 +1,27 @@
+---- Minecraft Crash Report ----
+
+// Why did you do that?
+
+Time: 2026-11-04 14:54:40
+Description: Mod loading failures have occurred; consult the issue messages for more details
+
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed
+
+
+A detailed walkthrough of the error, its code path and all known details is as follows:
+---------------------------------------------------------------------------------------
+
+-- Head --
+Thread: main
+Stacktrace:
+	at TRANSFORMER/neoforge@21.1.265/net.neoforged.neoforge.registries.RegistryManager.applySnapshot(RegistryManager.java:201) ~[neoforge-21.1.265-universal.jar%231111!/:?] {re:classloading}
+-- Mod loading issue --
+Details:
+	Mod file: /server/mods/MysticalAgriculturePlus-2.0.2.jar
+	Failure message: Mystical Agriculture Plus (mysticalagricultureplus) encountered an error while dispatching the net.neoforged.neoforge.registries.RegisterEvent event
+		java.lang.NoSuchMethodError: 'void me.almana.logisticsnetworks.item.NodeUpgradeItem.<init>(net.minecraft.world.item.Item$Properties, int, int, int, int)'
+	Mod version: 2.0.1
+	Mod issues URL: <No issues URL found>
+	Exception message: java.lang.NoSuchMethodError: 'void me.almana.logisticsnetworks.item.NodeUpgradeItem.<init>(net.minecraft.world.item.Item$Properties, int, int, int, int)'
+Stacktrace:
+	at TRANSFORMER/mysticalagricultureplus@2.0.1/com.dragon.mysticalagricultureplus.init.ModItems.lambda$register$1(ModItems.java:88) ~[MysticalAgriculturePlus-2.0.2.jar%23500!/:?] {}

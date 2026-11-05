@@ -302,3 +302,47 @@ distinct problems: {n}");
     println!("with the engine:   right mod first {e1}, in the top three {e3}");
     assert!(failed.is_empty(), "{failed:#?}");
 }
+
+/// One failed start can leave two reports: the one naming the mod that
+/// failed, and a follow-up whose error came while the loader undid the
+/// registries. The follow-up is the newest by name (and the one the old scan
+/// used), but "See why" and the crash card must land on the explaining one.
+#[test]
+fn a_follow_up_report_does_not_hide_the_report_that_explains_the_start() {
+    let case = corpus().join("server-fml-1104-1454");
+    let cfg: Case = toml::from_str(&fs::read_to_string(case.join("case.toml")).unwrap()).unwrap();
+    let root = std::env::temp_dir().join(format!("hopper-follow-up-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let (reports, logs, mods) = (root.join("crash-reports"), root.join("logs"), root.join("mods"));
+    for d in [&reports, &logs, &mods] {
+        fs::create_dir_all(d).unwrap();
+    }
+    for j in mod_list(&cfg.mods) {
+        fake_jar(&mods, &j);
+    }
+    // The explaining report is older by name; the follow-up is newer.
+    let first = reports.join("crash-2026-11-04_14.54.40-fml.txt");
+    let follow = reports.join(&cfg.report);
+    fs::copy(corpus().join("_followup").join("explaining.txt"), &first).unwrap();
+    fs::copy(case.join("report.txt"), &follow).unwrap();
+    fs::write(logs.join("latest.log"), gunzip(&case.join("latest.log.gz"))).unwrap();
+    let now = std::time::SystemTime::now();
+    for f in [&first, &follow, &logs.join("latest.log")] {
+        fs::File::options().write(true).open(f).unwrap().set_modified(now).unwrap();
+    }
+
+    let c = crashdetect::server(&root).expect("the server crashed");
+    assert_eq!(c.source, first, "the crash is the report that names the mod, not its follow-up");
+    assert_eq!(c.suspects.first().map(|s| s.mod_id.as_str()), Some("mysticalagricultureplus"));
+
+    // Read on its own (a later start has replaced the log), the follow-up is
+    // still a follow-up: the list folds it.
+    fs::remove_file(logs.join("latest.log")).unwrap();
+    let name = |s: &crashdetect::Suspect| crashdetect::jar_name(&mods, &s.file_name);
+    let f = crashdetect::server_report(&root, &follow).expect("the follow-up reads");
+    let fv = crashdetect::verdict(&f, &name);
+    assert!(hopper_core::crashgroup::is_follow_up_verdict(&fv), "follow-up verdict was: {fv}");
+    let e = crashdetect::server_report(&root, &first).expect("the explaining report reads");
+    assert!(!hopper_core::crashgroup::is_follow_up_verdict(&crashdetect::verdict(&e, &name)));
+    let _ = fs::remove_dir_all(&root);
+}

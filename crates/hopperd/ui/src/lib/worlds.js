@@ -29,6 +29,18 @@ export function whenLabel(secs) {
   return `${rel} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+/** The exact moment, "Today · 14:54:12", "Yesterday · 23:01:09", else
+ * "03/11/2026 · 14:54:12" (this browser's local time, 24 hour). */
+export function exactLabel(secs) {
+  if (!secs) return '';
+  const d = new Date(secs * 1000);
+  const p2 = (n) => String(n).padStart(2, '0');
+  const clock = `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+  const rel = relative(secs);
+  const day = rel === 'Today' || rel === 'Yesterday' ? rel : `${p2(d.getDate())}/${p2(d.getMonth() + 1)}/${d.getFullYear()}`;
+  return `${day} · ${clock}`;
+}
+
 /** The full date and time, for a tooltip. */
 export const fullDate = (secs) => new Date(secs * 1000).toLocaleString();
 
