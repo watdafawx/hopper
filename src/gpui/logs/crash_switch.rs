@@ -30,8 +30,9 @@ fn deletes(label: &str) -> String {
 
 /// Whether the card's settings come before turning mods off: a setting that
 /// keeps the whole mod and loses nothing.
+/// A changed one keeps its place, so the card doesn't jump after the click.
 pub(super) fn settings_first(c: &Crash) -> bool {
-    c.switches.iter().any(|s| s.kind != SwitchKind::Item)
+    c.switches.iter().chain(&c.switched_off).any(|s| s.kind != SwitchKind::Item)
 }
 
 /// The jar of mod `id`: a suspect's, else one in the mods folder named after it.

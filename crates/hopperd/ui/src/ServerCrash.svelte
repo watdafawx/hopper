@@ -162,7 +162,8 @@
   const switches = $derived(crash?.switches || []);
   const switchedOff = $derived(crash?.switched_off || []);
   const isItem = (sw) => !sw.kind || sw.kind === 'item';
-  const first = $derived(switches.some((sw) => !isItem(sw)));
+  // A changed one keeps its place, so the card doesn't jump after the click.
+  const first = $derived([...switches, ...switchedOff].some((sw) => !isItem(sw)));
   const sq = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const fileOfMod = (id) => suspects.find((s) => s.mod_id === id)?.file_name || mods.find((m) => sq(m.file).startsWith(sq(id)))?.file;
   const fileName = (sw) => sw.file.split('/').pop();
@@ -195,7 +196,7 @@
     busy = true;
     try {
       await post(`${base}/crash/switch-on`, { file: sw.file, key: sw.key });
-      say(`${sw.key} is ${fromText(sw)} again. The config as it was is in Mods › Backups.`);
+      say(`${sw.kind === 'limit' ? `${sw.label} is ${fromText(sw)}` : `${sw.label} is on`} again. The config as it was is in Mods › Backups.`);
       await load();
     } catch (e) {
       say(e.message, true);

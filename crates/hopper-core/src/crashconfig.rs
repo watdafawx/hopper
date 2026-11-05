@@ -298,9 +298,9 @@ fn mixin_switches(id: &str, f: &File, mixins: &[Mixin], suspects: &HashSet<Strin
         let label = configedit::label(opt.rsplit('.').next().unwrap_or(opt));
         let class = m.rel.rsplit('.').next().unwrap_or(&m.rel);
         let why = if m.strength >= 95 {
-            format!("The crash is this part of {id} failing to load ({class}).")
+            format!("The crash is this part of the mod failing to load ({class}). The rest of the mod keeps working.")
         } else {
-            format!("The crash went through this part of {id} ({class}).")
+            format!("The crash went through this part of the mod ({class}). The rest of the mod keeps working.")
         };
         let s = Switch {
             mod_id: id.to_string(),
@@ -371,7 +371,7 @@ fn module_switches(id: &str, f: &File, modules: &[Module]) -> Vec<(Switch, bool)
                 label,
                 kind: SwitchKind::Module,
                 path: e.path.clone(),
-                why: format!("The crash went through {id}'s code for {} ({}).", m.name, m.class),
+                why: format!("The crash went through the mod's code for {} ({}). The rest of the mod keeps working.", m.name, m.class.rsplit('.').next().unwrap_or(&m.class)),
                 score,
                 ..Default::default()
             };
