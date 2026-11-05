@@ -213,7 +213,7 @@ fn put_entry(inst: &mut Instance, new: Addon, tmp: &Path, on: bool) -> anyhow::R
 
 /// Puts `file` (one of [`Gone::choices`]) back for entry `f`, whose own
 /// version is gone.
-pub fn put_back_as(inst: &mut Instance, f: &Saved, file: &cf::File, job: &Job) -> anyhow::Result<PathBuf> {
+pub fn put_back_as(inst: &mut Instance, f: &Saved, file: &cf::File, job: Option<&Job>) -> anyhow::Result<PathBuf> {
     let r = f.src.as_ref().ok_or_else(|| anyhow::anyhow!("{}: History doesn't know where it came from", f.name))?;
     let on = !f.restore_to.ends_with(".disabled");
     let mut new = entry_of(r);
@@ -223,7 +223,7 @@ pub fn put_back_as(inst: &mut Instance, f: &Saved, file: &cf::File, job: &Job) -
     };
     let dest = inst.root.join(&f.restore_to).with_file_name(format!("{}.hopper-tmp", file.file_name));
     let url = cf::download_url(file)?;
-    cf::download_checked(&url, &dest, &file.expect(), Some(job), |_| {})?;
+    cf::download_checked(&url, &dest, &file.expect(), job, |_| {})?;
     // The picked file, with the old entry's history.
     let fresh = crate::install::addon_from(&m, file, new.from_pack);
     new = Addon { file_id: fresh.file_id, file_name: fresh.file_name, file_date: fresh.file_date, release_type: fresh.release_type, mr_version: fresh.mr_version, mr_sha1: fresh.mr_sha1, requires: fresh.requires, ..new };

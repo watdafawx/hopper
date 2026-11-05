@@ -374,7 +374,7 @@ impl AddonsView {
         }
         if moved > 0 {
             let what = if moved == 1 { files[0].clone() } else { format!("{moved} packs") };
-            window.push_notification(Notification::success(format!("Moved {what} to .hopper-backups")), cx);
+            window.push_notification(Notification::success(format!("Removed {what}. Undo from the instance's History.")), cx);
         }
         self.reload_globals(cx);
     }
@@ -478,7 +478,7 @@ impl AddonsView {
                         .xsmall()
                         .outline()
                         .label("Keep newest")
-                        .tooltip("Move the older jars to Hopper's backups")
+                        .tooltip("Remove the older jars (undo from History)")
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.remove(older.clone(), what.clone(), window, cx)
                         })),
@@ -1348,7 +1348,7 @@ impl AddonsView {
                     .outline()
                     .icon(IconName::Undo2)
                     .label(if ch.from.is_empty() { "Put the older version back".to_string() } else { format!("Put {} back", ch.from) })
-                    .tooltip("Swaps in the copy Hopper kept. The newer one goes to Backups, so you can undo this there.")
+                    .tooltip("Swaps in the copy Hopper kept. The newer one goes to History, so you can undo this there.")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let store = this.store.clone();
                         if crate::crash_help::put_back_changed(&store, &root, &ch, window, cx) {

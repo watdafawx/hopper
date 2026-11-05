@@ -29,6 +29,9 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mod-backups/restore", post(backup_restore))
         .route("/api/v1/servers/{id}/mod-backups/delete", post(backup_delete))
         .route("/api/v1/servers/{id}/mod-backups/clean", post(backup_clean))
+        .route("/api/v1/servers/{id}/mod-backups/undo", post(history_undo))
+        .route("/api/v1/servers/{id}/mod-backups/put-back", post(history_put_back))
+        .route("/api/v1/servers/{id}/mod-backups/free", post(history_free))
         .route("/api/v1/settings/backup-retention", get(get_retention).put(put_retention))
 }
 
@@ -208,9 +211,13 @@ async fn config_reset(State(app): State<Arc<App>>, headers: HeaderMap, method: M
 
 async fn backup_list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    let (sets, usage) = blocking(move || {
+    let (sets, usage, copies) = blocking(move || {
         let r = hopper_core::retention::policy();
-        Ok((backups::list(&e.root), (hopper_core::retention::usage(&e.root), hopper_core::retention::preview(&e.root), r)))
+        Ok((
+            backups::list(&e.root),
+            (hopper_core::retention::usage(&e.root), hopper_core::retention::preview(&e.root), r),
+            backups::copies_size(&e.root),
+        ))
     })
     .await?;
     let (u, would, r) = usage;
@@ -220,12 +227,18 @@ async fn backup_list(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
         .map(|s| {
             json!({
                 "when": s.when, "size": s.size(),
-                "files": s.files.iter().map(|f| json!({ "name": f.name, "size": f.size, "restore_to": f.restore_to, "download": f.download })).collect::<Vec<_>>(),
+                "files": s.files.iter().map(|f| json!({
+                    "name": f.name, "size": f.size, "restore_to": f.restore_to, "download": f.download,
+                    // History: what happened, the mod, its versions.
+                    "change": f.change.label(), "title": f.title(), "detail": f.detail(),
+                    "project_id": f.src.as_ref().map_or(0, |r| r.project_id),
+                    "icon": f.src.as_ref().and_then(|r| r.addon.as_ref()).map(|a| a.icon.clone()).unwrap_or_default(),
+                })).collect::<Vec<_>>(),
             })
         })
         .collect();
     Ok(Json(json!({
-        "sets": rows, "total_size": total,
+        "sets": rows, "total_size": total, "copies": copies,
         // The whole folder (snapshots and world zips too) and the clean up rules.
         "usage": { "total": u.total(), "limited": u.limited(), "frees": would.freed, "removes": would.count(),
                    "keep_actions": r.keep_actions, "keep_days": r.keep_days, "max_mb": r.max_mb },
@@ -306,6 +319,83 @@ async fn backup_restore(State(app): State<Arc<App>>, headers: HeaderMap, method:
     .await?;
     crate::mods_api::forget_updates(&id);
     Ok(Json(json!({ "restored": done, "restart_needed": running })))
+}
+
+#[derive(Deserialize)]
+struct UndoBody {
+    when: i64,
+    /// One file of the entry; none: all of them.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Undo from History, as desktop's: a mod downloads again from its site
+/// with its old entry; a config gets its old text back (what's there now
+/// goes to History first). A mod whose version its site no longer has
+/// comes back as `gone`, with the versions it does have, for the picker.
+async fn history_undo(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<UndoBody>) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let running = e.server.state().is_alive();
+    let (done, gone, errors) = blocking(move || {
+        let set = backups::list(&e.root).into_iter().find(|s| s.when == b.when).ok_or_else(|| anyhow::anyhow!("That History entry is gone."))?;
+        let files: Vec<_> = set.files.iter().filter(|f| b.name.as_ref().is_none_or(|n| *n == f.name)).cloned().collect();
+        anyhow::ensure!(!files.is_empty(), "Nothing to undo.");
+        let mut inst = crate::mods_api::instance_of(&e)?;
+        let (mut done, mut gone, mut errors) = (Vec::new(), None, Vec::new());
+        for f in &files {
+            match hopper_core::undo::undo(&mut inst, f) {
+                Ok(p) => done.push(p.file_name().unwrap_or_default().to_string_lossy().into_owned()),
+                Err(err) => match err.downcast::<hopper_core::undo::Gone>() {
+                    Ok(g) if gone.is_none() => {
+                        gone = Some(json!({
+                            "name": f.name, "title": g.name, "message": g.to_string(), "closest": g.closest,
+                            "choices": g.choices.iter().map(|c| json!({ "id": c.id, "file_name": c.file_name, "version": hopper_core::undo::version_of(&c.file_name), "date": c.file_date })).collect::<Vec<_>>(),
+                        }))
+                    }
+                    Ok(g) => errors.push(format!("{}: {g}", f.name)),
+                    Err(err) => errors.push(format!("{}: {err:#}", f.name)),
+                },
+            }
+        }
+        Ok((done, gone, errors))
+    })
+    .await?;
+    crate::mods_api::forget_updates(&id);
+    Ok(Json(json!({ "restored": done, "gone": gone, "errors": errors, "restart_needed": running })))
+}
+
+#[derive(Deserialize)]
+struct PutBackBody {
+    when: i64,
+    name: String,
+    file_id: u64,
+}
+
+/// Puts another version back for a History entry whose own version is gone
+/// from its site (the picker's choice).
+async fn history_put_back(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>, Json(b): Json<PutBackBody>) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let running = e.server.state().is_alive();
+    let put = blocking(move || {
+        let set = backups::list(&e.root).into_iter().find(|s| s.when == b.when).ok_or_else(|| anyhow::anyhow!("That History entry is gone."))?;
+        let f = set.files.iter().find(|f| f.name == b.name).ok_or_else(|| anyhow::anyhow!("That History entry is gone."))?;
+        let r = f.src.as_ref().ok_or_else(|| anyhow::anyhow!("{}: History doesn't know where it came from", f.name))?;
+        let mut inst = crate::mods_api::instance_of(&e)?;
+        let file = hopper_core::undo::choices(&inst, r)?.into_iter().find(|c| c.id == b.file_id).ok_or_else(|| anyhow::anyhow!("That version isn't offered any more."))?;
+        hopper_core::undo::put_back_as(&mut inst, f, &file, None)?;
+        Ok(file.file_name)
+    })
+    .await?;
+    crate::mods_api::forget_updates(&id);
+    Ok(Json(json!({ "restored": [put], "restart_needed": running })))
+}
+
+/// The one-time clean up the owner starts: old jar copies the sites still
+/// hand out become notes of where to download them.
+async fn history_free(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let (freed, kept) = blocking(move || Ok(backups::free_space(&e.root))).await?;
+    Ok(Json(json!({ "freed": freed, "kept": kept })))
 }
 
 /// Moves the jars in `mods/` that are the mod `ids` (by their mod ids) to

@@ -269,7 +269,7 @@ pub fn materialize(jar: &Path) -> anyhow::Result<()> {
     }
     let r = read_ref(jar).ok_or_else(|| anyhow::anyhow!("{}: its backup note can't be read", jar.display()))?;
     let (_, fetch) = hooks();
-    fetch(&r, jar).map_err(|e| anyhow::anyhow!("{}: the backup keeps only where to download it, and downloading it again failed: {e:#}", r.file_name))?;
+    fetch(&r, jar).map_err(|e| anyhow::anyhow!("{}: History keeps only where to download it, and downloading it again failed: {e:#}", r.file_name))?;
     let _ = fs::remove_file(ref_path(jar));
     Ok(())
 }
@@ -336,6 +336,44 @@ pub struct Saved {
     /// The file of the same project in the instance now (the version it was
     /// updated or rolled back to).
     pub now: Option<String>,
+}
+
+impl Saved {
+    /// The mod's name when History knows it, else the file's.
+    pub fn title(&self) -> String {
+        match &self.src {
+            Some(r) if !r.name.is_empty() => r.name.clone(),
+            _ => self.name.trim_end_matches(".disabled").to_string(),
+        }
+    }
+
+    /// "CurseForge" or "Modrinth", where Undo downloads it from; empty for
+    /// a kept copy.
+    pub fn site(&self) -> &'static str {
+        match &self.src {
+            Some(r) if !r.mr_version.is_empty() => "Modrinth",
+            Some(_) => "CurseForge",
+            None => "",
+        }
+    }
+
+    /// The line under an entry in History: "1.6.3 → 1.6.4 · CurseForge",
+    /// "0.116.15 · Modrinth", "No download source · copy kept (2 MB)" or
+    /// where a config goes back to.
+    pub fn detail(&self) -> String {
+        let base = self.name.trim_end_matches(".disabled");
+        match (self.change, &self.now, &self.src) {
+            (Change::Updated | Change::RolledBack | Change::Switched, Some(now), _) => {
+                let (old, new) = crate::install::version_change(base, now);
+                format!("{old} → {new} · {}", self.site())
+            }
+            (_, _, Some(_)) => format!("{} · {}", crate::undo::version_of(base), self.site()),
+            (_, _, None) if is_jar(&self.name) => {
+                format!("No download source · copy kept ({})", crate::instance_ops::human_bytes(self.size))
+            }
+            (_, _, None) => self.restore_to.clone(),
+        }
+    }
 }
 
 /// What a History entry was.

@@ -1899,6 +1899,13 @@ impl Store {
         let _ = self.run_job(None, title.into(), work);
     }
 
+    /// Reads an instance again after a change made outside a job (History's
+    /// Undo).
+    pub fn reload_instance(&mut self, root: &Path, cx: &mut Context<Self>) {
+        self.handle(Msg::InstanceChanged(root.to_path_buf()), cx);
+        cx.notify();
+    }
+
     /// [`spawn_job`] for work that changes an instance: it counts as busy
     /// until the job ends, so the UI holds off other changes to it.
     pub fn spawn_instance_job(
@@ -2727,7 +2734,8 @@ impl Store {
         Ok(())
     }
 
-    /// Moves files to the instance's `.hopper-backups`.
+    /// Removes files for good; History keeps where to download each again
+    /// (or a copy of one nothing else has), for Undo.
     pub fn remove_files(&mut self, root: &Path, files: &[String]) -> Result<(), String> {
         let inst = self
             .instances
@@ -2747,34 +2755,6 @@ impl Store {
                 None => install::remove_loose_file(inst, f),
             }
             .map_err(|e| format!("{:#}", install::explain_locked(e)))?;
-        }
-        self.drop_updates(root, &ids);
-        Ok(())
-    }
-
-    /// Deletes files (to the Recycle Bin) without keeping a backup.
-    /// Deletes files to the Recycle Bin, or for good with `permanent`.
-    pub fn delete_files(&mut self, root: &Path, files: &[String], permanent: bool) -> Result<(), String> {
-        let inst = self
-            .instances
-            .iter_mut()
-            .find(|i| i.root == root)
-            .ok_or("That instance is gone.")?;
-        // The projects these files are, to drop from the update list.
-        let ids: Vec<u64> = inst
-            .addons
-            .iter()
-            .filter(|a| files.contains(&a.file_name))
-            .map(|a| a.project_id)
-            .collect();
-        for f in files {
-            match (inst.addons.iter().position(|a| &a.file_name == f), permanent) {
-                (Some(i), false) => install::delete(inst, i),
-                (Some(i), true) => install::purge(inst, i),
-                (None, false) => install::delete_loose_file(inst, f),
-                (None, true) => install::purge_loose_file(inst, f),
-            }
-            .map_err(|e| format!("{e:#}"))?;
         }
         self.drop_updates(root, &ids);
         Ok(())
@@ -3671,7 +3651,7 @@ impl Store {
                         None => hopper::install::remove_loose_file(inst, f),
                     };
                     match r {
-                        Ok(()) => job.note(format!("{f} replaced; the old one is in Backups")),
+                        Ok(()) => job.note(format!("{f} replaced; undo it from History")),
                         Err(e) => job.note(format!("{f}: {e:#}")),
                     }
                 }
@@ -3721,7 +3701,7 @@ impl Store {
                         let keep = inst.root.join(".hopper-backups").join(stamp.to_string()).join(dir);
                         std::fs::create_dir_all(&keep)?;
                         std::fs::rename(&dest, keep.join(&name))?;
-                        job.note(format!("{name} replaced; the old one is in .hopper-backups"));
+                        job.note(format!("{name} replaced; undo it from History"));
                     }
                     std::fs::copy(p, &dest)?;
                     jars += usize::from(dir == "mods");

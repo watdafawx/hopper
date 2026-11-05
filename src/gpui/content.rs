@@ -142,7 +142,7 @@ impl WorldsView {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Trash)
-                        .tooltip("Move to .hopper-backups")
+                        .tooltip("Remove (undo from History)")
                         .on_click(
                             cx.listener(move |this, _, w, cx| {
                                 this.remove_pack(path.clone(), w, cx)

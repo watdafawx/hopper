@@ -994,9 +994,9 @@ impl UpdatePreview {
             .unwrap_or(choices.len() - 1);
         let mine = rows.iter().filter(|r| !self.take.contains(*r)).count();
         let backups = if server {
-            "The server's copies go to .hopper-backups."
+            "The server's copies can be undone from History."
         } else {
-            "Yours go to .hopper-backups."
+            "Yours can be undone from History."
         };
         let note = match self.bulk {
             Bulk::Pack if quick && mine > 0 => format!(
@@ -1157,7 +1157,7 @@ impl UpdatePreview {
             .join(", ");
         let more = if n > 2 { "…" } else { "" };
         let note = if reset {
-            format!("They change to the pack's versions: {some}{more}. The old jars go to .hopper-backups.")
+            format!("They change to the pack's versions: {some}{more}. You can undo it from History.")
         } else {
             format!("They stay as they are: {some}{more}.")
         };
@@ -1670,7 +1670,7 @@ impl UpdatePreview {
                     .children(needed_cards)
                     .child(self.list_tools("mods-filter", tabs, cx))
                     .child(self.mod_rows("chg", rows.into_iter().map(|r| r.1).collect(), cx))
-                    .when(dropped > 0, |c| c.child(widgets::caption("Dropped mods go to .hopper-backups.", cx).text_xs())),
+                    .when(dropped > 0, |c| c.child(widgets::caption("Dropped mods can be undone from History.", cx).text_xs())),
             );
         }
 
@@ -1754,7 +1754,7 @@ impl UpdatePreview {
                     "sum-dropped",
                     IconName::Archive,
                     danger,
-                    div().child(format!("{n} files the pack dropped, unedited: to backups")),
+                    div().child(format!("{n} files the pack dropped, unedited: undo from History")),
                     Some(open == Some(Section::Dropped)),
                     cx,
                 )
@@ -2381,7 +2381,7 @@ impl Render for UpdatePreview {
                                 .text_xs()
                                 .text_color(muted)
                                 .child(Icon::new(IconName::Layers).xsmall().flex_none())
-                                .child("Replaced mods and files go to .hopper-backups. No full backup is made: make one in Backups first if you want one."),
+                                .child("Replaced mods and files can be undone from History. No snapshot is made: take one in ⋯ › History › Snapshots first if you want one."),
                         )
                     })
                     .when(server_mode, |c| {

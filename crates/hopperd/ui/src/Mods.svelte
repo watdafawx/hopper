@@ -355,7 +355,7 @@
       const n = r.updated.length;
       const bad = r.failed?.length ? ` ${r.failed.length} failed: ${r.failed.slice(0, 3).join(', ')}${r.failed.length > 3 ? '…' : ''}.` : '';
       const web = r.web ? ` ${r.web} only download from CurseForge's website: get them on its page and drop them in mods/.` : '';
-      say(`${n === 1 && ids.length === 1 ? `Updated ${r.updated[0]}` : `Updated ${n}`}.${bad}${web}${n && alive ? ' Restart the server to load them.' : ''}${n ? ' The old jars are in Backups.' : ''}`, !n);
+      say(`${n === 1 && ids.length === 1 ? `Updated ${r.updated[0]}` : `Updated ${n}`}.${bad}${web}${n && alive ? ' Restart the server to load them.' : ''}${n ? ' Undo from History.' : ''}`, !n);
       // The quiet green "Updated" mark, on the rows that did (the job
       // names them as the server knows them).
       const names = new Set(r.updated);
@@ -770,7 +770,7 @@
 <div class="card">
   <nav class="subtabs">
     <button class="tab" class:tab-sel={sub === 'mods'} onclick={() => (sub = 'mods')}>Mods{data ? ` ${mods.length}` : ''}</button>
-    <button class="tab" class:tab-sel={sub === 'backups'} onclick={() => (sub = 'backups')}>Backups{backupCount ? ` ${backupCount}` : ''}</button>
+    <button class="tab" class:tab-sel={sub === 'backups'} onclick={() => (sub = 'backups')}>History{backupCount ? ` ${backupCount}` : ''}</button>
     <span class="sp"></span>
     {#if data}
       <button class="chip meta" title={/^(neoforge|forge|fabric|quilt)/i.test(data.loader || '') ? 'Loader versions and changelog' : 'Minecraft version and loader: change'} onclick={() => (/^(neoforge|forge|fabric|quilt)/i.test(data.loader || '') ? (loaderOpen = true) : editMeta())}><Settings2 size={11} />{data.game_version || 'version?'} · {data.loader || 'loader?'}</button>
@@ -813,7 +813,7 @@
     {#if identifying}<div class="banner small"><span class="spinner blue"></span>{identifying}… names, icons and updates fill in when it's done.</div>{/if}
     {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
     {#if data && !data.curseforge}<CfKey inline onSaved={() => { load(); checkUpdates(true); }} />{/if}
-    {#if twice.length}<div class="small warn row wrap">{twice.length} mod{twice.length === 1 ? ' is' : 's are'} in twice: {twice.map((l) => l[0].name).join(', ')}. <button class="link" onclick={async () => (await drop(older)) && changed(true)}>Keep newest</button><span class="muted">(the older jars go to Backups)</span></div>{/if}
+    {#if twice.length}<div class="small warn row wrap">{twice.length} mod{twice.length === 1 ? ' is' : 's are'} in twice: {twice.map((l) => l[0].name).join(', ')}. <button class="link" onclick={async () => (await drop(older)) && changed(true)}>Keep newest</button><span class="muted">(undo from History)</span></div>{/if}
     {#if clientOn}<div class="small warn">{clientOn} client-only mod{clientOn === 1 ? '' : 's'} on: servers usually don't need {clientOn === 1 ? 'it' : 'them'}, and some won't start with them. <button class="link" onclick={() => (chip = 'client')}>Show</button></div>{/if}
 
     <div class="split">

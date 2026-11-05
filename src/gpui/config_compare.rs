@@ -235,7 +235,7 @@ impl CompareView {
                 cx.emit(CompareApplied);
                 if done > 0 {
                     window.push_notification(
-                        Notification::success(format!("Applied {done} setting{}. The old copies are in Backups here and on {name}; the server uses them on its next start.", if done == 1 { "" } else { "s" })),
+                        Notification::success(format!("Applied {done} setting{}. Undo it from History here and on {name}; the server uses the change on its next start.", if done == 1 { "" } else { "s" })),
                         cx,
                     );
                 }
@@ -457,7 +457,7 @@ impl Render for CompareView {
             .child(div().text_sm().child(if n == 0 { "Pick → or ← on a setting".to_string() } else { format!("{n} picked:") }))
             .when(to_s > 0, |d| d.child(widgets::chip(theme.muted_foreground).child(format!("{to_s} → server"))))
             .when(to_c > 0, |d| d.child(widgets::chip(theme.muted_foreground).child(format!("{to_c} → this PC"))))
-            .child(widgets::caption("Only the picked settings change. Old copies go to Backups on both sides.", cx).text_xs())
+            .child(widgets::caption("Only the picked settings change. Undo it from History on both sides.", cx).text_xs())
             .child(div().flex_1())
             .child(Button::new("cmp-clear").ghost().small().label("Clear").disabled(n == 0).on_click(cx.listener(|this, _, _, cx| {
                 this.picks.clear();

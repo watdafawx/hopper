@@ -814,7 +814,7 @@ pub fn restore(root: &Path, id: &str, snapshot_first: bool) -> anyhow::Result<Re
     let aside_dir = root.join(crate::sync::BACKUP_DIR).join(format!("restore-{}", now_ms()));
     crate::retention::schedule(root);
     let after = |e: anyhow::Error| match &safety {
-        Some(s) => e.context(format!("Restore stopped partway. \"{}\" in Backups has the instance as it was", s.reason.label())),
+        Some(s) => e.context(format!("Restore stopped partway. \"{}\" in History › Snapshots has the instance as it was", s.reason.label())),
         None => e.context(format!("Restore stopped partway. Files it took away are in {}", aside_dir.display())),
     };
     // What's there now, by hash: from the snapshot just taken, else read

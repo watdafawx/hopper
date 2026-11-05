@@ -666,7 +666,7 @@ impl ConfigView {
             invalidate(&root, cx);
             let names: Vec<String> = saved.iter().map(|r| file_name(r)).collect();
             let what = if names.len() == 1 { names[0].clone() } else { format!("{} files", names.len()) };
-            let mut msg = format!("Saved {what}. The old copy is in Backups.");
+            let mut msg = format!("Saved {what}. Undo it from ⋯ › History.");
             if reapplied {
                 msg.push_str(" The game had changed the file meanwhile: your changes went onto its newer copy.");
             }
@@ -1159,7 +1159,7 @@ impl ConfigView {
             .when(n > 0, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(theme.primary)).child(div().text_sm().truncate().child(what)))
             .when(n == 0, |d| d.child(widgets::caption("No unsaved changes", cx).text_xs()))
             .when(!narrow && n > 0, |d| {
-                d.child(widgets::caption(if running { "The game is running: most mods pick changes up live. The old copy goes to Backups." } else { "The old copy goes to Backups." }, cx).text_xs())
+                d.child(widgets::caption(if running { "The game is running: most mods pick changes up live. Undo it any time from History." } else { "Undo it any time from History." }, cx).text_xs())
             })
             .child(div().flex_1())
             .child(
@@ -1189,7 +1189,7 @@ impl ConfigView {
                     .icon(IconName::Check)
                     .label("Save")
                     .disabled(n == 0)
-                    .tooltip("Checks every change first. The file as it was goes to Backups, so you can undo this.")
+                    .tooltip("Checks every change first. You can undo this from History.")
                     .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
             )
             .into_any_element()
@@ -1589,7 +1589,7 @@ fn watch_moved_back(store: Entity<Store>, root: PathBuf, files: Vec<(String, Vec
                             }
                         }
                         invalidate(&r, cx);
-                        window.push_notification(Notification::success(format!("Put back {n} setting{}. The old copy is in Backups.", if n == 1 { "" } else { "s" })), cx);
+                        window.push_notification(Notification::success(format!("Put back {n} setting{}. Undo it from ⋯ › History.", if n == 1 { "" } else { "s" })), cx);
                     });
                     window.push_notification(
                         Notification::warning(format!("The game changed {} back as it closed: {}.", if lines.len() == 1 { "a setting" } else { "some settings" }, lines.join("; ")))

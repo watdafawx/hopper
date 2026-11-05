@@ -274,7 +274,7 @@ impl PeersView {
                             results.iter().filter_map(|r| r.error.clone()).collect();
                         if failed.is_empty() {
                             Ok(format!(
-                                "Pulled {} files. Replaced ones are in .hopper-backups.",
+                                "Pulled {} files. Undo it from History.",
                                 results.len()
                             ))
                         } else {
@@ -538,7 +538,7 @@ impl PeersView {
                                     .outline()
                                     .icon(IconName::Upload)
                                     .label(format!("Push to them ({nu})"))
-                                    .tooltip("Send these files to their PC; they keep backups of what's replaced")
+                                    .tooltip("Send these files to their PC; they can undo it from History")
                                     .disabled(nu == 0 || self.running)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.transfer(false, push.clone(), cx)

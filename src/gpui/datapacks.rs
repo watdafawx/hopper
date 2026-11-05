@@ -1261,7 +1261,7 @@ impl AddonsView {
         }
         let store = self.store.clone();
         self.undo_toast(
-            format!("Removed {what}. It's in ⋯ › Backups."),
+            format!("Removed {what}. Undo here or in ⋯ › History."),
             Rc::new(move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
                 undo_remove(&store, root.clone(), moved.clone(), window, cx);
                 this.resync(cx);

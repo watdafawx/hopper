@@ -1714,7 +1714,7 @@ pub fn put_back(root: &Path, c: &Changed) -> anyhow::Result<PathBuf> {
         .into_iter()
         .flat_map(|s| s.files)
         .find(|f| f.path == c.backup)
-        .ok_or_else(|| anyhow::anyhow!("The older copy of {} isn't in backups any more.", c.name))?;
+        .ok_or_else(|| anyhow::anyhow!("The older copy of {} isn't in History any more.", c.name))?;
     let now = root.join("mods").join(&c.file_name);
     if now.is_file() {
         let dir = root.join(crate::sync::BACKUP_DIR).join(crate::time::now().to_string());

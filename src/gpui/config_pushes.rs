@@ -118,7 +118,7 @@ fn show(name: String, remote: hopper::hopperd::Remote, root: PathBuf, pushes: Ve
                     let (ok, failed) = apply(&root, &pushes, &remote);
                     note.dismiss(window, cx);
                     let msg = if failed.is_empty() {
-                        format!("Applied {ok} setting{} from {name}. The old copies are in Backups.", if ok == 1 { "" } else { "s" })
+                        format!("Applied {ok} setting{} from {name}. Undo it from ⋯ › History.", if ok == 1 { "" } else { "s" })
                     } else {
                         format!("Applied {ok} setting{} from {name}. Not applied: {}", if ok == 1 { "" } else { "s" }, failed.join(" "))
                     };

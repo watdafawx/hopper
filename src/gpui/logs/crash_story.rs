@@ -84,7 +84,7 @@ impl LogsView {
                             true,
                             cx,
                         ))
-                        .child(widgets::caption("Play to try again. Backups has the newer one.", cx).text_xs())
+                        .child(widgets::caption("Play to try again. Undo from History.", cx).text_xs())
                         .into_any_element()
                 } else {
                     let (root_p, ch_p) = (root.to_path_buf(), ch.clone());
@@ -98,7 +98,7 @@ impl LogsView {
                                 .primary()
                                 .icon(IconName::Undo2)
                                 .label(label)
-                                .tooltip("Swaps in the copy Hopper kept. The newer one goes to Backups, so you can undo this there.")
+                                .tooltip("Swaps in the copy Hopper kept. The newer one goes to History, so you can undo this there.")
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     let store = this.store.clone();
                                     crate::crash_help::put_back_changed(&store, &root_p, &ch_p, window, cx);
@@ -108,9 +108,9 @@ impl LogsView {
                         .children(actions.map(|a| div().child(a)))
                         .child(widgets::caption(
                             if ch.to.is_empty() {
-                                "The newer one goes to Backups.".to_string()
+                                "Undo it from History.".to_string()
                             } else {
-                                format!("{} goes to Backups.", ch.to)
+                                format!("{} is in History.", ch.to)
                             },
                             cx,
                         ).text_xs())

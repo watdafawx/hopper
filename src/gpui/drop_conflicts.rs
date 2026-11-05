@@ -101,7 +101,7 @@ pub fn ask(conflicts: Vec<Conflict>, plan: Plan, window: &mut Window, cx: &mut A
                 v_flex()
                     .gap_2()
                     .child(div().text_sm().child(format!(
-                        "{} is in this instance already{}. Replacing moves it to Backups, where it can be put back.",
+                        "{} is in this instance already{}. You can undo replacing it from History.",
                         c.old_file,
                         if same { " with the same version" } else { "" }
                     )))

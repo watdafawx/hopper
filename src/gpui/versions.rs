@@ -338,7 +338,7 @@ impl Render for VersionsView {
                                             .ghost()
                                             .icon(IconName::Settings2)
                                             .label("Reset config")
-                                            .tooltip("Reset config: move this mod's config files to backups so it writes fresh defaults")
+                                            .tooltip("Reset config: remove this mod's config files so it writes fresh defaults (undo from History)")
                                             .on_click(move |_, window, cx| {
                                                 open_reset_config(store.clone(), root.clone(), pid, from.clone(), window, cx)
                                             }),
@@ -807,8 +807,8 @@ impl Render for ResetConfig {
                 v_flex()
                     .gap_2()
                     .child(div().text_sm().child(format!(
-                        "{} to .hopper-backups (you can put {} back from Backups). {} writes fresh defaults the next time the game starts.",
-                        if f.len() == 1 { "This file goes".to_string() } else { format!("These {} files go", f.len()) },
+                        "{} removed. You can put {} back from History. {} writes fresh defaults the next time the game starts.",
+                        if f.len() == 1 { "This file is".to_string() } else { format!("These {} files are", f.len()) },
                         if f.len() == 1 { "it" } else { "them" },
                         self.name
                     )))
@@ -876,7 +876,7 @@ pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, f
                             .outline()
                             .danger()
                             .icon(IconName::RotateCcw)
-                            .label("Move to backups")
+                            .label("Remove")
                             .disabled(files.is_empty())
                             .on_click(move |_, window, cx| {
                                 let (root, files, name) = (root.clone(), files.clone(), name.clone());
@@ -898,7 +898,7 @@ pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, f
                                                 Ok(n) => {
                                                     window.push_notification(
                                                         Notification::success(format!(
-                                                            "{name}: {n} config file{} moved to backups. Fresh defaults next launch.",
+                                                            "{name}: {n} config file{} removed. Undo from History. Fresh defaults next launch.",
                                                             if n == 1 { "" } else { "s" }
                                                         )),
                                                         cx,
