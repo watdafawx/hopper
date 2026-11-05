@@ -25,6 +25,7 @@ mod configs;
 mod content;
 mod datapacks;
 mod dialogs;
+mod discord;
 mod drag_pick;
 mod fetch_progress;
 #[cfg(windows)]

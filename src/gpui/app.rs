@@ -155,7 +155,7 @@ pub struct AppView {
     pub(crate) page: Page,
     pub(crate) library: Entity<LibraryView>,
     pub(crate) browse: Entity<BrowseView>,
-    servers: Entity<ServersView>,
+    pub(crate) servers: Entity<ServersView>,
     settings: Entity<SettingsPage>,
     focus: FocusHandle,
     /// The tasks button and its popover.
@@ -171,6 +171,8 @@ pub struct AppView {
     pub(crate) palette: Option<crate::palette::Open>,
     /// Back and forward.
     history: crate::nav::History,
+    /// What Discord shows (see `discord.rs`).
+    _discord: Option<crate::discord::Hook>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -378,6 +380,7 @@ impl AppView {
             palette: None,
             history: Default::default(),
             _auto_restart: None,
+            _discord: None,
             _subscriptions: subs,
         };
         // Start where set in Settings, else where Hopper was left.
@@ -393,6 +396,7 @@ impl AppView {
         }
         view.apply_args(window, cx);
         view._auto_restart = Some(Self::auto_restart(window, cx));
+        view._discord = Some(crate::discord::start(cx));
         crate::java_form::init_java_gets(&view.store, cx);
         crate::setup_wizard::on_start(&view, window, cx);
         // One dialog at a time: the move offer waits for a start without
@@ -407,7 +411,15 @@ impl AppView {
             });
         }
         // Closing with work in flight asks first.
-        window.on_window_should_close(cx, |window, cx| quit_ok(window, cx));
+        window.on_window_should_close(cx, |window, cx| {
+            let ok = quit_ok(window, cx);
+            // Closing the window ends Hopper without the app's quit
+            // callbacks, so Discord is cleared here too.
+            if ok {
+                crate::discord::shutdown();
+            }
+            ok
+        });
         view.start_tray(window, cx);
         // "Follow Windows" follows it live.
         view._subscriptions.push(cx.observe_window_appearance(window, |this, _, cx| {

@@ -71,6 +71,8 @@ lsp-types = "0.97"
 
 # The window handle for screenshots and backdrops (the versions GPUI uses).
 raw-window-handle = "0.6"
+# Discord Rich Presence over the Discord app's local pipe (no login, no SDK).
+discord-rich-presence = "1.1"
 
 [target.'cfg(windows)'.dependencies]
 # The small window that fetches website-only CurseForge files (WebView2).

@@ -52,13 +52,14 @@ pub enum Category {
     Minecraft,
     Servers,
     Content,
+    Discord,
     Appearance,
     Updates,
     Advanced,
 }
 
 impl Category {
-    pub const ALL: [Category; 11] = [
+    pub const ALL: [Category; 12] = [
         Category::General,
         Category::Accounts,
         Category::Folders,
@@ -67,6 +68,7 @@ impl Category {
         Category::Minecraft,
         Category::Servers,
         Category::Content,
+        Category::Discord,
         Category::Appearance,
         Category::Updates,
         Category::Advanced,
@@ -82,6 +84,7 @@ impl Category {
             Category::Minecraft => "Minecraft",
             Category::Servers => "Servers",
             Category::Content => "Mod sources",
+            Category::Discord => "Discord",
             Category::Appearance => "Appearance",
             Category::Updates => "Updates & install",
             Category::Advanced => "Advanced",
@@ -98,6 +101,7 @@ impl Category {
             Category::Minecraft => IconName::Gamepad2,
             Category::Servers => IconName::Server,
             Category::Content => IconName::Compass,
+            Category::Discord => IconName::MessageCircle,
             Category::Appearance => IconName::Palette,
             Category::Updates => IconName::Download,
             Category::Advanced => IconName::Wrench,
@@ -115,6 +119,7 @@ impl Category {
             Category::Minecraft => "Your usual in-game options: sound, mouse, view and keys. Hopper sets them in each instance before it starts.",
             Category::Servers => "Your server packs, servers hosted on this PC, and the panel that runs them.",
             Category::Content => "The CurseForge API key, where Browse looks first, and mods from GitHub and other links.",
+            Category::Discord => "What your Discord profile shows friends while you use Hopper.",
             Category::Appearance => "Theme and size.",
             Category::Updates => "Hopper's version, its updates, and installing it.",
             Category::Advanced => "AI assistants (MCP), the notification-area icon, website links and Hopper's own files.",
@@ -268,6 +273,13 @@ const ENTRIES: &[Entry] = &[
     e(C::Content, "web-downloads", "Parallel web downloads", "Some CurseForge files only download from the website. Hopper's download window gets this many at once. Fewer helps if CurseForge keeps asking it to wait.", "curseforge website download window parallel tabs pages at once speed cloudflare"),
     e(C::Content, "allow-sources", "Allow mods from GitHub and other links", "Lets Add content's \"From GitHub or a link\" and a mod's \"Follow a source\" get mods from there. These files skip CurseForge's and Modrinth's checks, so add them only from people you trust.", "github maven jenkins link url source release jar"),
     e(C::Content, "github-token", "GitHub token", "Optional. Without one GitHub allows 60 checks an hour; Hopper asks only when something may have changed. A token (no scopes needed) raises that to 5,000. Kept in Windows Credential Manager.", "github token api rate limit"),
+    e(C::Discord, "discord", "Show what I'm doing on Discord", "Needs the Discord app open on this PC, with Discord's own activity sharing on. Hopper only talks to Discord on this PC.", "discord rich presence status activity profile friends playing"),
+    e(C::Discord, "discord-pack", "Show the pack", "Its name and icon. Off, friends see \"Playing Minecraft\".", "discord pack name icon modpack"),
+    e(C::Discord, "discord-browsing", "Show what I'm browsing", "\"Browsing modpacks on CurseForge\", or the mod you're looking at. Never what you search for.", "discord browse search mods"),
+    e(C::Discord, "discord-server", "Show the server I'm on", "On the Servers page: its name and the player count. Never its address.", "discord server name players"),
+    e(C::Discord, "discord-join", "Add a Join button", "Friends get a page on Hopper's site with the address below to copy.", "discord join button invite address"),
+    e(C::Discord, "discord-address", "Address to share", "A host name like play.example.com. IP addresses aren't shared.", "discord join address host"),
+    e(C::Discord, "discord-idle", "Hide while I'm not doing anything", "Clears your status when Hopper is just open.", "discord idle hide away"),
     e(C::Appearance, "theme", "Theme", "Hopper's colors. Your own theme files go in the folder next to it.", "dark light color colour glass mica"),
     e(C::Appearance, "still-header", "Still header", "Keep the header on instance and server pages still. Off, its colors drift slowly and react to what you do; they stop while Hopper isn't the focused window, after 20 seconds without input, and with reduced motion.", "animation animated motion gradient background drift header hero"),
     e(C::Appearance, "smooth-scroll", "Smooth scrolling", "The mouse wheel glides lists and pages instead of jumping a few lines at a time. Touchpads scroll the same either way. Off with reduced motion.", "scroll scrolling wheel mouse smooth animation motion"),
@@ -333,10 +345,11 @@ enum Text {
     KeepActions,
     KeepDays,
     KeepGb,
+    DiscordAddress,
 }
 
 impl Text {
-    const ALL: [Text; 11] = [
+    const ALL: [Text; 12] = [
         Text::Instances,
         Text::Launcher,
         Text::ServerPacks,
@@ -348,6 +361,7 @@ impl Text {
         Text::KeepActions,
         Text::KeepDays,
         Text::KeepGb,
+        Text::DiscordAddress,
     ];
 
     fn saved(self, s: &hopper::settings::Settings) -> String {
@@ -365,6 +379,7 @@ impl Text {
             Text::KeepActions => r.keep_actions.to_string(),
             Text::KeepDays => r.keep_days.to_string(),
             // "1", "0.5", "2.5": GB with at most two decimals.
+            Text::DiscordAddress => s.discord.share_address.clone(),
             Text::KeepGb => format!("{:.2}", r.max_mb as f64 / 1024.).trim_end_matches('0').trim_end_matches('.').to_string(),
         }
     }
@@ -381,6 +396,7 @@ impl Text {
             Text::McpPort => s.mcp_port = v,
             Text::KeepActions => s.backup_retention.keep_actions = v.parse().unwrap_or(s.backup_retention.keep_actions),
             Text::KeepDays => s.backup_retention.keep_days = v.parse().unwrap_or(s.backup_retention.keep_days),
+            Text::DiscordAddress => s.discord.share_address = v.trim().to_string(),
             Text::KeepGb => {
                 if let Ok(gb) = v.parse::<f64>() {
                     s.backup_retention.max_mb = (gb * 1024.).round() as u64;
@@ -416,6 +432,12 @@ impl Text {
             }
             Text::UpdateRepo if v.split('/').filter(|p| !p.trim().is_empty()).count() != 2 => {
                 Some("Use owner/name, like watdafawx/hopper.")
+            }
+            Text::DiscordAddress if v.trim().parse::<std::net::IpAddr>().is_ok() || v.split(':').next().is_some_and(|h| h.parse::<std::net::Ipv4Addr>().is_ok()) => {
+                Some("Use a host name, not an IP address.")
+            }
+            Text::DiscordAddress if !v.trim().chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':')) => {
+                Some("Use a host name like play.example.com.")
             }
             Text::McpPort => match v.parse::<u16>() {
                 Ok(47802) => Some("47802 is Hopper's link handler; pick another."),
@@ -539,6 +561,7 @@ impl SettingsPage {
                 Text::UpdateRepo => hopper::settings::DEFAULT_UPDATE_REPO,
                 Text::McpPort => "47801",
                 Text::Host => "myserver",
+                Text::DiscordAddress => "play.example.com",
                 _ => "",
             };
             texts.insert(
@@ -2221,6 +2244,33 @@ impl SettingsPage {
         vec![Block::card(None, rows)]
     }
 
+    fn discord(&self, s: &hopper::settings::Settings, cx: &mut Context<Self>) -> Vec<Block> {
+        let d = &s.discord;
+        let off = !d.enabled;
+        let main = Row::new("discord").control(self.switch("discord", d.enabled, |st, v| st.discord.enabled = v, cx));
+        let main = match crate::discord::status(d.enabled) {
+            Some(line) => main.desc(line),
+            None => main,
+        };
+        vec![Block::card(
+            None,
+            vec![
+                main,
+                Row::new("discord-pack").muted(off).control(self.switch("discord-pack", d.show_pack, |st, v| st.discord.show_pack = v, cx)),
+                Row::new("discord-browsing")
+                    .muted(off)
+                    .control(self.switch("discord-browsing", d.show_browsing, |st, v| st.discord.show_browsing = v, cx)),
+                Row::new("discord-server").muted(off).control(self.switch("discord-server", d.show_server, |st, v| st.discord.show_server = v, cx)),
+                Row::new("discord-join").muted(off || !d.show_server).control(self.switch("discord-join", d.join_button, |st, v| st.discord.join_button = v, cx)),
+                Row::new("discord-address")
+                    .muted(off || !d.join_button)
+                    .control(div().w(rems(14.)).child(Input::new(&self.texts[&Text::DiscordAddress]).small()))
+                    .note(self.note(Text::DiscordAddress, cx)),
+                Row::new("discord-idle").muted(off).control(self.switch("discord-idle", d.hide_idle, |st, v| st.discord.hide_idle = v, cx)),
+            ],
+        )]
+    }
+
     fn appearance(&self, s: &hopper::settings::Settings, window: &mut Window, cx: &mut Context<Self>) -> Vec<Block> {
         let rem = window.rem_size();
         let theme = h_flex()
@@ -2966,6 +3016,7 @@ impl Render for SettingsPage {
             Category::Minecraft => self.minecraft(&s, window, cx),
             Category::Servers => self.servers(&s, window, cx),
             Category::Content => self.content(&s, window.rem_size(), cx),
+            Category::Discord => self.discord(&s, cx),
             Category::Appearance => self.appearance(&s, window, cx),
             Category::Updates => self.updates(cx),
             Category::Advanced => self.advanced(&s, window.rem_size(), cx),

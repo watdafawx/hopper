@@ -31,6 +31,7 @@ pub mod joinfail;
 pub mod deps;
 pub mod emoji;
 pub mod diff;
+pub mod discord;
 pub mod disk_watch;
 pub mod env;
 pub mod extlog;
