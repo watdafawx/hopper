@@ -483,6 +483,31 @@ fn guess(path: &Path, name: &str) -> String {
     format!("{folder}/{clean}")
 }
 
+/// How many entries History holds from after `since` (a set's time, in
+/// seconds), and the newest time. A directory listing only, so it's cheap
+/// enough to poll for the History button's badge.
+pub fn count_since(root: &Path, since: i64) -> (usize, i64) {
+    let base = root.join(crate::sync::BACKUP_DIR);
+    let (mut n, mut newest) = (0, 0);
+    for e in fs::read_dir(base).into_iter().flatten().flatten() {
+        let Ok(when) = e.file_name().to_string_lossy().parse::<i64>() else { continue };
+        // A folder holding only its bookkeeping is not an entry.
+        let has_file = fs::read_dir(e.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|f| !matches!(f.file_name().to_string_lossy().as_ref(), ORIGINS | IDS | CHECKED));
+        if !has_file {
+            continue;
+        }
+        newest = newest.max(when);
+        if when > since {
+            n += 1;
+        }
+    }
+    (n, newest)
+}
+
 /// Everything set aside in an instance, newest first.
 pub fn list(root: &Path) -> Vec<Set> {
     let base = root.join(crate::sync::BACKUP_DIR);

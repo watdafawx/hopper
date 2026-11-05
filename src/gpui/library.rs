@@ -266,6 +266,8 @@ pub struct LibraryView {
     store: Entity<Store>,
     /// The Overview's modpack description, its GIFs playing.
     pack_desc: Entity<widgets::DescView>,
+    /// The header's History button, for the open instance.
+    history_btn: std::cell::RefCell<Option<Entity<crate::history_button::HistoryButton>>>,
     selected: Option<PathBuf>,
     tab: InstTab,
     /// The tab before the last switch, and when it happened, for the
@@ -475,6 +477,7 @@ impl LibraryView {
             folded: Default::default(),
             store,
             pack_desc,
+            history_btn: Default::default(),
             selected: None,
             tab: first_tab,
             tab_from: first_tab,
@@ -1876,6 +1879,18 @@ impl LibraryView {
         )
     }
 
+    /// The History button for `root`, made once per open instance.
+    fn history_button(&self, root: &Path, cx: &mut Context<Self>) -> Entity<crate::history_button::HistoryButton> {
+        let mut slot = self.history_btn.borrow_mut();
+        if let Some(b) = slot.as_ref().filter(|b| b.read(cx).root() == root) {
+            return b.clone();
+        }
+        let (store, root) = (self.store.clone(), root.to_path_buf());
+        let b = cx.new(|cx| crate::history_button::HistoryButton::new(store, root, cx));
+        *slot = Some(b.clone());
+        b
+    }
+
     fn header(&self, inst: &Instance, cx: &mut Context<Self>) -> AnyElement {
         let store = self.store.read(cx);
         let playing = store.running(&inst.root).is_some();
@@ -2024,6 +2039,7 @@ impl LibraryView {
         let play_color = if playing { theme.danger } else { theme.success };
         // First in the row on every tab, so it never moves.
         let play_small = Some(widgets::glow(play.min_w_24(), play_color, cx));
+        let history = self.history_button(&root, cx);
         let site = self.pack_facts(inst, cx).map(|(_, _, _, url, mr)| (url, mr));
         let actions = h_flex()
                             .flex_none()
@@ -2058,6 +2074,7 @@ impl LibraryView {
                                     .label("Settings")
                                     .on_click(cx.listener(|this, _, _, cx| this.set_tab(InstTab::Settings, cx))),
                             )
+                            .child(history)
                             .child(
                                 Button::new("more")
                                     .outline()
@@ -3077,7 +3094,6 @@ fn instance_menu(
     let playing = s.running(root).is_some();
     let tools = s.server_tools();
     // Snapshots and backups, counted when the menu opens.
-    let snaps = hopper::snapshots::count(root);
     // Another launcher's instance: deleting it here would break it there.
     let launcher = hopper::launchers::Kind::from_key(&inst.source).map(|k| k.name());
     let pack = inst.pack.as_ref().map(|p| (p.project_id, s.pack_update(inst).cloned()));
@@ -3240,12 +3256,6 @@ fn instance_menu(
         PopupMenuItem::new("Repair")
             .icon(IconName::Wrench)
             .on_click(move |_, _, cx| v.update(cx, |this, cx| this.repair(&r, cx)))
-    })
-    .item({
-        let (s, r) = (st(), r.clone());
-        PopupMenuItem::new(if snaps > 0 { format!("History ({snaps} snapshots)…") } else { "History…".to_string() })
-            .icon(IconName::Archive)
-            .on_click(move |_, window, cx| crate::backups_view::open(s.clone(), r.clone(), window, cx))
     })
     .separator()
     .item({

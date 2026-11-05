@@ -789,6 +789,8 @@ pub fn open(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut A
 /// Opens an instance's History dialog: on its snapshots with `snap` open,
 /// else on History.
 pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window: &mut Window, cx: &mut App) {
+    // Opening History, from anywhere, clears the header button's badge.
+    crate::history_button::mark_seen(&root);
     let view = cx.new(|cx| {
         let mut v = BackupsView {
             sets: Vec::new(),
