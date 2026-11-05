@@ -1,5 +1,7 @@
-//! Remote images (mod and pack icons) cached on disk, so a UI can show them
-//! from a local file.
+//! Remote images (mod and pack icons, galleries) cached on disk, so a UI can
+//! show them from a local file. Picture URLs on CurseForge's and Modrinth's
+//! CDNs never change what they serve, so a cached file is never asked
+//! again; the cache is kept to [`MAX_BYTES`] instead (see [`prune`]).
 
 use std::path::{Path, PathBuf};
 
@@ -223,11 +225,103 @@ fn open(path: &Path) -> anyhow::Result<image::DynamicImage> {
     Ok(image::ImageReader::open(path)?.with_guessed_format()?.decode()?)
 }
 
+/// How big the cache may get before [`prune`] clears the pictures used
+/// longest ago.
+pub const MAX_BYTES: u64 = 1 << 30;
+
+/// Marks the cached file `path` as just used, so [`prune`] keeps it. Its
+/// access time is set (not its modified time: scaled copies are keyed by
+/// that), on a thread, once per file per run.
+pub fn touch(path: &Path) {
+    use std::sync::mpsc::{Sender, channel};
+    use std::sync::{Mutex, OnceLock};
+    static TX: OnceLock<Mutex<Sender<PathBuf>>> = OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = channel::<PathBuf>();
+        std::thread::spawn(move || {
+            let mut done = std::collections::HashSet::new();
+            while let Ok(p) = rx.recv() {
+                if done.insert(p.clone()) {
+                    let now = std::fs::FileTimes::new().set_accessed(std::time::SystemTime::now());
+                    let _ = std::fs::File::options().write(true).open(&p).and_then(|f| f.set_times(now));
+                }
+            }
+        });
+        Mutex::new(tx)
+    });
+    if let Ok(tx) = tx.lock() {
+        let _ = tx.send(path.to_path_buf());
+    }
+}
+
+/// Keeps the image cache under `max` bytes: when it's over, the files used
+/// longest ago go until it's at four fifths. Half-written downloads left by
+/// a run that stopped go too.
+pub fn prune(max: u64) {
+    if let Some(d) = dir() {
+        let (n, bytes) = prune_dir(&d, max);
+        if n > 0 {
+            log::info!("image cache: cleared {n} old pictures ({} MB)", bytes >> 20);
+        }
+    }
+}
+
+/// [`prune`] on folder `dir` (and the folders in it): how many files went
+/// and how many bytes they held.
+pub fn prune_dir(dir: &Path, max: u64) -> (usize, u64) {
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+    let (mut gone, mut freed) = (0, 0);
+    while let Some(d) = stack.pop() {
+        let Ok(list) = std::fs::read_dir(&d) else { continue };
+        for e in list.flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            let path = e.path();
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let used = meta.accessed().or_else(|_| meta.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            let stale_part = path.extension().is_some_and(|x| x == "part") && used < day_ago;
+            if stale_part {
+                if std::fs::remove_file(&path).is_ok() {
+                    gone += 1;
+                    freed += meta.len();
+                }
+                continue;
+            }
+            files.push((path, meta.len(), used));
+        }
+    }
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    if total <= max {
+        return (gone, freed);
+    }
+    files.sort_by_key(|f| f.2);
+    let goal = max / 5 * 4;
+    for (path, len, _) in files {
+        if total <= goal {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= len;
+            gone += 1;
+            freed += len;
+        }
+    }
+    (gone, freed)
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    let tmp = path.with_extension("part");
+    // Its own name: two threads can fetch the same picture at once (a
+    // description showing a gallery image), and must not write one file.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{n}.part", std::process::id()));
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(tmp, path)?;
     Ok(())
@@ -289,6 +383,29 @@ mod tests {
         std::fs::rename(&png, &webp).unwrap();
         let still = still(&webp).unwrap();
         assert_eq!(image::open(&still).unwrap().width(), 8);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn prune_clears_the_pictures_used_longest_ago() {
+        let dir = std::env::temp_dir().join(format!("hopper-prune-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("thumbs")).unwrap();
+        let now = std::time::SystemTime::now();
+        // Four 100-byte files, used 4, 3, 2 and 1 hours ago (one in a sub-folder).
+        let names = ["a.png", "b.png", "thumbs/c.png", "d.png"];
+        for (i, n) in names.iter().enumerate() {
+            let p = dir.join(n);
+            std::fs::write(&p, [0u8; 100]).unwrap();
+            let used = now - std::time::Duration::from_secs((4 - i as u64) * 3600);
+            let t = std::fs::FileTimes::new().set_accessed(used).set_modified(used);
+            std::fs::File::options().write(true).open(&p).unwrap().set_times(t).unwrap();
+        }
+        // Under the limit: nothing goes.
+        assert_eq!(prune_dir(&dir, 1000), (0, 0));
+        // Over it: down to four fifths of 300, so the two oldest go.
+        assert_eq!(prune_dir(&dir, 300), (2, 200));
+        assert!(!dir.join("a.png").exists() && !dir.join("b.png").exists());
+        assert!(dir.join("thumbs/c.png").exists() && dir.join("d.png").exists());
         std::fs::remove_dir_all(dir).ok();
     }
 

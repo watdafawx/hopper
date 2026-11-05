@@ -34,6 +34,8 @@ pub struct ImageViewer {
     /// The big clip of the image shown (`store::view_key`), freed when the
     /// viewer moves on or closes.
     playing: Option<String>,
+    /// The image whose showing the timing log still waits for.
+    logged: Option<String>,
     _store: Subscription,
     /// A paused GIF picks up again when the window is focused.
     _focus: Subscription,
@@ -56,6 +58,10 @@ impl ImageViewer {
         // copy shows while it does.
         let url = want[0].url.clone();
         let key = crate::store::view_key(&url);
+        // Timed from the step to it until it shows (see `render`).
+        let shown = still_key(&url, self.cap);
+        crate::img_log::want("viewer", &shown);
+        self.logged = Some(shown);
         let old = self.playing.replace(key.clone()).filter(|k| *k != key);
         let stills: Vec<String> = want.iter().map(|s| still_key(&s.url, self.cap)).collect();
         let thumbs: Vec<String> = want.iter().filter_map(|s| s.thumb.clone()).collect();
@@ -63,9 +69,15 @@ impl ImageViewer {
             if let Some(old) = old {
                 s.forget_anim(&old, cx);
             }
+            // The picture shown (and its stand-in) before anything else on
+            // the page; the neighbours next.
+            if let Some(t) = &want[0].thumb {
+                s.want_image_now(t);
+            }
             if animated(&url) {
                 s.want_anim_view(&url);
             }
+            s.want_image_now(&stills[0]);
             for u in stills.iter().chain(&thumbs) {
                 s.want_image(u);
             }
@@ -142,6 +154,11 @@ impl Render for ImageViewer {
         let frame = store.anim(&crate::store::view_key(&url)).map(|c| c.frame_now());
         let path = store.image(&still_key(&url, self.cap)).map(|p| p.to_path_buf());
         let small = thumb.as_deref().and_then(|t| store.image(t)).map(|p| p.to_path_buf());
+        if (frame.is_some() || path.is_some())
+            && let Some(k) = self.logged.take()
+        {
+            crate::img_log::mark("viewer-shown", &k);
+        }
         let h = (window.viewport_size().height - window.rem_size() * 12.).max(window.rem_size() * 12.);
         // Room for the picture: the dialog's width less its padding.
         let rem = f32::from(window.rem_size());
@@ -199,6 +216,17 @@ impl Render for ImageViewer {
                 .child(widgets::caption("Loading the image", cx))
                 .into_any_element(),
         };
+        // The neighbours, drawn out of sight once they're on disk, so their
+        // pictures are decoded before the arrows get to them.
+        let ahead: Vec<AnyElement> = if n < 2 {
+            Vec::new()
+        } else {
+            [(self.at + 1) % n, (self.at + n - 1) % n]
+                .iter()
+                .filter_map(|&i| store.image(&still_key(&self.images[i].url, self.cap)))
+                .map(|p| img(p.to_path_buf()).absolute().size(px(1.)).opacity(0.).into_any_element())
+                .collect()
+        };
         let u2 = url.clone();
         v_flex()
             .id("image-viewer")
@@ -220,6 +248,7 @@ impl Render for ImageViewer {
                     // One image per notch: keep the window's smoother off it.
                     .child(crate::smooth_scroll::stepped_area())
                     .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.on_wheel(e, cx)))
+                    .children(ahead)
                     .child(picture),
             )
             .child(
@@ -271,16 +300,20 @@ fn animated(url: &str) -> bool {
 }
 
 /// The store key of a still image's copy no wider than `cap` pixels.
-fn still_key(url: &str, cap: u32) -> String {
+pub fn still_key(url: &str, cap: u32) -> String {
     hopper::imgcache::width_key(url, (!animated(url)).then_some(cap))
+}
+
+/// The widest the viewer shows a still in `window`: its width in pixels,
+/// in steps so a resized window reuses the copy already made.
+pub fn cap(window: &Window) -> u32 {
+    let wide = f32::from(window.viewport_size().width) * window.scale_factor();
+    ((wide / 512.).ceil() as u32).max(2) * 512
 }
 
 /// Opens `images` at `at`.
 pub fn open(store: Entity<Store>, images: Vec<Shot>, at: usize, window: &mut Window, cx: &mut App) {
-    // The screen's width in pixels, in steps so a resized window reuses the
-    // copy already made.
-    let wide = f32::from(window.viewport_size().width) * window.scale_factor();
-    let cap = ((wide / 512.).ceil() as u32).max(2) * 512;
+    let cap = cap(window);
     let view = cx.new(|cx| {
         let sub = cx.observe(&store, |_, _, cx| cx.notify());
         let refocus = cx.observe_window_activation(window, |_, _, cx| cx.notify());
@@ -300,6 +333,7 @@ pub fn open(store: Entity<Store>, images: Vec<Shot>, at: usize, window: &mut Win
             focus: cx.focus_handle(),
             anim_due: false,
             playing: None,
+            logged: None,
             _store: sub,
             _focus: refocus,
         };
