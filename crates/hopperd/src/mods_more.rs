@@ -26,6 +26,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mods/config", get(config_files))
         .route("/api/v1/servers/{id}/mods/config-reset", post(config_reset))
         .route("/api/v1/servers/{id}/mod-backups", get(backup_list))
+        .route("/api/v1/servers/{id}/mod-backups/count", get(backup_count))
         .route("/api/v1/servers/{id}/mod-backups/restore", post(backup_restore))
         .route("/api/v1/servers/{id}/mod-backups/delete", post(backup_delete))
         .route("/api/v1/servers/{id}/mod-backups/clean", post(backup_clean))
@@ -243,6 +244,21 @@ async fn backup_list(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
         "usage": { "total": u.total(), "limited": u.limited(), "frees": would.freed, "removes": would.count(),
                    "keep_actions": r.keep_actions, "keep_days": r.keep_days, "max_mb": r.max_mb },
     })))
+}
+
+/// How many History entries are newer than `since` (seconds), for the
+/// header button's badge. A folder listing only, so it can be asked often.
+async fn backup_count(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let e = entry(&app, &headers, &method, &id)?;
+    let since: i64 = q.get("since").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (n, newest) = blocking(move || Ok(backups::count_since(&e.root, since))).await?;
+    Ok(Json(json!({ "new": n, "newest": newest })))
 }
 
 /// Where old backups go when they're cleaned up: the server's trash (Files

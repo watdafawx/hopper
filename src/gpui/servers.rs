@@ -794,6 +794,8 @@ pub struct ServersView {
     /// The tabs only a Hopper Server's servers have.
     p_files: Entity<panel_tabs::files::FilesTab>,
     p_mods: Entity<panel_tabs::mods::ModsTab>,
+    /// The header's History button for the picked panel server.
+    history_btn: std::cell::RefCell<Option<Entity<crate::history_button::HistoryButton>>>,
     p_players: Entity<panel_tabs::players::PlayersTab>,
     p_backups: Entity<panel_tabs::backups::BackupsTab>,
     p_schedule: Entity<panel_tabs::schedule::ScheduleTab>,
@@ -956,6 +958,7 @@ impl ServersView {
             strip,
             p_files,
             p_mods,
+            history_btn: Default::default(),
             p_players,
             p_backups,
             p_schedule,
@@ -1251,6 +1254,26 @@ impl ServersView {
             self.p_shown = None;
             cx.notify();
         }
+    }
+
+    /// The header's History button for the picked server, made once per
+    /// server; None without a panel to ask. It opens Mods on History.
+    fn history_button(&self, cx: &mut Context<Self>) -> Option<Entity<crate::history_button::HistoryButton>> {
+        let Some(Ok(t)) = self.target.clone() else { return None };
+        let mut slot = self.history_btn.borrow_mut();
+        if let Some(b) = slot.as_ref().filter(|b| b.read(cx).is_panel(&t)) {
+            return Some(b.clone());
+        }
+        let view = cx.entity();
+        let open: std::rc::Rc<dyn Fn(&mut Window, &mut App)> = std::rc::Rc::new(move |_, cx| {
+            view.update(cx, |this, cx| {
+                this.set_tab(TAB_MODS, cx);
+                this.p_mods.update(cx, |m, cx| m.open_history(cx));
+            })
+        });
+        let b = cx.new(|cx| crate::history_button::HistoryButton::for_panel(t, open, cx));
+        *slot = Some(b.clone());
+        Some(b)
     }
 
     /// The picked server on a Hopper Server shows a panel tab: tell the tab
@@ -1608,6 +1631,7 @@ impl ServersView {
             .child(self.control.update(cx, |c, cx| c.controls_hero(cx)))
             .child(open)
             .when(pingable, |r| r.child(ping_button(&self.store, &server, cx)))
+            .children(self.history_button(cx))
             .children(self.control.update(cx, |c, cx| c.more_button(cx)));
         // Past Overview the hero folds to one row: the tab's content gets the room.
         let render_hero = crate::hero::render; // one header on every tab, so it does not jump

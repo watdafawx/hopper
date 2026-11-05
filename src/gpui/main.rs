@@ -35,6 +35,7 @@ mod crash_view;
 mod hero;
 mod hero_drift;
 mod host_dialog;
+mod history_button;
 mod history_view;
 mod hopper_versions;
 mod inst_settings;
