@@ -1,6 +1,7 @@
 <script>
   import { followConfigs } from './lib/configs.svelte.js';
   import { onChange } from './lib/changes.svelte.js';
+  import { markSeen as markHistorySeen } from './lib/historySeen.svelte.js';
   // The Mods tab, laid out like Hopper desktop's: a table with Update /
   // What changed (or Changelog) per row, Author, Side, On and Added
   // columns that sort, checkboxes for bulk work (the bar floats at the
@@ -42,11 +43,15 @@
   import SelectionBar from './lib/SelectionBar.svelte';
   import { rightClear } from './lib/rightclear.js';
 
-  let { server, openConfigs } = $props();
+  let { server, openConfigs, sub0 = '' } = $props();
   // The live feed hands over a new `server` object every second; effects
   // that should run once per server key on the id alone.
   const sid = $derived(server.id);
   let sub = $state('mods');
+  // The header's History button opens this tab on History (#/server/<id>/mods/history).
+  $effect(() => { if (sub0 === 'history') sub = 'backups'; });
+  // Looking at History clears the header button's badge.
+  $effect(() => { if (sub === 'backups') markHistorySeen(sid); });
   let data = $state(null);
   let filter = $state('');
   let chip = $state('all');

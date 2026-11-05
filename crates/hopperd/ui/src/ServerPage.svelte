@@ -27,6 +27,7 @@
   import Schedule from './Schedule.svelte';
   import Settings from './Settings.svelte';
   import Mods from './Mods.svelte';
+  import HistoryButton from './HistoryButton.svelte';
   import Configs from './Configs.svelte';
   import Worlds from './Worlds.svelte';
   import Addr from './Addr.svelte';
@@ -263,6 +264,7 @@
         <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('stop')}><Square size={14} />Stop</button>
         <button class="btn" disabled={s.state === 'stopping'} onclick={() => power('restart')}><RotateCw size={14} />Restart</button>
       {/if}
+      <HistoryButton {id} onOpen={() => nav('mods', 'history')} />
       <div class="morewrap">
         <button class="btn icon ghost" title="More" aria-haspopup="menu" aria-expanded={more} onclick={(e) => { e.stopPropagation(); playerMenu = null; more = !more; }}><Ellipsis size={15} /></button>
         {#if more}
@@ -296,7 +298,7 @@
   {:else if tab === 'logs'}
     <div class="full"><ServerLogs server={s} sub={path} go={(k) => nav('logs', k === 'crashes' ? '' : k)} onShare={(p) => (sharing = { path: p })} openFile={(p) => nav('edit', p)} openMods={() => nav('mods')} /></div>
   {:else if tab === 'mods'}
-    <div class="full scroll"><Mods server={s} openConfigs={(key) => nav('configs', key)} /></div>
+    <div class="full scroll"><Mods server={s} sub0={path} openConfigs={(key) => nav('configs', key)} /></div>
   {:else if tab === 'configs'}
     <div class="full"><Configs server={s} {path} go={(key) => nav('configs', key)} /></div>
   {:else if tab === 'worlds'}

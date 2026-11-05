@@ -1882,7 +1882,7 @@ impl LibraryView {
     /// The History button for `root`, made once per open instance.
     fn history_button(&self, root: &Path, cx: &mut Context<Self>) -> Entity<crate::history_button::HistoryButton> {
         let mut slot = self.history_btn.borrow_mut();
-        if let Some(b) = slot.as_ref().filter(|b| b.read(cx).root() == root) {
+        if let Some(b) = slot.as_ref().filter(|b| b.read(cx).is_for(root)) {
             return b.clone();
         }
         let (store, root) = (self.store.clone(), root.to_path_buf());

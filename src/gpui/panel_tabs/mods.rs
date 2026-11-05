@@ -387,6 +387,13 @@ impl ModsTab {
         }
     }
 
+    /// Switches to History (the header's History button).
+    pub fn open_history(&mut self, cx: &mut Context<Self>) {
+        self.sub = Sub::Backups;
+        self.load_backups(cx);
+        cx.notify();
+    }
+
     /// Shows `target`'s Mods (again when it's the same server: a refresh).
     pub fn show(&mut self, target: Target, _window: &mut Window, cx: &mut Context<Self>) {
         let same = self.target.as_ref() == Some(&target);
