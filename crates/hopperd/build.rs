@@ -288,7 +288,15 @@ fn main() {
     let out = Path::new(&std::env::var("OUT_DIR").unwrap()).join("ui");
     let _ = std::fs::remove_dir_all(&out);
     let dist = Path::new("ui/dist");
-    println!("cargo:rerun-if-changed=ui/dist");
+    if dist.exists() {
+        println!("cargo:rerun-if-changed=ui/dist");
+    } else {
+        // Cargo counts a missing watched path as changed on every build,
+        // which rebuilt hopperd each time in checkouts without a built UI
+        // (git worktrees). Watch the ui folder instead: `pnpm build`
+        // creating ui/dist still reruns this script.
+        println!("cargo:rerun-if-changed=ui");
+    }
     let svg = logo_svg();
     println!("cargo:rerun-if-changed=ui/public/logo.svg");
     if std::fs::read_to_string("ui/public/logo.svg").ok().as_deref() != Some(svg.as_str()) {
