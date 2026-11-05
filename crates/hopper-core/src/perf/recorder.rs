@@ -323,7 +323,7 @@ fn real_record() {
     )
     .unwrap();
     let java = std::env::var("HOPPER_TEST_JAVA").unwrap_or_else(|_| "java".into());
-    let child = std::process::Command::new(java)
+    let child = crate::proc::command(java)
         .args(["-Xms64m", "-Xmx256m", "-XX:+UseG1GC", &super::gc_log_arg(), "Alloc.java"])
         .current_dir(&root)
         .stdout(std::fs::File::create(root.join("logs").join("latest.log")).unwrap())

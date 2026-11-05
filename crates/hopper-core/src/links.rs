@@ -74,13 +74,8 @@ pub fn listen(on_link: impl Fn(String) + Send + 'static) {
 const KEY: &str = r"HKCU\Software\Classes\curseforge";
 
 fn reg(args: &[&str]) -> Option<String> {
-    let mut cmd = std::process::Command::new("reg");
+    let mut cmd = crate::proc::command("reg");
     cmd.args(args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
     let out = cmd.output().ok()?;
     out.status
         .success()

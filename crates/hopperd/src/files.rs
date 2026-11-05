@@ -672,7 +672,7 @@ mod tests {
     fn junctions_out_are_refused() {
         let root = temp("junction");
         let outside = temp("outside");
-        let st = std::process::Command::new("cmd")
+        let st = hopper_core::proc::command("cmd")
             .args(["/C", "mklink", "/J"])
             .arg(root.join("link"))
             .arg(&outside)

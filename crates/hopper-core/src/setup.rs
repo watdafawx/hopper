@@ -65,7 +65,7 @@ fn desktop_link() -> Option<PathBuf> {
 }
 
 fn reg(args: &[&str]) -> anyhow::Result<()> {
-    let out = std::process::Command::new("reg")
+    let out = crate::proc::command("reg")
         .args(args)
         .output()
         .context("running reg")?;
@@ -146,7 +146,7 @@ pub fn uninstall() -> anyhow::Result<()> {
             "ping 127.0.0.1 -n 3 > nul & rmdir /s /q \"{}\"",
             dir.display()
         );
-        let mut cmd = std::process::Command::new("cmd");
+        let mut cmd = crate::proc::command("cmd");
         #[cfg(not(windows))]
         cmd.args(["/c", &script]);
         #[cfg(windows)]
@@ -154,9 +154,8 @@ pub fn uninstall() -> anyhow::Result<()> {
             use std::os::windows::process::CommandExt;
             // cmd reads its own quoting; Rust's escaping would garble it.
             cmd.raw_arg(format!("/c {script}"));
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             const DETACHED_PROCESS: u32 = 0x0000_0008;
-            cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+            cmd.creation_flags(crate::proc::CREATE_NO_WINDOW | DETACHED_PROCESS);
         }
         cmd.spawn().context("scheduling the folder's removal")?;
     }
@@ -182,14 +181,14 @@ mod tests {
         let exe = install(false).unwrap();
         assert!(exe.is_file());
         assert!(start_menu_link().unwrap().is_file());
-        let q = std::process::Command::new("reg")
+        let q = crate::proc::command("reg")
             .args(["query", UNINSTALL_KEY, "/v", "UninstallString"])
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&q.stdout).contains("--uninstall"));
         uninstall().unwrap();
         assert!(!start_menu_link().unwrap().exists());
-        let q = std::process::Command::new("reg").args(["query", UNINSTALL_KEY]).output().unwrap();
+        let q = crate::proc::command("reg").args(["query", UNINSTALL_KEY]).output().unwrap();
         assert!(!q.status.success());
         std::thread::sleep(std::time::Duration::from_secs(4));
         assert!(!install_dir().unwrap().exists());
