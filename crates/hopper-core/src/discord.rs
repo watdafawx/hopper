@@ -250,7 +250,7 @@ pub fn activity(doing: &Doing, prefs: &Prefs, times: Times) -> Option<Activity> 
             }
             a.state = safe_text(&version_line(game_version, loader));
             a.show_details = true;
-            small(&mut a, "hopper", "Launched with Hopper");
+            small(&mut a, "playing", "Launched with Hopper");
         }
         Doing::Servers { count, running, open } => {
             a.large_image = "hopperd".into();
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(a.details, "All the Mods 10");
         assert_eq!(a.state.as_deref(), Some("Minecraft 1.21.1 · NeoForge"));
         assert_eq!(a.large_text, "All the Mods 10 · 5.2 · 491 mods");
-        assert_eq!(a.small_image.as_deref(), Some("hopper"));
+        assert_eq!(a.small_image.as_deref(), Some("playing"));
         assert_eq!(a.start, 2000);
         assert!(a.show_details);
         assert_eq!(a.buttons[1].0, "View pack");
