@@ -199,6 +199,10 @@ pub struct Crash {
     /// (the wrong Java, a graphics driver, a world entry whose mod is gone).
     #[serde(default)]
     pub advice: String,
+    /// Not a crash: a start that got stuck (a thread dump Hopper saved, see
+    /// [`crate::stuckstart`]). Cards say so instead of "crashed".
+    #[serde(default)]
+    pub stuck: bool,
 }
 
 impl Crash {
@@ -974,7 +978,7 @@ pub fn detect(root: &Path, started: i64, mods: &[String], ids: impl Fn(&str) -> 
         _ => String::new(),
     };
     let (switches, switched_off) = switches(root, &text, &log, &suspects, false);
-    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice })
+    Some(Crash { when: now, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice, stuck: false })
 }
 
 /// A saved crash read again from its report with today's rules (which mods
@@ -1031,6 +1035,9 @@ pub fn reread(root: &Path, saved: &Crash, mods: &[String], ids: impl Fn(&str) ->
 /// write (the game ran from another launcher, or Hopper was closed).
 /// The game log counts only when it is from the same run.
 pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&str) -> Vec<String>) -> Option<Crash> {
+    if crate::stuckstart::is_dump(report) {
+        return crate::stuckstart::as_crash(report, false);
+    }
     let written = modified_secs(report)?;
     let text = tail(report, 2 << 20);
     if headline(&text).is_empty() {
@@ -1050,7 +1057,7 @@ pub fn from_report(root: &Path, report: &Path, mods: &[String], ids: impl Fn(&st
     };
     let (switches, switched_off) = switches(root, &text, &log, &suspects, false);
     let advice = crate::crashsigs::advice(&text, &log, "", false);
-    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice })
+    Some(Crash { when: written, source: report.to_path_buf(), headline: headline(&text), kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: false, lingered: 0, advice, stuck: false })
 }
 
 /// What crash help makes of the newest crash in an instance or server
@@ -1243,13 +1250,16 @@ pub fn server(root: &Path) -> Option<Crash> {
     let (switches, switched_off) = switches(root, &text, log, &suspects, true);
     let advice = crate::crashsigs::advice(&text, log, &native.as_deref().map(|n| tail(n, 64 << 10)).unwrap_or_default(), true);
     let source = report.or(native).unwrap_or_default();
-    Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true, lingered, advice })
+    Some(Crash { when, source, headline, kind, suspects, turned_off: Vec::new(), stopped, switches, switched_off, server: true, lingered, advice, stuck: false })
 }
 
 /// Any crash report of a dedicated server, read like [`server`] reads the
 /// last one: the newest one of the current run gets the full reading (with
 /// its log); an older one is read from the report alone (its log is gone).
 pub fn server_report(root: &Path, report: &Path) -> Option<Crash> {
+    if crate::stuckstart::is_dump(report) {
+        return crate::stuckstart::as_crash(report, true);
+    }
     // Only the newest report can be the last start's (the full reading
     // costs more: it reads the whole log).
     let newest = crate::logs::crash_reports(root).into_iter().find(|p| p.extension().is_some_and(|e| e == "txt"));

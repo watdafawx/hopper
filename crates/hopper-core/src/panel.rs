@@ -158,6 +158,8 @@ pub struct PanelStats {
     pub progress: Option<crate::hosting::progress::Progress>,
     /// A start or stop that just ended ("Started in 1m 32s").
     pub finished: Option<crate::hosting::progress::Finished>,
+    /// The start looks stuck (Hopper's own servers, Hopper Server).
+    pub stuck: Option<crate::stuckstart::StuckReport>,
 }
 
 /// Hopper Server's `via` (from /hello) in words, as the web panel shows it.

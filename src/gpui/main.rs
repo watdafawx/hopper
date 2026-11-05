@@ -79,6 +79,7 @@ mod skin_viewer;
 mod skins;
 mod source_dialog;
 mod store;
+mod stuck;
 mod theme;
 mod tasks;
 mod translation;

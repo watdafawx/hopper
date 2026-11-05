@@ -20,13 +20,14 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hopper::logs::{Level, crash_reports, crash_summary, is_problem, level, tail};
+use hopper::logs::{Level, crash_summary, is_problem, level, tail};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod crash_story;
+pub(crate) use crash_story::mod_ref;
 mod crash_switch;
 
 /// How much of a log to show when it opens.
@@ -273,7 +274,7 @@ impl LogsView {
                 let r = root.clone();
                 let found = cx
                     .background_spawn(async move {
-                        let all = crash_reports(&r);
+                        let all = hopper::logs::crash_report_files(&r);
                         let newest = all.first()?.clone();
                         let mtime = std::fs::metadata(&newest).and_then(|m| m.modified()).ok();
                         if known.as_ref() == Some(&(newest.clone(), mtime)) {
@@ -464,6 +465,12 @@ impl LogsView {
             self.open_log(path, follow, cx);
         }
         cx.notify();
+    }
+
+    /// Shows a file from `crash-reports` (a stuck start's thread dump) in
+    /// the Crash reports tab.
+    pub(crate) fn open_file(&mut self, p: PathBuf, cx: &mut Context<Self>) {
+        self.open_crash(p, cx);
     }
 
     /// Shows crash report `p` in the Crash reports tab.
@@ -782,6 +789,8 @@ impl Render for LogsView {
                     .map(str::to_string)
                     .collect();
                 let share = self.share_row(&c.path, cx);
+                // A stuck start's thread dump, not a crash.
+                let title = if hopper::stuckstart::is_dump(&c.path) { "Stuck start" } else { "Latest crash" };
                 // When, so an old crash doesn't read as today's.
                 let secs = c.mtime.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
                 let when = secs.map(hopper::time::exact);
@@ -790,7 +799,7 @@ impl Render for LogsView {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(div().font_semibold().text_color(theme.danger).child("Latest crash"))
+                            .child(div().font_semibold().text_color(theme.danger).child(title))
                             .child(
                                 widgets::caption(
                                     match when {
@@ -832,7 +841,7 @@ impl Render for LogsView {
                     )
                     .child(div().pt_1().child(share));
                 let key = hopper::settings::notice_key(&root.to_string_lossy(), "latest-crash", &c.path.to_string_lossy());
-                widgets::closable_notice(body, key, widgets::Closed::Chip, "Latest crash", theme.danger, &self.store, cx)
+                widgets::closable_notice(body, key, widgets::Closed::Chip, title, theme.danger, &self.store, cx)
             });
             // No crash: say so, rather than leave the space blank.
             let calm = (card.is_none() && crash.is_none() && join.is_none()).then(|| {
@@ -1199,7 +1208,9 @@ impl LogsView {
                 h_flex()
                     .gap_2()
                     .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.danger))
-                    .child(div().font_semibold().text_color(theme.danger).child(if still_open {
+                    .child(div().font_semibold().text_color(theme.danger).child(if c.stuck {
+                        "The game got stuck while starting"
+                    } else if still_open {
                         "The game crashed and is showing its error screen"
                     } else {
                         "The game crashed"

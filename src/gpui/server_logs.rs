@@ -1316,7 +1316,7 @@ impl ServerLogsView {
             body.push(crate::crash_view::note_text(n, cx).into_any_element());
         }
         callout(theme.danger, cx)
-            .child(head("The server crashed", cx))
+            .child(head(if c.stuck { "The start got stuck" } else { "The server crashed" }, cx))
             .children(body)
             .child(div().pt_1().child(share))
             .into_any_element()
@@ -1468,7 +1468,7 @@ fn list_reports(root: &Path, mut known: HashMap<(String, i64), String>) -> Resul
     // Over SFTP / FTP: fetch what changed into Hopper's copy first.
     let _ = hopper::remotefs::refresh_path(&root.join("crash-reports"));
     let mods = root.join("mods");
-    let mut reports: Vec<Report> = hopper::logs::crash_reports(root)
+    let mut reports: Vec<Report> = hopper::logs::crash_report_files(root)
         .into_iter()
         .filter(|p| p.is_file())
         .map(|p| {

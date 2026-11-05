@@ -67,6 +67,9 @@ pub struct Settings {
     /// Record FPS, frame times, CPU, RAM, GPU and GC of each game run, to
     /// compare Java argument presets.
     pub record_sessions: bool,
+    /// A start with no log progress and an idle CPU for this many seconds
+    /// counts as stuck (0: don't check). See [`crate::stuckstart`].
+    pub stuck_start_secs: u64,
     /// Mods tab shows a dot per mod for its state on the paired server.
     pub mods_server_column: bool,
     /// Content tabs' table: columns the user hid ("author", "side", "added").
@@ -482,6 +485,7 @@ impl Default for Settings {
             minimize_while_playing: false,
             discord: Default::default(),
             record_sessions: true,
+            stuck_start_secs: crate::stuckstart::DEFAULT_SECS,
             mods_server_column: true,
             content_hidden_cols: Vec::new(),
             content_col_order: Vec::new(),

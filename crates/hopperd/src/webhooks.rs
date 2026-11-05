@@ -445,6 +445,7 @@ mod tests {
             finished: None,
             restarting: false,
             changed_since_start: false,
+            stuck: None,
             addresses: Vec::new(),
             address_default: false,
             sleep_after_minutes: 0,

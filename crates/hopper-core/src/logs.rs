@@ -68,6 +68,21 @@ pub fn is_problem(line: &str) -> bool {
     level(line) != Level::Plain || line.starts_with("\tat ")
 }
 
+/// Everything in `crash-reports`, newest first, Hopper's stuck-start thread
+/// dumps included: what Logs & crashes lists. Crash detection uses
+/// [`crash_reports`], which leaves the dumps out.
+pub fn crash_report_files(root: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(root.join("crash-reports"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    v.sort();
+    v.reverse();
+    v
+}
+
 /// Crash reports in a game folder, newest first.
 pub fn crash_reports(root: &Path) -> Vec<PathBuf> {
     let mut crashes: Vec<PathBuf> = std::fs::read_dir(root.join("crash-reports"))
@@ -75,6 +90,8 @@ pub fn crash_reports(root: &Path) -> Vec<PathBuf> {
         .flatten()
         .flatten()
         .map(|e| e.path())
+        // Hopper's stuck-start thread dumps sit here too; they aren't crashes.
+        .filter(|p| !crate::stuckstart::is_dump(p))
         .collect();
     crashes.sort();
     crashes.reverse();

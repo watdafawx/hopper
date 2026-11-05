@@ -183,6 +183,7 @@ impl ServerPanel for LocalPanel {
             version: t.version,
             world_size: String::new(),
             started,
+            stuck: s.stuck(),
             stopping: state == ServerState::Stopping,
             progress: s.progress(),
             finished: s.finished(),

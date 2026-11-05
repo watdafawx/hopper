@@ -211,6 +211,7 @@ const ENTRIES: &[Entry] = &[
     e(C::Java, "launch-with", "Launch with", "Hopper starts games itself with your Microsoft sign-in, like CurseForge. Mojang's launcher opens instead and you press Play there.", "launcher native mojang direct"),
     e(C::Java, "minimize", "Minimize while playing", "Hide Hopper while a game runs, and bring it back when it closes.", "minimize window hide"),
     e(C::Java, "record", "Record how games run", "FPS, frame times, CPU, RAM, GPU and GC pauses of each run, to compare Java arguments. See an instance's Performance tab.", "performance fps stats gc record benchmark"),
+    e(C::Java, "stuck", "Stuck start check", "When a game or server makes no progress and uses almost no CPU for this long while it starts, Hopper says so, reads what it's waiting on and names the mods.", "hang hung frozen freeze stuck loading deadlock thread dump jcmd"),
     e(C::Java, "memory", "Memory", "For instances that don't set their own.", "ram xmx gb heap"),
     e(C::Java, "java", "Java", "The Java instances use unless they pick one.", "jdk jre runtime path"),
     e(C::Java, "java-args", "Java arguments", "Extra arguments for instances that leave theirs blank.", "jvm flags aikar g1 zgc generator presets xms xmx graalvm"),
@@ -1128,6 +1129,24 @@ impl SettingsPage {
             }))
     }
 
+    /// How long a quiet, idle start waits before it counts as stuck.
+    fn stuck_picker(&self, current: u64, rem: Pixels) -> impl IntoElement {
+        const CHOICES: [(u64, &str); 5] = [(0, "Off"), (60, "1 minute"), (90, "90 seconds"), (120, "2 minutes"), (300, "5 minutes")];
+        let ix = CHOICES.iter().position(|(v, _)| *v == current).unwrap_or(2);
+        let store = self.store.clone();
+        div().w(rems(15.)).child(widgets::picker(
+            "stuck",
+            CHOICES[ix].1.to_string(),
+            CHOICES.iter().enumerate().map(|(i, (_, l))| (l.to_string(), i == ix)).collect(),
+            rem,
+            Rc::new(move |i, _, cx| {
+                let v = CHOICES.get(i).map_or(90, |c| c.0);
+                hopper::stuckstart::set_secs(v);
+                store.update(cx, |s, cx| s.update_settings(|st| st.stuck_start_secs = v, cx));
+            }),
+        ))
+    }
+
     /// A picker over `options` (settings key, label) with "Last used"
     /// (an empty key) first.
     fn key_picker(
@@ -1464,6 +1483,7 @@ impl SettingsPage {
                         |st, v| st.record_sessions = v,
                         cx,
                     )),
+                    Row::new("stuck").control(self.stuck_picker(s.stuck_start_secs, rem)),
                 ],
             ),
             Block::card(

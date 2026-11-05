@@ -147,6 +147,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/v1/servers/{id}/crash/put-back", post(crash_put_back))
         .route("/api/v1/servers/{id}/crash/switch-off", post(crash_switch_off))
         .route("/api/v1/servers/{id}/crash/switch-on", post(crash_switch_on))
+        .route("/api/v1/servers/{id}/stuck/snooze", post(stuck_snooze))
         .route("/api/v1/servers/{id}/neoforge", get(neoforge))
         .route("/api/v1/servers/{id}", get(server))
         .route("/api/v1/servers/{id}/power", post(power))
@@ -737,6 +738,15 @@ struct PutBackBody {
 /// Puts back the older copy of the mod the last crash's error names: the
 /// jar there now goes to `.hopper-backups` first. Read again here, so only
 /// a change this crash names can be undone this way.
+/// "Wait": hides a stuck start's notice and asks again after 5 more quiet
+/// minutes. The server keeps running either way.
+async fn stuck_snooze(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    e.server.snooze_stuck(300);
+    Ok(Json(json!({ "ok": true })))
+}
+
 async fn crash_put_back(
     State(app): State<Arc<App>>,
     headers: HeaderMap,

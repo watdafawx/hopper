@@ -56,6 +56,8 @@ pub struct Summary {
     pub restarting: bool,
     /// Its mods changed while it runs: they load on its next start.
     pub changed_since_start: bool,
+    /// The start looks stuck: what its thread dump showed.
+    pub stuck: Option<hopper_core::stuckstart::StuckReport>,
     /// Addresses players join it by (server addresses / the router):
     /// saved ones, or the default `name.<domain>` (see
     /// [`crate::router::effective`], which the callers fill in).
@@ -226,6 +228,7 @@ impl Servers {
             progress: e.server.progress(),
             finished: e.server.finished(),
             restarting: e.server.restarting(),
+            stuck: e.server.stuck(),
             changed_since_start: state.is_alive() && e.server.changed_since_start(),
             exit_code: match state {
                 ServerState::Crashed(c) => c,

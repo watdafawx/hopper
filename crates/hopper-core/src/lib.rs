@@ -103,6 +103,7 @@ pub mod snapshots;
 pub mod source;
 pub mod sources;
 pub mod stampcache;
+pub mod stuckstart;
 pub mod sync;
 pub mod time;
 pub mod tls;
