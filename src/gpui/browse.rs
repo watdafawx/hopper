@@ -335,6 +335,10 @@ pub struct BrowseView {
     target: Option<PathBuf>,
     /// Where data packs (or global resource packs) go, inside the target.
     dest: Option<String>,
+    /// Opened from a server list to host a pack: the place to host on
+    /// (`None` = this PC, `Some(id)` = a paired Hopper Server). It goes first
+    /// in each pack's host menu. Cleared by any other way into Browse.
+    host_for: Option<Option<String>>,
     /// Projects already in the target's global pack folders (Paxi…).
     global: HashMap<PathBuf, HashMap<u64, &'static str>>,
     global_info: HashMap<PathBuf, GlobalPacks>,
@@ -517,6 +521,7 @@ impl BrowseView {
             versions: Vec::new(),
             target: None,
             dest: None,
+            host_for: None,
             global: HashMap::new(),
             global_info: HashMap::new(),
             _global_poll: None,
@@ -615,6 +620,7 @@ impl BrowseView {
             self.want_global(cx);
             return;
         }
+        self.host_for = None;
         self.switch_class(class);
         if class == cf::CLASS_WORLDS {
             // Modrinth has no worlds.
@@ -1050,6 +1056,17 @@ impl BrowseView {
 
     /// Opens Browse on a class with no instance in mind.
     pub fn browse_class(&mut self, class: u32, cx: &mut Context<Self>) {
+        self.host_for = None;
+        self.browse_class_inner(class, cx);
+    }
+
+    /// Modpacks, to host one: `place` goes first in each pack's host menu.
+    pub fn browse_packs_for_server(&mut self, place: Option<String>, cx: &mut Context<Self>) {
+        self.host_for = Some(place);
+        self.browse_class_inner(cf::CLASS_MODPACKS, cx);
+    }
+
+    fn browse_class_inner(&mut self, class: u32, cx: &mut Context<Self>) {
         if self.class == class {
             self.category = None;
             self.run_search(false, cx);
@@ -1311,6 +1328,7 @@ impl BrowseView {
         };
         let (store, name, pack) = (self.store.clone(), m.name.clone(), m.clone());
         let panels = paired_panels(&self.store, cx);
+        let host_for = self.host_for.clone();
         Some(
             Button::new(id)
                 .xsmall()
@@ -1320,38 +1338,25 @@ impl BrowseView {
                 .tooltip("The pack author's own server files: download them or host a server from them")
                 .dropdown_menu(move |menu, _, _| {
                     let (s1, f1, n1) = (store.clone(), files.clone(), name.clone());
-                    let (s2, f2, n2) = (store.clone(), files.clone(), name.clone());
                     let (s3, p3) = (store.clone(), pack.clone());
                     let pid = pack.id;
+                    let mut menu = menu.item(
+                        PopupMenuItem::new("Download the server pack…")
+                            .icon(IconName::Download)
+                            .on_click(move |_, _, cx| {
+                                s1.update(cx, |s, _| s.note_server_files(pid));
+                                crate::dialogs::save_server_files(s1.clone(), f1.clone(), n1.clone(), cx)
+                            }),
+                    );
+                    // This PC, then each paired Hopper Server (the panel gets
+                    // the files itself); the place Browse was opened for first.
                     // Hosting is using server tools: it turns them on.
-                    let mut menu = menu
-                        .item(
-                            PopupMenuItem::new("Download the server pack…")
-                                .icon(IconName::Download)
-                                .on_click(move |_, _, cx| {
-                                    s1.update(cx, |s, _| s.note_server_files(pid));
-                                    crate::dialogs::save_server_files(s1.clone(), f1.clone(), n1.clone(), cx)
-                                }),
-                        )
-                        .item(
-                            PopupMenuItem::new("Host a server on this PC…")
-                                .icon(IconName::Server)
-                                .on_click(move |_, window, cx| {
-                                    s2.update(cx, |s, cx| s.set_server_tools(true, cx));
-                                    crate::host_dialog::open_for_files(s2.clone(), f2.clone(), n2.clone(), None, window, cx)
-                                }),
-                        );
-                    // Each paired Hopper Server: the panel gets the files itself.
-                    for (panel, label) in &panels {
-                        let (s, f, n, panel) = (store.clone(), files.clone(), name.clone(), panel.clone());
-                        menu = menu.item(
-                            PopupMenuItem::new(format!("Host on {label}…"))
-                                .icon(IconName::Server)
-                                .on_click(move |_, window, cx| {
-                                    s.update(cx, |s, cx| s.set_server_tools(true, cx));
-                                    crate::host_dialog::open_for_files(s.clone(), f.clone(), n.clone(), Some(panel.clone()), window, cx)
-                                }),
-                        );
+                    for (panel, label) in host_places(&panels, &host_for, "Host a server on this PC…", "Host on ") {
+                        let (s, f, n) = (store.clone(), files.clone(), name.clone());
+                        menu = menu.item(PopupMenuItem::new(label).icon(IconName::Server).on_click(move |_, window, cx| {
+                            s.update(cx, |s, cx| s.set_server_tools(true, cx));
+                            crate::host_dialog::open_for_files(s.clone(), f.clone(), n.clone(), panel.clone(), window, cx)
+                        }));
                     }
                     menu.separator().item(
                         PopupMenuItem::new("Build a server from this pack instead…")
@@ -1380,6 +1385,7 @@ impl BrowseView {
             .icon(IconName::ServerCog)
             .label(if long { "Build a server from this pack" } else { "Build a server" });
         let panels = paired_panels(&self.store, cx);
+        let host_for = self.host_for.clone();
         if panels.is_empty() {
             return Some(
                 button
@@ -1398,9 +1404,7 @@ impl BrowseView {
             button
                 .tooltip("This pack has no official server files. Build a server from the pack, leaving client-only mods out")
                 .dropdown_menu(move |mut menu, _, _| {
-                    let places = std::iter::once((None, "On this PC…".to_string()))
-                        .chain(panels.iter().map(|(id, n)| (Some(id.clone()), format!("On {n}…"))));
-                    for (panel, label) in places {
+                    for (panel, label) in host_places(&panels, &host_for, "On this PC…", "On ") {
                         let (s, p) = (store.clone(), pack.clone());
                         menu = menu.item(PopupMenuItem::new(label).icon(IconName::ServerCog).on_click(move |_, window, cx| {
                             s.update(cx, |s, cx| s.set_server_tools(true, cx));
@@ -4926,6 +4930,27 @@ fn stat(icon: IconName, text: impl Into<SharedString>, cx: &App) -> Div {
 type OnCategory = Rc<dyn Fn(u64, &mut Window, &mut App)>;
 
 /// The paired Hopper Servers a pack can be hosted on, as (id, name).
+/// Where a pack can be hosted: this PC, then each paired Hopper Server, with
+/// `first` (the place Browse was opened for) moved to the top. `suffix` is
+/// "…" after a panel's name.
+fn host_places(
+    panels: &[(String, String)],
+    first: &Option<Option<String>>,
+    local: &str,
+    prefix: &str,
+) -> Vec<(Option<String>, String)> {
+    let mut v: Vec<(Option<String>, String)> = std::iter::once((None, local.to_string()))
+        .chain(panels.iter().map(|(id, n)| (Some(id.clone()), format!("{prefix}{n}…"))))
+        .collect();
+    if let Some(f) = first {
+        if let Some(i) = v.iter().position(|(p, _)| p == f) {
+            let item = v.remove(i);
+            v.insert(0, item);
+        }
+    }
+    v
+}
+
 fn paired_panels(store: &Entity<Store>, cx: &App) -> Vec<(String, String)> {
     store.read(cx).settings().hopper_panels.iter().map(|p| (p.id.clone(), p.name.clone())).collect()
 }

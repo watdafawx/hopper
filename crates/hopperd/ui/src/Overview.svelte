@@ -1,7 +1,7 @@
 <script>
   import { session, outside } from './lib/me.svelte.js';
   import Avatar from './Avatar.svelte';
-  import { Play, Square, RotateCw, Terminal, Plus, Server } from '@lucide/svelte';
+  import { Play, Square, RotateCw, Terminal, Plus, Server, Compass } from '@lucide/svelte';
   import { live, history } from './lib/live.svelte.js';
   import { bytes, uptime, xmx, stateText, bootText, memTitle, loaderText } from './lib/format.js';
   import { power } from './lib/power.js';
@@ -37,6 +37,7 @@
 
 <div class="pad">
   <div class="row hd"><h2>Overview</h2><span class="sp"></span>
+    <a class="btn ghost icon" title="Browse modpacks to make a server from" href="#/browse"><Compass size={15} /></a>
     <button class="btn pri" onclick={onNew}><Plus size={14} />New server</button></div>
   <div class="alerts"><ServerAlerts server={PANEL} part="banner" /></div>
   <div class="grid4">
@@ -133,6 +134,7 @@
             <b>No servers yet</b>
             <p>Make one with New server, from a modpack or a server pack zip. Every folder with a <span class="mono">server.properties</span> in the panel's servers folder shows here too.</p>
             <button class="btn sm pri" onclick={onNew}><Plus size={13} />New server</button>
+            <a class="btn sm" href="#/browse"><Compass size={13} />Browse modpacks</a>
           </div>
         </div>
       {/if}
