@@ -99,7 +99,7 @@ fn walk(root: &Path, dir: &Path, rel: &str, depth: usize, out: &mut Vec<(String,
             if depth < 6 && !SKIP_DIRS.iter().any(|s| low.ends_with(&format!("/{s}")) || low == format!("config/{s}")) {
                 walk(root, &e.path(), &format!("{r}/"), depth + 1, out);
             }
-        } else if ft.is_file() && Format::of(&name).is_some() && !crate::packdiff::pack_content(&r) {
+        } else if ft.is_file() && Format::of(&name).is_some() && (r.starts_with("defaultconfigs/") || !crate::packdiff::pack_content(&r)) {
             let size = e.metadata().map_or(0, |m| m.len());
             if size <= MAX_BYTES {
                 out.push((r, size));
@@ -424,6 +424,35 @@ mod tests {
         assert_eq!(search(&root, &rels, "particles", true, 10).len(), 1);
         let p = read(&root, "config/create-client.toml");
         assert_eq!(changed_count(&p.as_ref().as_ref().unwrap().1), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_server_folder_lists_all_three_places() {
+        // A dedicated server: config/, defaultconfigs/ and the world named
+        // in server.properties, all owned by the same mod.
+        let root = std::env::temp_dir().join(format!("hopper-cfgindex-srv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let w = |rel: &str, t: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, t).unwrap();
+        };
+        w("server.properties", "level-name=survival
+");
+        w("config/create-server.toml", "a = 1
+");
+        w("defaultconfigs/create-server.toml", "a = 1
+");
+        w("survival/serverconfig/create-server.toml", "a = 2
+");
+        w("world/serverconfig/create-server.toml", "a = 3
+");
+        let rels: Vec<String> = list(&root).into_iter().map(|(r, _)| r).collect();
+        assert_eq!(rels, ["config/create-server.toml", "defaultconfigs/create-server.toml", "survival/serverconfig/create-server.toml"]);
+        let owners = crate::configowner::Owners::new(vec![crate::configowner::ModRef { key: "create.jar".into(), ids: vec!["create".into()], name: "Create".into() }]);
+        let files = index(&root, &owners);
+        assert!(files.iter().all(|f| f.owner.as_deref() == Some("create.jar")), "{files:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

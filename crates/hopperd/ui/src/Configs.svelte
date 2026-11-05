@@ -8,7 +8,7 @@
   // name, the open mod has its own box for its settings, and settings of
   // other mods that mention the words wait in a folded group.
   import { onMount } from 'svelte';
-  import { Search, X, Funnel, ArrowLeft, SlidersHorizontal, FileQuestion, Users, Send, ChevronRight, ChevronDown } from '@lucide/svelte';
+  import { Search, X, Funnel, ArrowLeft, SlidersHorizontal, FileQuestion, Users, Send, ChevronRight, ChevronDown, Info } from '@lucide/svelte';
   import ConfigView from './lib/ConfigView.svelte';
   import ConfigBar from './lib/ConfigBar.svelte';
   import PushPlayers from './lib/PushPlayers.svelte';
@@ -22,6 +22,8 @@
   import { say } from './lib/toast.svelte.js';
 
   let { server, path = '', go } = $props();
+  // A running server reads saved settings when it restarts (as on desktop).
+  const running = $derived(['running', 'starting'].includes(server.state));
 
   let error = $state('');
   let query = $state('');
@@ -177,6 +179,9 @@
     </label>
   </div>
 
+  {#if running}
+    <div class="rnote small"><Info size={14} />The server is running. Settings you save here apply when it restarts.</div>
+  {/if}
   {#if players?.differs}
     <div class="pnote small">
       <Users size={14} />
@@ -292,6 +297,8 @@
   .ofold { margin-top: 6px; color: var(--muted); font-size: 12px; gap: 6px; }
   .skels { display: flex; flex-direction: column; padding-top: 4px; }
   .phone-back { display: none; }
+  .rnote { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--raise); border-bottom: 1px solid var(--line); color: var(--subtle); }
+  .rnote :global(svg) { color: var(--muted); flex: none; }
   .pnote { flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; background: var(--blue-dim); border-bottom: 1px solid var(--line); color: var(--text); }
   .pnote :global(svg) { color: var(--blue); flex: none; }
   @media (max-width: 700px) {

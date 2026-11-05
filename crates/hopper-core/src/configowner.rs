@@ -77,6 +77,43 @@ impl ModRef {
     }
 }
 
+/// A server's jars (the jars in `mods_dir`, its `mods/` folder) as configs
+/// are matched to them, and the name and icon its `hopper.json` gives the
+/// ones Hopper knows, by key: the jar's file name without `.disabled`, as
+/// the Mods list keys its rows. Hopper desktop and Hopper Server read a
+/// server's configs with this.
+pub fn folder_mods(root: &Path, mods_dir: &Path) -> (Vec<ModRef>, HashMap<String, (String, String)>) {
+    // Read only: the Mods tab makes and heals hopper.json, not the configs.
+    let addons: HashMap<String, (String, String)> = if root.join(crate::instances::HOPPER_FILE).is_file() {
+        crate::instances::load(root)
+            .map(|i| i.addons.into_iter().map(|a| (a.file_name.trim_end_matches(".disabled").to_lowercase(), (a.name, a.icon))).collect())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut jars = Vec::new();
+    let mut known = HashMap::new();
+    for e in std::fs::read_dir(mods_dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let lower = name.to_lowercase();
+        if !(lower.ends_with(".jar") || lower.ends_with(".jar.disabled")) || !e.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let key = name.trim_end_matches(".disabled").to_string();
+        if !seen.insert(key.to_lowercase()) {
+            continue;
+        }
+        let (shown, icon) = addons.get(&key.to_lowercase()).cloned().unwrap_or_default();
+        if !shown.is_empty() || !icon.is_empty() {
+            known.insert(key.clone(), (shown.clone(), icon));
+        }
+        jars.push((key, e.path(), shown));
+    }
+    (of_jars(jars), known)
+}
+
+
 /// Reads many jars on a few threads (first time; `deps` caches them, in
 /// memory and on disk, so later opens only check each jar's size and time).
 pub fn of_jars(jars: Vec<(String, PathBuf, String)>) -> Vec<ModRef> {

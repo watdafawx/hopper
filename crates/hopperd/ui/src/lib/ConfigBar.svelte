@@ -26,7 +26,7 @@
       if (r.saved) {
         const back = r.backups.length === 1 ? ` The old copy is in ${r.backups[0]}.` : r.backups.length ? ` The old copies are in ${server.name}'s .hopper-backups.` : '';
         const re = r.reapplied.length ? ` ${r.reapplied.map(shortRel).join(', ')} had changed on the server, so your changes went onto the newer copy.` : '';
-        say(`Saved ${r.saved} setting${r.saved === 1 ? '' : 's'}.${back}${re}${running ? ' Most mods pick this up live; some need a restart.' : ''}`);
+        say(`Saved ${r.saved} setting${r.saved === 1 ? '' : 's'}.${back}${re}${running ? ' The server is running: this applies when it restarts.' : ''}`);
       }
       if (r.failed.length) say(`Not saved: ${r.failed.map(shortRel).join(', ')}. The reason is on the setting.`, true);
     } catch (e) {

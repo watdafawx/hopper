@@ -771,6 +771,13 @@ impl Client {
         self.get(&Self::server_path(id, "/configs/index"))
     }
 
+    /// Settings in the server's config files whose name or key (and with
+    /// `desc` their description) hold every word of `q`: `{ hits: [{ rel,
+    /// owner, entry }] }`, as the panel's Configs page searches.
+    pub fn configs_search(&self, id: &str, q: &str, desc: bool, limit: usize) -> anyhow::Result<Value> {
+        self.get(&format!("{}?q={}&desc={}&limit={limit}", Self::server_path(id, "/configs/search"), enc(q), if desc { 1 } else { 0 }))
+    }
+
     /// Config files' text, read by the panel: per file the text, or why it
     /// couldn't be read as settings.
     pub fn configs_parse(&self, id: &str, rels: &[String]) -> anyhow::Result<std::collections::HashMap<String, Result<String, String>>> {
@@ -1067,7 +1074,8 @@ pub fn snapshot_files(root: &Path) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut total = 0usize;
     for (rel, size) in crate::configindex::list(root) {
-        if !crate::configcompare::compared(&rel) || size > crate::configindex::MAX_BYTES {
+        // defaultconfigs/ only seeds a missing file: nothing a player's game reads.
+        if !crate::configcompare::compared(&rel) || rel.starts_with("defaultconfigs/") || size > crate::configindex::MAX_BYTES {
             continue;
         }
         let Ok(text) = std::fs::read_to_string(root.join(&rel)) else { continue };

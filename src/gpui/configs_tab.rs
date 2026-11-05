@@ -8,8 +8,12 @@
 //! mods by name, and the open mod has its own box for its settings.
 //! Settings of other mods that mention the words wait in a folded group
 //! under the mods, for "which mod changes X" questions.
+//!
+//! A server's Configs tab is the same tab: its files are read from the
+//! server folder on this PC, or through the panel of the Hopper Server it
+//! runs on.
 
-use crate::config_view::{self, ConfigView, ConfigViewEvent, Host, InstIndex};
+use crate::config_view::{self, ConfigView, ConfigViewEvent, Host, InstIndex, ServerSide, Source};
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
@@ -26,8 +30,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// A mod's name and icon from the instance, by its jar's file name.
-fn mod_info(store: &Store, root: &Path, key: &str) -> (String, Option<PathBuf>, u64) {
+/// A mod's name and icon from the instance (or for a server, its index), by
+/// its jar's file name.
+fn mod_info(store: &Store, root: &Path, key: &str, idx: Option<&InstIndex>) -> (String, Option<PathBuf>, u64) {
+    if let Some(i) = idx.filter(|i| i.server) {
+        return match i.names.get(key) {
+            Some((n, icon)) => (if n.is_empty() { key.trim_end_matches(".jar").to_string() } else { n.clone() }, store.image(icon).map(Path::to_path_buf), 0),
+            None => (key.trim_end_matches(".jar").to_string(), None, 0),
+        };
+    }
     let a = store.instance(root).and_then(|i| i.addons.iter().find(|a| a.file_name == key));
     match a {
         Some(a) => (a.name.clone(), store.image(&a.icon).map(Path::to_path_buf), a.project_id),
@@ -132,6 +143,10 @@ pub struct ConfigsTab {
     ver: u64,
     placeholder_total: Option<usize>,
     scroll: UniformListScrollHandle,
+    /// The tab is a server's: where its files are, whether it runs.
+    server: Option<ServerSide>,
+    /// Mods whose files a server's panel is still sending.
+    fetching: std::collections::HashSet<Pick>,
     _subs: Vec<Subscription>,
 }
 
@@ -194,12 +209,54 @@ impl ConfigsTab {
             ver: 0,
             placeholder_total: None,
             scroll: UniformListScrollHandle::new(),
+            server: None,
+            fetching: Default::default(),
             _subs: subs,
         }
     }
 
     pub fn show_for(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        if self.server.is_some() {
+            self.root = None;
+            self.server = None;
+        }
+        self.show_root(root, cx);
+    }
+
+    /// Shows a server's configs (its Configs tab). Called on every frame
+    /// the tab is drawn: only a new server or a new running state does
+    /// anything.
+    pub fn show_server(&mut self, root: PathBuf, side: ServerSide, cx: &mut Context<Self>) {
+        let same_place = match (&self.server, &side.source) {
+            (Some(ServerSide { source: Source::Local, .. }), Source::Local) => true,
+            (Some(ServerSide { source: Source::Panel(a), .. }), Source::Panel(b)) => a == b,
+            _ => false,
+        };
+        if same_place && self.root.as_ref() == Some(&root) {
+            if self.server.as_ref().is_some_and(|s| s.running != side.running) {
+                for v in self.views.values() {
+                    v.update(cx, |v, cx| {
+                        if let Some(s) = v.server.as_mut() {
+                            s.running = side.running;
+                        }
+                        cx.notify();
+                    });
+                }
+                self.server = Some(side);
+                cx.notify();
+            }
+            return;
+        }
+        if !same_place {
+            self.root = None;
+        }
+        self.server = Some(side);
+        self.show_root(root, cx);
+    }
+
+    fn show_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         if self.root.as_ref() != Some(&root) {
+            self.fetching.clear();
             // Unsaved edits of the old instance stay with its views only while it's shown.
             self.views.clear();
             self.picked = None;
@@ -222,7 +279,15 @@ impl ConfigsTab {
     fn refresh_index(&mut self, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
         let store = self.store.clone();
-        let idx = config_view::indexes(cx).update(cx, |i, cx| i.get(&root, &store, cx));
+        let idx = match self.server.as_ref().map(|s| s.source.clone()) {
+            Some(src) => config_view::indexes(cx).update(cx, |i, cx| i.get_server(&root, &src, cx)),
+            None => config_view::indexes(cx).update(cx, |i, cx| i.get(&root, &store, cx)),
+        };
+        if let Some(i) = idx.as_ref().filter(|i| i.server) {
+            // The mods' icons, for the list.
+            let icons: Vec<String> = i.names.values().map(|(_, icon)| icon.clone()).filter(|i| !i.is_empty()).collect();
+            self.store.update(cx, |s, _| icons.iter().for_each(|i| s.want_image(i)));
+        }
         if idx.is_some() {
             self.index = idx;
             self.ver += 1;
@@ -246,6 +311,10 @@ impl ConfigsTab {
         }
         let (Some(root), Some(idx)) = (self.root.clone(), self.index.clone()) else { return };
         let desc = self.desc;
+        let panel = match &self.server {
+            Some(ServerSide { source: Source::Panel(t), .. }) => Some(t.clone()),
+            _ => None,
+        };
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(180)).await;
             if this.update(cx, |t, _| t.search_serial != serial).unwrap_or(true) {
@@ -256,15 +325,24 @@ impl ConfigsTab {
                     let rels: Vec<String> = idx.files.iter().map(|f| f.rel.clone()).collect();
                     let owner: HashMap<&str, &str> = idx.files.iter().filter_map(|f| Some((f.rel.as_str(), f.owner.as_deref()?))).collect();
                     let mut out: HashMap<Pick, (usize, Vec<String>)> = HashMap::new();
-                    for h in hopper::configindex::search(&root, &rels, &q, desc, 20_000) {
-                        let pick = match owner.get(h.rel.as_str()) {
+                    // On a Hopper Server its panel searches (it has the files).
+                    let found: Vec<String> = match &panel {
+                        Some(t) => t
+                            .client
+                            .configs_search(t.id(), &q, desc, 2000)
+                            .map(|v| v["hits"].as_array().into_iter().flatten().filter_map(|h| h["rel"].as_str().map(str::to_string)).collect())
+                            .unwrap_or_default(),
+                        None => hopper::configindex::search(&root, &rels, &q, desc, 20_000).into_iter().map(|h| h.rel).collect(),
+                    };
+                    for rel in found {
+                        let pick = match owner.get(rel.as_str()) {
                             Some(o) => Pick::Mod(o.to_string()),
-                            None => Pick::File(h.rel.clone()),
+                            None => Pick::File(rel.clone()),
                         };
                         let e = out.entry(pick).or_default();
                         e.0 += 1;
-                        if !e.1.contains(&h.rel) {
-                            e.1.push(h.rel);
+                        if !e.1.contains(&rel) {
+                            e.1.push(rel);
                         }
                     }
                     out
@@ -310,7 +388,7 @@ impl ConfigsTab {
         let files = self.files_of(p);
         let (title, icon) = match p {
             Pick::Mod(k) => {
-                let (n, i, _) = mod_info(self.store.read(cx), &root, k);
+                let (n, i, _) = mod_info(self.store.read(cx), &root, k, self.index.as_deref());
                 (n, i)
             }
             Pick::File(r) => (r.rsplit('/').next().unwrap_or(r).to_string(), None),
@@ -319,6 +397,9 @@ impl ConfigsTab {
         let first = self.hits.as_ref().and_then(|h| h.get(p)).and_then(|(_, f)| f.first().cloned()).filter(|_| self.is_other(p, cx));
         let (desc, changed, side) = (self.desc, self.filter == Filter::Changed, self.side);
         let all_files: Vec<String> = self.index.as_ref().map(|i| i.files.iter().map(|f| f.rel.clone()).collect()).unwrap_or_default();
+        if let Some(side) = self.server.clone() {
+            return self.server_view(p, side, root, title, icon, files, first, all_files, window, cx);
+        }
         let view = cx.new(|cx| {
             let mut v = ConfigView::new(self.store.clone(), root, Host::Tab, title, icon, files, first, None, window, cx);
             v.desc = desc;
@@ -338,16 +419,94 @@ impl ConfigsTab {
         Some(view)
     }
 
+    /// A server's view for `p`. On a Hopper Server the mod's files come
+    /// from its panel first: None until they're here.
+    #[allow(clippy::too_many_arguments)]
+    fn server_view(
+        &mut self,
+        p: &Pick,
+        side: ServerSide,
+        root: PathBuf,
+        title: String,
+        icon: Option<PathBuf>,
+        files: Vec<String>,
+        first: Option<String>,
+        all_files: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<ConfigView>> {
+        let (desc, changed, s) = (self.desc, self.filter == Filter::Changed, self.side);
+        let source = side.source.clone();
+        let want_files: Vec<String> = files.iter().filter(|f| hopper::configedit::Format::of(f).is_some()).cloned().collect();
+        let make = move |this: &mut Self, texts: HashMap<String, Result<String, String>>, window: &mut Window, cx: &mut Context<Self>| {
+            let store = this.store.clone();
+            let view = cx.new(|cx| {
+                let mut v = ConfigView::for_server(store, root.clone(), side.clone(), texts, title.clone(), icon.clone(), files.clone(), first.clone(), window, cx);
+                v.desc = desc;
+                v.changed_only = changed;
+                v.side = s;
+                v.all_files = all_files.clone();
+                v
+            });
+            let sub = cx.subscribe(&view, |this, _, e: &ConfigViewEvent, cx| {
+                if let ConfigViewEvent::Changed = e {
+                    this.ver += 1;
+                    cx.notify();
+                }
+            });
+            this._subs.push(sub);
+            view
+        };
+        let Source::Panel(t) = source else {
+            let view = make(self, HashMap::new(), window, cx);
+            self.views.insert(p.clone(), view.clone());
+            return Some(view);
+        };
+        if !self.fetching.insert(p.clone()) {
+            return None;
+        }
+        let pick = p.clone();
+        let want = want_files;
+        let for_root = self.root.clone();
+        crate::panel_tabs::call_in(
+            window,
+            cx,
+            &t,
+            {
+                let id = t.id().to_string();
+                move |c| c.configs_parse(&id, &want)
+            },
+            move |this, r, window, cx| {
+                this.fetching.remove(&pick);
+                // Another server was picked meanwhile.
+                if this.root != for_root {
+                    return;
+                }
+                let texts = match r {
+                    Ok(t) => t,
+                    Err(e) => {
+                        use gpui_kit::component::WindowExt as _;
+                        window.push_notification(gpui_kit::component::notification::Notification::error(format!("Couldn't read the files from the panel: {e}")), cx);
+                        return;
+                    }
+                };
+                let view = make(this, texts, window, cx);
+                this.views.insert(pick, view);
+            },
+        );
+        None
+    }
+
     /// The top search's words, lower-case.
     fn words(&self) -> Vec<String> {
         widgets::search_words(&self.query)
     }
 
     /// Whether `p`'s name (or its jar's file name) has every word of the top search.
-    fn name_hit(&self, p: &Pick, names: &HashMap<&str, &str>) -> bool {
+    fn name_hit(&self, p: &Pick, names: &HashMap<String, String>) -> bool {
         let words = self.words();
         let hay = match p {
-            Pick::Mod(k) => format!("{} {k}", names.get(k.as_str()).copied().unwrap_or("")).to_lowercase(),
+            Pick::Mod(k) => format!("{} {k}", names.get(k.as_str()).map_or("", String::as_str)).to_lowercase(),
             Pick::File(r) => r.to_lowercase(),
         };
         words.iter().all(|w| hay.contains(w.as_str()))
@@ -363,9 +522,12 @@ impl ConfigsTab {
     }
 
     /// Every mod's name by its jar's file name.
-    fn names<'a>(&self, cx: &'a App) -> HashMap<&'a str, &'a str> {
+    fn names(&self, cx: &App) -> HashMap<String, String> {
+        if let Some(i) = self.index.as_ref().filter(|i| i.server) {
+            return i.names.iter().filter(|(_, (n, _))| !n.is_empty()).map(|(k, (n, _))| (k.clone(), n.clone())).collect();
+        }
         let root = self.root.as_deref().unwrap_or(Path::new(""));
-        self.store.read(cx).instance(root).map(|i| i.addons.iter().map(|a| (a.file_name.as_str(), a.name.as_str())).collect()).unwrap_or_default()
+        self.store.read(cx).instance(root).map(|i| i.addons.iter().map(|a| (a.file_name.clone(), a.name.clone())).collect()).unwrap_or_default()
     }
 
     /// Opens `p`; one from the "other mods" group opens on the settings
@@ -550,7 +712,7 @@ impl ConfigsTab {
         let root = self.root.clone().unwrap_or_default();
         let (name, icon, unmatched) = match p {
             Pick::Mod(k) => {
-                let (n, i, _) = mod_info(self.store.read(cx), &root, k);
+                let (n, i, _) = mod_info(self.store.read(cx), &root, k, self.index.as_deref());
                 (n, i, false)
             }
             Pick::File(r) => (r.trim_start_matches("config/").to_string(), None, true),
@@ -596,6 +758,9 @@ impl Render for ConfigsTab {
         let theme = cx.theme().clone();
         let Some(root) = self.root.clone() else { return div().into_any_element() };
         let Some(idx) = self.index.clone() else {
+            if let Some(e) = config_view::indexes(cx).read(cx).failed(&root) {
+                return div().p_6().child(widgets::empty_state(IconName::TriangleAlert, "Can't read the config files", Some(e.into()), cx)).into_any_element();
+            }
             return v_flex()
                 .size_full()
                 .p_6()
@@ -613,7 +778,9 @@ impl Render for ConfigsTab {
             self.placeholder_total = Some(mods_n);
             self.search.update(cx, |s, cx| s.set_placeholder(format!("Search {} mods", fmt_n(mods_n)), window, cx));
         }
-        let linked = self.store.read(cx).server_of(&root).cloned();
+        // A server compares with nothing; an instance with its linked server.
+        let linked = if self.server.is_some() { None } else { self.store.read(cx).server_of(&root).cloned() };
+        let running = self.server.as_ref().is_some_and(|s| s.running);
 
         let chips = h_flex()
             .gap_1p5()
@@ -712,6 +879,22 @@ impl Render for ConfigsTab {
 
         v_flex()
             .size_full()
+            .when(running, |d| {
+                d.child(
+                    h_flex()
+                        .mx_6()
+                        .mt_2()
+                        .px_3()
+                        .py_2()
+                        .gap_2()
+                        .rounded(theme.radius)
+                        .bg(theme.secondary)
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(Icon::new(IconName::Info).small().flex_none())
+                        .child("The server is running. Settings you save here apply when it restarts."),
+                )
+            })
             .child(toolbar)
             .child(
                 h_flex()
