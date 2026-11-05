@@ -46,33 +46,44 @@ fn status_color(status: Option<&Status>, panel: Option<&PanelStats>, cx: &App) -
     }
 }
 
-/// The server's last ping as the button that pings it again: signal bars
-/// and the round trip, a spinner while a ping is on its way, a red cross
-/// when it didn't answer.
-fn ping_button(store: &Entity<Store>, server: &ServerInfo, cx: &App) -> Button {
+/// The server's last ping as a status chip beside the state chips: the
+/// round trip (tinted by how good it is), "Didn't answer" in red, a spinner
+/// while a ping is on its way. Clicking pings again.
+fn ping_pill(store: &Entity<Store>, server: &ServerInfo, cx: &App) -> AnyElement {
     let s = store.read(cx);
-    let status = s.status(&server.root);
-    let (store, srv) = (store.clone(), server.clone());
-    let b = Button::new("ping")
-        .outline()
-        .small()
-        .tooltip("Ping it again, like the multiplayer screen")
-        .on_click(move |_, _, cx| store.update(cx, |s, cx| {
-            s.ping(&srv);
-            cx.notify();
-        }));
-    if s.pinging(&server.root) {
-        return b.icon(IconName::Activity).loading(true).label("Pinging…");
-    }
-    match status {
-        None => b.icon(IconName::Activity).label("Ping"),
-        Some(st) => b
-            .child(widgets::signal_bars(st.ms(), px(12.), cx))
-            .child(match st.ms() {
-                Some(ms) => ping_text(ms),
+    let theme = cx.theme();
+    let pinging = s.pinging(&server.root);
+    let (color, text): (Hsla, SharedString) = match (pinging, s.status(&server.root)) {
+        (true, _) => (theme.muted_foreground, "Pinging".into()),
+        (_, None) => (theme.muted_foreground, "Ping".into()),
+        (_, Some(st)) => (
+            widgets::ping_color(st.ms(), cx),
+            match st.ms() {
+                Some(ms) => ping_text(ms).into(),
                 None => "Didn't answer".into(),
-            }),
-    }
+            },
+        ),
+    };
+    let (store, srv) = (store.clone(), server.clone());
+    let hover = color.opacity(0.2);
+    widgets::pill(text, color, false)
+        .id("ping")
+        .clickable(cx)
+        .hover(move |st| st.bg(hover))
+        .tooltip(|window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new("Ping it again, like the multiplayer screen").build(window, cx)
+        })
+        .when(pinging, |d| d.child(Spinner::new().xsmall().color(color)))
+        .on_click(move |_, _, cx| {
+            if store.read(cx).pinging(&srv.root) {
+                return;
+            }
+            store.update(cx, |s, cx| {
+                s.ping(&srv);
+                cx.notify();
+            })
+        })
+        .into_any_element()
 }
 
 
@@ -1576,6 +1587,11 @@ impl ServersView {
                 .into_any_element(),
             );
         }
+        // A panel that says it is stopped won't answer a ping: no chip that
+        // can only say so.
+        if !pstats.as_ref().is_some_and(|p| !p.running && !p.starting) {
+            pills.push(ping_pill(&self.store, &server, cx));
+        }
         let facts = crate::hero::facts_row(cx)
             .when_some(minecraft, |r, v| r.child(crate::hero::fact(IconName::Box, theme.success, format!("Minecraft {v}"))))
             .when_some(loader_label, |r, l| r.child(crate::hero::fact(IconName::Blocks, theme.warning, l)))
@@ -1612,9 +1628,6 @@ impl ServersView {
         }
         stats.truncate(crate::library::hero_room(self.detail_w));
         let blur = art.as_ref().and_then(|a| self.blurs.get(a).cloned().flatten());
-        // A panel that says it is stopped won't answer a ping: no button
-        // that can only say so.
-        let pingable = !pstats.as_ref().is_some_and(|p| !p.running && !p.starting);
         let open = {
             // How this PC reaches the panel, as the panel sees it (the web
             // panel's status bar says the same).
@@ -1651,7 +1664,6 @@ impl ServersView {
             .gap_2()
             .child(self.control.update(cx, |c, cx| c.controls_hero(cx)))
             .child(open)
-            .when(pingable, |r| r.child(ping_button(&self.store, &server, cx)))
             .children(self.history_button(cx))
             .children(self.control.update(cx, |c, cx| c.more_button(cx)));
         // Past Overview the hero folds to one row: the tab's content gets the room.
