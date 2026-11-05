@@ -8,6 +8,27 @@ fn root(p: &str) -> String {
     format!("{ROOT}/{p}")
 }
 
+/// Asks Cargo to rerun this script when `path` changes, but only if it
+/// exists: Cargo treats a missing watched file as changed on every build,
+/// which rebuilt hopper-core and the app each time in checkouts without
+/// `.env` (git worktrees). A `.env` added later is still picked up on the
+/// next commit or checkout, which reruns the script through the git files.
+fn watch(path: &str) {
+    if std::path::Path::new(path).exists() {
+        println!("cargo:rerun-if-changed={path}");
+    }
+}
+
+/// The folder git keeps HEAD in. In a git worktree `.git` is a file
+/// (`gitdir: <path>`) pointing at it, not the folder itself.
+fn git_dir() -> String {
+    let dot_git = root(".git");
+    match std::fs::read_to_string(&dot_git) {
+        Ok(s) => s.trim().strip_prefix("gitdir:").map(|d| d.trim().to_string()).unwrap_or(dot_git),
+        Err(_) => dot_git,
+    }
+}
+
 fn main() {
     embed_cf_key();
     embed_ms_client_id();
@@ -20,7 +41,7 @@ fn main() {
 /// its own.
 fn embed_ms_client_id() {
     println!("cargo:rerun-if-env-changed=MS_CLIENT_ID");
-    println!("cargo:rerun-if-changed={}", root(".env"));
+    watch(&root(".env"));
     let from_file = || {
         std::fs::read_to_string(root(".env")).ok()?.lines().find_map(|l| {
             let v = l.trim().strip_prefix("MS_CLIENT_ID=")?;
@@ -45,7 +66,7 @@ fn embed_cf_key() {
     if std::env::var("HOPPER_EMBED_CF_KEY").as_deref() != Ok("1") {
         return;
     }
-    println!("cargo:rerun-if-changed={}", root(".env"));
+    watch(&root(".env"));
     let from_file = || {
         std::fs::read_to_string(root(".env")).ok()?.lines().find_map(|l| {
             let v = l.trim().strip_prefix("CF_API_KEY=")?;
@@ -82,8 +103,9 @@ fn write_cf_key(key: &[u8]) {
 /// of the commits it shipped (those since the release before). Without git
 /// (or history) the list is empty.
 fn embed_changelog() {
-    println!("cargo:rerun-if-changed={}", root(".git/HEAD"));
-    println!("cargo:rerun-if-changed={}", root(".git/logs/HEAD"));
+    let git = git_dir();
+    watch(&format!("{git}/HEAD"));
+    watch(&format!("{git}/logs/HEAD"));
     let out = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("changelog.txt");
     let log = std::process::Command::new("git")
         .args(["log", "-n", "600", "--format=%s%x1f%b%x1e"])
