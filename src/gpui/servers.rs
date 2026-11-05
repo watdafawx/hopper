@@ -1581,7 +1581,23 @@ impl ServersView {
             .when_some(loader_label, |r, l| r.child(crate::hero::fact(IconName::Blocks, theme.warning, l)))
             .when_some(pack_version, |r, v| {
                 let v = if v.starts_with(|c: char| c.is_ascii_digit()) { format!("v{v}") } else { v };
-                r.child(crate::hero::fact(IconName::Tag, theme.info, v))
+                // Opens the pack's versions and changelogs for this server,
+                // as the instance header's version does.
+                let (store, server, fg) = (self.store.clone(), s.clone(), theme.foreground);
+                r.child(
+                    crate::hero::fact(IconName::Tag, theme.info, v)
+                        .id("server-pack-version")
+                        .when(pack_id != 0, |d| {
+                            d.clickable(cx)
+                                .hover(move |s| s.text_color(fg))
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Pack versions and changelogs").build(window, cx)
+                                })
+                                .on_click(move |_, window, cx| {
+                                    crate::versions::open_server(store.clone(), server.clone(), window, cx)
+                                })
+                        }),
+                )
             })
             .when_some(addresses.first().cloned(), |r, a| r.child(crate::hero::soft_fact(IconName::Globe, a, cx)));
         let motd = s.properties.get("motd").and_then(|m| motd_line(m, cx)).map(|m| m.text_sm().into_any_element());

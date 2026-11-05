@@ -15,6 +15,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::cf;
 use hopper::install::{ChangelogEntry, Update};
+use hopper::instances::Instance;
+use hopper::server::ServerInfo;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use crate::widgets::{DIALOG_TOP, dialog_room};
@@ -36,6 +38,21 @@ pub struct VersionsView {
     all: Vec<cf::File>,
     /// Changelogs of other versions, opened on demand.
     others: HashMap<u64, Option<Result<SharedString, String>>>,
+    /// Server mode: the pack's versions for a server paired with it, which
+    /// updates from the pack's server packs.
+    server: Option<ServerMode>,
+}
+
+/// A server whose pack's versions are shown. `installed_file` is then the
+/// pack version the server is on.
+#[derive(Clone)]
+struct ServerMode {
+    info: ServerInfo,
+    inst: Instance,
+    /// Hopper recorded the server's pack version (it built or updated the
+    /// server from a server pack). Without, the list starts at the
+    /// instance's version.
+    known: bool,
 }
 
 impl VersionsView {
@@ -44,13 +61,39 @@ impl VersionsView {
             return;
         };
         let (pid, installed, pack) = (self.project_id, self.installed_file, self.pack);
+        let server = self.server.as_ref().map(|m| m.info.clone());
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
-                    hopper::install::changelogs(&inst, pid, installed, update.as_ref(), pack)
+                    // A server: start from the version it's on (read from
+                    // its folder or its Hopper Server), up to the newest of
+                    // the pack's update and the instance's own version.
+                    let marker = server.as_ref().and_then(hopper::server_pack_update::recorded_on);
+                    let on = marker.as_ref().map_or(0, |m| m.pack_file_id);
+                    let installed = if on != 0 { on } else { installed };
+                    let mut update = update;
+                    if server.is_some() && installed != inst_file(&inst) && inst_file(&inst) > installed {
+                        if update.as_ref().is_none_or(|u| u.id < inst_file(&inst)) {
+                            update = hopper::source::file(pid, inst_file(&inst)).ok().or(update);
+                        }
+                    }
+                    let to = update.as_ref().filter(|u| u.id > installed).map(|u| u.file_name.clone());
+                    hopper::install::changelogs(&inst, pid, installed, update.as_ref().filter(|u| u.id > installed), pack)
+                        .map(|r| (r, installed, on != 0, to))
                 })
                 .await;
             this.update(cx, |this, cx| {
+                let r = r.map(|(r, installed, known, to)| {
+                    if let Some(m) = this.server.as_mut() {
+                        m.known = known;
+                        this.installed_file = installed;
+                        this.to = to;
+                        if let Some(f) = r.1.iter().find(|f| f.id == installed) {
+                            this.from = f.display_name.clone();
+                        }
+                    }
+                    r
+                });
                 this.entries = Some(match r {
                     Ok((entries, mut all)) => {
                         // Server packs are separate downloads, not versions.
@@ -109,6 +152,12 @@ impl VersionsView {
         let v = view.read(cx);
         let (store, root, pack) = (v.store.clone(), v.root.clone(), v.pack);
         let (project_id, name, from) = (v.project_id, v.name.clone(), v.from.clone());
+        if let Some(m) = v.server.clone() {
+            // The server pack dialog shows what changes, then updates.
+            window.close_dialog(cx);
+            crate::pack_update::open_server_to(store, m.info, m.inst, Some(file), window, cx);
+            return;
+        }
         if pack {
             window.close_dialog(cx);
             crate::pack_update::switch(store, root, file, window, cx);
@@ -123,6 +172,24 @@ impl VersionsView {
             store.read(cx).run_updates(&root, vec![u]);
         }
         window.close_dialog(cx);
+    }
+
+    /// Why `f` can't be installed on the server right now, if it can't.
+    fn server_block(&self, f: &cf::File, cx: &App) -> Option<&'static str> {
+        let m = self.server.as_ref()?;
+        if crate::rigsync::server_online(self.store.read(cx), None, &m.info.root) {
+            Some("Stop the server first")
+        } else if !f.has_server_files() {
+            Some("No server pack for this version, so the server can't change to it")
+        } else {
+            None
+        }
+    }
+
+    /// The settings key for Clean update or Keep my changes: the server's
+    /// own choice in server mode.
+    fn mode_root(&self) -> &Path {
+        self.server.as_ref().map_or(&self.root, |m| m.info.root.as_path())
     }
 
     fn changelog(&self, id: ElementId, md: SharedString, cx: &App) -> AnyElement {
@@ -163,9 +230,13 @@ impl Render for VersionsView {
         let store = self.store.read(cx);
         let theme = cx.theme();
         let icon = store.image(&self.icon).map(Path::to_path_buf);
-        let line = match &self.to {
-            Some(to) => format!("{}  →  {to}", self.from),
-            None => format!("Installed: {}", self.from),
+        let line = match (&self.server, &self.to) {
+            (Some(_), _) if self.entries.is_none() => "Reading the server's version".to_string(),
+            (Some(m), _) if !m.known => format!("Your instance: {} · the server's version isn't recorded", self.from),
+            (Some(_), Some(to)) => format!("On the server: {}  →  {to}", self.from),
+            (Some(_), None) => format!("On the server: {}", self.from),
+            (None, Some(to)) => format!("{}  →  {to}", self.from),
+            (None, None) => format!("Installed: {}", self.from),
         };
         // The name wraps rather than cut off; the file line may truncate.
         let header = h_flex()
@@ -207,6 +278,10 @@ impl Render for VersionsView {
                 )
         });
         let locked = self.locked;
+        let server_mode = self.server.is_some();
+        // The server's own version, when Hopper recorded it.
+        let server_known = self.server.as_ref().is_some_and(|m| m.known);
+        let inst_on = self.server.as_ref().map_or(0, |m| inst_file(&m.inst));
         let body: AnyElement = match &self.entries {
             None => h_flex()
                 .gap_2()
@@ -257,6 +332,7 @@ impl Render for VersionsView {
                     // The installed one: the same file again, to get back
                     // what it ships (a pack's configs, a mod's jar).
                     let pack = self.pack;
+                    let block = file.as_ref().and_then(|f| self.server_block(f, cx));
                     let reinstall = file.clone().filter(|_| e.installed).map(|f| {
                         let view = view.clone();
                         Button::new(SharedString::from(format!("reinstall:{}", f.id)))
@@ -264,12 +340,15 @@ impl Render for VersionsView {
                             .outline()
                             .icon(IconName::RotateCcw)
                             .label("Reinstall")
-                            .tooltip(if pack {
+                            .tooltip(if server_mode {
+                                "Install this server pack again: shows every file on the server that differs from it"
+                            } else if pack {
                                 "Install this version again: lists every config that differs from the pack's so you can reset it, and puts back missing files"
                             } else {
                                 "Download this version again in place of the installed file"
                             })
-                            .disabled(locked)
+                            .disabled(locked || block.is_some())
+                            .when_some(block, |b, t| b.tooltip(t))
                             .on_click(move |_, window, cx| VersionsView::install(&view, f.clone(), window, cx))
                     });
                     // Named by what it does: these are all newer than the
@@ -280,9 +359,10 @@ impl Render for VersionsView {
                             .icon(IconName::Download)
                             .label(format!("Update to {}", version_label(&f)));
                         // The one filled button is the header's "Update to".
-                        b.outline().disabled(locked).on_click(move |_, window, cx| {
-                            VersionsView::install(&view, f.clone(), window, cx)
-                        })
+                        b.outline()
+                            .disabled(locked || block.is_some())
+                            .when_some(block, |b, t| b.tooltip(t))
+                            .on_click(move |_, window, cx| VersionsView::install(&view, f.clone(), window, cx))
                     });
                     // Two lines: the version's name and tags (wrapping, never
                     // cut off), then its date and buttons.
@@ -300,9 +380,17 @@ impl Render for VersionsView {
                                 .gap_y_1()
                                 .child(div().min_w_0().font_semibold().child(e.name.clone()))
                                 .child(widgets::chip(theme.muted_foreground).child(e.release))
-                                .when(e.installed, |r| r.child(widgets::chip(theme.success).child("Installed")))
+                                .when(e.installed && (!server_mode || server_known), |r| {
+                                    r.child(widgets::chip(theme.success).child(if server_mode { "On the server" } else { "Installed" }))
+                                })
+                                .when(server_mode && file.as_ref().is_some_and(|f| f.id == inst_on), |r| {
+                                    r.child(widgets::chip(theme.muted_foreground).child("Your instance"))
+                                })
                                 .when(pack && file.as_ref().is_some_and(|f| f.has_server_files()), |r| {
                                     r.child(widgets::server_files_chip(format!("srv-card-{i}"), cx))
+                                })
+                                .when(server_mode && file.as_ref().is_some_and(|f| !f.has_server_files()), |r| {
+                                    r.child(no_server_chip(format!("nosrv-card-{i}"), cx))
                                 }),
                         )
                         .child(
@@ -356,11 +444,12 @@ impl Render for VersionsView {
                             ),
                         })
                 });
-                let clean = self.store.read(cx).settings().clean_update(&self.root);
+                let clean = self.store.read(cx).settings().clean_update(self.mode_root());
                 let other_cards = others.into_iter().map(|f| {
                     let older = f.id < self.installed_file;
                     let open = self.others.get(&f.id);
                     let view = cx.entity();
+                    let block = self.server_block(&f, cx);
                     let (f1, f2) = (f.clone(), f.clone());
                     let body: Option<AnyElement> = open.map(|r| match r {
                         None => h_flex()
@@ -409,12 +498,19 @@ impl Render for VersionsView {
                                         .when(self.pack && f.has_server_files(), |r| {
                                             r.child(widgets::server_files_chip(format!("srv-other-{}", f.id), cx))
                                         })
+                                        .when(server_mode && f.id == inst_on, |r| {
+                                            r.child(widgets::chip(theme.muted_foreground).child("Your instance"))
+                                        })
+                                        .when(server_mode && !f.has_server_files(), |r| {
+                                            r.child(no_server_chip(format!("nosrv-other-{}", f.id), cx))
+                                        })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.open_other(f1.clone(), cx)
                                         })),
                                 )
                                 .child(widgets::caption(hopper::time::relative(&f.file_date), cx).text_xs().flex_none())
-                                .when(self.pack && clean, |r| {
+                                // A server always shows the preview first.
+                                .when(self.pack && clean && !server_mode, |r| {
                                     // A clean update skips the preview; this
                                     // is the way to it for one switch.
                                     let (store, root, f3) = (self.store.clone(), self.root.clone(), f.clone());
@@ -443,7 +539,8 @@ impl Render for VersionsView {
                                         } else {
                                             format!("Update to {}", version_label(&f))
                                         })
-                                        .disabled(locked)
+                                        .disabled(locked || block.is_some())
+                                        .when_some(block, |b, t| b.tooltip(t))
                                         .on_click(move |_, window, cx| {
                                             VersionsView::install(&view, f2.clone(), window, cx)
                                         }),
@@ -463,7 +560,7 @@ impl Render for VersionsView {
                 // Packs: how Update and Roll back treat your changes,
                 // remembered for this instance.
                 let mode = self.pack.then(|| {
-                    let key = self.root.to_string_lossy().to_string();
+                    let key = self.mode_root().to_string_lossy().to_string();
                     crate::pack_update::mode_tabs("pack-mode", clean)
                         .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                             let key = key.clone();
@@ -480,12 +577,14 @@ impl Render for VersionsView {
                 });
                 let mode_note = self
                     .pack
-                    .then(|| widgets::fine_print(crate::pack_update::mode_note(clean), cx));
+                    .then(|| widgets::fine_print(crate::pack_update::mode_note_for(clean, server_mode), cx));
                 v_flex()
                     .gap_3()
                     .child(
                         h_flex()
-                            .gap_3()
+                            .flex_wrap()
+                            .gap_x_3()
+                            .gap_y_2()
                             .child(
                                 div()
                                     .text_sm()
@@ -501,13 +600,15 @@ impl Render for VersionsView {
                             })
                             .when_some(mode, |r, m| r.child(div().flex_1()).child(m))
                             .when_some(latest, |r, f| {
+                                let block = self.server_block(&f, cx);
                                 r.child(
                                     Button::new("update-latest")
                                         .small()
                                         .primary()
                                         .icon(IconName::Download)
                                         .label(format!("Update to {}", version_label(&f)))
-                                        .disabled(locked)
+                                        .disabled(locked || block.is_some())
+                                        .when_some(block, |b, t| b.tooltip(t))
                                         .on_click(move |_, window, cx| {
                                             VersionsView::install(&view, f.clone(), window, cx)
                                         }),
@@ -605,6 +706,39 @@ pub fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
+    show(store, root, project_id, pack, update, None, window, cx)
+}
+
+/// Opens the versions and changelogs of the modpack `server` is paired
+/// with. Update and Roll back there update the server from the version's
+/// server pack.
+pub fn open_server(store: Entity<Store>, server: ServerInfo, window: &mut Window, cx: &mut App) {
+    let Some(inst) = store.read(cx).paired(&server).cloned() else {
+        return;
+    };
+    let Some(pid) = inst.pack.as_ref().map(|p| p.project_id).filter(|id| *id != 0) else {
+        return;
+    };
+    let update = store.read(cx).pack_update(&inst).cloned();
+    let mode = ServerMode {
+        info: server,
+        inst: inst.clone(),
+        known: false,
+    };
+    show(store, inst.root, pid, true, update, Some(mode), window, cx)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show(
+    store: Entity<Store>,
+    root: PathBuf,
+    project_id: u64,
+    pack: bool,
+    update: Option<cf::File>,
+    server: Option<ServerMode>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let Some(inst) = store.read(cx).instance(&root).cloned() else {
         return;
     };
@@ -628,6 +762,10 @@ pub fn open(
     let tick = store.read(cx).tr_tick().clone();
     let view = cx.new(|cx| {
         cx.observe(&tick, |_, _, cx| cx.notify()).detach();
+        // A server's buttons follow whether it runs.
+        if server.is_some() {
+            cx.observe(&store, |_, _, cx| cx.notify()).detach();
+        }
         let mut v = VersionsView {
             store,
             root,
@@ -642,6 +780,7 @@ pub fn open(
             entries: None,
             all: Vec::new(),
             others: HashMap::new(),
+            server,
         };
         v.load(update, cx);
         v
@@ -942,4 +1081,22 @@ pub fn open_reset_config(store: Entity<Store>, root: PathBuf, project_id: u64, f
                     ),
             )
     });
+}
+
+/// The pack file an instance is on (0: none).
+fn inst_file(inst: &Instance) -> u64 {
+    inst.pack.as_ref().map_or(0, |p| p.file_id)
+}
+
+/// A muted chip on a version the author published no server pack for: a
+/// server can't change to it.
+fn no_server_chip(id: String, cx: &App) -> AnyElement {
+    div()
+        .id(ElementId::Name(id.into()))
+        .flex_none()
+        .child(widgets::chip(cx.theme().muted_foreground).child("No server files"))
+        .tooltip(|w, cx| {
+            gpui_kit::component::tooltip::Tooltip::new("The author didn't publish a server pack for this version").build(w, cx)
+        })
+        .into_any_element()
 }
