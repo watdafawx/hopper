@@ -94,7 +94,13 @@ pub fn client_mods(inst: &Instance, sync_anyway: &HashSet<u64>) -> anyhow::Resul
 /// turned off in the pack that the server still runs isn't "only on the
 /// server": its row asks to turn the server's copy off too.
 pub fn diff_mods(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {
-    let mut diff = crate::diff::compute_diff(client, server);
+    // A turned-off jar whose mod another jar that's on provides (the pack's
+    // copy swapped for a player's own build) isn't turned off: the mod still
+    // runs, so the server is compared with the jar that's on. Matched by the
+    // jar's mod id, since a fork has another project and file name.
+    let on_ids: HashSet<String> = client.iter().filter(|m| !m.off && !m.mod_id.is_empty()).map(|m| m.mod_id.to_lowercase()).collect();
+    let client: Vec<ModInfo> = client.iter().filter(|m| !(m.off && on_ids.contains(&m.mod_id.to_lowercase()))).cloned().collect();
+    let mut diff = crate::diff::compute_diff(&client, server);
     for d in &mut diff {
         if d.client.as_ref().is_some_and(|c| c.off) && d.server.is_some() {
             d.mod_name = d.client.as_ref().map_or(d.mod_name.clone(), |c| c.mod_name.clone());
@@ -1000,6 +1006,48 @@ mod tests {
         assert!(crate::sync::plan(&diff, &pack.mods_dir(), &server_info.mods_dir()).is_empty());
         assert!(push(&diff, &pack, &server_info).is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The pack's copy turned off and the player's own build of the same mod
+    /// (same mod id, other file) turned on: the mod isn't turned off, and the
+    /// server is compared with the build that's on.
+    #[test]
+    fn turned_off_mod_replaced_by_a_fork_is_not_turned_off() {
+        use crate::model::ModInfo;
+        let m = |file: &str, id: &str, version: &str, off: bool| ModInfo {
+            file_name: file.into(),
+            mod_id: id.into(),
+            mod_name: "Effortless Building".into(),
+            version: version.into(),
+            side: "both".into(),
+            off,
+            wont_sync: off.then(|| TURNED_OFF.into()),
+            ..Default::default()
+        };
+        let client = [
+            m("effortlessbuilding-1.21.1-4.0.2-all.jar", "effortlessbuilding", "4.0.2", true),
+            m("EffortlessBuilding-fork-4.2.37.jar", "effortlessbuilding", "4.2.37", false),
+        ];
+
+        // The server runs the fork: in sync, nothing to turn off.
+        let diff = diff_mods(&client, &[m("EffortlessBuilding-fork-4.2.37.jar", "effortlessbuilding", "4.2.37", false)]);
+        assert!(diff.iter().all(|d| !is_off_here(d)), "{diff:?}");
+        assert_eq!(diff.len(), 1, "{diff:?}");
+        assert_eq!(Group::of(&diff[0]), Group::InSync);
+        assert!(join_check(&diff, &HashSet::new(), None, None).is_empty());
+
+        // The server runs another build of the fork: an update, not a turn-off.
+        let diff = diff_mods(&client, &[m("EffortlessBuilding-fork-4.2.30.jar", "effortlessbuilding", "4.2.30", false)]);
+        assert!(diff.iter().all(|d| !is_off_here(d)), "{diff:?}");
+        assert_eq!(diff.len(), 1, "{diff:?}");
+        assert_eq!(Group::of(&diff[0]), Group::Update);
+        assert_eq!(diff[0].client.as_ref().unwrap().version, "4.2.37");
+        let c = join_check(&diff, &HashSet::new(), None, None);
+        assert!(c.off_here.is_empty() && c.versions.len() == 1, "{c:?}");
+
+        // Without the fork, the turned-off copy still asks to turn it off.
+        let diff = diff_mods(&client[..1], &[m("EffortlessBuilding-fork-4.2.37.jar", "effortlessbuilding", "4.2.37", false)]);
+        assert!(diff.iter().any(is_off_here), "{diff:?}");
     }
 
     fn inst(n: &str) -> Instance {
