@@ -3,6 +3,7 @@
 //! the trash (restore or delete for good). Like the panel's Files page.
 
 use super::{Load, Target, bytes, call_in, confirm, q};
+use crate::selection::{self, KeyAct, Selection};
 use crate::store::Store;
 use crate::widgets::{self, Clickable as _};
 use gpui_kit::assets::IconName;
@@ -114,7 +115,12 @@ pub struct FilesTab {
     /// The folder shown, relative to the server folder ("" is the top).
     path: String,
     entries: Load<Vec<Entry>>,
-    selected: Option<String>,
+    /// Picked rows of the folder, by name.
+    sel: Selection,
+    /// Picked rows of the trash, by id.
+    trash_sel: Selection,
+    /// The list's keys (Ctrl+A, Delete, arrows) work while it has focus.
+    focus: FocusHandle,
     filter: Entity<InputState>,
     query: String,
     view: View,
@@ -211,7 +217,9 @@ impl FilesTab {
             target: None,
             path: String::new(),
             entries: Load::Waiting,
-            selected: None,
+            sel: Selection::new(),
+            trash_sel: Selection::new(),
+            focus: cx.focus_handle(),
             filter,
             query: String::new(),
             view: View::List,
@@ -257,10 +265,9 @@ impl FilesTab {
                 return;
             }
             let r = r.map(|v| list_of(&v, "entries", entry));
-            if let Ok(list) = &r
-                && this.selected.as_ref().is_some_and(|s| !list.iter().any(|e| &e.name == s))
-            {
-                this.selected = None;
+            if let Ok(list) = &r {
+                let names: Vec<String> = list.iter().map(|e| e.name.clone()).collect();
+                this.sel.retain(&names);
             }
             this.entries = Load::from(r);
         });
@@ -268,7 +275,7 @@ impl FilesTab {
 
     fn go(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.path = path;
-        self.selected = None;
+        self.sel = Selection::new();
         self.entries = Load::Waiting;
         self.view = View::List;
         self.naming = None;
@@ -294,6 +301,15 @@ impl FilesTab {
         all.iter().filter(|e| hopper::fuzzy::words_match(&self.query, &[&e.name])).cloned().collect()
     }
 
+    /// The names the list shows, in order (after the filter).
+    fn order(&self) -> Vec<String> {
+        self.shown().into_iter().map(|e| e.name).collect()
+    }
+
+    fn trash_order(&self) -> Vec<String> {
+        self.trash.ready().map(|l| l.iter().map(|t| t.id.clone()).collect()).unwrap_or_default()
+    }
+
     // ---- opening -----------------------------------------------------------
 
     fn open_entry(&mut self, e: &Entry, window: &mut Window, cx: &mut Context<Self>) {
@@ -303,7 +319,7 @@ impl FilesTab {
         } else if is_text(&e.name) || e.size < 64 * 1024 {
             self.edit(p, window, cx);
         } else {
-            self.selected = Some(e.name.clone());
+            self.sel.set_one(e.name.clone());
             self.download(p, window, cx);
         }
     }
@@ -351,7 +367,7 @@ impl FilesTab {
                             }
                         }
                     });
-                    this.selected = Some(name_of(&path));
+                    this.sel.set_one(name_of(&path));
                     this.open = Some(Open {
                         path,
                         modified: v["modified"].as_u64(),
@@ -503,22 +519,45 @@ impl FilesTab {
     }
 
     fn trash_entry(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let p = self.join(&name);
+        self.trash_entries(vec![name], window, cx)
+    }
+
+    /// Moves files of the folder shown to the panel's trash, after one
+    /// question for all of them.
+    fn trash_entries(&mut self, names: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let n = names.len();
+        if n == 0 {
+            return;
+        }
+        let paths: Vec<String> = names.iter().map(|name| self.join(name)).collect();
+        let (title, body, done) = if n == 1 {
+            (
+                format!("Move {} to the trash?", names[0]),
+                "You can restore it from the trash for 30 days.",
+                format!("Moved {} to the trash", names[0]),
+            )
+        } else {
+            (
+                format!("Move {n} items to the trash?"),
+                "You can restore them from the trash for 30 days.",
+                format!("Moved {n} items to the trash"),
+            )
+        };
         let view = cx.entity();
         confirm(
             window,
             cx,
-            format!("Move {name} to the trash?"),
-            "You can restore it from the trash for 30 days.".into(),
+            title,
+            body.into(),
             "Move to trash",
             true,
             move |_, cx| {
-                let (p, name) = (p.clone(), name.clone());
+                let (paths, done) = (paths.clone(), done.clone());
                 view.update(cx, |this, cx| {
-                    if this.open.as_ref().is_some_and(|o| o.path == p || o.path.starts_with(&format!("{p}/"))) {
+                    if this.open.as_ref().is_some_and(|o| paths.iter().any(|p| o.path == *p || o.path.starts_with(&format!("{p}/")))) {
                         this.open = None;
                     }
-                    this.ops(json!([{ "op": "trash", "paths": [p] }]), format!("Moved {name} to the trash"), cx);
+                    this.ops(json!([{ "op": "trash", "paths": paths }]), done, cx);
                 })
             },
             None,
@@ -671,6 +710,8 @@ impl FilesTab {
         let Some(t) = self.target.clone() else { return };
         super::get(cx, &t, t.fp("/trash"), |this, r, _| {
             this.trash = Load::from(r.map(|v| list_of(&v, "items", trash_item)));
+            let order = this.trash_order();
+            this.trash_sel.retain(&order);
         });
     }
 
@@ -874,13 +915,17 @@ impl FilesTab {
 
     fn rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let shown = self.shown();
+        let order: Vec<String> = shown.iter().map(|e| e.name.clone()).collect();
+        let picked = self.sel.in_order(&order);
         let view = cx.entity();
         range
             .filter_map(|i| shown.get(i).cloned().map(|e| (i, e)))
             .map(|(i, e)| {
                 let theme = cx.theme();
-                let selected = self.selected.as_deref() == Some(e.name.as_str());
+                let selected = self.sel.contains(&e.name);
                 let (e1, v) = (e.clone(), view.clone());
+                // Right-clicking one of several picked rows acts on them all.
+                let group = (picked.len() > 1 && selected).then(|| picked.clone());
                 h_flex()
                     .id(("file", i))
                     .clickable(cx)
@@ -912,14 +957,28 @@ impl FilesTab {
                         let e = e1.clone();
                         // A folder or text file opens on a click; other
                         // files select, and download on a double-click.
-                        if e.dir || is_text(&e.name) || ev.click_count() >= 2 {
+                        // Ctrl and Shift only pick.
+                        let order = this.order();
+                        if this.sel.click(&e.name, ev.modifiers(), &order)
+                            && (e.dir || is_text(&e.name) || ev.click_count() >= 2)
+                        {
                             this.open_entry(&e, window, cx);
-                        } else {
-                            this.selected = Some(e.name.clone());
                         }
                         cx.notify();
                     }))
                     .context_menu(move |menu, _, _| {
+                        if let Some(names) = group.clone() {
+                            let v = v.clone();
+                            let n = names.len();
+                            return menu.item(
+                                PopupMenuItem::new(format!("Move {n} to trash"))
+                                    .icon(IconName::Trash)
+                                    .on_click(move |_, w, cx| {
+                                        let names = names.clone();
+                                        v.update(cx, |this, cx| this.trash_entries(names, w, cx))
+                                    }),
+                            );
+                        }
                         let e = e.clone();
                         let (v1, v2, v3, v4) = (v.clone(), v.clone(), v.clone(), v.clone());
                         let (e1, e2, e3, e4) = (e.clone(), e.clone(), e.clone(), e.clone());
@@ -941,7 +1000,7 @@ impl FilesTab {
                         )
                         .item(PopupMenuItem::new("Rename").icon(IconName::Pencil).on_click(move |_, w, cx| {
                             v3.update(cx, |this, cx| {
-                                this.selected = Some(e3.name.clone());
+                                this.sel.set_one(e3.name.clone());
                                 this.start_naming(Naming::Rename(e3.name.clone()), w, cx)
                             })
                         }))
@@ -993,14 +1052,109 @@ impl FilesTab {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .track_focus(&self.focus)
+                    .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                        let order = this.order();
+                        match selection::on_key(&mut this.sel, e, &order, cx) {
+                            KeyAct::None => return,
+                            KeyAct::Delete => {
+                                let names = this.sel.in_order(&order);
+                                this.trash_entries(names, window, cx)
+                            }
+                            KeyAct::Moved(name) => {
+                                if let Some(ix) = order.iter().position(|n| *n == name) {
+                                    this.list_scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+                                }
+                            }
+                            KeyAct::Changed => {}
+                        }
+                        cx.notify();
+                    }))
                     .child(
                         uniform_list("files-list", n, cx.processor(|this, range: Range<usize>, _, cx| this.rows(range, cx)))
                             .track_scroll(&self.list_scroll)
                             .size_full(),
                     )
-                    .vertical_scrollbar(&self.list_scroll),
+                    .vertical_scrollbar(&self.list_scroll)
+                    .children(self.files_bar(cx)),
             )
             .into_any_element()
+    }
+
+    /// The bulk bar over the folder list, with several rows picked.
+    fn files_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.sel.many() {
+            return None;
+        }
+        let view = cx.entity();
+        let v2 = view.clone();
+        Some(selection::floating(
+            "files-bar",
+            selection::bar(
+                "files-bar",
+                self.sel.len(),
+                Vec::new(),
+                Some((
+                    "Move to trash".into(),
+                    Box::new(move |_, window, cx| {
+                        view.update(cx, |this, cx| {
+                            let names = this.sel.in_order(&this.order());
+                            this.trash_entries(names, window, cx)
+                        })
+                    }),
+                )),
+                move |_, _, cx| {
+                    v2.update(cx, |this, cx| {
+                        this.sel.clear();
+                        cx.notify();
+                    })
+                },
+                cx,
+            ),
+        ))
+    }
+
+    /// The bulk bar over the trash, with several items picked. No bulk
+    /// "delete for good": that stays one item at a time, or Empty trash.
+    fn trash_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.trash_sel.many() {
+            return None;
+        }
+        let v2 = cx.entity();
+        Some(selection::floating(
+            "trash-bar",
+            selection::bar(
+                "trash-bar",
+                self.trash_sel.len(),
+                vec![
+                    Button::new("trash-bar-restore")
+                        .small()
+                        .ghost()
+                        .icon(IconName::RotateCcw)
+                        .label("Restore")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let items: Vec<TrashItem> = this
+                                .trash
+                                .ready()
+                                .map(|l| l.iter().filter(|t| this.trash_sel.contains(&t.id)).cloned().collect())
+                                .unwrap_or_default();
+                            this.trash_sel.clear();
+                            for it in items {
+                                this.restore(it, cx);
+                            }
+                        }))
+                        .into_any_element(),
+                ],
+                None,
+                move |_, _, cx| {
+                    v2.update(cx, |this, cx| {
+                        this.trash_sel.clear();
+                        cx.notify();
+                    })
+                },
+                cx,
+            ),
+        ))
     }
 
     fn trash_view(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1041,14 +1195,22 @@ impl FilesTab {
                     };
                     let what = if it.kind == "saved-over" { "Version before a save" } else { "Deleted" };
                     let detail = format!("{what} · {} · {}", when(it.at), bytes(it.size));
-                    let (i1, id) = (it.clone(), it.id.clone());
+                    let (i1, id, key) = (it.clone(), it.id.clone(), it.id.clone());
+                    let picked = self.trash_sel.contains(&it.id);
                     h_flex()
                         .id(("trash", i))
                         .px_3()
                         .py_1p5()
                         .gap_3()
                         .rounded(theme.radius)
-                        .hover(|s| widgets::row_hover(s, cx))
+                        .clickable(cx)
+                        .when(picked, |r| widgets::row_selected(r, cx))
+                        .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
+                        .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                            let order = this.trash_order();
+                            this.trash_sel.click(&key, e.modifiers(), &order);
+                            cx.notify();
+                        }))
                         .child(Icon::new(icon).small().flex_none().text_color(color))
                         .child(
                             v_flex()
@@ -1076,7 +1238,25 @@ impl FilesTab {
                 }))
                 .into_any_element()
         };
-        v_flex().size_full().child(head).child(body).into_any_element()
+        v_flex()
+            .size_full()
+            .relative()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                // Delete does nothing here: deleting for good stays a
+                // button, one item at a time.
+                if e.keystroke.key == "delete" {
+                    return;
+                }
+                let order = this.trash_order();
+                if selection::on_key(&mut this.trash_sel, e, &order, cx) != KeyAct::None {
+                    cx.notify();
+                }
+            }))
+            .child(head)
+            .child(body)
+            .children(self.trash_bar(cx))
+            .into_any_element()
     }
 
     fn search_view(&self, cx: &mut Context<Self>) -> AnyElement {

@@ -12,6 +12,8 @@
   import ServerCrash from './ServerCrash.svelte';
   import LogText from './LogText.svelte';
   import ModPeek from './ModPeek.svelte';
+  import SelectionBar from './lib/SelectionBar.svelte';
+  import { Selection } from './lib/selection.svelte.js';
 
   /** sub: 'crashes' | 'latest' | 'debug'; go(sub) changes it. */
   let { server, sub = 'crashes', go, onShare, openFile, openMods } = $props();
@@ -43,6 +45,8 @@
       const r = await api(`${base}/crashes`);
       list = r.crashes || [];
       if (!list.some((c) => c.path === picked)) picked = (list.some((c) => c.path === want) ? want : '') || list[0]?.path || '';
+      sel.retain(list.map((c) => c.path));
+      if (picked && !sel.has(picked) && !sel.many) sel.setOne(picked);
       if (r.pending && view === 'crashes') more = setTimeout(loadList, 200);
     } catch (e) {
       list = list || [];
@@ -106,6 +110,8 @@
   }
   async function afterDelete() {
     picked = '';
+    sel.clear();
+    oldSel.clear();
     await loadList();
     await loadOld();
   }
@@ -115,19 +121,53 @@
     const g = groupOf(c);
     removeFiles(g, g.length > 1 ? `Delete these ${g.length} crash reports?` : 'Delete this crash report?', g.length > 1 ? "They are the report and its follow-up reports; they go to the server's trash (Files › Trash), where you can get them back." : "It goes to the server's trash (Files › Trash), where you can get it back.");
   }
-  const delLog = (f) => removeFiles([f.path], 'Delete this log?', `${fileOf(f.path)} goes to the server's trash (Files › Trash), where you can get it back.`);
-  const onKey = (e, run) => {
-    if (e.key === 'Delete') {
-      e.preventDefault();
-      run();
+  const delLog = (f) => delLogs([f.path]);
+  function delLogs(paths) {
+    if (!paths.length) return;
+    if (paths.length === 1) return removeFiles(paths, 'Delete this log?', `${fileOf(paths[0])} goes to the server's trash (Files › Trash), where you can get it back.`);
+    removeFiles(paths, `Delete these ${paths.length} logs?`, "They go to the server's trash (Files › Trash), where you can get them back.");
+  }
+
+  // ---- picking several (Ctrl / Shift, as a file explorer; lib/selection) ----
+  // The reports picked; with one, it is the one shown.
+  const sel = new Selection();
+  const order = $derived(rows.map((c) => c.path));
+  /** The picked reports with their follow-ups, each once, in list order. */
+  const pickedGroups = (paths) => [...new Set(paths.flatMap((p) => {
+    const c = list?.find((x) => x.path === p);
+    return c ? groupOf(c) : [p];
+  }))];
+  /** Deletes the picked reports (Delete key, the bar, a right-click on a picked row). */
+  function delPicked() {
+    const g = pickedGroups(sel.inOrder(order));
+    if (!sel.many) {
+      const c = list?.find((x) => x.path === g[0]);
+      return c && delReport(c);
     }
-  };
+    removeFiles(g, `Delete these ${g.length} crash reports?`, "They (with the follow-up reports of the ones picked) go to the server's trash (Files › Trash), where you can get them back.");
+  }
+  function repClick(c, e) {
+    if (sel.click(c.path, e, order)) picked = c.path;
+  }
+  function crashKey(e) {
+    const act = sel.onKey(e, order, { el: e.currentTarget, onMove: (k) => (picked = k), onDelete: delPicked });
+    // Esc back to one: that one is shown.
+    if (act === 'changed' && sel.size === 1 && sel.cursor && sel.has(sel.cursor)) picked = sel.cursor;
+  }
+  // The bar's clear: back to the report shown.
+  const clearPicked = () => (picked ? sel.setOne(picked) : sel.clear());
+
+  // The older logs picked.
+  const oldSel = new Selection();
+  const oldOrder = $derived((old || []).map((f) => f.path));
+  const oldKey = (e) => oldSel.onKey(e, oldOrder, { el: e.currentTarget, onDelete: delLogs });
 
   let old = $state(null);
   async function loadOld() {
     try {
       const r = await api(`${base}/logs`);
       old = (r.logs || []).filter((f) => !f.crash && f.path !== 'logs/latest.log' && f.path !== 'logs/debug.log').sort((a, b) => b.modified - a.modified);
+      oldSel.retain(old.map((f) => f.path));
     } catch (e) {
       old = old || [];
     }
@@ -154,7 +194,7 @@
 
   {#if view === 'crashes'}
     <div class="split">
-      <div class="list card">
+      <div class="list card" role="listbox" tabindex="-1" aria-multiselectable="true" aria-label="Crash reports" onkeydown={crashKey}>
         <div class="row lh"><b>Crash reports</b><span class="sp"></span><button class="btn sm ghost" title="Deletes every crash report of this server" disabled={!list?.length} onclick={() => clearAll('crashes', list.length)}><Trash2 size={13} />Clear all</button><button class="btn sm ghost icon" title="Look again" onclick={loadList}><RefreshCw size={13} /></button></div>
         {#if listErr}<div class="small err">{listErr}</div>{/if}
         {#if list === null}
@@ -163,8 +203,9 @@
           <div class="empty-state"><div class="es-ic"><FileWarning size={18} /></div><b>No crash reports</b><p>If the server crashes, its report shows here with what Hopper makes of it.</p></div>
         {:else}
           {#each rows as c (c.path)}
-            <div class="repw" role="presentation" oncontextmenu={(e) => { e.preventDefault(); delReport(c); }}>
-              <button class="rep row-hover" class:fu={c.follow_up} class:row-sel={picked === c.path} title={c.path} onclick={() => (picked = c.path)} onkeydown={(e) => onKey(e, () => delReport(c))}>
+            {@const on = sel.many ? sel.has(c.path) : picked === c.path}
+            <div class="repw" role="presentation" oncontextmenu={(e) => { e.preventDefault(); sel.many && sel.has(c.path) ? delPicked() : delReport(c); }}>
+              <button class="rep row-hover" class:fu={c.follow_up} class:row-sel={on} role="option" aria-selected={on} data-sel-key={c.path} title={c.path} onclick={(e) => repClick(c, e)}>
                 <span class="small t" title={fullDate(c.modified)}>{exactLabel(c.modified)}</span>
                 <span class="tiny v" class:muted={!c.verdict || c.follow_up}>{c.follow_up ? c.title : c.verdict || fileOf(c.path)}</span>
               </button>
@@ -177,6 +218,7 @@
               </button>
             {/if}
           {/each}
+          {#if sel.many}<SelectionBar n={sel.size} onDelete={delPicked} onClear={clearPicked} />{/if}
         {/if}
       </div>
       <div class="read">
@@ -200,7 +242,7 @@
       {#if peek}<ModPeek {server} mod={peek} onClose={() => (peek = null)} onChanged={() => {}} onUpdate={() => { peek = null; openMods(); }} />{/if}
     </div>
   {:else if view === 'older'}
-    <div class="older card col">
+    <div class="older card col" role="listbox" tabindex="-1" aria-multiselectable="true" aria-label="Older logs" onkeydown={oldKey}>
       <div class="row lh"><b>Older logs</b><span class="sp"></span><button class="btn sm ghost" title="Deletes every older log; latest.log and debug.log stay" disabled={!old?.length} onclick={() => clearAll('logs', old.length)}><Trash2 size={13} />Clear old logs</button></div>
       {#if old === null}
         {#each [0, 1, 2] as k (k)}<div class="skel"><i></i></div>{/each}
@@ -208,13 +250,17 @@
         <div class="empty-state"><div class="es-ic"><FileText size={18} /></div><b>No older logs</b><p>The server keeps its last start in latest.log. Older ones show up here.</p></div>
       {:else}
         {#each old as f (f.path)}
-          <div class="orow row-hover" role="presentation" tabindex="-1" onkeydown={(e) => onKey(e, () => delLog(f))}>
-            <span class="small grow name">{fileOf(f.path)}</span>
-            <span class="tiny muted" title={fullDate(f.modified)}>{exactLabel(f.modified)}</span>
-            <span class="tiny muted sz">{bytes(f.size)}</span>
+          {@const on = oldSel.has(f.path)}
+          <div class="orow row-hover" class:row-sel={on} role="presentation" oncontextmenu={(e) => { e.preventDefault(); oldSel.many && on ? delLogs(oldSel.inOrder(oldOrder)) : delLog(f); }}>
+            <button class="ob" role="option" aria-selected={on} data-sel-key={f.path} onclick={(e) => oldSel.click(f.path, e, oldOrder)}>
+              <span class="small grow name">{fileOf(f.path)}</span>
+              <span class="tiny muted" title={fullDate(f.modified)}>{exactLabel(f.modified)}</span>
+              <span class="tiny muted sz">{bytes(f.size)}</span>
+            </button>
             <button class="btn sm ghost icon" title="Delete this log" onclick={() => delLog(f)}><Trash2 size={13} /></button>
           </div>
         {/each}
+        {#if oldSel.many}<SelectionBar n={oldSel.size} onDelete={() => delLogs(oldSel.inOrder(oldOrder))} onClear={() => oldSel.clear()} />{/if}
       {/if}
     </div>
   {:else}
@@ -235,7 +281,9 @@
   .repw .del { opacity: 0; flex: none; }
   .repw:hover .del, .repw:focus-within .del { opacity: 1; }
   .older { max-width: 760px; gap: 2px; }
-  .orow { display: flex; align-items: center; gap: 12px; padding: 4px 8px; border-radius: var(--radius); }
+  .orow { display: flex; align-items: center; gap: 12px; padding: 0 8px 0 0; border-radius: var(--radius); }
+  .ob { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 4px 0 4px 8px; text-align: left; color: var(--text); user-select: none; }
+  .rep { user-select: none; }
   .orow .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .orow .sz { width: 64px; text-align: right; }
   .grow { flex: 1; min-width: 0; }

@@ -24,6 +24,8 @@
   import FileTree from './FileTree.svelte';
   import FileViewer from './FileViewer.svelte';
   import ModPeek from './ModPeek.svelte';
+  import SelectionBar from './lib/SelectionBar.svelte';
+  import { Selection } from './lib/selection.svelte.js';
 
   let { server, path = '', go, openFile, openTrash } = $props();
   // The live feed hands over a new `server` object every second; effects
@@ -36,7 +38,9 @@
   let error = $state('');
   let filter = $state('');
   let selected = $state(new Set());
-  let last = $state(null);
+  // Clicks with Ctrl / Shift and the keys (lib/selection), on the same picks
+  // as the tick boxes, their drag and the rubber band.
+  const sel = new Selection({ get: () => selected, set: (s) => (selected = s) });
   let dragging = $state(false);
   let scroller = $state();
   let scrollTop = $state(0);
@@ -145,8 +149,7 @@
       if (seq !== loadSeq) return;
       entries = r.entries;
       if (reveal && entries.some((e) => e.name === reveal)) {
-        selected = new Set([reveal]);
-        last = reveal;
+        sel.setOne(reveal);
         const ix = items.findIndex((e) => e.key == null && e.name === reveal);
         if (scroller && prefs.view === 'list' && ix >= 0) scroller.scrollTop = Math.max(0, ix * ROW - viewH / 3);
       } else {
@@ -274,19 +277,21 @@
   function click(e, ev) {
     // A tick sweep let go over a row's own name lands its click on the row.
     if (suppressClick || clickSwallowed()) return;
-    const s = new Set(selected);
-    if (ev.shiftKey && last) {
-      const a = ordered.findIndex((x) => x.name === last);
-      const b = ordered.findIndex((x) => x.name === e.name);
-      for (const x of ordered.slice(Math.min(a, b), Math.max(a, b) + 1)) s.add(x.name);
-    } else if (ev.ctrlKey || ev.metaKey) {
-      s.has(e.name) ? s.delete(e.name) : s.add(e.name);
-    } else {
-      s.clear();
-      s.add(e.name);
-    }
-    last = e.name;
-    selected = s;
+    sel.click(e.name, ev, names);
+  }
+  const names = $derived(ordered.map((x) => x.name));
+
+  /** Scrolls entry `name` into view (the list draws only the rows near it). */
+  function scrollToName(name) {
+    if (!scroller) return;
+    if (prefs.view === 'list') {
+      const ix = items.findIndex((x) => x.key == null && x.name === name);
+      if (ix < 0) return;
+      // Room for the floating selection bar.
+      const room = viewH - (selList.length ? 64 : 0);
+      if (ix * ROW < scroller.scrollTop) scroller.scrollTop = ix * ROW;
+      else if ((ix + 1) * ROW > scroller.scrollTop + room) scroller.scrollTop = (ix + 1) * ROW - room;
+    } else scroller.querySelector(`[data-name="${CSS.escape(name)}"]`)?.scrollIntoView({ block: 'nearest' });
   }
 
   // Press a row's tick box and drag across rows: each row crossed takes the
@@ -301,11 +306,8 @@
     });
   }
 
-  function toggle(e) {
-    const s = new Set(selected);
-    s.has(e.name) ? s.delete(e.name) : s.add(e.name);
-    last = e.name;
-    selected = s;
+  function toggle(e, ev) {
+    sel.tick(e.name, ev, names);
   }
 
   // Rubber band: drag on empty space (or a row's free space) to select.
@@ -535,8 +537,7 @@
   const INTERNAL = 'application/x-hopperd-files';
   function dragStart(ev, e) {
     if (!selected.has(e.name)) {
-      selected = new Set([e.name]);
-      last = e.name;
+      sel.setOne(e.name);
     }
     const paths = [...selected].map((n) => join(n));
     ev.dataTransfer.setData(INTERNAL, JSON.stringify({ sid, paths }));
@@ -582,8 +583,7 @@
   function menu(ev, e = null) {
     ev.preventDefault();
     if (e && !selected.has(e.name)) {
-      selected = new Set([e.name]);
-      last = e.name;
+      sel.setOne(e.name);
     }
     if (!e) selected = new Set();
     const w = 220;
@@ -624,13 +624,15 @@
     else if (ev.key === 'Escape') {
       if (ctx) ctx = null;
       else if (peekJar) peekJar = '';
-      else selected = new Set();
+      // A group goes back to the row the keys are on; one goes too.
+      else if (!sel.onKey(ev, names)) selected = new Set();
     }
+    else if ((ev.key === 'ArrowUp' || ev.key === 'ArrowDown') && !mod && !ev.altKey) sel.onKey(ev, names, { onMove: scrollToName });
     else if (ev.key === 'Delete' && selList.length) trash();
     else if (ev.key === 'F2' && selList.length === 1) rename();
     else if (ev.key === 'F5') { ev.preventDefault(); refresh(); }
     else if (ev.key === 'Backspace' && path) up();
-    else if (mod && ev.key === 'a') { ev.preventDefault(); selected = new Set(ordered.map((e) => e.name)); }
+    else if (mod && ev.key.toLowerCase() === 'a' && !ev.shiftKey) sel.onKey(ev, names);
     else if (mod && ev.key === 'x') cutCopy('move');
     else if (mod && ev.key === 'c') cutCopy('copy');
     else if (mod && ev.key === 'v') paste();
@@ -781,6 +783,7 @@
         <div
           class="list"
           class:tilesv={prefs.view === 'tiles'}
+          class:withbar={selList.length > 0}
           bind:this={scroller}
           bind:clientHeight={viewH}
           onscroll={() => (scrollTop = scroller.scrollTop)}
@@ -833,7 +836,7 @@
                   ondrop={(ev) => e.dir && dropOn(ev, join(e.name))}
                   onkeydown={() => {}}
                 >
-                  <input type="checkbox" checked={selected.has(e.name)} onpointerdown={(ev) => tickDown(ev, e, first + i)} onclick={(ev) => { ev.stopPropagation(); if (clickSwallowed()) { ev.preventDefault(); return; } toggle(e); }} />
+                  <input type="checkbox" checked={selected.has(e.name)} onpointerdown={(ev) => tickDown(ev, e, first + i)} onclick={(ev) => { ev.stopPropagation(); if (clickSwallowed()) { ev.preventDefault(); return; } toggle(e, ev); }} />
                   <span class="c-name"><span class="dragh" draggable="true" ondragstart={(ev) => dragStart(ev, e)} role="presentation"><Icon size={15} class={e.dir ? 'fold' : 'fic'} /><span class="nm">{e.name}</span></span>
                     {#if m}<button class="modtag" title="Show {m.name}" onclick={(ev) => { ev.stopPropagation(); showMod(m); }}>{#if m.icon}<img src={m.icon} alt="" />{/if}<span class="ell">{m.name}</span></button>{/if}</span>
                   <span class="c-date muted">{when(e.modified)}</span>
@@ -878,15 +881,12 @@
       {/if}
 
       {#if selList.length && !found}
-        <div class="selbar">
-          <b>{selList.length} selected</b><span class="muted small">{selSize ? `· ${bytes(selSize)}` : ''}</span>
-          <span class="sp"></span>
-          <button class="btn sm" onclick={() => downloadSel()}><Download size={13} />{selList.length === 1 && !selList[0].dir ? 'Download' : 'Download zip'}</button>
-          {#if selList.length === 1}<button class="btn sm" onclick={rename}><Pencil size={13} />Rename</button>{/if}
-          <button class="btn sm" onclick={() => moveOrCopy('copy')}><Copy size={13} />Copy to…</button>
-          <button class="btn sm" onclick={() => moveOrCopy('move')}><Scissors size={13} />Move to…</button>
-          <button class="btn sm bad" onclick={trash}><Trash2 size={13} />Trash</button>
-        </div>
+        <SelectionBar over n={selList.length} info={selSize ? `· ${bytes(selSize)}` : ''} onDelete={trash} deleteLabel="Trash" deleteTitle="Moves to the trash (Del)" onClear={() => (selected = new Set())}>
+          <button class="btn sm ghost" onclick={() => downloadSel()}><Download size={13} />{selList.length === 1 && !selList[0].dir ? 'Download' : 'Download zip'}</button>
+          {#if selList.length === 1}<button class="btn sm ghost" onclick={rename}><Pencil size={13} />Rename</button>{/if}
+          <button class="btn sm ghost" onclick={() => moveOrCopy('copy')}><Copy size={13} />Copy to…</button>
+          <button class="btn sm ghost" onclick={() => moveOrCopy('move')}><Scissors size={13} />Move to…</button>
+        </SelectionBar>
       {/if}
     </div>
 
@@ -990,7 +990,7 @@
   .btn.on { background: var(--raise); color: var(--text); }
   .body { flex: 1; min-height: 0; display: flex; }
   .treepane { width: 220px; flex: none; border-right: 1px solid var(--line); overflow: auto; }
-  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
   .found { flex: 1; overflow: auto; min-height: 200px; }
   .fh { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--base); }
   .fg { padding: 6px 0; border-bottom: 1px solid var(--line); }
@@ -1002,6 +1002,8 @@
   .head { padding: 6px 12px 6px 40px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11.5px; font-weight: 500; }
   .list { flex: 1; overflow: auto; position: relative; min-height: 200px; user-select: none; }
   .spacer { position: relative; }
+  /* Room under the last row for the floating selection bar. */
+  .list.withbar { padding-bottom: 64px; }
   .frow { position: absolute; left: 0; right: 0; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid #26262c; cursor: default; }
   .tile.sel, .tile.sel:hover { background: var(--sel); box-shadow: inset 0 0 0 1px #f9731655; }
   .ghead { background: var(--base); gap: 8px; }
@@ -1038,7 +1040,6 @@
   .dragh.big img { width: 56px; height: 56px; object-fit: contain; image-rendering: pixelated; background: var(--raise); border-radius: var(--radius); }
   .tn { font-size: 11.5px; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .band { position: absolute; border: 1px solid var(--acc); background: #f9731622; pointer-events: none; z-index: 3; }
-  .selbar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--surface); flex-wrap: wrap; }
   .prev { width: 280px; flex: none; border-left: 1px solid var(--line); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
   .pv-h { display: flex; align-items: center; gap: 8px; }
   .prev :global(.fold) { color: var(--acc); }

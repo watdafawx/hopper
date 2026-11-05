@@ -67,6 +67,26 @@ pub fn group(items: &[Item]) -> Vec<Role> {
             }
         }
     }
+    // A start can leave only follow-up reports: the real error was in the
+    // log, not in a report of its own. The oldest of them whose verdict
+    // names a cause (read with that log) explains the start, and the rest
+    // fold under it, so the list never leads with "Follow-up error".
+    let real = |i: usize| items[i].verdict.is_some_and(|v| !v.trim().is_empty() && !is_follow_up_verdict(v));
+    let orphans: Vec<usize> = (0..items.len()).filter(|&i| roles[i] == Role::FollowUp(None)).collect();
+    for &h in orphans.iter().rev().filter(|&&i| real(i)) {
+        if roles[h] != Role::FollowUp(None) {
+            continue;
+        }
+        let folded: Vec<usize> = orphans
+            .iter()
+            .copied()
+            .filter(|&j| j != h && roles[j] == Role::FollowUp(None) && (items[j].modified - items[h].modified).abs() <= WINDOW_SECS)
+            .collect();
+        for &j in &folded {
+            roles[j] = Role::FollowUp(Some(h));
+        }
+        roles[h] = if folded.is_empty() { Role::Plain } else { Role::Lead(folded) };
+    }
     roles
 }
 
@@ -155,6 +175,24 @@ mod tests {
         assert_eq!(roles[0], Role::FollowUp(Some(2)));
         assert!(is_follow_up_text("at net.neoforged.neoforge.registries.RegistryManager.revertToVanilla(RegistryManager.java:1)"));
         assert!(!is_follow_up_text("java.lang.NoSuchMethodError"));
+    }
+
+    #[test]
+    fn a_start_with_only_follow_up_reports_leads_with_the_one_that_names_the_cause() {
+        // The screenshot case: the newest report's text says it is a
+        // follow-up, but no report of that start explains it; read with the
+        // log, its verdict names the mod. Older reports from days before.
+        let mut list = items(&[(500_000, Some(LEAD)), (499_990, Some(FOLLOW)), (10_000, Some("likely Myths & Legends"))]);
+        list[0].follow_up = true;
+        list[1].follow_up = true;
+        let roles = group(&list);
+        assert_eq!(roles[0], Role::Lead(vec![1]));
+        assert_eq!(roles[1], Role::FollowUp(Some(0)));
+        assert_eq!(roles[2], Role::Plain);
+        // Alone, it is just a report.
+        let mut one = items(&[(500_000, Some(LEAD))]);
+        one[0].follow_up = true;
+        assert_eq!(group(&one), [Role::Plain]);
     }
 
     #[test]

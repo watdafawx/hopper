@@ -16,6 +16,7 @@ use gpui_kit::*;
 use hopper::instance_ops::{self, World};
 use std::collections::{HashMap, HashSet};
 use crate::addons_extra::{datapacks, is_hopper_file};
+use crate::selection::{self, KeyAct, Selection};
 use std::path::{Path, PathBuf};
 
 /// What these tabs ask the Library to do.
@@ -56,18 +57,90 @@ pub struct WorldsView {
     /// Data packs per world folder.
     packs: HashMap<PathBuf, Vec<PathBuf>>,
     open: HashSet<PathBuf>,
+    /// Picked worlds, by folder.
+    sel: Selection,
+    focus: FocusHandle,
 }
 
 impl EventEmitter<ContentEvent> for WorldsView {}
 
 impl WorldsView {
-    pub fn new(store: Entity<Store>, _: &mut Window, _: &mut Context<Self>) -> Self {
+    pub fn new(store: Entity<Store>, _: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             store,
             root: None,
             worlds: Vec::new(),
             packs: HashMap::new(),
             open: HashSet::new(),
+            sel: Selection::new(),
+            focus: cx.focus_handle(),
+        }
+    }
+
+    /// The worlds' keys in the order they're shown.
+    fn order(&self) -> Vec<String> {
+        self.worlds.iter().map(|w| w.dir.display().to_string()).collect()
+    }
+
+    fn picked_dirs(&self) -> Vec<PathBuf> {
+        self.worlds.iter().filter(|w| self.sel.contains(&w.dir.display().to_string())).map(|w| w.dir.clone()).collect()
+    }
+
+    /// Asks once, then deletes `dirs` the way the setting says (Recycle
+    /// Bin unless it's set to delete for good).
+    fn ask_delete(&mut self, dirs: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let n = dirs.len();
+        if n == 0 {
+            return;
+        }
+        let permanent = self.store.read(cx).settings().delete_permanently;
+        let title = match self.worlds.iter().find(|w| n == 1 && w.dir == dirs[0]) {
+            Some(w) => format!("Delete {}?", w.name),
+            None => format!("Delete {n} worlds?"),
+        };
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (dirs, view) = (dirs.clone(), view.clone());
+            alert
+                .title(title.clone())
+                .description(match (permanent, n) {
+                    (true, 1) => "The world is deleted for good.",
+                    (true, _) => "The worlds are deleted for good.",
+                    (false, 1) => "The world moves to the Recycle Bin.",
+                    (false, _) => "The worlds move to the Recycle Bin.",
+                })
+                .confirm()
+                .ok_text(if n == 1 { "Delete world" } else { "Delete worlds" })
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    for dir in &dirs {
+                        let r = if permanent {
+                            hopper::instance_ops::remove_for_good(dir)
+                        } else {
+                            trash::delete(dir).map_err(Into::into)
+                        };
+                        if let Err(e) = r {
+                            window.push_notification(Notification::error(format!("{e:#}")), cx);
+                        }
+                    }
+                    view.update(cx, |v, cx| v.reload(cx));
+                    true
+                })
+        });
+    }
+
+    /// Zips each world into .hopper-backups/worlds, one job per world.
+    fn back_up(&self, dirs: &[PathBuf], cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let s = self.store.read(cx);
+        let Some(full) = s.instance(&root).cloned() else { return };
+        for world in self.worlds.iter().filter(|w| dirs.contains(&w.dir)).cloned() {
+            let full = full.clone();
+            s.spawn_job(format!("Backing up {}", world.name), move |job| {
+                let out = instance_ops::backup_world(&full, &world, job)?;
+                job.detail(format!("Saved {}", out.display()));
+                Ok(Msg::Nothing)
+            });
         }
     }
 
@@ -98,6 +171,8 @@ impl WorldsView {
                 )
             })
             .collect();
+        let order = self.order();
+        self.sel.retain(&order);
         cx.notify();
     }
 
@@ -189,9 +264,9 @@ impl WorldsView {
         let packs = self.packs.get(&w.dir).cloned().unwrap_or_default();
         let expanded = self.open.contains(&w.dir);
         let id = |p: &str| ElementId::Name(format!("{p}:{}", w.dir.display()).into());
-        let (dir1, dir2, dir3) = (w.dir.clone(), w.dir.clone(), w.dir.clone());
-        let world = w.clone();
-        let store = self.store.clone();
+        let (dir1, dir2, dir3, dir4) = (w.dir.clone(), w.dir.clone(), w.dir.clone(), w.dir.clone());
+        let key = w.dir.display().to_string();
+        let picked = self.sel.contains(&key);
         let permanent = self.store.read(cx).settings().delete_permanently;
         let rel = w
             .dir
@@ -210,8 +285,18 @@ impl WorldsView {
                 .into_any_element(),
             None => widgets::thumb(None, rems(3.), cx),
         };
-        let name = w.name.clone();
         card(cx)
+            .id(id("w-card"))
+            .clickable(cx)
+            .when(picked, |c| widgets::row_selected(c, cx))
+            .when(!picked, |c| c.hover(|s| widgets::row_hover(s, cx)))
+            // A click picks the world; Ctrl and Shift pick several, as in
+            // a file explorer.
+            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                let order = this.order();
+                this.sel.click(&key, e.modifiers(), &order);
+                cx.notify();
+            }))
             .child(
                 h_flex()
                     .gap_4()
@@ -248,17 +333,7 @@ impl WorldsView {
                             .icon(IconName::Archive)
                             .label("Back up")
                             .tooltip("Zip into .hopper-backups/worlds")
-                            .on_click(move |_, _, cx| {
-                                let s = store.read(cx);
-                                if let Some(full) = s.instance(&root).cloned() {
-                                    let world = world.clone();
-                                    s.spawn_job(format!("Backing up {}", world.name), move |job| {
-                                        let out = instance_ops::backup_world(&full, &world, job)?;
-                                        job.detail(format!("Saved {}", out.display()));
-                                        Ok(Msg::Nothing)
-                                    });
-                                }
-                            }),
+                            .on_click(cx.listener(move |this, _, _, cx| this.back_up(&[dir4.clone()], cx))),
                     )
                     .child(
                         Button::new(id("w-delete"))
@@ -266,36 +341,8 @@ impl WorldsView {
                             .small()
                             .icon(IconName::Trash)
                             .tooltip(if permanent { "Delete" } else { "Delete (to the Recycle Bin)" })
-                            .on_click(cx.listener(move |_, _, window, cx| {
-                                let (dir, name, view) = (dir2.clone(), name.clone(), cx.entity());
-                                window.open_alert_dialog(cx, move |alert, _, _| {
-                                    let (dir, view) = (dir.clone(), view.clone());
-                                    alert
-                                        .title(format!("Delete {name}?"))
-                                        .description(if permanent {
-                                            "The world is deleted for good."
-                                        } else {
-                                            "The world moves to the Recycle Bin."
-                                        })
-                                        .confirm()
-                                        .ok_text("Delete world")
-                                        .ok_variant(ButtonVariant::Danger)
-                                        .on_ok(move |_, window, cx| {
-                                            let r = if permanent {
-                                                hopper::instance_ops::remove_for_good(&dir)
-                                            } else {
-                                                trash::delete(&dir).map_err(Into::into)
-                                            };
-                                            if let Err(e) = r {
-                                                window.push_notification(
-                                                    Notification::error(format!("{e:#}")),
-                                                    cx,
-                                                );
-                                            }
-                                            view.update(cx, |v, cx| v.reload(cx));
-                                            true
-                                        })
-                                });
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ask_delete(vec![dir2.clone()], window, cx)
                             })),
                     ),
             )
@@ -317,6 +364,8 @@ impl WorldsView {
                     )
                     .child(format!("Data packs ({})", packs.len()))
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        // Folding the packs doesn't pick the world.
+                        cx.stop_propagation();
                         if !this.open.remove(&dir3) {
                             this.open.insert(dir3.clone());
                         }
@@ -354,7 +403,47 @@ impl Render for WorldsView {
             .map(|w| self.world_card(w, cx))
             .collect();
         let empty = worlds.is_empty();
-        v_flex()
+        let bar = self.sel.many().then(|| {
+            let view = cx.entity();
+            let v2 = view.clone();
+            selection::floating(
+                "worlds-bar",
+                selection::bar(
+                    "worlds-bar",
+                    self.sel.len(),
+                    vec![
+                        Button::new("worlds-bar-backup")
+                            .small()
+                            .ghost()
+                            .icon(IconName::Archive)
+                            .label("Back up")
+                            .tooltip("Zip into .hopper-backups/worlds")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let dirs = this.picked_dirs();
+                                this.back_up(&dirs, cx)
+                            }))
+                            .into_any_element(),
+                    ],
+                    Some((
+                        "Delete".into(),
+                        Box::new(move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                let dirs = this.picked_dirs();
+                                this.ask_delete(dirs, window, cx)
+                            })
+                        }),
+                    )),
+                    move |_, _, cx| {
+                        v2.update(cx, |this, cx| {
+                            this.sel.clear();
+                            cx.notify();
+                        })
+                    },
+                    cx,
+                ),
+            )
+        });
+        let list = v_flex()
             .id("worlds")
             .size_full()
             .px_6()
@@ -424,7 +513,25 @@ impl Render for WorldsView {
                     ),
                 )
             })
-            .overflow_y_scrollbar()
+            .overflow_y_scrollbar();
+        div()
+            .relative()
+            .size_full()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                let order = this.order();
+                match selection::on_key(&mut this.sel, e, &order, cx) {
+                    KeyAct::None => return,
+                    KeyAct::Delete => {
+                        let dirs = this.picked_dirs();
+                        this.ask_delete(dirs, window, cx)
+                    }
+                    KeyAct::Changed | KeyAct::Moved(_) => {}
+                }
+                cx.notify();
+            }))
+            .child(list)
+            .children(bar)
             .into_any_element()
     }
 }
@@ -439,6 +546,9 @@ pub struct ScreenshotsView {
     /// The screenshot shown large.
     open: Option<usize>,
     focus: FocusHandle,
+    /// Picked screenshots in the grid, by path.
+    sel: Selection,
+    grid_focus: FocusHandle,
 }
 
 impl ScreenshotsView {
@@ -450,7 +560,46 @@ impl ScreenshotsView {
             thumbs: HashMap::new(),
             open: None,
             focus: cx.focus_handle(),
+            sel: Selection::new(),
+            grid_focus: cx.focus_handle(),
         }
+    }
+
+    fn order(&self) -> Vec<String> {
+        self.shots.iter().map(|p| p.display().to_string()).collect()
+    }
+
+    fn picked(&self) -> Vec<PathBuf> {
+        self.shots.iter().filter(|p| self.sel.contains(&p.display().to_string())).cloned().collect()
+    }
+
+    /// Asks once, then sends `paths` to the Recycle Bin (as the viewer's
+    /// Delete does).
+    fn ask_delete(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let n = paths.len();
+        if n == 0 {
+            return;
+        }
+        let title = if n == 1 { format!("Delete {}?", file_name(&paths[0])) } else { format!("Delete {n} screenshots?") };
+        let view = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let (paths, view) = (paths.clone(), view.clone());
+            alert
+                .title(title.clone())
+                .description(if n == 1 { "It moves to the Recycle Bin." } else { "They move to the Recycle Bin." })
+                .confirm()
+                .ok_text("Delete")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    for p in &paths {
+                        if let Err(e) = trash::delete(p) {
+                            window.push_notification(Notification::error(format!("{e:#}")), cx);
+                        }
+                    }
+                    view.update(cx, |v, cx| v.reload(cx));
+                    true
+                })
+        });
     }
 
     pub fn show_for(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -472,6 +621,8 @@ impl ScreenshotsView {
         };
         self.shots = instance_ops::screenshots(&inst);
         self.shots.retain(|p| !is_hopper_file(p));
+        let order = self.order();
+        self.sel.retain(&order);
         let missing: Vec<PathBuf> = self
             .shots
             .iter()
@@ -658,6 +809,8 @@ impl Render for ScreenshotsView {
         let theme = cx.theme();
         let tiles = self.shots.iter().enumerate().map(|(i, p)| {
             let thumb = self.thumbs.get(p).cloned();
+            let key = p.display().to_string();
+            let picked = self.sel.contains(&key);
             div()
                 .id(ElementId::Name(format!("tile:{}", p.display()).into()))
                 .w_64()
@@ -669,21 +822,59 @@ impl Render for ScreenshotsView {
                 .clickable(cx)
                 .border_1()
                 .border_color(theme.border)
-                .hover(|s| s.border_color(theme.foreground.opacity(widgets::alpha::LINE)))
-
+                // A tile isn't a row: picked ones get the primary edge (and
+                // keep it under the pointer).
+                .when(picked, |d| d.border_2().border_color(theme.primary))
+                .when(!picked, |d| d.hover(|s| s.border_color(theme.foreground.opacity(widgets::alpha::LINE))))
                 .tooltip({
                     let name = file_name(p);
                     move |w, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx)
                     }
                 })
-                .on_click(cx.listener(move |this, _, w, cx| this.go(Some(i), w, cx)))
+                // A click opens it large; Ctrl and Shift pick several.
+                .on_click(cx.listener(move |this, e: &ClickEvent, w, cx| {
+                    let order = this.order();
+                    if this.sel.click(&key, e.modifiers(), &order) {
+                        this.go(Some(i), w, cx)
+                    } else {
+                        cx.notify()
+                    }
+                }))
                 .when_some(thumb, |d, t| {
                     d.child(img(t).size_full().object_fit(ObjectFit::Cover))
                 })
         });
         let empty = self.shots.is_empty();
-        v_flex()
+        let bar = self.sel.many().then(|| {
+            let view = cx.entity();
+            let v2 = view.clone();
+            selection::floating(
+                "shots-bar",
+                selection::bar(
+                    "shots-bar",
+                    self.sel.len(),
+                    Vec::new(),
+                    Some((
+                        "Delete".into(),
+                        Box::new(move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                let paths = this.picked();
+                                this.ask_delete(paths, window, cx)
+                            })
+                        }),
+                    )),
+                    move |_, _, cx| {
+                        v2.update(cx, |this, cx| {
+                            this.sel.clear();
+                            cx.notify();
+                        })
+                    },
+                    cx,
+                ),
+            )
+        });
+        let grid = v_flex()
             .id("screenshots")
             .size_full()
             .px_6()
@@ -712,7 +903,30 @@ impl Render for ScreenshotsView {
                     cx,
                 ))
             })
-            .overflow_y_scrollbar()
+            .overflow_y_scrollbar();
+        div()
+            .relative()
+            .size_full()
+            .track_focus(&self.grid_focus)
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                // Up and Down walk a list; the tiles wrap, so they'd jump
+                // about. The other keys work as in every list.
+                if matches!(e.keystroke.key.as_str(), "up" | "down") {
+                    return;
+                }
+                let order = this.order();
+                match selection::on_key(&mut this.sel, e, &order, cx) {
+                    KeyAct::None => return,
+                    KeyAct::Delete => {
+                        let paths = this.picked();
+                        this.ask_delete(paths, window, cx)
+                    }
+                    KeyAct::Changed | KeyAct::Moved(_) => {}
+                }
+                cx.notify();
+            }))
+            .child(grid)
+            .children(bar)
             .into_any_element()
     }
 }

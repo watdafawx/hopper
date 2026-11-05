@@ -68,6 +68,7 @@ mod server_settings;
 mod panel_tabs;
 mod part;
 mod servers;
+mod selection;
 mod settings_page;
 mod setup_wizard;
 mod side_card;
