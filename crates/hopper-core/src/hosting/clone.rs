@@ -174,6 +174,7 @@ pub fn clone_server(src: &Path, dst: &Path, with_world: bool, port: u16, job: &J
         let _ = fs::remove_dir_all(dst);
         return Err(e);
     }
+    super::rcon::set_up_new_or_log(dst);
     Ok(n)
 }
 
@@ -283,6 +284,7 @@ pub fn from_template(dir: &Path, id: &str, dst: &Path, port: u16, motd: &str, ac
             p.set("motd", motd.trim());
             p.save(&path)?;
         }
+        super::rcon::set_up_new_or_log(dst);
         super::write_eula(dst, accept_eula)
     })();
     if let Err(e) = r {

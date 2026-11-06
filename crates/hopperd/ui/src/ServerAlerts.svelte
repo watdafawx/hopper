@@ -3,7 +3,7 @@
   // header (`part="chip"`), banners under it ("banner") and a TPS line in
   // the Live card ("live").
   import { onMount } from 'svelte';
-  import { AlertTriangle, X, Share2 } from '@lucide/svelte';
+  import { AlertTriangle, X, Share2, Info } from '@lucide/svelte';
   import ShareLog from './ShareLog.svelte';
   import { alerts, alertsFor, watchAlerts, dismissAlert, refreshAlerts } from './lib/alerts.svelte.js';
   import { post } from './lib/api.js';
@@ -26,6 +26,8 @@
     slow: 'The server didn’t answer within 20 seconds: it’s lagging hard (each tick is taking seconds).',
   };
   let turning = $state(false);
+  // Turned on from this page: says so until the page changes server.
+  let turnedOn = $state('');
   let sharing = $state(false);
 
   const md = (t) => t.replace(/\*\*/g, '');
@@ -35,6 +37,7 @@
     try {
       const r = await post(`/servers/${encodeURIComponent(id)}/rcon`);
       say(r.restart ? `RCON is on (port ${r.port}). TPS shows after the next restart.` : `RCON is on (port ${r.port}). TPS shows once it runs.`);
+      turnedOn = id;
       refreshAlerts();
     } catch (e) {
       say(e.message, true);
@@ -53,6 +56,12 @@
     <span class="chip tps" title={WHY[why] || 'Reading TPS…'}>TPS —</span>
   {/if}
 {:else if part === 'banner'}
+  {#if turnedOn && turnedOn === id}
+    <div class="ban info"><Info size={14} /><span class="grow">RCON is on. {running ? 'It starts with the server’s next restart.' : 'It starts with the server.'}</span></div>
+  {:else if server.rcon === false}
+    <!-- Older panels don't send `rcon`: no notice for them. -->
+    <div class="ban info"><Info size={14} /><span class="grow">Console commands and live player info need RCON · <button class="lnk" disabled={turning} onclick={rcon} title="Gives it its own port and a random password. Never restarts the server.">{turning ? 'Turning on…' : 'Turn on'}</button> <span class="muted">(applies on restart)</span></span></div>
+  {/if}
   {#each shown as a (a.kind + a.server_id + a.since)}
     <div class="ban" class:red={a.kind === 'crash'}>
       <AlertTriangle size={14} />
@@ -85,6 +94,8 @@
   .ban.red { background: var(--red-dim); border-color: #ef444440; }
   .ban :global(svg) { color: var(--gold); flex: none; }
   .ban.red :global(svg) { color: var(--red); }
+  .ban.info { background: var(--blue-dim); border-color: #38bdf840; }
+  .ban.info :global(svg) { color: var(--blue); }
   .grow { flex: 1; min-width: 0; }
   .t { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
   .t b { color: var(--text); font-weight: 500; }

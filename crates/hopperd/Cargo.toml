@@ -62,7 +62,10 @@ windows-service = "0.8"
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # Players' ping: the round-trip time of their router connection.
+    "Win32_Networking_WinSock",
     "Win32_System_Console",
+    "Win32_System_IO",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
@@ -72,6 +75,10 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Players' ping: TCP_INFO on their router connection.
+libc = "0.2"
 
 [build-dependencies]
 flate2.workspace = true

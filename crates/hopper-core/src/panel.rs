@@ -153,6 +153,10 @@ pub struct PanelStats {
     /// panels that send it (Hopper Server, Hopper's own servers): mods
     /// changed there show up without a manual refresh.
     pub mods_stamp: Option<u64>,
+    /// Hopper's own servers and Hopper Server: RCON is off, so console
+    /// commands and live player info (TPS, ping) can't work. The server
+    /// page offers to turn it on.
+    pub rcon_off: bool,
     /// A start or stop under way, from panels that read the console
     /// (Hopper's own servers, Hopper Server).
     pub progress: Option<crate::hosting::progress::Progress>,

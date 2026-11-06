@@ -322,6 +322,73 @@ pub fn enable_in(root: &Path, others: &[std::path::PathBuf], password: impl FnOn
     Ok(s)
 }
 
+/// A player's ping from spark's `spark ping --player <name>` answer
+/// ("Player Steve has 42 ms ping."); `None` when spark has none for them.
+pub fn parse_spark_ping(text: &str) -> Option<u32> {
+    // Colour codes (§a) are two characters to skip.
+    let mut plain = String::with_capacity(text.len());
+    let mut it = text.chars();
+    while let Some(c) = it.next() {
+        if c == '§' {
+            it.next();
+        } else {
+            plain.push(c);
+        }
+    }
+    let b = plain.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() && (i == 0 || !b[i - 1].is_ascii_alphanumeric()) {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            let rest = plain[i..].trim_start();
+            if rest.starts_with("ms") && !rest[2..].starts_with(|c: char| c.is_ascii_alphanumeric()) {
+                return plain[start..i].parse().ok();
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// A random RCON password: 36 hex digits.
+pub fn new_password() -> String {
+    crate::peer::random_hex(18)
+}
+
+/// RCON for a server Hopper just made, copied or imported: on, with a port
+/// no other server here uses and a new password, so console commands and
+/// player info work from its first start. A copy never shares its source's
+/// port or password. Only Hopper uses it, on 127.0.0.1: nothing is opened in
+/// the firewall. The other servers are the folders next to `root`.
+pub fn set_up_new(root: &Path) -> anyhow::Result<Setup> {
+    let path = root.join("server.properties");
+    let mut p = super::Properties::load(&path)?;
+    let others: Vec<std::path::PathBuf> = root
+        .parent()
+        .map(crate::server::discover)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.root)
+        .filter(|r| r != root)
+        .collect();
+    // No password makes enable() pick a fresh port and password.
+    p.set("rcon.password", "");
+    let s = enable(&mut p, &ports_in_use(&others), |n| std::net::TcpListener::bind(("127.0.0.1", n)).is_ok(), new_password)?;
+    p.save(&path)?;
+    Ok(s)
+}
+
+/// [`set_up_new`], logged instead of failing the create: a server without
+/// RCON still runs, and its page offers to turn it on.
+pub fn set_up_new_or_log(root: &Path) {
+    if let Err(e) = set_up_new(root) {
+        log::warn!("{}: couldn't turn RCON on: {e:#}", root.display());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,6 +571,36 @@ There are 0 of a max of 16 players online:
         let mut p = Properties::parse("enable-rcon=true\nrcon.port=25590\nrcon.password=\n");
         assert_eq!(enable(&mut p, &[], |_| true, PW).unwrap(), Setup::Enabled { port: 25575 });
         assert_eq!(p.get("rcon.password"), Some("newpass"));
+    }
+
+    #[test]
+    fn parses_spark_ping() {
+        assert_eq!(parse_spark_ping("§7Player §fSteve §7has §a42 ms§7 ping."), Some(42));
+        assert_eq!(parse_spark_ping("Player Steve_2 has 180ms ping."), Some(180));
+        assert_eq!(parse_spark_ping("No ping data for Steve2"), None);
+        assert_eq!(parse_spark_ping("Unknown or incomplete command"), None);
+    }
+
+    #[test]
+    fn new_servers_and_copies_get_their_own_rcon() {
+        let d = std::env::temp_dir().join(format!("hopper-rcon-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (a, b) = (d.join("a"), d.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("server.properties"), "server-port=25566
+").unwrap();
+        let sa = set_up_new(&a).unwrap();
+        let (pa, wa) = settings(&a).unwrap();
+        assert_eq!(pa, sa.port());
+        assert_eq!(wa.len(), 36);
+        // b is a copy of a: same RCON lines, but it gets its own.
+        std::fs::copy(a.join("server.properties"), b.join("server.properties")).unwrap();
+        set_up_new(&b).unwrap();
+        let (pb, wb) = settings(&b).unwrap();
+        assert_ne!(pb, pa);
+        assert_ne!(wb, wa);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

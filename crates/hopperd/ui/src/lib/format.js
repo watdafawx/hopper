@@ -131,6 +131,22 @@ export function pathKind(host = location.hostname) {
 
 /** How healthy a TPS reading is: 20 is full speed, under 15 players
  * notice, under 10 it's badly lagging. */
+/** A player's ping colour in the Players tab: green under 80 ms, amber under
+ * 200, red above (desktop's widgets::player_ping_color matches). */
+export function pingLevel(ms) {
+  return ms < 80 ? 'good' : ms < 200 ? 'warn' : 'bad';
+}
+
+/** Time online from a join time (unix seconds): "12m", "1h 05m", "2d 3h"
+ * (local_panel::uptime). */
+export function onlineFor(joined, now = Date.now() / 1000) {
+  const s = Math.max(0, Math.floor(now - joined));
+  const d = Math.floor(s / 86400), h = Math.floor(s / 3600) % 24, m = Math.floor(s / 60) % 60;
+  if (!d && !h) return `${m}m`;
+  if (!d) return `${h}h ${String(m).padStart(2, '0')}m`;
+  return `${d}d ${h}h`;
+}
+
 export function tpsLevel(tps) {
   return tps >= 15 ? 'good' : tps >= 10 ? 'warn' : 'bad';
 }

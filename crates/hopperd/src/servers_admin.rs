@@ -324,6 +324,12 @@ async fn import_folder(State(app): State<Arc<App>>, headers: HeaderMap, method: 
         return Err(bad("The panel has that server already."));
     }
     if !b.copy {
+        // RCON for console commands and player info; an owner's own setup
+        // is kept. A running server picks it up when it next starts.
+        let others: Vec<std::path::PathBuf> = app.servers.list().iter().map(|e| e.root.clone()).collect();
+        if let Err(e) = hopper_core::hosting::rcon::enable_in(&src, &others, hopper_core::hosting::rcon::new_password) {
+            log::warn!("{}: couldn't turn RCON on: {e:#}", src.display());
+        }
         {
             let mut c = app.cfg.write().unwrap();
             c.hidden.retain(|h| !same_path(h, &src));
@@ -352,6 +358,7 @@ async fn import_folder(State(app): State<Arc<App>>, headers: HeaderMap, method: 
             let _ = std::fs::remove_dir_all(&dest);
             return Err(e);
         }
+        hopper_core::hosting::rcon::set_up_new_or_log(&dest);
         a.rescan();
         a.refresh.notify_one();
         let id = a.servers.list().into_iter().find(|e| e.root == dest).map(|e| e.id.clone());

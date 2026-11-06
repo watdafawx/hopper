@@ -11,6 +11,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -22,11 +23,23 @@ struct Person {
     reason: String,
 }
 
+/// An online player's ping and when they joined.
+#[derive(Clone, Default)]
+struct Online {
+    name: String,
+    ms: Option<u32>,
+    /// Where the ping came from ("router", "spark"), or why there's none.
+    via: String,
+    why: String,
+    /// Unix seconds.
+    joined: Option<u64>,
+}
+
 #[derive(Default)]
 struct Data {
     running: bool,
     whitelist_on: bool,
-    online: Vec<String>,
+    online: Vec<Online>,
     ops: Vec<Person>,
     whitelist: Vec<Person>,
     banned: Vec<Person>,
@@ -52,10 +65,25 @@ fn parse(v: &Value) -> Data {
     Data {
         running: v["running"].as_bool().unwrap_or(false),
         whitelist_on: v["whitelist_on"].as_bool().unwrap_or(false),
-        online: v["online"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|n| n.as_str().map(String::from)).collect())
-            .unwrap_or_default(),
+        // Hopper Servers older than ping send only the names.
+        online: match v["people"].as_array() {
+            Some(a) => a
+                .iter()
+                .filter_map(|p| {
+                    Some(Online {
+                        name: p["name"].as_str()?.to_string(),
+                        ms: p["ms"].as_u64().map(|m| m as u32),
+                        via: p["via"].as_str().unwrap_or("").to_string(),
+                        why: p["why"].as_str().unwrap_or("").to_string(),
+                        joined: p["joined"].as_u64(),
+                    })
+                })
+                .collect(),
+            None => v["online"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|n| Some(Online { name: n.as_str()?.to_string(), ..Default::default() })).collect())
+                .unwrap_or_default(),
+        },
         ops: people(&v["ops"]),
         whitelist: people(&v["whitelist"]),
         banned: people(&v["banned"]),
@@ -93,6 +121,11 @@ impl PlayersTab {
         Self { store, target: None, data: Load::Waiting, name, error: None, generation: 0, _subs: subs }
     }
 
+    /// The tab went out of view: its refreshes stop until it shows again.
+    pub fn pause(&mut self) {
+        self.generation += 1;
+    }
+
     /// Shows `target`'s Players (again when it's the same server: a refresh).
     pub fn show(&mut self, target: Target, _window: &mut Window, cx: &mut Context<Self>) {
         if self.target.as_ref() != Some(&target) {
@@ -104,7 +137,8 @@ impl PlayersTab {
         let generation = self.generation;
         self.reload(cx);
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(10)).await;
+            // Pings and time online stay current while the tab shows.
+            cx.background_executor().timer(Duration::from_secs(5)).await;
             let again = this
                 .update(cx, |t, cx| {
                     if t.generation != generation {
@@ -135,6 +169,7 @@ impl PlayersTab {
                     let urls: Vec<String> = d
                         .online
                         .iter()
+                        .map(|p| &p.name)
                         .chain(d.ops.iter().map(|p| &p.name))
                         .chain(d.whitelist.iter().map(|p| &p.name))
                         .chain(d.banned.iter().map(|p| &p.name))
@@ -270,18 +305,49 @@ impl Render for PlayersTab {
         };
         let spacer = || div().flex_1();
         let op_names: Vec<String> = d.ops.iter().map(|p| p.name.to_lowercase()).collect();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
 
         // Online now.
         let online: Vec<AnyElement> = d
             .online
             .iter()
             .enumerate()
-            .map(|(i, p)| {
+            .map(|(i, o)| {
+                let p = &o.name;
                 let is_op = op_names.contains(&p.to_lowercase());
                 let (a, b, c) = (p.clone(), p.clone(), p.clone());
+                let (ping, tip) = match o.ms {
+                    Some(ms) => (
+                        div().text_color(widgets::player_ping_color(ms, cx)).child(format!("{ms} ms")),
+                        if o.via == "spark" { "Ping from spark".to_string() } else { "Ping through Hopper's address".to_string() },
+                    ),
+                    None => (div().text_color(theme.muted_foreground).child("—"), o.why.clone()),
+                };
+                let on_for = o.joined.map(|j| hopper::hosting::local_panel::uptime(now.saturating_sub(j))).unwrap_or_default();
                 row(format!("on-{i}"), p)
                     .children(is_op.then(|| widgets::chip(theme.primary).child("op")))
                     .child(spacer())
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("on-ping-{i}")))
+                            .w(rems(4.))
+                            .flex()
+                            .justify_end()
+                            .text_sm()
+                            .child(ping)
+                            .when(!tip.is_empty(), |d| d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("on-time-{i}")))
+                            .w(rems(4.5))
+                            .flex()
+                            .justify_end()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(on_for.clone())
+                            .when(!on_for.is_empty(), |d| d.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new("Time online").build(w, cx))),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("on-op-{i}")))
                             .ghost()

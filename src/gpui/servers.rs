@@ -1096,6 +1096,11 @@ impl ServersView {
 
     /// The page went out of view: the Sync tab's polls slow down.
     pub(crate) fn hidden(&mut self, cx: &mut Context<Self>) {
+        // Players' pings refresh only while the tab is on screen.
+        self.p_players.update(cx, |v, _| v.pause());
+        if self.tab == TAB_PLAYERS {
+            self.p_shown = None;
+        }
         if self.tab == TAB_SYNC {
             self.sync.update(cx, |p, cx| p.hidden(cx));
             self.sync_away = true;
@@ -1238,6 +1243,7 @@ impl ServersView {
         if !same {
             self.target = remote.map(panel_tabs::Target::new);
             self.p_shown = None;
+            self.p_players.update(cx, |v, _| v.pause());
         }
     }
 
@@ -1307,6 +1313,9 @@ impl ServersView {
             return;
         }
         self.p_shown = Some(key);
+        if self.tab != TAB_PLAYERS {
+            self.p_players.update(cx, |v, _| v.pause());
+        }
         match self.tab {
             TAB_FILES => self.p_files.update(cx, |v, cx| v.show(t, window, cx)),
             TAB_MODS => self.p_mods.update(cx, |v, cx| v.show(t, window, cx)),
@@ -1729,6 +1738,7 @@ impl ServersView {
             })
             .when(self.tab == TAB_OVERVIEW, |c| {
                 let players = self.control.update(cx, |ctl, cx| ctl.players_view(cx));
+                let rcon = self.control.update(cx, |ctl, cx| ctl.rcon_notice(cx));
                 // Stopped, the cards would be all dashes: the header's
                 // figures say what there is.
                 let cards = pstats
@@ -1781,6 +1791,7 @@ impl ServersView {
                         .flex_1()
                         .min_h_0()
                         .gap_5()
+                        .children(rcon)
                         .children(cards)
                         .child(div().text_sm().child(info))
                         .children(players)

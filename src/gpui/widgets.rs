@@ -498,6 +498,17 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla, dot: bool) -> Div {
         .child(text.into())
 }
 
+/// A player's ping in the Players tab: green under 80 ms, amber under
+/// 200, red above (the web UI's `pingClass` matches).
+pub fn player_ping_color(ms: u32, cx: &App) -> Hsla {
+    let theme = cx.theme();
+    match ms {
+        0..80 => theme.success,
+        80..200 => theme.warning,
+        _ => theme.danger,
+    }
+}
+
 /// A ping's color: green with four or five bars, yellow with three, red
 /// below that or when the server didn't answer.
 pub fn ping_color(ms: Option<u32>, cx: &App) -> Hsla {

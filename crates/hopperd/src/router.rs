@@ -313,6 +313,14 @@ async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow
                 {
                     return status_through(&mut sock, &mut up, buf, used, &msg).await;
                 }
+                // A joining player: list their connection so the Players tab
+                // can show its ping. Their name comes in the next packet.
+                let mut _listed = None;
+                if hs.is_login()
+                    && let Ok((name, _)) = read_until(&mut sock, &mut buf, used, core::read_login_name).await
+                {
+                    _listed = Some(crate::player_ping::listen(&e.id, &name, &sock));
+                }
                 up.write_all(&buf).await?;
                 tokio::io::copy_bidirectional(&mut sock, &mut up).await?;
                 return Ok(());

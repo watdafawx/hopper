@@ -204,7 +204,7 @@ fn free_on(disks: &sysinfo::Disks, p: &std::path::Path) -> Option<(String, u64)>
         .map(|d| (d.mount_point().to_string_lossy().trim_end_matches('\\').to_string(), d.available_space()))
 }
 
-fn has_spark(root: &std::path::Path) -> bool {
+pub(crate) fn has_spark(root: &std::path::Path) -> bool {
     ["mods", "plugins"].iter().any(|d| {
         std::fs::read_dir(root.join(d))
             .map(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("spark")))
@@ -340,12 +340,7 @@ fn guard(app: &App) {
     }
 }
 
-/// A random RCON password: 36 hex digits.
-fn new_password() -> String {
-    let mut raw = [0u8; 18];
-    getrandom::fill(&mut raw).expect("the OS random source");
-    hopper_core::hosting::chunkstore::hex(&raw)
-}
+use hopper_core::hosting::rcon::new_password;
 
 /// Turns RCON on for one server (keeping a setup the owner made). When the
 /// server is running, it comes up at its next start; until then the panel
