@@ -2577,6 +2577,7 @@ impl AddonsView {
         inst: &Instance,
         updates: &HashMap<u64, Update>,
         hint: bool,
+        narrow: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let pending: HashMap<u64, Update> = updates
@@ -2709,6 +2710,44 @@ impl AddonsView {
             }
             false => None,
         };
+        let rail_el = widgets::Segmented::new("show")
+            .rail()
+            .children(rail.iter().map(|r| {
+                let on = match r.kind {
+                    Rail::Show(_) => false,
+                    Rail::Added => self.added_only,
+                    Rail::Cfg => self.cfg_changed_only,
+                };
+                let item = widgets::SegItem::new()
+                    .label(r.label)
+                    .icon(r.icon)
+                    .count(r.count)
+                    .badge(r.badge)
+                    .toggled(on);
+                if r.gap { item.gap_before() } else { item }
+            }))
+            .selected_index(rail.iter().position(|r| matches!(r.kind, Rail::Show(s) if s == self.show)).unwrap_or(0))
+            .on_click({
+                let view = cx.entity();
+                let kinds: Vec<Rail> = rail.iter().map(|r| r.kind).collect();
+                move |ix, _, cx| {
+                    let Some(kind) = kinds.get(*ix).copied() else { return };
+                    view.update(cx, |this, cx| {
+                        let (show, added, cfg) = kind.apply(this.show, this.added_only, this.cfg_changed_only);
+                        this.show = show;
+                        this.added_only = added;
+                        this.cfg_changed_only = cfg;
+                        cx.notify();
+                    });
+                }
+            }).into_any_element();
+        let search_el = div().flex_1().min_w(rems(12.)).max_w(rems(26.)).child(
+            widgets::search_input(&self.search)
+                .small()
+                .prefix(Icon::new(IconName::Search).small())
+                .cleanable(true),
+        ).into_any_element();
+        let (first, second) = if narrow { (search_el, rail_el) } else { (rail_el, search_el) };
         let root = inst.root.clone();
         h_flex()
             .px_6()
@@ -2778,7 +2817,14 @@ impl AddonsView {
             .child({
                 // Update all and the check button are one split button; with
                 // nothing to update the check button stands alone.
-                let recheck_tip = if checking { "Checking for updates" } else { "Check for updates" };
+                let recheck_tip = if checking {
+            "Checking for updates".to_string()
+        } else {
+            match self.store.read(cx).updates(&inst.root).and_then(|u| u.checked_ago()) {
+                Some(ago) => format!("Check for updates · checked {ago}"),
+                None => "Check for updates".to_string(),
+            }
+        };
                 let recheck = Button::new("recheck")
                     .small()
                     .icon(IconName::RefreshCw)
@@ -2823,48 +2869,9 @@ impl AddonsView {
                 }
             })
             .child(div().w_px().h_5().flex_none().bg(cx.theme().border))
-            // What's listed: the filter rail, one pick plus the toggles.
-            .child(
-                widgets::Segmented::new("show")
-                    .rail()
-                    .children(rail.iter().map(|r| {
-                        let on = match r.kind {
-                            Rail::Show(_) => false,
-                            Rail::Added => self.added_only,
-                            Rail::Cfg => self.cfg_changed_only,
-                        };
-                        let item = widgets::SegItem::new()
-                            .label(r.label)
-                            .icon(r.icon)
-                            .count(r.count)
-                            .badge(r.badge)
-                            .toggled(on);
-                        if r.gap { item.gap_before() } else { item }
-                    }))
-                    .selected_index(rail.iter().position(|r| matches!(r.kind, Rail::Show(s) if s == self.show)).unwrap_or(0))
-                    .on_click({
-                        let view = cx.entity();
-                        let kinds: Vec<Rail> = rail.iter().map(|r| r.kind).collect();
-                        move |ix, _, cx| {
-                            let Some(kind) = kinds.get(*ix).copied() else { return };
-                            view.update(cx, |this, cx| {
-                                let (show, added, cfg) = kind.apply(this.show, this.added_only, this.cfg_changed_only);
-                                this.show = show;
-                                this.added_only = added;
-                                this.cfg_changed_only = cfg;
-                                cx.notify();
-                            });
-                        }
-                    }),
-            )
-            .child(
-                div().flex_1().min_w(rems(12.)).max_w(rems(26.)).child(
-                    widgets::search_input(&self.search)
-                        .small()
-                        .prefix(Icon::new(IconName::Search).small())
-                        .cleanable(true),
-                ),
-            )
+            // Narrow: the search goes first and the rail wraps under it.
+            .child(first)
+            .child(second)
             // No divider before Sort: when the bar wraps, it would be left
             // hanging at the end of a line.
             .child(self.sort_button(cx))
@@ -5752,7 +5759,7 @@ impl Render for AddonsView {
             && !self.hint_gone
             && self.room.is_some()
             && window.viewport_size().width < px(1100.);
-        let toolbar = self.toolbar(&inst, &updates, hint, cx);
+        let toolbar = self.toolbar(&inst, &updates, hint, window.viewport_size().width < px(1000.), cx);
         let bulk = self.bulk_bar(&inst, &updates, cx);
         let header = self.header(&rows, &inst, cx);
         let count = rows.len();

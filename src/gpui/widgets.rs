@@ -909,8 +909,18 @@ fn rail_view(
                         }))
                     })
                     .when(on, |el| {
-                        el.child(label.clone())
-                            .when_some(count, |el, c| el.child(div().text_xs().text_color(muted).child(c.to_string())))
+                        // The label and count fade in when the option opens.
+                        el.child(
+                            h_flex()
+                                .gap_1p5()
+                                .child(label.clone())
+                                .when_some(count, |el, c| el.child(div().text_xs().text_color(muted).child(c.to_string())))
+                                .with_animation(
+                                    ElementId::Name(format!("rail-open-{label}-{i}").into()),
+                                    Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+                                    |el, t| el.opacity(t),
+                                ),
+                        )
                     })
                     .when(!on, |el| {
                         el.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip2.clone()).build(w, cx))
