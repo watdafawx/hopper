@@ -84,6 +84,16 @@ Hopper Server (`ServerCrash.svelte`) and on desktop's server banner
   list names the mod that failed first, the crash is that failure: no "what
   happened" story, and the mods in the trace "set off the step where it
   failed" (Possible).
+- **A timing problem inside a library** (`loading_race`). Mods start in
+  parallel; Moonlight's `DynamicResourcesInternals.registerProvider` reads a
+  list other mods change at the same moment (`ConcurrentModificationException`,
+  Guava `validateIterator`). The loader names whichever mod was loading
+  (Snowy Spirit one day, Supplementaries the next). When a loader-named mod's
+  stack throws that error from another mod's code, that mod is Likely, marked
+  `timing` (no Turn off offered; steps: start again, then update it), and the
+  named mods are Possible ("the error came from X's code, not its own").
+  Thrown in the named mod's own frames, it is still that mod's.
+  Fixtures: `server-fml-1105-1727-race`, `-1106-2115-race`, `-race-own-code`.
 - **Client-only mods** (crashscan's signatures: a client class loaded on the
   server, a client mixin, a missing client class; and a report whose own
   error is a client class, which names the first mod in its trace) are

@@ -36,6 +36,7 @@ pub const ELSEWHERE: &str = "elsewhere";
 pub const REFERENCES: &str = "references";
 pub const MISMATCH: &str = "mismatch";
 pub const KNOCK_ON: &str = "knock_on";
+pub const RACE: &str = "race";
 
 /// What the older rules say of a mod whose mixin failed in the log.
 const MIXIN_ELSEWHERE: &str = "Its changes to the game's code (a mixin) failed to apply.";

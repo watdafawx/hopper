@@ -1,0 +1,8 @@
+side = "server"
+mods = "5a3c1e7d02"
+report = "crash-2026-11-06_21.16.00-fml.txt"
+problem = 17
+expect = ["supplementaries"]
+at_least = "Certain"
+note = "Negative: a ConcurrentModificationException thrown in the named mod's own code (no other mod above its frames) still blames that mod."
+pass = true
