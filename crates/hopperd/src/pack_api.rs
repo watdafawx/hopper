@@ -26,7 +26,7 @@ use hopper_core::cf;
 use hopper_core::instances::{self, Instance, PackRef};
 use hopper_core::server_pack_update::{self as spu, ServerPlan};
 use hopper_core::{modrinth, source};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::Path as FsPath;
@@ -90,69 +90,9 @@ fn now_secs() -> u64 {
 
 // ---- which pack a server runs ----------------------------------------------------------------
 
-/// In the server folder: the pack a server was made from, when it has no
-/// server pack record (a Modrinth pack, or a pack built from its client
-/// files).
-pub const LINK: &str = ".hopper-pack.json";
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PackLink {
-    /// "curseforge" or "modrinth".
-    pub source: String,
-    /// CurseForge's project id, or Modrinth's (its string id).
-    pub project: String,
-    /// CurseForge's file id, or Modrinth's version id.
-    pub file: String,
-}
-
-impl PackLink {
-    fn mr(&self) -> bool {
-        self.source == "modrinth"
-    }
-
-    /// Hopper's numeric ids (Modrinth's mapped, see [`modrinth::num_id`]).
-    fn ids(&self) -> anyhow::Result<(u64, u64)> {
-        if self.mr() {
-            return Ok((modrinth::num_id(&self.project), modrinth::num_id(&self.file)));
-        }
-        let p = self.project.parse().map_err(|_| anyhow::anyhow!("bad pack id {}", self.project))?;
-        let f = self.file.parse().map_err(|_| anyhow::anyhow!("bad pack file id {}", self.file))?;
-        Ok((p, f))
-    }
-}
-
-fn read_link(root: &FsPath) -> Option<PackLink> {
-    let l: PackLink = serde_json::from_slice(&std::fs::read(root.join(LINK)).ok()?).ok()?;
-    (!l.project.is_empty() && !l.file.is_empty()).then_some(l)
-}
-
-/// Records the pack a server the panel just made came from (version
-/// `file` of `project`, Hopper's ids), unless it has a server pack record
-/// already (that one is kept up to date by pack updates).
-pub(crate) fn link_new_server(root: &FsPath, mr: bool, project: u64, file: u64) {
-    if spu::recorded(root).is_some_and(|m| m.project_id != 0) {
-        return;
-    }
-    let link = if mr {
-        match (modrinth::real_id(project), modrinth::real_id(file)) {
-            (Ok(p), Ok(f)) => PackLink { source: "modrinth".into(), project: p, file: f },
-            _ => {
-                log::warn!("{}: couldn't record its Modrinth pack", root.display());
-                return;
-            }
-        }
-    } else {
-        PackLink { source: "curseforge".into(), project: project.to_string(), file: file.to_string() }
-    };
-    write_link(root, &link);
-}
-
-fn write_link(root: &FsPath, link: &PackLink) {
-    if let Err(e) = serde_json::to_vec_pretty(link).map_err(anyhow::Error::from).and_then(|b| Ok(std::fs::write(root.join(LINK), b)?)) {
-        log::warn!("recording {}'s pack: {e:#}", root.display());
-    }
-}
+// The link file and its record live in hopper-core, so Hopper desktop
+// writes the same one for servers it hosts.
+pub use hopper_core::hosting::pack_link::{PackLink, link_new_server, read as read_link, write as write_link};
 
 /// The pack `root` runs, newest record first: the server pack record
 /// (updated by every server pack update), the panel's link, then the
@@ -740,7 +680,7 @@ async fn job(
     }
     Ok(Json(json!({
         "id": st.id, "title": st.title, "detail": st.detail, "progress": st.progress,
-        "done": st.done, "error": st.error, "notes": st.notes, "result": result,
+        "done": st.done, "error": st.error, "cancelled": st.cancelled, "notes": st.notes, "result": result,
     })))
 }
 

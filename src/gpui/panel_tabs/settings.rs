@@ -6,7 +6,6 @@
 use super::motd_editor::{MotdChanged, MotdEditor};
 use super::{Load, Target};
 use crate::java_form::JavaForm;
-use gpui_kit::component::tab::{Tab, TabBar};
 use crate::store::Store;
 use crate::widgets;
 use crate::widgets::Clickable as _;
@@ -1407,11 +1406,10 @@ impl SettingsTab {
         col = col
             .child(
                 h_flex().gap_2().child(label("Who can wake it")).child(
-                    TabBar::new("settings-wake-who")
-                        .segmented()
+                    widgets::Segmented::new("settings-wake-who")
                         .xsmall()
                         .when_some(who_i, |t, i| t.selected_index(i))
-                        .children(WAKE_WHO.iter().map(|(_, l)| Tab::new().label(*l)))
+                        .children(WAKE_WHO.iter().map(|(_, l)| widgets::SegItem::new().label(*l)))
                         .on_click(cx.listener(|this, i: &usize, _, cx| {
                             this.wake_who = WAKE_WHO[*i].0.to_string();
                             cx.notify();
@@ -1424,11 +1422,10 @@ impl SettingsTab {
             )))
             .child(
                 h_flex().gap_2().child(label("While it starts")).child(
-                    TabBar::new("settings-wake-starting")
-                        .segmented()
+                    widgets::Segmented::new("settings-wake-starting")
                         .xsmall()
                         .when_some(starting_i, |t, i| t.selected_index(i))
-                        .children(WAKE_STARTING.iter().map(|(_, l)| Tab::new().label(*l)))
+                        .children(WAKE_STARTING.iter().map(|(_, l)| widgets::SegItem::new().label(*l)))
                         .on_click(cx.listener(|this, i: &usize, _, cx| {
                             this.wake_starting = WAKE_STARTING[*i].0.to_string();
                             cx.notify();
@@ -1445,11 +1442,10 @@ impl SettingsTab {
             )))
             .child(
                 h_flex().gap_2().child(label("After a failed start")).child(
-                    TabBar::new("settings-wake-retry")
-                        .segmented()
+                    widgets::Segmented::new("settings-wake-retry")
                         .xsmall()
                         .when_some(retry_i, |t, i| t.selected_index(i))
-                        .children(WAKE_RETRY.iter().map(|(_, l)| Tab::new().label(*l)))
+                        .children(WAKE_RETRY.iter().map(|(_, l)| widgets::SegItem::new().label(*l)))
                         .on_click(cx.listener(|this, i: &usize, _, cx| {
                             this.wake_retry = WAKE_RETRY[*i].0;
                             cx.notify();

@@ -142,7 +142,7 @@ impl CreateOptions {
     }
 
     pub fn new(name: &str, servers_root: &Path, mc_version: &str, loader: ServerLoader, java: &Path) -> Self {
-        let memory_mb = if loader.is_modded() { 6144 } else { 2048 };
+        let memory_mb = default_memory_mb(loader.is_modded(), 0);
         CreateOptions {
             name: name.to_string(),
             servers_root: servers_root.to_path_buf(),
@@ -175,6 +175,57 @@ impl CreateOptions {
     pub fn folder(&self) -> PathBuf {
         self.servers_root.join(Instance::folder_name(&self.name))
     }
+}
+
+/// The memory (MB) a new server gets unless the player picks some: the
+/// pack's recommendation when it gives one (rounded up to 0.5 GB), else
+/// 6 GB for a modded server and 2 GB for vanilla, Paper or Purpur. Both
+/// apps use this, so the same pack gets the same default everywhere.
+pub fn default_memory_mb(modded: bool, recommended_mb: u32) -> u32 {
+    if recommended_mb >= 2048 {
+        return recommended_mb.div_ceil(512) * 512;
+    }
+    if modded { 6144 } else { 2048 }
+}
+
+/// Free bytes on the drive holding `path`; 0 when Hopper can't tell.
+pub fn disk_free(path: &Path) -> u64 {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    sysinfo::Disks::new_with_refreshed_list()
+        .list()
+        .iter()
+        .filter(|d| path.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map_or(0, |d| d.available_space())
+}
+
+/// The room a server needs on disk for a `download` of that many bytes:
+/// the zip, what it unpacks to and the server's own files.
+pub fn room_needed(download: u64) -> u64 {
+    download.saturating_mul(3) + 512 * 1024 * 1024
+}
+
+/// Why a server with a `download` of that size won't fit in `free` bytes
+/// (0 = unknown, never a problem).
+pub fn room_problem(download: u64, free: u64, host: &str) -> Option<String> {
+    let need = room_needed(download);
+    (free > 0 && need > free).then(|| {
+        format!(
+            "Not enough space on {host}: this needs about {}, and {} is free.",
+            crate::instance_ops::human_bytes(need),
+            crate::instance_ops::human_bytes(free)
+        )
+    })
+}
+
+/// `name`, or "name 2", "name 3"... when a server folder of that name is
+/// already in `root`, so a second server from the same pack just works.
+pub fn free_server_name(root: &Path, name: &str) -> String {
+    let taken = |n: &str| root.join(Instance::folder_name(n)).exists();
+    if !taken(name) {
+        return name.to_string();
+    }
+    (2..1000).map(|i| format!("{name} {i}")).find(|n| !taken(n)).unwrap_or_else(|| name.to_string())
 }
 
 /// The Java a server's `mc_version` needs, and the major of `java` when
@@ -648,6 +699,25 @@ pub struct CreateReport {
 }
 
 impl CreateReport {
+    /// The finished job's line: "Ready: 5 mods, 7 client-only left out".
+    pub fn ready_line(&self) -> String {
+        let mods = match self.mods_copied {
+            0 => String::new(),
+            1 => "1 mod".to_string(),
+            n => format!("{n} mods"),
+        };
+        let left = match self.skipped.len() {
+            0 => String::new(),
+            n => format!("{n} client-only left out"),
+        };
+        match (mods.is_empty(), left.is_empty()) {
+            (true, true) => "Ready".to_string(),
+            (false, true) => format!("Ready: {mods}"),
+            (true, false) => format!("Ready: {left}"),
+            (false, false) => format!("Ready: {mods}, {left}"),
+        }
+    }
+
     /// One line per missing mod, for a job's notes.
     pub fn missing_notes(&self) -> Vec<String> {
         self.missing
@@ -697,6 +767,28 @@ fn missing_text(missing: &[crate::modpack::Pending]) -> String {
     )
 }
 
+/// The mods of `inst` a server gets (file names) and the ones left out as
+/// client-only (file, why), as [`create_from_instance`] picks them.
+fn pick_server_mods(
+    inst: &Instance,
+    sync_anyway: &HashSet<u64>,
+    hidden: &HashSet<String>,
+) -> (Vec<String>, Vec<(String, String)>, crate::serverpack::Annotation) {
+    let mut client = crate::scan::scan_folder(&inst.mods_dir()).unwrap_or_default();
+    client.retain(|m| !crate::rigsync::mod_hidden(m, hidden));
+    let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
+    let (keep, skipped) = server_mods(&client);
+    (keep, skipped, note)
+}
+
+/// How many of `inst`'s mods a server made from it keeps, and how many it
+/// leaves out as client-only: what the New server dialog says before
+/// anything is made. Reads the mods folder; no network.
+pub fn count_server_mods(inst: &Instance, sync_anyway: &HashSet<u64>, hidden: &HashSet<String>) -> (usize, usize) {
+    let (keep, skipped, _) = pick_server_mods(inst, sync_anyway, hidden);
+    (keep.len(), skipped.len())
+}
+
 /// A server for `inst`: makes the folder with `opts` (see
 /// [`CreateOptions::for_instance`]), then copies the mods that belong on a
 /// server and the pack's config. `sync_anyway` holds project ids the user
@@ -709,10 +801,7 @@ pub fn create_from_instance(
     job: &Job,
 ) -> anyhow::Result<CreateReport> {
     job.detail("Reading the pack's mods");
-    let mut client = crate::scan::scan_folder(&inst.mods_dir()).unwrap_or_default();
-    client.retain(|m| !crate::rigsync::mod_hidden(m, hidden));
-    let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
-    let (keep, skipped) = server_mods(&client);
+    let (keep, skipped, note) = pick_server_mods(inst, sync_anyway, hidden);
 
     let root = create_server(opts, job)?;
     let copied = copy_instance_files(inst, &root, &keep, job);
@@ -724,6 +813,12 @@ pub fn create_from_instance(
     // them too, so say which and where to get them.
     let missing = missing_mods(inst);
     write_missing(&root, &missing);
+    // The same finish Hopper Server gives every server it makes: the list
+    // of client-only mods left out, and which pack it came from.
+    write_left_out(&root, &skipped);
+    if let Some(p) = &inst.pack {
+        super::pack_link::link_from_instance(&root, p);
+    }
     Ok(CreateReport {
         root,
         mods_copied,
@@ -848,6 +943,17 @@ fn server_tree_files(src: &Path, rel: &str) -> anyhow::Result<Vec<(PathBuf, Stri
     Ok(out)
 }
 
+/// Writes `left-out-client-mods.txt` into server folder `root` when any
+/// mods were left out; nothing when none were.
+pub fn write_left_out(root: &Path, skipped: &[(String, String)]) {
+    if skipped.is_empty() {
+        return;
+    }
+    if let Err(e) = fs::write(root.join("left-out-client-mods.txt"), left_out_text(skipped)) {
+        log::warn!("writing the left-out list in {}: {e}", root.display());
+    }
+}
+
 /// The text of `left-out-client-mods.txt` (Hopper Server writes the same).
 fn left_out_text(skipped: &[(String, String)]) -> String {
     let lines: Vec<String> = skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
@@ -871,10 +977,7 @@ pub fn server_content_zip(
 ) -> anyhow::Result<CreateReport> {
     use std::io::Write as _;
     job.detail("Reading the pack's mods");
-    let mut client = crate::scan::scan_folder(&inst.mods_dir()).unwrap_or_default();
-    client.retain(|m| !crate::rigsync::mod_hidden(m, hidden));
-    let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
-    let (keep, skipped) = server_mods(&client);
+    let (keep, skipped, note) = pick_server_mods(inst, sync_anyway, hidden);
     let mut files: Vec<(PathBuf, String)> = Vec::new();
     for d in SERVER_DIRS {
         let src = inst.root.join(d);
@@ -954,6 +1057,52 @@ pub fn copy_tree(src: &Path, dst: &Path) -> anyhow::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_default_follows_the_pack_then_the_loader() {
+        assert_eq!(default_memory_mb(false, 0), 2048);
+        assert_eq!(default_memory_mb(true, 0), 6144);
+        // A pack's recommendation wins, rounded up to half a gigabyte.
+        assert_eq!(default_memory_mb(true, 8192), 8192);
+        assert_eq!(default_memory_mb(true, 7000), 7168);
+        // Too small to be a real recommendation.
+        assert_eq!(default_memory_mb(true, 1024), 6144);
+    }
+
+    #[test]
+    fn room_problem_only_when_known_and_short() {
+        let mb = 1024 * 1024;
+        assert_eq!(room_problem(744 * mb, 0, "fox"), None);
+        assert_eq!(room_problem(744 * mb, 100 * 1024 * mb, "fox"), None);
+        let p = room_problem(744 * mb, 1024 * mb, "fox").unwrap();
+        assert!(p.starts_with("Not enough space on fox: this needs about 2.7 GB"), "{p}");
+    }
+
+    #[test]
+    fn ready_line_counts_mods_and_left_out() {
+        let mut r = CreateReport::default();
+        assert_eq!(r.ready_line(), "Ready");
+        r.mods_copied = 1;
+        assert_eq!(r.ready_line(), "Ready: 1 mod");
+        r.mods_copied = 5;
+        r.skipped = vec![("a.jar".into(), "client".into()); 7];
+        assert_eq!(r.ready_line(), "Ready: 5 mods, 7 client-only left out");
+        r.mods_copied = 0;
+        assert_eq!(r.ready_line(), "Ready: 7 client-only left out");
+    }
+
+    #[test]
+    fn free_server_name_counts_up_past_taken_folders() {
+        let root = std::env::temp_dir().join(format!("hopper-free-name-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(free_server_name(&root, "Pack server"), "Pack server");
+        fs::create_dir_all(root.join(Instance::folder_name("Pack server"))).unwrap();
+        assert_eq!(free_server_name(&root, "Pack server"), "Pack server 2");
+        fs::create_dir_all(root.join(Instance::folder_name("Pack server 2"))).unwrap();
+        assert_eq!(free_server_name(&root, "Pack server"), "Pack server 3");
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn m(file: &str, side: &str, wont: Option<&str>) -> ModInfo {
         ModInfo {

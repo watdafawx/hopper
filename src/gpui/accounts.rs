@@ -1666,12 +1666,10 @@ impl AccountsView {
                     .gap_1p5()
                     .child(section_title("Arms", cx))
                     .child(
-                        TabBar::new("variant")
-                            .segmented()
-                            .small()
+                        widgets::Segmented::new("variant")
                             .selected_index(usize::from(shown_variant.is_slim()))
-                            .child(Tab::new().label("Classic (4 px)").disabled(busy))
-                            .child(Tab::new().label("Slim (3 px)").disabled(busy))
+                            .child(widgets::SegItem::new().label("Classic (4 px)").disabled(busy))
+                            .child(widgets::SegItem::new().label("Slim (3 px)").disabled(busy))
                             .on_click(cx.listener(|this, ix: &usize, window, cx| {
                                 let v = if *ix == 1 { Variant::Slim } else { Variant::Classic };
                                 this.set_variant(v, window, cx)
@@ -1872,12 +1870,11 @@ impl AccountsView {
                     .gap_2()
                     .child(section_title("Default skins", cx))
                     .child(
-                        TabBar::new("default-arms")
-                            .segmented()
+                        widgets::Segmented::new("default-arms")
                             .xsmall()
                             .selected_index(usize::from(self.default_slim))
-                            .child(Tab::new().label("Classic"))
-                            .child(Tab::new().label("Slim"))
+                            .child(widgets::SegItem::new().label("Classic"))
+                            .child(widgets::SegItem::new().label("Slim"))
                             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                                 this.default_slim = *ix == 1;
                                 cx.notify();

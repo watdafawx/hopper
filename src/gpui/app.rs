@@ -197,6 +197,11 @@ impl AppView {
             cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             cx.observe(&tasks, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, |this, _, event, window, cx| match event {
+                StoreEvent::BrowsePacksFor(place) => {
+                    let place = place.clone();
+                    this.browse.update(cx, |b, cx| b.browse_packs_for_server(place, cx));
+                    this.go(Page::Browse, cx);
+                }
                 StoreEvent::GameStarted => {
                     if this.store.read(cx).settings().minimize_while_playing {
                         window.minimize_window();
@@ -1017,6 +1022,7 @@ impl AppView {
                 for j in store.jobs().snapshot() {
                     if j.done && this.told_jobs.insert(j.id) && away {
                         match &j.error {
+                            Some(_) if j.cancelled => {}
                             Some(e) => crate::tray::notify(&j.title, e, true),
                             // One that waited for website downloads says how they went.
                             None if j.announce && j.waited > 0 => crate::tray::notify(&j.title, &format!("{}.", j.detail), j.waits_failed > 0),

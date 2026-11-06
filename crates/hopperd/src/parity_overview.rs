@@ -91,7 +91,7 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -
         .map(|j| {
             json!({
                 "id": j.id, "title": j.title, "detail": j.detail, "progress": j.progress,
-                "done": j.done, "error": j.error, "notes": j.notes,
+                "done": j.done, "error": j.error, "notes": j.notes, "cancelled": j.cancelled,
             })
         })
         .collect();

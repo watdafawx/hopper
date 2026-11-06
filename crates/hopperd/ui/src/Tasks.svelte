@@ -16,7 +16,7 @@
   let dead = false;
 
   const running = $derived(jobs.filter((j) => !j.done).length);
-  const failed = $derived(jobs.filter((j) => j.done && j.error).length);
+  const failed = $derived(jobs.filter((j) => j.done && j.error && !j.cancelled).length);
 
   async function load() {
     try {
@@ -119,13 +119,13 @@
             <div class="job">
               <div class="row top">
                 <span class="st">
-                  {#if !j.done}<span class="spinner acc"></span>{:else if j.error}<CircleX size={15} color="var(--red)" />{:else}<CircleCheck size={15} color="var(--green)" />{/if}
+                  {#if !j.done}<span class="spinner acc"></span>{:else if j.cancelled}<CircleX size={15} color="var(--muted)" />{:else if j.error}<CircleX size={15} color="var(--red)" />{:else}<CircleCheck size={15} color="var(--green)" />{/if}
                 </span>
                 <div class="txt">
                   <div class="t">{j.title}</div>
-                  <div class="d" class:bad={j.error}>{j.error || j.detail}</div>
+                  <div class="d" class:bad={j.error && !j.cancelled}>{j.error || j.detail}</div>
                 </div>
-                {#if j.done && j.error}<button class="btn ghost sm" onclick={() => copy(j)}><Copy size={12} />Copy details</button>{/if}
+                {#if j.done && j.error && !j.cancelled}<button class="btn ghost sm" onclick={() => copy(j)}><Copy size={12} />Copy details</button>{/if}
                 <button class="btn ghost sm" title={j.done ? 'Remove from the list' : 'Stops at the next safe point'} onclick={() => act(j)}>{j.done ? 'Dismiss' : 'Cancel'}</button>
               </div>
               {#if !j.done}

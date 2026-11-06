@@ -11,6 +11,8 @@
   import { say } from './lib/toast.svelte.js';
   import { followJob } from './lib/jobs.js';
   import { session } from './lib/me.svelte.js';
+  import { bytes } from './lib/format.js';
+  import { track } from './lib/making.svelte.js';
   import { uploadIncoming } from './lib/upload.js';
   import { dialog } from './lib/dialog.svelte.js';
   import { rightClear } from './lib/rightclear.js';
@@ -60,6 +62,14 @@
   let loader = $state('neoforge');
   let lv = $state('');
   let memory = $state(6);
+  // The player moved the slider: their choice stays. Until then memory
+  // follows the source (2 GB vanilla, 6 GB modded) and a pack's own
+  // recommendation decides on the panel (hosting::default_memory_mb).
+  let memTouched = $state(false);
+  // The line in players' server lists; empty: the name.
+  let motd = $state('');
+  // Start it once it's made (the server list does, when its row says Ready).
+  let startNow = $state(false);
   let port = $state('');
   let router = $state(null);
   let hostInfo = $state(null);
@@ -148,6 +158,29 @@
     if (!eula) return 'Agree to the Minecraft EULA to make a server.';
     return '';
   });
+  // What Create downloads first (bytes), when known: the server pack or
+  // pack zip of the picked version, or the zip being uploaded.
+  const download = $derived(
+    from === 'pack' ? check?.download || pickedVersion?.size || 0 : from === 'zip' ? zipFile?.size || 0 : 0,
+  );
+  // Room for it: the zip, what it unpacks to and the server (as
+  // hosting::room_needed works it out). Blocks Create when short.
+  const room = $derived.by(() => {
+    const free = hostInfo?.disk_free || 0;
+    const need = download * 3 + 512 * 2 ** 20;
+    return free && download && need > free ? `Not enough space on ${hostInfo.hostname || host}: this needs about ${bytes(need)}, and ${bytes(free)} is free.` : '';
+  });
+  // What Create will do, in one line, as desktop's dialog says it.
+  const summary = $derived.by(() => {
+    if (from === 'folder') return '';
+    const parts = [];
+    if (download) parts.push(`About ${bytes(download)} to download`);
+    else if (from === 'fresh') parts.push('Downloads the server');
+    if (hostInfo?.disk_free) parts.push(`${bytes(hostInfo.disk_free)} free on ${hostInfo.hostname || host}`);
+    parts.push('RCON on');
+    if (from === 'pack' || from === 'zip') parts.push('client-only mods stay out');
+    return parts.join(' · ');
+  });
   // A port another server here uses (or something listens on): say so and
   // offer a free one, as desktop's New server does. Empty port: the panel picks.
   let portCheck = $state(null);
@@ -209,7 +242,9 @@
     lv = rec && options.includes(rec) ? rec : options[0] || '';
   });
   $effect(() => {
+    if (memTouched) return;
     if (from === 'fresh') memory = loader === 'vanilla' || PLUGINS.includes(loader) ? 2 : 6;
+    else if (from === 'pack') memory = 6;
   });
 
   function loaderId() {
@@ -224,7 +259,7 @@
     try {
       zipInfo = await api(`/servers/zip-info?${q}`);
       if (!name.trim()) name = zipInfo.name;
-      if (zipInfo.recommended_mb) memory = Math.round(zipInfo.recommended_mb / 512) / 2;
+      if (zipInfo.recommended_mb && !memTouched) memory = Math.ceil(zipInfo.recommended_mb / 512) / 2;
     } catch (e) {
       error = e.message;
     }
@@ -357,7 +392,10 @@
   async function make() {
     if (!canMake) return;
     error = '';
-    const common = { name: name.trim(), memory_mb: Math.round(memory * 1024), port: port ? Number(port) : null, accept_eula: eula, address };
+    // Memory left on the default for a pack: null, so the panel takes the
+    // pack's own recommendation once it has read the pack.
+    const memory_mb = from === 'pack' && !memTouched ? null : Math.round(memory * 1024);
+    const common = { name: name.trim(), memory_mb, port: port ? Number(port) : null, accept_eula: eula, address, motd: motd.trim() };
     try {
       let r;
       if (from === 'folder') {
@@ -373,10 +411,14 @@
         else if (from === 'zip') req = post('/servers/import-zip', { ...common, upload: upload || null, path: zipPath || null, ...(needsPick ? { mc_version: mc, loader: loaderId() } : {}) });
         else req = post('/servers/create-from-pack', { ...common, source: pack.source, project: pack.id, file: packFile });
         const { job } = await req;
-        busy = 'Starting';
-        r = await followJob(job, (st) => (busy = st.detail || 'Working'));
+        // The server list shows it from here, with progress and Cancel, as
+        // desktop does; the dialog is done.
+        track(job, name.trim() || pack?.name || 'New server', startNow);
+        close();
+        return;
       }
-      say(from === 'folder' && !copy ? 'Added. It runs where it is.' : `Made ${name.trim() || 'the server'}${r?.left_out ? `: ${r.left_out} client-only mods left out (see left-out-client-mods.txt)` : ''}${r?.missing ? `. ${r.missing} mods can only be downloaded from CurseForge: see missing-mods.txt in the server folder` : ''}`);
+      if (from === 'folder' && r?.warnings?.length) say(`${!copy ? 'Added. It runs where it is. ' : ''}${r.warnings.join(' ')}`, true);
+      else say(from === 'folder' && !copy ? 'Added. It runs where it is.' : `Made ${name.trim() || 'the server'}${r?.left_out ? `: ${r.left_out} client-only mods left out (see left-out-client-mods.txt)` : ''}${r?.missing ? `. ${r.missing} mods can only be downloaded from CurseForge: see missing-mods.txt in the server folder` : ''}`);
       close();
       if (r?.id) location.hash = `/server/${encodeURIComponent(r.id)}/console`;
     } catch (e) {
@@ -436,13 +478,18 @@
       <select id="ns-mc" class="sel" bind:value={mc} onchange={() => (autoMc = false)} disabled={!!busy}>{#each versions as v (v)}<option value={v}>{v}</option>{/each}</select>
     </div>
     <div class="f">
-      <label class="lbl" for="ns-loader">Type</label>
-      <select id="ns-loader" class="sel" bind:value={loader} disabled={!!busy}>
-        <option value="vanilla">Vanilla</option>
-        {#each LOADER_GROUPS as [group, ids] (group)}<optgroup label={group}>{#each ids as id (id)}<option value={id}>{loaderLabel(id)}</option>{/each}</optgroup>{/each}
-      </select>
+      <span class="lbl" id="ns-loader">Type</span>
+      <!-- A value picker: the segmented control, as desktop's New server and New instance. -->
+      <div class="seg" role="radiogroup" aria-labelledby="ns-loader">
+        {#each ['vanilla', ...LOADER_GROUPS.flatMap(([, ids]) => ids)] as id (id)}
+          <button role="radio" aria-checked={loader === id} class:on={loader === id} disabled={!!busy} onclick={() => (loader = id)}>{id === 'vanilla' ? 'Vanilla' : loaderLabel(id)}</button>
+        {/each}
+      </div>
     </div>
-    {#if loader !== 'vanilla'}
+    {#if loader === 'vanilla'}
+      <!-- Kept, so switching type doesn't move the fields below. -->
+      <div class="f"><span class="lbl">Loader version</span><div class="small muted plain">None: plain Minecraft.</div></div>
+    {:else}
       <div class="f span">
         <label class="lbl" for="ns-lv">{loaderLabel(loader)} {PLUGINS.includes(loader) ? 'build' : 'version'}</label>
         {#if options.length}
@@ -498,6 +545,7 @@
         {/if}
       {:else}
         {#if from === 'template'}
+          <div class="f"><span class="lbl">Template</span>
           <div class="results">
             {#each templates as t (t.id)}
               <button class="res row-hover" class:row-sel={tpl === t.id} onclick={() => { tpl = t.id; if (!name.trim()) name = t.name; if (t.memory_mb) memory = t.memory_mb / 1024; }}>
@@ -506,8 +554,10 @@
               </button>
             {/each}
           </div>
+          </div>
         {/if}
         {#if from === 'zip'}
+          <div class="f"><span class="lbl">Zip</span>
           {#if zipPicking}
             <FolderPicker zips onPick={pickZipPath} onCancel={() => (zipPicking = false)} />
           {:else}
@@ -524,9 +574,12 @@
               {#if zipInfo.mc_version}<span class="chip">Minecraft {zipInfo.mc_version}</span>{/if}
               {#if zipInfo.loader}<span class="chip">{zipInfo.loader}</span>{/if}</div>
             {#if zipInfo.kind === 'curseforge' || zipInfo.kind === 'modrinth'}<div class="tiny muted">Built like desktop: client-only mods left out.</div>{/if}
-            {#if needsPick}<div class="small warn">The zip doesn't say which Minecraft and loader it's for: pick them.</div>{@render gameFields()}{/if}
+            {#if needsPick}<div class="small warn">The zip doesn't say which Minecraft and loader it's for: pick them.</div>{/if}
           {/if}
+          </div>
+          {#if zipInfo && needsPick}{@render gameFields()}{/if}
         {:else if from === 'pack'}
+          <div class="f"><span class="lbl">Modpack</span>
           {#if !showSearch && pack}
             <div class="row picked">
               {#if pack.icon}<img class="pi" src={pack.icon} alt="" width="34" height="34" />{:else}<span class="ph"><Package size={16} /></span>{/if}
@@ -554,6 +607,7 @@
               {:else}<div class="small muted empty">{searching ? 'Searching…' : query ? `No packs match “${query}”.` : 'Search for a modpack.'}</div>{/each}
             </div>
           {/if}
+          </div>
           {#if pack}
             <div class="f">
               <label class="lbl" for="ns-pv">Version</label>
@@ -581,11 +635,15 @@
 
         {#if from === 'fresh'}{@render gameFields()}{/if}
 
-        <div class="sec">Server</div>
         <div class="grid">
           <div class="f">
             <label class="lbl" for="ns-name">Name</label>
             <div class="input"><input id="ns-name" bind:this={nameEl} bind:value={name} placeholder="Survival" disabled={!!busy} /></div>
+          </div>
+          <div class="f">
+            <label class="lbl" for="ns-motd">MOTD</label>
+            <div class="input"><input id="ns-motd" bind:value={motd} placeholder="Same as the name" disabled={!!busy} /></div>
+            <div class="tiny muted">The line players see under the server in their list.</div>
           </div>
           <div class="f">
             <label class="lbl" for="ns-port">Port</label>
@@ -594,13 +652,15 @@
             <div class="tiny muted">{autoInfo?.auto ? `Empty: the panel uses ${autoInfo.auto}.` : 'Empty: the panel picks a free one.'}{joinAt ? ` Players join at ${joinAt}.` : ''}</div>
           </div>
           <div class="f span">
-            <div class="row"><label class="lbl" for="ns-mem">Memory</label><span class="sp"></span><span class="small"><b>{Number(memory).toFixed(1)} GB</b>{#if hostGb}<span class="muted"> of {Math.round(hostGb)} GB on {hostInfo.hostname || host}</span>{/if}</span></div>
-            <input id="ns-mem" class="range" type="range" min="1" max={Math.max(memMax, memory)} step="0.5" bind:value={memory} disabled={!!busy} />
+            <label class="lbl" for="ns-mem">Memory</label>
+            <div class="row mem"><input id="ns-mem" class="range" type="range" min="1" max={Math.max(memMax, memory)} step="0.5" bind:value={memory} oninput={() => (memTouched = true)} disabled={!!busy} />
+              <span class="small nowrap"><b>{Number(memory).toFixed(1)} GB</b>{#if hostGb}{' '}<span class="muted">of {Math.round(hostGb)} GB on {hostInfo.hostname || host}</span>{/if}</span></div>
+            {#if from === 'pack' && !memTouched}<div class="tiny muted">The pack's own recommendation is used when it gives one.</div>{/if}
             {#if hostGb && memory > hostGb * 0.75}<div class="tiny warn">That leaves little for {hostInfo.hostname || 'the host'} and its other servers.</div>{/if}
           </div>
           {#if router?.config?.enabled}
             <div class="f span">
-              <label class="lbl" for="ns-addr">Address players join</label>
+              <label class="lbl" for="ns-addr">Address</label>
               <div class="row">
                 <div class="input grow"><input id="ns-addr" class="mono" value={addrName} oninput={(e) => (addrEdit = e.currentTarget.value.trim().toLowerCase())} placeholder={domain ? 'survival' : 'survival.example.com (optional)'} disabled={!!busy} /></div>
                 {#if domain && !addrName.includes('.')}<span class="mono small muted">.{domain}</span>{/if}
@@ -609,17 +669,22 @@
             </div>
           {/if}
         </div>
-        <div class="row eula small"><label class="row"><input type="checkbox" bind:checked={eula} disabled={!!busy} /><span>I agree to the Minecraft EULA</span></label>
-          <a class="btn sm ghost" href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer">Read it</a></div>
+        <div class="f"><span class="lbl">EULA</span>
+          <div class="row eula small"><label class="row"><input type="checkbox" bind:checked={eula} disabled={!!busy} /><span>I agree to the Minecraft EULA</span></label>
+            <a class="btn sm ghost" href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer">Read it</a></div>
+          <div class="row eula small"><label class="row"><input type="checkbox" bind:checked={startNow} disabled={!!busy} /><span>Start it when it's ready</span></label></div>
+        </div>
       {/if}
     </div>
 
     <div class="foot">
       {#if error}<div class="err">{error}</div>{/if}
       {#if busy}<div class="busy small"><span class="spinner"></span>{busy}</div>{/if}
+      {#if summary}<div class="tiny muted">{summary} · Java is found or downloaded for you</div>{/if}
       <div class="row">
-        <span class="tiny muted hint">{why || (from === 'folder' ? '' : 'Java is found or downloaded for you.')}</span>
-        <button class="btn pri" disabled={!canMake} title={why} onclick={make}>{from === 'folder' && !copy ? 'Add server' : 'Create server'}</button>
+        <span class="tiny muted hint" class:warn={!!room}>{room || why}</span>
+        <button class="btn" disabled={!!busy} onclick={close}>Cancel</button>
+        <button class="btn pri" disabled={!canMake || !!room} title={room || why} onclick={make}>{from === 'folder' && !copy ? 'Add server' : 'Create server'}</button>
       </div>
     </div>
   </div>
@@ -628,15 +693,23 @@
 <style>
   .grow { flex: 1; min-width: 0; }
   /* One height for every source, so the dialog doesn't jump; the body scrolls. */
-  .box { width: min(560px, 100%); height: min(660px, calc(100dvh - var(--dialog-top) - 16px)); display: flex; flex-direction: column; outline: none; flex: none; }
+  .box { width: min(680px, 100%); height: min(700px, calc(100dvh - var(--dialog-top) - 16px)); display: flex; flex-direction: column; outline: none; flex: none; }
   .box .head { margin: 0; padding: 12px 10px 10px 16px; border-bottom: 1px solid var(--line); font-size: 13px; font-weight: 600; gap: 7px; }
   .body { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
   .foot { border-top: 1px solid var(--line); padding: 10px 16px 12px; display: flex; flex-direction: column; gap: 6px; }
   .hint { flex: 1; min-width: 0; }
-  .f { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-  .sec { font-size: 12px; font-weight: 600; color: var(--subtle); padding-top: 10px; border-top: 1px solid var(--line); margin-top: 2px; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
-  .span { grid-column: 1 / -1; }
+  /* Desktop's form: a label column, the field and its notes beside it. */
+  .f { display: grid; grid-template-columns: 112px minmax(0, 1fr); column-gap: 14px; row-gap: 6px; align-items: start; min-width: 0; }
+  /* Labels read like desktop's: the field's name, not a section header. */
+  .f > .lbl { grid-column: 1; grid-row: 1; padding-top: 7px; text-transform: none; letter-spacing: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+  .f > :not(.lbl) { grid-column: 2; }
+  .sec { display: none; }
+  .grid { display: flex; flex-direction: column; gap: 12px; }
+  .mem { gap: 10px; align-items: center; }
+  .mem .range { flex: 1; min-width: 0; }
+  .nowrap { white-space: nowrap; }
+  .plain { padding-top: 7px; }
+  .foot .row { gap: 8px; }
   .sel { background: var(--base); border: 1px solid var(--line2); border-radius: var(--radius); padding: 7px 8px; color: var(--text); width: 100%; font: inherit; }
   .sel:focus { border-color: var(--acc); outline: none; }
   .sel.ghost { border-style: dashed; }
@@ -687,7 +760,7 @@
   .ph { display: grid; place-items: center; color: var(--muted); }
   @media (max-width: 520px) {
     .box { height: calc(100dvh - var(--dialog-top) - 16px); }
-    .grid { grid-template-columns: 1fr; }
+    .f { display: flex; flex-direction: column; gap: 6px; }
     .tabs { gap: 14px; }
     .body { padding: 12px; }
     .foot { padding: 10px 12px; }

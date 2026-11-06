@@ -532,6 +532,9 @@ struct CreateBody {
     address: String,
     /// The person creating it agreed to the Minecraft EULA in the form.
     accept_eula: bool,
+    /// Start it once it's made.
+    #[serde(default)]
+    start: bool,
 }
 
 /// The server type a create body asks for. Versions end up in download
@@ -615,6 +618,10 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
         a.refresh.notify_one();
         let id = a.servers.list().into_iter().find(|e| e.root == folder).map(|e| e.id.clone());
         log::info!("made {}", folder.display());
+        job.detail("Ready");
+        if b.start {
+            crate::servers_admin::start_new(&a, &folder);
+        }
         Ok(json!({ "id": id, "path": folder }))
     });
     Ok(Json(json!({ "job": job })))

@@ -1960,11 +1960,9 @@ impl SyncPanel {
                 ),
             )
             .child(
-                TabBar::new("sync-show")
-                    .segmented()
-                    .small()
+                widgets::Segmented::new("sync-show")
                     .selected_index(show_ix)
-                    .children(choices.iter().map(|(s, n)| Tab::new().label(format!("{} {n}", s.label()))))
+                    .children(choices.iter().map(|(s, n)| widgets::SegItem::new().label(format!("{} {n}", s.label()))))
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                         if let Some(s) = picks.get(*ix) {
                             this.show = Some(*s);

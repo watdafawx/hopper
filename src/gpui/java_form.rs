@@ -10,7 +10,6 @@ use gpui_kit::component::input::{Editor, Input, InputEvent, InputState};
 use crate::args_editor::{self, ArgsEditor};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use crate::switch::Switch;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -896,11 +895,10 @@ fn segmented(
     selected: Option<usize>,
     on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    TabBar::new(id)
-        .segmented()
+    widgets::Segmented::new(id)
         .xsmall()
         .when_some(selected, |t, i| t.selected_index(i))
-        .children(labels.into_iter().map(|l| Tab::new().label(l)))
+        .children(labels.into_iter().map(|l| widgets::SegItem::new().label(l)))
         .on_click(on_pick)
 }
 

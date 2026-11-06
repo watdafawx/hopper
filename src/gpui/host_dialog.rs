@@ -11,7 +11,6 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::form::Field;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -19,6 +18,11 @@ use hopper::hosting::{CreateOptions, ServerLoader};
 use hopper::java::{JavaInstall, Side};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+/// The width of the form's field column (the 44rem dialog less its label
+/// column and padding). The form's rows don't shrink text to fit, so long
+/// lines and boxes in it are held to this.
+const FIELD_W: Rems = Rems(30.);
 
 /// The Java a server should run: detected installs ranked for its
 /// Minecraft version, the picked one, and a download when none fits.
@@ -79,7 +83,7 @@ pub fn java_field(
         .child(
             h_flex()
                 .gap_2()
-                .child(div().w_72().child(widgets::picker(
+                .child(div().w_72().child(widgets::field_picker(
                     "server-java",
                     label,
                     items,
@@ -140,6 +144,15 @@ pub struct PackFiles {
     /// files are older): the warning, and that version ready to build from
     /// the client pack.
     pub newer: Option<(String, Rc<PackFiles>)>,
+    /// What building it downloads first (bytes): the server pack, or the
+    /// pack zip (its mods come on top). 0: unknown.
+    pub download: u64,
+    /// This version's file id (CurseForge), to mark it in the version list.
+    pub file_id: u64,
+    /// The pack and its versions, newest first (CurseForge), for picking
+    /// another version in the dialog. Empty when the site's list isn't known.
+    pub pack: Option<Rc<hopper::cf::Mod>>,
+    pub versions: Rc<Vec<hopper::cf::File>>,
 }
 
 impl PackFiles {
@@ -157,6 +170,10 @@ impl PackFiles {
             .find(|t| matches!(t.as_str(), "NeoForge" | "Forge" | "Fabric" | "Quilt"))
             .cloned()
             .unwrap_or_default();
+        let download = match &build {
+            Build::ClientPack(..) => version.file_length,
+            Build::ServerFiles(f) => f.file.as_ref().map_or(0, |f| f.file_length),
+        };
         PackFiles {
             build,
             name,
@@ -165,6 +182,10 @@ impl PackFiles {
             loader,
             check: Default::default(),
             newer: None,
+            download,
+            file_id: version.id,
+            pack: None,
+            versions: Rc::new(Vec::new()),
         }
     }
 
@@ -178,6 +199,24 @@ impl PackFiles {
     fn must_pick_zip(&self) -> bool {
         self.needs_zip() && !hopper::modpack::can_fetch_from_website()
     }
+}
+
+/// How a CurseForge pack version builds: from its server files when it
+/// has them, else from the client pack.
+fn build_for(m: &hopper::cf::Mod, f: &hopper::cf::File) -> Build {
+    match f.server_pack_file_id.filter(|id| *id != 0 && f.has_server_files()) {
+        Some(sp) => Build::ServerFiles(hopper::browse::ServerFiles { project: m.id, pack_file: f.id, server_file: sp, file: None }),
+        None => Build::ClientPack(Box::new(m.clone()), Box::new(f.clone())),
+    }
+}
+
+/// What a pack version's [`PackFiles`] needs from CurseForge: what Hopper
+/// may download, and the size of what it downloads first (the server pack
+/// when it builds from one). Blocking: call from the background.
+fn look_up_version(m: &hopper::cf::Mod, f: &hopper::cf::File) -> (hopper::hosting::PackCheck, u64) {
+    let c = check(m, f);
+    let download = if c.download > 0 { c.download } else { f.file_length };
+    (c, download)
 }
 
 /// [`hopper::hosting::check_pack`] for a pack version, logged and treated
@@ -199,6 +238,35 @@ enum Source {
     Fresh,
     /// A pack's server files, with no instance.
     Files(Rc<PackFiles>),
+    /// The Modpack tab before a pack is picked (in Browse).
+    Pack,
+    /// A server pack zip or .mrpack on this PC.
+    Zip(Option<PathBuf>),
+    /// A server folder on this PC, copied into the servers folder.
+    Folder(Option<PathBuf>),
+}
+
+/// What a picked zip holds, read when it's picked: its Minecraft and
+/// loader (when it says) and a name for the server, or why it can't be used.
+#[derive(Clone)]
+struct ZipRead {
+    path: PathBuf,
+    mc: String,
+    loader: String,
+    name: String,
+    error: Option<String>,
+}
+
+/// What the picked source will make, looked up before anything is made.
+#[derive(Clone, Default)]
+struct Plan {
+    /// Still asking.
+    loading: bool,
+    /// The pack's server pack for the instance's version (CurseForge): its
+    /// name and size. None: it has none (or isn't a CurseForge pack).
+    server_pack: Option<(String, u64)>,
+    /// Mods a server from the instance keeps, and leaves out as client-only.
+    counts: Option<(usize, usize)>,
 }
 
 pub struct HostForm {
@@ -217,8 +285,15 @@ pub struct HostForm {
     port_hint: String,
     /// What the port clashes with: (where, port) it was asked for, and the answer.
     port_check: Option<((Option<String>, u16), hopper::hosting::ports::PortCheck)>,
-    /// The machine the server goes on: its name and RAM in GB, once known.
-    host: Option<(Option<String>, String, f64)>,
+    /// The machine the server goes on: its name, RAM in GB and free disk
+    /// space in bytes (0: unknown), once known.
+    host: Option<(Option<String>, String, f64, u64)>,
+    /// The player moved the memory slider: their choice stays. Until then it
+    /// follows the source's default (`hosting::default_memory_mb`).
+    memory_touched: bool,
+    /// What the picked source will make, looked up in the background: the
+    /// key it was asked for (see [`Self::plan_key`]) and the answer.
+    plan: Option<(String, Plan)>,
     /// Where players will join, for the place it was asked for: the port an
     /// empty Port box gets (panel), the machine's LAN address, and the
     /// panel's address domain when its addresses are on.
@@ -231,6 +306,10 @@ pub struct HostForm {
     eula: bool,
     /// Build from the pack's official server pack when it has one.
     server_pack: bool,
+    /// Start the server once it's made.
+    start: bool,
+    /// The Zip source's file, once read.
+    zip_read: Option<ZipRead>,
     /// A zip the player downloaded from CurseForge for a website-only pack
     /// or server pack; the server is made from it instead.
     zip: Option<PathBuf>,
@@ -254,7 +333,10 @@ impl HostForm {
             cx.subscribe(&motd, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.observe(&base, |_, _, cx| cx.notify()),
             cx.observe(&store, |_, _, cx| cx.notify()),
-            cx.subscribe(&memory, |_, _, _: &SliderEvent, cx| cx.notify()),
+            cx.subscribe(&memory, |this: &mut Self, _, _: &SliderEvent, cx| {
+                this.memory_touched = true;
+                cx.notify()
+            }),
             cx.subscribe(&port, |this: &mut Self, _, _: &InputEvent, cx| {
                 this.check_port(cx);
                 cx.notify()
@@ -265,7 +347,8 @@ impl HostForm {
             None => store
                 .read(cx)
                 .instances()
-                .first()
+                .iter()
+                .find(|i| ServerLoader::from_instance(&i.loader).is_ok())
                 .map_or(Source::Fresh, |i| Source::Instance(i.root.clone())),
         };
         Self {
@@ -276,6 +359,8 @@ impl HostForm {
             motd,
             port_check: None,
             host: None,
+            memory_touched: false,
+            plan: None,
             join: None,
             name_hint: String::new(),
             port_hint: String::new(),
@@ -286,6 +371,8 @@ impl HostForm {
             java: None,
             eula: false,
             server_pack: true,
+            start: false,
+            zip_read: None,
             zip: None,
             _subscriptions: subs,
         }
@@ -299,17 +386,25 @@ impl HostForm {
                 .store
                 .read(cx)
                 .instance(r)
-                .is_some_and(|i| i.pack.is_some()),
-            Source::Fresh | Source::Files(_) => false,
+                .is_some_and(hopper::hosting::may_have_server_pack),
+            _ => false,
         }
     }
 
     /// The name a server from the picked source gets unless one is typed.
     fn default_name(&self, cx: &App) -> String {
-        match &self.source {
+        let name = match &self.source {
             Source::Instance(r) => self.store.read(cx).instance(r).map(|i| format!("{} server", i.name)).unwrap_or_default(),
             Source::Fresh => self.base.read(cx).choice(cx).map(|(n, _, _)| n).unwrap_or_default(),
+            Source::Pack => String::new(),
+            Source::Zip(_) => self.zip_read.as_ref().map(|z| z.name.clone()).unwrap_or_default(),
+            Source::Folder(p) => p.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             Source::Files(p) => format!("{} server", p.name),
+        };
+        // On this PC a taken name gets " 2", " 3"...; a panel checks its own.
+        match self.place {
+            None if !name.is_empty() => hopper::hosting::free_server_name(Path::new(&self.store.read(cx).hosted_root()), &name),
+            _ => name,
         }
     }
 
@@ -341,8 +436,8 @@ impl HostForm {
             Some(id) => self
                 .host
                 .as_ref()
-                .filter(|(p, _, _)| p.as_ref() == Some(id))
-                .map(|(_, n, _)| n.clone())
+                .filter(|(p, ..)| p.as_ref() == Some(id))
+                .map(|(_, n, ..)| n.clone())
                 .or_else(|| self.store.read(cx).settings().hopper_panels.iter().find(|p| &p.id == id).map(|p| p.name.clone()))
                 .unwrap_or_else(|| "the panel".into()),
         }
@@ -405,7 +500,7 @@ impl HostForm {
     /// Looks up the machine's name and RAM: this PC's, or the panel's.
     fn look_up_host(&mut self, cx: &mut Context<Self>) {
         let place = self.place.clone();
-        if self.host.as_ref().is_some_and(|(p, _, _)| *p == place) {
+        if self.host.as_ref().is_some_and(|(p, ..)| *p == place) {
             return;
         }
         let client = place.as_ref().and_then(|id| {
@@ -417,23 +512,32 @@ impl HostForm {
                 .find(|p| &p.id == id)
                 .and_then(hopper::hopperd::Client::for_panel)
         });
+        let root = PathBuf::from(self.store.read(cx).hosted_root());
         cx.spawn(async move |this, cx| {
             let r = cx
                 .background_spawn(async move {
                     match client {
-                        None => Some(("this PC".to_string(), hopper::hosting::local_panel::total_memory() as f64)),
+                        None => Some((
+                            "this PC".to_string(),
+                            hopper::hosting::local_panel::total_memory() as f64,
+                            hopper::hosting::disk_free(&root),
+                        )),
                         Some(c) => c.get("/host").ok().map(|v| {
-                            (v["hostname"].as_str().unwrap_or("").to_string(), v["mem_total"].as_f64().unwrap_or(0.0))
+                            (
+                                v["hostname"].as_str().unwrap_or("").to_string(),
+                                v["mem_total"].as_f64().unwrap_or(0.0),
+                                v["disk_free"].as_u64().unwrap_or(0),
+                            )
                         }),
                     }
                 })
                 .await;
             this.update(cx, |this, cx| {
                 if this.place == place
-                    && let Some((name, bytes)) = r.filter(|(_, b)| *b > 0.0)
+                    && let Some((name, bytes, free)) = r.filter(|(_, b, _)| *b > 0.0)
                 {
                     let name = if name.is_empty() { this.host_label(cx) } else { name };
-                    this.host = Some((place, name, bytes / 1_073_741_824.0));
+                    this.host = Some((place, name, bytes / 1_073_741_824.0, free));
                     cx.notify();
                 }
             })
@@ -531,8 +635,134 @@ impl HostForm {
         match &self.source {
             Source::Instance(r) => self.store.read(cx).instance(r).map(|i| i.game_version.clone()),
             Source::Fresh => Some(self.base.read(cx).game_version().to_string()).filter(|v| !v.is_empty()),
+            Source::Zip(_) => self.zip_read.as_ref().map(|z| z.mc.clone()).filter(|v| !v.is_empty()),
+            Source::Pack | Source::Folder(_) => None,
             Source::Files(p) => Some(p.game_version.clone()).filter(|v| !v.is_empty()),
         }
+    }
+
+    /// Builds from another version of the Browse pack: looks up what Hopper
+    /// may download of it and its size, then shows it.
+    fn pick_version(&mut self, f: hopper::cf::File, cx: &mut Context<Self>) {
+        let Source::Files(p) = &self.source else { return };
+        let Some(m) = p.pack.clone() else { return };
+        let (name, versions) = (p.name.clone(), p.versions.clone());
+        let (m2, f2) = ((*m).clone(), f.clone());
+        cx.spawn(async move |this, cx| {
+            let (c, download) = cx.background_spawn(async move { look_up_version(&m2, &f2) }).await;
+            this.update(cx, |this, cx| {
+                let mut np = PackFiles::new(build_for(&m, &f), name, &f);
+                np.check = c;
+                np.download = download;
+                np.pack = Some(m);
+                np.versions = versions;
+                this.source = Source::Files(Rc::new(np));
+                this.zip = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Which source [`Plan`] answers for: the picked instance (its server
+    /// pack and mod counts). Fresh servers and pack files need no lookup.
+    fn plan_key(&self) -> Option<String> {
+        match &self.source {
+            Source::Instance(r) => Some(r.to_string_lossy().into_owned()),
+            _ => None,
+        }
+    }
+
+    /// The [`Plan`] for the picked source, when it's the one shown.
+    fn plan(&self) -> Option<&Plan> {
+        let key = self.plan_key()?;
+        self.plan.as_ref().filter(|(k, _)| *k == key).map(|(_, p)| p)
+    }
+
+    /// Asks, in the background, what a server from the picked instance gets:
+    /// the pack's server pack for its version (CurseForge) and how many mods
+    /// it keeps and leaves out.
+    fn look_up_plan(&mut self, cx: &mut Context<Self>) {
+        let Some(key) = self.plan_key() else { return };
+        if self.plan.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let Source::Instance(r) = &self.source else { return };
+        let store = self.store.read(cx);
+        let Some(inst) = store.instance(r).cloned() else { return };
+        let (anyway, hidden) = (store.settings().sync_anyway.clone(), store.settings().sync_blacklist.clone());
+        self.plan = Some((key.clone(), Plan { loading: true, ..Default::default() }));
+        cx.spawn(async move |this, cx| {
+            let plan = cx
+                .background_spawn(async move {
+                    let server_pack = if hopper::hosting::may_have_server_pack(&inst) {
+                        hopper::hosting::find_server_pack(&inst)
+                            .unwrap_or_else(|e| {
+                                log::warn!("looking up {}'s server pack: {e:#}", inst.name);
+                                None
+                            })
+                            .map(|f| (f.display_name.clone(), f.file_length))
+                    } else {
+                        None
+                    };
+                    let counts = hopper::hosting::count_server_mods(&inst, &anyway, &hidden);
+                    Plan { loading: false, server_pack, counts: Some(counts) }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.plan.as_ref().is_some_and(|(k, _)| *k == key) {
+                    this.plan = Some((key, plan));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether the server from the picked source runs mods.
+    fn modded(&self, cx: &App) -> bool {
+        let loader = |l: &str| ServerLoader::from_instance(l).is_ok_and(|l| l.is_modded());
+        match &self.source {
+            Source::Instance(r) => self.store.read(cx).instance(r).is_some_and(|i| loader(&i.loader)),
+            Source::Fresh => self.base.read(cx).choice(cx).is_some_and(|(_, _, l)| loader(&l)),
+            Source::Zip(_) => self.zip_read.as_ref().is_none_or(|z| !z.loader.is_empty()),
+            Source::Pack | Source::Folder(_) => true,
+            Source::Files(p) => !p.loader.is_empty(),
+        }
+    }
+
+    /// Whether the server will be built from the pack's server pack.
+    fn uses_server_pack(&self) -> bool {
+        self.server_pack && self.plan().is_some_and(|p| p.server_pack.is_some())
+    }
+
+    /// Roughly what making it downloads (bytes), when Hopper can tell: the
+    /// server pack or pack zip. A fresh server's loader is small.
+    fn download(&self) -> Option<u64> {
+        match &self.source {
+            Source::Instance(_) if self.uses_server_pack() => self.plan()?.server_pack.as_ref().map(|(_, n)| *n),
+            Source::Instance(_) | Source::Fresh | Source::Pack | Source::Folder(_) => None,
+            // Uploaded to a Hopper Server; read in place on this PC.
+            Source::Zip(Some(z)) if self.place.is_some() => std::fs::metadata(z).ok().map(|m| m.len()),
+            Source::Zip(_) => None,
+            Source::Files(_) if self.zip.is_some() => None,
+            Source::Files(p) => Some(p.download).filter(|n| *n > 0),
+        }
+    }
+
+    /// Free space where the server goes, once known (0: unknown).
+    fn free(&self) -> u64 {
+        self.host.as_ref().filter(|(p, ..)| *p == self.place).map_or(0, |(.., free)| *free)
+    }
+
+    /// The memory to ask for (MB): the slider's, or 0 when the player left
+    /// it on the default and the pack's own recommendation (read once its
+    /// files are in) should decide.
+    fn memory_mb(&self, cx: &App) -> u32 {
+        let mb = (self.memory.read(cx).value().start() * 1024.0).round() as u32;
+        if !self.memory_touched && matches!(self.source, Source::Files(_)) { 0 } else { mb }
     }
 
     /// What to ask a Hopper Server to make: the route and its body
@@ -548,6 +778,34 @@ impl HostForm {
                 (inst.game_version.clone(), inst.loader.clone())
             }
             Source::Fresh => self.base.read(cx).choice(cx).map(|(_, g, l)| (g, l)).ok_or("Pick a version and loader.")?,
+            Source::Pack => return Err("Find a modpack in Browse first.".into()),
+            Source::Folder(_) => {
+                return Err("A folder is added on this PC. On a Hopper Server, use its own New server › Folder.".into());
+            }
+            Source::Zip(_) => {
+                // The zip is uploaded when Create is pressed; the panel reads it.
+                let z = self.zip_read.as_ref().ok_or("Pick a zip.")?;
+                if let Some(e) = &z.error {
+                    return Err(e.clone());
+                }
+                let name = self.server_name(cx);
+                if name.trim().is_empty() {
+                    return Err("Name the server.".into());
+                }
+                let port = self.port.read(cx).value().trim().to_string();
+                let port: Option<u16> = if port.is_empty() { None } else { Some(port.parse().map_err(|_| "The port must be a number.")?) };
+                if !self.eula {
+                    return Err("Agree to the Minecraft EULA to make a server.".into());
+                }
+                return Ok(("/servers/import-zip", serde_json::json!({
+                    "name": name,
+                    "memory_mb": self.memory_mb(cx),
+                    "port": port,
+                    "motd": self.motd_text(cx),
+                    "address": self.join_address(cx),
+                    "accept_eula": true,
+                })));
+            }
             Source::Files(_) => unreachable!("handled above"),
         };
         let name = self.server_name(cx);
@@ -565,7 +823,7 @@ impl HostForm {
             "mc_version": gv,
             "loader": kind,
             "loader_version": version,
-            "memory_mb": (self.memory.read(cx).value().start() * 1024.0).round() as u32,
+            "memory_mb": self.memory_mb(cx),
             "port": port,
             "motd": self.motd_text(cx),
             "address": self.join_address(cx),
@@ -606,7 +864,9 @@ impl HostForm {
             "project": project,
             "file": file,
             "name": self.server_name(cx),
-            "memory_mb": (self.memory.read(cx).value().start() * 1024.0).round() as u32,
+            // Null: the panel takes the pack's recommended memory.
+            "memory_mb": Some(self.memory_mb(cx)).filter(|m| *m > 0),
+            "motd": self.motd_text(cx),
             "port": port,
             "address": self.join_address(cx),
             "accept_eula": true,
@@ -615,19 +875,32 @@ impl HostForm {
 
     /// Ready to create, or why not.
     fn problem(&self, cx: &App) -> Option<String> {
-        match &self.place {
+        let p = match &self.place {
             Some(_) => self.panel_body(cx).err(),
             None => self.options(cx).err(),
-        }
+        };
+        p.or_else(|| hopper::hosting::room_problem(self.download().unwrap_or(0), self.free(), &self.host_label(cx)))
     }
 
     fn options(&self, cx: &App) -> Result<CreateOptions, String> {
         let gv = self.game_version(cx).unwrap_or_default();
-        let java = self
-            .java
-            .clone()
-            .or_else(|| best_java(&self.store, &gv, cx))
-            .ok_or("Pick a Java (or download one).")?;
+        match &self.source {
+            Source::Pack => return Err("Find a modpack in Browse first.".into()),
+            Source::Zip(None) => return Err("Pick a zip.".into()),
+            Source::Zip(_) => match &self.zip_read {
+                None => return Err("Reading the zip…".into()),
+                Some(z) if z.error.is_some() => return Err(z.error.clone().unwrap_or_default()),
+                _ => {}
+            },
+            Source::Folder(None) => return Err("Pick the server folder.".into()),
+            _ => {}
+        }
+        // A folder keeps its own start script, and its own Java.
+        let java = match &self.source {
+            Source::Folder(_) => Some(PathBuf::from("java")),
+            _ => self.java.clone().or_else(|| best_java(&self.store, &gv, cx)),
+        }
+        .ok_or("Pick a Java (or download one).")?;
         let store = self.store.read(cx);
         let root = PathBuf::from(store.hosted_root());
         if root.as_os_str().is_empty() {
@@ -657,13 +930,25 @@ impl HostForm {
                 };
                 CreateOptions::new(&format!("{} server", p.name), &root, &p.game_version, l, &java)
             }
+            Source::Zip(_) => {
+                let z = self.zip_read.as_ref().ok_or("Pick a zip.")?;
+                let l = ServerLoader::from_instance(&z.loader).map_err(|e| format!("{e:#}"))?;
+                CreateOptions::new(&z.name, &root, &z.mc, l, &java)
+            }
+            Source::Folder(Some(src)) => {
+                if !src.join("server.properties").is_file() {
+                    return Err("That folder has no server.properties, so it isn't a server folder.".into());
+                }
+                CreateOptions::new("", &root, "", ServerLoader::Vanilla, &java)
+            }
+            Source::Pack | Source::Folder(None) => unreachable!("checked above"),
         };
         o.name = self.server_name(cx);
         if o.name.trim().is_empty() {
             return Err("Name the server.".into());
         }
         o.motd = self.motd_text(cx);
-        o.memory_mb = (self.memory.read(cx).value().start() * 1024.0).round() as u32;
+        o.memory_mb = self.memory_mb(cx);
         o.port = self
             .port
             .read(cx)
@@ -672,7 +957,7 @@ impl HostForm {
             .parse()
             .map_err(|_| "The port must be a number.")?;
         if o.folder().exists() {
-            return Err(format!("{} already exists.", o.folder().display()));
+            return Err(format!("A server called {} already exists here. Pick another name.", o.name));
         }
         if !self.eula {
             return Err("Agree to the Minecraft EULA to host a server.".into());
@@ -712,10 +997,27 @@ impl HostForm {
                 port: body["port"].as_u64().map(|p| p as u16),
                 address: body["address"].as_str().unwrap_or("").to_string(),
                 server_pack: this.server_pack && this.has_pack(cx),
+                start: this.start,
             };
             (i, o, store.settings().sync_anyway.clone(), store.settings().sync_blacklist.clone())
         });
         let job = store.start_job(format!("Making {name} on {}", p.name));
+        let job_id = job.id();
+        store.track_making(crate::store::Making {
+            job: job_id,
+            name: name.clone(),
+            place: Some(panel.to_string()),
+            root: None,
+            panel_id: None,
+            start: this.start,
+        });
+        let mut body = body;
+        body["start"] = serde_json::json!(this.start);
+        // The Zip source's file goes up first; the panel makes the server from it.
+        let zip_path = match &this.source {
+            Source::Zip(Some(z)) => Some(z.clone()),
+            _ => None,
+        };
         let store = store_entity;
         cx.spawn(async move |cx| {
             let r = cx
@@ -725,7 +1027,19 @@ impl HostForm {
                             hopper::hosting::panel_create::create_from_instance(&client, &i, &o, &anyway, &hidden, &job)
                                 .map(|r| r.made)
                         }
-                        None => client.run_job(route, body, &job).inspect(|made| {
+                        None => (|| {
+                            let mut body = body;
+                            if let Some(z) = &zip_path {
+                                job.detail("Uploading the zip");
+                                let size = std::fs::metadata(z).map_or(0, |m| m.len()).max(1);
+                                let up = client.upload_incoming(z, |sent| {
+                                    job.progress(sent as usize, size as usize);
+                                })?;
+                                body["upload"] = serde_json::json!(up);
+                            }
+                            client.run_job(route, body, &job)
+                        })()
+                        .inspect(|made| {
                             // The pack route has no MOTD of its own.
                             hopper::hosting::panel_create::set_motd(&client, made, &motd, &name)
                         }),
@@ -735,28 +1049,25 @@ impl HostForm {
                 })
                 .await;
             if let Ok((v, panel)) = r {
+                let id = v["id"].as_str().map(str::to_string);
                 let folder = hopper::hosting::panel_create::PanelReport { made: v, content: None }
                     .folder()
                     .unwrap_or_default();
                 store
                     .update(cx, |s, cx| {
-                        if let Some(inst) = inst
-                            && !folder.is_empty()
-                        {
-                            s.set_pairing(&hopper::hopperd::panel_root(&panel, &folder), &inst, cx);
+                        if !folder.is_empty() {
+                            let root = hopper::hopperd::panel_root(&panel, &folder);
+                            s.made_on_panel(job_id, root.clone(), id);
+                            if let Some(inst) = inst {
+                                s.set_pairing(&root, &inst, cx);
+                            }
                         }
                         s.rediscover_servers();
+                        cx.notify();
                     });
             }
         })
         .detach();
-        window.push_notification(
-            gpui_kit::component::notification::Notification::info(format!(
-                "Making the server on {}. It shows up in its group when it's ready.",
-                p.name
-            )),
-            cx,
-        );
         true
     }
 
@@ -773,39 +1084,43 @@ impl HostForm {
         // window first; the dialog closes, so say where to follow it.
         let via_window = hopper::modpack::can_fetch_from_website()
             && matches!(&this.source, Source::Files(p) if this.zip.is_none() && (p.check.pack.is_some() || p.check.server_files.is_some()));
-        match &this.source {
+        let store = this.store.read(cx);
+        // Its row in the server list learns where it went (and starts it).
+        let done = store.made_here(this.start);
+        let name = opts.name.clone();
+        let job = match &this.source {
             Source::Files(p) if this.zip.is_some() => {
                 let files = match &p.build {
                     Build::ServerFiles(f) => Some(f.clone()),
                     Build::ClientPack(..) => None,
                 };
-                this.store.read(cx).create_hosted_from_zip(opts, this.zip.clone().unwrap(), files, |_| {})
+                store.create_hosted_from_zip(opts, this.zip.clone().unwrap(), files, done)
             }
             Source::Files(p) => match &p.build {
-                Build::ServerFiles(files) => {
-                    this.store.read(cx).create_hosted_from_files(opts, files.clone(), |_| {})
+                Build::ServerFiles(files) => store.create_hosted_from_files(opts, files.clone(), done),
+                Build::ClientPack(pack, file) => {
+                    store.create_hosted_from_client_pack(opts, (**pack).clone(), (**file).clone(), done)
                 }
-                Build::ClientPack(pack, file) => this.store.read(cx).create_hosted_from_client_pack(
-                    opts,
-                    (**pack).clone(),
-                    (**file).clone(),
-                    |_| {},
-                ),
             },
             Source::Instance(r) => {
                 let pack = this.server_pack && this.has_pack(cx);
-                this.store.read(cx).create_hosted(opts, Some(r.clone()), pack, |_| {})
+                store.create_hosted(opts, Some(r.clone()), pack, done)
             }
-            Source::Fresh => this.store.read(cx).create_hosted(opts, None, false, |_| {}),
+            Source::Fresh => store.create_hosted(opts, None, false, done),
+            Source::Zip(Some(z)) => store.create_hosted_from_zip(opts, z.clone(), None, done),
+            Source::Folder(Some(src)) => store.create_hosted_from_folder(opts, src.clone(), done),
+            Source::Pack | Source::Zip(None) | Source::Folder(None) => return false,
+        };
+        store.track_making(crate::store::Making { job, name, place: None, root: None, panel_id: None, start: this.start });
+        // A website-only pack goes through the download window first.
+        if via_window {
+            window.push_notification(
+                gpui_kit::component::notification::Notification::info(
+                    "Hopper's download window gets the pack from CurseForge first: follow it from the top bar or the server list.",
+                ),
+                cx,
+            );
         }
-        window.push_notification(
-            gpui_kit::component::notification::Notification::info(if via_window {
-                "Creating the server. Hopper's download window gets the pack from CurseForge first: follow it from the top bar or the task list. The server shows up under Servers when it's ready."
-            } else {
-                "Creating the server. It shows up under Servers when it's ready."
-            }),
-            cx,
-        );
         true
     }
 }
@@ -897,6 +1212,71 @@ impl HostForm {
         )
     }
 
+    /// Asks for the Zip source's file, then reads what it is.
+    fn pick_source_zip(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Use this zip".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let p2 = path.clone();
+            let read = cx
+                .background_spawn(async move {
+                    let stem = p2.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    match hopper::hosting::zip_import::inspect(&p2) {
+                        Ok(i) => match i.target {
+                            Some(t) => ZipRead { path: p2, mc: t.mc_version, loader: t.loader, name: i.name, error: None },
+                            None => ZipRead {
+                                path: p2,
+                                mc: String::new(),
+                                loader: String::new(),
+                                name: i.name,
+                                error: Some("Hopper can't tell which Minecraft and loader this zip is for. Make the server from its pack in Browse instead.".into()),
+                            },
+                        },
+                        Err(e) => ZipRead { path: p2, mc: String::new(), loader: String::new(), name: stem, error: Some(format!("{e:#}")) },
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if matches!(this.source, Source::Zip(_)) {
+                    this.source = Source::Zip(Some(path));
+                    this.zip_read = Some(read);
+                    this.java = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks for the Folder source's server folder.
+    fn pick_source_folder(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Use this folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            this.update(cx, |this, cx| {
+                if matches!(this.source, Source::Folder(_)) {
+                    this.source = Source::Folder(Some(path));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Asks for the zip the player downloaded from CurseForge.
     fn pick_zip(cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -921,6 +1301,16 @@ impl HostForm {
 impl Render for HostForm {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rem = window.rem_size();
+        self.look_up_plan(cx);
+        // Until the player moves it, memory follows the source: 2 GB for a
+        // vanilla server, 6 GB for a modded one (a pack's own recommendation
+        // is applied when its files are read).
+        if !self.memory_touched {
+            let gb = hopper::hosting::default_memory_mb(self.modded(cx), 0) as f32 / 1024.0;
+            if (self.memory.read(cx).value().start() - gb).abs() > 0.01 {
+                self.memory.update(cx, |s, cx| s.set_value(gb, window, cx));
+            }
+        }
         let hint = self.default_name(cx);
         if hint != self.name_hint {
             self.name.update(cx, |i, cx| i.set_placeholder(hint.clone(), window, cx));
@@ -945,7 +1335,23 @@ impl Render for HostForm {
         let from_instance = matches!(self.source, Source::Instance(_));
         let picked_name = match &self.source {
             Source::Instance(r) => instances.iter().find(|(p, _)| p == r).map(|(_, n)| n.clone()),
-            Source::Fresh | Source::Files(_) => None,
+            _ => None,
+        };
+        let fresh = matches!(self.source, Source::Fresh);
+        let folder_src = matches!(self.source, Source::Folder(_));
+        // Tabs: what the server starts from. Folder is for this PC only (a
+        // Hopper Server adds folders on its own machine).
+        let mut tabs: Vec<(SharedString, Option<usize>)> =
+            vec![("An instance".into(), None), ("Modpack".into(), None), ("Fresh".into(), None), ("Zip".into(), None)];
+        if self.place.is_none() {
+            tabs.push(("Folder".into(), None));
+        }
+        let tab_ix = match &self.source {
+            Source::Instance(_) => 0,
+            Source::Pack | Source::Files(_) => 1,
+            Source::Fresh => 2,
+            Source::Zip(_) => 3,
+            Source::Folder(_) => 4,
         };
         let files = match &self.source {
             Source::Files(p) => Some(p.clone()),
@@ -956,38 +1362,52 @@ impl Render for HostForm {
         let roots: Vec<PathBuf> = instances.iter().map(|(r, _)| r.clone()).collect();
         let source_field = Field::new()
             .label("Start from")
-            .description(if from_instance {
-                "Its loader, server-side mods, config, kubejs and datapacks. Client-only mods stay out."
-            } else {
-                "A fresh server: pick the game and server type."
+            .description(match &self.source {
+                Source::Instance(_) => "Its loader, server-side mods, config, kubejs and datapacks. Client-only mods stay out.",
+                Source::Pack => "A CurseForge or Modrinth pack: its server files if it has them, otherwise built from the client pack.",
+                Source::Zip(_) => "A server pack zip or .mrpack on this PC.",
+                Source::Folder(_) => "A server folder on this PC: a copy goes in the servers folder; the original stays as it is.",
+                Source::Fresh | Source::Files(_) => "A fresh server: pick the game and server type.",
             })
             .child(
                 v_flex()
                     .gap_2()
                     .child(
-                        TabBar::new("host-source")
-                            .segmented()
-                            .small()
-                            .selected_index(usize::from(!from_instance))
-                            .child(Tab::new().label("An instance"))
-                            .child(Tab::new().label("Fresh"))
-                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                let first = this.store.read(cx).instances().first().map(|i| i.root.clone());
+                        // What the dialog shows depends on it: tabs, not a
+                        // value picker (see widgets::underline_tabs).
+                        widgets::underline_tabs(
+                            "host-source",
+                            tabs,
+                            tab_ix,
+                            cx.listener(|this, ix: &usize, _, cx| {
+                                let first = this
+                                    .store
+                                    .read(cx)
+                                    .instances()
+                                    .iter()
+                                    .find(|i| ServerLoader::from_instance(&i.loader).is_ok())
+                                    .map(|i| i.root.clone());
                                 this.source = match (*ix, first) {
                                     (0, Some(r)) => Source::Instance(r),
+                                    (1, _) => Source::Pack,
+                                    (3, _) => Source::Zip(None),
+                                    (4, _) => Source::Folder(None),
                                     _ => Source::Fresh,
                                 };
+                                this.zip_read = None;
                                 this.java = None;
                                 cx.notify();
-                            })),
+                            }),
+                            cx,
+                        ),
                     )
                     .when(from_instance, |c| {
-                        c.child(widgets::picker(
+                        c.child(widgets::field_picker(
                             "host-instance",
                             picked_name.unwrap_or_else(|| "Pick an instance".into()),
                             instances.iter().map(|(r, n)| (n.clone(), Some(r) == match &self.source {
                                 Source::Instance(p) => Some(p),
-                                Source::Fresh | Source::Files(_) => None,
+                                _ => None,
                             })).collect(),
                             rem,
                             Rc::new(move |ix, _, cx| {
@@ -1000,6 +1420,82 @@ impl Render for HostForm {
                                 }
                             }),
                         ))
+                    })
+                    .when(matches!(self.source, Source::Pack), |c| {
+                        let (store, place) = (self.store.clone(), self.place.clone());
+                        c.child(
+                            h_flex()
+                                .gap_2()
+                                .flex_wrap()
+                                .child(
+                                    Button::new("host-find-pack")
+                                        .outline()
+                                        .icon(IconName::Compass)
+                                        .label("Find a modpack…")
+                                        .on_click(move |_, window, cx| {
+                                            // Browse's Make a server opens this form again, with the pack.
+                                            store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::BrowsePacksFor(place.clone())));
+                                            window.close_dialog(cx);
+                                        }),
+                                )
+                                .child(widgets::caption("Its Make a server button brings it back here.", cx).text_xs()),
+                        )
+                    })
+                    .when(matches!(self.source, Source::Zip(_)), |c| {
+                        let read = self.zip_read.clone();
+                        c.child(
+                            v_flex()
+                                .w_full()
+                                .max_w(FIELD_W)
+                                .gap_1p5()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("host-pick-zip")
+                                                .outline()
+                                                .icon(IconName::FileArchive)
+                                                .label(if read.is_some() { "Pick another zip…" } else { "Pick a zip…" })
+                                                .on_click(cx.listener(|this, _, _, cx| this.pick_source_zip(cx))),
+                                        )
+                                        .children(read.as_ref().map(|z| {
+                                            widgets::caption(z.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), cx)
+                                                .text_xs()
+                                                .truncate()
+                                        })),
+                                )
+                                .children(read.map(|z| match z.error {
+                                    Some(e) => div().text_sm().text_color(theme.danger).child(e),
+                                    None => widgets::caption(
+                                        format!(
+                                            "Minecraft {}{}",
+                                            z.mc,
+                                            if z.loader.is_empty() { String::new() } else { format!(" · {}", z.loader) }
+                                        ),
+                                        cx,
+                                    ),
+                                })),
+                        )
+                    })
+                    .when(folder_src, |c| {
+                        let picked = match &self.source {
+                            Source::Folder(Some(p)) => Some(p.display().to_string()),
+                            _ => None,
+                        };
+                        c.child(
+                            h_flex()
+                                .w_full()
+                                .max_w(FIELD_W)
+                                .gap_2()
+                                .child(
+                                    Button::new("host-pick-folder")
+                                        .outline()
+                                        .icon(IconName::FolderOpen)
+                                        .label(if picked.is_some() { "Pick another folder…" } else { "Pick a folder…" })
+                                        .on_click(cx.listener(|this, _, _, cx| this.pick_source_folder(cx))),
+                                )
+                                .children(picked.map(|p| widgets::caption(p, cx).text_xs().truncate().min_w_0())),
+                        )
                     }),
             );
         // From a pack's server files: no instance to pick.
@@ -1013,8 +1509,11 @@ impl Render for HostForm {
                         p.game_version
                     );
                     match (&self.zip, &p.build) {
+                        (_, Build::ServerFiles(_)) if on_panel => format!(
+                            "The pack author's server mods and configs, on {on}."
+                        ),
                         _ if on_panel => format!(
-                            "Its server files, or built from the pack if it has none, on {on}."
+                            "Built from the client pack on {on}, client-only mods left out."
                         ),
                         (Some(z), _) => format!(
                             "From {}, the zip you downloaded.",
@@ -1045,8 +1544,33 @@ impl Render for HostForm {
                                 .text_sm()
                                 .child(Icon::new(IconName::Server).small())
                                 .child(div().font_semibold().child(p.name.clone()))
-                                .child(widgets::caption(p.version.clone(), cx)),
+                                // The same chip as Browse's card.
+                                .child(match &p.build {
+                                    Build::ServerFiles(_) => widgets::chip(cx.theme().success).child("Server files"),
+                                    Build::ClientPack(..) => widgets::chip(cx.theme().warning).child("From client pack"),
+                                })
+                                .when(p.versions.is_empty(), |r| r.child(widgets::caption(p.version.clone(), cx))),
                         )
+                        .when(!p.versions.is_empty(), |c| {
+                            let view = cx.entity();
+                            let list = p.versions.clone();
+                            c.child(widgets::field_picker(
+                                "host-version",
+                                p.version.clone(),
+                                list.iter()
+                                    .map(|f| {
+                                        let tag = if f.has_server_files() { " · server files" } else { "" };
+                                        (format!("{}{tag}", f.display_name), f.id == p.file_id)
+                                    })
+                                    .collect(),
+                                rem,
+                                Rc::new(move |ix, _, cx| {
+                                    if let Some(f) = list.get(ix).cloned() {
+                                        view.update(cx, |this, cx| this.pick_version(f, cx));
+                                    }
+                                }),
+                            ))
+                        })
                         .when(!on_panel, |c| c.children(self.website_only_notice(p, cx)))
                         .children(p.newer.clone().map(|(warning, alt)| {
                             h_flex()
@@ -1073,29 +1597,64 @@ impl Render for HostForm {
                 ),
             None => source_field,
         };
-        let pack_inst = match &self.source {
-            Source::Instance(r) => self.store.read(cx).instance(r).cloned().filter(|i| i.pack.is_some()),
-            Source::Fresh | Source::Files(_) => None,
-        };
-        let pack_field = pack_inst.map(|i| {
-            let known = hopper::hosting::has_server_pack(&i);
-            Field::new()
-                .label("Server pack")
-                .description(if known {
-                    "The pack author's server files: exactly their server mods and configs. Often a big download."
+        // What the server gets, by case: a choice only when the pack has
+        // server files for this version; otherwise what Hopper does instead.
+        let pack_field = match (&self.source, self.plan().cloned()) {
+            (Source::Instance(r), Some(plan)) => {
+                let inst = self.store.read(cx).instance(r).cloned();
+                let curse = inst.as_ref().is_some_and(hopper::hosting::may_have_server_pack);
+                let body = v_flex().w_full().max_w(FIELD_W).gap_1p5().text_sm();
+                let body = if plan.loading {
+                    body.child(widgets::caption("Checking the pack's server files…", cx))
+                } else if let Some((name, size)) = plan.server_pack.clone() {
+                    body.child(
+                        Checkbox::new("host-server-pack")
+                            .label(format!("Use the author's server files ({name})"))
+                            .checked(self.server_pack)
+                            .on_change(cx.listener(|this, v: &bool, _, cx| {
+                                this.server_pack = *v;
+                                cx.notify();
+                            })),
+                    )
+                    .child(widgets::caption(
+                        format!(
+                            "About {}. Untick to build from your instance instead: the mods you play with, client-only ones left out.",
+                            hopper::instance_ops::human_bytes(size)
+                        ),
+                        cx,
+                    ))
                 } else {
-                    "If the author published one for this version, Hopper uses it; otherwise it builds from the instance."
-                })
-                .child(
-                    Checkbox::new("host-server-pack")
-                        .label("Use the pack's official server pack")
-                        .checked(self.server_pack)
-                        .on_change(cx.listener(|this, v: &bool, _, cx| {
-                            this.server_pack = *v;
-                            cx.notify();
-                        })),
-                )
-        });
+                    body.child(
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(widgets::chip(theme.warning).child("From your instance"))
+                            .child(widgets::caption(
+                                if curse {
+                                    "No server pack for this version, so Hopper builds it from your instance."
+                                } else {
+                                    "Hopper builds it from your instance."
+                                },
+                                cx,
+                            )),
+                    )
+                };
+                let counts = plan.counts.filter(|_| !self.uses_server_pack());
+                let body = body.children(counts.map(|(keep, left)| {
+                    let mods = |n: usize| if n == 1 { "1 mod".to_string() } else { format!("{n} mods") };
+                    widgets::caption(format!("Keeps {} · leaves out {left} client-only", mods(keep)), cx)
+                }));
+                // Every mod is client-only: the server would be plain Minecraft.
+                let body = body.children(counts.filter(|(k, l)| *k == 0 && *l > 0).zip(inst).map(|((_, l), i)| {
+                    div().text_color(theme.warning).child(format!(
+                        "All {l} mods are client-only, so this server would be plain Minecraft {}.",
+                        i.game_version
+                    ))
+                }));
+                Some(Field::new().label("Server files").child(body))
+            }
+            _ => None,
+        };
         let gb = self.memory.read(cx).value().start();
         let view = cx.entity();
         let java = java_field(
@@ -1114,8 +1673,27 @@ impl Render for HostForm {
         let problem = self.problem(cx);
         let hosted_root = self.store.read(cx).hosted_root();
         let host = self.host_label(cx);
+        // What Create will do, in one line: download, room, RCON, mods.
+        let summary = {
+            let mut parts = Vec::new();
+            match self.download() {
+                Some(n) => parts.push(format!("About {} to download", hopper::instance_ops::human_bytes(n))),
+                None if matches!(self.source, Source::Fresh) => parts.push("Downloads the server".to_string()),
+                None => {}
+            }
+            match self.free() {
+                0 => {}
+                n => parts.push(format!("{} free on {host}", hopper::instance_ops::human_bytes(n))),
+            }
+            parts.push("RCON on".to_string());
+            let client_pack = matches!(&self.source, Source::Files(p) if matches!(p.build, Build::ClientPack(..)));
+            if (client_pack || matches!(self.source, Source::Instance(_) | Source::Zip(_))) && !self.uses_server_pack() {
+                parts.push("client-only mods stay out".to_string());
+            }
+            parts.join(" · ")
+        };
         // "of 48 GB on rig", and a word when that leaves the machine little.
-        let host_ram = self.host.as_ref().filter(|(p, _, _)| *p == self.place).map(|(_, n, total)| {
+        let host_ram = self.host.as_ref().filter(|(p, ..)| *p == self.place).map(|(_, n, total, _)| {
             (
                 format!("of {total:.0} GB on {n}"),
                 (gb as f64 > total * 0.75).then(|| format!("That leaves little for {n} and its other servers.")),
@@ -1127,18 +1705,23 @@ impl Render for HostForm {
             .filter(|((p, port), _)| *p == self.place && self.port_value(cx) == Some(*port))
             .and_then(|((_, port), c)| Some((c.message(*port, &host)?, c.suggest)))
             .map(|(msg, suggest)| {
+                // The form's field column doesn't shrink text to fit, so the
+                // box is held to the column's width (the dialog is 44rem).
                 h_flex()
                     .w_full()
+                    .max_w(FIELD_W)
                     .min_w_0()
                     .gap_2()
                     .p_2()
                     .rounded(px(crate::theme::RADIUS))
                     .bg(theme.warning.opacity(0.08))
                     .text_sm()
+                    .items_start()
                     .child(div().flex_1().min_w_0().child(msg))
                     .when_some(suggest, |r, s| {
                         r.child(
                             Button::new("host-port-free")
+                                .flex_none()
                                 .outline()
                                 .small()
                                 .label(format!("Use {s}"))
@@ -1179,7 +1762,7 @@ impl Render for HostForm {
                 } else {
                     "Runs on this PC while Hopper is open."
                 })
-                .child(widgets::picker(
+                .child(widgets::field_picker(
                     "host-place",
                     current,
                     items,
@@ -1203,24 +1786,30 @@ impl Render for HostForm {
                     }),
                 ))
         });
-        v_flex()
+        // The form scrolls when the window is short; what Create will do
+        // (and why it can't yet) stays in sight above the buttons.
+        let fields = v_flex()
+            .id("host-form")
             .gap_4()
+            .max_h(widgets::dialog_room(window) - rem * 11.)
+            .overflow_y_scroll()
             .child(settings_form(rem).children(place_field).child(source_field).children(pack_field))
-            .when(!from_instance && files.is_none(), |c| c.child(self.base.clone()))
-            .child(
+            .when(fresh, |c| c.child(self.base.clone()))
+            // A modpack is picked in Browse first: nothing to fill in yet.
+            .when(!matches!(self.source, Source::Pack), |c| c.child(
                 settings_form(rem)
-                    .when(files.is_some() || from_instance, |f| {
+                    .when(!fresh, |f| {
                         f.child(
                             Field::new()
                                 .label("Name")
-                                .child(div().w_80().child(Input::new(&self.name).small())),
+                                .child(div().w_80().child(Input::new(&self.name))),
                         )
                     })
                     .child(
                         Field::new()
                             .label("MOTD")
                             .description("The line players see under the server in their list.")
-                            .child(div().w_80().child(Input::new(&self.motd).small())),
+                            .child(div().w_80().child(Input::new(&self.motd))),
                     )
                     .child(
                         Field::new()
@@ -1239,19 +1828,22 @@ impl Render for HostForm {
                     .child(
                         Field::new()
                             .label("Port")
-                            .description({
+                            .description_fn({
                                 let auto = self.join.as_ref().filter(|(p, ..)| *p == self.place).and_then(|(_, a, ..)| *a);
                                 let join = self.join_line(cx).map(|j| format!(" {j}")).unwrap_or_default();
-                                match (on_panel, auto) {
+                                let text = match (on_panel, auto) {
                                     (true, Some(a)) => format!("Empty: the panel uses {a}.{join}"),
                                     (true, None) => format!("Empty: the panel picks a free one.{join}"),
-                                    (false, _) => format!("{} Forward the port on your router for friends outside your network.", join.trim()),
-                                }
+                                    (false, _) => format!("{join} Forward the port on your router for friends outside your network.").trim_start().to_string(),
+                                };
+                                move |_, _| div().max_w(FIELD_W).child(text.clone())
                             })
                             .child(
                                 v_flex()
+                                    .w_full()
+                                    .min_w_0()
                                     .gap_1p5()
-                                    .child(div().w_32().child(Input::new(&self.port).small()))
+                                    .child(div().w_32().child(Input::new(&self.port)))
                                     .children(port_warning),
                             ),
                     )
@@ -1263,10 +1855,10 @@ impl Render for HostForm {
                                     Some(d) => format!("A name players join by, under {d}. Empty: the server's name."),
                                     None => "A name players join by, when the panel's server addresses are on.".to_string(),
                                 })
-                                .child(div().w_56().child(Input::new(&self.address).small())),
+                                .child(div().w_56().child(Input::new(&self.address))),
                         )
                     })
-                    .when(!on_panel, |f| f.child(java))
+                    .when(!on_panel && !folder_src, |f| f.child(java))
                     .child(
                         Field::new().label("EULA").child(
                             h_flex()
@@ -1288,12 +1880,33 @@ impl Render for HostForm {
                                         .on_click(|_, _, cx| cx.open_url(hopper::hosting::EULA_URL)),
                                 ),
                         ),
+                    )
+                    .child(
+                        Field::new().child(
+                            Checkbox::new("host-start")
+                                .label("Start it when it's ready")
+                                .checked(self.start)
+                                .on_change(cx.listener(|this, v: &bool, _, cx| {
+                                    this.start = *v;
+                                    cx.notify();
+                                })),
+                        ),
                     ),
+            ))
+            ;
+        v_flex()
+            .gap_2()
+            .child(fields)
+            .child(
+                v_flex()
+                    .gap_1()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .when(!on_panel, |c| c.child(widgets::caption(format!("Goes in {hosted_root}"), cx).text_xs().truncate()))
+                    .child(widgets::caption(summary, cx).text_xs())
+                    .when_some(problem, |c, p| c.child(div().text_sm().text_color(theme.muted_foreground).child(p))),
             )
-            .when(!on_panel, |c| c.child(widgets::caption(format!("Goes in {hosted_root}"), cx).text_xs()))
-            .when_some(problem, |c, p| {
-                c.child(div().text_sm().text_color(theme.muted_foreground).child(p))
-            })
     }
 }
 
@@ -1360,35 +1973,49 @@ pub fn open_for_files(
                     None => hopper::cf::get_mod(f2.project).ok(),
                 };
                 let c = m.as_ref().map(|m| check(m, &v)).unwrap_or_default();
+                // What it downloads first: the server pack.
+                let download = match &f2.file {
+                    Some(f) => f.file_length,
+                    None => c.download,
+                };
+                // The pack's versions (CurseForge), for the dialog's Version list.
+                let versions: Vec<hopper::cf::File> = m
+                    .as_ref()
+                    .and_then(|m| hopper::source::files(m.id, "", hopper::cf::Loader::Any).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|f| f.is_server_pack != Some(true))
+                    .take(50)
+                    .collect();
                 // A newer version without server files (CurseForge): say so,
                 // and have it ready to build from the client pack.
-                let newer = m.and_then(|m| {
-                    let files: Vec<hopper::cf::File> = hopper::source::files(m.id, "", hopper::cf::Loader::Any)
-                        .ok()?
-                        .into_iter()
-                        .filter(|f| f.is_server_pack != Some(true))
-                        .take(50)
-                        .collect();
-                    let rows: Vec<(&str, bool)> = files
+                let newer = m.as_ref().and_then(|m| {
+                    let rows: Vec<(&str, bool)> = versions
                         .iter()
                         .map(|f| (f.display_name.as_str(), f.has_server_files()))
                         .collect();
                     let view = hopper::hosting::pack_versions::view(&rows);
-                    let newest = files.get(view.newest_client?)?.clone();
-                    let c = check(&m, &newest);
-                    Some((view.warning?, m, newest, c))
+                    let newest = versions.get(view.newest_client?)?.clone();
+                    let c = check(m, &newest);
+                    Some((view.warning?, newest, c))
                 });
-                anyhow::Ok((v, c, newer))
+                anyhow::Ok((v, c, newer, download, m, versions))
             })
             .await;
         handle
             .update(cx, |_, window, cx| match r {
-                Ok((v, c, newer)) => {
+                Ok((v, c, newer, download, m, versions)) => {
+                    let (m, versions) = (m.map(Rc::new), Rc::new(versions));
                     let mut p = PackFiles::new(Build::ServerFiles(files), name.clone(), &v);
                     p.check = c;
-                    p.newer = newer.map(|(warning, m, f, c)| {
-                        let mut alt = PackFiles::new(Build::ClientPack(Box::new(m), Box::new(f.clone())), name, &f);
+                    p.download = download;
+                    p.pack = m.clone();
+                    p.versions = versions.clone();
+                    p.newer = newer.zip(m.clone()).map(|((warning, f, c), m)| {
+                        let mut alt = PackFiles::new(Build::ClientPack(Box::new((*m).clone()), Box::new(f.clone())), name, &f);
                         alt.check = c;
+                        alt.pack = Some(m);
+                        alt.versions = versions;
                         (warning, Rc::new(alt))
                     });
                     open_files(store, p, panel, window, cx)
@@ -1421,16 +2048,32 @@ pub fn open_for_client_pack(
             .background_spawn(async move {
                 let f = hopper::browse::newest_pack_file(&p2)?;
                 let c = check(&p2, &f);
-                anyhow::Ok((f, c))
+                // The pack's versions (CurseForge), for the Version list.
+                let versions: Vec<hopper::cf::File> = if p2.modrinth.is_some() {
+                    Vec::new()
+                } else {
+                    hopper::source::files(p2.id, "", hopper::cf::Loader::Any)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|f| f.is_server_pack != Some(true))
+                        .take(50)
+                        .collect()
+                };
+                anyhow::Ok((f, c, versions))
             })
             .await;
         handle
             .update(cx, |_, window, cx| match r {
-                Ok((f, c)) => {
+                Ok((f, c, versions)) => {
                     let name = pack.name.clone();
+                    let rc = Rc::new(pack.clone());
                     let build = Build::ClientPack(Box::new(pack), Box::new(f.clone()));
                     let mut p = PackFiles::new(build, name, &f);
                     p.check = c;
+                    if !versions.is_empty() {
+                        p.pack = Some(rc);
+                        p.versions = Rc::new(versions);
+                    }
                     open_files(store, p, panel, window, cx)
                 }
                 Err(e) => window.push_notification(
@@ -1451,10 +2094,12 @@ fn open_form(form: Entity<HostForm>, window: &mut Window, cx: &mut App) {
     window.open_dialog(cx, move |dialog, window, cx| {
         let f2 = form.clone();
         let ready = form.read(cx).problem(cx).is_none();
-        let title = if form.read(cx).place.is_some() { "New server" } else { "Host a server on this PC" };
+        // One title wherever it goes: "Where" says the rest.
+        let title = "New server";
         dialog
             .title(title)
             .w(rems(44.).to_pixels(window.rem_size()))
+            .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
             .child(form.clone())
             .footer(crate::dialogs::footer("Create server", ready))
             .on_ok(move |_, window, cx| HostForm::create(&f2, window, cx))

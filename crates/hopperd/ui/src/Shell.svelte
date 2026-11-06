@@ -51,6 +51,7 @@
     session.owner = owner;
     session.trueOwner = me?.role === 'owner';
     session.home = me?.panel_folder || '';
+    session.servers = me?.servers_folder || '';
   });
 
   let route = $state(location.hash.slice(1) || '/');

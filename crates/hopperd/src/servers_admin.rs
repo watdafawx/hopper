@@ -318,11 +318,33 @@ async fn import_folder(State(app): State<Arc<App>>, headers: HeaderMap, method: 
     let src = crate::absolute(FsPath::new(b.path.trim()));
     crate::home::check(&app, &src)?;
     if !src.join("server.properties").is_file() {
-        return Err(bad(format!("{} has no server.properties, so it isn't a server folder.", src.display())));
+        return Err(bad("That folder has no server.properties, so it isn't a server folder."));
     }
     if app.servers.list().iter().any(|e| same_path(&e.root, &src)) {
         return Err(bad("The panel has that server already."));
     }
+    // Added anyway, but said: what would stop it starting, and a port
+    // another server here already uses.
+    let warnings = {
+        let port = hopper_core::hosting::Properties::load(&src.join("server.properties")).unwrap_or_default().port();
+        let mut used: Vec<(String, u16)> = app.servers.list().iter().map(|e| (e.name.clone(), crate::router::port_of(e))).collect();
+        {
+            let c = app.cfg.read().unwrap();
+            if c.router.enabled {
+                used.push(("The address router".into(), c.router.port));
+            }
+        }
+        let (dir, host) = (src.clone(), crate::config::hostname());
+        blocking(move || {
+            let mut w: Vec<String> = hopper_core::hosting::script::folder_problem(&dir).into_iter().collect();
+            let c = hopper_core::hosting::ports::check_here(port, &used);
+            if !c.taken_by.is_empty() {
+                w.extend(c.message(port, &host));
+            }
+            Ok(w)
+        })
+        .await?
+    };
     if !b.copy {
         // RCON for console commands and player info; an owner's own setup
         // is kept. A running server picks it up when it next starts.
@@ -342,7 +364,7 @@ async fn import_folder(State(app): State<Arc<App>>, headers: HeaderMap, method: 
         app.refresh.notify_one();
         let id = app.servers.list().into_iter().find(|e| same_path(&e.root, &src)).map(|e| e.id.clone());
         log::info!("added {} (runs where it is)", src.display());
-        return Ok(Json(json!({ "id": id })));
+        return Ok(Json(json!({ "id": id, "warnings": warnings })));
     }
     let root = servers_root(&app)?;
     let name = if b.name.trim().is_empty() { src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { b.name.trim().to_string() };
@@ -362,7 +384,7 @@ async fn import_folder(State(app): State<Arc<App>>, headers: HeaderMap, method: 
         a.rescan();
         a.refresh.notify_one();
         let id = a.servers.list().into_iter().find(|e| e.root == dest).map(|e| e.id.clone());
-        Ok(json!({ "id": id, "path": dest }))
+        Ok(json!({ "id": id, "path": dest, "warnings": warnings }))
     });
     Ok(Json(json!({ "job": job })))
 }
@@ -470,8 +492,14 @@ struct ZipBody {
     port: Option<u16>,
     #[serde(default)]
     address: String,
+    /// The line in players' server lists; empty: the name.
+    #[serde(default)]
+    motd: String,
     #[serde(default)]
     accept_eula: bool,
+    /// Start it once it's made.
+    #[serde(default)]
+    start: bool,
     /// For a server pack that doesn't say what it runs on.
     #[serde(default)]
     mc_version: String,
@@ -513,10 +541,14 @@ fn common(app: &App, address: &str, port: Option<u16>, accept_eula: bool) -> Api
     Ok(Common { root, address, auto_port })
 }
 
-fn options(c: &Common, name: &str, mc: &str, loader: ServerLoader, java: &FsPath, memory_mb: Option<u32>, port: Option<u16>) -> CreateOptions {
+#[allow(clippy::too_many_arguments)]
+fn options(c: &Common, name: &str, mc: &str, loader: ServerLoader, java: &FsPath, memory_mb: Option<u32>, port: Option<u16>, motd: &str) -> CreateOptions {
     let mut o = CreateOptions::new(name.trim(), &c.root, mc, loader, java);
     if let Some(m) = memory_mb {
         o.memory_mb = m;
+    }
+    if !motd.trim().is_empty() {
+        o.motd = motd.trim().to_string();
     }
     if let Some(p) = port.or(c.auto_port) {
         o.port = p;
@@ -526,24 +558,33 @@ fn options(c: &Common, name: &str, mc: &str, loader: ServerLoader, java: &FsPath
 }
 
 /// After any create: the address, the client-only mods left out, the list.
-fn finish(app: &App, folder: &FsPath, address: Option<String>, skipped: &[(String, String)]) -> anyhow::Result<Value> {
+/// Starts a server just made in `folder`, when the player asked to.
+pub(crate) fn start_new(app: &App, folder: &FsPath) {
+    match app.servers.list().into_iter().find(|e| e.root == folder) {
+        Some(e) => {
+            if let Err(err) = app.servers.act(&e, hopper_core::panel::PanelAction::Start) {
+                log::warn!("starting {}: {err:#}", folder.display());
+            }
+        }
+        None => log::warn!("starting {}: the panel doesn't list it yet", folder.display()),
+    }
+}
+
+fn finish(app: &App, folder: &FsPath, address: Option<String>, skipped: &[(String, String)], start: bool) -> anyhow::Result<Value> {
     if let Some(addr) = address {
         hopper_core::hosting::router::RouteSettings { addresses: vec![addr], ..Default::default() }.save(folder)?;
         app.router.changed();
     }
-    if !skipped.is_empty() {
-        let lines: Vec<String> = skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
-        let _ = std::fs::write(
-            folder.join("left-out-client-mods.txt"),
-            format!("Hopper left these mods out of the server as client-only. If the server needs one, copy it from the pack into mods.\n\n{}\n", lines.join("\n")),
-        );
-    }
+    hopper_core::hosting::write_left_out(folder, skipped);
     app.rescan();
     // The job ran after its request: tell open clients the server is here now.
     crate::changes::emit(app, None, &["list"]);
     app.refresh.notify_one();
     let id = app.servers.list().into_iter().find(|e| e.root == folder).map(|e| e.id.clone());
     log::info!("made {}", folder.display());
+    if start {
+        start_new(app, folder);
+    }
     Ok(json!({ "id": id, "path": folder, "left_out": skipped.len() }))
 }
 
@@ -566,12 +607,13 @@ fn start_zip_job(app: &Arc<App>, b: ZipBody) -> ApiResult<u64> {
         };
         let name = if b.name.trim().is_empty() { info.name.clone() } else { b.name.clone() };
         let java = crate::manage_api::java_for(&mc, job)?;
-        let memory = b.memory_mb.or(info.target.as_ref().map(|t| t.recommended_mb).filter(|m| *m >= 2048));
-        let o = options(&c, &name, &mc, ServerLoader::from_instance(&loader)?, &java, memory, b.port);
+        let memory = b.memory_mb.or(info.target.as_ref().map(|t| t.recommended_mb).filter(|m| *m >= 2048).map(|m| hopper_core::hosting::default_memory_mb(true, m)));
+        let o = options(&c, &name, &mc, ServerLoader::from_instance(&loader)?, &java, memory, b.port, &b.motd);
         let (r, _used, note) = zip_import::create_from_local_zip(&zip, &o, job)?;
         if let Some(n) = note {
             job.note(n);
         }
+        job.detail(r.ready_line());
         for n in r.missing_notes() {
             job.note(n);
         }
@@ -579,7 +621,7 @@ fn start_zip_job(app: &Arc<App>, b: ZipBody) -> ApiResult<u64> {
         if zip.starts_with(a.data_dir.join(INCOMING)) {
             let _ = std::fs::remove_file(&zip);
         }
-        finish(&a, &r.root, c.address, &r.skipped)
+        finish(&a, &r.root, c.address, &r.skipped, b.start)
     }))
 }
 
@@ -696,7 +738,7 @@ async fn pack_check(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
         hopper_core::hosting::BuildChoice::ClientPack => "client_pack",
         hopper_core::hosting::BuildChoice::NeedsZip => "needs_zip",
     };
-    Ok(Json(json!({ "choice": choice, "pack": page(&c.pack), "server_files": page(&c.server_files) })))
+    Ok(Json(json!({ "choice": choice, "pack": page(&c.pack), "server_files": page(&c.server_files), "download": c.download })))
 }
 
 #[derive(Deserialize)]
@@ -709,8 +751,14 @@ struct PackBody {
     port: Option<u16>,
     #[serde(default)]
     address: String,
+    /// The line in players' server lists; empty: the name.
+    #[serde(default)]
+    motd: String,
     #[serde(default)]
     accept_eula: bool,
+    /// Start it once it's made.
+    #[serde(default)]
+    start: bool,
 }
 
 /// A server from a pack version: its server files when it has them (the
@@ -752,20 +800,18 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
         if let Some(files) = files {
             let t = hopper_core::hosting::pack_target(&files, job)?;
             let java = crate::manage_api::java_for(&t.mc_version, job)?;
-            let memory = b.memory_mb.or(Some(t.recommended_mb).filter(|m| *m >= 2048));
-            let o = options(&c, &b.name, &t.mc_version, ServerLoader::from_instance(&t.loader)?, &java, memory, b.port);
+            let memory = b.memory_mb.or(Some(t.recommended_mb).filter(|m| *m >= 2048).map(|m| hopper_core::hosting::default_memory_mb(true, m)));
+            let o = options(&c, &b.name, &t.mc_version, ServerLoader::from_instance(&t.loader)?, &java, memory, b.port, &b.motd);
             let r = hopper_core::hosting::create_from_server_files(&files, &o, job)?;
             if r.website_only.is_some() {
                 job.note(hopper_core::hosting::BUILT_FROM_PACK);
-                job.note(format!("{} mods copied, {} left out as client-only.", r.create.mods_copied, r.create.skipped.len()));
-            } else {
-                job.note(format!("From {}: {} mods", r.server_pack, r.create.mods_copied));
             }
+            job.detail(r.ready_line());
             for n in r.create.missing_notes() {
                 job.note(n);
             }
             crate::pack_api::link_new_server(&r.create.root, mr, project, file_id);
-            let mut v = finish(&a, &r.create.root, c.address, &r.create.skipped)?;
+            let mut v = finish(&a, &r.create.root, c.address, &r.create.skipped, b.start)?;
             v["built_from_pack"] = json!(r.website_only.is_some());
             v["missing"] = json!(r.create.missing.len());
             return Ok(v);
@@ -778,14 +824,16 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
         let mc = mc_of(&file.game_versions);
         let java = crate::manage_api::java_for(&mc, job)?;
         // The pack's own Minecraft and loader replace these.
-        let o = options(&c, &b.name, &mc, ServerLoader::Vanilla, &java, b.memory_mb, b.port);
+        // A client pack is modded: its default memory, not vanilla's.
+        let memory = b.memory_mb.or(Some(hopper_core::hosting::default_memory_mb(true, 0)));
+        let o = options(&c, &b.name, &mc, ServerLoader::Vanilla, &java, memory, b.port, &b.motd);
         let (r, _used) = hopper_core::hosting::create_from_client_pack(&pack, &file, &o, job)?;
-        job.note(format!("Built from the client pack: {} mods copied, {} left out as client-only.", r.mods_copied, r.skipped.len()));
+        job.detail(r.ready_line());
         for n in r.missing_notes() {
             job.note(n);
         }
         crate::pack_api::link_new_server(&r.root, mr, project, file_id);
-        let mut v = finish(&a, &r.root, c.address, &r.skipped)?;
+        let mut v = finish(&a, &r.root, c.address, &r.skipped, b.start)?;
         v["missing"] = json!(r.missing.len());
         Ok(v)
     });

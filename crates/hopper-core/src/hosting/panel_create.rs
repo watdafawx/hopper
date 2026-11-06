@@ -22,6 +22,8 @@ pub struct PanelServer {
     pub address: String,
     /// Build from the pack's official server pack when it has one.
     pub server_pack: bool,
+    /// Start it once it's made.
+    pub start: bool,
 }
 
 /// What [`create_from_instance`] did.
@@ -63,6 +65,7 @@ pub fn create_from_instance(
         "port": o.port,
         "address": o.address.trim(),
         "accept_eula": true,
+        "start": o.start,
     });
     let with = |extra: Value| {
         let mut b = common.clone();

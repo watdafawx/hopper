@@ -381,7 +381,7 @@
           <a class="btn sm {p.source}" href={p.url} target="_blank" rel="noreferrer noopener"><Brand name={p.source} />Open on {SITE[p.source]}</a>
           {#if packs}
             {#if p.server_files}<span class="chip running" title="The pack author's own server files"><Server size={11} />Server files</span>
-            {:else}<span class="chip starting" title="This pack has no official server files: Hopper builds the server from the pack, leaving client-only mods out"><Hammer size={11} />Built from the client pack</span>{/if}
+            {:else}<span class="chip starting" title="This pack has no official server files: Hopper builds the server from the pack, leaving client-only mods out"><Hammer size={11} />From client pack</span>{/if}
           {:else if p.side === 'client'}<span class="chip starting" title="It says it runs on the client only: a server doesn't need it"><Monitor size={11} />Client only</span>{/if}
           {#each p.links as l (l.url)}
             {@const LIcon = LINK_ICON[l.label]}

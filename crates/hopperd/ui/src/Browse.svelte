@@ -531,7 +531,7 @@
             <div class="act">
               {#if type === 'modpacks'}
                 {#if r.server_files === true}<span class="chip running" title="The pack has server files: the mods its author picked for servers"><Server size={11} />Server files</span>
-                {:else if r.server_files === false}<span class="chip starting" title="No server files: Hopper builds the server from the client pack and leaves client-only mods out"><Hammer size={11} />Built from client pack</span>{/if}
+                {:else if r.server_files === false}<span class="chip starting" title="No server files: Hopper builds the server from the client pack and leaves client-only mods out"><Hammer size={11} />From client pack</span>{/if}
                 {#if session.owner}<button class="btn sm" onclick={(e) => { e.stopPropagation(); making = preset(r); }}>Make a server</button>{/if}
               {:else}
                 {#if r.side === 'client'}<span class="chip starting" title="Modrinth says this runs on the client only: a server doesn't need it"><Monitor size={11} />Client only</span>{/if}
