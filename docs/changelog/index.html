@@ -136,11 +136,27 @@ footer a:hover{color:var(--fg)}
   function show(){var a=set[i];img.src=a.href;img.alt=a.querySelector('img').alt;
     var c=a.parentNode.querySelector('figcaption');cap.textContent=c?c.textContent:'';
     num.textContent=set.length>1?(i+1)+' / '+set.length:'';
-    prev.disabled=i===0;next.disabled=i===set.length-1;prev.hidden=next.hidden=set.length<2;}
+    prev.hidden=next.hidden=set.length<2;
+    // The neighbours load ahead so stepping or scrolling doesn't wait.
+    [1,set.length-1].forEach(function(o){new Image().src=set[(i+o)%set.length].href;});}
   function open(a){opener=a;set=[].slice.call(a.closest('.shots').querySelectorAll('.cshot a'));i=set.indexOf(a);
     lb.hidden=false;document.body.style.overflow='hidden';show();close.focus();}
   function shut(){lb.hidden=true;img.removeAttribute('src');document.body.style.overflow='';if(opener)opener.focus();}
-  function step(d){var j=i+d;if(j>=0&&j<set.length){i=j;show();}}
+  // Steps wrap around at the ends, as in the Hopper app.
+  function step(d){var n=set.length;if(n<2)return;i=(i+d+n)%n;show();}
+  // The wheel works like the arrows, as in the Hopper app: down is next, up is
+  // previous. A mouse notch is one step; a touchpad steps every 60 px.
+  var wheel=0,wheelAt=0;
+  lb.addEventListener('wheel',function(e){
+    e.preventDefault();
+    if(set.length<2)return;
+    var t=Date.now();if(t-wheelAt>250)wheel=0;wheelAt=t;
+    var dy=e.deltaMode===1?e.deltaY*40:e.deltaY;
+    if(Math.sign(dy)!==Math.sign(wheel))wheel=0;
+    wheel+=dy;
+    if(Math.abs(wheel)<60)return;
+    wheel=0;step(dy>0?1:-1);
+  },{passive:false});
   document.addEventListener('click',function(e){
     var a=e.target.closest&&e.target.closest('.cshot a');
     if(a&&!e.ctrlKey&&!e.metaKey&&!e.shiftKey&&e.button===0){e.preventDefault();open(a);}
@@ -150,7 +166,7 @@ footer a:hover{color:var(--fg)}
   document.addEventListener('keydown',function(e){
     if(lb.hidden)return;
     if(e.key==='Escape')shut();else if(e.key==='ArrowLeft')step(-1);else if(e.key==='ArrowRight')step(1);
-    else if(e.key==='Tab'){var f=[close,prev,next].filter(function(b){return !b.hidden&&!b.disabled});
+    else if(e.key==='Tab'){var f=[close,prev,next].filter(function(b){return !b.hidden});
       if(!f.length)return;var k=f.indexOf(document.activeElement);e.preventDefault();f[(k+(e.shiftKey?-1:1)+f.length)%f.length].focus();}
   });
   var sx=null;
