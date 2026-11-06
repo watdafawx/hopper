@@ -17,6 +17,11 @@ h1,h2,h3,.brand{font-family:Archivo,"IBM Plex Sans",system-ui,"Segoe UI",sans-se
 a{color:inherit;text-decoration:none}
 img{display:block;max-width:100%}
 .wrap{max-width:900px;margin:0 auto;padding:0 16px}
+/* Letter field behind the page, same as the home page; calmer down the middle where the text is. */
+#ocean{position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;
+  -webkit-mask-image:radial-gradient(ellipse 40% 100% at 50% 50%,rgba(0,0,0,.3),#000 100%);
+          mask-image:radial-gradient(ellipse 40% 100% at 50% 50%,rgba(0,0,0,.3),#000 100%)}
+main,footer{position:relative;z-index:1}
 nav{position:sticky;top:0;z-index:20;background:#0d0d10;border-bottom:1px solid var(--line)}
 nav .wrap{display:flex;align-items:center;gap:24px;height:64px;max-width:1180px}
 .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-.01em}
@@ -104,6 +109,7 @@ footer a:hover{color:var(--fg)}
 </style>
 </head>
 <body>
+<canvas id="ocean" aria-hidden="true"></canvas>
 <nav><div class="wrap">
   <a class="brand" href="../"><img src="../hopper.png" alt="">Hopper</a>
   <div class="links"><a href="../#features">Features</a><a href="../#server">Hopper Server</a><a href="../#start">Download</a><a href="./" aria-current="page">Changelog</a><a href="https://github.com/watdafawx/hopper">GitHub</a></div>
@@ -337,5 +343,6 @@ footer a:hover{color:var(--fg)}
   lb.addEventListener('touchend',function(e){if(sx===null)return;var d=e.changedTouches[0].clientX-sx;sx=null;if(Math.abs(d)>50)step(d<0?1:-1)});
 })();
 </script>
+<script src="../ocean.js" defer></script>
 </body>
 </html>

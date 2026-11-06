@@ -140,9 +140,15 @@
     }
   }
 
+  // The field holds still while the page scrolls (and a moment after), so
+  // redrawing never competes with scrolling; it's a fixed backdrop anyway.
+  let calmUntil = 0;
+  addEventListener('scroll', () => { calmUntil = performance.now() + 200; }, { passive: true });
+
   let last = 0, raf = 0;
   function loop(ms) {
     raf = requestAnimationFrame(loop);
+    if (ms < calmUntil) return;
     if (ms - last < 33) return; // ~30 fps
     last = ms;
     frame(ms);
