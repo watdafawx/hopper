@@ -183,7 +183,14 @@ pub const PING_FILE: &str = ".hopper-ping.json";
 
 /// The parts of a server list answer that tell a client whether it can
 /// join (version, mod lists, chat settings); not the message or players.
-const PING_KEYS: &[&str] = &["version", "isModded", "forgeData", "modinfo", "modpackData", "enforcesSecureChat", "preventsChatReports"];
+const PING_KEYS: &[&str] = &["version", "isModded", "forgeData", "neoForgeData", "modinfo", "modpackData", "enforcesSecureChat", "preventsChatReports"];
+
+/// Whether a saved ping (see [`ping_part`]) is from a server with mods that
+/// clients must have: Forge, NeoForge (which reports `neoForgeData`) or old
+/// FML. A modded client can't wait on the lobby island for such a server.
+pub fn ping_is_modded(ping: &Value) -> bool {
+    ping["isModded"].as_bool() == Some(true) || ["forgeData", "neoForgeData", "modinfo"].iter().any(|k| ping.get(*k).is_some())
+}
 
 /// What of a running server's own answer to keep for its stand-ins, or
 /// None when it isn't a real one.
@@ -933,6 +940,17 @@ mod tests {
         assert!(!may_wake(&dir, WakeWho::Ops, "OpSteve"), "no ops file: nobody");
         assert!(refused_kick("ATM10", WakeWho::Ops).to_string().contains("Only ops can wake it"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn neoforge_pings_count_as_modded() {
+        let neo = json!({ "version": { "name": "1.21.1", "protocol": 767 }, "neoForgeData": { "channels": [], "mods": [] } });
+        assert!(ping_part(&neo).unwrap().get("neoForgeData").is_some(), "kept for later");
+        assert!(ping_is_modded(&ping_part(&neo).unwrap()));
+        assert!(ping_is_modded(&json!({ "forgeData": {} })));
+        assert!(ping_is_modded(&json!({ "modinfo": {} })));
+        assert!(ping_is_modded(&json!({ "isModded": true })));
+        assert!(!ping_is_modded(&json!({ "version": { "name": "1.21.1", "protocol": 767 } })), "vanilla");
     }
 
     #[test]

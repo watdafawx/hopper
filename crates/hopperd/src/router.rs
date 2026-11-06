@@ -572,7 +572,10 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
 
 /// A player's stay on the lobby island while `e` starts (see crate::limbo).
 async fn island(app: &Arc<App>, sock: &mut TcpStream, leftover: Vec<u8>, hs: &core::Handshake, e: &Arc<Entry>, player: &str, uuid: Option<[u8; 16]>) -> anyhow::Result<()> {
-    let modded = core::last_ping(&e.root).is_some_and(|v| v["isModded"].as_bool() == Some(true) || v.get("forgeData").is_some() || v.get("modinfo").is_some());
+    // No saved ping (the server never ran under the router) counts as modded:
+    // only a Forge / NeoForge client is turned away on that, and a modded
+    // client on a vanilla island dies with "server is not running NeoForge".
+    let modded = core::last_ping(&e.root).is_none_or(|v| core::ping_is_modded(&v));
     // Back to where the player came in: the same address and port.
     let host = if hs.host.is_empty() { "127.0.0.1".to_string() } else { hs.host.clone() };
     match crate::limbo::run(app, sock, leftover, e, player, uuid, &host, hs.port, modded).await? {
