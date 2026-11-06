@@ -120,10 +120,14 @@
   const toTurnOff = $derived(likely.filter((s) => !s.client_only && modOf(s.file_name) && isOn(s.file_name)));
   const offAlready = $derived(likely.filter((s) => !s.client_only && modOf(s.file_name) && !isOn(s.file_name)));
   // The report's own error, after the mod that stopped loading.
-  const knock = $derived(suspects.filter((s) => (s.knock_on || s.certainty === 'Possible') && s.file_name !== crash?.stopped?.file_name));
+  // Mods the loader named only because they read the stopped mod's unbound
+  // value (same test as hopper-core's only_read).
+  const onlyRead = (s) => s.certainty === 'Possible' && (s.why || '').startsWith('It was reading');
+  const readers = $derived(suspects.filter(onlyRead));
+  const knock = $derived(suspects.filter((s) => (s.knock_on || s.certainty === 'Possible') && !onlyRead(s) && s.file_name !== crash?.stopped?.file_name));
   const knockOn = $derived(knock.some((s) => s.knock_on));
   // The rest of the mods the crash names, beside the one that stopped it.
-  const others = $derived(st ? suspects.filter((s) => s.file_name !== st.file_name) : []);
+  const others = $derived(st ? suspects.filter((s) => s.file_name !== st.file_name && !onlyRead(s)) : []);
   const knockError = $derived((crash?.headline || '').split(' · ').slice(1).join(' · ') || crash?.headline || '');
   // A cause that isn't one mod, said by the crash itself, comes first.
   const note = $derived(
@@ -394,6 +398,7 @@
           <div>
             <div class="line">{@render mod(st.file_name)}{@render tag('Certain')}<span>{st.error ? 'stopped loading with this error:' : 'failed while the server was loading.'}</span></div>
             {#if st.error}<div class="tiny muted quote">"{st.error}"</div>{/if}
+            {#each readers as s (s.file_name)}<div class="line muted">{@render mod(s.file_name)}<span>was reading it when it failed.</span>{@render tag('Possible')}</div>{/each}
             {#if rootSuspect}{@render help(rootSuspect)}{/if}
           </div>
         </li>

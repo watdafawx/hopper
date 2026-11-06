@@ -40,8 +40,12 @@
     for (const v of versions) if (open[v.id]) untrack(() => loadLog(v));
   });
 
+  // A running server can't change version: as in the update window and
+  // desktop, it's stopped by the player, not for them.
+  const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
   const why = (v) =>
-    !pack.updatable ? "Modrinth packs don't publish server packs, so the server can't change version in place."
+    alive ? 'Stop the server first'
+      : !pack.updatable ? "Modrinth packs don't publish server packs, so the server can't change version in place."
       : !v.server_files ? 'No server pack for this version.'
         : '';
   const verb = (v) => (curIx >= 0 && ix(v) > curIx ? 'Switch to this' : 'Update to this');

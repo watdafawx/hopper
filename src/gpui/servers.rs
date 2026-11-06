@@ -188,7 +188,11 @@ fn short_state(status: Option<&Status>, panel: Option<&PanelStats>) -> String {
 }
 
 /// "No servers yet", with the Host action when the page has one.
-fn no_servers(on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>, cx: &App) -> Div {
+fn no_servers(
+    on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_browse: Rc<dyn Fn(Option<String>, &mut Window, &mut App)>,
+    cx: &App,
+) -> Div {
     widgets::empty_state(
         IconName::Server,
         "No servers yet",
@@ -205,6 +209,14 @@ fn no_servers(on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>, cx: &App) -> D
                 .on_click(move |_, window, cx| host(window, cx)),
         )
     })
+    .child(
+        Button::new("browse-packs-empty")
+            .small()
+            .outline()
+            .icon(IconName::Compass)
+            .label("Browse modpacks")
+            .on_click(move |_, window, cx| on_browse(None, window, cx)),
+    )
 }
 
 /// The server list's width: a rail of status tiles when dragged narrow.
@@ -221,6 +233,7 @@ fn server_list(
     rem: Pixels,
     on_pick: Rc<dyn Fn(PathBuf, &mut Window, &mut App)>,
     on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_browse: Rc<dyn Fn(Option<String>, &mut Window, &mut App)>,
     cx: &App,
 ) -> Stateful<Div> {
     if collapsed {
@@ -448,7 +461,7 @@ fn server_list(
             continue;
         }
         members.sort_by_key(|srv| !running(srv));
-        rows.push(group_head(&g, members.len(), folded, store, on_host.clone(), cx));
+        rows.push(group_head(&g, members.len(), folded, store, on_host.clone(), on_browse.clone(), cx));
         if !folded {
             rows.extend(members.into_iter().map(|srv| row_for(srv)));
         }
@@ -478,6 +491,15 @@ fn server_list(
                     h_flex()
                         .child(div().flex_1().min_w_0().truncate().text_lg().font_semibold().child("Servers"))
                         .child({
+                            let on_browse = on_browse.clone();
+                            Button::new("browse-packs")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Compass)
+                                .tooltip("Browse modpacks to host")
+                                .on_click(move |_, window, cx| on_browse(None, window, cx))
+                        })
+                        .child({
                             let store = store.clone();
                             Button::new("new-server")
                                 .ghost()
@@ -491,7 +513,7 @@ fn server_list(
         )
         .children(rows)
         .when(empty, |r| {
-            r.child(no_servers(on_host, cx))
+            r.child(no_servers(on_host, on_browse.clone(), cx))
         })
 }
 
@@ -570,6 +592,7 @@ fn group_head(
     folded: bool,
     store: &Entity<Store>,
     on_host: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_browse: Rc<dyn Fn(Option<String>, &mut Window, &mut App)>,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -605,6 +628,24 @@ fn group_head(
         }
     };
     let what = if g.what.is_empty() { format!("{n}") } else { format!("{} · {n}", g.what) };
+    let browse: Option<AnyElement> = match &g.kind {
+        GroupKind::Panel(_) | GroupKind::Local => {
+            let place = if let GroupKind::Panel(id) = &g.kind { Some(id.clone()) } else { None };
+            Some(
+                Button::new(ElementId::Name(format!("group-browse:{}", g.key).into()))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Compass)
+                    .tooltip(format!("Browse modpacks to host on {}", g.name))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        on_browse(place.clone(), window, cx)
+                    })
+                    .into_any_element(),
+            )
+        }
+        GroupKind::Folder | GroupKind::Site(_) => None,
+    };
     let add: Option<AnyElement> = match &g.kind {
         GroupKind::Panel(id) => {
             let (store, id) = (store.clone(), id.clone());
@@ -676,6 +717,7 @@ fn group_head(
                         .child(g.name.clone()),
                 )
                 .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme.muted_foreground).child(what))
+                .children(browse)
                 .children(add),
         )
         .when_some(error.filter(|_| !folded), |c, e| {
@@ -898,6 +940,9 @@ pub enum ServersEvent {
     OpenProject { root: PathBuf, project: u64 },
     /// "Not now" on the intro: back to where the user was.
     Leave,
+    /// Browse modpacks to host a server: on a paired Hopper Server (its
+    /// id), or on this PC when `None`. From the list's Browse icons.
+    BrowsePacks(Option<String>),
 }
 
 impl EventEmitter<ServersEvent> for ServersView {}
@@ -1682,7 +1727,23 @@ impl ServersView {
             .when_some(loader_label, |r, l| r.child(crate::hero::fact(IconName::Blocks, theme.warning, l)))
             .when_some(pack_version, |r, v| {
                 let v = if v.starts_with(|c: char| c.is_ascii_digit()) { format!("v{v}") } else { v };
-                r.child(crate::hero::fact(IconName::Tag, theme.info, v))
+                // Opens the pack's versions and changelogs for this server,
+                // as the instance header's version does.
+                let (store, server, fg) = (self.store.clone(), s.clone(), theme.foreground);
+                r.child(
+                    crate::hero::fact(IconName::Tag, theme.info, v)
+                        .id("server-pack-version")
+                        .when(pack_id != 0, |d| {
+                            d.clickable(cx)
+                                .hover(move |s| s.text_color(fg))
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Pack versions and changelogs").build(window, cx)
+                                })
+                                .on_click(move |_, window, cx| {
+                                    crate::versions::open_server(store.clone(), server.clone(), window, cx)
+                                })
+                        }),
+                )
             })
             .when_some(addresses.first().cloned(), |r, a| r.child(crate::hero::soft_fact(IconName::Globe, a, cx)));
         let motd = s.properties.get("motd").and_then(|m| motd_line(m, cx)).map(|m| m.text_sm().into_any_element());
@@ -2118,6 +2179,7 @@ impl Render for ServersView {
             return self.intro(cx);
         }
         let view = cx.entity();
+        let view2 = view.clone();
         let layout = self.list_panel.layout(self.store.read(cx).settings(), window);
         let collapsed = layout.collapsed;
         // The Sync tab fits its rows to the room beside the list.
@@ -2142,6 +2204,7 @@ impl Render for ServersView {
                     crate::host_dialog::open(store.clone(), None, window, cx)
                 }))
             },
+            Rc::new(move |place, _, cx| view2.update(cx, |_, cx| cx.emit(ServersEvent::BrowsePacks(place)))),
             cx,
         )
         .overflow_y_scrollbar();
@@ -2165,6 +2228,7 @@ impl Render for ServersView {
             ),
             None if self.store.read(cx).servers().is_empty() => {
                 let store = self.store.clone();
+                let view3 = cx.entity();
                 v_flex()
                     .size_full()
                     .items_center()
@@ -2173,6 +2237,7 @@ impl Render for ServersView {
                         Some(Rc::new(move |window: &mut Window, cx: &mut App| {
                             crate::host_dialog::open(store.clone(), None, window, cx)
                         })),
+                        Rc::new(move |place, _, cx| view3.update(cx, |_, cx| cx.emit(ServersEvent::BrowsePacks(place)))),
                         cx,
                     ))
                     .into_any_element()

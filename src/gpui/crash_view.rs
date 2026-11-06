@@ -263,6 +263,8 @@ pub fn what_happened(c: &Crash, st: &Stopped, changed: Option<(&Changed, &str)>,
     let theme = cx.theme().clone();
     let thing = what(c);
     let mut steps: Vec<(bool, AnyElement)> = Vec::new();
+    // Mods the loader named only because they read the stopped mod's value.
+    let readers: Vec<&str> = c.suspects.iter().filter(|s| hopper::crashdetect::only_read(s)).map(|s| s.file_name.as_str()).collect();
     if let Some((ch, file)) = changed {
         let when = hopper::time::relative_secs(ch.when);
         let w = if ch.from.is_empty() || ch.to.is_empty() {
@@ -286,6 +288,10 @@ pub fn what_happened(c: &Crash, st: &Stopped, changed: Option<(&Changed, &str)>,
                 }),
             ]))
             .when(!st.error.is_empty(), |d| d.child(crate::crash_view::note_text(format!("\"{}\"", st.error), cx)))
+            .children(readers.iter().enumerate().map(|(i, f)| {
+                sentence(vec![link(f, &format!("read{i}"), cx), words("was reading it when it failed."), tag(Certainty::Possible, cx)])
+                    .text_color(theme.muted_foreground)
+            }))
             .into_any_element(),
     ));
     if !st.skipped.is_empty() {
@@ -299,13 +305,19 @@ pub fn what_happened(c: &Crash, st: &Stopped, changed: Option<(&Changed, &str)>,
         parts.extend(st.skipped.iter().enumerate().map(|(i, f)| link(f, &format!("skip{i}"), cx)));
         steps.push((false, sentence(parts).into_any_element()));
     }
-    let knock: Vec<&str> =
-        c.suspects.iter().filter(|s| s.knock_on || s.certainty == Certainty::Possible).map(|s| s.file_name.as_str()).collect();
+    let knock: Vec<&str> = c
+        .suspects
+        .iter()
+        .filter(|s| (s.knock_on || s.certainty == Certainty::Possible) && !hopper::crashdetect::only_read(s) && s.file_name != st.file_name)
+        .map(|s| s.file_name.as_str())
+        .collect();
+    // The step the knock-on followed from: the mod's own error.
+    let cause = if changed.is_some() { 2 } else { 1 };
     if !knock.is_empty() {
         let error = c.headline.split_once(" · ").map_or(c.headline.as_str(), |(_, e)| e).to_string();
         let mut parts = vec![words(format!("Then the {thing} crashed in"))];
         parts.extend(knock.iter().enumerate().map(|(i, f)| link(f, &format!("knock{i}"), cx)));
-        parts.push(words("(knock-on, ignore). That's the report's own error, which only followed from step 2:"));
+        parts.push(words(format!("(knock-on, ignore). That's the report's own error, which only followed from step {cause}:")));
         steps.push((
             false,
             v_flex()
