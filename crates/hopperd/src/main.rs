@@ -57,6 +57,7 @@ mod parity_mods;
 mod parity_overview;
 mod parity_worlds;
 mod packs_where_api;
+mod limbo;
 mod router;
 mod rules;
 mod servers;

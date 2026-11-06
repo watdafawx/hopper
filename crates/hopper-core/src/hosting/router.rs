@@ -54,6 +54,20 @@ pub struct RouteSettings {
     /// Who last woke it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_wake: Option<LastWake>,
+    /// What a player who joins while it starts gets.
+    pub while_starting: WhileStarting,
+}
+
+/// What a player joining a server that's starting gets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WhileStarting {
+    /// The lobby island with the start's progress, then a move to the
+    /// server (Minecraft 1.21 / 1.21.1; see `limbo`). Others get the kick.
+    #[default]
+    Lobby,
+    /// "Join again in about 2 min."
+    Kick,
 }
 
 impl Default for RouteSettings {
@@ -69,6 +83,7 @@ impl Default for RouteSettings {
             retry_after_minutes: 0,
             wake_failed: None,
             last_wake: None,
+            while_starting: WhileStarting::Lobby,
         }
     }
 }
@@ -391,7 +406,7 @@ pub fn write_varint(out: &mut Vec<u8>, v: i32) {
     }
 }
 
-fn write_string(out: &mut Vec<u8>, s: &str) {
+pub fn write_string(out: &mut Vec<u8>, s: &str) {
     write_varint(out, s.len() as i32);
     out.extend_from_slice(s.as_bytes());
 }
@@ -444,14 +459,26 @@ pub fn read_handshake(b: &[u8]) -> anyhow::Result<Read<Handshake>> {
 
 /// The player name from a Login Start packet at the start of `b`.
 pub fn read_login_name(b: &[u8]) -> anyhow::Result<Read<String>> {
+    Ok(match read_login_start(b)? {
+        Read::Done((name, _), used) => Read::Done(name, used),
+        Read::More => Read::More,
+    })
+}
+
+/// A Login Start packet: the name and, from 1.20.2 on, the player's id.
+pub fn read_login_start(b: &[u8]) -> anyhow::Result<Read<(String, Option<[u8; 16]>)>> {
     match read_packet(b, 4096)? {
         Read::More => Ok(Read::More),
-        Read::Done((0, body), used) => Ok(Read::Done(read_string(body, 64)?.0, used)),
+        Read::Done((0, body), used) => {
+            let (name, n) = read_string(body, 64)?;
+            let uuid = body.get(n..n + 16).map(|u| u.try_into().unwrap_or([0; 16]));
+            Ok(Read::Done((name, uuid), used))
+        }
         Read::Done((id, _), _) => bail!("not a login start (packet {id:#x})"),
     }
 }
 
-fn packet(id: i32, body: &[u8]) -> Vec<u8> {
+pub fn packet(id: i32, body: &[u8]) -> Vec<u8> {
     let mut inner = Vec::with_capacity(body.len() + 2);
     write_varint(&mut inner, id);
     inner.extend_from_slice(body);
@@ -771,6 +798,7 @@ mod tests {
         let p = packet(0, &body);
         assert_eq!(read_login_name(&p).unwrap(), Read::Done("Steve".to_string(), p.len()));
         assert_eq!(read_login_name(&p[..3]).unwrap(), Read::More);
+        assert_eq!(read_login_start(&p).unwrap(), Read::Done(("Steve".to_string(), Some([0; 16])), p.len()));
     }
 
     #[test]
@@ -869,7 +897,9 @@ mod tests {
         assert_eq!(s.message(), SLEEP_MESSAGE);
         let off = RouteSettings { sleep_after_minutes: 0, ..s.clone() };
         assert!(!off.wakes(0), "no sleep, no wake");
-        let t: RouteSettings = serde_json::from_str(r#"{"sleep_after_minutes":5,"wake_who":"whitelist","wake_on_join":false}"#).unwrap();
+        assert_eq!(s.while_starting, WhileStarting::Lobby, "the lobby by default");
+        let t: RouteSettings = serde_json::from_str(r#"{"sleep_after_minutes":5,"wake_who":"whitelist","wake_on_join":false,"while_starting":"kick"}"#).unwrap();
+        assert_eq!(t.while_starting, WhileStarting::Kick);
         assert_eq!((t.wake_who, t.wakes(0)), (WakeWho::Whitelist, false));
     }
 

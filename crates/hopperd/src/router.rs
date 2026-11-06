@@ -70,6 +70,9 @@ pub struct Router {
     woken: Mutex<HashMap<String, String>>,
     /// When each running server's own server list answer was last kept.
     pinged: Mutex<HashMap<String, Instant>>,
+    /// "server id/player" of clients that turned the lobby island down:
+    /// they get the "join again" message instead (until hopperd restarts).
+    lobby_refused: Mutex<std::collections::HashSet<String>>,
     reload: tokio::sync::Notify,
 }
 
@@ -77,6 +80,15 @@ impl Router {
     /// Re-reads addresses and the config now.
     pub fn changed(&self) {
         self.reload.notify_one();
+    }
+
+    /// A join is waking this server and it isn't up yet.
+    pub fn is_waking(&self, id: &str) -> bool {
+        self.woken.lock().unwrap().contains_key(id)
+    }
+
+    fn refused_key(id: &str, player: &str) -> String {
+        format!("{id}/{}", player.to_ascii_lowercase())
     }
 }
 
@@ -260,7 +272,7 @@ fn sleep_and_time(app: &Arc<App>) {
     crate::webhooks::emit(app, events);
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
@@ -443,7 +455,20 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
     let usual = e.and_then(|e| e.server.usual_start_secs()).or(s.last_start_secs);
     let boot = e.and_then(|e| e.server.boot_status());
     if hs.is_login() {
-        let player = read_until(sock, &mut buf, used, core::read_login_name).await.map(|(n, _)| n).unwrap_or_default();
+        let (player, uuid, end) = match read_until(sock, &mut buf, used, core::read_login_start).await {
+            Ok(((n, u), end)) => (n, u, end),
+            Err(_) => (String::new(), None, buf.len()),
+        };
+        // The lobby island instead of the kick: 1.21 / 1.21.1 clients that
+        // haven't turned it down, on servers set to it.
+        let lobby = |e: &Entry| {
+            s.while_starting == core::WhileStarting::Lobby
+                && s.sleep_after_minutes > 0
+                && s.wake_on_join
+                && hs.protocol == hopper_core::hosting::limbo::PROTOCOL
+                && !player.is_empty()
+                && !app.router.lobby_refused.lock().unwrap().contains(&Router::refused_key(&e.id, &player))
+        };
         if kind == Standin::WakeFailed {
             return kick(sock, &core::wake_failed_kick(&name, s.retry_in_minutes(unix_now()))).await;
         }
@@ -467,8 +492,14 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                 busy
             };
             if busy {
+                if lobby(e) && crate::limbo::takes_transfers(e) {
+                    return island(app, sock, buf[end..].to_vec(), hs, e, &player, uuid).await;
+                }
                 return kick(sock, &core::standin_kick(Standin::Starting, &name, usual, e.server.boot_status().as_ref())).await;
             }
+            // The island moves players over with a transfer, which the
+            // server must accept: on before it starts.
+            let to_island = lobby(e) && crate::limbo::allow_transfers(e);
             let a = app.clone();
             let entry = e.clone();
             let started = match tokio::task::spawn_blocking(move || a.servers.act(&entry, PanelAction::Start)).await {
@@ -487,6 +518,9 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                     app.router.active.lock().unwrap().insert(e.id.clone(), Instant::now());
                     crate::webhooks::emit(app, vec![event(e, "wake", format!("**{}** woke up for {who}", e.name))]);
                     app.refresh.notify_one();
+                    if to_island {
+                        return island(app, sock, buf[end..].to_vec(), hs, e, &player, uuid).await;
+                    }
                 }
                 Err(err) => {
                     app.router.woken.lock().unwrap().remove(&e.id);
@@ -495,6 +529,13 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                     return kick(sock, &core::wake_failed_kick(&name, settings(e).retry_in_minutes(unix_now()))).await;
                 }
             }
+        }
+        if kind == Standin::Starting
+            && let Some(e) = e
+            && lobby(e)
+            && crate::limbo::takes_transfers(e)
+        {
+            return island(app, sock, buf[end..].to_vec(), hs, e, &player, uuid).await;
         }
         return kick(sock, &core::standin_kick(kind, &name, usual, boot.as_ref())).await;
     }
@@ -517,6 +558,22 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
     sock.write_all(&core::status_packet(&core::standin_status(kind, &motd, usual, max, icon.as_deref(), boot.as_ref(), s.message(), real.as_ref()))).await?;
     if let Ok(((1, payload), _)) = read_until(sock, &mut buf, after, |b| packet(b, 64)).await {
         sock.write_all(&core::pong_packet(&payload)).await?;
+    }
+    Ok(())
+}
+
+/// A player's stay on the lobby island while `e` starts (see crate::limbo).
+async fn island(app: &Arc<App>, sock: &mut TcpStream, leftover: Vec<u8>, hs: &core::Handshake, e: &Arc<Entry>, player: &str, uuid: Option<[u8; 16]>) -> anyhow::Result<()> {
+    let modded = core::last_ping(&e.root).is_some_and(|v| v["isModded"].as_bool() == Some(true) || v.get("forgeData").is_some() || v.get("modinfo").is_some());
+    // Back to where the player came in: the same address and port.
+    let host = if hs.host.is_empty() { "127.0.0.1".to_string() } else { hs.host.clone() };
+    match crate::limbo::run(app, sock, leftover, e, player, uuid, &host, hs.port, modded).await? {
+        crate::limbo::Outcome::Refused(why) => {
+            app.router.lobby_refused.lock().unwrap().insert(Router::refused_key(&e.id, player));
+            log::info!("router: {player}'s game didn't take the lobby island for {} ({why}); they get the join-again message from now on", e.name);
+            e.server.note(&format!("[Hopper] {player}'s game didn't take the lobby island ({why}). They get the \"join again\" message instead."));
+        }
+        o => log::debug!("router: {player} left the lobby island: {o:?}"),
     }
     Ok(())
 }
@@ -660,6 +717,7 @@ struct AddressBody {
     wake_who: Option<core::WakeWho>,
     sleep_message: Option<String>,
     retry_after_minutes: Option<u32>,
+    while_starting: Option<core::WhileStarting>,
 }
 
 async fn get_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -681,6 +739,7 @@ async fn get_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
         "wake_on_join": s.wake_on_join, "wake_who": s.wake_who, "sleep_message": s.sleep_message,
         "default_sleep_message": core::SLEEP_MESSAGE, "retry_after_minutes": s.retry_after_minutes,
         "wake_failed": s.wake_failed, "last_wake": s.last_wake,
+        "while_starting": s.while_starting, "accepts_transfers": crate::limbo::takes_transfers(&e),
         "wake_estimate": core::wake_estimate(e.server.usual_start_secs().or(s.last_start_secs)),
         "port": port_of(&e), "router_port": router_port, "managed_by": e.managed_by,
     })))
@@ -725,6 +784,9 @@ async fn put_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
         }
         s.sleep_message = if m == core::SLEEP_MESSAGE { String::new() } else { m.to_string() };
     }
+    if let Some(w) = b.while_starting {
+        s.while_starting = w;
+    }
     if let Some(r) = b.retry_after_minutes {
         if r > 24 * 60 {
             return Err(bad("Try again after at most a day (1440 minutes)."));
@@ -732,6 +794,11 @@ async fn put_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
         s.retry_after_minutes = r;
     }
     s.save(&e.root).map_err(|e| bad(format!("{e:#}")))?;
+    // The lobby island moves players over with a transfer; the server
+    // takes those only with accepts-transfers on (from its next start).
+    if s.while_starting == core::WhileStarting::Lobby && s.sleep_after_minutes > 0 && s.wake_on_join {
+        crate::limbo::allow_transfers(&e);
+    }
     log::info!("{}: addresses {:?}{}, sleep {} min", e.name, s.addresses, if s.off { " (off)" } else { "" }, s.sleep_after_minutes);
     app.router.changed();
     app.refresh.notify_one();

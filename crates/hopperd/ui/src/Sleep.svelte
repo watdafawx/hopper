@@ -16,6 +16,7 @@
   let who = $state('anyone');
   let retry = $state(0);
   let message = $state('');
+  let starting = $state('lobby');
   let saved = $state('');
   let saving = $state(false);
 
@@ -26,6 +27,7 @@
     wake_who: who,
     retry_after_minutes: Number(retry) || 0,
     sleep_message: message.trim(),
+    while_starting: starting,
   });
   const dirty = $derived(info && JSON.stringify(body) !== saved);
   const shown = $derived(message.trim() || info?.default_sleep_message || '');
@@ -33,6 +35,10 @@
     ['anyone', 'Anyone'],
     ['whitelist', 'Whitelist'],
     ['ops', 'Ops'],
+  ];
+  const STARTING = [
+    ['lobby', 'Lobby island'],
+    ['kick', 'Kick with rejoin message'],
   ];
   const RETRY = [
     [0, 'Wait for a start here'],
@@ -42,7 +48,7 @@
   ];
 
   function stateOf(i) {
-    return { sleep_after_minutes: i.sleep_after_minutes, wake_on_join: i.wake_on_join, wake_who: i.wake_who, retry_after_minutes: i.retry_after_minutes, sleep_message: i.sleep_message || '' };
+    return { sleep_after_minutes: i.sleep_after_minutes, wake_on_join: i.wake_on_join, wake_who: i.wake_who, retry_after_minutes: i.retry_after_minutes, sleep_message: i.sleep_message || '', while_starting: i.while_starting };
   }
 
   async function load() {
@@ -54,6 +60,7 @@
       who = info.wake_who;
       retry = info.retry_after_minutes;
       message = info.sleep_message || '';
+      starting = info.while_starting || 'lobby';
       saved = JSON.stringify(stateOf(info));
     } catch (e) {
       say(e.message, true);
@@ -118,6 +125,15 @@
         <div class="tiny muted hint">
           {#if who === 'anyone'}Anyone who joins starts it.{:else if who === 'whitelist'}Players on the whitelist or the ops list.{:else}Only players on the ops list.{/if}
           Names aren't checked until the server is up, so this keeps strangers from waking it by accident, not on purpose.
+        </div>
+        <div class="f small"><span class="k">While it starts</span>
+          <div class="seg" role="group" aria-label="While it starts">
+            {#each STARTING as [v, label] (v)}<button class:on={starting === v} aria-pressed={starting === v} onclick={() => (starting = v)}>{label}</button>{/each}
+          </div>
+        </div>
+        <div class="tiny muted hint">
+          {#if starting === 'lobby'}Players wait on a small island with the start's progress, then move over by themselves. Works for Minecraft 1.21 and 1.21.1; other versions and modded clients get the rejoin message. Hopper turns on accepts-transfers in server.properties for this.
+          {:else}Players are told when to join again.{/if}
         </div>
         <div class="f small"><span class="k">After a failed start</span>
           <div class="seg" role="group" aria-label="After a failed start">

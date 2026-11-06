@@ -126,9 +126,12 @@ struct Wake {
     who: String,
     retry: u32,
     message: String,
+    /// "lobby" or "kick".
+    starting: String,
 }
 
 const WAKE_WHO: [(&str, &str); 3] = [("anyone", "Anyone"), ("whitelist", "Whitelist"), ("ops", "Ops")];
+const WAKE_STARTING: [(&str, &str); 2] = [("lobby", "Lobby island"), ("kick", "Kick with rejoin message")];
 const WAKE_RETRY: [(u32, &str); 4] = [(0, "Wait for a start here"), (2, "2 min"), (10, "10 min"), (30, "30 min")];
 
 /// "just now", "4 min ago", "2 h ago", "3 days ago".
@@ -248,6 +251,7 @@ fn parse_addr(v: &Value) -> Addr {
             who: v["wake_who"].as_str().unwrap_or("anyone").to_string(),
             retry: v["retry_after_minutes"].as_u64().unwrap_or(0) as u32,
             message: s(v, "sleep_message"),
+            starting: v["while_starting"].as_str().unwrap_or("lobby").to_string(),
         }),
         default_message: s(v, "default_sleep_message"),
         estimate: s(v, "wake_estimate"),
@@ -321,6 +325,7 @@ pub struct SettingsTab {
     wake_on: bool,
     wake_who: String,
     wake_retry: u32,
+    wake_starting: String,
     sleep_msg: Entity<InputState>,
     /// DNS check results by address: (points here, note).
     dns: Option<HashMap<String, (bool, String)>>,
@@ -362,6 +367,7 @@ impl SettingsTab {
             wake_on: true,
             wake_who: "anyone".into(),
             wake_retry: 0,
+            wake_starting: "lobby".into(),
             sleep_msg,
             dns: None,
             checking: false,
@@ -525,8 +531,8 @@ impl SettingsTab {
         let mins = if sleep > 0 { sleep } else { 15 }.to_string();
         self.sleep_min.update(cx, |s, cx| s.set_value(mins, window, cx));
         if let Some(a) = d.addr.as_ref() {
-            let w = a.wake.clone().unwrap_or(Wake { on: true, who: "anyone".into(), retry: 0, message: String::new() });
-            (self.wake_on, self.wake_who, self.wake_retry) = (w.on, w.who, w.retry);
+            let w = a.wake.clone().unwrap_or(Wake { on: true, who: "anyone".into(), retry: 0, message: String::new(), starting: "lobby".into() });
+            (self.wake_on, self.wake_who, self.wake_retry, self.wake_starting) = (w.on, w.who, w.retry, w.starting);
             let placeholder = a.default_message.clone();
             self.sleep_msg.update(cx, |s, cx| {
                 s.set_value(w.message, window, cx);
@@ -628,7 +634,13 @@ impl SettingsTab {
 
     /// The wake settings as the form has them.
     fn wake(&self, cx: &App) -> Wake {
-        Wake { on: self.wake_on, who: self.wake_who.clone(), retry: self.wake_retry, message: self.sleep_msg.read(cx).value().trim().to_string() }
+        Wake {
+            on: self.wake_on,
+            who: self.wake_who.clone(),
+            retry: self.wake_retry,
+            message: self.sleep_msg.read(cx).value().trim().to_string(),
+            starting: self.wake_starting.clone(),
+        }
     }
 
     /// Edits not saved yet (or an editor open): a change made elsewhere
@@ -694,6 +706,7 @@ impl SettingsTab {
                 b["wake_who"] = json!(w.who);
                 b["retry_after_minutes"] = json!(w.retry);
                 b["sleep_message"] = json!(w.message);
+                b["while_starting"] = json!(w.starting);
             }
             b
         });
@@ -1385,6 +1398,7 @@ impl SettingsTab {
         let label = |t: &str| div().w(rems(9.)).flex_none().text_sm().child(t.to_string());
         let who_i = WAKE_WHO.iter().position(|(k, _)| *k == self.wake_who);
         let retry_i = WAKE_RETRY.iter().position(|(m, _)| *m == self.wake_retry);
+        let starting_i = WAKE_STARTING.iter().position(|(k, _)| *k == self.wake_starting);
         let who_note = match self.wake_who.as_str() {
             "whitelist" => "Players on the whitelist or the ops list.",
             "ops" => "Only players on the ops list.",
@@ -1406,6 +1420,27 @@ impl SettingsTab {
             )
             .child(div().pl(rems(9.5)).child(widgets::caption(
                 format!("{who_note} Names aren't checked until the server is up, so this keeps strangers from waking it by accident, not on purpose."),
+                cx,
+            )))
+            .child(
+                h_flex().gap_2().child(label("While it starts")).child(
+                    TabBar::new("settings-wake-starting")
+                        .segmented()
+                        .xsmall()
+                        .when_some(starting_i, |t, i| t.selected_index(i))
+                        .children(WAKE_STARTING.iter().map(|(_, l)| Tab::new().label(*l)))
+                        .on_click(cx.listener(|this, i: &usize, _, cx| {
+                            this.wake_starting = WAKE_STARTING[*i].0.to_string();
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(div().pl(rems(9.5)).child(widgets::caption(
+                if self.wake_starting == "lobby" {
+                    "Players wait on a small island with the start's progress, then move over by themselves. Works for Minecraft 1.21 and 1.21.1; other versions and modded clients get the rejoin message. Hopper turns on accepts-transfers in server.properties for this."
+                } else {
+                    "Players are told when to join again."
+                },
                 cx,
             )))
             .child(
