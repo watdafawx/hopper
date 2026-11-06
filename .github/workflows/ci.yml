@@ -6,6 +6,10 @@ on:
   pull_request:
   # Run on any branch by hand: gh workflow run ci.yml --ref <branch>
   workflow_dispatch:
+  # The slow Linux / macOS release builds and packages run here, not on
+  # every push.
+  schedule:
+    - cron: '0 3 * * *'
 
 jobs:
   test:
@@ -59,8 +63,10 @@ jobs:
       - name: Build Hopper Server
         run: cargo build -p hopperd
 
-  # Hopper desktop on Linux and macOS: release builds, packaged as
-# artifacts to try. Not required to pass while the ports are under way.
+  # Hopper desktop on Linux and macOS. Pushes and pull requests only check
+  # that it compiles (fast); the nightly run and a manual run do the full
+  # release build and package it as artifacts to try. Not required to pass
+  # while the ports are under way.
   desktop-build:
     strategy:
       fail-fast: false
@@ -78,15 +84,20 @@ jobs:
       - name: Rust (from rust-toolchain.toml)
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+      - name: Check it compiles
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        run: cargo check --bin hopper --message-format short
       - name: Build
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: cargo build --release --bin hopper --message-format short
       # Shows how much of the shared library's logic holds up off Windows.
       # Many tests use Windows paths, so failures here don't fail the job.
       - name: Library tests (not required yet)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         continue-on-error: true
         run: cargo test --release -p hopper-core --lib --message-format short
       - name: Package (Linux tarball)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         run: |
           v=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
           mkdir -p dist/hopper
@@ -95,7 +106,7 @@ jobs:
           tar czf "dist/hopper-$v-linux-x64.tar.gz" -C dist hopper
           ldd target/release/hopper | sed 's/ (0x.*//'
       - name: Package (macOS app)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         run: |
           v=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
           app=dist/Hopper.app/Contents
@@ -128,6 +139,7 @@ jobs:
           lipo -info "$app/MacOS/hopper"
           (cd dist && ditto -c -k --keepParent Hopper.app "hopper-$v-macos-$(uname -m).zip")
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         with:
           name: hopper-${{ runner.os }}
           path: |
