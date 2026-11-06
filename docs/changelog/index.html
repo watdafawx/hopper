@@ -75,6 +75,32 @@ footer a:hover{color:var(--fg)}
 .lb .p{left:14px}.lb .q{right:14px}
 .lb [disabled]{opacity:.3;cursor:default}
 @media (max-width:600px){.lb .p,.lb .q{top:auto;bottom:14px;transform:none}.lb figure{padding-bottom:56px}}
+/* Version rail: JS adds it above the releases and shows one release at a time. Without JS every release stays stacked. */
+.rel[hidden]{display:none}
+.rb{display:grid;grid-template-columns:44px minmax(0,1fr) 44px;grid-template-areas:"prev rail next" ". meta .";gap:6px 8px;align-items:center;margin-top:-12px}
+.rb .pv{grid-area:prev}.rb .nx{grid-area:next}
+.rail{grid-area:rail;position:relative;display:flex;gap:10px;overflow-x:auto;overscroll-behavior-x:contain;scroll-snap-type:x proximity;padding:4px calc(50% - 110px);touch-action:pan-y;scrollbar-width:none;-webkit-mask-image:linear-gradient(90deg,transparent,#000 10%,#000 90%,transparent);mask-image:linear-gradient(90deg,transparent,#000 10%,#000 90%,transparent)}
+.rail::-webkit-scrollbar{display:none}
+.rc{flex:0 0 220px;scroll-snap-align:center;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;color:var(--fg);font:inherit;cursor:pointer;display:flex;flex-direction:column;gap:3px;min-height:44px}
+.rc:hover{background:var(--panel2)}
+.rc[aria-selected=true]{background:#f9731617;border-color:#f9731655;box-shadow:inset 3px 0 0 var(--acc)}
+.rc:focus-visible{outline:2px solid var(--acc2);outline-offset:-3px}
+.rc .t{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.rc .v{font:800 20px/1.2 Archivo,"IBM Plex Sans",system-ui,sans-serif;letter-spacing:-.02em;word-spacing:.08em}
+.rc .tag{margin:0;font-size:11px;padding:1px 8px;white-space:nowrap}
+.rc .s,.rc .d{font:500 12px "IBM Plex Mono",ui-monospace,Consolas,monospace;color:var(--dim)}
+.rc .g{font-size:13.5px;line-height:1.4;color:var(--mut);margin-top:4px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
+.rb button.ar{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:999px;width:44px;height:44px;font-size:20px;line-height:1;cursor:pointer;display:grid;place-items:center}
+.rb button.ar:hover{background:var(--panel);border-color:var(--mut)}
+.meta{grid-area:meta;min-width:0;display:flex;gap:10px 18px;flex-wrap:wrap;align-items:center;justify-content:center;font-size:14px;color:var(--mut)}
+.jump{display:flex;align-items:center;gap:8px}
+.jump label{font:500 12px "IBM Plex Mono",ui-monospace,Consolas,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.jump select{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:10px;min-height:44px;padding:0 12px;font:500 14px "IBM Plex Sans",system-ui,sans-serif;max-width:100%;cursor:pointer}
+.jump select:hover{border-color:var(--mut)}
+.shown button{background:none;border:0;color:var(--acc);font:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:3px;min-height:44px;padding:0 4px}
+.shown button:hover{color:var(--acc2)}
+@media (max-width:600px){.rb{grid-template-areas:"rail rail rail" "prev meta next";margin-top:-24px}.rail{padding-inline:calc(50% - 100px)}.rc{flex-basis:200px}.meta{min-width:0;gap:0 12px}.jump{flex-direction:column;align-items:stretch;gap:2px;width:100%}.jump select{width:100%}}
+@media (prefers-reduced-motion:reduce){.rail{scroll-behavior:auto}}
 </style>
 </head>
 <body>
@@ -127,6 +153,143 @@ footer a:hover{color:var(--fg)}
   <figure><img id="lbi" alt=""><figcaption id="lbc"></figcaption></figure>
   <button class="q" type="button" aria-label="Next screenshot" id="lbq">&#8250;</button>
 </div>
+<script>
+// Version rail. Without this script every release stays stacked, as before.
+(function(){
+  var secs=[].slice.call(document.querySelectorAll('main section.rel'));
+  if(!secs.length)return;
+  document.documentElement.classList.add('js');
+  var n=secs.length,rm=window.matchMedia('(prefers-reduced-motion: reduce)');
+  function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e;}
+  var RANK={bad:2,warn:1,ok:0};
+  var items=secs.map(function(s){
+    var h=s.querySelector('.relhead h2').textContent,vs=[];
+    h.replace(/(Hopper Server|Hopper)\s+(\d+\.\d+\.\d+)/g,function(_,a,v){vs.push({n:a==='Hopper'?'Hopper':'Server',v:v});});
+    var tg=null;[].forEach.call(s.querySelectorAll('.tag'),function(t){var c=t.classList.contains('bad')?'bad':t.classList.contains('warn')?'warn':'ok';if(!tg||RANK[c]>RANK[tg.c])tg={c:c,t:t.textContent};});
+    var w=s.querySelector('.when'),g=s.querySelector('article h3');
+    return {v:vs.length?vs[0].v:s.id,sub:vs.length>1?'Server '+vs[1].v:(vs.length?vs[0].n:''),when:w?w.textContent:'',gist:g?g.textContent:'',tag:tg,full:h};
+  });
+  var bar=el('div','rb'),rail=el('div','rail'),meta=el('div','meta');
+  rail.setAttribute('role','tablist');rail.setAttribute('aria-label','Releases');
+  function arrow(c,ch,label){var b=el('button','ar '+c,ch);b.type='button';b.setAttribute('aria-label',label);return b;}
+  var pv=arrow('pv','‹','Newer release'),nx=arrow('nx','›','Older release');
+  var tabs=items.map(function(it,i){
+    var b=el('button','rc');b.type='button';b.id='rt-'+i;b.setAttribute('role','tab');b.setAttribute('aria-controls',secs[i].id);
+    var t=el('span','t'),v=el('span','v',it.v);t.appendChild(v);
+    if(it.tag)t.appendChild(el('span','tag '+it.tag.c,it.tag.t));
+    b.appendChild(t);
+    if(it.sub)b.appendChild(el('span','s',it.sub));
+    b.appendChild(el('span','d',it.when));
+    b.appendChild(el('span','g',it.gist));
+    b.addEventListener('click',function(){go(i,i>sel?1:-1,true,true);});
+    rail.appendChild(b);
+    secs[i].setAttribute('role','tabpanel');secs[i].setAttribute('aria-labelledby','rt-'+i);
+    return b;
+  });
+  var jump=el('div','jump'),lab=el('label',null,'Jump to version'),sl=el('select');
+  sl.id='jumpsel';lab.htmlFor='jumpsel';
+  items.forEach(function(it,i){var o=el('option',null,it.v+(it.sub==='Server'?' (Server only)':'')+' · '+it.when);o.value=i;sl.appendChild(o);});
+  jump.appendChild(lab);jump.appendChild(sl);
+  var shown=el('span','shown'),stat=el('span'),tog=el('button');tog.type='button';stat.setAttribute('aria-live','polite');
+  shown.appendChild(stat);shown.appendChild(document.createTextNode(' · '));shown.appendChild(tog);
+  meta.appendChild(jump);meta.appendChild(shown);
+  bar.appendChild(pv);bar.appendChild(rail);bar.appendChild(nx);bar.appendChild(meta);
+  document.querySelector('main header').after(bar);
+
+  var sel=0,all=false,cur=null,token=0;
+  function center(smooth){var t=tabs[sel];
+    rail.scrollTo({left:t.offsetLeft-(rail.clientWidth-t.offsetWidth)/2,behavior:smooth&&!rm.matches?'smooth':'auto'});}
+  // Old release slides out, new one slides in (direction follows the move); reduced motion = quick fade.
+  function swap(nw,dir,anim){
+    var tok=++token,old=cur;
+    secs.forEach(function(s){s.getAnimations().forEach(function(a){a.cancel();});if(s!==old&&s!==nw)s.hidden=true;});
+    if(old===nw){nw.hidden=false;return;}
+    if(!anim||!old||old.hidden||!nw.animate){if(old)old.hidden=true;nw.hidden=false;cur=nw;return;}
+    var d=rm.matches?0:28*dir,t=rm.matches?80:125;
+    old.animate([{opacity:1,transform:'none'},{opacity:0,transform:'translateX('+(-d)+'px)'}],{duration:t,easing:'ease-in',fill:'forwards'}).finished.then(function(){
+      if(tok!==token)return;
+      old.hidden=true;cur=nw;nw.hidden=false;
+      nw.animate([{opacity:0,transform:'translateX('+d+'px)'},{opacity:1,transform:'none'}],{duration:t,easing:'ease-out'});
+    }).catch(function(){});
+  }
+  function status(){
+    stat.textContent=all?'Showing all '+n+' releases':'Showing 1 of '+n+' releases';
+    tog.textContent=all?'Show one at a time':'Show all';
+  }
+  function hash(){
+    var h=all?'all':items[sel].v;
+    try{history.replaceState(null,'',location.pathname+location.search+'#'+h);}catch(e){}
+  }
+  function paint(smooth){
+    tabs.forEach(function(t,k){var on=k===sel;t.setAttribute('aria-selected',on?'true':'false');t.tabIndex=on?0:-1;});
+    sl.value=String(sel);center(smooth);status();
+  }
+  function go(i,dir,anim,scroll){
+    sel=(i+n)%n;paint(anim);
+    if(all){if(scroll)secs[sel].scrollIntoView({behavior:rm.matches?'auto':'smooth'});}
+    else swap(secs[sel],dir,anim);
+    hash();
+  }
+  function setAll(on){
+    all=on;token++;
+    secs.forEach(function(s){s.getAnimations().forEach(function(a){a.cancel();});});
+    if(on){secs.forEach(function(s){s.hidden=false;});cur=null;}
+    else{cur=null;secs.forEach(function(s){s.hidden=true;});swap(secs[sel],1,false);}
+    paint(false);
+  }
+  function fromHash(){
+    var h=location.hash.slice(1);try{h=decodeURIComponent(h);}catch(e){}
+    if(h==='all')return 'all';
+    for(var k=0;k<n;k++)if(items[k].v===h||secs[k].id===h)return k;
+    return -1;
+  }
+  function apply(first){
+    var r=fromHash();
+    if(r==='all'){if(!all)setAll(true);return;}
+    if(r>=0){
+      var dir=r>sel?1:-1;
+      if(all){sel=r;setAll(false);}
+      else{sel=r;paint(!first);swap(secs[sel],dir,!first);}
+    }
+    else if(first){sel=0;paint(false);swap(secs[0],1,false);}
+    else if(all)setAll(false);
+  }
+  tog.addEventListener('click',function(){setAll(!all);hash();});
+  pv.addEventListener('click',function(){go(sel-1,-1,true,true);});
+  nx.addEventListener('click',function(){go(sel+1,1,true,true);});
+  sl.addEventListener('change',function(){var i=+sl.value;go(i,i>sel?1:-1,true,true);});
+  window.addEventListener('hashchange',function(){apply(false);});
+  // Keys only while focus is on the rail, so the page and the screenshot viewer keep theirs.
+  rail.addEventListener('keydown',function(e){
+    if(e.altKey||e.ctrlKey||e.metaKey||e.shiftKey)return;
+    var d=e.key==='ArrowRight'?1:e.key==='ArrowLeft'?-1:0,t=null;
+    if(e.key==='Home')t=0;else if(e.key==='End')t=n-1;else if(!d)return;
+    e.preventDefault();
+    var i=t!==null?t:sel+d;go(i,t!==null?(t>sel?1:-1):d,true,false);tabs[sel].focus();
+  });
+  // Wheel over the rail steps releases like the screenshot viewer: a notch is one step, a touchpad
+  // steps every 60 px, and it wraps. Only the rail eats the wheel; the rest of the page scrolls.
+  var wheel=0,wheelAt=0;
+  rail.addEventListener('wheel',function(e){
+    e.preventDefault();
+    var t=Date.now();if(t-wheelAt>250)wheel=0;wheelAt=t;
+    var m=e.deltaMode===1?40:1,dy=(Math.abs(e.deltaX)>Math.abs(e.deltaY)?e.deltaX:e.deltaY)*m;
+    if(Math.sign(dy)!==Math.sign(wheel))wheel=0;
+    wheel+=dy;
+    if(Math.abs(wheel)<60)return;
+    wheel=0;var d=dy>0?1:-1;go(sel+d,d,true,false);
+  },{passive:false});
+  // Swipe on the rail (phone).
+  var sx=null,sy=0;
+  rail.addEventListener('touchstart',function(e){sx=e.touches[0].clientX;sy=e.touches[0].clientY;},{passive:true});
+  rail.addEventListener('touchend',function(e){
+    if(sx===null)return;var dx=e.changedTouches[0].clientX-sx,dy=e.changedTouches[0].clientY-sy;sx=null;
+    if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)){var d=dx<0?1:-1;go(sel+d,d,true,false);}
+  });
+  window.addEventListener('resize',function(){center(false);});
+  apply(true);
+})();
+</script>
 <script>
 // Without this script the links still open the image in a new tab.
 (function(){
