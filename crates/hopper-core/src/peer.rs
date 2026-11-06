@@ -1131,7 +1131,9 @@ fn receive(mut body: impl Read, backup_root: &Path, dst: &Path) -> crate::model:
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(8)))
-        .timeout_global(Some(Duration::from_secs(600)))
+        // Big file pulls can take minutes. Tests only talk to a hub on this PC,
+        // so a request that stalls fails after 30 s, not ten minutes.
+        .timeout_global(Some(Duration::from_secs(if cfg!(test) { 30 } else { 600 })))
         .build()
         .into()
 }
