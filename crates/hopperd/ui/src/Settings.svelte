@@ -58,8 +58,8 @@
     ['all', 'All properties', ListTree, []],
   ];
   /** Words that find a page (things on it that aren't server.properties keys). */
-  const PAGE_WORDS = { java: 'java memory ram xmx xms gc garbage aikar zgc generator start files run.bat start.bat user_jvm_args flags jvm args arguments script command', version:'version minecraft loader neoforge forge fabric quilt paper purpur upgrade downgrade update', general: 'clone copy template duplicate remove delete' };
-  const PAGE_HINT = { version: 'Change Minecraft or loader version', general: 'Clone, save as template, remove', java: 'Memory, Java arguments, generator and start files' };
+  const PAGE_WORDS = { java: 'java memory ram xmx xms gc garbage aikar zgc generator start files run.bat start.bat user_jvm_args flags jvm args arguments script command', version:'version minecraft loader neoforge forge fabric quilt paper purpur upgrade downgrade update', general: 'sleep wake idle asleep clone copy template duplicate remove delete' };
+  const PAGE_HINT = { version: 'Change Minecraft or loader version', general: 'Sleep, clone, save as template, remove', java: 'Memory, Java arguments, generator and start files' };
   const SECRET = ['rcon.password', 'management-server-secret'];
   let shown = $state({});
   const UNITS = { 'view-distance': 'chunks', 'simulation-distance': 'chunks', 'spawn-protection': 'blocks', 'max-players': 'players' };
@@ -298,6 +298,8 @@
       {/each}
 
       {#if pg === 'general'}
+        <h4>Sleep</h4>
+        <Sleep {server} />
         <CopyServer {server} />
       {/if}
       {#if pg === 'general' && session.owner}
@@ -308,9 +310,7 @@
       {/if}
       {#if pg === 'network'}
         <h4>Address players join by</h4>
-        <Address {server} />
-        <h4>Sleep</h4>
-        <Sleep {server} />
+        <Address {server} ongeneral={() => (page = 'general')} />
       {:else if pg === 'java'}
         {#if jvm}
           <JavaPage {server} {jvm} bind:xms bind:xmx bind:flagsText dirty={{ memory: memDirty, flags: flagsDirty }} />

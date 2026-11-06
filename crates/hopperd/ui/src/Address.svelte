@@ -1,13 +1,14 @@
 <script>
   // Settings › Address: the addresses players join this server by.
   // Sleeping and waking have their own card (Sleep.svelte).
-  import { Globe, Save, Plus, X, TriangleAlert, ArrowRightLeft, SearchCheck } from '@lucide/svelte';
+  import { Globe, Save, Plus, X, TriangleAlert, ArrowRightLeft, SearchCheck, Moon } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
   import { session } from './lib/me.svelte.js';
   import { routerChip } from './lib/router.js';
 
-  let { server } = $props();
+  // `ongeneral`: opens Settings › General, where sleep lives.
+  let { server, ongeneral = null } = $props();
   // The live feed hands over a new `server` object every second; effects
   // that should run once per server key on the id alone.
   const sid = $derived(server.id);
@@ -180,10 +181,16 @@
       {#if live.length}<button class="btn sm ghost" disabled={checking} onclick={check} title="Check DNS"><SearchCheck size={13} />{checking ? 'Checking…' : 'Check DNS'}</button>{/if}
     </div>
     {#if router.state === 'off'}<div class="tiny muted">Turn server addresses on in <a href="#/access">Access &amp; devices</a>.</div>{/if}
+    {#if info.sleep_after_minutes > 0}
+      <div class="sleepnote small"><Moon size={13} /><span class="grow">Sleeps after {info.sleep_after_minutes} min with nobody online.{info.wake_on_join && info.addresses?.length ? ' Joining this address wakes it.' : ''}</span>
+        {#if ongeneral}<button class="btn sm ghost" onclick={ongeneral}>Change in General</button>{/if}</div>
+    {/if}
   {/if}
 </div>
 
 <style>
+  .sleepnote { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--raise); border-radius: var(--radius); }
+  .sleepnote .grow { flex: 1; min-width: 0; }
   .side { gap: 8px; }
   .side h3 { margin-bottom: 2px; }
   .name { width: 120px; padding: 4px 8px; flex: none; }
