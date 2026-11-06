@@ -23,7 +23,6 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::radio::Radio;
-use gpui_kit::component::tab::{Tab, TabBar};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -1076,11 +1075,9 @@ impl WorldsView {
                             h_flex()
                                 .gap_2()
                                 .child(
-                                    TabBar::new("pregen-radius")
-                                        .segmented()
-                                        .small()
+                                    widgets::Segmented::new("pregen-radius")
                                         .selected_index(presets.iter().position(|p| *p == r).unwrap_or(usize::MAX))
-                                        .children(presets.iter().map(|p| Tab::new().label(format!("{}k", p / 1000))))
+                                        .children(presets.iter().map(|p| widgets::SegItem::new().label(format!("{}k", p / 1000))))
                                         .on_click(move |ix: &usize, window, cx| {
                                             let v = presets.get(*ix).copied().unwrap_or(3000).to_string();
                                             rad2.update(cx, |s, cx| s.set_value(v, window, cx));
@@ -1095,13 +1092,11 @@ impl WorldsView {
                             h_flex()
                                 .gap_2()
                                 .child(
-                                    TabBar::new("pregen-center")
-                                        .segmented()
-                                        .small()
+                                    widgets::Segmented::new("pregen-center")
                                         .selected_index(c)
-                                        .child(Tab::new().label("World spawn"))
-                                        .child(Tab::new().label("0, 0"))
-                                        .child(Tab::new().label("Custom"))
+                                        .child(widgets::SegItem::new().label("World spawn"))
+                                        .child(widgets::SegItem::new().label("0, 0"))
+                                        .child(widgets::SegItem::new().label("Custom"))
                                         .on_click(move |ix: &usize, window, _| {
                                             center2.set(*ix);
                                             window.refresh();
