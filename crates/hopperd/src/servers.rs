@@ -72,6 +72,9 @@ pub struct Summary {
     /// The mods folder's fingerprint (`hopper_core::server::mods_stamp`):
     /// Hopper desktop compares the pack again when it changes.
     pub mods_stamp: Option<u64>,
+    /// RCON is on (with a password): console commands and live player
+    /// info work. Off: the server page offers to turn it on.
+    pub rcon: bool,
 }
 
 pub struct Servers {
@@ -264,6 +267,7 @@ impl Servers {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs()),
             mods_stamp: hopper_core::server::mods_stamp(&e.root),
+            rcon: hopper_core::hosting::rcon::settings(&e.root).is_some(),
         }
     }
 

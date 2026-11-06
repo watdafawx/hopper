@@ -75,8 +75,8 @@
       {@const up = packUpdates.byId[s.id]}
       {@const on = alive(s)}
       {@const mem = on ? s.mem_bytes : 0}
-      <!-- The bar spans the larger of use and setting, so going over shows as a hatched tail past a tick at the setting. -->
-      {@const span = Math.max(mem, cap)}
+      <!-- The figure is the whole Java process and -Xmx only caps its heap, so the bar is out of this PC's memory, with a tick at the heap limit: never "10 GB of 8 GB". -->
+      {@const span = Math.max(h?.mem_total || 0, mem, cap)}
       {@const nchips = Number(!!up) + Number(!!s.managed_by) + Number(outside(s.path))}
       <div class="scard">
         <div class="row">
@@ -105,11 +105,11 @@
             <div class="t">CPU<b>{on ? `${Math.round(s.cpu)} %` : '—'}</b></div>
             <div class="bar"><i style:width="{on ? Math.min(100, s.cpu) : 0}%"></i></div>
           </div>
-          <div title={on ? (mem > cap && cap ? `${bytes(mem)} of ${bytes(cap)}, over the memory setting. ` : '') + memTitle(mem, cap) : undefined}>
-            <div class="t">RAM<b>{on ? bytes(mem) : '—'}{#if cap}<span class="u">{` / ${bytes(cap)}`}</span>{/if}</b></div>
+          <div title={on ? `${memTitle(mem, cap)} The bar is out of this PC's memory${cap ? '; the mark is the heap limit' : ''}.` : undefined}>
+            <div class="t">RAM<b>{on ? bytes(mem) : '—'}{#if cap}<span class="u">{` · heap limit ${bytes(cap)}`}</span>{/if}</b></div>
             <div class="bar b mem">
-              {#if span}<i style:width="{(Math.min(mem, cap || mem) / span) * 100}%"></i>{/if}
-              {#if cap && mem > cap}<s style:left="{(cap / span) * 100}%"></s><u style:left="{(cap / span) * 100}%"></u>{/if}
+              {#if span}<i style:width="{(mem / span) * 100}%"></i>{/if}
+              {#if cap && span}<u style:left="{(cap / span) * 100}%"></u>{/if}
             </div>
           </div>
         </div>
@@ -169,8 +169,7 @@
   .t .u { color: var(--muted); font-weight: 400; }
   /* Memory past the setting: a tick at the setting and a hatched tail. */
   .mem { position: relative; overflow: visible; }
-  .mem s, .mem u { position: absolute; top: 0; bottom: 0; }
-  .mem s { right: 0; border-radius: 0 9px 9px 0; background: repeating-linear-gradient(135deg, #38bdf8aa 0 3px, #38bdf833 3px 6px); }
+  .mem u { position: absolute; }
   .mem u { top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text); opacity: .7; }
   .foot { gap: 4px; }
   .foot { flex-wrap: nowrap; }

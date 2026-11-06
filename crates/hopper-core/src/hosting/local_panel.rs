@@ -188,6 +188,7 @@ impl ServerPanel for LocalPanel {
             progress: s.progress(),
             finished: s.finished(),
             mods_stamp: crate::server::mods_stamp(&s.root()),
+            rcon_off: super::rcon::settings(&s.root()).is_none(),
             ..Default::default()
         })
     }

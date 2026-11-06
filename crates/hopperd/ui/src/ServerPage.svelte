@@ -328,7 +328,7 @@
         <!-- As desktop's Live cards: a dash and the state while it isn't running. -->
         <div class="t">CPU<b>{alive ? `${Math.round(s.cpu)} %` : '—'}</b></div>
         {#if alive}<Spark values={history[`${id}.cpu`]} color="var(--acc)" />{/if}
-        <div class="t gap" title={alive ? memTitle(s.mem_bytes, cap) : undefined}>RAM<b>{alive ? `${bytes(s.mem_bytes)}${cap ? ` / ${bytes(cap)}` : ''}` : cap ? `— / ${bytes(cap)}` : '—'}</b></div>
+        <div class="t gap" title={alive ? memTitle(s.mem_bytes, cap) : undefined}>RAM<b>{alive ? bytes(s.mem_bytes) : '—'}{#if cap}<span class="muted fw">{` · heap limit ${bytes(cap)}`}</span>{/if}</b></div>
         {#if alive}<Spark values={history[`${id}.mem`]} color="var(--blue)" />{:else}<div class="tiny muted gap">{stateText(s)}</div>{/if}
         <ServerAlerts server={s} part="live" />
       </div>

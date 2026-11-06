@@ -4,10 +4,12 @@
   // (panel_tabs/players.rs): one column of sections (online now, the
   // operators, the whitelist with a box to add names, the bans), each row
   // with its actions. Kicks and bans ask first, with an optional reason.
-  // Refreshes every 10 seconds and after each change.
+  // Refreshes every 5 seconds while open (pings and time online), and
+  // after each change.
   import { Crown, Ban, ShieldCheck, UserPlus, Undo2, LogOut, Users } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { askKickOrBan, playerAct, head } from './lib/consoleKit.js';
+  import { pingLevel, onlineFor } from './lib/format.js';
 
   let { server } = $props();
   // The live feed hands over a new `server` object every second; effects
@@ -21,11 +23,15 @@
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const ops = $derived(new Set((data?.ops || []).map((p) => p.name.toLowerCase())));
   const online = $derived(data?.online || server.players);
+  // Ping and join time by name; older panels send only names.
+  const info = $derived(new Map((data?.people || []).map((p) => [p.name, p])));
+  let now = $state(Date.now() / 1000);
   const running = $derived(data ? data.running : server.state === 'running');
 
   async function load() {
     try {
       data = await api(`${base}/players`);
+      now = Date.now() / 1000;
       error = '';
     } catch (e) {
       // Keep what is on screen when a refresh fails.
@@ -60,7 +66,7 @@
   });
   $effect(() => {
     sid;
-    const t = setInterval(load, 10000);
+    const t = setInterval(load, 5000);
     return () => clearInterval(t);
   });
 
@@ -83,6 +89,12 @@
           {@render face(p)}<span class="nm">{p}</span>
           {#if ops.has(p.toLowerCase())}<span class="chip acc">op</span>{/if}
           <span class="sp"></span>
+          {#if data?.people}
+            {@const i = info.get(p)}
+            {#if i?.ms != null}<span class="ping {pingLevel(i.ms)}" title={i.via === 'spark' ? 'Ping from spark' : 'Ping through Hopper’s address'}>{i.ms} ms</span>
+            {:else}<span class="ping muted" title={i?.why || ''}>—</span>{/if}
+            <span class="on muted" title={i?.joined ? 'Time online' : ''}>{i?.joined ? onlineFor(i.joined, now) : ''}</span>
+          {/if}
           <button class="btn sm ghost" onclick={() => act(ops.has(p.toLowerCase()) ? 'deop' : 'op', p)}><Crown size={13} />{ops.has(p.toLowerCase()) ? 'Deop' : 'Op'}</button>
           <button class="btn sm ghost" onclick={() => kickOrBan('kick', p)}><LogOut size={13} />Kick</button>
           <button class="btn sm ghost red" onclick={() => kickOrBan('ban', p)}><Ban size={13} />Ban</button>
@@ -136,6 +148,10 @@
   .pl { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: var(--radius); min-height: 34px; }
   .pl img { width: 24px; height: 24px; border-radius: var(--radius-sm); background: var(--raise); flex: none; }
   .nm { font-weight: 500; font-size: 13px; }
+  .ping, .on { font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; flex: none; }
+  .ping { width: 4rem; }
+  .on { width: 4.5rem; }
+  .ping.good { color: var(--green); } .ping.warn { color: var(--gold); } .ping.bad { color: var(--red); }
   .empty { padding: 0 8px; }
   /* Ban is red, as desktop draws it (also on hover). */
   .btn.red, .btn.red:hover:not(:disabled) { color: var(--red); }

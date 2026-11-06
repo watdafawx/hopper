@@ -223,6 +223,103 @@ pub fn parse_tps(text: &str) -> Option<(f32, Option<f32>)> {
     clean.lines().filter_map(read).min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
+/// A TPS reading spark printed in the server's console.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConsoleTps {
+    pub tps: f32,
+    pub mspt: Option<f32>,
+    pub at: std::time::SystemTime,
+}
+
+/// Follows spark's blocks in the console. It prints a heading line, then
+/// the numbers on the next one, each with its own log prefix:
+///
+/// ```text
+/// [spark-worker-pool-1-thread-3/INFO]: [⚡] TPS from last 5s, 10s, 1m, 5m, 15m:
+/// [spark-worker-pool-1-thread-3/INFO]: [⚡]  20.0, 20.0, *20.0, *20.0, *20.0
+/// [spark-worker-pool-1-thread-3/INFO]: [⚡] Tick durations (min/med/95%ile/max ms) from last 10s, 1m:
+/// [spark-worker-pool-1-thread-3/INFO]: [⚡]  0.5/1.2/3.4/10.1;  0.4/1.1/3.0/9.0
+/// ```
+///
+/// Reading it costs nothing: no command, no RCON.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SparkBlock {
+    next: Option<SparkNext>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SparkNext {
+    Tps,
+    Mspt,
+}
+
+/// The message part of a console line, after its "[time] [thread/LEVEL]: ".
+fn message(line: &str) -> &str {
+    line.find("]: ").map_or(line, |i| &line[i + 3..])
+}
+
+/// The numbers in `s` ("*20.0" counts: spark marks some with a star).
+fn numbers(s: &str) -> Vec<f32> {
+    s.split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .filter(|t| t.chars().any(|c| c.is_ascii_digit()))
+        .filter_map(|t| t.trim_matches('.').parse().ok())
+        .collect()
+}
+
+impl SparkBlock {
+    pub fn push(&mut self, line: &str, out: &mut Option<ConsoleTps>) {
+        let msg = strip_colors(message(line));
+        let next = self.next.take();
+        // Player chat ("<Steve> TPS from last…") never counts.
+        if msg.trim_start().starts_with('<') {
+            return;
+        }
+        if let Some(i) = msg.find("TPS from last") {
+            // Paper and some setups put the numbers on the same line.
+            let rest = msg[i..].split_once(':').map_or("", |(_, r)| r);
+            match tps_values(rest) {
+                Some(tps) => *out = Some(ConsoleTps { tps, mspt: None, at: std::time::SystemTime::now() }),
+                None => self.next = Some(SparkNext::Tps),
+            }
+            return;
+        }
+        if msg.contains("Tick durations") {
+            self.next = Some(SparkNext::Mspt);
+            return;
+        }
+        // The numbers line is nothing but numbers after spark's tag ("[⚡]",
+        // or "[?]" in a console that can't show it).
+        let body = msg.trim_start();
+        let body = if body.starts_with('[') { body.split_once(']').map_or(body, |(_, r)| r) } else { body };
+        let only = |allowed: &str| !body.trim().is_empty() && body.chars().all(|c| c.is_ascii_digit() || c.is_whitespace() || allowed.contains(c));
+        match next {
+            Some(SparkNext::Tps) if only(".,*") => {
+                if let Some(tps) = tps_values(body) {
+                    *out = Some(ConsoleTps { tps, mspt: None, at: std::time::SystemTime::now() });
+                }
+            }
+            Some(SparkNext::Mspt) if only("./;*") => {
+                // min/med/95%ile/max for the shortest window: the median.
+                let first = body.split(';').next().unwrap_or("");
+                let n = numbers(first);
+                if n.len() == 4
+                    && first.contains('/')
+                    && let Some(t) = out.as_mut()
+                {
+                    t.mspt = Some(n[1]);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The most recent TPS from a "20.0, 20.0, *20.0, ..." line.
+fn tps_values(s: &str) -> Option<f32> {
+    let n = numbers(s);
+    (n.len() >= 3 && s.contains(',')).then(|| n[0].min(20.0))
+}
+
 fn strip_colors(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut skip = false;
@@ -320,6 +417,73 @@ pub fn enable_in(root: &Path, others: &[std::path::PathBuf], password: impl FnOn
         p.save(&path)?;
     }
     Ok(s)
+}
+
+/// A player's ping from spark's `spark ping --player <name>` answer
+/// ("Player Steve has 42 ms ping."); `None` when spark has none for them.
+pub fn parse_spark_ping(text: &str) -> Option<u32> {
+    // Colour codes (§a) are two characters to skip.
+    let mut plain = String::with_capacity(text.len());
+    let mut it = text.chars();
+    while let Some(c) = it.next() {
+        if c == '§' {
+            it.next();
+        } else {
+            plain.push(c);
+        }
+    }
+    let b = plain.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() && (i == 0 || !b[i - 1].is_ascii_alphanumeric()) {
+            let start = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            let rest = plain[i..].trim_start();
+            if rest.starts_with("ms") && !rest[2..].starts_with(|c: char| c.is_ascii_alphanumeric()) {
+                return plain[start..i].parse().ok();
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// A random RCON password: 36 hex digits.
+pub fn new_password() -> String {
+    crate::peer::random_hex(18)
+}
+
+/// RCON for a server Hopper just made, copied or imported: on, with a port
+/// no other server here uses and a new password, so console commands and
+/// player info work from its first start. A copy never shares its source's
+/// port or password. Only Hopper uses it, on 127.0.0.1: nothing is opened in
+/// the firewall. The other servers are the folders next to `root`.
+pub fn set_up_new(root: &Path) -> anyhow::Result<Setup> {
+    let path = root.join("server.properties");
+    let mut p = super::Properties::load(&path)?;
+    let others: Vec<std::path::PathBuf> = root
+        .parent()
+        .map(crate::server::discover)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.root)
+        .filter(|r| r != root)
+        .collect();
+    // No password makes enable() pick a fresh port and password.
+    p.set("rcon.password", "");
+    let s = enable(&mut p, &ports_in_use(&others), |n| std::net::TcpListener::bind(("127.0.0.1", n)).is_ok(), new_password)?;
+    p.save(&path)?;
+    Ok(s)
+}
+
+/// [`set_up_new`], logged instead of failing the create: a server without
+/// RCON still runs, and its page offers to turn it on.
+pub fn set_up_new_or_log(root: &Path) {
+    if let Err(e) = set_up_new(root) {
+        log::warn!("{}: couldn't turn RCON on: {e:#}", root.display());
+    }
 }
 
 #[cfg(test)]
@@ -504,6 +668,70 @@ There are 0 of a max of 16 players online:
         let mut p = Properties::parse("enable-rcon=true\nrcon.port=25590\nrcon.password=\n");
         assert_eq!(enable(&mut p, &[], |_| true, PW).unwrap(), Setup::Enabled { port: 25575 });
         assert_eq!(p.get("rcon.password"), Some("newpass"));
+    }
+
+    #[test]
+    fn reads_spark_tps_from_the_console() {
+        let mut b = SparkBlock::default();
+        let mut out = None;
+        for l in [
+            "[12:00:00] [spark-worker-pool-1-thread-3/INFO]: [⚡] TPS from last 5s, 10s, 1m, 5m, 15m:",
+            "[12:00:00] [spark-worker-pool-1-thread-3/INFO]: [⚡]  19.5, 20.0, *20.0, *20.0, *20.0",
+            "[12:00:00] [spark-worker-pool-1-thread-3/INFO]: [⚡] Tick durations (min/med/95%ile/max ms) from last 10s, 1m:",
+            "[12:00:00] [spark-worker-pool-1-thread-3/INFO]: [⚡]  0.5/1.2/3.4/10.1;  0.4/1.1/3.0/9.0",
+        ] {
+            b.push(l, &mut out);
+        }
+        let t = out.unwrap();
+        assert_eq!((t.tps, t.mspt), (19.5, Some(1.2)));
+        // The heading followed by something else isn't a reading; chat
+        // that only mentions TPS isn't either.
+        let mut out = None;
+        b.push("[12:01:00] [spark-worker-pool-1-thread-3/INFO]: [?] TPS from last 5s, 10s, 1m, 5m, 15m:", &mut out);
+        b.push("[12:01:00] [Server thread/INFO]: There are 0 of a max of 16 players online:", &mut out);
+        b.push("[12:01:01] [Server thread/INFO]: <Steve> TPS from last week was bad", &mut out);
+        // A stack trace quoting the heading, then a path full of digits.
+        b.push("    print(t + '[?] TPS from last 5s, 10s, 1m, 5m, 15m:', flush=True)", &mut out);
+        b.push(r#"  File "C:\Temp\382f0cdb9af9d316\fake.py", line 102, in spark_reports"#, &mut out);
+        assert_eq!(out, None);
+        // A console that can't show spark's ⚡ prints "?".
+        b.push("[12:01:30] [spark-worker-pool-1-thread-3/INFO]: [?] TPS from last 5s, 10s, 1m, 5m, 15m:", &mut out);
+        b.push("[12:01:30] [spark-worker-pool-1-thread-3/INFO]: [?]  20.0, 20.0, *20.0, *20.0, *20.0", &mut out);
+        assert_eq!(out.map(|t| t.tps), Some(20.0));
+        out = None;
+        // Paper: one line.
+        b.push("[12:02:00] [Server thread/INFO]: TPS from last 1m, 5m, 15m: 18.2, 19.0, 19.5", &mut out);
+        assert_eq!(out.map(|t| t.tps), Some(18.2));
+    }
+
+    #[test]
+    fn parses_spark_ping() {
+        assert_eq!(parse_spark_ping("§7Player §fSteve §7has §a42 ms§7 ping."), Some(42));
+        assert_eq!(parse_spark_ping("Player Steve_2 has 180ms ping."), Some(180));
+        assert_eq!(parse_spark_ping("No ping data for Steve2"), None);
+        assert_eq!(parse_spark_ping("Unknown or incomplete command"), None);
+    }
+
+    #[test]
+    fn new_servers_and_copies_get_their_own_rcon() {
+        let d = std::env::temp_dir().join(format!("hopper-rcon-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (a, b) = (d.join("a"), d.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("server.properties"), "server-port=25566
+").unwrap();
+        let sa = set_up_new(&a).unwrap();
+        let (pa, wa) = settings(&a).unwrap();
+        assert_eq!(pa, sa.port());
+        assert_eq!(wa.len(), 36);
+        // b is a copy of a: same RCON lines, but it gets its own.
+        std::fs::copy(a.join("server.properties"), b.join("server.properties")).unwrap();
+        set_up_new(&b).unwrap();
+        let (pb, wb) = settings(&b).unwrap();
+        assert_ne!(pb, pa);
+        assert_ne!(wb, wa);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -46,7 +46,8 @@ impl HopperServer {
 /// or why it has none. Panels older than alerts leave both empty.
 fn add_tps(st: &mut PanelStats, alerts: &Value, id: &str) {
     let t = &alerts["tps"][id];
-    st.tps = t["tps"].as_f64().map(|tps| super::Tps { tps: tps as f32, mspt: t["mspt"].as_f64().map(|m| m as f32) });
+    let source = if t["source"].as_str() == Some("console") { super::TpsSource::Console } else { super::TpsSource::Rcon };
+    st.tps = t["tps"].as_f64().map(|tps| super::Tps { tps: tps as f32, mspt: t["mspt"].as_f64().map(|m| m as f32), source });
     st.no_tps = alerts["no_tps"][id].as_str().map(str::to_string);
 }
 
@@ -92,6 +93,8 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
         icon: v["icon"].as_u64(),
         stopping: state == "stopping",
         mods_stamp: v["mods_stamp"].as_u64(),
+        // Older Hopper Servers don't say: no notice for them.
+        rcon_off: v["rcon"].as_bool() == Some(false),
         // Older Hopper Servers send only `boot`: their starts still show.
         progress: serde_json::from_value(v["progress"].clone()).ok().or_else(|| old_boot(&v["boot"])),
         finished: serde_json::from_value(v["finished"].clone()).ok(),

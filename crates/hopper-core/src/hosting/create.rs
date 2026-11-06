@@ -218,6 +218,7 @@ fn fill(root: &Path, opts: &CreateOptions, job: &Job) -> anyhow::Result<()> {
     super::write_eula(root, opts.accept_eula)?;
     super::properties::defaults(opts.port, &opts.motd, opts.loader.is_modded())
         .save(&root.join("server.properties"))?;
+    super::rcon::set_up_new_or_log(root);
     // Without it, the Minecraft version is only known once the server has
     // run, and adding mods before that picks files for the wrong version.
     opts.hosted_meta().save(root)?;

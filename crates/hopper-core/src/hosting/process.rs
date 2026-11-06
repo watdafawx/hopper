@@ -65,6 +65,8 @@ impl ServerState {
 pub struct Tracker {
     pub lines: VecDeque<String>,
     pub players: BTreeSet<String>,
+    /// When each online player joined, for the ones seen joining this run.
+    pub joined: std::collections::HashMap<String, SystemTime>,
     pub done: bool,
     pub version: String,
     pub port_in_use: bool,
@@ -88,20 +90,26 @@ pub struct Tracker {
     pub boot: Boot,
     /// How far a stop has got.
     pub halt: Halt,
+    /// TPS (and ms per tick) spark printed in the console, and when.
+    pub console_tps: Option<super::rcon::ConsoleTps>,
+    spark: super::rcon::SparkBlock,
 }
 
 impl Tracker {
     pub fn push(&mut self, line: String) {
         let now = Instant::now();
         self.heard_at = Some(now);
+        self.spark.push(&line, &mut self.console_tps);
         self.boot.push(&line, now);
         self.halt.push(&line, now);
         match parse_line(&line) {
             Some(LogEvent::Done) => self.done = true,
             Some(LogEvent::Joined(n)) => {
+                self.joined.entry(n.clone()).or_insert_with(SystemTime::now);
                 self.players.insert(n);
             }
             Some(LogEvent::Left(n)) => {
+                self.joined.remove(&n);
                 self.players.remove(&n);
             }
             Some(LogEvent::List(_, max, names)) => {
@@ -109,6 +117,8 @@ impl Tracker {
                 // Old servers print names on the next line; keep ours then.
                 if line.contains(" of a max of ") {
                     self.players = names.into_iter().collect();
+                    let on = &self.players;
+                    self.joined.retain(|n, _| on.contains(n));
                 }
             }
             Some(LogEvent::Version(v)) => self.version = v,
@@ -396,6 +406,16 @@ impl LocalServer {
     /// Players online, from joins and leaves (and `list` replies).
     pub fn players(&self) -> Vec<String> {
         self.lock().tracker.players.iter().cloned().collect()
+    }
+
+    /// The last TPS spark printed in the console this run, if any.
+    pub fn console_tps(&self) -> Option<super::rcon::ConsoleTps> {
+        self.lock().tracker.console_tps
+    }
+
+    /// When each online player joined (only the ones seen joining).
+    pub fn joined_at(&self) -> std::collections::HashMap<String, SystemTime> {
+        self.lock().tracker.joined.clone()
     }
 
     /// How far the start has got, while the server is starting.
@@ -1200,8 +1220,11 @@ mod tests {
         assert!(t.done);
         assert_eq!(t.version, "1.21.1");
         assert_eq!(t.players.iter().collect::<Vec<_>>(), ["Steve"]);
+        // Join times follow joins and leaves; a name only seen in `list` has none.
+        assert_eq!(t.joined.keys().collect::<Vec<_>>(), ["Steve"]);
         t.push("[10:03:00] [Server thread/INFO]: There are 2 of a max of 10 players online: Bob, Steve".into());
         assert_eq!(t.players.len(), 2);
+        assert!(t.joined.contains_key("Steve") && !t.joined.contains_key("Bob"));
         assert_eq!(t.max_from_list, Some(10));
         for i in 0..MAX_LINES + 5 {
             t.push(format!("line {i}"));

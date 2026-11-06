@@ -386,8 +386,11 @@ async fn players(
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
     let props = Properties::load(&e.root.join("server.properties")).unwrap_or_default();
+    let people = crate::player_ping::people(&e).await;
     Ok(Json(json!({
         "online": e.server.players(),
+        "people": people,
+        "rcon": hopper_core::hosting::rcon::settings(&e.root).is_some(),
         "running": e.server.state().is_alive(),
         "ops": names_in(&e.root, "ops.json"),
         "whitelist": names_in(&e.root, "whitelist.json"),

@@ -112,6 +112,11 @@ pub struct ServerControl {
     active: bool,
     /// When the last poll was sent.
     polled: std::time::Instant,
+    /// Turning RCON on: waiting for it, or done for this server id (it then
+    /// starts with the next restart).
+    rcon_turning: bool,
+    rcon_done: Option<String>,
+    rcon_error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -190,6 +195,9 @@ impl ServerControl {
             _poll: None,
             active: false,
             polled: std::time::Instant::now(),
+            rcon_turning: false,
+            rcon_done: None,
+            rcon_error: None,
             _subscriptions: subs,
         }
     }
@@ -990,6 +998,85 @@ impl ServerControl {
             .into_any_element()
     }
 
+    /// "Console commands and live player info need RCON · Turn on", for a
+    /// server of Hopper's own or on a Hopper Server that has it off. Never
+    /// restarts the server: RCON starts with its next start.
+    pub fn rcon_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Some(Ok(s)) = &self.stats else { return None };
+        let theme = cx.theme();
+        let done = self.rcon_done.is_some() && self.rcon_done == self.id;
+        if !s.rcon_off && !done {
+            return None;
+        }
+        let bar = widgets::notice_bar(theme.info, IconName::Info, cx);
+        if done {
+            let when = if s.running { "It starts with the server's next restart." } else { "It starts with the server." };
+            return Some(bar.id("rcon-notice").child(div().flex_1().min_w_0().text_sm().child(format!("RCON is on. {when}"))).into_any_element());
+        }
+        Some(
+            bar.id("rcon-notice")
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_2()
+                        .flex_wrap()
+                        .text_sm()
+                        .child("Console commands and live player info need RCON")
+                        .child(div().text_color(theme.muted_foreground).child("·"))
+                        .child(
+                            Button::new("rcon-on")
+                                .link()
+                                .small()
+                                .label(if self.rcon_turning { "Turning on…" } else { "Turn on" })
+                                .disabled(self.rcon_turning)
+                                .on_click(cx.listener(|t, _, _, cx| t.turn_on_rcon(cx))),
+                        )
+                        .child(div().text_color(theme.muted_foreground).child("(applies on restart)"))
+                        .children(self.rcon_error.clone().map(|e| div().text_color(theme.danger).child(e))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Turns RCON on with its own port and a random password: on this PC
+    /// for a server Hopper hosts, else through its Hopper Server.
+    fn turn_on_rcon(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let hosted = self.hosted(cx);
+        let remote = self.remote(cx);
+        let others: Vec<PathBuf> = self.store.read(cx).servers().iter().map(|s| s.root.clone()).filter(|r| *r != root).collect();
+        let id = self.id.clone();
+        self.rcon_turning = true;
+        self.rcon_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    if hosted {
+                        hopper::hosting::rcon::enable_in(&root, &others, hopper::hosting::rcon::new_password).map(|_| ())
+                    } else if let Some(r) = remote {
+                        let c = hopper::hopperd::Client::for_remote(&r)?;
+                        c.post(&hopper::hopperd::Client::server_path(&r.id, "/rcon"), serde_json::json!({})).map(|_| ())
+                    } else {
+                        anyhow::bail!("This server's panel can't turn RCON on.")
+                    }
+                })
+                .await;
+            this.update(cx, |t, cx| {
+                t.rcon_turning = false;
+                match r {
+                    Ok(()) => t.rcon_done = id,
+                    Err(e) => t.rcon_error = Some(format!("{e:#}")),
+                }
+                t.poll_now(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The Overview's cards: CPU and memory with sparklines of the last
     /// minute or so, players and world size.
     pub fn stat_cards(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1046,6 +1133,14 @@ impl ServerControl {
             (s.mem[..split].trim().to_string(), s.mem[split..].trim().to_string())
         };
         let players: Vec<String> = s.players.iter().take(5).cloned().collect();
+        // The figure is the whole Java process; -Xmx only caps its heap, so
+        // it's named as a limit, never as the total the figure is out of.
+        let heap = self
+            .root
+            .as_ref()
+            .and_then(|r| self.store.read(cx).server(r))
+            .and_then(|i| i.max_memory.clone())
+            .filter(|m| !m.trim().is_empty());
         // A sparkline once there are two samples; a note while stopped.
         let (app, state): (&App, &str) = (cx, s.state());
         let trend = |v: Vec<f32>, top: f32, color: Hsla| -> AnyElement {
@@ -1070,6 +1165,13 @@ impl ServerControl {
                 .child(
                     card("card-mem", IconName::MemoryStick, "Memory")
                         .child(value(mem_value.0, mem_value.1))
+                        .when(live, |c| {
+                            let text = match &heap {
+                                Some(h) => format!("Process · heap limit {}", heap_text(h)),
+                                None => "Whole Java process".to_string(),
+                            };
+                            c.child(widgets::caption(text, cx).text_xs())
+                        })
                         .child(trend(mem, 100.0, theme.primary)),
                 )
                 // Only panels that read TPS (Hopper Server) get the card.
@@ -1078,7 +1180,8 @@ impl ServerControl {
                     r.child(match s.tps {
                         Some(t) => {
                             let color = widgets::tps_color(&t, cx);
-                            c.child(
+                            let from = t.source.text();
+                            c.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(from).build(w, cx)).child(
                                 h_flex()
                                     .items_baseline()
                                     .gap_1()
@@ -2192,5 +2295,14 @@ mod console_tests {
         assert!(ConsoleFilter::Errors.fits(LineKind::Frame));
         assert!(!ConsoleFilter::Errors.fits(LineKind::Warn));
         assert!(!ConsoleFilter::Chat.fits(LineKind::Join));
+    }
+}
+
+/// "8G" / "8192M" (as -Xmx writes it) as "8 GB" / "8192 MB".
+fn heap_text(xmx: &str) -> String {
+    let x = xmx.trim();
+    match x.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => format!("{} {}B", &x[..i], c.to_ascii_uppercase()),
+        _ => x.to_string(),
     }
 }

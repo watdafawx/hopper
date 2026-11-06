@@ -66,7 +66,7 @@ fn os_random(buf: &mut [u8]) -> std::io::Result<()> {
 }
 
 /// `bytes` random bytes from the OS, as lowercase hex.
-fn random_hex(bytes: usize) -> String {
+pub(crate) fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     // Tokens guard the peer API; never fall back to something guessable.
     os_random(&mut buf).expect("the system random number generator failed");

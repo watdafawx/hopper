@@ -678,8 +678,9 @@ fn overlay(zip_path: &Path, plan: &Plan, root: &Path, job: &Job) -> anyhow::Resu
 }
 
 /// Keys Hopper keeps its own value for: the port it picked (and the query
-/// port that follows it) and the MOTD the user typed.
-const KEEP_HOPPERS: &[&str] = &["server-port", "query.port", "motd"];
+/// port that follows it), the MOTD the user typed, and the RCON it set up
+/// (a pack's RCON is off, or shares a port and password with every copy).
+const KEEP_HOPPERS: &[&str] = &["server-port", "query.port", "motd", "enable-rcon", "rcon.port", "rcon.password"];
 
 /// Sets the pack's values on `hopper`, except [`KEEP_HOPPERS`]; returns the
 /// keys that changed or were added.

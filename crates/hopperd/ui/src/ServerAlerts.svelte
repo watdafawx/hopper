@@ -3,7 +3,7 @@
   // header (`part="chip"`), banners under it ("banner") and a TPS line in
   // the Live card ("live").
   import { onMount } from 'svelte';
-  import { AlertTriangle, X, Share2 } from '@lucide/svelte';
+  import { AlertTriangle, X, Share2, Info } from '@lucide/svelte';
   import ShareLog from './ShareLog.svelte';
   import { alerts, alertsFor, watchAlerts, dismissAlert, refreshAlerts } from './lib/alerts.svelte.js';
   import { post } from './lib/api.js';
@@ -24,8 +24,13 @@
     restart: 'RCON is set up and starts with the server’s next restart. TPS shows then.',
     unsupported: 'No cheap way to read TPS on this loader (add spark to get it).',
     slow: 'The server didn’t answer within 20 seconds: it’s lagging hard (each tick is taking seconds).',
+    spark_console: 'spark answers too late over RCON; TPS shows when spark next prints its report in the console.',
   };
+  const FROM = { console: 'From spark’s report in the console', rcon: 'From the server’s TPS command (RCON)' };
+  const tpsTitle = (t) => [FROM[t.source], t.mspt != null ? `${t.mspt.toFixed(1)} ms a tick` : ''].filter(Boolean).join(' · ');
   let turning = $state(false);
+  // Turned on from this page: says so until the page changes server.
+  let turnedOn = $state('');
   let sharing = $state(false);
 
   const md = (t) => t.replace(/\*\*/g, '');
@@ -35,6 +40,7 @@
     try {
       const r = await post(`/servers/${encodeURIComponent(id)}/rcon`);
       say(r.restart ? `RCON is on (port ${r.port}). TPS shows after the next restart.` : `RCON is on (port ${r.port}). TPS shows once it runs.`);
+      turnedOn = id;
       refreshAlerts();
     } catch (e) {
       say(e.message, true);
@@ -48,11 +54,17 @@
 
 {#if part === 'chip'}
   {#if running && tps}
-    <span class="chip tps {level}" title={tps.mspt != null ? `${tps.mspt.toFixed(1)} ms a tick` : 'Ticks per second'}>TPS {tps.tps.toFixed(1)}</span>
+    <span class="chip tps {level}" title={tpsTitle(tps) || 'Ticks per second'}>TPS {tps.tps.toFixed(1)}</span>
   {:else if running}
     <span class="chip tps" title={WHY[why] || 'Reading TPS…'}>TPS —</span>
   {/if}
 {:else if part === 'banner'}
+  {#if turnedOn && turnedOn === id}
+    <div class="ban info"><Info size={14} /><span class="grow">RCON is on. {running ? 'It starts with the server’s next restart.' : 'It starts with the server.'}</span></div>
+  {:else if server.rcon === false}
+    <!-- Older panels don't send `rcon`: no notice for them. -->
+    <div class="ban info"><Info size={14} /><span class="grow">Console commands and live player info need RCON · <button class="lnk" disabled={turning} onclick={rcon} title="Gives it its own port and a random password. Never restarts the server.">{turning ? 'Turning on…' : 'Turn on'}</button> <span class="muted">(applies on restart)</span></span></div>
+  {/if}
   {#each shown as a (a.kind + a.server_id + a.since)}
     <div class="ban" class:red={a.kind === 'crash'}>
       <AlertTriangle size={14} />
@@ -66,10 +78,11 @@
 {:else if part === 'live'}
   {#if running}
     <div class="t gap">TPS
-      {#if tps}<b class:w={level === 'warn'} class:r={level === 'bad'}>{tps.tps.toFixed(1)}{tps.mspt != null ? ` · ${tps.mspt.toFixed(1)} ms` : ''}</b>
+      {#if tps}<b class:w={level === 'warn'} class:r={level === 'bad'} title={tpsTitle(tps)}>{tps.tps.toFixed(1)}{tps.mspt != null ? ` · ${tps.mspt.toFixed(1)} ms` : ''}</b>
       {:else if why === 'restart'}<b class="muted" title={WHY.restart}>RCON on next restart</b>
       {:else if why === 'rcon_off'}<button class="lnk" disabled={turning} onclick={rcon} title="Gives it a random RCON password; takes effect at the next restart">Turn on RCON to see it</button>
       {:else if why === 'unsupported'}<b class="muted" title="No cheap way to read TPS on this loader (add spark to get it)">n/a</b>
+      {:else if why === 'spark_console'}<b class="muted" title={WHY.spark_console}>Waiting for spark</b>
       {:else if why === 'slow'}<b class="muted" title="The server didn't answer within 20 seconds: it's lagging hard (each tick is taking seconds)">No answer</b>
       {:else}<b class="muted">…</b>{/if}
     </div>
@@ -85,6 +98,8 @@
   .ban.red { background: var(--red-dim); border-color: #ef444440; }
   .ban :global(svg) { color: var(--gold); flex: none; }
   .ban.red :global(svg) { color: var(--red); }
+  .ban.info { background: var(--blue-dim); border-color: #38bdf840; }
+  .ban.info :global(svg) { color: var(--blue); }
   .grow { flex: 1; min-width: 0; }
   .t { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
   .t b { color: var(--text); font-weight: 500; }
