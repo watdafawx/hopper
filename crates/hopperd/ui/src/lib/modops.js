@@ -62,14 +62,14 @@ export async function removeMods(base, mods, alive, { onUndo = () => {} } = {}) 
     files = [...files, ...extra];
   } else {
     const ok = await confirmIt(`Remove ${w}?`, {
-      body: `Move to backups keeps a copy in .hopper-backups (Mods › Backups).${need.length ? ` ${need.map((n) => n.name).join(', ')} ${need.length === 1 ? 'needs' : 'need'} ${mods.length === 1 ? 'it' : 'them'}: the server stops at loading without.` : ''}`,
+      body: `Move to backups keeps a copy in .hopper-backups (Mods › History).${need.length ? ` ${need.map((n) => n.name).join(', ')} ${need.length === 1 ? 'needs' : 'need'} ${mods.length === 1 ? 'it' : 'them'}: the server stops at loading without.` : ''}`,
       ok: 'Move to backups',
     });
     if (!ok) return false;
   }
   try {
     const r = await post(`${base}/mods/remove-many`, { files });
-    const text = `Removed ${r.removed === 1 && files.length === 1 ? w : `${r.removed} mods`}. ${r.removed === 1 ? "It's" : "They're"} in Mods › Backups.${restart(alive)}`;
+    const text = `Removed ${r.removed === 1 && files.length === 1 ? w : `${r.removed} mods`}. ${r.removed === 1 ? "It's" : "They're"} in Mods › History.${restart(alive)}`;
     if (r.undo && removing.hosts) offerUndo({ base, token: r.undo, text, alive, onUndo });
     else say(text);
     return true;

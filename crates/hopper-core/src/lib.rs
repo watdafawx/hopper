@@ -88,6 +88,7 @@ pub mod server;
 pub mod server_update;
 pub mod serverpack;
 pub mod server_pack_update;
+pub mod server_mods;
 pub mod secrets;
 pub mod selfupdate;
 pub mod settings;

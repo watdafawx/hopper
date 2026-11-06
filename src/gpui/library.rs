@@ -2,7 +2,7 @@
 //! header and tabs in the work area.
 
 use crate::widgets::Clickable as _;
-use crate::addons::{AddonsEvent, AddonsView, in_class};
+use crate::addons::{AddonsEvent, AddonsView};
 use crate::content::{ContentEvent, ScreenshotsView, WorldsView};
 use crate::inst_settings::InstanceSettings;
 use crate::logs::LogsView;
@@ -2266,7 +2266,7 @@ impl LibraryView {
                     .truncate()
                     .child(s)
             });
-        let mods = inst.addons.iter().filter(|a| in_class(a, cf::CLASS_MODS)).count();
+        let mods = crate::addons::shown_count(inst, cf::CLASS_MODS);
         let (time, time_label) = match store::played(inst.play_seconds) {
             Some(t) => (t, "Played"),
             None => (
@@ -2347,7 +2347,7 @@ impl LibraryView {
             let count = t
                 .class()
                 .filter(|_| !t.is_pack())
-                .map(|c| inst.addons.iter().filter(|a| in_class(a, c)).count());
+                .map(|c| crate::addons::shown_count(inst, c));
             let tab = *t;
             h_flex()
                 .id(("inst-tab", i))

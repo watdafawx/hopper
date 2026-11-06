@@ -1182,6 +1182,29 @@ pub fn duplicates(inst: &Instance) -> Vec<Duplicate> {
     out
 }
 
+/// Mods in twice where only one copy is on: an older version left turned
+/// off beside the one that runs (a sync or update added the new one and
+/// kept the old). Not a load problem, but the list showed the mod twice.
+/// Maps the copy to show (the one that's on, else the newest) to the other
+/// copies' file names, for mods (`mods/`) with a known project. Two copies
+/// on is [`duplicates`]' job (the game won't start) and isn't listed here.
+pub fn off_copies(addons: &[crate::instances::Addon]) -> HashMap<String, Vec<String>> {
+    let mut by_project: HashMap<u64, Vec<&crate::instances::Addon>> = HashMap::new();
+    for a in addons.iter().filter(|a| a.project_id != 0 && a.folder() == "mods") {
+        by_project.entry(a.project_id).or_default().push(a);
+    }
+    let mut out = HashMap::new();
+    for mut list in by_project.into_values().filter(|l| l.len() > 1) {
+        if list.iter().filter(|a| a.enabled).count() > 1 {
+            continue;
+        }
+        // The one that's on first, then newest file first.
+        list.sort_by(|a, b| b.enabled.cmp(&a.enabled).then(b.file_id.cmp(&a.file_id)).then(a.file_name.cmp(&b.file_name)));
+        out.insert(list[0].file_name.clone(), list[1..].iter().map(|a| a.file_name.clone()).collect());
+    }
+    out
+}
+
 /// Jars in `mods/` that Hopper does not track yet.
 pub fn loose_jars(inst: &Instance) -> Vec<String> {
     let Ok(rd) = fs::read_dir(inst.mods_dir()) else {
@@ -2159,5 +2182,38 @@ mod archived_files {
         // Project 3 moved on to file 32: its archived file 31 isn't installed.
         let addons = [addon(1, 10), addon(2, 20), addon(3, 32), addon(4, 40)];
         assert_eq!(archived_in(&addons, &files), HashSet::from([2]));
+    }
+}
+
+#[cfg(test)]
+mod off_copies_tests {
+    use super::off_copies;
+    use crate::instances::Addon;
+
+    fn addon(file: &str, pid: u64, fid: u64, on: bool) -> Addon {
+        Addon { file_name: file.into(), project_id: pid, file_id: fid, enabled: on, class_id: crate::cf::CLASS_MODS, ..Default::default() }
+    }
+
+    #[test]
+    fn an_old_copy_left_off_folds_into_the_one_on() {
+        let list = [
+            addon("af-2.3.0.jar", 556795, 8908031, false),
+            addon("af-2.3.2.jar", 556795, 9081347, true),
+            addon("jade.jar", 324717, 1, true),
+        ];
+        let m = off_copies(&list);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m["af-2.3.2.jar"], vec!["af-2.3.0.jar".to_string()]);
+    }
+
+    #[test]
+    fn all_off_keeps_the_newest_and_two_on_is_left_alone() {
+        let off = [addon("a-1.jar", 7, 1, false), addon("a-2.jar", 7, 2, false)];
+        assert_eq!(off_copies(&off)["a-2.jar"], vec!["a-1.jar".to_string()]);
+        let on = [addon("a-1.jar", 7, 1, true), addon("a-2.jar", 7, 2, true)];
+        assert!(off_copies(&on).is_empty());
+        // Unknown jars (no project) never pair up.
+        let unknown = [addon("x.jar", 0, 0, true), addon("y.jar", 0, 0, false)];
+        assert!(off_copies(&unknown).is_empty());
     }
 }

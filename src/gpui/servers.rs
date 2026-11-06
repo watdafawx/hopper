@@ -837,7 +837,14 @@ pub struct ServersView {
     strip: Entity<crate::server_crash::CrashStrip>,
     /// The tabs only a Hopper Server's servers have.
     p_files: Entity<panel_tabs::files::FilesTab>,
+    /// A Hopper Server's mod backups (Mods › History).
     p_mods: Entity<panel_tabs::mods::ModsTab>,
+    /// The Mods tab: the instance Mods table, on the server's mods.
+    mods_table: Entity<crate::addons::AddonsView>,
+    /// The server the Mods table was last pointed at.
+    mods_shown: Option<PathBuf>,
+    /// Mods › History is open (a Hopper Server's), not the table.
+    mods_backups: bool,
     /// The header's History button for the picked panel server.
     history_btn: std::cell::RefCell<Option<Entity<crate::history_button::HistoryButton>>>,
     p_players: Entity<panel_tabs::players::PlayersTab>,
@@ -925,6 +932,12 @@ pub enum ServersEvent {
     /// Settings › Servers, at one setting (the panel's address, the
     /// servers folder).
     OpenSettings(&'static str),
+    /// The Mods table's Add content: Browse, installing into the server.
+    Browse { root: PathBuf, class: u32 },
+    /// The Mods table's search for a missing mod, in Browse.
+    Find { root: PathBuf, text: String },
+    /// A mod's page in Browse, from the Mods table.
+    OpenProject { root: PathBuf, project: u64 },
     /// "Not now" on the intro: back to where the user was.
     Leave,
     /// Browse modpacks to host a server: on a paired Hopper Server (its
@@ -990,6 +1003,21 @@ impl ServersView {
         let configs = cx.new(|cx| crate::configs_tab::ConfigsTab::new(store.clone(), window, cx));
         let p_files = cx.new(|cx| panel_tabs::files::FilesTab::new(store.clone(), window, cx));
         let p_mods = cx.new(|cx| panel_tabs::mods::ModsTab::new(store.clone(), window, cx));
+        let mods_table = cx.new(|cx| crate::addons::AddonsView::new(store.clone(), window, cx));
+        let peek = mods_table.read(cx).peek().clone();
+        let mut subs = subs;
+        subs.push(crate::browse::observe_peek(&peek, cx, |_, cx| cx.notify()));
+        subs.push(cx.subscribe(&mods_table, |_, _, e: &crate::addons::AddonsEvent, cx| {
+            use crate::addons::AddonsEvent as E;
+            match e {
+                E::AddContent { root, class } | E::AddTo { root, class, .. } => {
+                    cx.emit(ServersEvent::Browse { root: root.clone(), class: *class })
+                }
+                E::Find { root, text } => cx.emit(ServersEvent::Find { root: root.clone(), text: text.clone() }),
+                E::OpenProject { root, project } => cx.emit(ServersEvent::OpenProject { root: root.clone(), project: *project }),
+                _ => {}
+            }
+        }));
         let p_players = cx.new(|cx| panel_tabs::players::PlayersTab::new(store.clone(), window, cx));
         let p_backups = cx.new(|cx| panel_tabs::backups::BackupsTab::new(store.clone(), window, cx));
         let p_schedule = cx.new(|cx| panel_tabs::schedule::ScheduleTab::new(store.clone(), window, cx));
@@ -1011,6 +1039,9 @@ impl ServersView {
             strip,
             p_files,
             p_mods,
+            mods_table,
+            mods_shown: None,
+            mods_backups: false,
             history_btn: Default::default(),
             p_players,
             p_backups,
@@ -1334,6 +1365,7 @@ impl ServersView {
         let open: std::rc::Rc<dyn Fn(&mut Window, &mut App)> = std::rc::Rc::new(move |_, cx| {
             view.update(cx, |this, cx| {
                 this.set_tab(TAB_MODS, cx);
+                this.mods_backups = true;
                 this.p_mods.update(cx, |m, cx| m.open_history(cx));
             })
         });
@@ -1361,6 +1393,75 @@ impl ServersView {
             TAB_SETTINGS => self.p_settings.update(cx, |v, cx| v.show(t, window, cx)),
             _ => {}
         }
+    }
+
+    /// The Mods tab shows the instance Mods table: on a Hopper Server and
+    /// in a folder on this PC. A server reached over SFTP / FTP keeps the
+    /// plain jar list (Hopper only has a copy of its files).
+    fn mods_table_for(&self, s: &ServerInfo, cx: &App) -> bool {
+        s.remote.is_some() || self.store.read(cx).site_of(&s.root).is_none()
+    }
+
+    /// The Mods tab's content: the Mods table (and on a Hopper Server, its
+    /// Backups).
+    fn mods_area(&self, s: &ServerInfo, remote: bool, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(e) = self.store.read(cx).server_mods_error(&s.root).map(str::to_string)
+            && self.store.read(cx).instance(&s.root).is_none()
+        {
+            return widgets::empty_state(IconName::TriangleAlert, "Can't read this server's mods", Some(e.into()), cx).into_any_element();
+        }
+        if !remote {
+            return self.mods_table.clone().into_any_element();
+        }
+        // Mods | History, as the panel's web UI has them.
+        // As the table counts: an old copy left off isn't a row of its own.
+        let n = self.store.read(cx).instance(&s.root).map(|i| {
+            crate::addons::shown_count(i, hopper::cf::CLASS_MODS) + self.store.read(cx).remote_loose(&s.root).len()
+        });
+        let tabs = TabBar::new("server-mods-sub")
+            .underline()
+            .small()
+            .selected_index(if self.mods_backups { 1 } else { 0 })
+            .child(Tab::new().label(n.map_or("Mods".to_string(), |n| format!("Mods {n}"))))
+            .child(Tab::new().label("History"))
+            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                this.mods_backups = *ix == 1;
+                if this.mods_backups {
+                    this.p_mods.update(cx, |m, cx| m.open_history(cx));
+                } else if let Some(r) = this.mods_shown.clone() {
+                    // Back from Backups (something may have been put back).
+                    this.store.update(cx, |s, _| s.reload_server_mods(&r));
+                }
+                cx.notify();
+            }));
+        let body: AnyElement = if self.mods_backups { self.p_mods.clone().into_any_element() } else { self.mods_table.clone().into_any_element() };
+        v_flex().size_full().gap_2().child(tabs).child(div().flex_1().min_h_0().child(body)).into_any_element()
+    }
+
+    /// Points the Mods table at the picked server when its Mods tab opens.
+    fn show_mods_table(&mut self, cx: &mut Context<Self>) {
+        if self.tab != TAB_MODS {
+            return;
+        }
+        let Some(s) = self.picked.as_ref().and_then(|p| self.store.read(cx).server(p)).cloned() else { return };
+        if self.mods_shown.as_ref() == Some(&s.root) || !self.mods_table_for(&s, cx) {
+            return;
+        }
+        self.mods_shown = Some(s.root.clone());
+        self.mods_backups = false;
+        self.mods_table.update(cx, |a, cx| a.show_server(s.root.clone(), &s.name, cx));
+    }
+
+    /// Where files dropped on the window go: the server whose Mods table is
+    /// open.
+    pub fn mods_drop_target(&self) -> Option<PathBuf> {
+        (self.tab == TAB_MODS && !self.mods_backups).then(|| self.mods_shown.clone()).flatten().filter(|r| Some(r) == self.picked.as_ref())
+    }
+
+    /// The Mods table's project page, while it's open on the Mods tab.
+    fn mods_peek(&self, cx: &App) -> Option<Entity<crate::browse::BrowseView>> {
+        let p = self.mods_table.read(cx).peek().clone();
+        (self.tab == TAB_MODS && !self.mods_backups && self.mods_shown.is_some() && self.mods_shown == self.picked && p.read(cx).is_open()).then_some(p)
     }
 
     fn scan(&mut self, root: PathBuf, again: bool, cx: &mut Context<Self>) {
@@ -1779,7 +1880,7 @@ impl ServersView {
                         .into_any_element(),
                     _ => match self.tab {
                         TAB_FILES => self.p_files.clone().into_any_element(),
-                        TAB_MODS => self.p_mods.clone().into_any_element(),
+                        TAB_MODS => self.mods_area(s, true, cx),
                         TAB_PLAYERS => self.p_players.clone().into_any_element(),
                         TAB_BACKUPS => self.p_backups.clone().into_any_element(),
                         TAB_SCHEDULE => self.p_schedule.clone().into_any_element(),
@@ -1908,7 +2009,11 @@ impl ServersView {
                         .overflow_y_scrollbar(),
                 )
             })
-            .when(self.tab == TAB_MODS && !remote, |c| c.child(
+            .when(self.tab == TAB_MODS && !remote && self.mods_table_for(s, cx), |c| {
+                let area = self.mods_area(s, false, cx);
+                c.child(div().flex_1().min_h_0().child(area))
+            })
+            .when(self.tab == TAB_MODS && !remote && !self.mods_table_for(s, cx), |c| c.child(
                 v_flex()
                     .flex_1()
                     .min_h_0()
@@ -2115,6 +2220,7 @@ impl Render for ServersView {
             .and_then(|p| self.store.read(cx).server(p))
             .cloned();
         self.show_panel_tab(window, cx);
+        self.show_mods_table(cx);
         let detail: AnyElement = match server {
             Some(s) => widgets::enter(
                 ElementId::Name(format!("server-detail:{}", s.root.display()).into()),
@@ -2143,11 +2249,25 @@ impl Render for ServersView {
                 .child(widgets::caption("Pick a server.", cx))
                 .into_any_element(),
         };
+        // A mod's page from the Mods table, docked beside the page.
+        let peek = self.mods_peek(cx);
+        let peek_w = peek.as_ref().map_or(0.0, |p| p.read(cx).panel_width(window, cx));
+        self.mods_table.update(cx, |a, _| {
+            a.room = Some(room - peek_w);
+            a.list_open = !collapsed;
+        });
+        let peek = peek.map(|p| div().w(rems(peek_w)).flex_none().h_full().child(p));
         h_flex()
             .size_full()
             .items_stretch()
+            .on_drag_move(cx.listener(|_, _: &DragMoveEvent<crate::browse::PanelResize>, _, cx| cx.notify()))
+            .on_drop(cx.listener(|this, _: &crate::browse::PanelResize, _, cx| {
+                let peek = this.mods_table.read(cx).peek().clone();
+                peek.update(cx, |p, cx| p.end_resize(cx));
+            }))
             .child(list)
             .child(div().flex_1().min_w_0().h_full().child(detail))
+            .children(peek)
             .into_any_element()
     }
 }

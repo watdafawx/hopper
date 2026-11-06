@@ -96,6 +96,9 @@ impl Store {
         for (root, mut areas) in by_root {
             areas.sort();
             areas.dedup();
+            if areas.iter().any(|a| a == "mods" || a == "*") {
+                self.refetch_server_mods(&root);
+            }
             cx.emit(StoreEvent::PanelChanged(root, areas));
         }
         cx.notify();

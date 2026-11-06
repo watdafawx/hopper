@@ -39,6 +39,10 @@ enum Show {
     AlwaysOn,
     /// The author archived the installed file.
     Archived,
+    /// Mods that only do something in the game (Side: client).
+    ClientOnly,
+    /// Mods Hopper can't name: no CurseForge / Modrinth project or source.
+    Unknown,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -344,6 +348,9 @@ pub(crate) struct Table {
     pub(crate) rows_for: Option<RowsKey>,
     /// Some row has a side (client / server / both): else no Side column.
     pub(crate) has_side: bool,
+    /// Mods in twice with only one copy on: the shown copy's file → the
+    /// other copies (hidden rows, behind its "Old copy" chip).
+    pub(crate) extra: Rc<HashMap<String, Vec<String>>>,
 }
 
 /// The view's filters and sort, as the rows were built for them.
@@ -398,7 +405,25 @@ fn fingerprint(store: &Store, root: &Path, class: u32) -> Option<u64> {
         }
     }
     (store.server_rev(), store.settings().mods_server_column).hash(&mut h);
+    for l in store.remote_loose(root) {
+        (&l.file, &l.icon).hash(&mut h);
+    }
     Some(h.finish())
+}
+
+/// How many rows of `class` the table lists: an old copy left off beside
+/// the one that's on is one row (see [`Table::extra`]).
+pub(crate) fn shown_count(inst: &Instance, class: u32) -> usize {
+    let n = inst.addons.iter().filter(|a| in_class(a, class)).count();
+    if class != cf::CLASS_MODS {
+        return n;
+    }
+    n - hopper::install::off_copies(&inst.addons).values().map(Vec::len).sum::<usize>()
+}
+
+/// `file` is an older copy folded into another row (see [`Table::extra`]).
+fn hidden_copy(extra: &HashMap<String, Vec<String>>, file: &str) -> bool {
+    extra.values().any(|v| v.iter().any(|f| f == file))
 }
 
 /// What the Server column was compared for: the server's revision and each
@@ -647,6 +672,14 @@ pub struct AddonsView {
     pub(crate) store: Entity<Store>,
     pub(crate) root: Option<PathBuf>,
     pub(crate) class: u32,
+    /// A server's mods (Servers page), not an instance's: no crash tags,
+    /// Server column or CurseForge app locks.
+    pub(crate) server: bool,
+    /// A server on a Hopper Server: the panel has the files, so what reads
+    /// them here (missing mods, configs, the folder) is left out.
+    pub(crate) remote: bool,
+    /// Icons of the untracked jars on a Hopper Server, by file.
+    remote_icons: HashMap<String, String>,
     pub(crate) globals: crate::addons_extra::GlobalPacks,
     /// Each mod's state on the paired server, by lower-case file name, for
     /// the server root and [`marks_key`] it was compared at.
@@ -810,6 +843,9 @@ impl AddonsView {
             store,
             root: None,
             class: cf::CLASS_MODS,
+            server: false,
+            remote: false,
+            remote_icons: HashMap::new(),
             globals: Default::default(),
             folder: None,
             folder_packs: None,
@@ -907,6 +943,21 @@ impl AddonsView {
 
     /// Points the table at an instance and class.
     pub fn show_for(&mut self, root: PathBuf, class: u32, cx: &mut Context<Self>) {
+        self.server = false;
+        self.remote = false;
+        self.point(root, class, cx);
+    }
+
+    /// Points the table at a server's mods (on this PC or a Hopper
+    /// Server); `name` is the server's. Its list is read (or fetched) again.
+    pub fn show_server(&mut self, root: PathBuf, name: &str, cx: &mut Context<Self>) {
+        self.server = true;
+        self.remote = crate::store::on_hopper_server(&root).is_some();
+        self.store.update(cx, |s, _| s.open_server_mods(&root, name));
+        self.point(root, cf::CLASS_MODS, cx);
+    }
+
+    fn point(&mut self, root: PathBuf, class: u32, cx: &mut Context<Self>) {
         if self.root.as_ref() != Some(&root) || self.class != class {
             if let Some(old) = self.root.clone() {
                 let at = self.scroll.0.borrow().base_handle.offset();
@@ -940,8 +991,9 @@ impl AddonsView {
     /// always, with `force`). All the disk reads the table needs happen
     /// here, never while rendering.
     fn sync(&mut self, force: bool, cx: &mut Context<Self>) {
-        // The last crash's mods, for their tag (read once, then cached).
-        if let Some(root) = self.root.clone() {
+        // The last crash's mods, for their tag (read once, then cached). A
+        // server's crash has its own strip on the Servers page.
+        if let Some(root) = self.root.clone().filter(|_| !self.server) {
             let c = self.store.update(cx, |s, _| s.crash(&root).cloned());
             // A mod turned off since the crash isn't marked any more.
             let off: HashSet<String> = self
@@ -1020,12 +1072,33 @@ impl AddonsView {
         } else {
             (None, true)
         };
-        self.refresh_loose(&inst);
-        if class == cf::CLASS_MODS {
+        if self.remote {
+            let loose = self.store.read(cx).remote_loose(&root).to_vec();
+            self.remote_icons = loose.iter().filter(|l| !l.icon.is_empty()).map(|l| (l.file.clone(), l.icon.clone())).collect();
+            self.loose = (None, loose.into_iter().map(|l| l.file).collect());
+        } else {
+            self.refresh_loose(&inst);
+        }
+        if class == cf::CLASS_MODS && !self.remote {
             self.want_missing(&inst, cx);
         }
         let archived = self.store.read(cx).archived(&root).cloned().unwrap_or_default();
+        let extra = if class == cf::CLASS_MODS { hopper::install::off_copies(&inst.addons) } else { HashMap::new() };
+        // An offer made for an old copy left off is for the copy shown: kept
+        // when that one is older than the offer, else there's nothing to do.
+        let mut updates = updates;
+        updates.retain(|_, u| {
+            let Some(shown) = extra.iter().find(|(_, v)| v.contains(&u.from)).map(|(k, _)| k) else { return true };
+            match inst.addons.iter().find(|a| &a.file_name == shown) {
+                Some(a) if a.file_id < u.file.id => {
+                    u.from = shown.clone();
+                    true
+                }
+                _ => false,
+            }
+        });
         self.table = Table {
+            extra: Rc::new(extra),
             sig,
             inst: Some(Rc::new(inst)),
             updates: Rc::new(updates),
@@ -1103,7 +1176,7 @@ impl AddonsView {
 
     /// Compares the mods with the paired server, for the Server column.
     pub(crate) fn want_marks(&mut self, cx: &mut Context<Self>) {
-        if self.class != cf::CLASS_MODS {
+        if self.class != cf::CLASS_MODS || self.server {
             return;
         }
         let store = self.store.read(cx);
@@ -1383,6 +1456,9 @@ impl AddonsView {
 
     /// A loose jar's icon, as [`Self::refresh_loose`] read it.
     fn loose_icon(&self, file: &str) -> Option<String> {
+        if self.remote {
+            return self.remote_icons.get(file).cloned();
+        }
         let inst = self.table.inst.as_ref()?;
         let icon = hopper::sources::looks::known(&inst.mods_dir().join(file))?.icon;
         (!icon.is_empty()).then_some(icon)
@@ -1395,6 +1471,8 @@ impl AddonsView {
             .iter()
             .enumerate()
             .filter(|(_, a)| in_class(a, self.class))
+            // An old copy left off shows as a chip on the copy that's on.
+            .filter(|(_, a)| !hidden_copy(&self.table.extra, &a.file_name))
             .filter(|(_, a)| !self.added_only || inst.pack.is_none() || !a.from_pack)
             .filter(|(_, a)| !self.cfg_changed_only || self.cfg_index.as_ref().is_some_and(|i| i.mod_changed(a.file_name.trim_end_matches(".disabled")) > 0))
             .filter(|(_, a)| match self.show {
@@ -1406,6 +1484,8 @@ impl AddonsView {
                 ),
                 Show::AlwaysOn => matches!(self.where_group(&a.file_name), hopper::pack_where::Group::Global(_)),
                 Show::Archived => self.table.archived.contains(&a.project_id),
+                Show::ClientOnly => a.env == "client",
+                Show::Unknown => a.project_id == 0 && a.source.is_none(),
                 Show::All => true,
             })
             .filter(|(_, a)| {
@@ -1527,6 +1607,11 @@ impl AddonsView {
     /// The name of one file's mod, or "N files".
     fn describe(&self, files: &[String], cx: &App) -> String {
         match files {
+            // An old copy behind another row's chip: say which.
+            [one] if hidden_copy(&self.table.extra, one) => {
+                let name = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).and_then(|i| i.addon_by_file(one)).map_or(one.clone(), |a| a.name.clone());
+                format!("the old copy of {name} ({})", hopper::scan::short_version(one))
+            }
             [one] => self
                 .root
                 .as_ref()
@@ -1805,7 +1890,12 @@ impl AddonsView {
         // Files with no download source: History keeps a copy of only these,
         // so Undo works for everything.
         let unknown: Vec<String> = files.iter().filter(|f| pids.get(*f).is_none_or(|p| *p == 0)).cloned().collect();
-        let intro = remove_intro(files.len(), &unknown);
+        // A server's mods go to its backups (Mods › History on a Hopper Server).
+        let intro = if self.remote {
+            format!("{} the server's backups: undo from the toast or Mods › History.", if files.len() == 1 { "It goes to" } else { "They go to" })
+        } else {
+            remove_intro(files.len(), &unknown)
+        };
         let body_focus = cx.focus_handle();
         let peek: Peek = {
             let view = view.clone();
@@ -1986,6 +2076,10 @@ impl AddonsView {
         let Some(root) = self.root.clone() else {
             return;
         };
+        if self.remote {
+            self.remove_remote(root, files, what, window, cx);
+            return;
+        }
         let store = self.store.clone();
         // Where each file is now and its entry, to find and restore it.
         let before: Vec<(PathBuf, Option<Addon>)> = store
@@ -2054,6 +2148,73 @@ impl AddonsView {
         self.selected.clear();
         // A loose jar leaves the instance as it was: read the folder again.
         self.sync(true, cx);
+        cx.notify();
+    }
+
+    /// [`Self::remove`] on a Hopper Server: the panel keeps the jars in its
+    /// backups and gives a token for Undo.
+    fn remove_remote(&mut self, root: PathBuf, files: Vec<String>, what: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Gone from the table at once; the panel's answer fetches the list.
+        let gone: HashSet<String> = files.iter().map(|f| f.trim_end_matches(".disabled").to_lowercase()).collect();
+        self.store.update(cx, |s, cx| {
+            s.hide_server_mods(&root, &gone);
+            cx.notify();
+        });
+        let n = files.len();
+        let store = self.store.clone();
+        window
+            .spawn(cx, async move |cx| {
+                let (r2, f2) = (root.clone(), files.clone());
+                let r = cx.background_spawn(async move { crate::store::remote_remove(&r2, &f2) }).await;
+                cx.update(|window, cx| {
+                    store.update(cx, |s, _| s.reload_server_mods(&root));
+                    let token = match r {
+                        Ok(t) => t,
+                        Err(e) => {
+                            window.push_notification(Notification::error(format!("{e:#}")), cx);
+                            return;
+                        }
+                    };
+                    let text = if n == 1 {
+                        format!("Removed {what}. It's in the server's backups.")
+                    } else {
+                        format!("Removed {n} mods. They're in the server's backups.")
+                    };
+                    let mut note = Notification::success(text).autohide(true);
+                    if let Some(token) = token {
+                        let undone = Rc::new(std::cell::Cell::new(false));
+                        note = note.action(move |_, _, cx| {
+                            let (store, root, token, undone) = (store.clone(), root.clone(), token.clone(), undone.clone());
+                            Button::new("undo-remove")
+                                .label("Undo")
+                                .disabled(undone.get())
+                                .on_click(cx.listener(move |note, _, window, cx| {
+                                    if !undone.replace(true) {
+                                        let (store, root, token) = (store.clone(), root.clone(), token.clone());
+                                        window
+                                            .spawn(cx, async move |cx| {
+                                                let r2 = root.clone();
+                                                let r = cx.background_spawn(async move { crate::store::remote_undo_remove(&r2, &token) }).await;
+                                                cx.update(|window, cx| {
+                                                    store.update(cx, |s, _| s.reload_server_mods(&root));
+                                                    if let Err(e) = r {
+                                                        window.push_notification(Notification::error(format!("{e:#}")), cx);
+                                                    }
+                                                })
+                                                .ok();
+                                            })
+                                            .detach();
+                                    }
+                                    note.dismiss(window, cx);
+                                }))
+                        });
+                    }
+                    window.push_notification(note, cx);
+                })
+                .ok();
+            })
+            .detach();
+        self.selected.clear();
         cx.notify();
     }
 
@@ -2368,7 +2529,7 @@ impl AddonsView {
             .map(|(k, v)| (*k, v.clone()))
             .collect();
         let updates = &pending;
-        let of_class = || inst.addons.iter().filter(|a| in_class(a, self.class));
+        let of_class = || inst.addons.iter().filter(|a| in_class(a, self.class) && !hidden_copy(&self.table.extra, &a.file_name));
         let n_up = of_class()
             .filter(|a| updates.contains_key(&a.project_id))
             .count();
@@ -2405,6 +2566,18 @@ impl AddonsView {
         if show_arch {
             show_order.push(Show::Archived);
             show_tabs.push(("Archived".into(), Some(n_arch)));
+        }
+        // Mods: Client-only and Unknown, as Hopper Server's web UI has them,
+        // when there are any (or one is being viewed).
+        if self.class == cf::CLASS_MODS && !packs {
+            let n_client = of_class().filter(|a| a.env == "client").count();
+            let n_unknown = of_class().filter(|a| a.project_id == 0 && a.source.is_none()).count();
+            for (show, label, n) in [(Show::ClientOnly, "Client-only", n_client), (Show::Unknown, "Unknown", n_unknown)] {
+                if n > 0 || self.show == show {
+                    show_order.push(show);
+                    show_tabs.push((label.into(), Some(n)));
+                }
+            }
         }
         let show_ix = show_order.iter().position(|s| *s == self.show).unwrap_or(0);
         // The last check's results stay up while a new check runs or after
@@ -3105,7 +3278,7 @@ impl AddonsView {
                                 }
                             })),
                     )
-                    .when(self.store.read(cx).settings().allow_sources, |r| {
+                    .when(self.store.read(cx).settings().allow_sources && !self.remote, |r| {
                         r.child(
                             Button::new("find-sources")
                                 .small()
@@ -3150,7 +3323,7 @@ impl AddonsView {
                                 .truncate()
                                 .child(name.clone()),
                         )
-                        .when(self.class == cf::CLASS_MODS && self.store.read(cx).settings().allow_sources, |r| {
+                        .when(self.class == cf::CLASS_MODS && self.store.read(cx).settings().allow_sources && !self.remote, |r| {
                             let f = name.trim_end_matches(".disabled").to_string();
                             r.child(
                                 Button::new(ElementId::Name(format!("src-loose:{name}").into()))
@@ -3448,6 +3621,7 @@ impl AddonsView {
         flags: Flags,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let old_copy = self.old_copy_chip(a, cx);
         // Resource packs in game order: grip, place and ↑↓ (or Use).
         let order_cell = if self.where_mode() {
             Some(self.where_order_cell(&a.file_name, &a.name, cx))
@@ -3638,7 +3812,7 @@ Details").into()),
         // An unknown jar: a quiet way to follow its source. A source that
         // came with a pack or sync: a way to turn its updates on.
         let src_prompt: Option<(SharedString, Option<hopper::sources::ModSource>)> =
-            if self.class != cf::CLASS_MODS || global || !store.settings().allow_sources {
+            if self.class != cf::CLASS_MODS || global || !store.settings().allow_sources || self.remote {
                 None
             } else if a.project_id == 0 && a.source.is_none() {
                 Some(("Add a source to get updates".into(), None))
@@ -3885,7 +4059,7 @@ It stays disabled after updating: turn it on in the On column.")
             a.project_id != 0,
         );
         // Following a source (or able to): only mods of the instance itself.
-        let src_menu = (!global && self.class == cf::CLASS_MODS).then(|| SrcMenu {
+        let src_menu = (!global && self.class == cf::CLASS_MODS && !self.remote).then(|| SrcMenu {
             name: a.name.clone(),
             source: a.source.as_ref().map(|s| (s.kind.label(), s.page())),
         });
@@ -4071,7 +4245,8 @@ Change version", a.file_name).into()
                                     this.versions(pid, upd.clone(), window, cx)
                                 }))
                         })
-                    }).children(self.lock_tags(a, update, &breaks, needs.as_deref(), vlocked, cx))),
+                    }).children(self.lock_tags(a, update, &breaks, needs.as_deref(), vlocked, cx))
+                    .children(old_copy)),
             )
             .when(self.action_fits(), |r| r.child(action))
             .children(self.spacer())
@@ -4275,6 +4450,10 @@ Change version", a.file_name).into()
     /// mods from links on: for mods in the instance's own folder, and for
     /// resource packs and shaders wherever they go.
     fn links_menu(&self, cx: &App) -> bool {
+        // Sources on a Hopper Server are set in its web UI for now.
+        if self.remote {
+            return false;
+        }
         let kind = match self.class {
             cf::CLASS_MODS => self.global_dir().is_none(),
             cf::CLASS_RESOURCE_PACKS | cf::CLASS_SHADERS => true,
@@ -4321,6 +4500,68 @@ Change version", a.file_name).into()
 
     /// Beside the version chip: what the update breaks (each mod with its
     /// icon, opening its page) and Lock, or the locked tag (a click unlocks).
+    /// A server's mods: "N client-only mods on", as Hopper Server's web UI
+    /// says, with Show (the Client-only filter). Hidden once closed, until
+    /// the count changes.
+    fn client_on_note(&self, inst: &Instance, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.server || self.class != cf::CLASS_MODS || self.show == Show::ClientOnly {
+            return None;
+        }
+        let n = inst
+            .addons
+            .iter()
+            .filter(|a| in_class(a, cf::CLASS_MODS) && a.enabled && a.env == "client" && !hidden_copy(&self.table.extra, &a.file_name))
+            .count();
+        if n == 0 {
+            return None;
+        }
+        let theme = cx.theme();
+        let text = format!(
+            "{n} client-only mod{} on: servers usually don't need {}, and some won't start with them.",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "it" } else { "them" }
+        );
+        let key = hopper::settings::notice_key(&inst.root.to_string_lossy(), "client-on", &n.to_string());
+        let body = crate::crash_help::callout(theme.warning, cx)
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(div().flex_1().text_sm().child(text))
+            .child(Button::new("client-on-show").small().outline().label("Show").on_click(cx.listener(|this, _, _, cx| {
+                this.show = Show::ClientOnly;
+                cx.notify();
+            })));
+        let notice = widgets::closable_notice(body, key, widgets::Closed::Gone, "", theme.warning, &self.store, cx)?;
+        Some(div().px_6().child(notice).into_any_element())
+    }
+
+    /// "Old copy": the mod is in twice, an older file kept turned off beside
+    /// this one. Clicking it offers to remove the extra file.
+    fn old_copy_chip(&self, a: &Addon, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let extra = self.table.extra.get(&a.file_name)?.clone();
+        let n = extra.len();
+        let tip = format!(
+            "Also here, turned off: {}. It's an older copy of this mod, so the list showed the mod twice. Click to remove {}.",
+            extra.join(", "),
+            if n == 1 { "it" } else { "them" }
+        );
+        let warn = cx.theme().warning;
+        Some(
+            div()
+                .id(SharedString::from(format!("old-copy:{}", a.file_name)))
+                .flex_none()
+                .clickable(cx)
+                .rounded(px(crate::theme::RADIUS))
+                .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.ask_remove(extra.clone(), window, cx);
+                }))
+                .child(widgets::chip(warn).child(if n == 1 { "Old copy".to_string() } else { format!("{n} old copies") }))
+                .into_any_element(),
+        )
+    }
+
     fn lock_tags(
         &self,
         a: &Addon,
@@ -4547,13 +4788,16 @@ Change version", a.file_name).into()
                 )
                 .when_some(reset_cfg.clone(), |m, (store, root, pid, file)| {
                     let (s2, r2, f2) = (store.clone(), root.clone(), file.clone());
-                    m.item(
+                    // The config editor reads the files on this PC; on a
+                    // Hopper Server, the Configs tab edits them.
+                    let edit = crate::store::on_hopper_server(&root).is_none();
+                    m.when(edit, |m| m.item(
                         PopupMenuItem::new("Edit config…")
                             .icon(IconName::Pencil)
                             .on_click(move |_, window, cx| {
                                 crate::config_editor::open_for_mod(s2.clone(), r2.clone(), pid, f2.clone(), window, cx)
                             }),
-                    )
+                    ))
                     .item(
                         PopupMenuItem::new("Reset config…")
                             .icon(IconName::Settings2)
@@ -4758,6 +5002,13 @@ Change version", a.file_name).into()
             return;
         }
         let Some(root) = &self.root else { return };
+        // On a Hopper Server: its mods folder in the panel's Files.
+        if self.remote {
+            if let Some(url) = hopper::hopperd::web_url(&root.join("mods")) {
+                cx.open_url(&url);
+            }
+            return;
+        }
         if let Some(inst) = self.store.read(cx).instance(root)
             && let Some(a) = inst.addon_by_file(file)
         {
@@ -4783,6 +5034,10 @@ pub fn set_locks(
     });
     if let Err(e) = res {
         window.push_notification(Notification::error(e), cx);
+        return;
+    }
+    // A server's folder has no CurseForge app list to tell.
+    if store.read(cx).is_server_list(&root) {
         return;
     }
     let store = store.clone();
@@ -5342,7 +5597,7 @@ impl Render for AddonsView {
         self.compact = peek_open;
         self.tight = peek_open && self.global_dir().is_some();
         // Which mods have config files, for their config buttons.
-        self.cfg_index = match (&self.root, self.class == cf::CLASS_MODS) {
+        self.cfg_index = match (&self.root, self.class == cf::CLASS_MODS && !self.remote) {
             (Some(root), true) => {
                 let (root, store) = (root.clone(), self.store.clone());
                 crate::config_view::indexes(cx).update(cx, |i, cx| i.get(&root, &store, cx))
@@ -5371,6 +5626,7 @@ impl Render for AddonsView {
         let blockers = self.blocker_banner(&inst, cx);
         let shaders = self.shader_notes(&inst, cx);
         let restart = self.restart_note(&inst, cx);
+        let client_on = self.client_on_note(&inst, cx);
         let updates = self.table.updates.clone();
         let rows = self.table.rows.clone();
         // Narrow with the instance list open: offer its room, once.
@@ -5510,6 +5766,7 @@ impl Render for AddonsView {
             .children(global_head)
             .child(toolbar)
             .children(restart)
+            .children(client_on)
             .children(blockers)
             .children(dups)
             .children(missing)

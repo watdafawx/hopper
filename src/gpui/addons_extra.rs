@@ -1521,6 +1521,10 @@ impl AddonsView {
 
     fn use_profile(&mut self, name: String, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
+        if self.remote {
+            self.store.update(cx, |s, _| s.use_remote_profile(&root, &name));
+            return;
+        }
         let store = self.store.read(cx);
         if let Some(mut inst) = store.instance(&root).cloned() {
             store.spawn_job(format!("Switching to profile {name}"), move |job| {

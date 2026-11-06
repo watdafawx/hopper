@@ -56,23 +56,19 @@ pub fn compare(
     sync_anyway: &HashSet<u64>,
 ) -> Result<(Vec<DiffEntry>, Annotation), String> {
     let (client, note) = client_mods(inst, sync_anyway).map_err(|e| format!("client: {e:#}"))?;
-    let theirs = server_mods(server).map_err(|e| format!("server: {e:#}"))?;
+    let theirs = server_mods_with_off(server).map_err(|e| format!("server: {e:#}"))?;
     Ok((diff_mods(&client, &theirs), note))
 }
 
-/// Why a mod turned off in the pack stays off the server.
-pub const TURNED_OFF: &str = "Turned off in this pack";
-
-/// The pack's mods, the ones turned off included (`off`, held back from the
-/// server), marked with what shouldn't sync.
-pub fn client_mods(inst: &Instance, sync_anyway: &HashSet<u64>) -> anyhow::Result<(Vec<ModInfo>, Annotation)> {
-    let dir = inst.mods_dir();
-    let mut client = crate::scan::scan_folder(&dir)?;
-    for e in std::fs::read_dir(&dir)?.flatten() {
+/// The jars in `dir`, on and off: an off one (`foo.jar.disabled`) is listed
+/// as `foo.jar` with `off` set, unless the same jar is there on too.
+pub fn mods_with_off(dir: &Path) -> anyhow::Result<Vec<ModInfo>> {
+    let mut mods = crate::scan::scan_folder(dir)?;
+    for e in std::fs::read_dir(dir)?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let Some(jar) = name.strip_suffix(".disabled").filter(|j| j.to_ascii_lowercase().ends_with(".jar")) else { continue };
         // Both copies there: the one that's on wins.
-        if client.iter().any(|m| m.file_name.eq_ignore_ascii_case(jar)) || !e.path().is_file() {
+        if mods.iter().any(|m| m.file_name.eq_ignore_ascii_case(jar)) || !e.path().is_file() {
             continue;
         }
         let mut m = crate::scan::scan_file(&e.path());
@@ -81,8 +77,18 @@ pub fn client_mods(inst: &Instance, sync_anyway: &HashSet<u64>) -> anyhow::Resul
             m.mod_name = crate::scan::strip_version_suffix(jar);
         }
         m.off = true;
-        client.push(m);
+        mods.push(m);
     }
+    Ok(mods)
+}
+
+/// Why a mod turned off in the pack stays off the server.
+pub const TURNED_OFF: &str = "Turned off in this pack";
+
+/// The pack's mods, the ones turned off included (`off`, held back from the
+/// server), marked with what shouldn't sync.
+pub fn client_mods(inst: &Instance, sync_anyway: &HashSet<u64>) -> anyhow::Result<(Vec<ModInfo>, Annotation)> {
+    let mut client = mods_with_off(&inst.mods_dir())?;
     let note = crate::serverpack::annotate(&mut client, inst, sync_anyway);
     for m in client.iter_mut().filter(|m| m.off) {
         m.wont_sync = Some(TURNED_OFF.into());
@@ -90,10 +96,33 @@ pub fn client_mods(inst: &Instance, sync_anyway: &HashSet<u64>) -> anyhow::Resul
     Ok((client, note))
 }
 
+/// Why a mod the server has turned off isn't added again.
+pub const OFF_ON_SERVER: &str = "Turned off on the server";
+
 /// Compares the pack's mods ([`client_mods`]) with the server's. A mod
 /// turned off in the pack that the server still runs isn't "only on the
-/// server": its row asks to turn the server's copy off too.
+/// server": its row asks to turn the server's copy off too. A mod the
+/// server has turned off (any version) isn't added there again: that left
+/// the old copy off beside a new one on, and the mod back on.
 pub fn diff_mods(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {
+    let (server_off, server_on): (Vec<&ModInfo>, Vec<&ModInfo>) = server.iter().partition(|m| m.off);
+    let server: Vec<ModInfo> = server_on.into_iter().cloned().collect();
+    let off_ids: HashSet<String> = server_off.iter().filter(|m| !m.mod_id.is_empty()).map(|m| m.mod_id.to_lowercase()).collect();
+    let off_stems: HashSet<String> = server_off.iter().map(|m| crate::serverpack::jar_stem(&m.file_name)).collect();
+    let mut diff = diff_on(client, &server);
+    for d in &mut diff {
+        let Some(c) = d.client.as_ref().filter(|_| d.status == DiffStatus::OnlyClient) else { continue };
+        let off_there = (!c.mod_id.is_empty() && off_ids.contains(&c.mod_id.to_lowercase()))
+            || off_stems.contains(&crate::serverpack::jar_stem(&c.file_name));
+        if off_there {
+            d.action = DiffAction::Skip;
+            d.skip_reason = Some(OFF_ON_SERVER.into());
+        }
+    }
+    diff
+}
+
+fn diff_on(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {
     // A turned-off jar whose mod another jar that's on provides (the pack's
     // copy swapped for a player's own build) isn't turned off: the mod still
     // runs, so the server is compared with the jar that's on. Matched by the
@@ -116,6 +145,19 @@ pub fn diff_mods(client: &[ModInfo], server: &[ModInfo]) -> Vec<DiffEntry> {
 /// A server mod the pack has turned off: syncing turns it off there too.
 pub fn is_off_here(d: &DiffEntry) -> bool {
     d.action == DiffAction::DisableOnServer
+}
+
+/// [`server_mods`] with the jars turned off there (`off` set), so Sync
+/// knows what the server has turned off. An older Hopper Server sends only
+/// the ones that are on.
+pub fn server_mods_with_off(server: &ServerInfo) -> anyhow::Result<Vec<crate::model::ModInfo>> {
+    match &server.remote {
+        Some(r) => crate::hopperd::Client::for_remote(r)?.mods_with_off(&r.id),
+        None => {
+            crate::remotefs::refresh_path(&server.root)?;
+            mods_with_off(&server.mods_dir())
+        }
+    }
 }
 
 /// The server's mods; a Hopper Server reads its own jars and sends the
@@ -1048,6 +1090,30 @@ mod tests {
         // Without the fork, the turned-off copy still asks to turn it off.
         let diff = diff_mods(&client[..1], &[m("EffortlessBuilding-fork-4.2.37.jar", "effortlessbuilding", "4.2.37", false)]);
         assert!(diff.iter().any(is_off_here), "{diff:?}");
+    }
+
+    /// TNP-LL8, 2026-11-06: Advancement Frames was off on the server; Sync
+    /// added the pack's newer version on beside the old copy left off.
+    #[test]
+    fn a_mod_off_on_the_server_is_not_added_again() {
+        use crate::model::ModInfo;
+        let m = |file: &str, version: &str, off: bool| ModInfo {
+            file_name: file.into(),
+            mod_id: "advancementframes".into(),
+            mod_name: "Advancement Frames".into(),
+            version: version.into(),
+            side: "both".into(),
+            off,
+            ..Default::default()
+        };
+        let client = [m("advancementframes-1.21-2.3.2-neoforge.jar", "2.3.2", false)];
+        let diff = diff_mods(&client, &[m("advancementframes-1.21-2.3.0-neoforge.jar", "2.3.0", true)]);
+        assert_eq!(diff.len(), 1, "{diff:?}");
+        assert_eq!(diff[0].action, DiffAction::Skip);
+        assert_eq!(diff[0].skip_reason.as_deref(), Some(OFF_ON_SERVER));
+        // Not there at all: added as before.
+        let diff = diff_mods(&client, &[]);
+        assert_eq!(diff[0].action, DiffAction::CopyToServer, "{diff:?}");
     }
 
     fn inst(n: &str) -> Instance {

@@ -7,12 +7,15 @@
 //!   these go (desktop's "Also remove these mods? Nothing else needs them").
 //! - `POST /servers/{id}/mods/undo-remove`: the Undo on "Removed X": puts the
 //!   jars a remove moved to `.hopper-backups` back, with their entries.
+//! - `GET /servers/{id}/mods/instance`: the server's mod list as Hopper
+//!   desktop keeps an instance's (`hopper.json`), plus the jars it doesn't
+//!   track, so desktop shows a server's mods in its own Mods table.
 
 use crate::App;
 use crate::api::{ApiResult, bad, not_found, require};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Method};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use hopper_core::instances::{Addon, Instance};
 use serde::Deserialize;
@@ -25,6 +28,42 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mods/version-lock", post(version_lock))
         .route("/api/v1/servers/{id}/mods/orphans", post(orphans))
         .route("/api/v1/servers/{id}/mods/undo-remove", post(undo_remove))
+        .route("/api/v1/servers/{id}/mods/instance", get(as_instance))
+}
+
+/// The server's `hopper.json` (icons as links the client can load) and its
+/// untracked jars, each with what the jar says about itself.
+async fn as_instance(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    method: Method,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let v = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let mut inst = crate::mods_api::instance_of(&e)?;
+        for a in &mut inst.addons {
+            a.icon = crate::mods_api::icon_url(&a.icon);
+        }
+        let dir = inst.mods_dir();
+        let loose: Vec<Value> = hopper_core::install::loose_jars(&inst)
+            .into_iter()
+            .map(|f| {
+                let looks = hopper_core::sources::looks::loose(&dir.join(&f));
+                json!({ "file": f, "icon": crate::mods_api::icon_url(&looks.icon), "author": looks.authors })
+            })
+            .collect();
+        Ok(json!({
+            "instance": inst,
+            "loose": loose,
+            "curseforge": hopper_core::cf::api_key().is_some(),
+        }))
+    })
+    .await
+    .map_err(bad)?
+    .map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(v))
 }
 
 #[derive(Deserialize)]

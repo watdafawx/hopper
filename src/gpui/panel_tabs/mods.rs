@@ -709,7 +709,7 @@ impl ModsTab {
                     Ok(v) => {
                         let n = arr(&v, "updated").len();
                         this.say(format!(
-                            "Updated {n}. If the server is running, restart it to load {}. The old jars are in Backups.",
+                            "Updated {n}. If the server is running, restart it to load {}. The old jars are in History.",
                             if n == 1 { "it" } else { "them" }
                         ));
                         this.reviewing = false;
@@ -879,7 +879,7 @@ impl ModsTab {
         let n = files.len();
         self.confirm(
             format!("Remove {n} mods?"),
-            "They're kept in .hopper-backups (Mods › Backups).".into(),
+            "They're kept in .hopper-backups (Mods › History).".into(),
             "Remove",
             window,
             cx,
@@ -905,7 +905,7 @@ impl ModsTab {
                                 this.peek = None;
                                 this.sel.clear();
                                 this.say(format!(
-                                    "Removed {n} mods. They're in Backups.{}",
+                                    "Removed {n} mods. They're in History.{}",
                                     if restart { " Restart the server to apply." } else { "" }
                                 ));
                                 this.check_updates(false, cx);
@@ -1075,7 +1075,7 @@ impl ModsTab {
                 match r {
                     Ok(v) => {
                         this.say(format!(
-                            "{} is {label} now. If the server is running, restart it to load it. The old jar is in Backups.",
+                            "{} is {label} now. If the server is running, restart it to load it. The old jar is in History.",
                             m.name
                         ));
                         // The jar has a new name: follow it.
@@ -1171,7 +1171,7 @@ impl ModsTab {
         let file = m.file.clone();
         self.confirm(
             format!("Remove {}?", m.name),
-            "It's kept in .hopper-backups (Mods › Backups).".into(),
+            "It's kept in .hopper-backups (Mods › History).".into(),
             "Remove",
             window,
             cx,
@@ -1204,7 +1204,7 @@ impl ModsTab {
     fn restore(&mut self, when: i64, name: Option<String>, what: String, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm(
             format!("Put back {what}?"),
-            "A mod's current jar moves to Backups first, so this can be undone the same way.".into(),
+            "A mod's current jar moves to History first, so this can be undone the same way.".into(),
             "Restore",
             window,
             cx,
@@ -1948,7 +1948,7 @@ impl ModsTab {
                     }))),
             )
             .child(widgets::caption(
-                "The jars they replace go to Mods › Backups, so each one can be put back. If the server is running, restart it afterwards to load them.",
+                "The jars they replace go to Mods › History, so each one can be put back. If the server is running, restart it afterwards to load them.",
                 cx,
             ))
             .child(
@@ -2397,6 +2397,11 @@ impl Picks for ModsTab {
 
 impl Render for ModsTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The Servers page shows the Mods table itself and this view only
+        // for Mods › History, under its own Mods | History tabs.
+        if self.sub == Sub::Backups {
+            return self.backups_view(window, cx);
+        }
         let tabs = self.sub_tabs(window, cx).into_any_element();
         if self.sub == Sub::Backups {
             let body = self.backups_view(window, cx);

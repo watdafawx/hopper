@@ -207,24 +207,32 @@ pub fn undo(inst: &mut Instance, f: &Saved) -> anyhow::Result<PathBuf> {
 /// Puts `new` (its file downloaded to `tmp`) in place of whatever file of
 /// the same project the instance has now, on or off as `on` says.
 fn put_entry(inst: &mut Instance, new: Addon, tmp: &Path, on: bool) -> anyhow::Result<()> {
+    // An old copy that was off, put back while the mod's copy that's on is
+    // there: it was removed on its own (the "Old copy" chip), not replaced
+    // by an update, so the copy that's on stays and this one goes beside it.
+    let beside = !on && !inst.addons.iter().any(|a| a.file_name.eq_ignore_ascii_case(&new.file_name))
+        && inst.addons.iter().any(|a| a.project_id == new.project_id && a.enabled);
     // The same project, or the same file tracked from the other site (a
     // note made from a copy can name either): replaced, never doubled.
-    let old = inst
-        .addons
-        .iter()
-        .position(|a| a.project_id == new.project_id)
-        .or_else(|| inst.addons.iter().position(|a| a.file_name.eq_ignore_ascii_case(&new.file_name)))
-        .map(|i| inst.addons.remove(i));
+    let old = if beside {
+        None
+    } else {
+        inst.addons
+            .iter()
+            .position(|a| a.project_id == new.project_id)
+            .or_else(|| inst.addons.iter().position(|a| a.file_name.eq_ignore_ascii_case(&new.file_name)))
+            .map(|i| inst.addons.remove(i))
+    };
     let mut new = new;
     if old.is_none() {
         new.enabled = on;
     }
-    let pid = new.project_id;
+    let (pid, file) = (new.project_id, new.file_name.clone());
     if let Err(e) = crate::install::replace_addon(inst, old, new, tmp) {
         let _ = fs::remove_file(tmp);
         return Err(e);
     }
-    if let Some(i) = inst.addons.iter().position(|a| a.project_id == pid)
+    if let Some(i) = inst.addons.iter().position(|a| a.project_id == pid && (!beside || a.file_name.eq_ignore_ascii_case(&file)))
         && inst.addons[i].enabled != on
     {
         crate::install::set_enabled(inst, i, on)?;
@@ -278,6 +286,38 @@ mod tests {
         assert_eq!(version_of("ExtendedAE-Plus-1.6.3.jar.disabled"), "1.6.3");
         assert_eq!(version_of("Jade_15.10.4.jar"), "15.10.4");
         assert_eq!(version_of("nothing.jar"), "nothing");
+    }
+
+    /// Undoing the removal of an old copy left off (TNP-LL8's doubles, 2026-11)
+    /// puts it back beside the copy that's on; undoing an update of a mod
+    /// that's off still swaps the files.
+    #[test]
+    fn an_old_copy_goes_back_beside_the_one_on() {
+        let dir = std::env::temp_dir().join(format!("hopper-undo-beside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("mods")).unwrap();
+        let addon = |f: &str, on: bool| Addon { file_name: f.into(), project_id: 7, file_id: 1, enabled: on, class_id: cf::CLASS_MODS, ..Default::default() };
+        let mut inst = Instance { root: dir.clone(), ..Default::default() };
+        fs::write(dir.join("mods/x-2.jar"), b"new").unwrap();
+        inst.addons = vec![addon("x-2.jar", true)];
+        let tmp = dir.join("mods/x-1.jar.hopper-tmp");
+        fs::write(&tmp, b"old").unwrap();
+        put_entry(&mut inst, addon("x-1.jar", false), &tmp, false).unwrap();
+        assert!(dir.join("mods/x-2.jar").is_file(), "the copy that's on stays");
+        assert!(dir.join("mods/x-1.jar.disabled").is_file(), "the old copy is back, off");
+        assert_eq!(inst.addons.len(), 2);
+
+        // Both off: an update of a turned-off mod being undone.
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("mods")).unwrap();
+        fs::write(dir.join("mods/x-2.jar.disabled"), b"new").unwrap();
+        inst.addons = vec![addon("x-2.jar", false)];
+        fs::write(&tmp, b"old").unwrap();
+        put_entry(&mut inst, addon("x-1.jar", false), &tmp, false).unwrap();
+        assert!(!dir.join("mods/x-2.jar.disabled").exists());
+        assert!(dir.join("mods/x-1.jar.disabled").is_file());
+        assert_eq!(inst.addons.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn file(id: u64, date: &str) -> cf::File {

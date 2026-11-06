@@ -202,7 +202,7 @@ impl AppView {
                         window.minimize_window();
                     }
                 }
-                StoreEvent::Schedule(msg, bad) => {
+                StoreEvent::Schedule(msg, bad) | StoreEvent::Notice(msg, bad) => {
                     let n = if *bad {
                         gpui_kit::component::notification::Notification::warning(msg.clone())
                     } else {
@@ -341,6 +341,24 @@ impl AppView {
                 ServersEvent::BrowsePacks(place) => {
                     let place = place.clone();
                     this.browse.update(cx, |b, cx| b.browse_packs_for_server(place, cx));
+                    this.go(Page::Browse, cx);
+                }
+                ServersEvent::Browse { root, class } => {
+                    let (root, class) = (root.clone(), *class);
+                    this.browse.update(cx, |b, cx| b.browse_for(root, class, None, cx));
+                    this.go(Page::Browse, cx);
+                }
+                ServersEvent::Find { root, text } => {
+                    let (root, text) = (root.clone(), text.clone());
+                    this.browse.update(cx, |b, cx| {
+                        b.browse_for(root, hopper::cf::CLASS_MODS, None, cx);
+                        b.find(text, cx);
+                    });
+                    this.go(Page::Browse, cx);
+                }
+                ServersEvent::OpenProject { root, project } => {
+                    let (root, project) = (root.clone(), *project);
+                    this.browse.update(cx, |b, cx| b.open_project(root, project, cx));
                     this.go(Page::Browse, cx);
                 }
                 // "Not now" on the servers intro: back where the user was.
@@ -681,6 +699,18 @@ impl AppView {
     }
 
     fn dropped(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        // On a server's Mods tab: into that server.
+        if self.page == Page::Servers
+            && let Some(root) = self.servers.read(cx).mods_drop_target()
+        {
+            let jars: Vec<std::path::PathBuf> = paths.paths().iter().filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("jar"))).cloned().collect();
+            if jars.is_empty() {
+                window.push_notification(gpui_kit::component::notification::Notification::info("Drop .jar files here to add them to the server."), cx);
+                return;
+            }
+            self.store.update(cx, |s, _| s.add_server_jars(&root, jars));
+            return;
+        }
         let (target, folder) = self.library.read(cx).drop_target(cx);
         let paths = paths.paths().to_vec();
         // Packs bringing mods from GitHub and other links: ask first.

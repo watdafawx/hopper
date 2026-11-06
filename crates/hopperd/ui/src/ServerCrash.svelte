@@ -180,7 +180,7 @@
   async function switchOff(sw) {
     if (isItem(sw)) {
       const ok = await confirmIt(`Turn off ${sw.label}?`, {
-        body: `Sets ${sw.key} to false in ${sw.file}, line ${sw.line}. Every ${sw.label} already in the worlds goes away. The config as it was goes to Mods › Backups.`,
+        body: `Sets ${sw.key} to false in ${sw.file}, line ${sw.line}. Every ${sw.label} already in the worlds goes away. The config as it was goes to Mods › History.`,
         ok: 'Turn off',
       });
       if (!ok) return;
@@ -188,7 +188,7 @@
     busy = true;
     try {
       await post(`${base}/crash/switch-off`, { file: sw.file, key: sw.key });
-      say(`${doneText(sw)}. The old config is in Mods › Backups. Start the server to try again.`);
+      say(`${doneText(sw)}. The old config is in Mods › History. Start the server to try again.`);
       await load();
     } catch (e) {
       say(e.message, true);
@@ -201,7 +201,7 @@
     busy = true;
     try {
       await post(`${base}/crash/switch-on`, { file: sw.file, key: sw.key });
-      say(`${sw.kind === 'limit' ? `${sw.label} is ${fromText(sw)}` : `${sw.label} is on`} again. The config as it was is in Mods › Backups.`);
+      say(`${sw.kind === 'limit' ? `${sw.label} is ${fromText(sw)}` : `${sw.label} is on`} again. The config as it was is in Mods › History.`);
       await load();
     } catch (e) {
       say(e.message, true);
@@ -217,7 +217,7 @@
     busy = true;
     try {
       const r = await post(`${base}/crash/put-back`, { file: ch.file_name });
-      say(`${ch.from || 'The older version'} is back. ${ch.to || 'The newer one'} is in Mods › Backups.`);
+      say(`${ch.from || 'The older version'} is back. ${ch.to || 'The newer one'} is in Mods › History.`);
       const keep = { file: r.back, from: ch.from, name: ch.name, ch };
       await load();
       back = keep;
@@ -334,7 +334,7 @@
   {/each}
   {#each switchedOff as sw, i (sw.file + sw.key)}
     <div class="sw">
-      <div class="line"><span class="done"><Check size={13} />{doneText(sw)}</span><span class="tiny muted">{changes[i]?.length ? 'Start the server to try again. The old file is in Mods › Backups.' : `${sw.key} = ${toText(sw)} in ${fileName(sw)}. Start the server to try again.`}</span></div>
+      <div class="line"><span class="done"><Check size={13} />{doneText(sw)}</span><span class="tiny muted">{changes[i]?.length ? 'Start the server to try again. The old file is in Mods › History.' : `${sw.key} = ${toText(sw)} in ${fileName(sw)}. Start the server to try again.`}</span></div>
       {#if changes[i]?.length}
         <div class="diff">
           <div class="tiny muted">{sw.file}</div>
@@ -370,9 +370,9 @@
             <div class="row acts">
               {#if isBack}
                 <span class="done"><Check size={13} />{back.from || 'The older version'} is back</span>
-                <span class="tiny muted">Start the server to try again. Mods › Backups has the newer one.</span>
+                <span class="tiny muted">Start the server to try again. Mods › History has the newer one.</span>
               {:else}
-                <button class="btn sm pri" disabled={busy || alive} title={alive ? 'Stop the server first' : 'Swaps in the copy Hopper kept. The newer one goes to Mods › Backups, so you can undo this there.'} onclick={() => putBack(changed)}><Undo2 size={13} />{changed.from ? `Put ${changed.from} back` : 'Put the older version back'}</button>
+                <button class="btn sm pri" disabled={busy || alive} title={alive ? 'Stop the server first' : 'Swaps in the copy Hopper kept. The newer one goes to Mods › History, so you can undo this there.'} onclick={() => putBack(changed)}><Undo2 size={13} />{changed.from ? `Put ${changed.from} back` : 'Put the older version back'}</button>
                 {@render actions()}
                 <span class="tiny muted">{changed.to ? `${changed.to} goes to Backups.` : 'The newer one goes to Backups.'}</span>
               {/if}

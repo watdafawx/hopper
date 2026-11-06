@@ -322,6 +322,9 @@ impl Instance {
     /// Refuses for an [unreadable](Instance::unreadable) instance, which
     /// would otherwise replace the damaged file with an empty one.
     pub fn save(&self) -> anyhow::Result<()> {
+        // A server on a Hopper Server is shown here under a stand-in path
+        // ("hopperd:\TNP"); its list lives on the panel, which changes it.
+        anyhow::ensure!(!crate::hopperd::is_remote_root(&self.root), "{} is on a Hopper Server", self.name);
         if let Some(e) = &self.unreadable {
             anyhow::bail!(
                 "{} is unreadable ({e}); not overwriting it",
