@@ -24,7 +24,7 @@ use gpui_kit::*;
 use std::path::Path;
 
 const STEPS: [&str; 7] = ["Welcome", "Files", "CurseForge", "Instances", "Servers", "Look", "Done"];
-const CF_CONSOLE: &str = "https://console.curseforge.com/";
+pub(crate) const CF_CONSOLE: &str = "https://console.curseforge.com/";
 /// After a restart that moved Hopper's files: the step to open on.
 const RESUME_ARG: &str = "--setup-step=";
 

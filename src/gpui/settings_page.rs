@@ -2170,6 +2170,16 @@ impl SettingsPage {
                             .disabled(self.cf_testing || (!typed && source.is_none()))
                             .on_click(cx.listener(|this, _, _, cx| this.test_cf_key(cx))),
                     )
+                    .child(
+                        // Where the key comes from: the CurseForge console, in the browser.
+                        Button::new("cf-key-get")
+                            .small()
+                            .outline()
+                            .icon(IconName::ExternalLink)
+                            .label("Get a key")
+                            .tooltip("Opens console.curseforge.com: sign in, open API keys and copy your key")
+                            .on_click(|_, _, cx| cx.open_url(super::setup_wizard::CF_CONSOLE)),
+                    )
                     .when(source == Some(KeySource::Saved), |r| {
                         r.child(
                             Button::new("cf-key-remove")

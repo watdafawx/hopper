@@ -1,7 +1,7 @@
 <script>
   // The panel's CurseForge API key: set, change or remove it. In Access &
   // devices, and in the Mods tab while there is none.
-  import { KeyRound, Save } from '@lucide/svelte';
+  import { ExternalLink, KeyRound, Save } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
 
@@ -50,6 +50,7 @@
     <form class="row" onsubmit={(e) => { e.preventDefault(); if (key.trim()) save(); }}>
       <div class="input grow"><input type="password" bind:value={key} placeholder="Paste your CurseForge API key" autocomplete="off" spellcheck="false" /></div>
       <button class="btn sm pri" disabled={!key.trim() || saving}><Save size={13} />{saving ? 'Checking…' : 'Save'}</button>
+      <a class="btn sm" href="https://console.curseforge.com/" target="_blank" rel="noreferrer" title="Opens console.curseforge.com: sign in, open API keys and copy your key"><ExternalLink size={13} />Get a key</a>
       {#if editing}<button type="button" class="btn sm ghost" onclick={() => (editing = false)}>Cancel</button>{/if}
     </form>
   {/if}
