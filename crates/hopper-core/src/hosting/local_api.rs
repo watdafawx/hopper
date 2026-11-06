@@ -240,6 +240,50 @@ impl LocalApi {
                 let b = worlds::backup_world(root, name, Kind::Manual, &format!("World {name}"), self.server.as_deref(), job)?;
                 Ok(json!(b))
             }
+            (Method::Post, ["worlds", name, "reset"]) => {
+                self.stopped("resetting a world")?;
+                worlds::check_name(name)?;
+                let seed: worlds::SeedChoice = serde_json::from_value(body["seed"].clone()).context("reading the seed")?;
+                let keep = body["keep_dims"].as_bool().unwrap_or(false);
+                let quiet;
+                let job = match job {
+                    Some(j) => j,
+                    None => {
+                        quiet = crate::jobs::Jobs::default().start("reset");
+                        &quiet
+                    }
+                };
+                // A backup only when the person ticked it: backups are theirs to make.
+                if body["backup_first"].as_bool().unwrap_or(false) && root.join(name).join("level.dat").is_file() {
+                    job.detail(format!("Backing up {name}"));
+                    worlds::backup_world(root, name, Kind::Manual, &format!("Before resetting {name}"), None, job)?;
+                }
+                job.detail(format!("Moving {name} to the trash"));
+                let seed = worlds::reset(root, name, &seed, keep, &self.trash())?;
+                Ok(json!({ "seed": seed }))
+            }
+            (Method::Post, ["worlds", "import"]) => {
+                let name = body["name"].as_str().unwrap_or_default().trim().to_string();
+                let zip = body["zip"].as_str().unwrap_or_default().to_string();
+                worlds::check_name(&name)?;
+                files::resolve(root, &zip)?;
+                let quiet;
+                let job = match job {
+                    Some(j) => j,
+                    None => {
+                        quiet = crate::jobs::Jobs::default().start("import");
+                        &quiet
+                    }
+                };
+                let r = worlds::import_zip(root, &zip, &name, job);
+                // The upload only carries the world here: don't leave it in
+                // the server folder when it couldn't be unpacked.
+                if r.is_err() && zip.starts_with("world-upload-") && zip.ends_with(".zip") && !zip.contains(['/', '\\']) {
+                    let _ = std::fs::remove_file(root.join(&zip));
+                }
+                r?;
+                Ok(json!({ "ok": true }))
+            }
             (Method::Delete, ["worlds", name]) => {
                 worlds::delete(root, name, &self.trash())?;
                 Ok(json!({ "ok": true }))
@@ -387,6 +431,25 @@ impl PanelApi for LocalApi {
         Ok(())
     }
     fn save(&self, path: &str, local: &Path) -> anyhow::Result<()> {
+        // `/fs/{id}/zip?path=a&path=b`: folders as one zip, as the panel's
+        // download gives them. The query repeats `path`, so read it here.
+        let (p, query) = path.split_once('?').unwrap_or((path, ""));
+        if self.fs_route(p) == Some("/zip") {
+            let rels: Vec<String> =
+                query.split('&').filter_map(|kv| kv.strip_prefix("path=")).map(dec).filter(|r| !r.is_empty()).collect();
+            if rels.is_empty() {
+                bail!("Pick what to download.");
+            }
+            if let Some(p) = local.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            let tmp = local.with_extension("hopper-download");
+            zip_folders(&self.root, &rels, &tmp).inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })?;
+            std::fs::rename(&tmp, local)?;
+            return Ok(());
+        }
         let (path, _) = split_query(path);
         let seg: Vec<String> = self.server_route(path).unwrap_or_default().split('/').filter(|s| !s.is_empty()).map(dec).collect();
         let seg: Vec<&str> = seg.iter().map(String::as_str).collect();
@@ -430,6 +493,41 @@ fn zip_backup(root: &Path, name: &str, out: &Path) -> anyhow::Result<()> {
             .compression_method(if packed { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated });
         z.start_file(f.path.as_str(), opts)?;
         std::io::copy(&mut st.reader(f), &mut z)?;
+    }
+    std::io::Write::flush(&mut z.finish()?)?;
+    Ok(())
+}
+
+/// Folders (or files) in the server folder as one zip, named from the
+/// server folder down (`world/level.dat`), as the panel's zip download.
+fn zip_folders(root: &Path, rels: &[String], out: &Path) -> anyhow::Result<()> {
+    let mut z = zip::ZipWriter::new(std::io::BufWriter::new(std::fs::File::create(out)?));
+    let mut todo: Vec<PathBuf> = Vec::new();
+    for r in rels {
+        todo.push(files::resolve(root, r)?);
+    }
+    while let Some(p) = todo.pop() {
+        let name = files::rel_of(root, &p);
+        if p.is_dir() {
+            z.add_directory(format!("{name}/"), zip::write::SimpleFileOptions::default())?;
+            for e in std::fs::read_dir(&p)?.flatten() {
+                todo.push(e.path());
+            }
+            continue;
+        }
+        // A running server holds session.lock; the world doesn't need it.
+        if p.file_name().is_some_and(|n| n == "session.lock") {
+            continue;
+        }
+        let size = std::fs::metadata(&p).map_or(0, |m| m.len());
+        // Region files are already packed: storing them keeps it quick.
+        let l = name.to_ascii_lowercase();
+        let packed = [".mca", ".zip", ".jar", ".png", ".gz", ".mcc", ".linear"].iter().any(|e| l.ends_with(e));
+        let opts = zip::write::SimpleFileOptions::default()
+            .large_file(size >= u32::MAX as u64)
+            .compression_method(if packed { zip::CompressionMethod::Stored } else { zip::CompressionMethod::Deflated });
+        z.start_file(name.as_str(), opts)?;
+        std::io::copy(&mut std::fs::File::open(&p).with_context(|| format!("reading {name}"))?, &mut z)?;
     }
     std::io::Write::flush(&mut z.finish()?)?;
     Ok(())
@@ -508,6 +606,47 @@ mod tests {
         assert!(PanelApi::put(&api, &sp("/schedule"), json!({ "daily_restart": "25:99" })).is_err());
         // Another server's id isn't this one's.
         assert!(PanelApi::get(&api, &Client::server_path("elsewhere", "/worlds")).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn world_reset_upload_and_zip() {
+        use std::io::Read as _;
+        let root = temp("worldtools");
+        std::fs::write(root.join("server.properties"), "level-name=world\n").unwrap();
+        std::fs::create_dir_all(root.join("world/DIM-1")).unwrap();
+        std::fs::write(root.join("world/level.dat"), b"lvl").unwrap();
+        std::fs::write(root.join("world/session.lock"), b"x").unwrap();
+        std::fs::write(root.join("world/DIM-1/r.mca"), b"nether").unwrap();
+        let api = LocalApi::new(&root, None);
+        let id = LocalApi::id_of(&root);
+        let sp = |r: &str| Client::server_path(&id, r);
+        // Download: the world's folder as a zip, named from the server folder.
+        let out = root.join("out/world.zip");
+        PanelApi::save(&api, &Client::fs_path(&id, "/zip?path=world"), &out).unwrap();
+        let mut z = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+        let mut s = String::new();
+        z.by_name("world/DIM-1/r.mca").unwrap().read_to_string(&mut s).unwrap();
+        assert_eq!(s, "nether");
+        assert!(z.by_name("world/session.lock").is_err());
+        drop(z);
+        assert!(PanelApi::save(&api, &Client::fs_path(&id, "/zip?path=..%2Fx"), &out).is_err());
+        // Upload: the zip goes in, then unpacks into a new world.
+        PanelApi::upload(&api, &id, &out, "world-upload-1.zip").unwrap();
+        PanelApi::post(&api, &sp("/worlds/import"), json!({ "zip": "world-upload-1.zip", "name": "copy" })).unwrap();
+        assert!(root.join("copy/level.dat").is_file() && root.join("copy/DIM-1/r.mca").is_file());
+        assert!(!root.join("world-upload-1.zip").exists());
+        // A zip with no world in it fails and doesn't stay behind.
+        std::fs::write(root.join("junk.txt"), b"j").unwrap();
+        PanelApi::save(&api, &Client::fs_path(&id, "/zip?path=junk.txt"), &out).unwrap();
+        PanelApi::upload(&api, &id, &out, "world-upload-2.zip").unwrap();
+        assert!(PanelApi::post(&api, &sp("/worlds/import"), json!({ "zip": "world-upload-2.zip", "name": "bad" })).is_err());
+        assert!(!root.join("world-upload-2.zip").exists());
+        // Reset keeping the Nether: the overworld goes, DIM-1 stays.
+        PanelApi::post(&api, &sp("/worlds/world/reset"), json!({ "seed": { "mode": "custom", "seed": "123" }, "keep_dims": true })).unwrap();
+        assert!(!root.join("world/level.dat").exists());
+        assert!(root.join("world/DIM-1/r.mca").is_file());
+        assert!(std::fs::read_to_string(root.join("server.properties")).unwrap().contains("level-seed=123"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

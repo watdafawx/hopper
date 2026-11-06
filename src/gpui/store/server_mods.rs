@@ -648,3 +648,50 @@ impl Store {
         });
     }
 }
+
+// ---- data packs on a Hopper Server ----
+//
+// The panel reads and changes the folders (`packs_where_api.rs` there) and
+// sends the same one list desktop builds for a folder here; the Data packs
+// table shows it under the server's stand-in root.
+
+impl Store {
+    /// The server's data packs as the panel lists them, each folder and copy
+    /// under the stand-in `root`, and whether the server runs.
+    pub fn remote_datapacks(root: &Path) -> anyhow::Result<(Vec<hopper::pack_where::Entry>, Vec<hopper::packs::Location>, bool)> {
+        let (c, r) = panel_of(root)?;
+        let v = c.get(&Client::server_path(&r.id, "/datapacks"))?;
+        let (entries, locs) = hopper::pack_where::from_panel(root, &v)?;
+        Ok((entries, locs, v["running"].as_bool().unwrap_or(false)))
+    }
+
+    /// Sends a data pack to `to` on the panel. Answers whether the server
+    /// runs (it picks the change up after /reload or a restart).
+    pub fn remote_datapack_where(root: &Path, file: &str, to: &hopper::pack_where::Target) -> anyhow::Result<bool> {
+        let (c, r) = panel_of(root)?;
+        let body = json!({ "file": file.trim_end_matches(".disabled"), "to": to });
+        Ok(c.post(&Client::server_path(&r.id, "/datapacks/where"), body)?["reload"].as_bool().unwrap_or(false))
+    }
+
+    /// Paxi's load order on the panel (first loads first).
+    pub fn remote_datapack_order(root: &Path, names: &[String]) -> anyhow::Result<bool> {
+        let (c, r) = panel_of(root)?;
+        Ok(c.post(&Client::server_path(&r.id, "/datapacks/order"), json!({ "names": names }))?["reload"].as_bool().unwrap_or(false))
+    }
+
+    /// Moves files under the stand-in `root` to the server's trash (Files ›
+    /// Trash puts them back).
+    pub fn remote_trash(root: &Path, paths: &[PathBuf]) -> anyhow::Result<()> {
+        let (c, r) = panel_of(root)?;
+        let rels: Vec<String> = paths
+            .iter()
+            .filter_map(|p| p.strip_prefix(root).ok())
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .filter(|p| !p.is_empty())
+            .collect();
+        if rels.is_empty() {
+            return Ok(());
+        }
+        c.trash(&r.id, &rels)
+    }
+}

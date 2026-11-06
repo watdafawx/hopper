@@ -50,7 +50,25 @@ pub(crate) struct WhereState {
     pub class: u32,
     /// The pack being dragged and its group, while a drag is on.
     pub dragging: Option<(String, Group)>,
+    /// A server on a Hopper Server: the list its panel sent (the folders
+    /// are on the panel's machine), or why it couldn't be read.
+    pub remote: Option<RemoteWhere>,
+    pub remote_err: Option<String>,
+    /// Fetches asked for, so an older answer arriving late is dropped.
+    pub asked: u64,
 }
+
+/// A Hopper Server's data packs, as its panel lists them.
+#[derive(Clone, Default)]
+pub(crate) struct RemoteWhere {
+    pub entries: Vec<Entry>,
+    pub locs: Vec<hopper::packs::Location>,
+    /// The server runs: changes count after /reload or a restart.
+    pub running: bool,
+}
+
+/// What a change on a running server's panel still needs.
+const RELOAD_TIP: &str = "The server picks it up after /reload or a restart.";
 
 /// A row dragged by its grip, to another place or group.
 #[derive(Clone)]
@@ -79,6 +97,18 @@ impl Render for WhereDrag {
 
 fn mtime(p: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+/// Opens a pack folder: in Explorer, or for a server on a Hopper Server in
+/// its panel's Files (the folder is on the panel's machine).
+pub(crate) fn open_pack_dir(dir: &Path, cx: &App) {
+    if hopper::hopperd::is_remote_root(dir) {
+        if let Some(url) = hopper::hopperd::web_url(dir) {
+            cx.open_url(&url);
+        }
+        return;
+    }
+    crate::store::open_folder(dir);
 }
 
 /// A loader's short name ("Paxi", "Global Packs").
@@ -131,7 +161,9 @@ impl AddonsView {
 
     /// Whether a pack folder changed since the list was read.
     pub(crate) fn where_moved(&self) -> bool {
-        self.where_mode() && self.wh.root.is_some() && self.where_stamp() != self.wh.stamp
+        // A Hopper Server's folders can't be watched from here: its list is
+        // read again when the table is.
+        !self.remote && self.where_mode() && self.wh.root.is_some() && self.where_stamp() != self.wh.stamp
     }
 
     /// Reads each location's packs in the background (a big Paxi folder
@@ -141,7 +173,9 @@ impl AddonsView {
         let stamp = self.where_stamp();
         let class = self.class;
         let same = self.wh.root.as_ref() == Some(&inst.root) && self.wh.class == class;
-        if same && stamp == self.wh.stamp {
+        // A Hopper Server's list is fetched each time the table is read (no
+        // folder times to compare: they're on the panel's machine).
+        if same && stamp == self.wh.stamp && !self.remote {
             return;
         }
         if !same {
@@ -149,6 +183,9 @@ impl AddonsView {
         }
         self.wh.root = Some(inst.root.clone());
         self.wh.stamp = stamp;
+        if self.remote {
+            return self.fetch_remote_where(inst.root.clone(), cx);
+        }
         let dirs = self.where_dirs();
         let root = inst.root.clone();
         let header = inst.clone_header();
@@ -198,6 +235,56 @@ impl AddonsView {
         .detach();
     }
 
+    /// The panel's list for a server on a Hopper Server, read again each time
+    /// the table is (opening the tab, after a change); the old one stays up
+    /// meanwhile.
+    fn fetch_remote_where(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.wh.asked += 1;
+        let (asked, class) = (self.wh.asked, self.class);
+        cx.spawn(async move |this, cx| {
+            let r2 = root.clone();
+            let r = cx.background_spawn(async move { crate::store::Store::remote_datapacks(&r2) }).await;
+            this.update(cx, |this, cx| {
+                if this.wh.root.as_ref() != Some(&root) || this.wh.class != class || this.wh.asked != asked {
+                    return;
+                }
+                match r {
+                    Ok((entries, locs, running)) => {
+                        this.wh.remote_err = None;
+                        this.wh.remote = Some(RemoteWhere { entries, locs, running });
+                    }
+                    Err(e) => this.wh.remote_err = Some(format!("{e:#}")),
+                }
+                if this.class == class {
+                    this.locs = this.remote_locs();
+                    this.apply_where(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The folders of the Hopper Server list shown (none before it came).
+    pub(crate) fn remote_locs(&self) -> Vec<hopper::packs::Location> {
+        let same = self.wh.root.as_ref() == self.root.as_ref() && self.wh.class == self.class;
+        self.wh.remote.as_ref().filter(|_| same).map(|r| r.locs.clone()).unwrap_or_default()
+    }
+
+    /// A Hopper Server's list hasn't come yet (`Some(why)` when it failed).
+    pub(crate) fn remote_waiting(&self) -> Option<Option<String>> {
+        if !self.remote || !self.where_mode() {
+            return None;
+        }
+        let same = self.wh.root.as_ref() == self.root.as_ref() && self.wh.class == self.class;
+        match (&self.wh.remote_err, same && self.wh.remote.is_some()) {
+            (Some(e), _) => Some(Some(e.clone())),
+            (None, false) => Some(None),
+            (None, true) => None,
+        }
+    }
+
     /// The table as one list: the instance's packs (tracked and not), then
     /// one row for each pack only other places hold, from the copy in
     /// effect. Each row's group comes from `pack_where::list`.
@@ -213,7 +300,12 @@ impl AddonsView {
         let Some(real) = self.root.as_ref().and_then(|r| self.store.read(cx).instance(r)).cloned() else {
             return;
         };
-        let entries = pw::list(&real, class, &self.locs);
+        // A Hopper Server's list comes from its panel.
+        let entries = if self.remote {
+            self.wh.remote.as_ref().map(|r| r.entries.clone()).unwrap_or_default()
+        } else {
+            pw::list(&real, class, &self.locs)
+        };
         let rp = class == cf::CLASS_RESOURCE_PACKS;
         // Resource packs: the instance's own (tracked, then the untracked
         // ones read from its folder); data packs live only in folders.
@@ -509,7 +601,7 @@ impl AddonsView {
                         .link()
                         .xsmall()
                         .label("Open folder")
-                        .on_click(move |_, _, _| crate::store::open_folder(&dir)),
+                        .on_click(move |_, _, cx| open_pack_dir(&dir, cx)),
                 )
             })
             .into_any_element()
@@ -845,6 +937,9 @@ impl AddonsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.remote {
+            return self.write_remote_order(names, undo, window, cx);
+        }
         let class = self.class;
         let r = self.root.as_ref().and_then(|root| self.store.read(cx).instance(root)).map(|inst| {
             // Packs listed before but not in the group now (switched off)
@@ -876,7 +971,45 @@ impl AddonsView {
         }
     }
 
+    /// [`Self::write_paxi_order`] on a Hopper Server: the panel writes the
+    /// group's order as shown, as its own Data packs page does.
+    fn write_remote_order(&mut self, names: Vec<String>, undo: Option<(String, Vec<String>)>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        cx.spawn_in(window, async move |this, cx| {
+            let n2 = names.clone();
+            let r = cx.background_spawn(async move { crate::store::Store::remote_datapack_order(&root, &n2) }).await;
+            this.update_in(cx, |this, window, cx| {
+                this.resync(cx);
+                let reload = match r {
+                    Ok(reload) => reload,
+                    Err(e) => return window.push_notification(Notification::error(format!("{e:#}")), cx),
+                };
+                match undo {
+                    Some((msg, before)) => {
+                        let msg = if reload { format!("{msg}. {RELOAD_TIP}") } else { msg };
+                        this.undo_toast(
+                            msg,
+                            Rc::new(move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                                this.write_paxi_order(before.clone(), None, window, cx)
+                            }),
+                            window,
+                            cx,
+                        );
+                    }
+                    None if reload => window.push_notification(Notification::info(format!("Load order saved. {RELOAD_TIP}")), cx),
+                    None => {}
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub(crate) fn where_running(&self, cx: &App) -> bool {
+        // A Hopper Server's server, as its panel said with the list.
+        if self.remote {
+            return self.wh.remote.as_ref().is_some_and(|r| r.running);
+        }
         self.root.as_ref().is_some_and(|r| self.store.read(cx).running(r).is_some())
     }
 
@@ -964,6 +1097,9 @@ impl AddonsView {
     /// switches of tracked packs (so the instance's list agrees), the
     /// game's order and Paxi's. With `toast`, Undo sends each back.
     fn move_where(&mut self, entries: Vec<Entry>, to: Target, at: Option<usize>, toast: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote {
+            return self.move_remote(entries, to, at, toast, window, cx);
+        }
         let Some(root) = self.root.clone() else { return };
         let class = self.class;
         let locs = self.locs.clone();
@@ -994,14 +1130,7 @@ impl AddonsView {
         }
         let undo: Vec<(String, Target)> = entries.iter().map(|e| (e.file.clone(), e.target())).collect();
         let what = self.describe_packs(&entries.iter().map(|e| e.file.clone()).collect::<Vec<_>>());
-        let place = match &to {
-            Target::Off => "Off".to_string(),
-            Target::InGame => "In game".to_string(),
-            Target::Global(k) if k == pw::PAXI => "Always on (Paxi)".to_string(),
-            Target::Global(k) => format!("Always on ({})", self.loc_label(k)),
-            Target::Worlds(w) if w.len() == 1 => format!("In {}", self.loc_label(&w[0])),
-            Target::Worlds(w) => format!("In {} worlds", w.len()),
-        };
+        let place = self.place_label(&to);
         let one = (entries.len() == 1).then(|| entries[0].file.clone());
         cx.spawn_in(window, async move |this, cx| {
             let r2 = root.clone();
@@ -1055,10 +1184,113 @@ impl AddonsView {
         .detach();
     }
 
+    /// Where a move sends packs, for its toast.
+    fn place_label(&self, to: &Target) -> String {
+        match to {
+            Target::Off => "Off".to_string(),
+            Target::InGame => "In game".to_string(),
+            Target::Global(k) if k == pw::PAXI => "Always on (Paxi)".to_string(),
+            Target::Global(k) => format!("Always on ({})", self.loc_label(k)),
+            Target::Worlds(w) if w.len() == 1 => format!("In {}", self.loc_label(&w[0])),
+            Target::Worlds(w) => format!("In {} worlds", w.len()),
+        }
+    }
+
+    /// [`Self::move_where`] on a Hopper Server: the panel plans and makes
+    /// the same file steps (`POST /datapacks/where`), then the list is read
+    /// again. A drop at a place in Paxi sets its load order after.
+    fn move_remote(&mut self, entries: Vec<Entry>, to: Target, at: Option<usize>, toast: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let undo: Vec<(String, Target)> = entries.iter().map(|e| (e.file.clone(), e.target())).collect();
+        let files: Vec<String> = entries.iter().map(|e| e.file.clone()).collect();
+        let what = self.describe_packs(&files);
+        let place = self.place_label(&to);
+        let order = match (&to, at, files.as_slice()) {
+            (Target::Global(k), Some(at), [f]) if k == pw::PAXI => {
+                let mut names = self.ranked_files(&Group::Global(k.clone()));
+                names.retain(|n| !n.eq_ignore_ascii_case(f));
+                Some(pw::reorder(&names, f, at))
+            }
+            _ => None,
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx
+                .background_spawn(async move {
+                    let mut reload = false;
+                    for f in &files {
+                        reload |= crate::store::Store::remote_datapack_where(&root, f, &to)?;
+                    }
+                    if let Some(names) = order {
+                        reload |= crate::store::Store::remote_datapack_order(&root, &names)?;
+                    }
+                    anyhow::Ok(reload)
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.resync(cx);
+                let reload = match r {
+                    Ok(reload) => reload,
+                    Err(e) => return window.push_notification(Notification::error(format!("{what}: {e:#}")), cx),
+                };
+                if !toast {
+                    return;
+                }
+                let msg = if reload { format!("{what}: {place}. {RELOAD_TIP}") } else { format!("{what}: {place}") };
+                this.undo_toast(
+                    msg,
+                    Rc::new(move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                        for (f, t) in undo.clone() {
+                            if let Some(e) = this.where_entry(&f).cloned() {
+                                this.move_where(vec![e], t, None, false, window, cx);
+                            }
+                        }
+                    }),
+                    window,
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Remove on a Hopper Server: every copy goes to the server's trash
+    /// (Files › Trash puts it back), then the list is read again.
+    fn remove_remote_packs(&mut self, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else { return };
+        let paths: Vec<PathBuf> =
+            files.iter().filter_map(|f| self.where_entry(f)).flat_map(|e| e.copies.iter().map(|c| c.path.clone())).collect();
+        if paths.is_empty() {
+            return;
+        }
+        let what = self.describe_packs(&files);
+        self.selected.clear();
+        cx.spawn_in(window, async move |this, cx| {
+            let r = cx.background_spawn(async move { crate::store::Store::remote_trash(&root, &paths) }).await;
+            this.update_in(cx, |this, window, cx| {
+                this.resync(cx);
+                match r {
+                    Ok(()) => window.push_notification(
+                        Notification::success(format!("Removed {what}. It's in the server's Files › Trash.")).autohide(true),
+                        cx,
+                    ),
+                    Err(e) => window.push_notification(Notification::error(format!("{what}: {e:#}")), cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Remove: every copy outside the instance's own folder goes to
     /// backups; returns the files that also have one there, for the
     /// usual removal.
     pub(crate) fn where_remove(&mut self, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Vec<String> {
+        // A Hopper Server's data packs live only in its folders, all on the panel.
+        if self.remote {
+            self.remove_remote_packs(files, window, cx);
+            return Vec::new();
+        }
         let Some(root) = self.root.clone() else { return files };
         let mut rest = Vec::new();
         let mut moved = 0;

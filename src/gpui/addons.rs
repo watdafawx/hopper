@@ -2666,7 +2666,11 @@ impl AddonsView {
                 // the arrow and a right-click offer the other way to add;
                 // otherwise Browse is the only way, so there's no arrow.
                 let links = self.links_menu(cx);
-                if links {
+                // Browse installs into a Hopper Server through its mods route
+                // only, so its data packs are added in its web UI for now.
+                if self.remote && self.class == cf::CLASS_DATAPACKS {
+                    div().into_any_element()
+                } else if links {
                     let menu = self.add_menu(cx);
                     let m2 = menu.clone();
                     widgets::split_menu(
@@ -5005,6 +5009,12 @@ Change version", a.file_name).into()
     }
 
     fn show_in_folder(&self, file: &str, cx: &App) {
+        // A Hopper Server's data pack: its folder in the panel's Files.
+        if self.remote
+            && let Some(dir) = self.rep_dir(file)
+        {
+            return crate::pack_where::open_pack_dir(&dir, cx);
+        }
         if let Some(dir) = self
             .global_dir()
             .or_else(|| self.rep_dir(file))
@@ -5639,6 +5649,15 @@ impl Render for AddonsView {
         let Some(inst) = self.table.inst.clone() else {
             return div().into_any_element();
         };
+        // A Hopper Server's data packs: being read, or out of reach.
+        match self.remote_waiting() {
+            Some(Some(e)) => {
+                return widgets::empty_state(IconName::TriangleAlert, "Can't read this server's data packs", Some(e.into()), cx)
+                    .into_any_element();
+            }
+            Some(None) => return div().px_6().pt_4().child(widgets::skeleton_rows(6, rems(ROW_H), cx)).into_any_element(),
+            None => {}
+        }
         // Data packs with no folder to show: what to do instead.
         if self.class == cf::CLASS_DATAPACKS && self.locs.is_empty() {
             return self.no_datapack_folders(cx);

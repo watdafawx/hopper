@@ -40,30 +40,11 @@ fn inst(root: &std::path::Path) -> Instance {
     Instance { root: root.to_path_buf(), ..Default::default() }
 }
 
-/// The list without paths on disk: keys, labels, groups.
+/// The list without paths on disk: keys, labels, groups (the shape is
+/// `pack_where::to_panel`'s, which desktop reads back with `from_panel`).
 fn listing(root: &std::path::Path) -> Value {
     let locs = pw::server_locations(root);
-    let entries: Vec<Value> = pw::list(&inst(root), CLASS_DATAPACKS, &locs)
-        .into_iter()
-        .map(|e| {
-            json!({
-                "file": e.file,
-                "group": e.group,
-                "rank": e.rank,
-                "worlds": e.worlds,
-                "using": e.using,
-                "copies": e.copies.iter().map(|c| json!({ "key": c.key, "label": c.label, "on": c.on })).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
-    let locations: Vec<Value> = locs
-        .iter()
-        .map(|l| {
-            let rel = l.dir.strip_prefix(root).unwrap_or(&l.dir).to_string_lossy().replace('\\', "/");
-            json!({ "key": l.key, "label": l.label, "world": l.world.is_some(), "dir": rel })
-        })
-        .collect();
-    json!({ "entries": entries, "locations": locations })
+    pw::to_panel(root, &pw::list(&inst(root), CLASS_DATAPACKS, &locs), &locs)
 }
 
 async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {

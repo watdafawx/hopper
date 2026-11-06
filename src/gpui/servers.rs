@@ -917,9 +917,8 @@ const TAB_DATAPACKS: usize = 12;
 /// (`hosted`): the schedule is Hopper's to carry out.
 fn tabs_for(remote: bool, site: bool, hosted: bool) -> &'static [usize] {
     if remote {
-        // No Data packs table yet: it reads world folders from disk. Each
-        // world card lists its data packs.
-        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_FILES, TAB_MODS, TAB_CONFIGS, TAB_WORLDS, TAB_PLAYERS, TAB_BACKUPS, TAB_SCHEDULE, TAB_SETTINGS, TAB_SYNC]
+        // The Data packs table reads the panel's list (`packs_where_api`).
+        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_FILES, TAB_MODS, TAB_CONFIGS, TAB_WORLDS, TAB_DATAPACKS, TAB_PLAYERS, TAB_BACKUPS, TAB_SCHEDULE, TAB_SETTINGS, TAB_SYNC]
     } else if site {
         &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_BACKUPS, TAB_SETTINGS, TAB_MODS, TAB_CONFIGS, TAB_SYNC]
     } else if hosted {

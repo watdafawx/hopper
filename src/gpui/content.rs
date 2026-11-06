@@ -19,7 +19,11 @@ use std::collections::{HashMap, HashSet};
 use crate::addons_extra::{datapacks, is_hopper_file};
 use crate::selection::{self, KeyAct, Selection};
 use crate::panel_tabs::Target;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+use gpui_kit::component::radio::Radio;
+use gpui_kit::component::tab::{Tab, TabBar};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -35,6 +39,19 @@ pub enum ContentEvent {
 /// "1 world", "3 worlds".
 fn plural(n: usize, what: &str) -> String {
     format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+/// "12,345".
+fn fmt_thousands(n: u64) -> String {
+    let d = n.to_string();
+    let mut out = String::new();
+    for (i, c) in d.chars().enumerate() {
+        if i > 0 && (d.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn file_name(p: &Path) -> String {
@@ -89,6 +106,18 @@ pub struct WorldsView {
     creating: bool,
     new_name: Entity<InputState>,
     new_seed: Entity<InputState>,
+    /// A server's world folders (with Bukkit-style dimension folders),
+    /// what Download zips.
+    folders: HashMap<PathBuf, Vec<String>>,
+    /// The rest of a server's `/worlds` reply: Chunky, pre-generation,
+    /// players online (a Hopper Server's).
+    info: Value,
+    /// An upload, reset or pre-generation on its way: what it's doing.
+    busy: Option<String>,
+    /// The active world's Pre-generate section is open (it starts open).
+    pg_open: bool,
+    /// Counts lists asked for, so only the newest one keeps polling.
+    poll: u64,
 }
 
 impl EventEmitter<ContentEvent> for WorldsView {}
@@ -111,6 +140,11 @@ impl WorldsView {
             creating: false,
             new_name: cx.new(|cx| InputState::new(window, cx).placeholder("World name")),
             new_seed: cx.new(|cx| InputState::new(window, cx).placeholder("Seed (empty: random)")),
+            folders: HashMap::new(),
+            info: Value::Null,
+            busy: None,
+            pg_open: true,
+            poll: 0,
         }
     }
 
@@ -295,6 +329,8 @@ impl WorldsView {
             self.notice = None;
             self.load = None;
             self.sel.clear();
+            self.info = Value::Null;
+            self.busy = None;
         }
         self.source = WorldsSource::Server(target);
         self.root = Some(root);
@@ -305,7 +341,9 @@ impl WorldsView {
     /// listings), a server's from its API.
     fn reload(&mut self, cx: &mut Context<Self>) {
         if let Some(t) = self.target() {
-            crate::panel_tabs::get(cx, &t, t.sp("/worlds"), |this: &mut Self, r, cx| {
+            self.poll += 1;
+            let poll = self.poll;
+            crate::panel_tabs::get(cx, &t, t.sp("/worlds"), move |this: &mut Self, r, cx| {
                 match r {
                     Ok(v) => {
                         this.take_server_list(&v);
@@ -315,6 +353,21 @@ impl WorldsView {
                 }
                 let order = this.order();
                 this.sel.retain(&order);
+                // While Chunky runs its progress is read again every 2
+                // seconds, as Hopper Server's page does; a newer list (or
+                // another server) ends this round.
+                if this.info["pregen"]["state"] == "running" {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+                        this.update(cx, |this, cx| {
+                            if this.poll == poll {
+                                this.reload(cx);
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 cx.notify();
             });
             return;
@@ -355,12 +408,19 @@ impl WorldsView {
         }
         self.worlds.clear();
         self.packs.clear();
+        self.folders.clear();
+        self.info = json!({
+            "chunky": v["chunky"], "pregen": v["pregen"], "last_pregen": v["last_pregen"],
+            "players": v["players"], "level": v["level"],
+        });
         for w in v["worlds"].as_array().into_iter().flatten() {
             let name = s(&w["name"]);
             let dir = match &local {
                 Some(root) => root.join(&name),
                 None => PathBuf::from(&name),
             };
+            let folders: Vec<String> = w["folders"].as_array().into_iter().flatten().map(s).filter(|f| !f.is_empty()).collect();
+            self.folders.insert(dir.clone(), if folders.is_empty() { vec![name.clone()] } else { folders });
             let icon = local.as_ref().filter(|_| w["icon"].as_bool() == Some(true)).map(|_| dir.join("icon.png"));
             let packs = w["datapacks"]
                 .as_array()
@@ -535,6 +595,11 @@ impl WorldsView {
             .unwrap_or_default();
         let caption = self.world_caption(w);
         let running = self.running;
+        let busy = self.busy.is_some();
+        // Chunky runs in a Hopper Server's own process; a server on this PC
+        // has no pre-generation here.
+        let pregen = (server && w.active && self.target().is_some_and(|t| t.local.is_none()) && !self.info["chunky"].is_null())
+            .then(|| self.pregen_section(w, cx));
         let name = w.name.clone();
         let success = cx.theme().success;
         let icon = match &w.icon {
@@ -607,6 +672,20 @@ impl WorldsView {
                                     this.open_dir(&dir1, cx)
                                 })),
                         )
+                        .when(server, |r| {
+                            let w = w.clone();
+                            r.child(
+                                Button::new(id("w-zip"))
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Download)
+                                    .tooltip("Download as zip")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.download(&w, window, cx)
+                                    })),
+                            )
+                        })
                         .child(
                             Button::new(id("w-backup"))
                                 .outline()
@@ -617,6 +696,22 @@ impl WorldsView {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
                                     this.back_up(&[dir4.clone()], cx)
+                                })),
+                        )
+                    })
+                    .when(server && w.active && w.created, |r| {
+                        let w = w.clone();
+                        r.child(
+                            Button::new(id("w-reset"))
+                                .outline()
+                                .small()
+                                .icon(IconName::RotateCcw)
+                                .label("Reset…")
+                                .disabled(running || busy)
+                                .tooltip(if running { "Stop the server first" } else { "Start this world over" })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.ask_reset(&w, window, cx)
                                 })),
                         )
                     })
@@ -677,6 +772,532 @@ impl WorldsView {
                         .child(self.pack_actions(&w.dir.display().to_string(), dir, rel, cx)),
                 ))
             })
+            .children(pregen)
+            .into_any_element()
+    }
+
+    /// Asks where to save the world as a zip (the Downloads folder first),
+    /// then saves it as a job in Tasks, as a backup's Download does. The
+    /// zip holds all the world's folders, dimension folders too.
+    fn download(&mut self, w: &World, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.target() else { return };
+        let folders = self.folders.get(&w.dir).cloned().unwrap_or_else(|| vec![w.name.clone()]);
+        let query: Vec<String> = folders.iter().map(|f| format!("path={}", crate::panel_tabs::q(f))).collect();
+        let path = t.fp(&format!("/zip?{}", query.join("&")));
+        let dir = directories::UserDirs::new().and_then(|u| u.download_dir().map(|d| d.to_path_buf())).unwrap_or_default();
+        let name = w.name.clone();
+        let rx = cx.prompt_for_new_path(&dir, Some(format!("{name}.zip").as_str()));
+        let store = self.store.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(local))) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                let job = store.read(cx).start_job(format!("Downloading {name}"));
+                let shown = local.display().to_string();
+                this.notice = None;
+                crate::panel_tabs::call(
+                    cx,
+                    &t,
+                    move |c| {
+                        let r = c.save(&path, &local);
+                        job.finish(&r);
+                        r
+                    },
+                    move |this: &mut Self, r, _| {
+                        this.notice = Some(match r {
+                            Ok(()) => (false, format!("Saved {name} to {shown}")),
+                            Err(e) => (true, e),
+                        })
+                    },
+                );
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Picks a world zip to add to the server.
+    fn pick_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Upload world".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                if let Some(p) = paths.into_iter().next() {
+                    this.upload_world(p, cx)
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sends the zip into the server folder, then has the server unpack it
+    /// into a new world, as Hopper Server's Upload world does: one job in
+    /// Tasks for both.
+    fn upload_world(&mut self, local: PathBuf, cx: &mut Context<Self>) {
+        let Some(t) = self.target() else { return };
+        if !local.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+            self.notice = Some((true, "Pick a world saved as a .zip file.".into()));
+            cx.notify();
+            return;
+        }
+        if self.busy.is_some() {
+            return;
+        }
+        let taken: Vec<String> = self.worlds.iter().map(|w| w.name.clone()).collect();
+        let name = hopper::hosting::worlds::upload_name(&file_name(&local), &taken);
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        // The name Hopper Server knows to clear away when unpacking fails.
+        let rel = format!("world-upload-{ms}.zip");
+        let job = self.store.read(cx).start_job(format!("Adding world {name}"));
+        let (id, path) = (t.id().to_string(), t.sp("/worlds/import"));
+        let body = json!({ "zip": rel, "name": name });
+        self.busy = Some(format!("Uploading {name}"));
+        self.notice = None;
+        crate::panel_tabs::call(
+            cx,
+            &t,
+            move |c| {
+                job.detail("Uploading the zip");
+                let r = c.upload(&id, &local, &rel).and_then(|_| {
+                    job.detail(format!("Unpacking {}", body["name"].as_str().unwrap_or_default()));
+                    c.run_job(&path, body, &job)
+                });
+                job.finish(&r);
+                r
+            },
+            move |this: &mut Self, r, cx| {
+                this.busy = None;
+                this.after(r.map(|_| ()), Some(format!("{name} added. Make it active to play it.")), cx)
+            },
+        );
+        cx.notify();
+    }
+
+    /// The Reset dialog: same seed, a new random one or one typed in; the
+    /// Nether and End kept or not; a backup first only when ticked.
+    fn ask_reset(&mut self, w: &World, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.target() else { return };
+        #[derive(Clone, Copy, PartialEq)]
+        enum Mode {
+            Same,
+            New,
+            Custom,
+        }
+        struct Form {
+            mode: Mode,
+            keep: bool,
+            backup: bool,
+        }
+        let seed = w.seed.clone();
+        let form = std::rc::Rc::new(std::cell::RefCell::new(Form {
+            mode: if seed.is_some() { Mode::Same } else { Mode::New },
+            keep: false,
+            backup: false,
+        }));
+        let custom = cx.new(|cx| InputState::new(window, cx).placeholder("Seed"));
+        // Typing a seed picks "This seed" and wakes the Reset button.
+        let fc = form.clone();
+        cx.subscribe_in(&custom, window, move |_, _, e: &InputEvent, window, _| {
+            if matches!(e, InputEvent::Change) {
+                fc.borrow_mut().mode = Mode::Custom;
+                window.refresh();
+            }
+        })
+        .detach();
+        let (name, size) = (w.name.clone(), hopper::instance_ops::human_bytes(w.size));
+        let (view, store, running) = (cx.entity(), self.store.clone(), self.running);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let f = form.borrow();
+            let (mode, keep, backup) = (f.mode, f.keep, f.backup);
+            drop(f);
+            let set = |m: Mode| {
+                let form = form.clone();
+                move |_: &bool, window: &mut Window, _: &mut App| {
+                    form.borrow_mut().mode = m;
+                    window.refresh();
+                }
+            };
+            let (fk, fb) = (form.clone(), form.clone());
+            let typed = custom.read(cx).value().trim().to_string();
+            let can = !running && (mode != Mode::Custom || !typed.is_empty());
+            let muted = cx.theme().muted_foreground;
+            let (form2, custom2, view, store, t, name2) = (form.clone(), custom.clone(), view.clone(), store.clone(), t.clone(), name.clone());
+            dialog
+                .title(format!("Reset {name}?"))
+                .w(rems(30.).to_pixels(window.rem_size()))
+                .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
+                .child(
+                    v_flex()
+                        .id("reset-body")
+                        .gap_3()
+                        .max_h(widgets::dialog_room(window) - window.rem_size() * 3.)
+                        .overflow_y_scroll()
+                        .text_sm()
+                        .child(div().text_color(muted).child("Players get a fresh world on the next start."))
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .child(
+                                    Radio::new("reset-same")
+                                        .label(match &seed {
+                                            Some(s) => format!("Same seed ({s}: same terrain, everything built is gone)"),
+                                            None => "Same seed (seed unknown)".into(),
+                                        })
+                                        .checked(mode == Mode::Same)
+                                        .disabled(seed.is_none())
+                                        .on_click(set(Mode::Same)),
+                                )
+                                .child(Radio::new("reset-new").label("New random seed").checked(mode == Mode::New).on_click(set(Mode::New)))
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(Radio::new("reset-custom").label("This seed").checked(mode == Mode::Custom).on_click(set(Mode::Custom)))
+                                        .child(div().w_48().child(Input::new(&custom).small())),
+                                ),
+                        )
+                        .child(
+                            Checkbox::new("reset-keep").label("Keep the Nether and the End").checked(keep).on_click(move |v: &bool, window, _| {
+                                fk.borrow_mut().keep = *v;
+                                window.refresh();
+                            }),
+                        )
+                        .child(
+                            Checkbox::new("reset-backup")
+                                .label(format!("Back up the world first ({size}, Backups tab)"))
+                                .checked(backup)
+                                .on_click(move |v: &bool, window, _| {
+                                    fb.borrow_mut().backup = *v;
+                                    window.refresh();
+                                }),
+                        )
+                        .child(widgets::caption("The old folder goes to the server's trash (Files › Trash) for 30 days.", cx))
+                        .when(running, |c| c.child(div().text_color(cx.theme().danger).child("Stop the server first."))),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().child(Button::new("reset-cancel").outline().label("Cancel")))
+                        .child(
+                            DialogAction::new().child(
+                                Button::new("reset-ok")
+                                    .danger()
+                                    .icon(IconName::RotateCcw)
+                                    .label(if backup { "Back up and reset" } else { "Reset" })
+                                    .disabled(!can),
+                            ),
+                        ),
+                )
+                .on_ok(move |_, _, cx| {
+                    let f = form2.borrow();
+                    let typed = custom2.read(cx).value().trim().to_string();
+                    let seed = match f.mode {
+                        Mode::Same => json!({ "mode": "same" }),
+                        Mode::New => json!({ "mode": "new" }),
+                        Mode::Custom if typed.is_empty() => return false,
+                        Mode::Custom => json!({ "mode": "custom", "seed": typed }),
+                    };
+                    let body = json!({ "seed": seed, "keep_dims": f.keep, "backup_first": f.backup });
+                    let name = name2.clone();
+                    let path = Self::world_path(&t, &name, "/reset");
+                    let t = t.clone();
+                    view.update(cx, |this, cx| {
+                        this.busy = Some(format!("Resetting {name}"));
+                        this.notice = None;
+                        crate::panel_tabs::job(cx, &store, &t, format!("Resetting {name}"), path, body, move |this: &mut Self, r, cx| {
+                            this.busy = None;
+                            this.after(r.map(|_| ()), Some(format!("{name} reset. A fresh one is made on the next start.")), cx)
+                        });
+                        cx.notify();
+                    });
+                    true
+                })
+        });
+    }
+
+    /// The Pre-generate dialog: a radius and where to center it, then
+    /// Hopper Server adds Chunky when it's missing, starts (or restarts)
+    /// the server and runs it, as its own page does.
+    fn ask_pregen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.target() else { return };
+        let last = self.info["last_pregen"]["radius"].as_u64().filter(|r| *r > 0).unwrap_or(3000);
+        let radius = cx.new(|cx| {
+            let mut s = InputState::new(window, cx);
+            s.set_value(last.to_string(), window, cx);
+            s
+        });
+        // The chunk count and the Start button follow the radius typed.
+        cx.subscribe_in(&radius, window, |_, _, _: &InputEvent, window, _| window.refresh()).detach();
+        let x = cx.new(|cx| InputState::new(window, cx).placeholder("x"));
+        let z = cx.new(|cx| InputState::new(window, cx).placeholder("z"));
+        // 0: world spawn, 1: 0, 0, 2: typed in.
+        let center = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let info = self.info.clone();
+        let (view, store, running) = (cx.entity(), self.store.clone(), self.running);
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let theme = cx.theme().clone();
+            let r: u64 = radius.read(cx).value().trim().parse().unwrap_or(0);
+            let chunks = (2 * r).div_ceil(16).pow(2);
+            let jar = info["chunky"]["jar"].as_str().is_some();
+            let players = info["players"].as_u64().unwrap_or(0);
+            let blocked = !jar && running && players > 0;
+            let c = center.get();
+            let (rad2, center2, c3) = (radius.clone(), center.clone(), center.clone());
+            let presets = [1000u64, 3000, 5000, 10000];
+            let warn = |text: String| {
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .p_2()
+                    .rounded(theme.radius)
+                    .bg(theme.warning.opacity(0.12))
+                    .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
+                    .child(div().flex_1().min_w_0().child(text))
+            };
+            let (radius2, x2, z2, center4, view, store, t) = (radius.clone(), x.clone(), z.clone(), center.clone(), view.clone(), store.clone(), t.clone());
+            dialog
+                .title(format!("Pre-generate {}", info["level"].as_str().unwrap_or("the world")))
+                .w(rems(32.).to_pixels(window.rem_size()))
+                .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
+                .child(
+                    v_flex()
+                        .id("pregen-body")
+                        .gap_3()
+                        .max_h(widgets::dialog_room(window) - window.rem_size() * 3.)
+                        .overflow_y_scroll()
+                        .text_sm()
+                        .child(div().text_color(theme.muted_foreground).child("Generates the overworld around a point now, so players don't wait for chunks later."))
+                        .child(div().font_semibold().child("Radius (blocks)"))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    TabBar::new("pregen-radius")
+                                        .segmented()
+                                        .small()
+                                        .selected_index(presets.iter().position(|p| *p == r).unwrap_or(usize::MAX))
+                                        .children(presets.iter().map(|p| Tab::new().label(format!("{}k", p / 1000))))
+                                        .on_click(move |ix: &usize, window, cx| {
+                                            let v = presets.get(*ix).copied().unwrap_or(3000).to_string();
+                                            rad2.update(cx, |s, cx| s.set_value(v, window, cx));
+                                            window.refresh();
+                                        }),
+                                )
+                                .child(div().w_24().child(Input::new(&radius).small()))
+                                .child(widgets::caption(format!("≈ {} chunks", fmt_thousands(chunks)), cx)),
+                        )
+                        .child(div().font_semibold().child("Center"))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    TabBar::new("pregen-center")
+                                        .segmented()
+                                        .small()
+                                        .selected_index(c)
+                                        .child(Tab::new().label("World spawn"))
+                                        .child(Tab::new().label("0, 0"))
+                                        .child(Tab::new().label("Custom"))
+                                        .on_click(move |ix: &usize, window, _| {
+                                            center2.set(*ix);
+                                            window.refresh();
+                                        }),
+                                )
+                                .when(c3.get() == 2, |r| {
+                                    r.child(div().w_24().child(Input::new(&x).small())).child(div().w_24().child(Input::new(&z).small()))
+                                }),
+                        )
+                        .when(!jar, |b| {
+                            let kind = &info["chunky"]["kind"];
+                            let what = if kind["kind"] == "plugin" {
+                                "the Paper plugin".to_string()
+                            } else {
+                                let l = kind["loader"].as_str().unwrap_or_default();
+                                let mut ch = l.chars();
+                                format!("the {}{} mod", ch.next().map(|c| c.to_uppercase().to_string()).unwrap_or_default(), ch.as_str())
+                            };
+                            let mc = info["chunky"]["minecraft"].as_str().filter(|m| !m.is_empty()).unwrap_or("?");
+                            b.child(warn(format!(
+                                "Chunky isn't installed. Hopper adds {what} for Minecraft {mc} from Modrinth, then {} the server to load it and starts pre-generating.",
+                                if running { "restarts" } else { "starts" }
+                            )))
+                            .when(blocked, |b| {
+                                b.child(div().text_color(theme.danger).child(format!(
+                                    "{players} {} online. Installing needs a restart; try again when they've left.",
+                                    if players == 1 { "player is" } else { "players are" }
+                                )))
+                            })
+                        })
+                        .when(jar && !running, |b| b.child(widgets::caption("The server starts first; pre-generation begins once it's up.", cx)))
+                        .when(jar && running && players > 0, |b| {
+                            b.child(warn(format!("{players} online. Chunky runs alongside them but the server may lag a bit while it works.")))
+                        }),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().child(Button::new("pregen-cancel").outline().label("Cancel")))
+                        .child(
+                            DialogAction::new().child(
+                                Button::new("pregen-ok")
+                                    .primary()
+                                    .label(match (jar, running) {
+                                        (false, true) => "Install, restart and start",
+                                        (false, false) => "Install, start and run",
+                                        (true, true) => "Start",
+                                        (true, false) => "Start server and run",
+                                    })
+                                    .disabled(!(16..=100_000).contains(&r) || blocked),
+                            ),
+                        ),
+                )
+                .on_ok(move |_, _, cx| {
+                    let r: u64 = radius2.read(cx).value().trim().parse().unwrap_or(0);
+                    if !(16..=100_000).contains(&r) {
+                        return false;
+                    }
+                    let num = |i: &Entity<InputState>| i.read(cx).value().trim().parse::<i64>().unwrap_or(0);
+                    let center = match center4.get() {
+                        0 => Value::Null,
+                        1 => json!([0, 0]),
+                        _ => json!([num(&x2), num(&z2)]),
+                    };
+                    let (path, body, t) = (t.sp("/worlds/pregen"), json!({ "radius": r, "center": center }), t.clone());
+                    view.update(cx, |this, cx| {
+                        this.busy = Some("Starting pre-generation".into());
+                        this.notice = None;
+                        crate::panel_tabs::job(cx, &store, &t, "Starting pre-generation", path, body, |this: &mut Self, r, cx| {
+                            this.busy = None;
+                            this.after(r.map(|_| ()), Some("Pre-generation started.".into()), cx)
+                        });
+                        cx.notify();
+                    });
+                    true
+                })
+        });
+    }
+
+    /// Pause, Continue or Cancel on the running pre-generation.
+    fn pregen_op(&mut self, op: &'static str, cx: &mut Context<Self>) {
+        let Some(t) = self.target() else { return };
+        let path = t.sp(&format!("/worlds/pregen/{op}"));
+        crate::panel_tabs::call(cx, &t, move |c| c.post(&path, Value::Null).map(|_| ()), |this: &mut Self, r, cx| this.after(r, None, cx));
+    }
+
+    /// The active world's Pre-generate section (a server on a Hopper
+    /// Server: Chunky runs in its process): what it can do, or how far a
+    /// run has got with Pause / Continue / Cancel.
+    fn pregen_section(&self, w: &World, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let info = &self.info;
+        let pg = &info["pregen"];
+        let state = pg["state"].as_str().unwrap_or_default();
+        let percent = pg["percent"].as_f64().unwrap_or(0.) as f32;
+        let last = &info["last_pregen"];
+        let last_here = last["world"].as_str() == Some(w.name.as_str());
+        let last_radius = fmt_thousands(last["radius"].as_u64().unwrap_or(0));
+        let jar = info["chunky"]["jar"].as_str().map(|j| j.rsplit('/').next().unwrap_or(j).to_string());
+        let busy = self.busy.is_some();
+        let open = self.pg_open;
+        let head = h_flex()
+            .id("pg-head")
+            .gap_2()
+            .clickable(cx)
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .hover(|s| s.text_color(theme.foreground))
+            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).small())
+            .child("Pre-generate")
+            .when(!open && state == "running", |r| r.child(widgets::chip(theme.primary).child(format!("{percent:.1}%"))))
+            .when(!open && state != "running" && last_here, |r| r.child(widgets::chip(theme.muted_foreground).child(format!("Pre-generated {last_radius} blocks"))))
+            .on_click(cx.listener(|this, _, _, cx| {
+                // Folding it doesn't pick the world.
+                cx.stop_propagation();
+                this.pg_open = !this.pg_open;
+                cx.notify();
+            }));
+        if !open {
+            return head.into_any_element();
+        }
+        let body = v_flex().gap_2().p_3().rounded(theme.radius_lg).border_1().border_color(theme.border).text_sm();
+        let body = if info["chunky"]["kind"].is_null() {
+            body.child(widgets::caption(
+                "Pre-generation uses Chunky, a mod or plugin. This server runs plain Minecraft, which can't load either; a Fabric, NeoForge, Forge, Quilt or Paper server can.",
+                cx,
+            ))
+        } else if state == "running" || state == "paused" {
+            let radius = if last_here { format!(" · radius {last_radius} blocks") } else { String::new() };
+            let rate = pg["rate"].as_f64().unwrap_or(0.).round();
+            let eta = pg["eta"].as_str().filter(|e| !e.is_empty()).map(|e| format!("ETA {e} · ")).unwrap_or_default();
+            body.child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().truncate().child(format!("{}{radius}", pg["dimension"].as_str().unwrap_or_default())))
+                    .child(if state == "running" {
+                        div().text_color(theme.muted_foreground).child(format!("{eta}{rate} chunks/s"))
+                    } else {
+                        div().text_color(theme.warning).child("Paused")
+                    }),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(gpui_kit::component::progress::Progress::new("pg-bar").value(percent.min(100.))))
+                    .child(div().font_semibold().child(format!("{percent:.1}%")))
+                    .child(if state == "running" {
+                        Button::new("pg-pause").outline().small().icon(IconName::Pause).label("Pause").disabled(busy).on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.pregen_op("pause", cx)
+                        }))
+                    } else {
+                        Button::new("pg-continue").outline().small().icon(IconName::Play).label("Continue").disabled(busy).on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.pregen_op("continue", cx)
+                        }))
+                    })
+                    .child(Button::new("pg-cancel").outline().small().icon(IconName::Close).label("Cancel").disabled(busy).on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.pregen_op("cancel", cx)
+                    }))),
+            )
+            .child(widgets::caption(
+                format!(
+                    "{}{} chunks done · keeps going if you leave this page",
+                    jar.map(|j| format!("{j} · ")).unwrap_or_default(),
+                    fmt_thousands(pg["chunks"].as_u64().unwrap_or(0))
+                ),
+                cx,
+            ))
+        } else {
+            let mut text = if state == "done" {
+                format!("Done: {} chunks generated.", fmt_thousands(pg["chunks"].as_u64().unwrap_or(0)))
+            } else if state == "cancelled" {
+                "Cancelled.".to_string()
+            } else if last_here {
+                format!("Last run: radius {last_radius} blocks, {}.", hopper::time::relative_secs(last["at"].as_i64().unwrap_or(0)))
+            } else {
+                "Generate the land around spawn now, so players don't wait for it (and the server doesn't lag) later.".to_string()
+            };
+            if jar.is_none() {
+                text.push_str(" Adds Chunky first.");
+            }
+            body.child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().min_w_0().text_color(theme.muted_foreground).child(text))
+                    .child(Button::new("pg-start").outline().small().label("Pre-generate…").disabled(busy).on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.ask_pregen(window, cx)
+                    }))),
+            )
+        };
+        v_flex()
+            .gap_2()
+            .child(head)
+            .child(body.id("pg-body").on_click(|_, _, cx| cx.stop_propagation()))
             .into_any_element()
     }
 
@@ -723,6 +1344,16 @@ impl WorldsView {
             return h_flex()
                 .gap_2()
                 .child(widgets::caption(caption, cx))
+                .when_some(self.busy.clone(), |r, b| {
+                    r.child(
+                        h_flex()
+                            .gap_2()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(gpui_kit::component::spinner::Spinner::new().small())
+                            .child(b),
+                    )
+                })
                 .child(div().flex_1())
                 .when_some(t.local.clone(), |r, dir| {
                     r.child(
@@ -734,6 +1365,16 @@ impl WorldsView {
                             .on_click(move |_, _, _| open_path(&dir)),
                     )
                 })
+                .child(
+                    Button::new("upload-world")
+                        .outline()
+                        .small()
+                        .icon(IconName::Upload)
+                        .label(if self.busy.as_deref().is_some_and(|b| b.starts_with("Uploading")) { "Uploading…" } else { "Upload world" })
+                        .tooltip("Upload a world as a zip")
+                        .disabled(self.busy.is_some())
+                        .on_click(cx.listener(|this, _, window, cx| this.pick_upload(window, cx))),
+                )
                 .child(
                     Button::new("new-world")
                         .primary()
@@ -869,12 +1510,23 @@ impl Render for WorldsView {
             .children(worlds)
             .when(empty, |r| {
                 if server {
-                    return r.child(widgets::empty_state(
-                        IconName::Globe,
-                        "No worlds yet",
-                        Some("The server makes one on its first start, or make one with New world.".into()),
-                        cx,
-                    ));
+                    return r.child(
+                        widgets::empty_state(
+                            IconName::Globe,
+                            "No worlds yet",
+                            Some("The server makes one on its first start. Make one with New world, or upload a world to start from.".into()),
+                            cx,
+                        )
+                        .child(
+                            Button::new("upload-world-empty")
+                                .outline()
+                                .small()
+                                .icon(IconName::Upload)
+                                .label("Upload world")
+                                .disabled(self.busy.is_some())
+                                .on_click(cx.listener(|this, _, window, cx| this.pick_upload(window, cx))),
+                        ),
+                    );
                 }
                 r.child(
                     widgets::empty_state(

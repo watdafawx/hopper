@@ -149,7 +149,11 @@ impl AddonsView {
     /// order, and for data packs which folder is shown (then its packs).
     pub(crate) fn load_locations(&mut self, inst: &Instance, cx: &mut Context<Self>) {
         let class = self.class;
-        self.locs = if matches!(class, cf::CLASS_RESOURCE_PACKS | cf::CLASS_DATAPACKS) {
+        // A Hopper Server's folders are on the panel's machine: the ones its
+        // last list named (`load_where` reads it again).
+        self.locs = if self.remote && class == cf::CLASS_DATAPACKS {
+            self.remote_locs()
+        } else if matches!(class, cf::CLASS_RESOURCE_PACKS | cf::CLASS_DATAPACKS) {
             places(inst, class)
         } else {
             Vec::new()
