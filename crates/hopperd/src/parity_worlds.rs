@@ -16,7 +16,7 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new().route("/api/v1/servers/{id}/worlds/{name}/datapacks/{file}", delete(remove_pack))
 }
 
-use hopper_core::hosting::worlds::check_pack_name;
+pub use hopper_core::hosting::worlds::check_pack_name;
 
 /// Moves a world's data pack to the server's trash (Files › Trash).
 async fn remove_pack(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, name, file)): Path<(String, String, String)>) -> ApiResult<Json<Value>> {

@@ -8,9 +8,11 @@
 //! Only the routes those tabs use are here. Anything else answers "Hopper
 //! can't do that for a server on this PC yet".
 
-use super::backup::Kind;
+use super::backup::{self, Kind, Scope};
 use super::files;
 use super::process::LocalServer;
+use super::players;
+use super::schedule::{self, Schedule};
 use super::worlds;
 use crate::hopperd::{Client, PanelApi, enc};
 use crate::jobs::Job;
@@ -101,6 +103,89 @@ impl LocalApi {
         move |rel| files::trash(&self.root, rel).map(|_| ())
     }
 
+    /// Free bytes on the drive the server is on.
+    fn disk_free(&self) -> u64 {
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        disks
+            .list()
+            .iter()
+            .filter(|d| self.root.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())
+            .map_or(0, |d| d.available_space())
+    }
+
+    /// Sends a command to the server: through Hopper when it hosts it,
+    /// else over RCON when the server has it on.
+    fn command(&self, cmd: &str) -> anyhow::Result<String> {
+        if let Some(s) = self.server.as_ref().filter(|s| s.state().is_alive()) {
+            s.command(cmd)?;
+            return Ok(String::new());
+        }
+        let Some((port, pass)) = super::rcon::settings(&self.root) else {
+            bail!("Start the server to change players: it looks names up and saves the lists itself.");
+        };
+        let mut r = super::rcon::Rcon::connect(port, &pass, std::time::Duration::from_secs(3))
+            .map_err(|_| anyhow::anyhow!("The server isn't running, or doesn't answer RCON. Start it to change players."))?;
+        r.command(cmd)
+    }
+
+    /// Who's online: Hopper's own list for a server it hosts, else the
+    /// server's answer to `list` over RCON. None when it isn't reachable.
+    fn online(&self) -> Option<Vec<String>> {
+        if let Some(s) = &self.server
+            && s.state().is_alive()
+        {
+            return Some(s.players());
+        }
+        let (port, pass) = super::rcon::settings(&self.root)?;
+        let mut r = super::rcon::Rcon::connect(port, &pass, std::time::Duration::from_millis(800)).ok()?;
+        r.command("list").ok().map(|t| players::parse_list(&t))
+    }
+
+    /// The route under `/fs/{id}`.
+    fn fs_route<'a>(&self, path: &'a str) -> Option<&'a str> {
+        let prefix = format!("/fs/{}", enc(&self.id));
+        path.strip_prefix(&prefix).filter(|r| r.is_empty() || r.starts_with('/'))
+    }
+
+    fn files(&self, m: Method, rest: &str, q: &HashMap<String, String>, body: Value) -> anyhow::Result<Value> {
+        let root = &self.root;
+        let path = q.get("path").cloned().unwrap_or_default();
+        match (m, rest) {
+            (Method::Get, "/list") => Ok(json!({ "entries": files::list(root, &path)? })),
+            (Method::Get, "/text") => Ok(json!(files::read_text(root, &path)?)),
+            (Method::Put, "/text") => {
+                let p = body["path"].as_str().unwrap_or_default();
+                let content = body["content"].as_str().unwrap_or_default();
+                Ok(json!(files::write_text(root, p, content, body["modified"].as_u64(), body["force"].as_bool().unwrap_or(false))?))
+            }
+            (Method::Post, "/ops") => {
+                let ops: Vec<files::Op> = serde_json::from_value(body["ops"].clone()).context("reading the file operations")?;
+                let mut done = Vec::new();
+                for op in ops {
+                    done.push(files::run(root, op)?);
+                }
+                Ok(json!({ "done": done }))
+            }
+            (Method::Get, "/trash") => Ok(json!({ "items": files::list_trash(root)? })),
+            (Method::Post, "/trash/restore") => Ok(json!({ "path": files::restore(root, body["id"].as_str().unwrap_or_default())? })),
+            (Method::Post, "/trash/purge") => {
+                let ids: Vec<String> = serde_json::from_value(body["ids"].clone()).unwrap_or_default();
+                Ok(json!({ "removed": files::purge(root, &ids)? }))
+            }
+            (Method::Get, "/search") => {
+                let query = q.get("q").cloned().unwrap_or_default();
+                if query.trim().len() < 2 {
+                    bail!("Search for at least 2 characters.");
+                }
+                let regex = q.get("regex").is_some_and(|v| v == "1" || v == "true");
+                let (hits, more) = files::search(root, &path, &query, regex, 500)?;
+                Ok(json!({ "hits": hits, "more": more }))
+            }
+            _ => bail!("Hopper can't do that for a server on this PC yet."),
+        }
+    }
+
     /// The route under `/servers/{id}`, as decoded segments.
     fn server_route<'a>(&self, path: &'a str) -> Option<&'a str> {
         let prefix = format!("/servers/{}", enc(&self.id));
@@ -108,7 +193,10 @@ impl LocalApi {
     }
 
     fn route(&self, m: Method, path: &str, body: Value, job: Option<&Job>) -> anyhow::Result<Value> {
-        let (path, _q) = split_query(path);
+        let (path, q) = split_query(path);
+        if let Some(rest) = self.fs_route(path) {
+            return self.files(m, rest, &q, body);
+        }
         let Some(rest) = self.server_route(path) else {
             bail!("Hopper can't do that for a server on this PC yet.");
         };
@@ -160,6 +248,84 @@ impl LocalApi {
                 }
                 files::trash(root, &format!("{name}/datapacks/{file}"))?;
                 Ok(json!({ "ok": true }))
+            }
+            (Method::Get, ["players"]) => {
+                let online = self.online();
+                let mut v = players::lists_json(root);
+                v["running"] = json!(online.is_some());
+                v["online"] = json!(online.unwrap_or_default());
+                Ok(v)
+            }
+            (Method::Post, ["players"]) => {
+                let cmd = players::command_for(body["action"].as_str().unwrap_or_default(), body["name"].as_str().unwrap_or_default(), body["reason"].as_str().unwrap_or_default())?;
+                self.command(&cmd)?;
+                Ok(json!({ "ok": true }))
+            }
+            (Method::Get, ["schedule"]) => {
+                let s = Schedule::load(root);
+                Ok(json!({
+                    "schedule": s,
+                    "next_restart": schedule::describe_next_restart(&s, schedule::LocalTime::now()),
+                    "gave_up": Value::Null,
+                    "last_backup": backup::last_scheduled(root),
+                }))
+            }
+            (Method::Put, ["schedule"]) => {
+                let mut s: Schedule = serde_json::from_value(body).context("reading the schedule")?;
+                if s.daily_restart.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                    s.daily_restart = None;
+                }
+                s.validate().map_err(|e| anyhow::anyhow!(e))?;
+                s.warn_minutes.sort_unstable_by(|a, b| b.cmp(a));
+                s.warn_minutes.dedup();
+                s.save(root)?;
+                Ok(json!({ "ok": true }))
+            }
+            (Method::Get, ["backups"]) => {
+                let list = backup::list(root);
+                let as_zips: u64 = list.iter().map(|b| b.size).sum();
+                let zips: u64 = list.iter().filter(|b| b.is_zip()).map(|b| b.size).sum();
+                Ok(json!({
+                    "backups": list, "total_size": backup::usage(root), "as_zips": as_zips, "zips_size": zips,
+                    "keep": backup::keep_rules(root), "every_hours": Schedule::load(root).backup_every_hours,
+                    "targets": [], "can_edit_targets": false, "key_set": false,
+                    "disk_free": self.disk_free(), "folder": backup::DIR,
+                }))
+            }
+            (Method::Post, ["backups"]) => {
+                let scope = if body["worlds_only"].as_bool().unwrap_or(false) { Scope::Worlds } else { Scope::Full };
+                let quiet;
+                let job = match job {
+                    Some(j) => j,
+                    None => {
+                        quiet = crate::jobs::Jobs::default().start("backup");
+                        &quiet
+                    }
+                };
+                let note = body["note"].as_str().unwrap_or_default().trim().to_string();
+                Ok(json!(backup::make(root, scope, Kind::Manual, &note, self.server.as_deref(), job)?))
+            }
+            (Method::Delete, ["backups", name]) => {
+                backup::delete(root, name)?;
+                Ok(json!({ "ok": true }))
+            }
+            (Method::Get, ["backups", name, "entries"]) => Ok(json!({ "entries": backup::entries(root, name)? })),
+            (Method::Post, ["backups", name, "restore"]) => {
+                if self.running() {
+                    bail!("Stop the server before restoring a backup.");
+                }
+                backup::check(name)?;
+                let paths: Vec<String> = serde_json::from_value(body["paths"].clone()).unwrap_or_default();
+                let quiet;
+                let job = match job {
+                    Some(j) => j,
+                    None => {
+                        quiet = crate::jobs::Jobs::default().start("restore");
+                        &quiet
+                    }
+                };
+                let alive = || self.running();
+                backup::restore_checked(root, name, &paths, body["backup_first"].as_bool().unwrap_or(false), &alive, job)
             }
             _ => bail!("Hopper can't do that for a server on this PC yet."),
         }
@@ -250,6 +416,27 @@ mod tests {
         assert_eq!(worlds::level_name(&root), "old");
         PanelApi::delete(&api, &sp("/worlds/world")).unwrap();
         assert!(!root.join("world").exists());
+        // Files: list, save (old copy to the trash), trash, put back.
+        let fp = |r: &str| Client::fs_path(&LocalApi::id_of(&root), r);
+        let v = PanelApi::get(&api, &fp("/list?path=")).unwrap();
+        assert!(v["entries"].as_array().unwrap().iter().any(|e| e["name"] == "server.properties"));
+        PanelApi::put(&api, &fp("/text"), json!({ "path": "notes.txt", "content": "a" })).unwrap();
+        let t = PanelApi::get(&api, &fp("/text?path=notes.txt")).unwrap();
+        assert_eq!(t["content"], "a");
+        let items = PanelApi::get(&api, &fp("/trash")).unwrap();
+        assert!(items["items"].as_array().unwrap().iter().any(|i| i["path"] == "world"));
+        // Players come from the json files; changing them needs it running.
+        std::fs::write(root.join("ops.json"), r#"[{"uuid":"u","name":"Alex","level":4}]"#).unwrap();
+        let p = PanelApi::get(&api, &sp("/players")).unwrap();
+        assert_eq!(p["ops"][0]["name"], "Alex");
+        assert_eq!(p["running"], false);
+        assert!(PanelApi::post(&api, &sp("/players"), json!({ "action": "op", "name": "Steve" })).is_err());
+        // Schedule round trip.
+        PanelApi::put(&api, &sp("/schedule"), json!({ "daily_restart": "04:00", "warn_minutes": [1, 5, 5] })).unwrap();
+        let s = PanelApi::get(&api, &sp("/schedule")).unwrap();
+        assert_eq!(s["schedule"]["daily_restart"], "04:00");
+        assert_eq!(s["schedule"]["warn_minutes"], json!([5, 1]));
+        assert!(PanelApi::put(&api, &sp("/schedule"), json!({ "daily_restart": "25:99" })).is_err());
         // Another server's id isn't this one's.
         assert!(PanelApi::get(&api, &Client::server_path("elsewhere", "/worlds")).is_err());
         let _ = std::fs::remove_dir_all(&root);

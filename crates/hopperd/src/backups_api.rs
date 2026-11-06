@@ -152,40 +152,12 @@ async fn restore(State(app): State<Arc<App>>, headers: HeaderMap, method: Method
     log::info!("{}: restoring {name} ({} paths)", e.name, if b.paths.is_empty() { "all".into() } else { b.paths.len().to_string() });
     let job = crate::pack_api::spawn(&app, format!("Restoring {}", e.name), move |job| {
         let _guard = guard;
-        let old = backup::list(&e.root).into_iter().find(|x| x.name == name).ok_or_else(|| anyhow::anyhow!("That backup is gone."))?;
-        // Picked files that aren't in it: say so before backing anything up.
-        if !b.paths.is_empty() {
-            let names: Vec<String> = backup::entries(&e.root, &name)?.into_iter().map(|(p, _)| p).collect();
-            if matching(&names, &b.paths) == 0 {
-                anyhow::bail!("None of the picked files are in that backup.");
-            }
-        }
-        // A "Before restoring" backup only when the person ticked "Back up
-        // first". It must be complete before any file is touched: an error
-        // stops here.
-        let safety = if b.backup_first {
-            let label = if old.note.trim().is_empty() { format!("the {} backup", hopper_core::time::date(old.at as i64)) } else { format!("\"{}\"", old.note.trim()) };
-            job.detail("Backing up first, so this can be undone");
-            let scope = if b.paths.is_empty() { old.scope } else { Scope::Full };
-            let s = backup::make(&e.root, scope, Kind::Manual, &format!("Before restoring {label}"), None, job)?;
+        let alive = || e.server.state().is_alive();
+        let r = backup::restore_checked(&e.root, &name, &b.paths, b.backup_first, &alive, job).inspect_err(|err| log::warn!("{}: restore of {name} failed: {err:#}", e.name))?;
+        if r["safety"].is_string() {
             offsite::kick();
-            // Started while that ran: writing under a running server
-            // corrupts its world, so stop with nothing changed.
-            if e.server.state().is_alive() {
-                anyhow::bail!("{} was started while it was being backed up, so nothing was restored. Stop it and restore again.", e.name);
-            }
-            Some(s)
-        } else {
-            None
-        };
-        let n = backup::restore(&e.root, &name, &b.paths, job).map_err(|err| {
-            log::warn!("{}: restore of {name} failed: {err:#}", e.name);
-            match &safety {
-                Some(s) => anyhow::anyhow!("{err:#}. If some files were already put back, restore \"{}\" to undo it.", s.note),
-                None => err,
-            }
-        })?;
-        Ok(json!({ "files": n, "safety": safety.as_ref().map(|s| &s.name), "safety_note": safety.as_ref().map(|s| &s.note) }))
+        }
+        Ok(r)
     });
     Ok(Json(json!({ "job": job })))
 }
@@ -215,12 +187,6 @@ impl Drop for Restoring {
     fn drop(&mut self) {
         Self::set().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
     }
-}
-
-/// How many of a backup's paths a restore of `only` (files, or folders
-/// ending in `/`) puts back, as hopper-core's restore picks them.
-fn matching(names: &[String], only: &[String]) -> usize {
-    names.iter().filter(|n| only.iter().any(|o| *n == o || (o.ends_with('/') && n.starts_with(o.as_str())))).count()
 }
 
 /// What changed on the server since a backup, as desktop's "Since then".
@@ -791,6 +757,7 @@ async fn store_op(State(app): State<Arc<App>>, headers: HeaderMap, Path(op): Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hopper_core::hosting::backup::matching;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

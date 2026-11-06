@@ -490,6 +490,50 @@ fn move_worlds_aside(root: &Path, names: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How many of `names` (a backup's files) `only` picks: exact paths, or
+/// folders ending in `/`.
+pub fn matching(names: &[String], only: &[String]) -> usize {
+    names.iter().filter(|n| only.iter().any(|o| *n == o || (o.ends_with('/') && n.starts_with(o.as_str())))).count()
+}
+
+/// A restore as the panel API runs it (Hopper Server, and desktop's servers
+/// on this PC): picked files must be in the backup; with `backup_first`, a
+/// "Before restoring" backup is made and finished before any file is
+/// touched; `alive` says whether the server was started meanwhile (then
+/// nothing is restored). Answers the files put back and the safety backup.
+pub fn restore_checked(root: &Path, name: &str, paths: &[String], backup_first: bool, alive: &dyn Fn() -> bool, job: &Job) -> anyhow::Result<serde_json::Value> {
+    let old = list(root).into_iter().find(|x| x.name == name).ok_or_else(|| anyhow::anyhow!("That backup is gone."))?;
+    // Picked files that aren't in it: say so before backing anything up.
+    if !paths.is_empty() {
+        let names: Vec<String> = entries(root, name)?.into_iter().map(|(p, _)| p).collect();
+        if matching(&names, paths) == 0 {
+            bail!("None of the picked files are in that backup.");
+        }
+    }
+    // A "Before restoring" backup only when the person ticked "Back up
+    // first". It must be complete before any file is touched: an error
+    // stops here.
+    let safety = if backup_first {
+        let label = if old.note.trim().is_empty() { format!("the {} backup", crate::time::date(old.at as i64)) } else { format!("\"{}\"", old.note.trim()) };
+        job.detail("Backing up first, so this can be undone");
+        let scope = if paths.is_empty() { old.scope } else { Scope::Full };
+        let s = make(root, scope, Kind::Manual, &format!("Before restoring {label}"), None, job)?;
+        // Started while that ran: writing under a running server corrupts
+        // its world, so stop with nothing changed.
+        if alive() {
+            bail!("The server was started while it was being backed up, so nothing was restored. Stop it and restore again.");
+        }
+        Some(s)
+    } else {
+        None
+    };
+    let n = restore(root, name, paths, job).map_err(|err| match &safety {
+        Some(s) => anyhow::anyhow!("{err:#}. If some files were already put back, restore \"{}\" to undo it.", s.note),
+        None => err,
+    })?;
+    Ok(serde_json::json!({ "files": n, "safety": safety.as_ref().map(|s| &s.name), "safety_note": safety.as_ref().map(|s| &s.note) }))
+}
+
 /// Puts a backup back. `only` limits it to these paths (files, or folders
 /// ending in `/`); empty restores everything in it. Worlds it contains are
 /// replaced whole: the current ones are moved aside first. The server must

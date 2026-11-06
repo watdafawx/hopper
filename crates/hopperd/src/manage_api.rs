@@ -365,18 +365,7 @@ async fn preview_jvm(
 
 // ---- players ------------------------------------------------------------------------
 
-fn names_in(root: &std::path::Path, file: &str) -> Vec<Value> {
-    std::fs::read(root.join(file))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Vec<Value>>(&b).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| {
-            let name = v["name"].as_str()?.to_string();
-            Some(json!({ "name": name, "uuid": v["uuid"], "reason": v["reason"], "level": v["level"] }))
-        })
-        .collect()
-}
+use hopper_core::hosting::players::names_in;
 
 async fn players(
     State(app): State<Arc<App>>,
@@ -404,10 +393,6 @@ struct PlayerBody {
     reason: String,
 }
 
-/// Player name rules: 3-16 letters, digits, underscores.
-fn valid_name(n: &str) -> bool {
-    (1..=16).contains(&n.len()) && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
 
 /// Ops, kicks, bans and the whitelist go through the server's own
 /// commands, so it looks names up and writes its files itself.
@@ -419,24 +404,10 @@ async fn player_action(
     Json(b): Json<PlayerBody>,
 ) -> ApiResult<Json<Value>> {
     let e = entry(&app, &headers, &method, &id)?;
-    let name = b.name.trim();
-    if !valid_name(name) {
-        return Err(bad(format!("\"{name}\" isn't a Minecraft name.")));
-    }
+    let cmd = hopper_core::hosting::players::command_for(&b.action, &b.name, &b.reason).map_err(|e| bad(format!("{e:#}")))?;
     if !e.server.state().is_alive() {
         return Err(conflict("Start the server to change players: it looks names up and saves the lists itself."));
     }
-    let reason = b.reason.replace(['\n', '\r'], " ");
-    let cmd = match b.action.as_str() {
-        "op" => format!("op {name}"),
-        "deop" => format!("deop {name}"),
-        "kick" => format!("kick {name} {reason}"),
-        "ban" => format!("ban {name} {reason}"),
-        "pardon" => format!("pardon {name}"),
-        "whitelist_add" => format!("whitelist add {name}"),
-        "whitelist_remove" => format!("whitelist remove {name}"),
-        other => return Err(bad(format!("Unknown action {other}"))),
-    };
     e.server.command(cmd.trim()).map_err(|e| conflict(format!("{e:#}")))?;
     log::info!("{}: {}", e.name, cmd.trim());
     Ok(Json(json!({ "ok": true })))

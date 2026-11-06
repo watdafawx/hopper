@@ -18,6 +18,7 @@ pub mod logshare;
 pub mod motd;
 pub mod motd_edit;
 pub mod pack_versions;
+pub mod players;
 pub mod panel_create;
 pub mod ports;
 pub mod process;

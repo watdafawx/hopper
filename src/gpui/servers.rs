@@ -852,6 +852,9 @@ pub struct ServersView {
     /// A server on this PC answered in process, for the tabs Hopper Server
     /// servers reach through their panel (Worlds).
     local_target: Option<panel_tabs::Target>,
+    /// A server on this PC's Backups tab shows its backup mod's backups
+    /// rather than Hopper's own.
+    backups_mod: bool,
     /// Mods › History is open (a Hopper Server's), not the table.
     mods_backups: bool,
     /// The header's History button for the picked panel server.
@@ -898,16 +901,20 @@ const TAB_DATAPACKS: usize = 12;
 /// A server's tabs, in order, as codes: a Hopper Server's servers have the
 /// panel's tabs (in the panel's order), others the ones Hopper reads itself.
 /// A server reached over SFTP / FTP (`site`) has no Worlds or Data packs:
-/// Hopper only holds a copy of some of its files.
-fn tabs_for(remote: bool, site: bool) -> &'static [usize] {
+/// Hopper only holds a copy of some of its files. A folder on this PC has
+/// the panel's tabs too, answered here; Schedule only when Hopper runs it
+/// (`hosted`): the schedule is Hopper's to carry out.
+fn tabs_for(remote: bool, site: bool, hosted: bool) -> &'static [usize] {
     if remote {
         // No Data packs table yet: it reads world folders from disk. Each
         // world card lists its data packs.
         &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_FILES, TAB_MODS, TAB_CONFIGS, TAB_WORLDS, TAB_PLAYERS, TAB_BACKUPS, TAB_SCHEDULE, TAB_SETTINGS, TAB_SYNC]
     } else if site {
         &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_BACKUPS, TAB_SETTINGS, TAB_MODS, TAB_CONFIGS, TAB_SYNC]
+    } else if hosted {
+        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_FILES, TAB_MODS, TAB_CONFIGS, TAB_WORLDS, TAB_DATAPACKS, TAB_PLAYERS, TAB_BACKUPS, TAB_SCHEDULE, TAB_SETTINGS, TAB_SYNC]
     } else {
-        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_BACKUPS, TAB_SETTINGS, TAB_MODS, TAB_CONFIGS, TAB_WORLDS, TAB_DATAPACKS, TAB_SYNC]
+        &[TAB_OVERVIEW, TAB_CONSOLE, TAB_LOGS, TAB_FILES, TAB_MODS, TAB_CONFIGS, TAB_WORLDS, TAB_DATAPACKS, TAB_PLAYERS, TAB_BACKUPS, TAB_SETTINGS, TAB_SYNC]
     }
 }
 
@@ -1090,6 +1097,7 @@ impl ServersView {
             dp_table,
             dp_shown: None,
             local_target: None,
+            backups_mod: false,
             mods_shown: None,
             mods_backups: false,
             history_btn: Default::default(),
@@ -1378,7 +1386,8 @@ impl ServersView {
         let remote = self.picked.as_ref().and_then(|r| self.store.read(cx).server(r)).and_then(|s| s.remote.clone());
         let same = matches!((&self.target, &remote), (Some(Ok(t)), Some(r)) if &t.remote == r);
         let site = self.picked.as_ref().is_some_and(|r| self.store.read(cx).site_of(r).is_some());
-        if !tabs_for(remote.is_some(), site).contains(&self.tab) {
+        let hosted = self.picked.as_ref().is_some_and(|r| self.store.read(cx).is_hosted(r));
+        if !tabs_for(remote.is_some(), site, hosted).contains(&self.tab) {
             self.tab = TAB_OVERVIEW;
         }
         // A server folder on this PC: the same routes, answered here.
@@ -1455,7 +1464,15 @@ impl ServersView {
     /// The picked server on a Hopper Server shows a panel tab: tell the tab
     /// (once per server and tab, so it loads on opening).
     fn show_panel_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Ok(t)) = self.target.clone() else { return };
+        let t = match (&self.target, self.tab) {
+            (Some(Ok(t)), _) => t.clone(),
+            // A server on this PC: these tabs are answered here.
+            (None, TAB_FILES | TAB_PLAYERS | TAB_BACKUPS | TAB_SCHEDULE) => match self.local_target.clone() {
+                Some(t) => t,
+                None => return,
+            },
+            _ => return,
+        };
         let Some(root) = self.picked.clone() else { return };
         let key = (root, self.tab);
         if self.p_shown.as_ref() == Some(&key) {
@@ -1953,7 +1970,7 @@ impl ServersView {
             .pb_5()
             .map(|c| if self.tab == TAB_OVERVIEW { c.gap_5() } else { c.gap_3() })
             .child({
-                let codes = tabs_for(remote, self.store.read(cx).site_of(&s.root).is_some());
+                let codes = tabs_for(remote, self.store.read(cx).site_of(&s.root).is_some(), self.store.read(cx).is_hosted(&s.root));
                 let danger = cx.theme().danger;
                 let logs_dot = self.strip.read(cx).unseen_key().is_some_and(|k| !self.store.read(cx).notice_hidden(&k));
                 let online = pstats.as_ref().filter(|p| p.running).map(|p| p.online);
@@ -2107,15 +2124,38 @@ impl ServersView {
                 self.logs.update(cx, |v, cx| v.show(root, cx));
                 c.child(div().flex_1().min_h_0().child(self.logs.clone()))
             })
+            .when(!remote && matches!(self.tab, TAB_FILES | TAB_PLAYERS | TAB_SCHEDULE), |c| {
+                let body: AnyElement = match self.tab {
+                    TAB_FILES => self.p_files.clone().into_any_element(),
+                    TAB_PLAYERS => self.p_players.clone().into_any_element(),
+                    _ => self.p_schedule.clone().into_any_element(),
+                };
+                c.child(div().flex_1().min_h_0().child(body))
+            })
             .when(self.tab == TAB_BACKUPS && !remote, |c| {
-                c.child(
+                // Hopper's own backups (made here, scheduled, or from a world
+                // card), and beside them what a backup mod in the server keeps.
+                let tabs = TabBar::new("server-backups-sub")
+                    .underline()
+                    .small()
+                    .selected_index(if self.backups_mod { 1 } else { 0 })
+                    .child(Tab::new().label("Hopper's backups"))
+                    .child(Tab::new().label("Backup mod"))
+                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                        this.backups_mod = *ix == 1;
+                        cx.notify();
+                    }));
+                let body: AnyElement = if self.backups_mod {
                     div()
                         .id("server-backups")
-                        .flex_1()
-                        .min_h_0()
+                        .size_full()
                         .child(self.control.update(cx, |ctl, cx| ctl.backups_view(cx)))
-                        .overflow_y_scrollbar(),
-                )
+                        .overflow_y_scrollbar()
+                        .into_any_element()
+                } else {
+                    self.p_backups.clone().into_any_element()
+                };
+                c.child(v_flex().flex_1().min_h_0().gap_2().child(tabs).child(div().flex_1().min_h_0().child(body)))
             })
             .when(self.tab == TAB_SETTINGS && !remote, |c| {
                 let root = s.root.clone();

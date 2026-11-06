@@ -33,7 +33,7 @@ flate2 = "1"
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode"] }
 trash = "5"
 sha1_smol = { version = "1", features = ["std"] }
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
 regex = "1"
 keyring = { version = "3", features = ["windows-native"] }
 similar = "2"
