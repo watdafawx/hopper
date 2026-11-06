@@ -654,6 +654,129 @@ pub fn underline_tabs(
     }))
 }
 
+/// One option of a [`Segmented`] control. Built like gpui_kit's `Tab`
+/// (`SegItem::new().label("Slim").disabled(busy)`), and an interactive
+/// element itself, so drag-pick's `paint_option` can hook its press.
+pub struct SegItem {
+    base: Div,
+    label: SharedString,
+    disabled: bool,
+}
+
+impl SegItem {
+    pub fn new() -> Self {
+        Self { base: div(), label: SharedString::default(), disabled: false }
+    }
+
+    pub fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+}
+
+impl InteractiveElement for SegItem {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.base.interactivity()
+    }
+}
+
+/// The control for choosing one of a few values (Classic or Slim, a loader,
+/// a file format): a framed row of options, the chosen one in the selected
+/// tint (`alpha::SELECTED` of primary, like `row_selected`), the others
+/// muted with the quiet hover wash. Each option is a Tab stop with the
+/// focus ring. Views (what a dialog shows) use `underline_tabs` instead.
+/// Same builder as gpui_kit's segmented `TabBar`: `.child`/`.children` of
+/// [`SegItem`]s, `.selected_index`, `.xsmall()`, `.on_click`.
+#[derive(IntoElement)]
+pub struct Segmented {
+    id: ElementId,
+    items: Vec<SegItem>,
+    selected: Option<usize>,
+    xsmall: bool,
+    on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App)>>,
+}
+
+impl Segmented {
+    pub fn new(id: impl Into<ElementId>) -> Self {
+        Self { id: id.into(), items: Vec::new(), selected: None, xsmall: false, on_click: None }
+    }
+
+    pub fn child(mut self, item: SegItem) -> Self {
+        self.items.push(item);
+        self
+    }
+
+    pub fn children(mut self, items: impl IntoIterator<Item = SegItem>) -> Self {
+        self.items.extend(items);
+        self
+    }
+
+    pub fn selected_index(mut self, ix: usize) -> Self {
+        self.selected = Some(ix);
+        self
+    }
+
+    /// The smaller size, for controls inside list rows.
+    pub fn xsmall(mut self) -> Self {
+        self.xsmall = true;
+        self
+    }
+
+    pub fn on_click(mut self, f: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Rc::new(f));
+        self
+    }
+}
+
+impl RenderOnce for Segmented {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        let (fg, muted, border, wash) = (theme.foreground, theme.muted_foreground, theme.border, theme.list_hover);
+        let tint = theme.primary.opacity(alpha::SELECTED);
+        let (id, selected, xsmall, on_click) = (self.id, self.selected, self.xsmall, self.on_click);
+        // A row around the frame keeps it as wide as its options inside a
+        // full-width column (a form field), instead of stretching.
+        h_flex().child(
+        h_flex()
+            .id(id.clone())
+            .flex_none()
+            .p(px(2.))
+            .gap(px(2.))
+            .border_1()
+            .border_color(border)
+            .rounded(px(crate::theme::RADIUS))
+            .children(self.items.into_iter().enumerate().map(|(i, item)| {
+                let on = selected == Some(i);
+                let pick = on_click.clone();
+                let SegItem { base, label, disabled } = item;
+                // Small: 26px options in a 32px frame, an input's height.
+                base.id(ElementId::Integer(i as u64))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .rounded(px(crate::theme::RADIUS_SM))
+                    .map(|el| if xsmall { el.h(px(20.)).px_2().text_xs() } else { el.h(px(26.)).px_2p5().text_sm() })
+                    .when(on, |el| el.bg(tint).text_color(fg).font_weight(FontWeight::MEDIUM))
+                    .when(!on && !disabled, |el| el.text_color(muted).hover(move |s| s.bg(wash).text_color(fg)))
+                    .when(disabled, |el| el.text_color(muted).opacity(0.5))
+                    .when(!disabled, |el| {
+                        el.clickable(cx).on_click(move |_, window, cx| {
+                            if let Some(f) = &pick {
+                                f(&i, window, cx)
+                            }
+                        })
+                    })
+                    .child(label)
+            })),
+        )
+    }
+}
+
 /// Buttons inside a clickable header that opens and closes its section
 /// (Restore, Delete, Open folder): their clicks stop here, so pressing
 /// one doesn't also fold or unfold the section.
@@ -1012,9 +1135,33 @@ pub fn picker_with(
     rem: Pixels,
     on_pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
 ) -> impl IntoElement {
+    picker_sized(id, label, lead, items, rem, on_pick, false)
+}
+
+/// [`picker`] at a text input's full height, for dialog forms where it
+/// sits in a column of inputs (New instance, New server).
+pub fn field_picker(
+    id: impl Into<ElementId>,
+    label: String,
+    items: Vec<(String, bool)>,
+    rem: Pixels,
+    on_pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+) -> impl IntoElement {
+    picker_sized(id, label, None, items.into_iter().map(|(l, c)| (l, c, None)).collect(), rem, on_pick, true)
+}
+
+fn picker_sized(
+    id: impl Into<ElementId>,
+    label: String,
+    lead: Option<PickIcon>,
+    items: Vec<(String, bool, Option<PickIcon>)>,
+    rem: Pixels,
+    on_pick: Rc<dyn Fn(usize, &mut Window, &mut App)>,
+    field: bool,
+) -> impl IntoElement {
     Button::new(id)
         .outline()
-        .small()
+        .map(|b| if field { b } else { b.small() })
         .w_full()
         // Logo and name as one child, so the caret's spacing keeps them
         // together on the left.

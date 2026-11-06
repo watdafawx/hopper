@@ -146,6 +146,9 @@ pub struct PackCheck {
     /// The version's server pack, when it has one.
     pub server_files: Option<WebsiteOnly>,
     pub has_server_files: bool,
+    /// What a build downloads first (bytes): the server pack when it builds
+    /// from one, else the pack zip (its mods come on top). 0: unknown.
+    pub download: u64,
 }
 
 /// How a server for a pack version gets built, given [`PackCheck`].
@@ -179,7 +182,7 @@ pub fn check_pack(project: &cf::Mod, f: &cf::File) -> anyhow::Result<PackCheck> 
     if project.modrinth.is_some() {
         return Ok(PackCheck::default());
     }
-    let mut c = PackCheck::default();
+    let mut c = PackCheck { download: f.file_length, ..Default::default() };
     if cf::website_only(f)? {
         c.pack = Some(WebsiteOnly::of(project, f));
     }
@@ -188,6 +191,9 @@ pub fn check_pack(project: &cf::Mod, f: &cf::File) -> anyhow::Result<PackCheck> 
         let sp = cf::file(project.id, id).context("looking up the server pack on CurseForge")?;
         if cf::website_only(&sp)? {
             c.server_files = Some(WebsiteOnly::of(project, &sp));
+        }
+        if c.choice() == BuildChoice::ServerFiles {
+            c.download = sp.file_length;
         }
     }
     Ok(c)
@@ -1124,6 +1130,7 @@ mod tests {
             has_server_files: has,
             server_files: server.then(|| w.clone()),
             pack: pack.then(|| w.clone()),
+            download: 0,
         };
         assert_eq!(c(true, false, false).choice(), BuildChoice::ServerFiles);
         // Server files website-only: build from the pack itself.

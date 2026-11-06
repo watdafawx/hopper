@@ -10,7 +10,6 @@ use gpui_kit::component::form::Field;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
     h_flex, v_flex,
@@ -268,7 +267,7 @@ impl Render for CreateForm {
         settings_form(rem)
             .child(Field::new().label("Name").child(Input::new(&self.name)))
             .child(
-                Field::new().label("Minecraft").child(widgets::picker(
+                Field::new().label("Minecraft").child(widgets::field_picker(
                     "new-mc",
                     if self.game_version.is_empty() {
                         "Loading versions".into()
@@ -285,11 +284,9 @@ impl Render for CreateForm {
             )
             .child(
                 Field::new().label(if self.server { "Type" } else { "Loader" }).child(
-                    TabBar::new("new-kind")
-                        .segmented()
-                        .small()
+                    widgets::Segmented::new("new-kind")
                         .selected_index(kind_ix)
-                        .children(kinds.iter().map(|(_, l)| Tab::new().label(*l)))
+                        .children(kinds.iter().map(|(_, l)| widgets::SegItem::new().label(*l)))
                         .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                             this.kind = kinds[*ix].0;
                             this.loader.clear();
@@ -306,7 +303,7 @@ impl Render for CreateForm {
                         } else {
                             "Loader version".to_string()
                         })
-                        .child(widgets::picker(
+                        .child(widgets::field_picker(
                         "new-loader",
                         match (self.loader.is_empty(), self.loaded()) {
                             (false, _) => self.loader.clone(),
@@ -333,6 +330,15 @@ impl Render for CreateForm {
                         rem,
                         pick_loader,
                     )),
+                )
+            })
+            // Vanilla keeps the row, so switching type doesn't move the
+            // fields below (and the buttons) under the pointer.
+            .when(self.kind.is_empty(), |f| {
+                f.child(
+                    Field::new()
+                        .label("Loader version")
+                        .child(div().h_8().flex().items_center().text_sm().text_color(muted).child("None: plain Minecraft.")),
                 )
             })
             .when(plugins, |f| {
@@ -385,6 +391,7 @@ pub fn open_create(store: Entity<Store>, window: &mut Window, cx: &mut App) {
         dialog
             .title("New instance")
             .w(rems(36.).to_pixels(window.rem_size()))
+            .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
             .child(form.clone())
             .footer(footer("Create", ready))
             .on_ok(move |_, window, cx| CreateForm::create(&f2, &store, window, cx))
@@ -1036,12 +1043,10 @@ impl Render for ExportForm {
             .max_h(widgets::dialog_room(window) - rem * 3.)
             .overflow_y_scroll()
             .child(
-                TabBar::new("export-format")
-                    .segmented()
-                    .small()
+                widgets::Segmented::new("export-format")
                     .selected_index(format_ix)
-                    .child(Tab::new().label("Modrinth .mrpack"))
-                    .child(Tab::new().label("CurseForge .zip"))
+                    .child(widgets::SegItem::new().label("Modrinth .mrpack"))
+                    .child(widgets::SegItem::new().label("CurseForge .zip"))
                     .on_click(cx.listener(|this, ix: &usize, window, cx| {
                         let f = if *ix == 0 { ExportFormat::Modrinth } else { ExportFormat::Curse };
                         this.set_format(f, window, cx);

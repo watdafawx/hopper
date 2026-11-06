@@ -12,7 +12,6 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::form::Field;
 use gpui_kit::component::spinner::Spinner;
 use crate::switch::Switch;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex,
     v_flex,
@@ -1768,12 +1767,10 @@ impl ServerControl {
                     h_flex()
                         .gap_3()
                         .child(
-                            TabBar::new("console-source")
-                                .segmented()
-                                .small()
+                            widgets::Segmented::new("console-source")
                                 .selected_index(usize::from(full))
-                                .child(Tab::new().label("Live"))
-                                .child(Tab::new().label("Whole log file"))
+                                .child(widgets::SegItem::new().label("Live"))
+                                .child(widgets::SegItem::new().label("Whole log file"))
                                 .on_click(cx.listener(|this, ix: &usize, _, cx| this.set_console_full(*ix == 1, cx))),
                         )
                         .child(widgets::caption(
@@ -1893,11 +1890,9 @@ impl ServerControl {
             .items_center()
             .gap_2()
             .child(
-                TabBar::new("console-filter")
-                    .segmented()
-                    .small()
+                widgets::Segmented::new("console-filter")
                     .selected_index(picked)
-                    .children(CONSOLE_FILTERS.iter().map(|f| Tab::new().label(label(*f))))
+                    .children(CONSOLE_FILTERS.iter().map(|f| widgets::SegItem::new().label(label(*f))))
                     .on_click(cx.listener(|this, ix: &usize, _, cx| {
                         if let Some(f) = CONSOLE_FILTERS.get(*ix) {
                             this.console_filter = *f;

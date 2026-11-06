@@ -475,6 +475,8 @@ async fn versions(State(app): State<Arc<App>>, headers: HeaderMap, method: Metho
                         "version": if v.version_number.is_empty() { &v.name } else { &v.version_number },
                         "title": v.name, "date": v.date_published, "mc_version": mc_of(&v.game_versions),
                         "loaders": loaders_of(&f.game_versions), "type": v.version_type,
+                        // What a build downloads first: the server zip when it has one.
+                        "size": browse::modrinth_server_files(v).filter(|_| packs).and_then(|s| s.file).map_or(f.file_length, |s| s.file_length),
                         "server_files": packs && browse::modrinth_server_files(v).is_some(),
                         "changelog": blocks_json(&richtext::parse_markdown(&log)),
                     })
@@ -492,6 +494,7 @@ async fn versions(State(app): State<Arc<App>>, headers: HeaderMap, method: Metho
                         "version": Some(hopper_core::scan::short_version(&f.file_name)).filter(|v| !v.is_empty()).unwrap_or_else(|| f.display_name.clone()),
                         "mc_version": mc_of(&f.game_versions), "loaders": loaders_of(&f.game_versions),
                         "type": f.release_name().to_lowercase(),
+                        "size": f.file_length,
                         "server_files": f.has_server_files(),
                         "changelog": Value::Null,
                     })

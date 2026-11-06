@@ -10,7 +10,6 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{Selectable as _, 
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
@@ -651,11 +650,9 @@ impl PeersView {
                         .child(Icon::new(IconName::ArrowLeftRight).small())
                         .child(div().w_72().child(widgets::picker("peer-inst", current, items, rem, pick)))
                         .child(
-                            TabBar::new("peer-folder")
-                                .segmented()
-                                .small()
+                            widgets::Segmented::new("peer-folder")
                                 .selected_index(folder_ix)
-                                .children(peer::FOLDERS.iter().map(|f| Tab::new().label(format!("{f}/"))))
+                                .children(peer::FOLDERS.iter().map(|f| widgets::SegItem::new().label(format!("{f}/"))))
                                 .on_click(cx.listener(|this, ix: &usize, _, cx| {
                                     this.folder = peer::FOLDERS[*ix];
                                     this.compare(cx);

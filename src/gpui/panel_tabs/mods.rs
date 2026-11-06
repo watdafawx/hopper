@@ -1506,11 +1506,9 @@ impl ModsTab {
             .gap_2()
             .flex_wrap()
             .child(
-                TabBar::new("mods-filter")
-                    .segmented()
-                    .small()
+                widgets::Segmented::new("mods-filter")
                     .selected_index(picked)
-                    .children(filters.iter().map(|f| Tab::new().label(format!("{} {}", f.label(), count(*f)))))
+                    .children(filters.iter().map(|f| widgets::SegItem::new().label(format!("{} {}", f.label(), count(*f)))))
                     .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                         if let Some(f) = fl.get(*ix) {
                             this.filter = *f;
@@ -1796,12 +1794,10 @@ impl ModsTab {
                 h_flex()
                     .gap_2()
                     .child(
-                        TabBar::new("mods-source")
-                            .segmented()
-                            .small()
+                        widgets::Segmented::new("mods-source")
                             .selected_index(if self.modrinth { 0 } else { 1 })
-                            .child(Tab::new().label("Modrinth"))
-                            .child(Tab::new().label("CurseForge").disabled(!has_cf))
+                            .child(widgets::SegItem::new().label("Modrinth"))
+                            .child(widgets::SegItem::new().label("CurseForge").disabled(!has_cf))
                             .on_click(cx.listener(|this, ix: &usize, _, cx| {
                                 this.modrinth = *ix == 0;
                                 cx.notify();

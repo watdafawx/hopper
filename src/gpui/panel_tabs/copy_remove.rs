@@ -11,7 +11,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -245,12 +244,10 @@ impl Render for CloneForm {
                         .gap_3()
                         .items_center()
                         .child(
-                            TabBar::new("clone-world")
-                                .segmented()
-                                .small()
+                            crate::widgets::Segmented::new("clone-world")
                                 .selected_index(usize::from(!self.with_world))
-                                .child(Tab::new().label("With world"))
-                                .child(Tab::new().label("Fresh world"))
+                                .child(crate::widgets::SegItem::new().label("With world"))
+                                .child(crate::widgets::SegItem::new().label("Fresh world"))
                                 .on_click(cx.listener(|this, ix: &usize, _, cx| {
                                     this.with_world = *ix == 0;
                                     cx.notify();

@@ -3607,6 +3607,10 @@ impl Store {
             let t = hopper::hosting::pack_target(&files, job)?;
             opts.mc_version = t.mc_version;
             opts.loader = hopper::hosting::ServerLoader::from_instance(&t.loader)?;
+            // Memory left on the default (0): the pack's recommendation.
+            if opts.memory_mb == 0 {
+                opts.memory_mb = hopper::hosting::default_memory_mb(opts.loader.is_modded(), t.recommended_mb);
+            }
             let r = hopper::hosting::create_from_server_files(&files, &opts, job)?;
             if r.website_only.is_some() {
                 job.note(hopper::hosting::BUILT_FROM_PACK);
@@ -3636,6 +3640,7 @@ impl Store {
         self.spawn_job(title, move |job| {
             job.detail("Reading the zip");
             let info = hopper::hosting::zip_import::inspect(&zip)?;
+            let recommended = info.target.as_ref().map_or(0, |t| t.recommended_mb);
             if info.kind == hopper::hosting::zip_import::ZipKind::ServerPack {
                 let t = match (info.target, &files) {
                     (Some(t), _) => t,
@@ -3644,6 +3649,9 @@ impl Store {
                 };
                 opts.mc_version = t.mc_version;
                 opts.loader = hopper::hosting::ServerLoader::from_instance(&t.loader)?;
+            }
+            if opts.memory_mb == 0 {
+                opts.memory_mb = hopper::hosting::default_memory_mb(true, recommended);
             }
             let (r, used, note) = hopper::hosting::zip_import::create_from_local_zip(&zip, &opts, job)?;
             job.detail(r.ready_line());
@@ -3666,12 +3674,15 @@ impl Store {
     /// `left-out-client-mods.txt` in the server folder.
     pub fn create_hosted_from_client_pack(
         &self,
-        opts: hopper::hosting::CreateOptions,
+        mut opts: hopper::hosting::CreateOptions,
         pack: hopper::cf::Mod,
         file: hopper::cf::File,
         done: impl FnOnce(PathBuf) + Send + 'static,
     ) {
         let title = format!("Creating {}", opts.name);
+        if opts.memory_mb == 0 {
+            opts.memory_mb = hopper::hosting::default_memory_mb(true, 0);
+        }
         self.spawn_job(title, move |job| {
             let (r, used) = hopper::hosting::create_from_client_pack(&pack, &file, &opts, job)?;
             // The list of client-only mods left out is in

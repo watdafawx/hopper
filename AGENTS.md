@@ -125,6 +125,11 @@ on screen, not just the tests:
 - One filled orange button per region; Play / Start is green; secondary
   actions are outlined; icon-only buttons are ghost.
 - Chips are tinted with no border (`widgets::chip`).
+- Choosing one of a few values (a loader, Classic or Slim) is a segmented
+  control: `widgets::Segmented` (the chosen one in the selected tint; the
+  web UI's `.seg`). Switching what a dialog shows is `widgets::underline_tabs`.
+- Dialog forms: label column (`settings_form`), every field at an input's
+  height (`widgets::field_picker` for dropdowns), `widgets::DIALOG_TOP`.
 - Anywhere a mod is named (lists, cards, dialogs, sentences) its icon sits
   next to the name and clicking it opens the mod's page beside what you're
   on (`widgets::mod_link`); a dialog stays open.

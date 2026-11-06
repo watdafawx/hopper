@@ -954,11 +954,10 @@ impl UpdatePreview {
                     .gap_3()
                     .child(div().text_sm().child("Pack version"))
                     .child(
-                        TabBar::new("server-target")
-                            .segmented()
+                        widgets::Segmented::new("server-target")
                             .xsmall()
                             .selected_index(t.pick)
-                            .children(labels.into_iter().map(|l| Tab::new().label(l)))
+                            .children(labels.into_iter().map(|l| widgets::SegItem::new().label(l)))
                             .on_click(cx.listener(|this, ix: &usize, _, cx| this.pick_target(*ix, cx))),
                     ),
             );
@@ -1168,11 +1167,9 @@ impl UpdatePreview {
             .when(n > 0, |c| {
                 c.child(
                     h_flex().child(
-                        TabBar::new("bulk-pick")
-                            .segmented()
-                            .small()
+                        widgets::Segmented::new("bulk-pick")
                             .selected_index(selected)
-                            .children(choices.iter().map(|(_, l)| Tab::new().label(*l)))
+                            .children(choices.iter().map(|(_, l)| widgets::SegItem::new().label(*l)))
                             .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                                 if let Some(b) = picks.get(*ix) {
                                     this.pick_bulk(*b, cx);
@@ -1307,12 +1304,10 @@ impl UpdatePreview {
             )
             .child(
                 h_flex().child(
-                    TabBar::new("versions-pick")
-                        .segmented()
-                        .small()
+                    widgets::Segmented::new("versions-pick")
                         .selected_index(usize::from(reset))
-                        .child(Tab::new().label(if whose == "your" { "Keep my versions" } else { "Keep the server's" }))
-                        .child(Tab::new().label("Use the pack's"))
+                        .child(widgets::SegItem::new().label(if whose == "your" { "Keep my versions" } else { "Keep the server's" }))
+                        .child(widgets::SegItem::new().label("Use the pack's"))
                         .on_click(cx.listener(|this, ix: &usize, _, cx| this.pick_versions(*ix == 1, cx))),
                 ),
             )
@@ -2193,7 +2188,7 @@ impl UpdatePreview {
                     let paint = &this.paint;
                     let opt = |ix: usize, label: &'static str| {
                         let set = set.clone();
-                        crate::drag_pick::paint_option(Tab::new().label(label), paint, title, ix, move |v, w, cx| set(v, w, cx))
+                        crate::drag_pick::paint_option(widgets::SegItem::new().label(label), paint, title, ix, move |v, w, cx| set(v, w, cx))
                     };
                     let row_set = set.clone();
                     crate::drag_pick::paint_row(h_flex().id(SharedString::from(format!("lrow:{}", m.key))), paint, title, move |v, w, cx| row_set(v, w, cx))
@@ -2203,8 +2198,7 @@ impl UpdatePreview {
                         .child(this.mod_cell(format!("cell:{}", m.key), &m.name, &m.icon, m.project, cx))
                         .child(widgets::caption(detail, cx).text_xs().flex_1().min_w_0())
                         .child(
-                            TabBar::new(SharedString::from(format!("pick:{}", m.key)))
-                                .segmented()
+                            widgets::Segmented::new(SharedString::from(format!("pick:{}", m.key)))
                                 .xsmall()
                                 .selected_index(usize::from(on))
                                 .child(opt(0, labels[0]))
@@ -2290,7 +2284,7 @@ impl UpdatePreview {
                 let paint = &self.paint;
                 let opt = |ix: usize, label: &'static str| {
                     let set = set.clone();
-                    crate::drag_pick::paint_option(Tab::new().label(label), paint, "conflicts", ix, move |v, w, cx| set(v, w, cx))
+                    crate::drag_pick::paint_option(widgets::SegItem::new().label(label), paint, "conflicts", ix, move |v, w, cx| set(v, w, cx))
                 };
                 let row_set = set.clone();
                 let n_set = settings.len();
@@ -2336,8 +2330,7 @@ impl UpdatePreview {
                                     })),
                             )
                             .child(
-                                TabBar::new(SharedString::from(format!("pick:{rel}")))
-                                    .segmented()
+                                widgets::Segmented::new(SharedString::from(format!("pick:{rel}")))
                                     .xsmall()
                                     .selected_index(pick)
                                     .child(opt(0, "Mine"))
@@ -2599,13 +2592,11 @@ impl Render for UpdatePreview {
 
 /// "Clean update | Keep my changes": how a pack update treats your changes
 /// (index 0 is clean). Shared by this dialog and Versions and changelogs.
-pub(crate) fn mode_tabs(id: &'static str, clean: bool) -> TabBar {
-    TabBar::new(id)
-        .segmented()
-        .small()
+pub(crate) fn mode_tabs(id: &'static str, clean: bool) -> widgets::Segmented {
+    widgets::Segmented::new(id)
         .selected_index(if clean { 0 } else { 1 })
-        .child(Tab::new().label("Clean update"))
-        .child(Tab::new().label("Keep my changes"))
+        .child(widgets::SegItem::new().label("Clean update"))
+        .child(widgets::SegItem::new().label("Keep my changes"))
 }
 
 /// What the choice does, in one line under it: for an instance, or a

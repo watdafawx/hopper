@@ -492,6 +492,9 @@ struct ZipBody {
     port: Option<u16>,
     #[serde(default)]
     address: String,
+    /// The line in players' server lists; empty: the name.
+    #[serde(default)]
+    motd: String,
     #[serde(default)]
     accept_eula: bool,
     /// For a server pack that doesn't say what it runs on.
@@ -535,10 +538,14 @@ fn common(app: &App, address: &str, port: Option<u16>, accept_eula: bool) -> Api
     Ok(Common { root, address, auto_port })
 }
 
-fn options(c: &Common, name: &str, mc: &str, loader: ServerLoader, java: &FsPath, memory_mb: Option<u32>, port: Option<u16>) -> CreateOptions {
+#[allow(clippy::too_many_arguments)]
+fn options(c: &Common, name: &str, mc: &str, loader: ServerLoader, java: &FsPath, memory_mb: Option<u32>, port: Option<u16>, motd: &str) -> CreateOptions {
     let mut o = CreateOptions::new(name.trim(), &c.root, mc, loader, java);
     if let Some(m) = memory_mb {
         o.memory_mb = m;
+    }
+    if !motd.trim().is_empty() {
+        o.motd = motd.trim().to_string();
     }
     if let Some(p) = port.or(c.auto_port) {
         o.port = p;
@@ -582,12 +589,13 @@ fn start_zip_job(app: &Arc<App>, b: ZipBody) -> ApiResult<u64> {
         };
         let name = if b.name.trim().is_empty() { info.name.clone() } else { b.name.clone() };
         let java = crate::manage_api::java_for(&mc, job)?;
-        let memory = b.memory_mb.or(info.target.as_ref().map(|t| t.recommended_mb).filter(|m| *m >= 2048));
-        let o = options(&c, &name, &mc, ServerLoader::from_instance(&loader)?, &java, memory, b.port);
+        let memory = b.memory_mb.or(info.target.as_ref().map(|t| t.recommended_mb).filter(|m| *m >= 2048).map(|m| hopper_core::hosting::default_memory_mb(true, m)));
+        let o = options(&c, &name, &mc, ServerLoader::from_instance(&loader)?, &java, memory, b.port, &b.motd);
         let (r, _used, note) = zip_import::create_from_local_zip(&zip, &o, job)?;
         if let Some(n) = note {
             job.note(n);
         }
+        job.detail(r.ready_line());
         for n in r.missing_notes() {
             job.note(n);
         }
@@ -712,7 +720,7 @@ async fn pack_check(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
         hopper_core::hosting::BuildChoice::ClientPack => "client_pack",
         hopper_core::hosting::BuildChoice::NeedsZip => "needs_zip",
     };
-    Ok(Json(json!({ "choice": choice, "pack": page(&c.pack), "server_files": page(&c.server_files) })))
+    Ok(Json(json!({ "choice": choice, "pack": page(&c.pack), "server_files": page(&c.server_files), "download": c.download })))
 }
 
 #[derive(Deserialize)]
@@ -725,6 +733,9 @@ struct PackBody {
     port: Option<u16>,
     #[serde(default)]
     address: String,
+    /// The line in players' server lists; empty: the name.
+    #[serde(default)]
+    motd: String,
     #[serde(default)]
     accept_eula: bool,
 }
@@ -768,15 +779,13 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
         if let Some(files) = files {
             let t = hopper_core::hosting::pack_target(&files, job)?;
             let java = crate::manage_api::java_for(&t.mc_version, job)?;
-            let memory = b.memory_mb.or(Some(t.recommended_mb).filter(|m| *m >= 2048));
-            let o = options(&c, &b.name, &t.mc_version, ServerLoader::from_instance(&t.loader)?, &java, memory, b.port);
+            let memory = b.memory_mb.or(Some(t.recommended_mb).filter(|m| *m >= 2048).map(|m| hopper_core::hosting::default_memory_mb(true, m)));
+            let o = options(&c, &b.name, &t.mc_version, ServerLoader::from_instance(&t.loader)?, &java, memory, b.port, &b.motd);
             let r = hopper_core::hosting::create_from_server_files(&files, &o, job)?;
             if r.website_only.is_some() {
                 job.note(hopper_core::hosting::BUILT_FROM_PACK);
-                job.note(format!("{} mods copied, {} left out as client-only.", r.create.mods_copied, r.create.skipped.len()));
-            } else {
-                job.note(format!("From {}: {} mods", r.server_pack, r.create.mods_copied));
             }
+            job.detail(r.ready_line());
             for n in r.create.missing_notes() {
                 job.note(n);
             }
@@ -794,9 +803,11 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
         let mc = mc_of(&file.game_versions);
         let java = crate::manage_api::java_for(&mc, job)?;
         // The pack's own Minecraft and loader replace these.
-        let o = options(&c, &b.name, &mc, ServerLoader::Vanilla, &java, b.memory_mb, b.port);
+        // A client pack is modded: its default memory, not vanilla's.
+        let memory = b.memory_mb.or(Some(hopper_core::hosting::default_memory_mb(true, 0)));
+        let o = options(&c, &b.name, &mc, ServerLoader::Vanilla, &java, memory, b.port, &b.motd);
         let (r, _used) = hopper_core::hosting::create_from_client_pack(&pack, &file, &o, job)?;
-        job.note(format!("Built from the client pack: {} mods copied, {} left out as client-only.", r.mods_copied, r.skipped.len()));
+        job.detail(r.ready_line());
         for n in r.missing_notes() {
             job.note(n);
         }

@@ -17,7 +17,6 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::radio::RadioGroup;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use crate::switch::Switch;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ 
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
     h_flex, v_flex,
@@ -2192,12 +2191,10 @@ impl SettingsPage {
                     }),
             );
         let browse = Row::new("browse-source").control(
-            TabBar::new("browse-source")
-                .segmented()
-                .small()
+            widgets::Segmented::new("browse-source")
                 .selected_index(usize::from(s.browse_modrinth))
-                .child(Tab::new().label("CurseForge"))
-                .child(Tab::new().label("Modrinth"))
+                .child(widgets::SegItem::new().label("CurseForge"))
+                .child(widgets::SegItem::new().label("Modrinth"))
                 .on_click(cx.listener(|_, ix: &usize, _, cx| {
                     cx.emit(SettingsEvent::BrowseSource(*ix == 1))
                 })),

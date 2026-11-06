@@ -15,7 +15,6 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _, StyledExt as _, WindowExt as _,
     h_flex, v_flex,
@@ -911,12 +910,10 @@ impl ConfigsPanel {
             .w(rems(30.))
             .child(div().text_sm().font_semibold().child(format!("How {}/ syncs", rule.folder)))
             .child(
-                TabBar::new("rule-mode")
-                    .segmented()
-                    .small()
+                widgets::Segmented::new("rule-mode")
                     .selected_index(mode_ix)
                     .children(MODES.iter().map(|m| {
-                        Tab::new().label(match m {
+                        widgets::SegItem::new().label(match m {
                             Mode::Review => "Review each file",
                             Mode::MirrorExcept => "Mirror all except…",
                             Mode::MirrorOnly => "Mirror only…",
@@ -936,12 +933,10 @@ impl ConfigsPanel {
                         .gap_2()
                         .child(widgets::caption("From", cx).text_xs())
                         .child(
-                            TabBar::new("rule-dir")
-                                .segmented()
-                                .small()
+                            widgets::Segmented::new("rule-dir")
                                 .selected_index(usize::from(rule.pull))
-                                .child(Tab::new().label("Client → server"))
-                                .child(Tab::new().label("Server → client"))
+                                .child(widgets::SegItem::new().label("Client → server"))
+                                .child(widgets::SegItem::new().label("Server → client"))
                                 .on_click(cx.listener(move |this, ix: &usize, _, cx| {
                                     let mut r = r2.clone();
                                     r.pull = *ix == 1;
