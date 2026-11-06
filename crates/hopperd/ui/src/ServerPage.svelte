@@ -7,7 +7,7 @@
   import { Play, Square, RotateCw, Ellipsis, Archive, Skull, Gauge, Users, Info, PackagePlus, SquareTerminal, FolderOpen, Puzzle, Globe, Clock, Settings2, LogOut, Crown, UserPlus, UserMinus, ShieldOff, ChevronDown, Box, Blocks, Tag, Copy, Folder, SlidersHorizontal, Stethoscope } from '@lucide/svelte';
   import { live, history, follow, unfollow } from './lib/live.svelte.js';
   import { api, post } from './lib/api.js';
-  import { bytes, uptime, xmx, stateText, bootLeft, memTitle, loaderText } from './lib/format.js';
+  import { bytes, uptime, xmx, stateText, stateKey, stateTip, bootLeft, memTitle, loaderText } from './lib/format.js';
   import { say } from './lib/toast.svelte.js';
   import { copyText } from './lib/browse.js';
   import { ask } from './lib/dialog.svelte.js';
@@ -233,7 +233,7 @@
     <div class="ttl">
       <div class="row wrap">
         <h2 title={s.path}>{s.name}</h2>
-        <span class="chip {s.state}"><span class="dot {s.state}"></span>{stateText(s)}{s.boot && !s.progress ? ` · ${s.boot.label}` : ''}{alive && !s.progress ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
+        <span class="chip {stateKey(s)}" title={stateTip(s)}><span class="dot {stateKey(s)}"></span>{stateText(s)}{s.boot && !s.progress ? ` · ${s.boot.label}` : ''}{alive && !s.progress ? ` · ${uptime(s.uptime_secs)}` : ''}{s.exit_code != null ? ` · exit ${s.exit_code}` : ''}</span>
         {#if s.managed_by}<span class="chip" title="{s.managed_by} also has this folder. It runs here in place; don't start it in both at once.">Also in {s.managed_by}</span>{/if}{#if outside(s.path)}<span class="chip" title="It runs where it is, outside the panel folder ({session.home})">Outside the panel folder</span>{/if}<ServerAlerts server={s} part="chip" />
         {#if packShort}<button class="chip acc packup" title="{packCheck.pack.name}: {packNewer.length} newer version{packNewer.length === 1 ? '' : 's'}. Review the changelog and update." onclick={() => openUpdate()}><PackagePlus size={12} />Pack update {packShort[0]} → {packShort[1]}</button>{/if}
       </div>
@@ -246,7 +246,7 @@
           <span class="fi"><Globe size={13} /></span>
           {#if s.addresses?.length}<span class="mono" title={s.addresses.join(', ')}>{s.addresses[0]}{s.addresses.length > 1 ? ` +${s.addresses.length - 1}` : ''}</span><button class="cpi" title="Copy the address" aria-label="Copy the address" onclick={() => copyOf(s.addresses[0], s.addresses[0])}><Copy size={12} /></button>{/if}<span class="mono">:{s.port}</span>
         </span>
-        {#if s.sleep_after_minutes && s.state === 'stopped'}<span class="fact sleep">Sleeping, joining wakes it</span>{/if}
+        {#if stateKey(s) === 'sleeping' && s.wakes_on_join}<span class="fact sleep">Wakes when someone joins</span>{/if}
       </div>
       {#if s.progress}
         <!-- How far a start or stop has got; the server list shows players the same. -->

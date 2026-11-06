@@ -1,6 +1,6 @@
 <script>
-  // Settings › Address: the addresses players join this server by, and
-  // sleeping (stop when empty, start when someone joins).
+  // Settings › Address: the addresses players join this server by.
+  // Sleeping and waking have their own card (Sleep.svelte).
   import { Globe, Save, Plus, X, TriangleAlert, ArrowRightLeft, SearchCheck } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -16,8 +16,6 @@
   let addrs = $state([]);
   // No address at all, not even the default name.<domain>.
   let off = $state(false);
-  let sleepOn = $state(false);
-  let minutes = $state(15);
   let saved = $state('');
   let saving = $state(false);
   let dns = $state(null);
@@ -31,7 +29,6 @@
   const useDefault = $derived(!off && !!info?.default_address && typed.length === 1 && typed[0] === info.default_address);
   const body = $derived({
     addresses: off || useDefault ? [] : typed,
-    sleep_after_minutes: sleepOn ? Math.max(1, Number(minutes) || 1) : 0,
     off,
   });
   // What players join at, as saved (default included).
@@ -49,9 +46,7 @@
       [info, router] = await Promise.all([api(`${base}/address`), api('/router')]);
       addrs = info.effective.length ? [...info.effective] : [''];
       off = info.off;
-      sleepOn = info.sleep_after_minutes > 0;
-      minutes = info.sleep_after_minutes || 15;
-      saved = JSON.stringify({ addresses: info.addresses, sleep_after_minutes: info.sleep_after_minutes, off: info.off });
+      saved = JSON.stringify({ addresses: info.addresses, off: info.off });
       dns = null;
     } catch (e) {
       say(e.message, true);
@@ -177,12 +172,6 @@
         <span class="tiny muted">Keeping {router.config.port}: players add <span class="mono">:{router.config.port}</span>, or add an SRV record pointing at it.{session.owner ? '' : ' The owner or a manager can change the port in Access & devices.'}</span></div></div>
     {/if}
     <button class="btn sm ghost add" onclick={() => (addrs = [...addrs, ''])}><Plus size={13} />Add another address</button>
-    <label class="row small"><input type="checkbox" bind:checked={sleepOn} />Sleep when empty for
-      <span class="input mins"><input type="number" min="1" max="1440" bind:value={minutes} disabled={!sleepOn} /></span>min</label>
-    <div class="tiny muted">
-      {#if sleepOn}Joining starts it again; the server list shows "Sleeping" meanwhile.
-      {:else}Off: it runs until someone stops it.{/if}
-    </div>
     {#if router.state === 'error'}<div class="err small">{router.status.error}</div>{/if}
     <div class="status small">
       <span class="muted">Router</span><span class="chip {chip.cls}">{chip.label}</span>
@@ -199,7 +188,6 @@
   .side h3 { margin-bottom: 2px; }
   .name { width: 120px; padding: 4px 8px; flex: none; }
   .full { flex: 1; padding: 4px 8px; min-width: 0; }
-  .mins { width: 64px; padding: 2px 6px; display: inline-flex; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .add { align-self: flex-start; }
   .icon { padding: 3px 5px; }
@@ -210,5 +198,4 @@
   .lnk { background: none; border: none; padding: 0; font: inherit; color: var(--acc); cursor: pointer; }
   .status { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 8px; min-width: 0; }
   .warn .tiny { color: var(--muted); }
-  label.row input[type='checkbox'] { width: 15px; height: 15px; accent-color: var(--acc); }
 </style>

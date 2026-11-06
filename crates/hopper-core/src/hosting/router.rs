@@ -26,7 +26,7 @@ pub const MAX_HANDSHAKE: usize = 1024;
 pub const FILE: &str = ".hopper-route.json";
 
 /// A server's addresses and sleep setting, kept in its folder.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RouteSettings {
     /// Full addresses ("survival.mc.example.com", "*.mc.example.com").
@@ -38,9 +38,114 @@ pub struct RouteSettings {
     /// No address at all, not even the default `name.<domain>`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub off: bool,
+    /// A player joining a sleeping server starts it (on unless turned off).
+    pub wake_on_join: bool,
+    /// Who may wake it by joining.
+    pub wake_who: WakeWho,
+    /// The server list's line while it sleeps; empty: [`SLEEP_MESSAGE`].
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub sleep_message: String,
+    /// After a wake that didn't come up, joining starts it again only after
+    /// this many minutes; 0: only once someone starts it in the panel.
+    pub retry_after_minutes: u32,
+    /// The last wake that didn't come up, until a start that does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_failed: Option<WakeFailed>,
+    /// Who last woke it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_wake: Option<LastWake>,
+    /// What a player who joins while it starts gets.
+    pub while_starting: WhileStarting,
+}
+
+/// What a player joining a server that's starting gets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WhileStarting {
+    /// The lobby island with the start's progress, then a move to the
+    /// server (Minecraft 1.21 / 1.21.1; see `limbo`). Others get the kick.
+    #[default]
+    Lobby,
+    /// "Join again in about 2 min."
+    Kick,
+}
+
+impl Default for RouteSettings {
+    fn default() -> Self {
+        RouteSettings {
+            addresses: Vec::new(),
+            sleep_after_minutes: 0,
+            last_start_secs: None,
+            off: false,
+            wake_on_join: true,
+            wake_who: WakeWho::Anyone,
+            sleep_message: String::new(),
+            retry_after_minutes: 0,
+            wake_failed: None,
+            last_wake: None,
+            while_starting: WhileStarting::Lobby,
+        }
+    }
+}
+
+/// The server list's line for a sleeping server, unless one is set.
+pub const SLEEP_MESSAGE: &str = "💤 Sleeping · join to wake it";
+
+/// Who may wake a sleeping server by joining. The name in a login isn't
+/// checked until the server itself is up (online mode), so this keeps
+/// strangers from waking it by accident, not on purpose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WakeWho {
+    #[default]
+    Anyone,
+    /// The whitelist and the ops.
+    Whitelist,
+    Ops,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WakeFailed {
+    /// Unix seconds.
+    pub at: i64,
+    /// Who joined to wake it.
+    pub by: String,
+    /// "crashed while starting", "stopped before it was up", or the start's error.
+    pub why: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LastWake {
+    pub by: String,
+    /// Unix seconds.
+    pub at: i64,
 }
 
 impl RouteSettings {
+    /// Whether joining may start it now: sleep and wake on, and no failed
+    /// wake still holding it (see [`RouteSettings::retry_after_minutes`]).
+    pub fn wakes(&self, now: i64) -> bool {
+        self.sleep_after_minutes > 0 && self.wake_on_join && self.failed_hold(now).is_none()
+    }
+
+    /// The failed wake that keeps joins from starting it now, if any.
+    pub fn failed_hold(&self, now: i64) -> Option<&WakeFailed> {
+        let f = self.wake_failed.as_ref()?;
+        let retry = self.retry_after_minutes as i64 * 60;
+        (retry == 0 || now < f.at + retry).then_some(f)
+    }
+
+    /// Minutes until a failed wake lets joins try again; None: never (it
+    /// waits for the panel), or nothing failed.
+    pub fn retry_in_minutes(&self, now: i64) -> Option<u32> {
+        let f = self.failed_hold(now)?;
+        (self.retry_after_minutes > 0).then(|| ((f.at + self.retry_after_minutes as i64 * 60 - now + 59) / 60).max(1) as u32)
+    }
+
+    pub fn message(&self) -> &str {
+        if self.sleep_message.trim().is_empty() { SLEEP_MESSAGE } else { self.sleep_message.trim() }
+    }
+
     pub fn load(root: &Path) -> Self {
         std::fs::read_to_string(root.join(FILE))
             .ok()
@@ -52,6 +157,64 @@ impl RouteSettings {
         let path = root.join(FILE);
         std::fs::write(&path, serde_json::to_string_pretty(self)?).with_context(|| format!("writing {}", path.display()))
     }
+}
+
+/// The names in a server's `whitelist.json` or `ops.json`, lower case.
+fn names_in(root: &Path, file: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(root.join(file)) else { return Vec::new() };
+    let list: Vec<Value> = serde_json::from_str(&text).unwrap_or_default();
+    list.iter().filter_map(|e| e["name"].as_str()).map(|n| n.to_ascii_lowercase()).collect()
+}
+
+/// Whether `player` may wake the server in `root` under `who`.
+pub fn may_wake(root: &Path, who: WakeWho, player: &str) -> bool {
+    let p = player.trim().to_ascii_lowercase();
+    match who {
+        WakeWho::Anyone => true,
+        _ if p.is_empty() => false,
+        WakeWho::Ops => names_in(root, "ops.json").contains(&p),
+        WakeWho::Whitelist => names_in(root, "whitelist.json").contains(&p) || names_in(root, "ops.json").contains(&p),
+    }
+}
+
+// ---- the last real server list answer ----------------------------------------
+
+pub const PING_FILE: &str = ".hopper-ping.json";
+
+/// The parts of a server list answer that tell a client whether it can
+/// join (version, mod lists, chat settings); not the message or players.
+const PING_KEYS: &[&str] = &["version", "isModded", "forgeData", "modinfo", "modpackData", "enforcesSecureChat", "preventsChatReports"];
+
+/// What of a running server's own answer to keep for its stand-ins, or
+/// None when it isn't a real one.
+pub fn ping_part(status: &Value) -> Option<Value> {
+    let protocol = status["version"]["protocol"].as_i64()?;
+    if protocol < 0 || status["version"]["name"].as_str().is_none() {
+        return None;
+    }
+    let mut out = serde_json::Map::new();
+    for k in PING_KEYS {
+        if let Some(v) = status.get(*k) {
+            out.insert(k.to_string(), v.clone());
+        }
+    }
+    Some(Value::Object(out))
+}
+
+/// Keeps a running server's answer (see [`ping_part`]) for when it sleeps;
+/// writes only when it changed.
+pub fn remember_ping(root: &Path, status: &Value) {
+    let Some(part) = ping_part(status) else { return };
+    if last_ping(root).as_ref() == Some(&part) {
+        return;
+    }
+    if let Ok(t) = serde_json::to_string(&part) {
+        let _ = std::fs::write(root.join(PING_FILE), t);
+    }
+}
+
+pub fn last_ping(root: &Path) -> Option<Value> {
+    std::fs::read_to_string(root.join(PING_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).filter(|v: &Value| v.is_object())
 }
 
 /// The name part of a server's default address: "All the Mons" →
@@ -243,7 +406,7 @@ pub fn write_varint(out: &mut Vec<u8>, v: i32) {
     }
 }
 
-fn write_string(out: &mut Vec<u8>, s: &str) {
+pub fn write_string(out: &mut Vec<u8>, s: &str) {
     write_varint(out, s.len() as i32);
     out.extend_from_slice(s.as_bytes());
 }
@@ -296,14 +459,26 @@ pub fn read_handshake(b: &[u8]) -> anyhow::Result<Read<Handshake>> {
 
 /// The player name from a Login Start packet at the start of `b`.
 pub fn read_login_name(b: &[u8]) -> anyhow::Result<Read<String>> {
+    Ok(match read_login_start(b)? {
+        Read::Done((name, _), used) => Read::Done(name, used),
+        Read::More => Read::More,
+    })
+}
+
+/// A Login Start packet: the name and, from 1.20.2 on, the player's id.
+pub fn read_login_start(b: &[u8]) -> anyhow::Result<Read<(String, Option<[u8; 16]>)>> {
     match read_packet(b, 4096)? {
         Read::More => Ok(Read::More),
-        Read::Done((0, body), used) => Ok(Read::Done(read_string(body, 64)?.0, used)),
+        Read::Done((0, body), used) => {
+            let (name, n) = read_string(body, 64)?;
+            let uuid = body.get(n..n + 16).map(|u| u.try_into().unwrap_or([0; 16]));
+            Ok(Read::Done((name, uuid), used))
+        }
         Read::Done((id, _), _) => bail!("not a login start (packet {id:#x})"),
     }
 }
 
-fn packet(id: i32, body: &[u8]) -> Vec<u8> {
+pub fn packet(id: i32, body: &[u8]) -> Vec<u8> {
     let mut inner = Vec::with_capacity(body.len() + 2);
     write_varint(&mut inner, id);
     inner.extend_from_slice(body);
@@ -356,8 +531,28 @@ pub enum Standin {
     Starting,
     Stopping,
     Crashed,
+    /// A join woke it, but it didn't come up: joining doesn't start it
+    /// again until someone starts it in the panel (or the retry time).
+    WakeFailed,
     /// No server has this address.
     Unknown,
+}
+
+impl Standin {
+    /// Its name in the answer's `hopper.state`, which tells Hopper's own
+    /// pings a stand-in from the server.
+    pub fn key(self) -> &'static str {
+        match self {
+            Standin::Sleeping => "sleeping",
+            Standin::Stopped => "stopped",
+            Standin::Offline => "offline",
+            Standin::Starting => "starting",
+            Standin::Stopping => "stopping",
+            Standin::Crashed => "crashed",
+            Standin::WakeFailed => "wake_failed",
+            Standin::Unknown => "unknown",
+        }
+    }
 }
 
 /// "about 2 min" from the last start's length.
@@ -419,7 +614,20 @@ fn boot_hover(b: &BootStatus) -> Vec<String> {
 /// The server list entry for a server that isn't up. Protocol -1 makes the
 /// client show `version` (in red) where the ping bars go. A starting server
 /// shows how far it has got (`boot`); players see it again on Refresh.
-pub fn standin_status(kind: Standin, motd: &str, last_start_secs: Option<u32>, max_players: u32, favicon: Option<&str>, boot: Option<&BootStatus>) -> Value {
+/// A sleeping one shows `message` and, with `real` (its own last answer,
+/// see [`last_ping`]), its real version and mods, so the client lists it
+/// as joinable.
+#[allow(clippy::too_many_arguments)]
+pub fn standin_status(
+    kind: Standin,
+    motd: &str,
+    last_start_secs: Option<u32>,
+    max_players: u32,
+    favicon: Option<&str>,
+    boot: Option<&BootStatus>,
+    message: &str,
+    real: Option<&Value>,
+) -> Value {
     let (label, color, rest) = match kind {
         Standin::Sleeping => ("Sleeping", "yellow", format!("join to wake it ({})", wake_estimate(last_start_secs))),
         Standin::Stopped => ("Offline", "gray", "the server is stopped".into()),
@@ -427,11 +635,16 @@ pub fn standin_status(kind: Standin, motd: &str, last_start_secs: Option<u32>, m
         Standin::Starting => ("Starting…", "aqua", "try again in a moment".into()),
         Standin::Stopping => ("Stopping", "gold", "back soon".into()),
         Standin::Crashed => ("Crashed", "red", "the owner has been told".into()),
+        Standin::WakeFailed => ("Failed to start", "red", "ask an admin".into()),
         Standin::Unknown => ("No server at this address", "red", "check the address with whoever runs the server".into()),
     };
     let boot = boot.filter(|_| kind == Standin::Starting);
     let mut extra = match boot {
         Some(b) => boot_line(b),
+        None if kind == Standin::Sleeping => {
+            let m = if message.trim().is_empty() { SLEEP_MESSAGE } else { message.trim() };
+            vec![json!({ "text": m, "color": color }), json!({ "text": format!(" ({})", wake_estimate(last_start_secs)), "color": "gray" })]
+        }
         None => vec![json!({ "text": format!("● {label}"), "color": color }), json!({ "text": format!(" · {rest}"), "color": "gray" })],
     };
     if !motd.trim().is_empty() && kind != Standin::Unknown {
@@ -440,18 +653,60 @@ pub fn standin_status(kind: Standin, motd: &str, last_start_secs: Option<u32>, m
     let version = match boot {
         Some(b) => boot_label(b),
         None if kind == Standin::Starting => "Starting".into(),
+        None if kind == Standin::WakeFailed => "Couldn't start".into(),
         None => label.to_string(),
     };
-    let sample: Vec<Value> = boot.map(boot_hover).unwrap_or_default().into_iter().map(|name| json!({ "name": name, "id": NO_ID })).collect();
+    let mut hover = boot.map(boot_hover).unwrap_or_default();
+    if kind == Standin::Sleeping {
+        hover = vec!["§eSleeping".into(), format!("§7Join to wake it: {}", wake_estimate(last_start_secs))];
+    }
+    let sample: Vec<Value> = hover.into_iter().map(|name| json!({ "name": name, "id": NO_ID })).collect();
     let mut v = json!({
         "version": { "name": version, "protocol": -1 },
         "players": { "max": max_players, "online": 0, "sample": sample },
         "description": { "text": "", "extra": extra },
+        "hopper": { "state": kind.key() },
     });
+    // Asleep, it answers as the server would: same version and mod list.
+    if kind == Standin::Sleeping
+        && let Some(Value::Object(real)) = real
+        && real.get("version").is_some_and(|x| x["protocol"].as_i64().is_some_and(|p| p >= 0))
+    {
+        for (k, x) in real {
+            v[k] = x.clone();
+        }
+    }
     if let Some(f) = favicon {
         v["favicon"] = json!(f);
     }
     v
+}
+
+/// Whether a server list answer is a stand-in from Hopper Server's router
+/// rather than the server itself.
+pub fn is_standin(v: &Value) -> bool {
+    v["version"]["protocol"].as_i64() == Some(-1) || v["hopper"]["state"].is_string()
+}
+
+/// What a player who may not wake it is told.
+pub fn refused_kick(name: &str, who: WakeWho) -> Value {
+    let list = if who == WakeWho::Ops { "ops" } else { "whitelisted players" };
+    json!({ "text": "", "extra": [
+        { "text": format!("{name} is asleep."), "color": "yellow" },
+        { "text": format!("\n\nOnly {list} can wake it. Ask an admin."), "color": "gray" },
+    ] })
+}
+
+/// What a player joining after a failed wake is told.
+pub fn wake_failed_kick(name: &str, retry_in_minutes: Option<u32>) -> Value {
+    let rest = match retry_in_minutes {
+        Some(m) => format!("Ask an admin, or join again in {m} min to try once more."),
+        None => "Ask an admin to start it from the panel.".into(),
+    };
+    json!({ "text": "", "extra": [
+        { "text": format!("{name} couldn't start."), "color": "red" },
+        { "text": format!("\n\n{rest}"), "color": "gray" },
+    ] })
 }
 
 /// What a player joining a server that isn't up is told.
@@ -466,7 +721,8 @@ pub fn standin_kick(kind: Standin, name: &str, last_start_secs: Option<u32>, boo
                 None => "Join again in a moment.".into(),
             },
         ),
-        Standin::Sleeping => (format!("Waking up {name}…"), "yellow", format!("It usually takes {}. Join again then.", wake_estimate(last_start_secs))),
+        Standin::Sleeping => (format!("Starting {name}…"), "yellow", format!("Join again in {}.", wake_estimate(last_start_secs))),
+        Standin::WakeFailed => return wake_failed_kick(name, None),
         Standin::Starting => (format!("{name} is starting."), "aqua", "Join again in a moment.".into()),
         Standin::Stopping => (format!("{name} is stopping."), "gold", "Try again in a minute.".into()),
         Standin::Crashed => (format!("{name} crashed."), "red", "The owner can see what happened in the panel.".into()),
@@ -542,6 +798,7 @@ mod tests {
         let p = packet(0, &body);
         assert_eq!(read_login_name(&p).unwrap(), Read::Done("Steve".to_string(), p.len()));
         assert_eq!(read_login_name(&p[..3]).unwrap(), Read::More);
+        assert_eq!(read_login_start(&p).unwrap(), Read::Done(("Steve".to_string(), Some([0; 16])), p.len()));
     }
 
     #[test]
@@ -572,14 +829,14 @@ mod tests {
 
     #[test]
     fn standins_say_what_is_going_on() {
-        let s = standin_status(Standin::Sleeping, "§aMy §lSMP\\nline two", Some(130), 20, None, None);
+        let s = standin_status(Standin::Sleeping, "§aMy §lSMP\\nline two", Some(130), 20, None, None, "", None);
         assert_eq!(s["version"]["protocol"], -1);
         let text = s["description"]["extra"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect::<String>();
-        assert_eq!(text, "My SMP\n● Sleeping · join to wake it (about 2 min)");
+        assert_eq!(text, "My SMP\n💤 Sleeping · join to wake it (about 2 min)");
         let k = standin_kick(Standin::Sleeping, "ATM10", None, None).to_string();
-        assert!(k.contains("Waking up ATM10") && k.contains("a minute or two"), "{k}");
+        assert!(k.contains("Starting ATM10") && k.contains("Join again in a minute or two."), "{k}");
         assert_eq!(wake_estimate(Some(20)), "under a minute");
-        let u = standin_status(Standin::Unknown, "ignored", None, 0, None, None).to_string();
+        let u = standin_status(Standin::Unknown, "ignored", None, 0, None, None, "", None).to_string();
         assert!(u.contains("No server at this address") && !u.contains("ignored"));
     }
 
@@ -594,7 +851,7 @@ mod tests {
         let last = BootRecord { secs: 100.0, marks: vec![Some(0.0), Some(1.0), Some(5.0), Some(20.0), Some(60.0), Some(90.0), Some(95.0)], mods: None };
         let st = b.status(t0 + Duration::from_secs(40), Some(&last));
         assert_eq!((st.percent, st.left_secs), (40, Some(60)));
-        let s = standin_status(Standin::Starting, "My Pack", None, 20, None, Some(&st));
+        let s = standin_status(Standin::Starting, "My Pack", None, 20, None, Some(&st), "", None);
         let text = s["description"]["extra"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect::<String>();
         assert_eq!(text, format!("My Pack\n{}{} 40% Loading mods", "|".repeat(16), "|".repeat(24)));
         assert_eq!(s["version"]["name"], "§b~1m left");
@@ -606,14 +863,14 @@ mod tests {
         let k = standin_kick(Standin::Starting, "ATM10", None, Some(&st)).to_string();
         assert!(k.contains("ATM10 is starting: 40%, loading mods.") && k.contains("About 1m left"), "{k}");
         // No progress (up, but not answering yet): as before.
-        let s = standin_status(Standin::Starting, "", None, 20, None, None);
+        let s = standin_status(Standin::Starting, "", None, 20, None, None, "", None);
         assert_eq!(s["version"]["name"], "Starting");
         // Past the last start's time.
         let slow = b.status(t0 + Duration::from_secs(400), Some(&last));
-        let s = standin_status(Standin::Starting, "", None, 20, None, Some(&slow));
+        let s = standin_status(Standin::Starting, "", None, 20, None, Some(&slow), "", None);
         assert_eq!(s["version"]["name"], "§6Taking longer");
         // Other kinds ignore a stray progress.
-        let s = standin_status(Standin::Sleeping, "", None, 20, None, Some(&st));
+        let s = standin_status(Standin::Sleeping, "", None, 20, None, Some(&st), "", None);
         assert_eq!(s["version"]["name"], "Sleeping");
     }
 
@@ -622,7 +879,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hopper-route-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(RouteSettings::load(&dir), RouteSettings::default());
-        let s = RouteSettings { addresses: vec!["a.example.com".into()], sleep_after_minutes: 15, last_start_secs: Some(40), off: false };
+        let s = RouteSettings { addresses: vec!["a.example.com".into()], sleep_after_minutes: 15, last_start_secs: Some(40), wake_who: WakeWho::Ops, ..Default::default() };
         s.save(&dir).unwrap();
         assert_eq!(RouteSettings::load(&dir), s);
         // Older files have no `off`; a turned-off server keeps it.
@@ -630,6 +887,100 @@ mod tests {
         off.save(&dir).unwrap();
         assert_eq!(RouteSettings::load(&dir), off);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wake_settings_default_on_and_old_files_keep_working() {
+        // A file from before wake settings: waking stays on.
+        let s: RouteSettings = serde_json::from_str(r#"{"addresses":[],"sleep_after_minutes":15}"#).unwrap();
+        assert!(s.wake_on_join && s.wake_who == WakeWho::Anyone && s.wakes(0));
+        assert_eq!(s.message(), SLEEP_MESSAGE);
+        let off = RouteSettings { sleep_after_minutes: 0, ..s.clone() };
+        assert!(!off.wakes(0), "no sleep, no wake");
+        assert_eq!(s.while_starting, WhileStarting::Lobby, "the lobby by default");
+        let t: RouteSettings = serde_json::from_str(r#"{"sleep_after_minutes":5,"wake_who":"whitelist","wake_on_join":false,"while_starting":"kick"}"#).unwrap();
+        assert_eq!(t.while_starting, WhileStarting::Kick);
+        assert_eq!((t.wake_who, t.wakes(0)), (WakeWho::Whitelist, false));
+    }
+
+    #[test]
+    fn failed_wakes_hold_until_the_panel_or_the_retry_time() {
+        let failed = Some(WakeFailed { at: 1000, by: "Alex".into(), why: "crashed while starting".into() });
+        let s = RouteSettings { sleep_after_minutes: 15, wake_failed: failed.clone(), ..Default::default() };
+        assert!(!s.wakes(1000) && !s.wakes(1_000_000), "0: waits for the panel");
+        assert_eq!(s.retry_in_minutes(1000), None);
+        let r = RouteSettings { retry_after_minutes: 10, ..s };
+        assert!(!r.wakes(1000 + 9 * 60));
+        assert_eq!(r.retry_in_minutes(1000 + 9 * 60 + 30), Some(1));
+        assert_eq!(r.retry_in_minutes(1000), Some(10));
+        assert!(r.wakes(1000 + 10 * 60));
+        let k = wake_failed_kick("ATM10", Some(3)).to_string();
+        assert!(k.contains("ATM10 couldn't start.") && k.contains("join again in 3 min"), "{k}");
+        assert!(wake_failed_kick("ATM10", None).to_string().contains("start it from the panel"));
+    }
+
+    #[test]
+    fn who_may_wake() {
+        let dir = std::env::temp_dir().join(format!("hopper-wake-who-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("whitelist.json"), r#"[{"uuid":"1","name":"Alex"}]"#).unwrap();
+        std::fs::write(dir.join("ops.json"), r#"[{"uuid":"2","name":"OpSteve","level":4}]"#).unwrap();
+        assert!(may_wake(&dir, WakeWho::Anyone, ""));
+        assert!(may_wake(&dir, WakeWho::Whitelist, "alex") && may_wake(&dir, WakeWho::Whitelist, "OPSTEVE"));
+        assert!(!may_wake(&dir, WakeWho::Whitelist, "Stranger") && !may_wake(&dir, WakeWho::Whitelist, ""));
+        assert!(may_wake(&dir, WakeWho::Ops, "OpSteve") && !may_wake(&dir, WakeWho::Ops, "Alex"));
+        let _ = std::fs::remove_file(dir.join("ops.json"));
+        assert!(!may_wake(&dir, WakeWho::Ops, "OpSteve"), "no ops file: nobody");
+        assert!(refused_kick("ATM10", WakeWho::Ops).to_string().contains("Only ops can wake it"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sleeping_servers_answer_with_their_real_version() {
+        let real = json!({
+            "version": { "name": "NeoForge 1.21.1", "protocol": 767 },
+            "players": { "max": 12, "online": 3 },
+            "description": { "text": "Live MOTD" },
+            "isModded": true,
+            "forgeData": { "d": "abc" },
+        });
+        let part = ping_part(&real).unwrap();
+        assert!(part.get("players").is_none() && part.get("description").is_none());
+        assert_eq!(part["forgeData"]["d"], "abc");
+        assert!(ping_part(&json!({ "version": { "name": "Sleeping", "protocol": -1 } })).is_none(), "a stand-in isn't kept");
+        let dir = std::env::temp_dir().join(format!("hopper-ping-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(last_ping(&dir), None);
+        remember_ping(&dir, &real);
+        assert_eq!(last_ping(&dir), Some(part.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let s = standin_status(Standin::Sleeping, "My SMP", Some(130), 12, None, None, "Zzz, join me", Some(&part));
+        assert_eq!(s["version"], json!({ "name": "NeoForge 1.21.1", "protocol": 767 }));
+        assert_eq!((s["isModded"].as_bool(), s["players"]["online"].as_i64()), (Some(true), Some(0)));
+        let text = s["description"]["extra"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect::<String>();
+        assert_eq!(text, "My SMP\nZzz, join me (about 2 min)");
+        assert!(is_standin(&s), "Hopper still sees it's asleep");
+        assert!(!is_standin(&real));
+        // Failed: keeps the red label so nobody waits on it.
+        let f = standin_status(Standin::WakeFailed, "My SMP", None, 12, None, None, "", Some(&part));
+        assert_eq!((f["version"]["protocol"].as_i64(), f["version"]["name"].as_str()), (Some(-1), Some("Couldn't start")));
+        assert_eq!(f["hopper"]["state"], "wake_failed");
+        let text = f["description"]["extra"].as_array().unwrap().iter().map(|e| e["text"].as_str().unwrap()).collect::<String>();
+        assert_eq!(text, "My SMP\n● Failed to start · ask an admin");
+    }
+
+    #[test]
+    fn encodes_answers_as_packets() {
+        let s = status_packet(&json!({ "a": 1 }));
+        let Read::Done((id, body), used) = read_packet(&s, 1 << 16).unwrap() else { panic!() };
+        assert_eq!((id, used), (0, s.len()));
+        assert_eq!(read_string(body, 1 << 16).unwrap().0, r#"{"a":1}"#);
+        let p = pong_packet(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(p, [9, 1, 1, 2, 3, 4, 5, 6, 7, 8]);
+        let k = login_disconnect_packet(&json!({ "text": "hi" }));
+        let Read::Done((0, body), _) = read_packet(&k, 1 << 16).unwrap() else { panic!() };
+        assert_eq!(read_string(body, 99).unwrap().0, r#"{"text":"hi"}"#);
     }
 
     #[test]

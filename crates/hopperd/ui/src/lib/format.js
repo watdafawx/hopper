@@ -60,7 +60,22 @@ export const stateLabel = {
   running: 'Running',
   stopping: 'Stopping',
   crashed: 'Crashed',
+  sleeping: 'Sleeping',
+  wake_failed: "Couldn't wake",
 };
+
+/** A server's state for its pill and colour: a stopped server the router
+ * answers for is "sleeping", one whose wake didn't come up "wake_failed". */
+export const stateKey = (s) =>
+  s.wake_failed && (s.state === 'stopped' || s.state === 'crashed') ? 'wake_failed' : s.sleep_after_minutes && s.state === 'stopped' ? 'sleeping' : s.state;
+
+/** The state pill's tooltip for a sleeping server, or one that didn't wake. */
+export function stateTip(s) {
+  const k = stateKey(s);
+  if (k === 'sleeping') return s.wakes_on_join ? 'Stopped while nobody is on. Joining starts it.' : "Stopped while nobody is on. Joining doesn't start it.";
+  if (k === 'wake_failed') return "A player woke it, but it didn't start. Joining won't try again until it's started here.";
+  return undefined;
+}
 
 /** A server's state in words; a stop that is saving its worlds says so,
  * a start how far it has got. */
@@ -68,7 +83,7 @@ export const stateText = (s) => {
   if (s.progress) return progressPill(s.progress);
   if (s.state === 'stopping' && s.saving) return 'Saving worlds…';
   if (s.state === 'starting' && s.boot) return `Starting ${s.boot.percent}%`;
-  return stateLabel[s.state];
+  return stateLabel[stateKey(s)];
 };
 
 /** The state pill while starting or stopping, as desktop words it

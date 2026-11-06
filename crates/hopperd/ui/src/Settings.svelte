@@ -16,6 +16,7 @@
   import { confirmIt } from './lib/dialog.svelte.js';
   import { queueUploads, onUploaded } from './lib/transfers.svelte.js';
   import Address from './Address.svelte';
+  import Sleep from './Sleep.svelte';
   import MotdEditor from './MotdEditor.svelte';
   import Avatar from './Avatar.svelte';
   import JavaPage from './JavaPage.svelte';
@@ -308,6 +309,8 @@
       {#if pg === 'network'}
         <h4>Address players join by</h4>
         <Address {server} />
+        <h4>Sleep</h4>
+        <Sleep {server} />
       {:else if pg === 'java'}
         {#if jvm}
           <JavaPage {server} {jvm} bind:xms bind:xmx bind:flagsText dirty={{ memory: memDirty, flags: flagsDirty }} />

@@ -392,6 +392,12 @@ impl LocalServer {
         super::rcon::allowed(&state, g.tracker.stopping)
     }
 
+    /// Adds a line of Hopper's to the console ("[Hopper] …"), in order with
+    /// the server's own.
+    pub fn note(&self, line: &str) {
+        self.lock().note(line);
+    }
+
     /// The console so far, oldest first.
     pub fn console(&self) -> Vec<String> {
         self.lock().tracker.lines.iter().cloned().collect()

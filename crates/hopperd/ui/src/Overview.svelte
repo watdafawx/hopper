@@ -3,7 +3,7 @@
   import Avatar from './Avatar.svelte';
   import { Play, Square, RotateCw, Terminal, Plus, Server, Compass } from '@lucide/svelte';
   import { live, history } from './lib/live.svelte.js';
-  import { bytes, uptime, xmx, stateText, bootText, memTitle, loaderText } from './lib/format.js';
+  import { bytes, uptime, xmx, stateText, stateKey, stateTip, bootText, memTitle, loaderText } from './lib/format.js';
   import { power } from './lib/power.js';
   import { packUpdates } from './lib/packs.svelte.js';
   import Spark from './Spark.svelte';
@@ -84,7 +84,7 @@
           <a class="nmw" href={href(s)}>
             <div class="nm">{s.name}</div>
             <div class="tiny muted cap" title={[loaderText(s.loader), s.version].filter(Boolean).join(' · ')}>
-              {loaderText(s.loader, true) || 'Minecraft'}{s.version ? ` ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{:else}:{s.port}{/if}{on ? ` · up ${uptime(s.uptime_secs)}` : ''}{#if s.sleep_after_minutes && s.state === 'stopped'} · Sleeping{/if}
+              {loaderText(s.loader, true) || 'Minecraft'}{s.version ? ` ${s.version}` : ''} · {#if s.addresses?.length}<Addr address={s.addresses[0]} more={s.addresses.length - 1} />{:else}:{s.port}{/if}{on ? ` · up ${uptime(s.uptime_secs)}` : ''}
             </div>
           </a>
           {#if s.state === 'running'}
@@ -93,7 +93,7 @@
           {:else if s.state === 'stopped'}
             <span class="stopped"><span class="dot"></span>Stopped</span>
           {:else}
-            <span class="pill {s.state}" title={bootText(s) || undefined}>{stateText(s)}{s.exit_code != null ? ` (${s.exit_code})` : ''}</span>
+            <span class="pill {stateKey(s)}" title={bootText(s) || stateTip(s)}>{stateText(s)}{s.exit_code != null ? ` (${s.exit_code})` : ''}</span>
           {/if}
         </div>
         {#if s.progress}<Progress server={s} />{/if}

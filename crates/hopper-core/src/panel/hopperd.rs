@@ -87,6 +87,9 @@ fn stats_from(v: &Value, total_mem: u64) -> PanelStats {
         players,
         addresses: v["addresses"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect(),
         sleep_minutes: v["sleep_after_minutes"].as_u64().unwrap_or(0) as u32,
+        // Older Hopper Servers don't say: they always wake on join.
+        wakes_on_join: v["wakes_on_join"].as_bool().unwrap_or(v["sleep_after_minutes"].as_u64().unwrap_or(0) > 0),
+        wake_failed: v["wake_failed"].as_bool().unwrap_or(false),
         tps: None,
         no_tps: None,
         via: None,

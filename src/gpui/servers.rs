@@ -34,8 +34,8 @@ fn status_color(status: Option<&Status>, panel: Option<&PanelStats>, cx: &App) -
     let theme = cx.theme();
     match (panel, status) {
         (Some(p), _) if p.progress.as_ref().is_some_and(|g| g.stuck) => theme.danger,
-        (Some(p), _) if p.crashed => theme.danger,
-        (Some(p), _) if p.starting || p.stopping || p.updating => theme.warning,
+        (Some(p), _) if p.crashed || p.wake_failed && !p.running => theme.danger,
+        (Some(p), _) if p.starting || p.stopping || p.updating || p.sleeping() => theme.warning,
         // Running in the panel but not answering yet: still loading.
         (Some(p), Some(Status::Online { .. })) if p.running => theme.success,
         (Some(p), _) if p.running => theme.warning,
@@ -185,12 +185,15 @@ fn motd_line(raw: &str, cx: &App) -> Option<Div> {
 fn short_state(status: Option<&Status>, panel: Option<&PanelStats>) -> String {
     match (panel, status) {
         (Some(p), _) if p.progress.is_some() => p.progress.as_ref().map(|g| g.pill()).unwrap_or_default(),
+        (Some(p), _) if p.wake_failed && !p.running => "Couldn't wake".into(),
         (Some(p), _) if p.crashed => "Crashed".into(),
         (Some(p), _) if p.starting => "Starting".into(),
         (Some(p), _) if p.running => {
             let up = p.up_text();
             if up.is_empty() { "Running".into() } else { format!("Running · {}", up.trim_start_matches("Up ").trim_start_matches("up ")) }
         }
+        (Some(p), _) if p.sleeping() && p.wakes_on_join => "Sleeping · wakes on join".into(),
+        (Some(p), _) if p.sleeping() => "Sleeping".into(),
         (Some(_), _) => "Stopped".into(),
         (None, Some(Status::Online { .. })) => "Online".into(),
         (None, Some(Status::Offline)) => "Offline".into(),

@@ -76,7 +76,8 @@ a.btn { color: var(--text); }
 .chip { display: inline-flex; align-items: center; gap: 5px; box-sizing: border-box; height: 20px; line-height: 1; font-size: 11.5px; padding: 0 8px 2px; border-radius: var(--radius-sm); border: 1px solid transparent; background: #ededef14; color: var(--subtle); white-space: nowrap; }
 .chip.running { color: var(--green); border-color: transparent; background: var(--green-dim); }
 .chip.starting, .chip.stopping, .chip.warn { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
-.chip.crashed { color: var(--red); border-color: transparent; background: var(--red-dim); }
+.chip.crashed, .chip.wake_failed { color: var(--red); border-color: transparent; background: var(--red-dim); }
+.chip.sleeping { color: var(--gold); border-color: transparent; background: var(--gold-dim); }
 .chip.lan { color: var(--blue); border-color: transparent; background: var(--blue-dim); }
 .chip.ts { color: var(--violet); border-color: transparent; background: var(--violet-dim); }
 /* A search word inside a hit (lib/mark.js), as desktop tints it. */
@@ -86,14 +87,16 @@ mark.hit { background: color-mix(in srgb, var(--acc) 30%, transparent); color: v
 .pill { display: inline-flex; align-items: center; gap: 6px; flex: none; box-sizing: border-box; height: 20px; line-height: 1; padding: 0 9px 2px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--muted); background: #9a9aa31a; }
 .pill.running { color: var(--green); background: var(--green-dim); }
 .pill.starting, .pill.stopping { color: var(--gold); background: var(--gold-dim); }
-.pill.crashed { color: var(--red); background: var(--red-dim); }
+.pill.crashed, .pill.wake_failed { color: var(--red); background: var(--red-dim); }
+.pill.sleeping { color: var(--gold); background: var(--gold-dim); }
 .pill.acc { color: var(--acc); background: var(--acc-dim); }
 .pill .glow { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; flex: none; }
 /* A server's state light (widgets::status_dot). */
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); }
 .dot.running { background: var(--green); }
 .dot.starting, .dot.stopping { background: var(--gold); }
-.dot.crashed { background: var(--red); }
+.dot.crashed, .dot.wake_failed { background: var(--red); }
+.dot.sleeping { background: var(--gold); }
 /* Rows and nav items: quiet grey hover; selected is the accent wash with a 3px bar on the left. */
 .row-hover:hover { background: var(--hover); }
 .row-sel, .row-sel:hover { background-color: var(--sel); background-image: linear-gradient(var(--acc), var(--acc)); background-size: 3px calc(100% - 8px); background-position: 0 50%; background-repeat: no-repeat; color: var(--text); }

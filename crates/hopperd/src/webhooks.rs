@@ -449,6 +449,8 @@ mod tests {
             addresses: Vec::new(),
             address_default: false,
             sleep_after_minutes: 0,
+            wakes_on_join: false,
+            wake_failed: false,
             icon: None,
             mods_stamp: None,
             rcon: true,

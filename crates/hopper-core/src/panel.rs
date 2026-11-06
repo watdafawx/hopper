@@ -136,6 +136,11 @@ pub struct PanelStats {
     pub addresses: Vec<String>,
     /// Sleeps after this many minutes with nobody on (Hopper Server); 0: never.
     pub sleep_minutes: u32,
+    /// Joining starts it while it sleeps (Hopper Server).
+    pub wakes_on_join: bool,
+    /// A join woke it but it didn't come up; joins don't start it again
+    /// until it's started from the panel (Hopper Server).
+    pub wake_failed: bool,
     /// Ticks per second, from panels that read it (Hopper Server).
     pub tps: Option<Tps>,
     /// Why such a panel has no TPS for it: "rcon_off" or "unsupported".
@@ -251,7 +256,9 @@ impl PanelStats {
     }
 
     pub fn state(&self) -> &'static str {
-        if self.crashed {
+        if self.wake_failed && !self.running {
+            "Couldn't wake"
+        } else if self.crashed {
             "Crashed"
         } else if self.updating {
             "Updating"
@@ -261,9 +268,17 @@ impl PanelStats {
             "Stopping"
         } else if self.running {
             "Running"
+        } else if self.sleeping() {
+            "Sleeping"
         } else {
             "Stopped"
         }
+    }
+
+    /// Stopped by its sleep time (Hopper Server): the router answers for
+    /// it, and joining may start it.
+    pub fn sleeping(&self) -> bool {
+        self.sleep_minutes > 0 && !self.running && !self.crashed
     }
 }
 
