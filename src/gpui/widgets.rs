@@ -1384,6 +1384,175 @@ pub fn open_desc_link(
         .detach();
 }
 
+/// What a link opens in Hopper itself on a left-click (a project's panel,
+/// the image viewer); listed first in the link's right-click menu.
+pub type InApp = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// The link menu now showing: where, which link, and its in-Hopper action.
+struct LinkMenu {
+    url: String,
+    at: Point<Pixels>,
+    in_app: Option<InApp>,
+}
+
+thread_local! {
+    static LINK_MENU: std::cell::RefCell<Option<LinkMenu>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether `event` is a plain left click (or a keyboard / touch activation),
+/// which keeps doing what the link always did.
+pub fn is_primary_click(event: &ClickEvent) -> bool {
+    match event {
+        ClickEvent::Mouse(c) => c.up.button == MouseButton::Left,
+        _ => true,
+    }
+}
+
+/// The other mouse buttons on a link, for every link in the app: middle
+/// opens `url` in the browser at once, right opens a small menu (Open in
+/// Hopper when `in_app` is set, Open in browser, Copy link). Returns false
+/// for a left click, which the caller handles as before.
+pub fn aux_link_click(url: &str, event: &ClickEvent, in_app: Option<InApp>, window: &mut Window, cx: &mut App) -> bool {
+    let ClickEvent::Mouse(c) = event else { return false };
+    match c.up.button {
+        MouseButton::Middle => cx.open_url(url),
+        MouseButton::Right => {
+            LINK_MENU.with(|m| *m.borrow_mut() = Some(LinkMenu { url: url.to_string(), at: c.up.position, in_app }));
+            window.refresh();
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// The click handler of a link element: left clicks run `primary`, middle
+/// and right ones go to [`aux_link_click`]. `in_app` is `primary` when it
+/// does something other than open the browser.
+pub fn link_click(
+    url: &str,
+    event: &ClickEvent,
+    in_app: Option<InApp>,
+    primary: impl FnOnce(&mut Window, &mut App),
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if is_primary_click(event) {
+        primary(window, cx);
+    } else {
+        aux_link_click(url, event, in_app, window, cx);
+    }
+}
+
+/// Makes `el` (a clickable link built by hand) react to middle and right
+/// clicks like every other link. `web` is the page it points at; `in_app`
+/// its left-click action, if that isn't just the browser.
+pub fn link_aux<E: StatefulInteractiveElement>(el: E, web: String, in_app: Option<InApp>) -> E {
+    el.on_aux_click(move |event, window, cx| {
+        aux_link_click(&web, event, in_app.clone(), window, cx);
+    })
+}
+
+/// The right-click menu of a link, drawn over the whole window; the app's
+/// root adds it. Any click outside closes it.
+pub fn link_menu_overlay(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+    let (url, at, in_app) = LINK_MENU.with(|m| m.borrow().as_ref().map(|m| (m.url.clone(), m.at, m.in_app.clone())))?;
+    let close = |window: &mut Window| {
+        LINK_MENU.with(|m| *m.borrow_mut() = None);
+        window.refresh();
+    };
+    let theme = cx.theme();
+    let (bg, border, radius) = (theme.popover, theme.border, theme.radius);
+    let anchor = Bounds::new(at, size(px(0.), px(0.)));
+    let hover = theme.list_hover;
+    let place = anchored_popover(anchor, window);
+    let item = |id: &'static str, icon: IconName, label: &'static str, run: Rc<dyn Fn(&mut Window, &mut App)>, cx: &App| {
+        h_flex()
+            .id(id)
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded(radius)
+            .text_sm()
+            .clickable(cx)
+            .hover(move |s| s.bg(hover))
+            .child(Icon::new(icon).small())
+            .child(label)
+            .on_click(move |_, window, cx| {
+                LINK_MENU.with(|m| *m.borrow_mut() = None);
+                window.refresh();
+                run(window, cx);
+            })
+    };
+    let web = url.clone();
+    let copy = url.clone();
+    let menu = v_flex()
+        .id("link-menu")
+        .occlude()
+        .p_1()
+        .gap_0p5()
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .rounded(radius)
+        .shadow_md()
+        .when_some(in_app, |m, f| m.child(item("link-hopper", IconName::Package, "Open in Hopper", f, cx)))
+        .child(item("link-browser", IconName::ExternalLink, "Open in browser", Rc::new(move |_, cx| cx.open_url(&web)), cx))
+        .child(item(
+            "link-copy",
+            IconName::Copy,
+            "Copy link",
+            Rc::new(move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))),
+            cx,
+        ));
+    Some(
+        div()
+            .id("link-menu-backdrop")
+            .absolute()
+            .size_full()
+            .top_0()
+            .left_0()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, move |_, window, _| close(window))
+            .on_mouse_down(MouseButton::Right, move |_, window, _| close(window))
+            .on_mouse_down(MouseButton::Middle, move |_, window, _| close(window))
+            .child(place.apply(menu, 9., 14., window))
+            .into_any_element(),
+    )
+}
+
+/// The `on_link_click` handler for a text view's links: left clicks run
+/// `open`, middle ones open the browser, right ones show the link menu.
+/// With `project_aware`, links `open` shows inside Hopper (CurseForge and
+/// Modrinth projects) get "Open in Hopper" in that menu.
+pub fn link_handler(
+    open: Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync>,
+    project_aware: bool,
+) -> impl Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static {
+    move |url, event, window, cx| {
+        let u = url.to_string();
+        let in_app = (project_aware && hopper::source::project_link(&u).is_some()).then(|| {
+            let (open, u) = (open.clone(), u.clone());
+            Rc::new(move |w: &mut Window, cx: &mut App| open(&u, w, cx)) as InApp
+        });
+        link_click(&u, event, in_app, |w, cx| open(&u, w, cx), window, cx)
+    }
+}
+
+/// The middle / right click handler of an image link in a description.
+fn desc_aux(
+    target: &str,
+    open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let target = target.to_string();
+    move |event, window, cx| {
+        let (open, t) = (open.clone(), target.clone());
+        let in_app = hopper::source::project_link(&target).is_some().then(|| {
+            Rc::new(move |w: &mut Window, cx: &mut App| open(&t, w, cx)) as InApp
+        });
+        aux_link_click(&target, event, in_app, window, cx);
+    }
+}
+
 /// A project description (from `richtext::to_segments`) with its images
 /// served from the store's cache (stills of animated ones, unless the store
 /// decoded them to play, scaled to the width the page gave them) and opened in Hopper's image viewer on click;
@@ -1482,7 +1651,7 @@ pub fn description_view(
                         None => ImageSource::Image(blank_image()),
                     }
                 })
-                .on_link_click(move |url, _, window, cx| open(url.as_ref(), window, cx))
+                .on_link_click(link_handler(Arc::new(move |u, w, cx| open(u, w, cx)), true))
                 .into_any_element()
             }
             Segment::Badges(badges) => gpui_kit::component::h_flex()
@@ -1519,7 +1688,11 @@ pub fn description_view(
                         .aspect_ratio(w / h)
                         .clickable(cx)
                         .hover(|s| s.opacity(0.85))
-                        .on_click(move |_, window, cx| open(&target, window, cx))
+                        .on_click({
+                            let (open, target) = (open.clone(), target.clone());
+                            move |_, window, cx| open(&target, window, cx)
+                        })
+                        .on_aux_click(desc_aux(&target, open.clone()))
                         .when_some(path, |d, p| {
                             let src = match frame {
                                 Some(f) => ImageSource::Render(f),
@@ -1583,7 +1756,11 @@ pub fn description_view(
                                             .aspect_ratio(ratio)
                                             .clickable(cx)
                                             .hover(|s| s.opacity(0.85))
-                                            .on_click(move |_, window, cx| open(&target, window, cx))
+                                            .on_click({
+                                                let (open, target) = (open.clone(), target.clone());
+                                                move |_, window, cx| open(&target, window, cx)
+                                            })
+                                            .on_aux_click(desc_aux(&target, open.clone()))
                                             .when_some(path, |d, p| {
                                                 let src = match frame {
                                                     Some(f) => ImageSource::Render(f),
@@ -1899,10 +2076,19 @@ pub fn mod_link(
     cx: &App,
 ) -> Stateful<Div> {
     let accent = cx.theme().primary;
+    let open = Rc::new(open);
     mod_name(id, name, icon, cx).when(project != 0, |d| {
-        d.clickable(cx)
+        let (peek, aux) = (open.clone(), open);
+        let d = d
+            .clickable(cx)
             .hover(move |s| s.text_color(accent))
-            .on_click(move |_, window, cx| open(project, window, cx))
+            .on_click(move |_, window, cx| peek(project, window, cx));
+        // CurseForge sends a project id to the project's page.
+        link_aux(
+            d,
+            format!("https://www.curseforge.com/projects/{project}"),
+            Some(Rc::new(move |w: &mut Window, cx: &mut App| aux(project, w, cx))),
+        )
     })
 }
 

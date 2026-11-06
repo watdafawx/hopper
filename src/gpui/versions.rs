@@ -218,7 +218,7 @@ pub(crate) fn changelog_view(
     };
     // The list around it scrolls; the text must not catch the wheel.
     widgets::changelog_text(id, &md, cx)
-        .on_link_click(move |url, _, window, cx| on_link(url, window, cx))
+        .on_link_click(widgets::link_handler(std::sync::Arc::new(on_link), true))
         .into_any_element()
 }
 
@@ -823,10 +823,13 @@ impl Render for FileLog {
                     None => ("file-log", md.clone()),
                 };
                 widgets::changelog_text(id, &md, cx)
-                    .on_link_click(move |url, _, window, cx| match &root {
-                        Some(root) => open_link(&store, root, url, window, cx),
-                        None => cx.open_url(url),
-                    })
+                    .on_link_click(widgets::link_handler(
+                        std::sync::Arc::new(move |url, window, cx| match &root {
+                            Some(root) => open_link(&store, root, url, window, cx),
+                            None => cx.open_url(url),
+                        }),
+                        true,
+                    ))
                     .into_any_element()
             }
         };

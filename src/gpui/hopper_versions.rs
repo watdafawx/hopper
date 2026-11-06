@@ -73,7 +73,7 @@ impl HopperVersions {
         }
         // The column around it scrolls; the text must not catch the wheel.
         widgets::changelog_text(ElementId::Name(id.into()), &md, cx)
-            .on_link_click(|url, _, _, cx| cx.open_url(url))
+            .on_link_click(widgets::link_handler(std::sync::Arc::new(|u, _, cx| cx.open_url(u)), false))
             .into_any_element()
     }
 
