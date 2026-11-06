@@ -1844,7 +1844,7 @@ impl ModsTab {
             return widgets::caption("No changelog for this version.", cx).italic().into_any_element();
         }
         crate::widgets::changelog_text(id, md, cx)
-            .on_link_click(|url, _, _, cx| cx.open_url(url))
+            .on_link_click(widgets::link_handler(std::sync::Arc::new(|u, _, cx| cx.open_url(u)), false))
             .into_any_element()
     }
 

@@ -1451,6 +1451,7 @@ impl Render for AppView {
                 div().size_full().child(page),
             )))
             .children(overlay)
+            .children(widgets::link_menu_overlay(window, cx))
             .children(self.palette.as_ref().map(|p| p.view()))
             // A playing video's window hides under the palette and dialogs.
             .child({
