@@ -464,6 +464,20 @@ impl Change {
             Change::Replaced => "Replaced",
         }
     }
+
+    /// [`Change::label`] read back; anything else is a removal.
+    pub fn from_label(s: &str) -> Change {
+        match s {
+            "Updated" => Change::Updated,
+            "Rolled back" => Change::RolledBack,
+            "Switched" => Change::Switched,
+            "Turned on" => Change::TurnedOn,
+            "Turned off" => Change::TurnedOff,
+            "Changed" => Change::Edited,
+            "Replaced" => Change::Replaced,
+            _ => Change::Removed,
+        }
+    }
 }
 
 /// Small text files Hopper edits: their earlier text is the History entry.
@@ -526,6 +540,53 @@ pub struct Set {
 impl Set {
     pub fn size(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
+    }
+
+    /// The set as Hopper Server sends it (`GET /servers/{id}/mod-backups`),
+    /// so Hopper desktop shows a panel server's History with the same rows
+    /// as an instance's.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "when": self.when, "size": self.size(),
+            "files": self.files.iter().map(|f| serde_json::json!({
+                "name": f.name, "size": f.size, "restore_to": f.restore_to, "download": f.download,
+                // Shown as is by the web UI.
+                "change": f.change.label(), "title": f.title(), "detail": f.detail(),
+                "project_id": f.src.as_ref().map_or(0, |r| r.project_id),
+                "icon": f.src.as_ref().and_then(|r| r.addon.as_ref()).map(|a| a.icon.clone()).unwrap_or_default(),
+                // The rest of the entry, for Hopper desktop.
+                "src": f.src, "now": f.now, "now_site": f.now_site, "reason": f.reason,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Reads [`Set::to_json`] back. A panel from before the `src` field still
+    /// gives rows that read right, only without versions under them.
+    pub fn from_json(v: &serde_json::Value) -> Option<Set> {
+        let when = v["when"].as_i64()?;
+        let s = |v: &serde_json::Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
+        let files = v["files"]
+            .as_array()?
+            .iter()
+            .map(|f| Saved {
+                path: PathBuf::from(s(f, "name")),
+                name: s(f, "name"),
+                size: f["size"].as_u64().unwrap_or(0),
+                restore_to: s(f, "restore_to"),
+                download: f["download"].as_bool().unwrap_or(false),
+                src: serde_json::from_value(f["src"].clone()).ok(),
+                change: Change::from_label(&s(f, "change")),
+                now: f["now"].as_str().map(str::to_string),
+                now_site: match f["now_site"].as_str() {
+                    Some("CurseForge") => "CurseForge",
+                    Some("Modrinth") => "Modrinth",
+                    _ => "",
+                },
+                reason: s(f, "reason"),
+            })
+            .collect();
+        // Sets are told apart by their time; there is no folder here.
+        Some(Set { dir: PathBuf::from(when.to_string()), when, files })
     }
 }
 
@@ -1188,5 +1249,37 @@ mod tests {
         let back = restore(&root, &sets[0].files[0]).unwrap();
         assert_eq!(back, root.join("config/a.json"));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn set_json_round_trip() {
+        let src: Ref = serde_json::from_value(serde_json::json!({
+            "project_id": 7, "file_id": 9, "file_name": "jei-1.2.jar", "sha1": "", "size": 5, "name": "JEI",
+        }))
+        .unwrap();
+        let set = Set {
+            dir: PathBuf::from("x"),
+            when: 1_700_000_000,
+            files: vec![Saved {
+                path: PathBuf::from("jei-1.2.jar"),
+                name: "jei-1.2.jar".into(),
+                size: 5,
+                restore_to: "mods/jei-1.2.jar".into(),
+                download: true,
+                src: Some(src),
+                change: Change::Updated,
+                now: Some("jei-1.3.jar".into()),
+                now_site: "CurseForge",
+                reason: "Clean update".into(),
+            }],
+        };
+        let back = Set::from_json(&set.to_json()).unwrap();
+        assert_eq!(back.when, set.when);
+        assert_eq!(back.files, set.files.iter().map(|f| Saved { path: PathBuf::from(&f.name), ..f.clone() }).collect::<Vec<_>>());
+        assert_eq!(back.files[0].detail(), set.files[0].detail());
+        // Every label reads back as itself.
+        for c in [Change::Removed, Change::Updated, Change::RolledBack, Change::Switched, Change::TurnedOn, Change::TurnedOff, Change::Edited, Change::Replaced] {
+            assert_eq!(Change::from_label(c.label()), c);
+        }
     }
 }

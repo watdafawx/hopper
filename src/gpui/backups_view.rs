@@ -30,6 +30,9 @@ const SHOWN: usize = 6;
 pub struct BackupsView {
     pub(crate) store: Entity<Store>,
     pub(crate) root: PathBuf,
+    /// A server on a Hopper Server: History is read and changed through its
+    /// panel (`/mod-backups`), and `root` is its stand-in.
+    pub(crate) panel: Option<crate::panel_tabs::Target>,
     pub(crate) sets: Vec<Set>,
     /// History is read (in the background: a big pack has hundreds of
     /// entries).
@@ -50,9 +53,9 @@ pub struct BackupsView {
     mode: Mode,
     /// `None` while loading.
     snaps: Option<Vec<Snapshot>>,
-    /// What the backups folder holds, and what a clean up would free now;
-    /// `None` while reading.
-    usage: Option<(hopper::retention::Usage, hopper::retention::Pruned)>,
+    /// What the backups folder holds, what a clean up would free now, and
+    /// the clean up rules (a panel has its own); `None` while reading.
+    usage: Option<(hopper::retention::Usage, hopper::retention::Pruned, hopper::retention::Retention)>,
     /// Snapshots shown open, and those showing every change (by id).
     open_snaps: HashSet<String>,
     all: HashSet<String>,
@@ -61,6 +64,8 @@ pub struct BackupsView {
     comparing: HashSet<String>,
     /// What's running (a snapshot or restore), shown instead of the intro.
     pub(crate) busy: Option<String>,
+    /// A panel's History couldn't be read.
+    error: Option<String>,
     /// The snapshot to show open the first time the list loads, instead of
     /// the newest (a task's "View snapshot").
     focus: Option<String>,
@@ -73,6 +78,9 @@ pub struct BackupsView {
 
 impl BackupsView {
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+        if let Some(t) = self.panel.clone() {
+            return self.reload_panel(t, cx);
+        }
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let (sets, projects, copies) = cx
@@ -95,12 +103,53 @@ impl BackupsView {
         .detach();
     }
 
+    /// A panel server's History: the same sets, sent by its panel.
+    fn reload_panel(&mut self, t: crate::panel_tabs::Target, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_spawn(async move { t.client.get(&t.sp("/mod-backups")).map_err(|e| format!("{e:#}")) }).await;
+            this.update(cx, |this, cx| {
+                this.sel.clear();
+                this.sets_loaded = true;
+                match r {
+                    Ok(v) => {
+                        this.error = None;
+                        this.sets = v["sets"].as_array().into_iter().flatten().filter_map(Set::from_json).collect();
+                        this.copies = v["copies"].as_u64();
+                        let u = &v["usage"];
+                        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                        let (total, limited) = (n("total"), n("limited"));
+                        this.usage = Some((
+                            hopper::retention::Usage { managed: limited, pinned: 0, other: total.saturating_sub(limited), actions: 0 },
+                            hopper::retention::Pruned { folders: n("removes") as usize, snapshots: 0, freed: n("frees") },
+                            hopper::retention::Retention {
+                                keep_actions: n("keep_actions") as u32,
+                                keep_days: n("keep_days") as u32,
+                                max_mb: n("max_mb"),
+                            },
+                        ));
+                    }
+                    Err(e) => {
+                        this.sets.clear();
+                        this.error = Some(e);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn reload_usage(&mut self, cx: &mut Context<Self>) {
+        // A panel sends its usage with the list.
+        if self.panel.is_some() {
+            return;
+        }
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let u = cx
                 .background_spawn(async move {
-                    (hopper::retention::usage(&root), hopper::retention::preview(&root))
+                    (hopper::retention::usage(&root), hopper::retention::preview(&root), hopper::retention::policy())
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -115,12 +164,32 @@ impl BackupsView {
     /// Runs the clean up rules (Settings › Library & folders) now.
     fn clean_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.root.clone();
+        let panel = self.panel.clone();
         self.busy = Some("Clearing old History…".into());
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let p = cx.background_spawn(async move { hopper::retention::clean_up(&root) }).await;
+            let p = cx
+                .background_spawn(async move {
+                    match panel {
+                        // The panel moves them to the server's trash.
+                        Some(t) => t.client.post(&t.sp("/mod-backups/clean"), serde_json::json!({})).map(|v| hopper::retention::Pruned {
+                            folders: v["removed"].as_u64().unwrap_or(0) as usize,
+                            snapshots: 0,
+                            freed: v["freed"].as_u64().unwrap_or(0),
+                        }),
+                        None => Ok(hopper::retention::clean_up(&root)),
+                    }
+                })
+                .await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
+                let p = match p {
+                    Ok(p) => p,
+                    Err(e) => {
+                        window.push_notification(Notification::error(format!("Couldn't clean up: {e:#}")), cx);
+                        return;
+                    }
+                };
                 let n = p.count();
                 let msg = if n == 0 {
                     "Nothing to clean up".to_string()
@@ -143,8 +212,7 @@ impl BackupsView {
     /// "History uses 4.9 GB · Over the 1 GB limit · Keeps … · Clean up".
     fn usage_line(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let r = hopper::retention::policy();
-        let Some((u, would)) = &self.usage else {
+        let Some((u, would, r)) = &self.usage else {
             return widgets::caption("Reading History…", cx).text_xs().into_any_element();
         };
         let cap = r.max_mb * 1024 * 1024;
@@ -175,6 +243,10 @@ impl BackupsView {
     }
 
     fn reload_snaps(&mut self, cx: &mut Context<Self>) {
+        // A panel server has its Backups tab instead.
+        if self.panel.is_some() {
+            return;
+        }
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
             let snaps = cx.background_spawn(async move { hopper::snapshots::list(&root) }).await;
@@ -304,6 +376,12 @@ impl BackupsView {
 
     pub(crate) fn changed(&mut self, cx: &mut Context<Self>) {
         let root = self.root.clone();
+        if self.panel.is_some() {
+            // Its mod list is fetched again from the panel.
+            self.store.update(cx, |s, _| s.reload_server_mods(&root));
+            self.reload(cx);
+            return;
+        }
         self.store.update(cx, |s, cx| {
             let r = root.clone();
             s.spawn(move || Msg::InstanceChanged(r));
@@ -746,7 +824,11 @@ impl Render for BackupsView {
                 "What changed in this instance, newest first. Undo puts a mod back by downloading it again; configs come back from the text Hopper kept.".into()
             }
         };
-        let body = if snaps_mode { self.snapshots_body(cx) } else { self.history_body(cx) };
+        let body = match &self.error {
+            Some(e) if !snaps_mode => widgets::empty_state(IconName::TriangleAlert, "Can't read History", Some(e.clone().into()), cx).into_any_element(),
+            _ if snaps_mode => self.snapshots_body(cx),
+            _ => self.history_body(cx),
+        };
         let banner = if snaps_mode { None } else { self.free_banner(cx) };
         let room = widgets::dialog_room(window).max(window.rem_size() * 12.);
         // A mod's page, beside the lists.
@@ -820,6 +902,17 @@ pub fn open(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut A
 pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window: &mut Window, cx: &mut App) {
     // Opening History, from anywhere, clears the header button's badge.
     crate::history_button::mark_seen(&root);
+    open_with(store, root, None, snap, window, cx)
+}
+
+/// Opens the History of a server on a Hopper Server (`root` is its stand-in):
+/// the same dialog as an instance's, read and changed through its panel.
+pub fn open_panel(store: Entity<Store>, root: PathBuf, t: crate::panel_tabs::Target, window: &mut Window, cx: &mut App) {
+    crate::history_button::mark_seen_panel(&t, cx);
+    open_with(store, root, Some(t), None, window, cx)
+}
+
+fn open_with(store: Entity<Store>, root: PathBuf, panel: Option<crate::panel_tabs::Target>, snap: Option<String>, window: &mut Window, cx: &mut App) {
     let view = cx.new(|cx| {
         let mut v = BackupsView {
             sets: Vec::new(),
@@ -828,6 +921,7 @@ pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window
             projects: HashMap::new(),
             store,
             root,
+            panel,
             open: HashSet::new(),
             sel: Default::default(),
             hpaint: Default::default(),
@@ -840,6 +934,7 @@ pub fn open_at(store: Entity<Store>, root: PathBuf, snap: Option<String>, window
             changes: HashMap::new(),
             comparing: HashSet::new(),
             busy: None,
+            error: None,
             focus: snap,
             peek: None,
             _peek_watch: None,

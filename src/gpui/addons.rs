@@ -1084,7 +1084,7 @@ impl AddonsView {
         } else {
             self.refresh_loose(&inst);
         }
-        if class == cf::CLASS_MODS && !self.remote {
+        if class == cf::CLASS_MODS {
             self.want_missing(&inst, cx);
         }
         let archived = self.store.read(cx).archived(&root).cloned().unwrap_or_default();
@@ -3283,7 +3283,7 @@ impl AddonsView {
                                 }
                             })),
                     )
-                    .when(self.store.read(cx).settings().allow_sources && !self.remote, |r| {
+                    .when(self.store.read(cx).settings().allow_sources, |r| {
                         r.child(
                             Button::new("find-sources")
                                 .small()
@@ -3328,7 +3328,7 @@ impl AddonsView {
                                 .truncate()
                                 .child(name.clone()),
                         )
-                        .when(self.class == cf::CLASS_MODS && self.store.read(cx).settings().allow_sources && !self.remote, |r| {
+                        .when(self.class == cf::CLASS_MODS && self.store.read(cx).settings().allow_sources, |r| {
                             let f = name.trim_end_matches(".disabled").to_string();
                             r.child(
                                 Button::new(ElementId::Name(format!("src-loose:{name}").into()))
@@ -3815,16 +3815,17 @@ Details").into()),
             });
 
         // An unknown jar: a quiet way to follow its source. A source that
-        // came with a pack or sync: a way to turn its updates on.
+        // came with a pack or sync: a way to turn its updates on (on a
+        // Hopper Server, whether the panel trusts it).
         let src_prompt: Option<(SharedString, Option<hopper::sources::ModSource>)> =
-            if self.class != cf::CLASS_MODS || global || !store.settings().allow_sources || self.remote {
+            if self.class != cf::CLASS_MODS || global || !store.settings().allow_sources {
                 None
             } else if a.project_id == 0 && a.source.is_none() {
                 Some(("Add a source to get updates".into(), None))
             } else {
                 a.source
                     .as_ref()
-                    .filter(|s| !hopper::sources::trusted(s))
+                    .filter(|s| self.root.as_deref().is_some_and(|r| !crate::source_dialog::trusted(r, &a.file_name, s)))
                     .map(|s| (format!("Turn on updates from {}", s.publisher).into(), Some(s.clone())))
             };
         let name_line = name_line.when_some(src_prompt, |r, (label, src)| {
@@ -3840,7 +3841,7 @@ Details").into()),
                         let Some(root) = this.root.clone() else { return };
                         let store = this.store.clone();
                         match &src {
-                            Some(s) => crate::source_dialog::confirm_trust(store, root, s.clone(), window, cx),
+                            Some(s) => crate::source_dialog::confirm_trust(store, root, f.clone(), s.clone(), window, cx),
                             None => crate::source_dialog::open_follow(store, root, f.clone(), n.clone(), String::new(), window, cx),
                         }
                     })),
@@ -4064,7 +4065,7 @@ It stays disabled after updating: turn it on in the On column.")
             a.project_id != 0,
         );
         // Following a source (or able to): only mods of the instance itself.
-        let src_menu = (!global && self.class == cf::CLASS_MODS && !self.remote).then(|| SrcMenu {
+        let src_menu = (!global && self.class == cf::CLASS_MODS).then(|| SrcMenu {
             name: a.name.clone(),
             source: a.source.as_ref().map(|s| (s.kind.label(), s.page())),
         });
@@ -4455,8 +4456,9 @@ Change version", a.file_name).into()
     /// mods from links on: for mods in the instance's own folder, and for
     /// resource packs and shaders wherever they go.
     fn links_menu(&self, cx: &App) -> bool {
-        // Sources on a Hopper Server are set in its web UI for now.
-        if self.remote {
+        // A Hopper Server adds mods from links through its panel; its packs
+        // from links are added in its web UI.
+        if self.remote && self.class != cf::CLASS_MODS {
             return false;
         }
         let kind = match self.class {
@@ -4711,7 +4713,7 @@ Change version", a.file_name).into()
         let changed = idx.mod_changed(key);
         let open = self.config_open.as_deref() == Some(key);
         let theme = cx.theme();
-        let (accent, root, file) = (theme.primary, self.root.clone()?, key.to_string());
+        let (accent, root, file, pid) = (theme.primary, self.root.clone()?, key.to_string(), a.project_id);
         let n = files.len();
         let tip = match (changed, n) {
             (0, 1) => "Config (1 file)".to_string(),
@@ -4728,7 +4730,15 @@ Change version", a.file_name).into()
                         .map(|b| if open { b.outline() } else { b.ghost() })
                         .icon(Icon::new(IconName::SlidersHorizontal).when(changed > 0 || open, |i| i.text_color(accent)))
                         .tooltip(tip)
-                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(AddonsEvent::Config { root: root.clone(), file: file.clone() }))),
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            // The side panel reads files here; a Hopper
+                            // Server's open in the config dialog, through its panel.
+                            if this.remote {
+                                crate::config_editor::open_for_mod(this.store.clone(), root.clone(), pid, file.clone(), window, cx);
+                            } else {
+                                cx.emit(AddonsEvent::Config { root: root.clone(), file: file.clone() })
+                            }
+                        })),
                 )
                 .into_any_element(),
         )
@@ -4793,16 +4803,14 @@ Change version", a.file_name).into()
                 )
                 .when_some(reset_cfg.clone(), |m, (store, root, pid, file)| {
                     let (s2, r2, f2) = (store.clone(), root.clone(), file.clone());
-                    // The config editor reads the files on this PC; on a
-                    // Hopper Server, the Configs tab edits them.
-                    let edit = crate::store::on_hopper_server(&root).is_none();
-                    m.when(edit, |m| m.item(
+                    // On a Hopper Server the dialog reads and saves through its panel.
+                    m.item(
                         PopupMenuItem::new("Edit config…")
                             .icon(IconName::Pencil)
                             .on_click(move |_, window, cx| {
                                 crate::config_editor::open_for_mod(s2.clone(), r2.clone(), pid, f2.clone(), window, cx)
                             }),
-                    ))
+                    )
                     .item(
                         PopupMenuItem::new("Reset config…")
                             .icon(IconName::Settings2)
@@ -5602,7 +5610,22 @@ impl Render for AddonsView {
         self.compact = peek_open;
         self.tight = peek_open && self.global_dir().is_some();
         // Which mods have config files, for their config buttons.
-        self.cfg_index = match (&self.root, self.class == cf::CLASS_MODS && !self.remote) {
+        self.cfg_index = match (&self.root, self.class == cf::CLASS_MODS) {
+            // A Hopper Server's: the panel's index, shared with its Configs tab.
+            (Some(root), true) if self.remote => {
+                let root = root.clone();
+                crate::config_view::indexes(cx).update(cx, |i, cx| {
+                    i.peek(&root).or_else(|| {
+                        // Being read, or out of reach (the Configs tab says why):
+                        // no new client every frame.
+                        if i.tried(&root) {
+                            return None;
+                        }
+                        let t = crate::panel_tabs::Target::new(crate::store::on_hopper_server(&root)?).ok()?;
+                        i.get_server(&root, &crate::config_view::Source::Panel(t), cx)
+                    })
+                })
+            }
             (Some(root), true) => {
                 let (root, store) = (root.clone(), self.store.clone());
                 crate::config_view::indexes(cx).update(cx, |i, cx| i.get(&root, &store, cx))

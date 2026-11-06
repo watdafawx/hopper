@@ -120,6 +120,8 @@ fn resolved_json(r: &Resolved) -> Value {
         "publisher": r.source.publisher,
         "page": r.source.page(),
         "trusted": sources::trusted(&r.source),
+        // The whole source, for Hopper desktop's dialog (branch folders, ids).
+        "source": r.source,
         "pick": r.pick,
         "ambiguous": r.ambiguous,
         "candidates": r.candidates.iter().map(|c| json!({
@@ -133,6 +135,8 @@ fn resolved_json(r: &Resolved) -> Value {
             "fits": c.fit.usable(),
             "tag": c.fit.tag(),
             "good": c.fit == sources::Fit::Good,
+            "fit": c.fit,
+            "page": c.page,
         })).collect::<Vec<_>>(),
     })
 }

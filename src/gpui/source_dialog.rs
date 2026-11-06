@@ -7,6 +7,10 @@
 //! The Resource packs and Shaders tabs open it for a pack ([`open_add_pack`]):
 //! a GitHub folder on a branch, a release's zip or a link, put into the
 //! location picked (This instance, Paxi, Global Packs).
+//!
+//! On a server on a Hopper Server the panel does the work through its
+//! `/mods/source/*` routes (the store's `remote_source_*`): its jars are
+//! there, it downloads, and it keeps its own trusted publishers.
 
 use crate::dialogs::footer;
 use crate::store::{Msg, Store};
@@ -16,11 +20,12 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Icon, Selectable as _, Sizable as _, StyledExt as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hopper::sources::{self, Fit, Resolved};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What the dialog is doing.
 enum Stage {
@@ -56,6 +61,12 @@ pub struct SourceForm {
     chosen: Option<usize>,
     /// The file list is open (ambiguous, nothing fits, or "Other file").
     picking: bool,
+    /// The mods are on a Hopper Server: the panel looks up and adds.
+    remote: bool,
+    /// Whether the panel trusts the publisher looked up (its own list).
+    panel_trusted: Option<bool>,
+    /// The link the shown lookup is for.
+    looked: String,
     _subs: Vec<Subscription>,
 }
 
@@ -88,6 +99,23 @@ impl SourceForm {
             _ => {}
         })];
         link_in.update(cx, |s, cx| s.focus(window, cx));
+        let remote = crate::store::on_hopper_server(&root).is_some();
+        // The jar is on the panel's machine: ask it what the jar links to.
+        if let Some((file, _)) = follow.clone().filter(|_| remote && link.is_empty()) {
+            let r2 = root.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let found = cx.background_spawn(async move { Store::remote_source_suggest(&r2, &file).ok().flatten() }).await;
+                let Some(found) = found else { return };
+                this.update_in(cx, |this, window, cx| {
+                    if this.link.read(cx).value().trim().is_empty() {
+                        this.link.update(cx, |s, cx| s.set_value(found, window, cx));
+                        this.look_up(cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
         let mut this = SourceForm {
             store,
             root,
@@ -98,12 +126,27 @@ impl SourceForm {
             stage: Stage::Idle,
             chosen: None,
             picking: false,
+            remote,
+            panel_trusted: None,
+            looked: String::new(),
             _subs: subs,
         };
         if !link.is_empty() {
             this.look_up(cx);
         }
         this
+    }
+
+    /// Whether the publisher is trusted: by the panel on a Hopper Server
+    /// (it said so with the lookup), else on this PC.
+    fn trusted(&self, src: &sources::ModSource) -> bool {
+        self.panel_trusted.unwrap_or_else(|| sources::trusted(src))
+    }
+
+    fn found(&mut self, r: Resolved) {
+        self.chosen = r.pick;
+        self.picking = r.ambiguous || r.pick.is_none();
+        self.stage = Stage::Found(Box::new(r));
     }
 
     fn look_up(&mut self, cx: &mut Context<Self>) {
@@ -116,7 +159,40 @@ impl SourceForm {
         self.stage = Stage::Looking;
         self.chosen = None;
         self.picking = false;
+        self.panel_trusted = None;
+        self.looked = link.clone();
         cx.notify();
+        if self.remote {
+            let (root, follow) = (self.root.clone(), self.follow.clone().map(|f| f.0));
+            cx.spawn(async move |this, cx| {
+                let r = cx
+                    .background_spawn(async move {
+                        match follow {
+                            Some(file) => Store::remote_source_plan(&root, &file, &link, pre).map(|(a, t)| (Stage::Adopt(Box::new(a)), t)),
+                            None => Store::remote_source_resolve(&root, &link, pre).map(|(r, t)| (Stage::Found(Box::new(r)), t)),
+                        }
+                        .map_err(|e| format!("{e:#}"))
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    match r {
+                        Ok((Stage::Found(r), t)) => {
+                            this.panel_trusted = Some(t);
+                            this.found(*r);
+                        }
+                        Ok((stage, t)) => {
+                            this.panel_trusted = Some(t);
+                            this.stage = stage;
+                        }
+                        Err(e) => this.stage = Stage::Failed(e),
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         // An installed jar: matched where it is, nothing downloads.
         if let Some((file, _)) = self.follow.clone() {
             cx.spawn(async move |this, cx| {
@@ -148,11 +224,7 @@ impl SourceForm {
                 .await;
             this.update(cx, |this, cx| {
                 match r {
-                    Ok(r) => {
-                        this.chosen = r.pick;
-                        this.picking = r.ambiguous || r.pick.is_none();
-                        this.stage = Stage::Found(Box::new(r));
-                    }
+                    Ok(r) => this.found(r),
                     Err(e) => this.stage = Stage::Failed(e),
                 }
                 cx.notify();
@@ -188,8 +260,8 @@ impl SourceForm {
 
     fn footer(&self) -> DialogFooter {
         let trusted = match &self.stage {
-            Stage::Adopt(a) => sources::trusted(&a.source),
-            _ => self.resolved().is_none_or(|r| sources::trusted(&r.source)),
+            Stage::Adopt(a) => self.trusted(&a.source),
+            _ => self.resolved().is_none_or(|r| self.trusted(&r.source)),
         };
         let action = match (&self.follow, trusted) {
             (Some(_), true) => "Follow",
@@ -212,10 +284,31 @@ impl SourceForm {
             return false;
         }
         let this = form.read(cx);
+        // On a Hopper Server the panel looks the link up again, trusts the
+        // publisher and adds or follows; nothing comes to this PC.
+        if this.remote {
+            let (store, root, link, pre) = (this.store.read(cx), &this.root, &this.looked, this.pre);
+            match (&this.stage, this.follow.clone()) {
+                (Stage::Adopt(a), Some((file, name))) => {
+                    let title = format!("{name} follows {}", a.source.publisher);
+                    store.remote_source_adopt(root, title, name, &file, link, pre);
+                }
+                (Stage::Found(r), follow) => {
+                    let Some(c) = this.chosen.and_then(|i| r.candidates.get(i)) else { return false };
+                    let title = match &follow {
+                        Some((_, name)) => format!("Following {} for {name}", r.source.publisher),
+                        None => format!("Adding {}", c.file_name),
+                    };
+                    store.remote_source_add(root, title, link, pre, &c.file_name, follow.map(|f| f.0));
+                }
+                _ => return false,
+            }
+            return true;
+        }
         if let (Stage::Adopt(a), Some((file, name))) = (&this.stage, this.follow.clone()) {
             let (a, store, root) = ((**a).clone(), this.store.clone(), this.root.clone());
             if let Err(e) = sources::trust(&a.source) {
-                window.push_notification(gpui_kit::component::notification::Notification::error(format!("{e:#}")), cx);
+                window.push_notification(Notification::error(format!("{e:#}")), cx);
             }
             store.update(cx, |s, _| {
                 s.spawn_instance_job(&root.clone(), format!("{name} follows {}", a.source.publisher), move |job| {
@@ -235,7 +328,7 @@ impl SourceForm {
             let Some((place, dir)) = p.places.get(p.picked).cloned() else { return false };
             let (store, root) = (this.store.clone(), this.root.clone());
             if let Err(e) = sources::trust(&r.source) {
-                window.push_notification(gpui_kit::component::notification::Notification::error(format!("{e:#}")), cx);
+                window.push_notification(Notification::error(format!("{e:#}")), cx);
             }
             let name = r.candidates.get(i).map(|c| c.file_name.clone()).unwrap_or_default();
             store.update(cx, |s, _| {
@@ -252,7 +345,7 @@ impl SourceForm {
         let follow = this.follow.clone();
         let store = this.store.clone();
         if let Err(e) = sources::trust(&r.source) {
-            window.push_notification(gpui_kit::component::notification::Notification::error(format!("{e:#}")), cx);
+            window.push_notification(Notification::error(format!("{e:#}")), cx);
         }
         let file = r.candidates[i].file_name.clone();
         let what = match &follow {
@@ -460,7 +553,7 @@ impl Render for SourceForm {
                         .child(div().text_sm().child(what))
                         .child(div().text_xs().text_color(theme.muted_foreground).child(next)),
                 );
-                if !sources::trusted(&a.source) {
+                if !self.trusted(&a.source) {
                     body = body.child(trust_note(&a.source.publisher, a.source.kind.label(), None, &theme));
                 }
                 body = body.child(widgets::caption(
@@ -544,7 +637,7 @@ impl Render for SourceForm {
                         ))),
                     );
                 }
-                if !sources::trusted(&r.source) && chosen.is_some() {
+                if !self.trusted(&r.source) && chosen.is_some() {
                     let by = chosen.as_ref().map(|c| c.author.clone()).filter(|a| !a.is_empty());
                     body = body.child(trust_note(&r.source.publisher, r.source.kind.label(), by, &theme));
                 }
@@ -588,13 +681,41 @@ fn open_with(
 /// Add content › "From GitHub or a link…". Asks to turn the setting on
 /// first when it's off.
 pub fn open_add(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut App) {
-    with_opt_in(store, window, cx, move |store, window, cx| open(store, root.clone(), None, String::new(), window, cx));
+    with_opt_in(store, &root.clone(), window, cx, move |store, window, cx| open(store, root.clone(), None, String::new(), window, cx));
+}
+
+/// Where the mods are: `Ok(true)` on a Hopper Server (the panel does the
+/// work), `Ok(false)` on this PC. A server whose panel isn't paired any
+/// more is neither, so nothing runs here for it by mistake.
+fn on_panel(root: &Path) -> Result<bool, String> {
+    if crate::store::on_hopper_server(root).is_some() {
+        Ok(true)
+    } else if hopper::hopperd::is_remote_root(root) {
+        Err("That server's Hopper Server isn't paired with Hopper any more.".into())
+    } else {
+        Ok(false)
+    }
+}
+
+/// Whether a mod's source is trusted, for the row's "Turn on updates":
+/// on a Hopper Server the panel's word (no prompt when it didn't say),
+/// else this PC's list.
+pub fn trusted(root: &Path, file: &str, src: &sources::ModSource) -> bool {
+    if crate::store::on_hopper_server(root).is_some() {
+        return !Store::remote_source_untrusted(root, file).unwrap_or(false);
+    }
+    sources::trusted(src)
 }
 
 /// The Resource packs or Shaders tab's "From GitHub or a link…": a pack
 /// of `class` into one of the instance's pack locations, `dest` (a folder
 /// inside the instance, such as Paxi's) picked first when given.
 pub fn open_add_pack(store: Entity<Store>, root: PathBuf, class: u32, dest: Option<String>, window: &mut Window, cx: &mut App) {
+    // Packs go into folders on this PC; a Hopper Server adds them in its
+    // own web UI.
+    if hopper::hopperd::is_remote_root(&root) {
+        return;
+    }
     let Some(inst) = store.read(cx).instance(&root).cloned() else { return };
     let places: Vec<(String, PathBuf)> =
         hopper::packs::locations(&inst, class).into_iter().filter(|l| l.world.is_none()).map(|l| (l.label, l.dir)).collect();
@@ -602,7 +723,7 @@ pub fn open_add_pack(store: Entity<Store>, root: PathBuf, class: u32, dest: Opti
         .map(|d| root.join(d))
         .and_then(|d| places.iter().position(|(_, p)| *p == d))
         .unwrap_or(0);
-    with_opt_in(store, window, cx, move |store, window, cx| {
+    with_opt_in(store, &root.clone(), window, cx, move |store, window, cx| {
         let pack = PackTarget { class, places: places.clone(), picked };
         open_with(store, root.clone(), None, Some(pack), String::new(), window, cx)
     });
@@ -624,7 +745,8 @@ fn branch_of(url: &str) -> String {
 /// A mod's "Follow a source…" (also "Change source…").
 pub fn open_follow(store: Entity<Store>, root: PathBuf, file: String, name: String, link: String, window: &mut Window, cx: &mut App) {
     // The jar's own links (its sources or issues page) suggest the repo.
-    let link = if link.is_empty() {
+    // On a Hopper Server the dialog asks the panel, which has the jar.
+    let link = if link.is_empty() && !hopper::hopperd::is_remote_root(&root) {
         store
             .read(cx)
             .instance(&root)
@@ -633,13 +755,18 @@ pub fn open_follow(store: Entity<Store>, root: PathBuf, file: String, name: Stri
     } else {
         link
     };
-    with_opt_in(store, window, cx, move |store, window, cx| {
+    with_opt_in(store, &root.clone(), window, cx, move |store, window, cx| {
         open(store, root.clone(), Some((file.clone(), name.clone())), link.clone(), window, cx)
     });
 }
 
 /// "Stop following": the mod goes back to where it came from.
 pub fn unfollow(store: Entity<Store>, root: PathBuf, file: String, cx: &mut App) {
+    match on_panel(&root) {
+        Ok(true) => return store.read(cx).remote_source_unfollow(&root, &file),
+        Ok(false) => {}
+        Err(e) => return store.update(cx, |_, cx| cx.emit(crate::store::StoreEvent::Notice(e, true))),
+    }
     store.update(cx, |s, _| {
         s.spawn_instance_job(&root.clone(), format!("Stop following a source for {file}"), move |job| {
             let mut inst = hopper::instances::load(&root).ok_or_else(|| anyhow::anyhow!("the instance is gone"))?;
@@ -651,13 +778,40 @@ pub fn unfollow(store: Entity<Store>, root: PathBuf, file: String, cx: &mut App)
 }
 
 /// Runs `then` when mods from links are allowed; otherwise explains and
-/// offers to turn it on (Settings › Mod sources).
+/// offers to turn it on (Settings › Mod sources). On a Hopper Server it's
+/// the panel's setting that counts, and only its owner changes that.
 fn with_opt_in(
     store: Entity<Store>,
+    root: &Path,
     window: &mut Window,
     cx: &mut App,
     then: impl Fn(Entity<Store>, &mut Window, &mut App) + 'static,
 ) {
+    match on_panel(root) {
+        Err(e) => return window.push_notification(Notification::error(e), cx),
+        Ok(true) => {
+            let r2 = root.to_path_buf();
+            let ask = cx.background_spawn(async move { Store::remote_sources_allowed(&r2) });
+            window
+                .spawn(cx, async move |cx| {
+                    let allowed = ask.await;
+                    cx.update(|window, cx| match allowed {
+                        Ok(true) => then(store, window, cx),
+                        Ok(false) => window.push_notification(
+                            Notification::error(
+                                "Mods from GitHub and other links are off on this Hopper Server. Its owner can turn them on in its Settings › Mod sources.",
+                            ),
+                            cx,
+                        ),
+                        Err(e) => window.push_notification(Notification::error(format!("Couldn't reach the Hopper Server: {e:#}")), cx),
+                    })
+                    .ok();
+                })
+                .detach();
+            return;
+        }
+        Ok(false) => {}
+    }
     if store.read(cx).settings().allow_sources {
         then(store, window, cx);
         return;
@@ -689,12 +843,13 @@ fn with_opt_in(
 }
 
 /// "Turn on updates" for a mod whose source came with a pack, a share code
-/// or a sync: the same once-per-source confirm as adding one.
-pub fn confirm_trust(store: Entity<Store>, root: PathBuf, src: sources::ModSource, window: &mut Window, cx: &mut App) {
-    with_opt_in(store, window, cx, move |store, window, cx| {
-        let (src, root) = (src.clone(), root.clone());
+/// or a sync: the same once-per-source confirm as adding one. `file` is the
+/// mod's jar: a Hopper Server trusts the source it keeps for it.
+pub fn confirm_trust(store: Entity<Store>, root: PathBuf, file: String, src: sources::ModSource, window: &mut Window, cx: &mut App) {
+    with_opt_in(store, &root.clone(), window, cx, move |store, window, cx| {
+        let (src, root, file) = (src.clone(), root.clone(), file.clone());
         window.open_dialog(cx, move |dialog, window, cx| {
-            let (s2, st, r2) = (src.clone(), store.clone(), root.clone());
+            let (s2, st, r2, f2) = (src.clone(), store.clone(), root.clone(), file.clone());
             let theme = cx.theme().clone();
             dialog
                 .title(format!("Get updates from {}?", src.publisher))
@@ -711,8 +866,15 @@ pub fn confirm_trust(store: Entity<Store>, root: PathBuf, src: sources::ModSourc
                 )
                 .footer(footer("Trust and check for updates", true))
                 .on_ok(move |_, window, cx| {
+                    if crate::store::on_hopper_server(&r2).is_some() {
+                        st.update(cx, |s, cx| {
+                            s.remote_source_trust(&r2, &f2);
+                            cx.notify();
+                        });
+                        return true;
+                    }
                     if let Err(e) = sources::trust(&s2) {
-                        window.push_notification(gpui_kit::component::notification::Notification::error(format!("{e:#}")), cx);
+                        window.push_notification(Notification::error(format!("{e:#}")), cx);
                     }
                     st.update(cx, |s, cx| {
                         s.check_updates(&r2, true);
@@ -730,11 +892,33 @@ pub struct FindForm {
     store: Entity<Store>,
     root: PathBuf,
     rows: Option<Vec<(sources::Unknown, bool)>>,
+    /// The mods are on a Hopper Server: it reads the jars and follows.
+    remote: bool,
+    /// The panel couldn't list them: why.
+    failed: Option<String>,
 }
 
 impl FindForm {
     fn new(store: Entity<Store>, root: PathBuf, cx: &mut Context<Self>) -> Self {
-        if let Some(inst) = store.read(cx).instance(&root).cloned() {
+        let remote = crate::store::on_hopper_server(&root).is_some();
+        if remote {
+            let r2 = root.clone();
+            cx.spawn(async move |this, cx| {
+                let found = cx.background_spawn(async move { Store::remote_source_unknown(&r2) }).await;
+                this.update(cx, |this, cx| {
+                    match found {
+                        Ok(found) => this.rows = Some(found.into_iter().map(|u| {
+                            let on = u.link.is_some();
+                            (u, on)
+                        }).collect()),
+                        Err(e) => this.failed = Some(format!("{e:#}")),
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        } else if let Some(inst) = store.read(cx).instance(&root).cloned() {
             cx.spawn(async move |this, cx| {
                 let found = cx.background_spawn(async move { sources::unknown_mods(&inst) }).await;
                 this.update(cx, |this, cx| {
@@ -748,7 +932,7 @@ impl FindForm {
             })
             .detach();
         }
-        FindForm { store, root, rows: None }
+        FindForm { store, root, rows: None, remote, failed: None }
     }
 
     fn picked(&self) -> Vec<(String, String)> {
@@ -767,6 +951,10 @@ impl FindForm {
             return false;
         }
         let (store, root) = (this.store.clone(), this.root.clone());
+        if this.remote {
+            store.read(cx).remote_source_adopt_many(&root, picked);
+            return true;
+        }
         let n = picked.len();
         store.update(cx, |s, _| {
             s.spawn_instance_job(&root.clone(), format!("Finding sources for {n} mods"), move |job| {
@@ -798,6 +986,16 @@ impl FindForm {
 impl Render for FindForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        if let Some(e) = &self.failed {
+            return v_flex().child(
+                h_flex()
+                    .gap_2()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child(Icon::new(IconName::CircleX).small())
+                    .child(div().flex_1().child(e.clone())),
+            );
+        }
         let Some(rows) = &self.rows else {
             return v_flex().gap_2().child(widgets::skeleton_rows(3, rems(2.5), cx));
         };
@@ -862,7 +1060,7 @@ impl Render for FindForm {
 
 /// Opens "Find sources for N unknown mods".
 pub fn open_find(store: Entity<Store>, root: PathBuf, window: &mut Window, cx: &mut App) {
-    with_opt_in(store, window, cx, move |store, window, cx| {
+    with_opt_in(store, &root.clone(), window, cx, move |store, window, cx| {
         let form = cx.new(|cx| FindForm::new(store.clone(), root.clone(), cx));
         window.open_dialog(cx, move |dialog, window, cx| {
             let f2 = form.clone();

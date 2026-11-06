@@ -340,6 +340,14 @@ pub fn restore(root: &Path, id: &str) -> anyhow::Result<String> {
     Ok(rel_of(root, &dest))
 }
 
+/// Earlier versions of the file at `rel` (saved over, or deleted), newest
+/// first: a file's History. Paths match however the caller wrote them.
+pub fn history(root: &Path, rel: &str) -> anyhow::Result<Vec<TrashItem>> {
+    let rel = rel.replace('\\', "/");
+    let rel = rel.trim_matches('/');
+    Ok(list_trash(root)?.into_iter().filter(|t| t.path == rel && !t.dir).collect())
+}
+
 /// Deletes trashed items for good (all of them when `ids` is empty).
 pub fn purge(root: &Path, ids: &[String]) -> anyhow::Result<usize> {
     let items = list_trash(root)?;
@@ -722,6 +730,22 @@ mod tests {
         assert!(validate("x.json", "{\"a\": }").unwrap_err().contains("line 1"));
         fs::write(root.join("bin.dat"), [0u8, 1, 2]).unwrap();
         assert!(read_text(&root, "bin.dat").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn history_is_one_files_versions() {
+        let root = temp("history");
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("config/a.toml"), "a = 1\n").unwrap();
+        fs::write(root.join("config/b.toml"), "b = 1\n").unwrap();
+        write_text(&root, "config/a.toml", "a = 2\n", None, false).unwrap();
+        write_text(&root, "config/b.toml", "b = 2\n", None, false).unwrap();
+        let h = history(&root, "/config\\a.toml").unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!((h[0].path.as_str(), h[0].kind.as_str()), ("config/a.toml", "saved-over"));
+        assert_eq!(trash_text(&root, &h[0].id).unwrap(), "a = 1\n");
+        assert!(history(&root, "config/c.toml").unwrap().is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 

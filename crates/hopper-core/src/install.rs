@@ -1099,7 +1099,7 @@ pub(crate) fn addon_as_mod(a: &crate::instances::Addon) -> cf::Mod {
 
 /// Two or more enabled jars in `mods/` that are one mod, whatever their
 /// versions. The game refuses to start with both.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Duplicate {
     pub name: String,
     /// Newest file first (the one to keep).

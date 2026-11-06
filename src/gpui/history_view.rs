@@ -323,6 +323,9 @@ impl BackupsView {
     /// Undoes entries, newest set first. A mod whose version its site no
     /// longer has opens the version picker.
     pub(crate) fn undo(&mut self, files: Vec<Saved>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(t) = self.panel.clone() {
+            return self.undo_panel(t, files, window, cx);
+        }
         let root = self.root.clone();
         let s = self.store.read(cx);
         if let Some(why) = s.edit_hold_reason(&root) {
@@ -370,6 +373,73 @@ impl BackupsView {
         .detach();
     }
 
+    /// The time of the History entry a file is in (how a panel names it).
+    fn when_of(&self, f: &Saved) -> Option<i64> {
+        self.sets.iter().find(|s| s.files.contains(f)).map(|s| s.when)
+    }
+
+    /// Undo on a panel server: the panel does the same per file.
+    fn undo_panel(&mut self, t: crate::panel_tabs::Target, files: Vec<Saved>, window: &mut Window, cx: &mut Context<Self>) {
+        let picked: Vec<(i64, Saved)> = files.into_iter().filter_map(|f| Some((self.when_of(&f)?, f))).collect();
+        let downloads = picked.iter().any(|(_, f)| f.download);
+        self.busy = Some(if downloads { "Downloading to put it back…".into() } else { "Putting it back…".into() });
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let (done, gone, errors, restart) = cx
+                .background_spawn(async move {
+                    let mut done: Vec<String> = Vec::new();
+                    let mut gone: Option<(Saved, Gone)> = None;
+                    let mut errors = Vec::new();
+                    let mut restart = false;
+                    for (when, f) in &picked {
+                        match t.client.post(&t.sp("/mod-backups/undo"), serde_json::json!({ "when": when, "name": f.name })) {
+                            Ok(v) => {
+                                restart |= v["restart_needed"].as_bool().unwrap_or(false);
+                                done.extend(v["restored"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(str::to_string)));
+                                errors.extend(v["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_string)));
+                                if gone.is_none()
+                                    && let Some(g) = gone_of(&v["gone"])
+                                {
+                                    gone = Some((f.clone(), g));
+                                }
+                            }
+                            Err(e) => errors.push(format!("{}: {e:#}", f.name)),
+                        }
+                    }
+                    (done, gone, errors, restart)
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.busy = None;
+                let paths: Vec<std::path::PathBuf> = done.iter().map(std::path::PathBuf::from).collect();
+                this.say_put_back(&paths, restart, window, cx);
+                this.changed(cx);
+                for e in errors {
+                    window.push_notification(Notification::error(e), cx);
+                }
+                if let Some((f, g)) = gone {
+                    this.pick_version(f, g, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// "Put back X" / "Put back 3 files", with a restart hint for a running
+    /// server.
+    fn say_put_back(&self, done: &[std::path::PathBuf], restart: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let hint = if restart { ". Restart the server to load it." } else { "" };
+        match done {
+            [] => {}
+            [one] => {
+                let n = one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                window.push_notification(Notification::success(format!("Put back {n}{hint}")), cx)
+            }
+            many => window.push_notification(Notification::success(format!("Put back {} files{hint}", many.len())), cx),
+        }
+    }
+
     /// Tells the store and the user what came back.
     fn after_undo(&mut self, done: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
         let root = self.root.clone();
@@ -384,14 +454,7 @@ impl BackupsView {
             s.reload_instance(&root, cx);
             s.identify_jars(&root, jars);
         });
-        match done {
-            [] => {}
-            [one] => {
-                let n = one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                window.push_notification(Notification::success(format!("Put back {n}")), cx)
-            }
-            many => window.push_notification(Notification::success(format!("Put back {} files", many.len())), cx),
-        }
+        self.say_put_back(done, false, window, cx);
         self.changed(cx);
     }
 
@@ -478,16 +541,26 @@ impl BackupsView {
 
     /// Puts another version back in place of a gone one.
     fn put_back_as(&mut self, f: Saved, file: hopper::cf::File, cx: &mut Context<Self>) {
-        let root = self.root.clone();
-        let s = self.store.read(cx);
-        let Some(mut inst) = s.instance(&root).cloned() else { return };
-        let name = f.src.as_ref().map(|r| r.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| f.name.clone());
-        let r2 = root.clone();
-        s.spawn_instance_job(&root, format!("Putting back {name}"), move |job| {
-            hopper::undo::put_back_as(&mut inst, &f, &file, Some(job))?;
-            job.detail(format!("Put back {}", file.file_name));
-            Ok(crate::store::Msg::InstanceChanged(r2))
-        });
+        if let Some(t) = self.panel.clone() {
+            let Some(when) = self.when_of(&f) else { return };
+            let name = f.title();
+            self.store.read(cx).spawn_job(format!("Putting back {name}"), move |job| {
+                t.client.post(&t.sp("/mod-backups/put-back"), serde_json::json!({ "when": when, "name": f.name, "file_id": file.id }))?;
+                job.detail(format!("Put back {}", file.file_name));
+                Ok(crate::store::Msg::Nothing)
+            });
+        } else {
+            let root = self.root.clone();
+            let s = self.store.read(cx);
+            let Some(mut inst) = s.instance(&root).cloned() else { return };
+            let name = f.src.as_ref().map(|r| r.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| f.name.clone());
+            let r2 = root.clone();
+            s.spawn_instance_job(&root, format!("Putting back {name}"), move |job| {
+                hopper::undo::put_back_as(&mut inst, &f, &file, Some(job))?;
+                job.detail(format!("Put back {}", file.file_name));
+                Ok(crate::store::Msg::InstanceChanged(r2))
+            });
+        }
         // The entry leaves History once the job is done.
         let view = cx.entity();
         cx.spawn(async move |_, cx| {
@@ -555,12 +628,30 @@ impl BackupsView {
 
     fn free_space(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let root = self.root.clone();
+        let panel = self.panel.clone();
         self.busy = Some("Checking which mods can be downloaded again…".into());
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let (freed, kept) = cx.background_spawn(async move { hopper::backups::free_space(&root) }).await;
+            let r = cx
+                .background_spawn(async move {
+                    match panel {
+                        Some(t) => t
+                            .client
+                            .post(&t.sp("/mod-backups/free"), serde_json::json!({}))
+                            .map(|v| (v["freed"].as_u64().unwrap_or(0), v["kept"].as_u64().unwrap_or(0))),
+                        None => Ok(hopper::backups::free_space(&root)),
+                    }
+                })
+                .await;
             this.update_in(cx, |this, window, cx| {
                 this.busy = None;
+                let (freed, kept) = match r {
+                    Ok(r) => r,
+                    Err(e) => {
+                        window.push_notification(Notification::error(format!("Couldn't free up space: {e:#}")), cx);
+                        return;
+                    }
+                };
                 let size = hopper::instance_ops::human_bytes;
                 let msg = match (freed, kept) {
                     (0, _) => "None of the copies can be downloaded again, so they stay.".to_string(),
@@ -574,6 +665,28 @@ impl BackupsView {
         })
         .detach();
     }
+}
+
+/// The version picker's question, from a panel's undo reply.
+fn gone_of(v: &serde_json::Value) -> Option<Gone> {
+    let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+    let choices: Vec<hopper::cf::File> = v["choices"]
+        .as_array()?
+        .iter()
+        .map(|c| hopper::cf::File {
+            id: c["id"].as_u64().unwrap_or(0),
+            file_name: c["file_name"].as_str().unwrap_or_default().to_string(),
+            file_date: c["date"].as_str().unwrap_or_default().to_string(),
+            ..Default::default()
+        })
+        .collect();
+    Some(Gone {
+        name: if s("title").is_empty() { s("name") } else { s("title") },
+        version: s("version"),
+        site: if v["site"].as_str() == Some("Modrinth") { "Modrinth" } else { "CurseForge" },
+        choices,
+        closest: v["closest"].as_u64().unwrap_or(0) as usize,
+    })
 }
 
 fn change_color(c: Change, same: bool, cx: &App) -> Hsla {

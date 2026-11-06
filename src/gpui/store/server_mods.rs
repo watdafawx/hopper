@@ -48,6 +48,7 @@ fn fetch_remote(root: &Path, r: &Remote) -> anyhow::Result<Fetched> {
     let v = c.get(&Client::server_path(&r.id, "/mods/instance"))?;
     let mut inst: Instance = serde_json::from_value(v["instance"].clone())?;
     inst.root = root.to_path_buf();
+    note_untrusted(root, &v);
     let loose = v["loose"]
         .as_array()
         .map(|a| {
@@ -417,4 +418,233 @@ pub fn remote_config_reset(root: &Path, file: &str) -> anyhow::Result<usize> {
     let c = Client::for_remote(&r)?;
     let v = c.post(&Client::server_path(&r.id, "/mods/config-reset"), json!({ "file": file.trim_end_matches(".disabled") }))?;
     Ok(v["reset"].as_u64().unwrap_or(0) as usize)
+}
+
+// ---- mods from GitHub and other links, on a Hopper Server ----
+//
+// The jars are on the panel's machine, so the panel looks links up, reads
+// the jars, downloads and keeps its own list of trusted publishers: nothing
+// here reads them or downloads to this PC, and this PC's trust list isn't
+// asked.
+
+/// Files on each Hopper Server list whose source the panel hasn't trusted
+/// yet, from the last fetch. A root with no entry: the panel didn't say.
+static UNTRUSTED: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, HashSet<String>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn note_untrusted(root: &Path, v: &Value) {
+    let mut map = UNTRUSTED.lock().unwrap_or_else(|e| e.into_inner());
+    match v["untrusted"].as_array() {
+        Some(a) => {
+            map.insert(root.to_path_buf(), a.iter().filter_map(|f| f.as_str()).map(str::to_lowercase).collect());
+        }
+        None => {
+            map.remove(root);
+        }
+    }
+}
+
+fn panel_of(root: &Path) -> anyhow::Result<(Client, Remote)> {
+    let r = remote(root).ok_or_else(|| anyhow::anyhow!("That server isn't on a Hopper Server."))?;
+    Ok((Client::for_remote(&r)?, r))
+}
+
+fn source_kind(label: &str) -> hopper::sources::Kind {
+    use hopper::sources::Kind;
+    match label {
+        "GitHub" => Kind::GitHub,
+        "Maven" => Kind::Maven,
+        "Jenkins" => Kind::Jenkins,
+        _ => Kind::Url,
+    }
+}
+
+/// The source in a panel's answer: whole from a newer panel, else rebuilt
+/// from its kind, publisher and page.
+fn source_of(v: &Value) -> hopper::sources::ModSource {
+    if let Ok(s) = serde_json::from_value::<hopper::sources::ModSource>(v["source"].clone())
+        && !s.publisher.is_empty()
+    {
+        return s;
+    }
+    let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+    let kind = source_kind(&s("kind"));
+    let page = s("page");
+    let url = match kind {
+        hopper::sources::Kind::GitHub => page.trim_start_matches("https://github.com/").to_string(),
+        _ => page,
+    };
+    hopper::sources::ModSource { kind, url, publisher: s("publisher"), seen: s("seen"), ..Default::default() }
+}
+
+fn resolved_of(v: &Value) -> hopper::sources::Resolved {
+    use hopper::sources::{Candidate, Fit};
+    let s = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
+    let candidates = v["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| Candidate {
+            file_name: s(c, "file"),
+            version: s(c, "version"),
+            title: s(c, "title"),
+            date: s(c, "date"),
+            size: c["size"].as_u64().unwrap_or(0),
+            author: s(c, "author"),
+            prerelease: c["prerelease"].as_bool().unwrap_or(false),
+            page: s(c, "page"),
+            // An older panel only says whether it fits.
+            fit: serde_json::from_value(c["fit"].clone()).unwrap_or_else(|_| {
+                if c["good"].as_bool().unwrap_or(false) {
+                    Fit::Good
+                } else if c["fits"].as_bool().unwrap_or(false) {
+                    Fit::Unknown
+                } else {
+                    Fit::Loader(s(c, "tag"))
+                }
+            }),
+            ..Default::default()
+        })
+        .collect();
+    hopper::sources::Resolved {
+        source: source_of(v),
+        name: s(v, "name"),
+        candidates,
+        pick: v["pick"].as_u64().map(|i| i as usize),
+        ambiguous: v["ambiguous"].as_bool().unwrap_or(false),
+    }
+}
+
+fn adoption_of(v: &Value) -> hopper::sources::Adoption {
+    let s = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
+    hopper::sources::Adoption {
+        source: source_of(v),
+        matched: serde_json::from_value(v["matched"].clone()).unwrap_or(hopper::sources::Matched::Unknown),
+        newest: v["newest"].is_object().then(|| hopper::sources::Candidate {
+            file_name: s(&v["newest"], "file"),
+            version: s(&v["newest"], "version"),
+            title: s(&v["newest"], "title"),
+            ..Default::default()
+        }),
+        name: s(v, "name"),
+    }
+}
+
+impl Store {
+    /// Whether the panel allows mods from links (its owner's setting).
+    pub fn remote_sources_allowed(root: &Path) -> anyhow::Result<bool> {
+        let (c, _) = panel_of(root)?;
+        Ok(c.get("/settings/sources")?["allowed"].as_bool().unwrap_or(false))
+    }
+
+    /// A link looked up by the panel for the server, and whether the panel
+    /// trusts its publisher.
+    pub fn remote_source_resolve(root: &Path, link: &str, pre: bool) -> anyhow::Result<(hopper::sources::Resolved, bool)> {
+        let (c, r) = panel_of(root)?;
+        let v = c.post(&Client::server_path(&r.id, "/mods/source/resolve"), json!({ "link": link, "prerelease": pre }))?;
+        Ok((resolved_of(&v), v["trusted"].as_bool().unwrap_or(false)))
+    }
+
+    /// How an installed jar on the server would follow `link` (nothing
+    /// changes yet), and whether the panel trusts its publisher.
+    pub fn remote_source_plan(root: &Path, file: &str, link: &str, pre: bool) -> anyhow::Result<(hopper::sources::Adoption, bool)> {
+        let (c, r) = panel_of(root)?;
+        let body = json!({ "file": file.trim_end_matches(".disabled"), "link": link, "prerelease": pre });
+        let v = c.post(&Client::server_path(&r.id, "/mods/source/plan"), body)?;
+        Ok((adoption_of(&v), v["trusted"].as_bool().unwrap_or(false)))
+    }
+
+    /// The source a jar on the server links to in its own files.
+    pub fn remote_source_suggest(root: &Path, file: &str) -> anyhow::Result<Option<String>> {
+        let (c, r) = panel_of(root)?;
+        let path = format!("/mods/source/suggest?file={}", hopper::hopperd::enc(file.trim_end_matches(".disabled")));
+        Ok(c.get(&Client::server_path(&r.id, &path))?["link"].as_str().filter(|l| !l.is_empty()).map(str::to_string))
+    }
+
+    /// The server's unknown mods, each with the source its jar suggests.
+    pub fn remote_source_unknown(root: &Path) -> anyhow::Result<Vec<hopper::sources::Unknown>> {
+        let (c, r) = panel_of(root)?;
+        let v = c.get(&Client::server_path(&r.id, "/mods/source/unknown"))?;
+        Ok(serde_json::from_value(v["mods"].clone()).unwrap_or_default())
+    }
+
+    /// Whether a mod on a Hopper Server needs its source confirmed, as the
+    /// panel said on the last fetch; `None` when it didn't say.
+    pub fn remote_source_untrusted(root: &Path, file: &str) -> Option<bool> {
+        let map = UNTRUSTED.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(root).map(|l| l.contains(&file.to_lowercase()))
+    }
+
+    /// Adds the file `file` from `link` to the server, or makes the
+    /// installed `follow` follow it: the panel looks the link up again,
+    /// trusts its publisher and downloads, as a job.
+    pub fn remote_source_add(&self, root: &Path, title: String, link: &str, pre: bool, file: &str, follow: Option<String>) {
+        let body = json!({
+            "link": link, "prerelease": pre, "file": file,
+            "follow": follow.map(|f| f.trim_end_matches(".disabled").to_string()),
+        });
+        self.remote_job(root, title, "/mods/source/add", body, |root, _| Msg::InstanceChanged(root));
+    }
+
+    /// Makes the installed jar follow `link`, the file left as it is.
+    pub fn remote_source_adopt(&self, root: &Path, title: String, name: String, file: &str, link: &str, pre: bool) {
+        let Some(r) = remote(root) else { return };
+        let body = json!({ "file": file.trim_end_matches(".disabled"), "link": link, "prerelease": pre });
+        let root2 = root.to_path_buf();
+        self.spawn_instance_job(root, title, move |job| {
+            let c = Client::for_remote(&r)?;
+            let v = c.post(&Client::server_path(&r.id, "/mods/source/adopt"), body)?;
+            let who = v["publisher"].as_str().unwrap_or_default();
+            job.detail(match v["newest"]["version"].as_str() {
+                Some(new) => format!("{name} follows {who}. {new} is out: it's in Updates."),
+                None => format!("{name} follows {who}. It's up to date."),
+            });
+            Ok(Msg::InstanceChanged(root2))
+        });
+    }
+
+    /// Follows sources for several unknown mods (file, link) in one panel job.
+    pub fn remote_source_adopt_many(&self, root: &Path, picked: Vec<(String, String)>) {
+        let n = picked.len();
+        let items: Vec<Value> = picked
+            .iter()
+            .map(|(f, l)| json!({ "file": f.trim_end_matches(".disabled"), "link": l }))
+            .collect();
+        self.remote_job(root, format!("Finding sources for {n} mods"), "/mods/source/adopt-many", json!({ "items": items }), |root, _| {
+            Msg::InstanceChanged(root)
+        });
+    }
+
+    /// "Stop following" on a Hopper Server.
+    pub fn remote_source_unfollow(&self, root: &Path, file: &str) {
+        let Some(r) = remote(root) else { return };
+        let (root2, file) = (root.to_path_buf(), file.trim_end_matches(".disabled").to_string());
+        self.spawn_instance_job(root, format!("Stop following a source for {file}"), move |job| {
+            let c = Client::for_remote(&r)?;
+            c.post(&Client::server_path(&r.id, "/mods/source/unfollow"), json!({ "file": file }))?;
+            job.detail(format!("{file} no longer follows its source."));
+            Ok(Msg::InstanceChanged(root2))
+        });
+    }
+
+    /// The panel trusts the source a mod came with (a pack or a sync), then
+    /// checks the server's updates again so it shows there.
+    pub fn remote_source_trust(&mut self, root: &Path, file: &str) {
+        let Some(r) = remote(root) else { return };
+        let prev = self.updates.get(root).and_then(|u| u.ready().cloned()).unwrap_or_default();
+        let (root, file) = (root.to_path_buf(), file.trim_end_matches(".disabled").to_string());
+        self.spawn(move || {
+            let asked = Client::for_remote(&r).and_then(|c| c.post(&Client::server_path(&r.id, "/mods/source/trust"), json!({ "file": file })));
+            if let Err(e) = asked {
+                return Msg::RemoteFailed(root, format!("{e:#}"));
+            }
+            if let Some(l) = UNTRUSTED.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&root) {
+                l.remove(&file.to_lowercase());
+            }
+            match updates_remote(&r, true) {
+                Ok((list, archived, breaks)) => Msg::RemoteUpdates(root, list, archived, breaks),
+                Err(e) => Msg::Updates { root, result: Err(format!("{e:#}")), prev },
+            }
+        });
+    }
 }

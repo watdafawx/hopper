@@ -60,10 +60,66 @@ pub(crate) fn mod_files(store: &Entity<Store>, root: &Path, project_id: u64, fil
 
 /// Opens a mod's config: its first settings file, with chips for the rest.
 pub fn open_for_mod(store: Entity<Store>, root: PathBuf, project_id: u64, file_name: String, window: &mut Window, cx: &mut App) {
+    if let Some(r) = crate::store::on_hopper_server(&root) {
+        return open_for_mod_on_panel(store, root, r, project_id, file_name, window, cx);
+    }
     let Some((name, icon, files)) = mod_files(&store, &root, project_id, &file_name, cx) else { return };
     let first = files.iter().find(|f| hopper::configedit::Format::of(f).is_some()).or(files.first()).cloned();
     match first {
         Some(rel) => open_titled(store, root, name, icon, files, rel, None, window, cx),
         None => window.push_notification(Notification::info(format!("{name} has no config files yet. Most mods write them on the first launch.")), cx),
     }
+}
+
+/// [`open_for_mod`] for a server on a Hopper Server: its panel says which
+/// files are the mod's and sends their text, and saves go back through it
+/// (the same view as its Configs tab, in the dialog).
+fn open_for_mod_on_panel(store: Entity<Store>, root: PathBuf, r: hopper::hopperd::Remote, project_id: u64, file_name: String, window: &mut Window, cx: &mut App) {
+    let t = match crate::panel_tabs::Target::new(r) {
+        Ok(t) => t,
+        Err(e) => return window.push_notification(Notification::error(format!("Can't reach the panel: {e}")), cx),
+    };
+    let s = store.read(cx);
+    let addon = s.instance(&root).and_then(|i| i.addons.iter().find(|a| (project_id != 0 && a.project_id == project_id) || a.file_name == file_name).cloned());
+    let (name, icon_url) = addon.map(|a| (a.name, a.icon)).unwrap_or_else(|| (file_name.clone(), String::new()));
+    let icon = s.image(&icon_url).map(Path::to_path_buf);
+    let running = s.status(&root).is_some_and(|st| st.ms().is_some());
+    let (r2, f2, t2) = (root.clone(), file_name.clone(), t.clone());
+    let task = cx.background_spawn(async move {
+        let files: Vec<String> = crate::store::remote_config_files(&r2, &f2)?
+            .into_iter()
+            .filter(|f| {
+                let l = f.to_ascii_lowercase();
+                TEXT_ENDINGS.iter().any(|e| l.ends_with(e))
+            })
+            .collect();
+        let want: Vec<String> = files.iter().filter(|f| hopper::configedit::Format::of(f).is_some()).cloned().collect();
+        let texts = crate::panel_tabs::http(&*t2.client)?.configs_parse(t2.id(), &want)?;
+        anyhow::Ok((files, texts))
+    });
+    window
+        .spawn(cx, async move |cx| {
+            let r = task.await;
+            cx.update(|window, cx| match r {
+                Err(e) => window.push_notification(Notification::error(format!("Couldn't read {name}'s config from the panel: {e:#}")), cx),
+                Ok((files, _)) if files.is_empty() => {
+                    window.push_notification(Notification::info(format!("{name} has no config files yet. Most mods write them on the first launch.")), cx)
+                }
+                Ok((files, texts)) => {
+                    let room = widgets::dialog_room(window) - window.rem_size() * 4.;
+                    let side = crate::config_view::ServerSide { source: crate::config_view::Source::Panel(t), running };
+                    let title = name.clone();
+                    let view = cx.new(|cx| ConfigView::for_server(store, root, side, texts, title, icon, files, None, window, cx));
+                    window.open_dialog(cx, move |dialog, window, _| {
+                        dialog
+                            .title(format!("{name} · config"))
+                            .w(rems(64.).to_pixels(window.rem_size()))
+                            .margin_top(rems(widgets::DIALOG_TOP).to_pixels(window.rem_size()))
+                            .child(div().h(room).child(view.clone()))
+                    });
+                }
+            })
+            .ok();
+        })
+        .detach();
 }

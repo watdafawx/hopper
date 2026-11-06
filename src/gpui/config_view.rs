@@ -1846,6 +1846,11 @@ impl ConfigIndexes {
         .detach();
     }
 
+    /// An index for `root` is being read, or couldn't be.
+    pub fn tried(&self, root: &Path) -> bool {
+        matches!(self.map.get(root), Some(Slot::Loading | Slot::Failed(_)))
+    }
+
     /// The index right now, without starting one.
     pub fn peek(&self, root: &Path) -> Option<Arc<InstIndex>> {
         match self.map.get(root) {
