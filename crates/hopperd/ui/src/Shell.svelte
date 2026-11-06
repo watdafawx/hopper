@@ -8,8 +8,10 @@
   import {
     LayoutDashboard, Compass, ChevronLeft, ChevronRight, Search, RefreshCw, Settings as Gear, LogOut,
     Plus, Play, Square, RotateCw, Server, Terminal, Folder, Puzzle, Earth, Users, Archive, CalendarClock, SlidersHorizontal,
-    CircleCheck, CircleAlert, FolderOpen, Stethoscope, X as Close,
+    CircleCheck, CircleAlert, FolderOpen, Stethoscope, X as Close, Bug,
   } from '@lucide/svelte';
+  import GithubMark from './lib/GithubMark.svelte';
+  import { REPO_URL, issueUrl, setVersion } from './lib/report.js';
   import { loaderText } from './lib/format.js';
   import { boot } from './lib/boot.svelte.js';
   import { api, post } from './lib/api.js';
@@ -38,6 +40,8 @@
   import { upd } from './lib/panelupdate.svelte.js';
 
   let { hello, me, onSignOut } = $props();
+  // The panel's version doesn't change under an open page (it reloads on update).
+  setVersion(hello?.version);
   const owner = $derived(ownerLike(me));
   const canPower = $derived(me?.role !== 'viewer');
   // A toast when a start or stop ends ("TNP-LL8 started in 1m 32s.").
@@ -366,6 +370,9 @@
       <div class="track">
         <button class="btn ghost sm" title="Search or run a command (Ctrl+K)" onclick={openPalette}><Search size={14} /><span class="kl">Ctrl K</span></button>
         {#if owner}<button class="btn ghost icon" title="Look for new server folders" onclick={rescan}><RefreshCw size={14} /></button>{/if}
+        <!-- Help sits with the tools, as in desktop: report a problem, or the project page. -->
+        <a class="btn ghost icon" href={issueUrl()} target="_blank" rel="noopener" title="Report a problem on GitHub" aria-label="Report a problem on GitHub"><Bug size={14} /></a>
+        <a class="btn ghost icon" href={REPO_URL} target="_blank" rel="noopener" title="Hopper on GitHub" aria-label="Hopper on GitHub"><GithubMark size={14} /></a>
         <button class="btn ghost icon" class:on={page === 'settings'} title="Settings (Ctrl+,)" onclick={() => go('/settings')}>
           <Gear size={14} />{#if pending.length}<span class="pdot"></span>{/if}
         </button>

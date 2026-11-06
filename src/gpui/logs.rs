@@ -534,7 +534,7 @@ impl LogsView {
                         callout(theme.danger, cx)
                             .child(crash_list::card_head("The game crashed", when, times, vec![crash_list::open_button(path)], cx))
                             .child(widgets::caption("Hopper couldn't tell what went wrong. The report has the details.", cx))
-                            .child(div().pt_1().child(crash_list::share_row(self, &rel, cx)))
+                            .child(div().pt_1().child(crash_list::crash_share_row(self, &rel, "", cx)))
                             .into_any_element()
                     }
                     _ => {
@@ -751,7 +751,7 @@ impl LogsView {
         } else {
             "The game crashed"
         };
-        let share = rel.filter(|_| source.is_file()).map(|r| crash_list::share_row(self, &r, cx));
+        let share = rel.filter(|_| source.is_file()).map(|r| crash_list::crash_share_row(self, &r, &c.headline, cx));
         let follow = crash_list::follow_up_note(c, cx);
         callout(theme.danger, cx)
             .child(crash_list::card_head(title, c.when, times, buttons, cx))

@@ -440,19 +440,19 @@ impl ServerLogsView {
                 return callout(theme.danger, cx)
                     .child(head("The server crashed", cx))
                     .child(crate::crash_view::note_text(format!("Hopper couldn't read this report: {e}"), cx))
-                    .child(div().pt_1().child(crash_list::share_row(self, &r.rel, cx)))
+                    .child(div().pt_1().child(crash_list::crash_share_row(self, &r.rel, "", cx)))
                     .into_any_element();
             }
             Some(Some(Ok(c))) => c.clone(),
         };
-        let share = crash_list::share_row(self, &r.rel, cx);
         let Some(c) = card.crash else {
             return callout(theme.danger, cx)
                 .child(head("The server crashed", cx))
                 .child(widgets::caption("Hopper couldn't tell what went wrong. The report has the details.", cx))
-                .child(div().pt_1().child(share))
+                .child(div().pt_1().child(crash_list::crash_share_row(self, &r.rel, "", cx)))
                 .into_any_element();
         };
+        let share = crash_list::crash_share_row(self, &r.rel, &c.headline, cx);
 
         // Names and icons from the pack the server runs, else the jar's own.
         let addons: Vec<Addon> = {
