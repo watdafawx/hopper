@@ -15,7 +15,6 @@
   import { followJob } from './lib/jobs.js';
   import { download, queueUploads, transfers } from './lib/transfers.svelte.js';
   import { onDestroy, untrack } from 'svelte';
-  import DataPacks from './DataPacks.svelte';
 
   let { server, openFiles, openBackups } = $props();
   const sid = $derived(server.id);
@@ -220,8 +219,6 @@
 </div>
 
 {#if data}
-  <!-- Every world's packs and Paxi's in one list, as desktop's Data packs tab. -->
-  <DataPacks {server} {openFiles} reloadKey={data.worlds.map((w) => w.name).join('|')} />
   {#each data.worlds as w (w.name)}
     <div class="card world" class:act={w.active}>
       <div class="row">

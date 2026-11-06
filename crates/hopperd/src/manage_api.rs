@@ -621,8 +621,8 @@ async fn create(State(app): State<Arc<App>>, headers: HeaderMap, method: Method,
 mod tests {
     #[test]
     fn names() {
-        assert!(super::valid_name("Steve") && super::valid_name("a_b_9"));
-        assert!(!super::valid_name("x y") && !super::valid_name("Steve;op me") && !super::valid_name(""));
+        assert!(hopper_core::hosting::players::valid_name("Steve") && hopper_core::hosting::players::valid_name("a_b_9"));
+        assert!(!hopper_core::hosting::players::valid_name("x y") && !hopper_core::hosting::players::valid_name("Steve;op me") && !hopper_core::hosting::players::valid_name(""));
     }
 
     #[test]
