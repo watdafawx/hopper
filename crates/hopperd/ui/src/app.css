@@ -112,6 +112,25 @@ mark.hit { background: color-mix(in srgb, var(--acc) 30%, transparent); color: v
 .tpill { display: inline-flex; align-items: center; gap: 5px; box-sizing: border-box; height: 24px; line-height: 1; padding: 0 11px; border-radius: var(--radius); border: 1px solid var(--line2); color: var(--subtle); font-size: 12.5px; white-space: nowrap; }
 .tpill:hover { background: var(--hover); color: var(--text); }
 .tpill[aria-pressed='true'] { background: #2e2e34; border-color: #6a6a74; color: var(--text); padding-left: 8px; }
+/* The Mods filter rail (desktop's widgets::Segmented::rail): icon buttons in one rounded track. The picked one (and a toggle that is
+   on) opens to icon + name + count; the rest stay icons with a "Name · count" tooltip on hover and keyboard focus. Use
+   <div class="seg icons" role="group"> with <button class="si" aria-pressed data-tip>; .tog is a toggle (a ring while on). */
+.seg.icons { display: inline-flex; flex: none; align-items: center; gap: 2px; padding: 2px; border-radius: var(--radius); background: #ededef0f; }
+.seg.icons .si { position: relative; display: inline-flex; align-items: center; height: 26px; padding: 0 7px; border-radius: var(--radius-sm); color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.seg.icons .si:hover { background: var(--hover); color: var(--text); }
+.seg.icons .si[aria-pressed='true'] { background: var(--sel); color: var(--text); font-weight: 500; }
+.seg.icons .si.tog[aria-pressed='true'] { box-shadow: inset 0 0 0 1px #f9731680; }
+.seg.icons .si:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
+.seg.icons .sep { width: 1px; height: 14px; margin: 0 2px; background: #ededef2e; flex: none; }
+/* Name and count open with an animated width: a grid track from 0fr to 1fr. */
+.seg.icons .lbw { display: grid; grid-template-columns: 0fr; transition: grid-template-columns .16s ease-out; }
+.seg.icons .si[aria-pressed='true'] .lbw { grid-template-columns: 1fr; }
+.seg.icons .lbw > span { overflow: hidden; min-width: 0; display: inline-flex; align-items: center; gap: 6px; opacity: 0; transition: opacity .16s; }
+.seg.icons .si[aria-pressed='true'] .lbw > span { opacity: 1; padding-left: 6px; }
+.seg.icons .ct { font-size: 11px; color: var(--muted); font-weight: 400; }
+.seg.icons .bdg { position: absolute; top: -3px; right: -4px; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 7px; background: var(--acc); color: #1c0d02; font-size: 9.5px; font-weight: 700; line-height: 14px; text-align: center; }
+.seg.icons .si[aria-pressed='true'] .bdg { display: none; }
+.seg.icons .si:not([aria-pressed='true'])[data-tip]:is(:hover, :focus-visible)::after { content: attr(data-tip); position: absolute; z-index: 80; top: calc(100% + 6px); left: 50%; transform: translateX(-50%); padding: 4px 8px; border-radius: var(--radius); background: var(--popover); border: 1px solid var(--line2); color: var(--text); font-size: 12px; font-weight: 400; box-shadow: 0 8px 24px #0009; pointer-events: none; }
 /* The muted label in front of a group of filters ("Filter"). */
 .glabel { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
 .input { display: flex; align-items: center; gap: 7px; background: var(--base); border: 1px solid var(--input-line); border-radius: var(--radius); padding: 7px 10px; color: var(--subtle); }
