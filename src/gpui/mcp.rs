@@ -369,6 +369,10 @@ fn navigate(app: &mut AppView, v: &Value, window: &mut Window, cx: &mut Context<
             .map(|s| s.root.clone());
         if let Some(root) = root {
             app.open_sync(Some(root), cx);
+            // `server_tab`: one of its tabs by name ("worlds", "data packs").
+            if let Some(tab) = s("server_tab") {
+                app.servers.update(cx, |v, cx| v.set_tab_named(&tab, cx));
+            }
         }
     }
 }

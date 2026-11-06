@@ -343,6 +343,11 @@ impl AppView {
                     this.browse.update(cx, |b, cx| b.browse_for(root, class, None, cx));
                     this.go(Page::Browse, cx);
                 }
+                ServersEvent::BrowseInto { root, class, dest } => {
+                    let (root, class, dest) = (root.clone(), *class, dest.clone());
+                    this.browse.update(cx, |b, cx| b.browse_for(root, class, dest, cx));
+                    this.go(Page::Browse, cx);
+                }
                 ServersEvent::Find { root, text } => {
                     let (root, text) = (root.clone(), text.clone());
                     this.browse.update(cx, |b, cx| {

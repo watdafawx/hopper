@@ -18,27 +18,42 @@ pub mod settings;
 
 use crate::store::Store;
 use gpui_kit::*;
-use hopper::hopperd::{Client, Remote};
+use hopper::hopperd::{Client, PanelApi, Remote};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// A server on a Hopper Server, and a client for its panel.
+/// A server's tabs' way in: a server on a Hopper Server through its
+/// panel, or a server folder on this PC answered in process with the same
+/// routes ([`hopper::hosting::local_api::LocalApi`]).
 #[derive(Clone)]
 pub struct Target {
     pub remote: Remote,
-    pub client: Arc<Client>,
+    pub client: Arc<dyn PanelApi>,
+    /// The server folder, for a server on this PC.
+    pub local: Option<std::path::PathBuf>,
 }
 
 impl PartialEq for Target {
     fn eq(&self, o: &Self) -> bool {
-        self.remote == o.remote
+        self.remote == o.remote && self.local == o.local
     }
 }
 
 impl Target {
     pub fn new(remote: Remote) -> Result<Self, String> {
         let client = Client::for_remote(&remote).map_err(|e| format!("{e:#}"))?;
-        Ok(Target { remote, client: Arc::new(client) })
+        Ok(Target { remote, client: Arc::new(client), local: None })
+    }
+
+    /// A server folder on this PC; `server` is its process when Hopper
+    /// hosts it.
+    pub fn local(root: &std::path::Path, server: Option<Arc<hopper::hosting::process::LocalServer>>) -> Self {
+        let id = hopper::hosting::local_api::LocalApi::id_of(root);
+        Target {
+            remote: Remote { base: "local".into(), id, ca: String::new(), panel: "local".into() },
+            client: Arc::new(hopper::hosting::local_api::LocalApi::new(root, server)),
+            local: Some(root.to_path_buf()),
+        }
     }
 
     /// The server's id on its panel.
@@ -57,6 +72,11 @@ impl Target {
     }
 }
 
+/// The HTTP client behind `c`, for what only a Hopper Server does.
+pub fn http(c: &dyn PanelApi) -> anyhow::Result<&Client> {
+    c.client().ok_or_else(|| anyhow::anyhow!("Only a Hopper Server does this."))
+}
+
 /// `s` encoded for a query value.
 pub fn q(s: &str) -> String {
     hopper::hopperd::enc(s)
@@ -67,12 +87,12 @@ pub fn q(s: &str) -> String {
 pub fn call<V: 'static, T: Send + 'static>(
     cx: &mut Context<V>,
     t: &Target,
-    work: impl FnOnce(&Client) -> anyhow::Result<T> + Send + 'static,
+    work: impl FnOnce(&dyn PanelApi) -> anyhow::Result<T> + Send + 'static,
     done: impl FnOnce(&mut V, Result<T, String>, &mut Context<V>) + 'static,
 ) {
     let client = t.client.clone();
     cx.spawn(async move |this, cx| {
-        let r = cx.background_spawn(async move { work(&client).map_err(|e| format!("{e:#}")) }).await;
+        let r = cx.background_spawn(async move { work(&*client).map_err(|e| format!("{e:#}")) }).await;
         this.update(cx, |v, cx| {
             done(v, r, cx);
             cx.notify();
@@ -88,12 +108,12 @@ pub fn call_in<V: 'static, T: Send + 'static>(
     window: &mut Window,
     cx: &mut Context<V>,
     t: &Target,
-    work: impl FnOnce(&Client) -> anyhow::Result<T> + Send + 'static,
+    work: impl FnOnce(&dyn PanelApi) -> anyhow::Result<T> + Send + 'static,
     done: impl FnOnce(&mut V, Result<T, String>, &mut Window, &mut Context<V>) + 'static,
 ) {
     let client = t.client.clone();
     cx.spawn_in(window, async move |this, cx| {
-        let r = cx.background_spawn(async move { work(&client).map_err(|e| format!("{e:#}")) }).await;
+        let r = cx.background_spawn(async move { work(&*client).map_err(|e| format!("{e:#}")) }).await;
         this.update_in(cx, |v, window, cx| {
             done(v, r, window, cx);
             cx.notify();

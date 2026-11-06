@@ -16,43 +16,7 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new().route("/api/v1/servers/{id}/worlds/{name}/datapacks/{file}", delete(remove_pack))
 }
 
-/// One data pack in a world's `datapacks/`.
-#[derive(serde::Serialize)]
-pub struct Pack {
-    pub name: String,
-    pub size: u64,
-    pub dir: bool,
-}
-
-/// A world's data packs (zips, jars and folders; switched-off ones too),
-/// without Hopper's own files, as desktop lists them.
-pub fn datapacks(dir: &std::path::Path) -> Vec<Pack> {
-    hopper_core::instance_ops::datapacks(dir)
-        .into_iter()
-        .filter_map(|p| {
-            let name = p.file_name()?.to_string_lossy().into_owned();
-            if name.to_ascii_lowercase().starts_with(".hopper-") {
-                return None;
-            }
-            let dir = p.is_dir();
-            let size = if dir { 0 } else { std::fs::metadata(&p).map_or(0, |m| m.len()) };
-            Some(Pack { name, size, dir })
-        })
-        .collect()
-}
-
-/// One file or folder name in `datapacks/`: no separators, no `.` / `..`,
-/// no drive or stream (`:`), no control characters, and not Hopper's own
-/// `.hopper-*` files (the list hides them, so they can't be meant).
-pub fn check_pack_name(file: &str) -> Result<(), &'static str> {
-    let bad = file.is_empty()
-        || file.len() > 255
-        || file == "."
-        || file == ".."
-        || file.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
-        || file.to_ascii_lowercase().starts_with(".hopper-");
-    if bad { Err("That isn't a data pack's name.") } else { Ok(()) }
-}
+use hopper_core::hosting::worlds::check_pack_name;
 
 /// Moves a world's data pack to the server's trash (Files › Trash).
 async fn remove_pack(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path((id, name, file)): Path<(String, String, String)>) -> ApiResult<Json<Value>> {
@@ -75,7 +39,7 @@ async fn remove_pack(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
 
 #[cfg(test)]
 mod tests {
-    use super::check_pack_name;
+    use hopper_core::hosting::worlds::check_pack_name;
 
     #[test]
     fn datapack_names() {

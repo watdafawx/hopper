@@ -260,13 +260,58 @@ pub struct World {
     pub dir: PathBuf,
     /// `icon.png`, when the world has one.
     pub icon: Option<PathBuf>,
-    /// Seconds since the epoch, from `level.dat`'s mtime.
+    /// Seconds since the epoch: `level.dat`'s mtime (an instance's), or
+    /// its LastPlayed (a server's).
     pub last_played: i64,
+    /// A server's world that `level-name` points at (the one it loads).
+    pub active: bool,
+    /// Bytes, its dimension folders included. Servers only (0 elsewhere:
+    /// walking every save on each look at the tab would be slow).
+    pub size: u64,
+    pub seed: Option<String>,
+    /// False for a server world made in Hopper and not started yet.
+    pub created: bool,
+}
+
+/// A server folder rather than an instance: worlds sit in the folder
+/// itself, named by `level-name`, not in `saves/`.
+pub fn is_server_dir(root: &Path) -> bool {
+    root.join("server.properties").is_file()
+}
+
+/// The folder worlds live in: `saves/` in an instance, the server's own
+/// folder for a server.
+pub fn worlds_dir(root: &Path) -> PathBuf {
+    if is_server_dir(root) { root.to_path_buf() } else { root.join("saves") }
 }
 
 /// Worlds in `saves/`, most recently played first.
 pub fn worlds(inst: &Instance) -> Vec<World> {
-    let mut out: Vec<World> = fs::read_dir(inst.root.join("saves"))
+    worlds_at(&inst.root)
+}
+
+/// The worlds in an instance or server folder: an instance's newest
+/// first, a server's active one first.
+pub fn worlds_at(root: &Path) -> Vec<World> {
+    if is_server_dir(root) {
+        return crate::hosting::worlds::list(root)
+            .into_iter()
+            .map(|w| {
+                let dir = root.join(&w.name);
+                World {
+                    icon: Some(dir.join("icon.png")).filter(|p| p.exists()),
+                    last_played: w.last_played as i64,
+                    active: w.active,
+                    size: w.size,
+                    seed: w.seed,
+                    created: w.created,
+                    name: w.name,
+                    dir,
+                }
+            })
+            .collect();
+    }
+    let mut out: Vec<World> = fs::read_dir(root.join("saves"))
         .into_iter()
         .flatten()
         .flatten()
@@ -283,6 +328,10 @@ pub fn worlds(inst: &Instance) -> Vec<World> {
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs() as i64),
+            active: false,
+            size: 0,
+            seed: None,
+            created: true,
             dir,
         })
         .collect();
@@ -434,7 +483,10 @@ pub fn datapack_targets(inst: &Instance) -> Vec<(String, String)> {
     for w in worlds(inst) {
         out.push((
             format!("World: {}", w.name),
-            format!("saves/{}/datapacks", w.name),
+            w.dir.join("datapacks").strip_prefix(&inst.root).map_or_else(
+                |_| format!("saves/{}/datapacks", w.name),
+                |r| r.to_string_lossy().replace('\\', "/"),
+            ),
         ));
     }
     out

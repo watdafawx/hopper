@@ -120,6 +120,44 @@ pub fn world_size(dir: &Path) -> u64 {
     total
 }
 
+/// One data pack in a world's `datapacks/`.
+#[derive(serde::Serialize)]
+pub struct Pack {
+    pub name: String,
+    pub size: u64,
+    pub dir: bool,
+}
+
+/// A world's data packs (zips, jars and folders; switched-off ones too),
+/// without Hopper's own files, as desktop lists them.
+pub fn datapacks(dir: &std::path::Path) -> Vec<Pack> {
+    crate::instance_ops::datapacks(dir)
+        .into_iter()
+        .filter_map(|p| {
+            let name = p.file_name()?.to_string_lossy().into_owned();
+            if name.to_ascii_lowercase().starts_with(".hopper-") {
+                return None;
+            }
+            let dir = p.is_dir();
+            let size = if dir { 0 } else { std::fs::metadata(&p).map_or(0, |m| m.len()) };
+            Some(Pack { name, size, dir })
+        })
+        .collect()
+}
+
+/// One file or folder name in `datapacks/`: no separators, no `.` / `..`,
+/// no drive or stream (`:`), no control characters, and not Hopper's own
+/// `.hopper-*` files (the list hides them, so they can't be meant).
+pub fn check_pack_name(file: &str) -> Result<(), &'static str> {
+    let bad = file.is_empty()
+        || file.len() > 255
+        || file == "."
+        || file == ".."
+        || file.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control())
+        || file.to_ascii_lowercase().starts_with(".hopper-");
+    if bad { Err("That isn't a data pack's name.") } else { Ok(()) }
+}
+
 /// The world's folders that exist: itself and Bukkit-style dimension folders.
 pub fn folders(root: &Path, name: &str) -> Vec<String> {
     [name.to_string(), format!("{name}_nether"), format!("{name}_the_end")]
@@ -202,6 +240,26 @@ pub fn list(root: &Path) -> Vec<World> {
         .collect();
     out.sort_by_key(|w| (!w.active, std::cmp::Reverse(w.last_played)));
     out
+}
+
+/// The worlds as the panel API sends them: each with its icon (whether
+/// it has one) and data packs, plus their total size and the active one's
+/// name. Hopper Server and desktop's servers on this PC answer with it.
+pub fn list_json(root: &Path) -> serde_json::Value {
+    let ws = list(root);
+    let total: u64 = ws.iter().map(|w| w.size).sum();
+    let ws: Vec<serde_json::Value> = ws
+        .into_iter()
+        .map(|w| {
+            let dir = root.join(&w.name);
+            let packs = datapacks(&dir.join("datapacks"));
+            let mut v = serde_json::json!(w);
+            v["icon"] = serde_json::json!(dir.join("icon.png").is_file());
+            v["datapacks"] = serde_json::json!(packs);
+            v
+        })
+        .collect();
+    serde_json::json!({ "worlds": ws, "total_size": total, "level": level_name(root) })
 }
 
 /// Makes `name` the world the server loads next start. A world made here

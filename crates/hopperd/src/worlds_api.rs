@@ -79,32 +79,15 @@ async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, P
     let root = e.root.clone();
     let mc = mc_of(&e);
     let v = blocking(move || {
-        let ws = worlds::list(&root);
-        let total: u64 = ws.iter().map(|w| w.size).sum();
-        // As desktop's world cards: the world's icon.png and its data packs.
-        let ws: Vec<Value> = ws
-            .into_iter()
-            .map(|w| {
-                let dir = root.join(&w.name);
-                let packs = crate::parity_worlds::datapacks(&dir.join("datapacks"));
-                let mut v = json!(w);
-                v["icon"] = json!(dir.join("icon.png").is_file());
-                v["datapacks"] = json!(packs);
-                v
-            })
-            .collect();
-        Ok(json!({
-            "worlds": ws,
-            "total_size": total,
-            "level": worlds::level_name(&root),
-            "chunky": {
-                "kind": kind,
-                "jar": worlds::chunky_jar(&root),
-                "minecraft": mc,
-            },
-            "pregen": if running { worlds::chunky_progress(&lines) } else { None },
-            "last_pregen": worlds::last_pregen(&root),
-        }))
+        let mut v = worlds::list_json(&root);
+        v["chunky"] = json!({
+            "kind": kind,
+            "jar": worlds::chunky_jar(&root),
+            "minecraft": mc,
+        });
+        v["pregen"] = json!(if running { worlds::chunky_progress(&lines) } else { None });
+        v["last_pregen"] = json!(worlds::last_pregen(&root));
+        Ok(v)
     })
     .await?;
     let mut v = v;

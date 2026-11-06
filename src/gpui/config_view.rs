@@ -834,6 +834,7 @@ impl ConfigView {
             cx,
             &t,
             move |c| {
+                let c = crate::panel_tabs::http(c)?;
                 Ok(jobs
                     .into_iter()
                     .map(|(rel, base, edits, typed)| {
@@ -1815,7 +1816,7 @@ impl ConfigIndexes {
         match source.clone() {
             Source::Local => self.start(root, cx, |r| Ok(InstIndex::of_server_folder(r))),
             Source::Panel(t) => self.start(root, cx, move |_| {
-                let v = t.client.configs_index(t.id()).map_err(|e| format!("{e:#}"))?;
+                let v = crate::panel_tabs::http(&*t.client).and_then(|c| c.configs_index(t.id())).map_err(|e| format!("{e:#}"))?;
                 Ok(InstIndex::of_panel(&v))
             }),
         }

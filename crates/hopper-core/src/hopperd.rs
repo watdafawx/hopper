@@ -1107,6 +1107,54 @@ pub fn snapshot_files(root: &Path) -> BTreeMap<String, String> {
     out
 }
 
+/// A server's panel API as Hopper's server tabs use it: a Hopper Server
+/// over HTTP ([`Client`]), or a server folder on this PC answered in
+/// process ([`crate::hosting::local_api::LocalApi`]) with the same routes
+/// and replies, so one view serves both.
+pub trait PanelApi: Send + Sync {
+    fn get(&self, path: &str) -> anyhow::Result<Value>;
+    fn post(&self, path: &str, body: Value) -> anyhow::Result<Value>;
+    fn put(&self, path: &str, body: Value) -> anyhow::Result<Value>;
+    fn delete(&self, path: &str) -> anyhow::Result<Value>;
+    /// A POST that starts a job, followed until it ends; its result.
+    fn run_job(&self, path: &str, body: Value, job: &crate::jobs::Job) -> anyhow::Result<Value>;
+    /// Copies `local` to `rel` in the server folder, replacing what's there.
+    fn upload(&self, id: &str, local: &Path, rel: &str) -> anyhow::Result<()>;
+    /// Copies `rel` in the server folder to `local`.
+    fn download(&self, id: &str, rel: &str, local: &Path) -> anyhow::Result<()>;
+    /// The HTTP client, for what only a Hopper Server does.
+    fn client(&self) -> Option<&Client> {
+        None
+    }
+}
+
+impl PanelApi for Client {
+    fn get(&self, path: &str) -> anyhow::Result<Value> {
+        Client::get(self, path)
+    }
+    fn post(&self, path: &str, body: Value) -> anyhow::Result<Value> {
+        Client::post(self, path, body)
+    }
+    fn put(&self, path: &str, body: Value) -> anyhow::Result<Value> {
+        Client::put(self, path, body)
+    }
+    fn delete(&self, path: &str) -> anyhow::Result<Value> {
+        Client::delete(self, path)
+    }
+    fn run_job(&self, path: &str, body: Value, job: &crate::jobs::Job) -> anyhow::Result<Value> {
+        Client::run_job(self, path, body, job)
+    }
+    fn upload(&self, id: &str, local: &Path, rel: &str) -> anyhow::Result<()> {
+        Client::upload(self, id, local, rel)
+    }
+    fn download(&self, id: &str, rel: &str, local: &Path) -> anyhow::Result<()> {
+        Client::download(self, id, rel, local)
+    }
+    fn client(&self) -> Option<&Client> {
+        Some(self)
+    }
+}
+
 pub fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {

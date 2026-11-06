@@ -339,7 +339,7 @@ impl SettingsTab {
         done: impl FnOnce(&mut Self, Result<T, String>, &mut Window, &mut Context<Self>) + 'static,
     ) {
         let Some(t) = &self.target else { return };
-        super::call_in(window, cx, t, work, done);
+        super::call_in(window, cx, t, move |c| work(super::http(c)?), done);
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {

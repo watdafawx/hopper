@@ -951,10 +951,15 @@ impl AddonsView {
     /// Points the table at a server's mods (on this PC or a Hopper
     /// Server); `name` is the server's. Its list is read (or fetched) again.
     pub fn show_server(&mut self, root: PathBuf, name: &str, cx: &mut Context<Self>) {
+        self.show_server_class(root, name, cf::CLASS_MODS, cx);
+    }
+
+    /// [`Self::show_server`] for another class (a server's data packs).
+    pub fn show_server_class(&mut self, root: PathBuf, name: &str, class: u32, cx: &mut Context<Self>) {
         self.server = true;
         self.remote = crate::store::on_hopper_server(&root).is_some();
         self.store.update(cx, |s, _| s.open_server_mods(&root, name));
-        self.point(root, cf::CLASS_MODS, cx);
+        self.point(root, class, cx);
     }
 
     fn point(&mut self, root: PathBuf, class: u32, cx: &mut Context<Self>) {
