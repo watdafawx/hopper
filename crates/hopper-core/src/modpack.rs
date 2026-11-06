@@ -675,6 +675,28 @@ impl PackMods {
     }
 }
 
+/// Marks `inst`'s addons as the pack's or not, for showing only (never
+/// saved), so the instance Mods table, which reads `from_pack`, agrees with
+/// the rule everything else on a server uses ([`PackMods`]). A server made
+/// from a server pack has no marks of its own, so without this every mod
+/// showed "Added by you". When the pack's list can't be had (no CurseForge
+/// key, pack file gone) nothing can be told apart: all count as the pack's,
+/// as an instance does when it has no list, rather than all as yours.
+pub fn mark_pack_mods(inst: &mut Instance) {
+    if inst.pack.is_some() {
+        let found = PackMods::of(inst);
+        apply_pack_marks(inst, found);
+    }
+}
+
+fn apply_pack_marks(inst: &mut Instance, found: Option<PackMods>) {
+    match found {
+        Some(PackMods::Marked) => {}
+        Some(p) => inst.addons.iter_mut().for_each(|a| a.from_pack = p.has(a)),
+        None => inst.addons.iter_mut().for_each(|a| a.from_pack = true),
+    }
+}
+
 /// The files under a downloaded pack's overrides folder, in zip order with
 /// backslashes, as CurseForge lists them in `modpackOverrides`. `None` when
 /// the pack file isn't in Hopper's cache.
@@ -3266,5 +3288,55 @@ mod pack_fix_tests {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod pack_marks_tests {
+    use super::*;
+    use crate::instances::Addon;
+
+    fn server(marks: [bool; 3]) -> Instance {
+        let a = |id: u64, from_pack: bool| Addon { project_id: id, file_name: format!("m{id}.jar"), from_pack, ..Default::default() };
+        Instance {
+            pack: Some(PackRef { project_id: 9, file_id: 90, ..Default::default() }),
+            addons: vec![a(1, marks[0]), a(2, marks[1]), a(3, marks[2])],
+            ..Default::default()
+        }
+    }
+
+    fn marks(i: &Instance) -> Vec<bool> {
+        i.addons.iter().map(|a| a.from_pack).collect()
+    }
+
+    #[test]
+    fn server_pack_server_marks_only_the_listed_mods() {
+        // Nothing marked, the pack lists mods 1 and 2: mod 3 is the player's.
+        let mut i = server([false; 3]);
+        apply_pack_marks(&mut i, Some(PackMods::Listed([1, 2].into_iter().collect())));
+        assert_eq!(marks(&i), [true, true, false]);
+    }
+
+    #[test]
+    fn hoppers_own_marks_are_kept() {
+        let mut i = server([true, false, true]);
+        apply_pack_marks(&mut i, Some(PackMods::Marked));
+        assert_eq!(marks(&i), [true, false, true]);
+    }
+
+    #[test]
+    fn no_list_means_none_are_yours() {
+        // The pack's list can't be had: not "everything is yours".
+        let mut i = server([false; 3]);
+        apply_pack_marks(&mut i, None);
+        assert_eq!(marks(&i), [true; 3]);
+    }
+
+    #[test]
+    fn no_pack_changes_nothing() {
+        let mut i = server([false; 3]);
+        i.pack = None;
+        mark_pack_mods(&mut i);
+        assert_eq!(marks(&i), [false; 3]);
     }
 }

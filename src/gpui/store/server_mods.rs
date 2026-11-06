@@ -138,7 +138,11 @@ impl Store {
         let name = name.to_string();
         self.spawn(move || {
             let r = hopper::server_mods::load(&root, &name, "")
-                .map(|(inst, _)| Box::new(Fetched { inst, loose: Vec::new() }))
+                .map(|(mut inst, _)| {
+                    // View only: a server set up from a server pack has no marks.
+                    hopper::modpack::mark_pack_mods(&mut inst);
+                    Box::new(Fetched { inst, loose: Vec::new() })
+                })
                 .map_err(|e| format!("{e:#}"));
             Msg::ServerMods(root, r)
         });

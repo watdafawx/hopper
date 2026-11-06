@@ -299,6 +299,10 @@ async fn list(
         };
         let (cats, cats_pending) = crate::mods_table::categories(&inst);
         let pack = PackMods::of(&inst);
+        // A pack whose mod list can't be had (no CurseForge key, pack file
+        // gone): nothing tells the pack's mods from yours, so none show as
+        // "Added by you" (same as the desktop table).
+        let no_list = inst.pack.is_some() && pack.is_none();
         let mut rows: Vec<Value> = Vec::new();
         let mut known = std::collections::HashSet::new();
         // The jars in mods/ (on or off), by name without ".disabled".
@@ -342,7 +346,7 @@ async fn list(
                 "src_label": a.source.as_ref().map(|s| s.kind.label()), "src_page": a.source.as_ref().map(|s| s.page()),
                 // Came with a sync or pack and not confirmed here yet: no updates until it is.
                 "src_trusted": a.source.as_ref().map(hopper_core::sources::trusted), "src_publisher": a.source.as_ref().map(|s| s.publisher.clone()),
-                "from_pack": pack_mod(&pack, a), "page": a.page, "author": a.author,
+                "from_pack": no_list || pack_mod(&pack, a), "page": a.page, "author": a.author,
                 "locked": a.locked, "file_id": id_str(a.file_id), "release_type": a.release_type,
                 "update": ups.get(&a.file_name.trim_end_matches(".disabled").to_lowercase()).cloned(),
                 "date_added": a.date_added, "file_date": a.file_date,
