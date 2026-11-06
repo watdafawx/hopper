@@ -368,6 +368,10 @@ pub struct BrowseView {
     sticky: Sticky,
     /// A history place's panel scroll, put back once its page is drawn.
     peek_scroll_after: Option<Point<Pixels>>,
+    /// Where the retry last put the panel, and how many frames it has tried:
+    /// the page may be shorter than the spot until its images and fonts are
+    /// laid out, which would clamp the scroll to the top for good.
+    peek_scroll_set: (Point<Pixels>, u32),
     /// How each project's panel was left (scroll, tab), for Back and
     /// Forward, in Browse and in a peek docked beside a list.
     peek_spots: HashMap<u64, PeekSpot>,
@@ -537,6 +541,7 @@ impl BrowseView {
             detail_scroll: ScrollHandle::new(),
             sticky: Sticky::default(),
             peek_scroll_after: None,
+            peek_scroll_set: (Point::default(), 0),
             peek_spots: HashMap::new(),
             restore_spot: None,
             opening: None,
@@ -1658,6 +1663,7 @@ impl BrowseView {
         if p.project.is_some() {
             self.detail_scroll.set_offset(p.peek_scroll);
             self.peek_scroll_after = Some(p.peek_scroll);
+            self.peek_scroll_set = (Point::default(), 0);
         }
         self.stepping = false;
         cx.notify();
@@ -1680,6 +1686,7 @@ impl BrowseView {
             let spot = back.unwrap_or_default();
             self.detail_scroll.set_offset(spot.scroll);
             self.peek_scroll_after = back.map(|b| b.scroll);
+            self.peek_scroll_set = (Point::default(), 0);
             self.detail_tab = spot.tab;
         }
         // Files for the current Minecraft and loader filters (they follow the
@@ -1892,10 +1899,51 @@ impl BrowseView {
         // The gallery may have changed: its full-size pictures are queued again.
         self.warmed = None;
         if self.selected_id() == Some(id)
-            && let Some(at) = self.peek_scroll_after.take()
+            && let Some(at) = self.peek_scroll_after
         {
             self.detail_scroll.set_offset(at);
         }
+    }
+
+    /// Puts the panel back where Back or Forward left it. The offset is
+    /// clamped to the page's height each frame, and a page that was just
+    /// drawn is shorter than it ends up (images and text still laying out),
+    /// so the spot is asked for again each frame until the page is tall
+    /// enough, or the user scrolls, or it has had its chance.
+    fn restore_peek_scroll(&mut self, window: &mut Window) {
+        let Some(want) = self.peek_scroll_after else { return };
+        if self.selected.is_none() || self.author.is_some() || want.y == px(0.) {
+            self.peek_scroll_after = None;
+            return;
+        }
+        let ready = self.selected.as_ref().is_some_and(|m| matches!(self.detail.get(&m.id), Some(Load::Ready(_))));
+        let (last, tries) = self.peek_scroll_set;
+        let now = self.detail_scroll.offset();
+        // Scrolled further down than where it was put: the user (a clamp
+        // only ever pulls it back up).
+        if tries > 0 && now.y < last.y - px(2.) {
+            self.peek_scroll_after = None;
+            return;
+        }
+        if tries > 300 {
+            self.peek_scroll_after = None;
+            return;
+        }
+        if !ready {
+            self.peek_scroll_set = (now, tries + 1);
+            window.request_animation_frame();
+            return;
+        }
+        let room = self.detail_scroll.max_offset().y;
+        let fits = -want.y <= room + px(1.);
+        // Held for a couple of frames at full height: it stays.
+        if fits && tries >= 2 && (now.y - want.y).abs() <= px(1.) {
+            self.peek_scroll_after = None;
+            return;
+        }
+        self.detail_scroll.set_offset(want);
+        self.peek_scroll_set = (want, tries + 1);
+        window.request_animation_frame();
     }
 
     /// A hovered result: its page, icon and gallery strip load ahead.
@@ -5257,6 +5305,7 @@ impl Render for BrowseView {
         } else if !self.peek_images.is_empty() {
             self.drop_peek_images(cx);
         }
+        self.restore_peek_scroll(window);
         if self.peek {
             // Its logos are marked again as it lays out (played by the
             // page it's docked in, if that page has a logo layer).
