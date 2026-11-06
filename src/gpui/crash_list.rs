@@ -924,6 +924,30 @@ pub fn share_row<V: Host>(this: &V, rel: &str, cx: &mut Context<V>) -> AnyElemen
     }
 }
 
+/// A crash card's share row plus "Report", which opens Hopper's bug form
+/// titled "Crash: <headline>". Nothing is attached: the form asks for the
+/// mclo.gs link the row makes.
+pub fn crash_share_row<V: Host>(this: &V, rel: &str, headline: &str, cx: &mut Context<V>) -> AnyElement {
+    let headline = headline.trim();
+    let title = format!("Crash: {}", if headline.is_empty() { "the game or server crashed" } else { headline });
+    h_flex()
+        .gap_3()
+        .flex_wrap()
+        .child(share_row(this, rel, cx))
+        .child(
+            Button::new("crash-report")
+                .link()
+                .small()
+                .label("Report")
+                .tooltip("Report it on GitHub if Hopper caused this crash or got its cause wrong")
+                .on_click(move |_, _, cx| {
+                    use hopper::report::{issue_url, App};
+                    cx.open_url(&issue_url(App::Hopper, hopper::selfupdate::CURRENT, Some(&title)))
+                }),
+        )
+        .into_any_element()
+}
+
 // ---- The card's frame -------------------------------------------------------
 
 /// The card's first line: "⚠ The server crashed · Today · 07:56:15 · 4

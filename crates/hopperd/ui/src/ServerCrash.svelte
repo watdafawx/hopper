@@ -8,6 +8,7 @@
   // With `given` (a report picked in Logs & crashes: {crash, report, names,
   // lingered}) it shows that one instead, read-only: no fixes from an old
   // report.
+  import { issueUrl } from './lib/report.js';
   import { AlertTriangle, FileText, Share2, RefreshCw, Undo2, PowerOff, Trash2, Check, ChevronDown, ChevronRight, Info } from '@lucide/svelte';
   import { api, post } from './lib/api.js';
   import { removeMods, setOn } from './lib/modops.js';
@@ -446,7 +447,10 @@
     {#if lingered}<div class="tiny muted">{lingered}</div>{/if}
     {#if given?.follow_note}<div class="tiny muted follow"><Info size={12} />{given.follow_note}</div>{/if}
     {#if report || crash.source}
-      <div class="row acts share"><button class="btn sm" onclick={() => onShare(report || crash.source)}><Share2 size={13} />Share on mclo.gs</button></div>
+      <div class="row acts share">
+        <button class="btn sm" onclick={() => onShare(report || crash.source)}><Share2 size={13} />Share on mclo.gs</button>
+        <a class="report" href={issueUrl(`Crash: ${crash.headline || 'the server crashed'}`)} target="_blank" rel="noopener" title="Report it on GitHub if Hopper caused this crash or got its cause wrong">Report</a>
+      </div>
     {/if}
   </div>
 {/if}
@@ -467,6 +471,8 @@
   .fix { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius); border: 1px solid #f9731659; background: #f9731612; }
   .acts { gap: 6px; flex-wrap: wrap; align-items: center; }
   .share { padding-top: 2px; }
+  .report { font-size: 12.5px; color: var(--acc); align-self: center; }
+  .report:hover { text-decoration: underline; }
   .what { font-size: 13px; font-weight: 600; padding-top: 4px; }
   .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .steps li { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }

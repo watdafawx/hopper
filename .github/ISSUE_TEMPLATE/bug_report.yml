@@ -1,0 +1,73 @@
+name: Report a problem
+description: Something in Hopper or Hopper Server doesn't work, crashes or looks wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Opened from the app? App, version and OS are already filled in.
+
+        **Sharing a log:** in Hopper open the instance (or server), go to **Logs & crashes**, and click **Share on mclo.gs**. IPs and passwords are hidden before upload. Paste the link below. Please don't paste whole logs here.
+  # A text field, not a dropdown: links from the apps can only fill text fields.
+  - type: input
+    id: app
+    attributes:
+      label: App
+      description: Hopper (the desktop app) or Hopper Server (the server panel).
+      placeholder: "Hopper"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Shown next to the name at the top of Hopper, or in Hopper Server's Settings.
+      placeholder: "0.47.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What went wrong? Include any error message you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What did you click, in order? Which modpack, if it matters.
+      placeholder: |
+        1. Open ...
+        2. Click ...
+        3. See ...
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: false
+  - type: input
+    id: logs
+    attributes:
+      label: Logs or mclo.gs link
+      description: Optional. Use Logs & crashes → Share on mclo.gs and paste the link.
+      placeholder: "https://mclo.gs/..."
+    validations:
+      required: false
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: Optional. Drag images in here.
+    validations:
+      required: false

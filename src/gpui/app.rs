@@ -1352,6 +1352,26 @@ impl AppView {
                                             this.refresh(&Refresh, window, cx)
                                         })),
                                 )
+                                // Help lives with the tools: report a problem, or the project page.
+                                .child(
+                                    Button::new("report-issue")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Bug)
+                                        .when(!dialog, |b| b.tooltip("Report a problem on GitHub"))
+                                        .on_click(|_, _, cx| {
+                                            use hopper::report::{issue_url, App};
+                                            cx.open_url(&issue_url(App::Hopper, hopper::selfupdate::CURRENT, None))
+                                        }),
+                                )
+                                .child(
+                                    Button::new("open-github")
+                                        .ghost()
+                                        .small()
+                                        .icon(IconName::Github)
+                                        .when(!dialog, |b| b.tooltip("Hopper on GitHub"))
+                                        .on_click(|_, _, cx| cx.open_url(hopper::report::REPO_URL)),
+                                )
                                 .child(
                                     Button::new("open-settings")
                                         .ghost()

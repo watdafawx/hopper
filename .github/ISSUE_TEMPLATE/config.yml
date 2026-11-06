@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Hopper website and guide
+    url: https://watdafawx.github.io/hopper/
+    about: How Hopper and Hopper Server work, and answers to common questions.
