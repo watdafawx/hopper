@@ -1,0 +1,8 @@
+side = "server"
+mods = "5a3c1e7d02"
+report = "crash-2026-11-06_21.15.28-fml.txt"
+problem = 16
+expect = ["moonlight"]
+at_least = "Likely"
+note = "Same Moonlight DynamicResourcesInternals.registerProvider race as 1105; this time the loader blamed Supplementaries."
+pass = true

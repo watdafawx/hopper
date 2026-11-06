@@ -117,9 +117,9 @@
   const changed = $derived(rootSuspect?.changed || (st && back ? back.ch : null));
   // Certain and Likely, apart from errors that only followed from another mod's failure (knock-on: never turned off).
   const likely = $derived(suspects.filter((s) => s.certainty !== 'Possible' && !s.knock_on));
-  // Turned off, or removed: Certain and Likely mods still on and here, apart from client-only ones (they go).
-  const toTurnOff = $derived(likely.filter((s) => !s.client_only && modOf(s.file_name) && isOn(s.file_name)));
-  const offAlready = $derived(likely.filter((s) => !s.client_only && modOf(s.file_name) && !isOn(s.file_name)));
+  // Turned off, or removed: Certain and Likely mods still on and here, apart from client-only ones (they go) and a timing problem inside a mod (start again first, same as hopper-core's `to_turn_off`).
+  const toTurnOff = $derived(likely.filter((s) => !s.client_only && !s.timing && modOf(s.file_name) && isOn(s.file_name)));
+  const offAlready = $derived(likely.filter((s) => !s.client_only && !s.timing && modOf(s.file_name) && !isOn(s.file_name)));
   // The report's own error, after the mod that stopped loading.
   // Mods the loader named only because they read the stopped mod's unbound
   // value (same test as hopper-core's only_read).

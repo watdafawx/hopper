@@ -1,0 +1,8 @@
+side = "server"
+mods = "5a3c1e7d02"
+report = "crash-2026-11-05_17.27.21-fml.txt"
+problem = 16
+expect = ["moonlight"]
+at_least = "Likely"
+note = "Snowy Spirit's loader error is a timing problem inside Moonlight Lib (same frames as the 11-06 crash); the loader blamed Snowy Spirit. Expanded AE's extra failure message is not in this fixture."
+pass = true

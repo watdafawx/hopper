@@ -95,6 +95,11 @@ pub struct Suspect {
     /// didn't find), to name beside it.
     #[serde(default)]
     pub partner: Option<Partner>,
+    /// A timing problem inside this mod (two mods used it at the same
+    /// moment while loading): starting again often fixes it, so the card
+    /// doesn't offer to turn it off first.
+    #[serde(default)]
+    pub timing: bool,
 }
 
 /// A second mod a suspect's error names: its jar, name and version.
@@ -1366,7 +1371,7 @@ fn report_only(root: &Path, report: &Path) -> Option<Crash> {
 /// never one that only followed from another (knock-on) or a client-only
 /// mod (that one goes, it isn't turned off).
 pub fn to_turn_off(c: &Crash) -> Vec<&Suspect> {
-    c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.client_only && !s.knock_on).collect()
+    c.suspects.iter().filter(|s| s.certainty <= Certainty::Likely && !s.client_only && !s.knock_on && !s.timing).collect()
 }
 
 /// One line for a crash, naming every mod it's sure of: "Mystical
@@ -1787,6 +1792,9 @@ fn analyze(
             s.partner = partner;
         }
     }
+    if engine {
+        loading_race(text, &mut suspects, &root.join("mods"), mods, ids);
+    }
     // What the loader names may say which other mod it wanted: if that one
     // changed lately, the change is the likely trigger.
     let sets: Vec<crate::backups::Set> = crate::backups::list(root).into_iter().filter(|s| s.when <= before).collect();
@@ -1807,6 +1815,107 @@ fn analyze(
         s.steps = default_steps(s, &jar_name(&dir, &s.file_name));
     }
     (suspects, stopped)
+}
+
+/// Mods start in parallel, and some mod's setup code reads a shared list
+/// another mod's setup changes at the same moment (a
+/// `ConcurrentModificationException`). The loader then names whichever mod
+/// was loading, but the code that threw is in the mod right above that
+/// mod's own frames. So the first mod in the stack that isn't the named one
+/// is the likely cause (a timing problem inside it, often gone on the next
+/// start), and the named mods only were loading at that moment.
+/// An error thrown in the named mod's own code is left alone.
+fn loading_race(text: &str, suspects: &mut Vec<Suspect>, dir: &Path, mods: &[String], ids: &impl Fn(&str) -> Vec<String>) {
+    let lines: Vec<&str> = text.lines().collect();
+    // (loader-named mod id, mod id or jar of the code that threw)
+    let mut pairs: Vec<(String, String, String)> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let Some(m) = LOADING_ISSUE.captures(l.trim_start()) else { continue };
+        let Some(named) = m.get(1).or(m.get(2)).map(|g| g.as_str().to_string()) else { continue };
+        let block: Vec<&str> = lines[i + 1..].iter().take_while(|l| !l.trim_start().starts_with("-- ")).take(120).copied().collect();
+        let concurrent = block.iter().any(|l| l.contains("ConcurrentModificationException") || l.contains("validateIterator"));
+        if !concurrent {
+            continue;
+        }
+        // The first frame of a mod's code (the JDK's, Guava's and the loader's
+        // have no mod id or are the loader's jar).
+        let owner = block
+            .iter()
+            .filter(|l| l.trim_start().starts_with("at "))
+            .filter_map(|l| crate::crashtrace::frame_mod(l))
+            .find(|(id, jar)| !NOT_MODS.contains(&id.as_str()) && !is_loader_jar(jar));
+        let Some((id, jar)) = owner else { continue };
+        if id.eq_ignore_ascii_case(&named) {
+            continue;
+        }
+        pairs.push((named, id, jar));
+    }
+    let find = |suspects: &[Suspect], id: &str, jar: &str| {
+        suspects.iter().position(|s| (!id.is_empty() && s.mod_id.eq_ignore_ascii_case(id)) || (!jar.is_empty() && s.file_name.trim_end_matches(".disabled") == jar))
+    };
+    let mut done: Vec<usize> = Vec::new();
+    for (named, id, jar) in &pairs {
+        // The report's own trace may stop above the mod's frames, so the mod
+        // isn't a suspect yet: it's found by its jar like any other.
+        let b = match find(suspects, id, jar) {
+            Some(b) => b,
+            None => {
+                let r = Raw { mod_id: id.clone(), jar: jar.clone(), certainty: Certainty::Possible, why: String::new(), class: String::new(), needs: Vec::new() };
+                let Some(file) = match_jar(&r, mods, ids) else { continue };
+                suspects.push(Suspect { file_name: file, mod_id: id.clone(), ..Default::default() });
+                suspects.len() - 1
+            }
+        };
+        if suspects[b].mod_id.eq_ignore_ascii_case(named) || done.contains(&b) {
+            continue;
+        }
+        done.push(b);
+        // Everyone the loader named for the same cause.
+        let victims: Vec<usize> = pairs
+            .iter()
+            .filter(|(_, i2, j2)| find(suspects, i2, j2) == Some(b))
+            .filter_map(|(n, _, _)| suspects.iter().position(|s| s.mod_id.eq_ignore_ascii_case(n)))
+            .filter(|v| *v != b)
+            .collect();
+        if victims.is_empty() {
+            continue;
+        }
+        let lib = jar_name(dir, &suspects[b].file_name);
+        let version = crate::crashengine::shown_version(dir, &suspects[b].file_name);
+        let names: Vec<String> = victims.iter().map(|v| jar_name(dir, &suspects[*v].file_name)).collect();
+        let list = match names.as_slice() {
+            [a] => a.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+            [] => String::new(),
+        };
+        let why = format!("It threw the error while {list} was loading: it read a list while another mod changed it at the same moment. A timing problem inside {lib}, so the mod named can be a different one each time.");
+        let installed = if version.is_empty() { String::new() } else { format!(" ({version} installed)") };
+        let s = &mut suspects[b];
+        if s.certainty > Certainty::Likely {
+            s.certainty = Certainty::Likely;
+        }
+        s.timing = true;
+        s.facts.insert(0, Fact { rule: crate::crashengine::RACE.into(), weight: 40, text: why.clone() });
+        s.why = why;
+        s.steps = vec![
+            format!("Start again: this is a timing problem inside {lib} and often goes away."),
+            format!("If it keeps happening, update {lib}{installed} or ask its author."),
+        ];
+        for (k, v) in victims.iter().enumerate() {
+            let text = if k == 0 {
+                format!("The loader names it because it was loading when {lib} failed. The error came from {lib}'s code, not its own.")
+            } else {
+                format!("It was loading at the same time, and {lib} failed there too. The error came from {lib}'s code, not its own.")
+            };
+            let s = &mut suspects[*v];
+            s.certainty = Certainty::Possible;
+            s.changed = None;
+            s.why = text.clone();
+            s.facts.insert(0, Fact { rule: crate::crashengine::RACE.into(), weight: -40, text });
+            s.steps = vec![format!("Nothing to do for this one: the error came from {lib}. Start again, and follow the steps for {lib} if it keeps happening.")];
+        }
+    }
+    suspects.sort_by_key(|s| s.certainty);
 }
 
 /// What to do about a suspect when no rule said something more exact.
@@ -3791,6 +3900,70 @@ java.lang.IllegalArgumentException: No model for layer victim:shield#main\n\
         assert_eq!(v.certainty, Certainty::Possible);
         // A mixin that only redirects a call on the way isn't the one.
         assert!(c.suspects.iter().filter(|s| s.mod_id == "speedy").all(|s| s.certainty == Certainty::Possible));
+    }
+
+    /// A loading-failure report whose stack runs: Guava, Moonlight's
+    /// `registerProvider`, then `top` (the named mod's constructor frames).
+    fn race_report(named: &str, display: &str, jar: &str, moonlight: &str) -> String {
+        format!(
+            "---- Minecraft Crash Report ----\nDescription: Mod loading failures have occurred; consult the issue messages for more details\n\n\
+net.neoforged.neoforge.logging.CrashReportExtender$ModLoadingCrashException: Mod loading has failed\n\
+\n-- Mod loading issue for: {named} --\nDetails:\n\tMod file: /G:/Minecraft/packs/X/mods/{jar}\n\tFailure message: {display} ({named}) has failed to load correctly\n\t\tjava.util.ConcurrentModificationException: null\n\tException message: java.util.ConcurrentModificationException\nStacktrace:\n\
+\tat MC-BOOTSTRAP/com.google.common@32.1.2-jre/com.google.common.collect.AbstractMapBasedMultimap$WrappedCollection$WrappedIterator.validateIterator(AbstractMapBasedMultimap.java:459) ~[guava-32.1.2-jre.jar%2382!/:?] {{}}\n\
+\tat MC-BOOTSTRAP/com.google.common@32.1.2-jre/com.google.common.collect.AbstractMapBasedMultimap$WrappedCollection$WrappedIterator.hasNext(AbstractMapBasedMultimap.java:465) ~[guava-32.1.2-jre.jar%2382!/:?] {{}}\n\
+\tat TRANSFORMER/moonlight@1.21.1-{moonlight}/net.mehvahdjukaar.moonlight.core.pack.DynamicResourcesInternals.registerProvider(DynamicResourcesInternals.java:125) ~[moonlight-1.21.1-{moonlight}-neoforge.jar%231785!/:1.21.1-{moonlight}] {{re:classloading}}\n\
+\tat TRANSFORMER/moonlight@1.21.1-{moonlight}/net.mehvahdjukaar.moonlight.api.platform.RegHelper.registerDynamicResourceProvider(RegHelper.java:886) ~[moonlight-1.21.1-{moonlight}-neoforge.jar%231785!/:1.21.1-{moonlight}] {{re:classloading}}\n\
+\tat TRANSFORMER/{named}@1.21.1-1.0/com.x.{named}.Init.commonInit(Init.java:89) ~[{jar}%232045!/:1.0] {{re:classloading}}\n\
+\tat TRANSFORMER/{named}@1.21.1-1.0/com.x.{named}.Forge.<init>(Forge.java:35) ~[{jar}%232045!/:1.0] {{re:classloading,re:mixin}}\n\
+\tat java.base/jdk.internal.reflect.DirectConstructorHandleAccessor.newInstance(DirectConstructorHandleAccessor.java:62) ~[?:?] {{}}\n\
+\tat MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.javafmlmod.FMLModContainer.constructMod(FMLModContainer.java:122) ~[loader-4.0.45.jar%2359!/:4.0] {{}}\n\
+\tat MC-BOOTSTRAP/fml_loader@4.0.45/net.neoforged.fml.ModLoader.lambda$dispatchParallelTask$7(ModLoader.java:231) ~[loader-4.0.45.jar%2359!/:4.0] {{}}\n\n"
+        )
+    }
+
+    const RACE_MODS: [(&str, &str, &str); 3] = [
+        ("moonlight-1.21.1-3.8.2-neoforge.jar", "moonlight", "Moonlight Lib"),
+        ("supplementaries-1.21.1-4.0.2-neoforge.jar", "supplementaries", "Supplementaries"),
+        ("snowyspirit-1.21.1-3.1.17.jar", "snowyspirit", "Snowy Spirit"),
+    ];
+
+    /// Mods load in parallel and Moonlight reads a list another mod is
+    /// changing: the loader names whichever mod was loading, but Moonlight
+    /// threw. Moonlight is the likely one, the named mod only possible, and
+    /// nothing offers to turn the named mod off.
+    #[test]
+    fn a_race_inside_a_library_is_not_the_named_mods_fault() {
+        for (named, display, jar, moon) in [
+            ("supplementaries", "Supplementaries", "supplementaries-1.21.1-4.0.2-neoforge.jar", "3.8.2"),
+            ("snowyspirit", "Snowy Spirit", "snowyspirit-1.21.1-3.1.17.jar", "3.8.1"),
+        ] {
+            let c = engine_case(&format!("race-{named}"), &RACE_MODS, &race_report(named, display, jar, moon));
+            let top = &c.suspects[0];
+            assert_eq!((top.mod_id.as_str(), top.certainty), ("moonlight", Certainty::Likely), "{:#?}", c.suspects);
+            assert!(top.timing && top.why.contains(display), "{}", top.why);
+            assert!(top.steps[0].starts_with("Start again") && top.steps[1].contains("update Moonlight Lib (1.0 installed)"), "{:?}", top.steps);
+            let named = c.suspects.iter().find(|s| s.mod_id == named).unwrap();
+            assert_eq!(named.certainty, Certainty::Possible, "{:#?}", c.suspects);
+            assert!(named.why.contains("was loading when Moonlight Lib failed"), "{}", named.why);
+            assert!(to_turn_off(&c).is_empty(), "{:#?}", to_turn_off(&c));
+            assert_eq!(verdict(&c, &|s| s.mod_id.clone()), "likely moonlight");
+        }
+    }
+
+    /// The same error thrown in the named mod's own code is still that
+    /// mod's: the rule only fires when another mod's code threw it.
+    #[test]
+    fn a_race_in_the_named_mods_own_code_still_blames_it() {
+        let report = race_report("supplementaries", "Supplementaries", "supplementaries-1.21.1-4.0.2-neoforge.jar", "3.8.2")
+            .lines()
+            .filter(|l| !l.contains("moonlight@"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c = engine_case("race-own", &RACE_MODS, &report);
+        let s = c.suspects.iter().find(|s| s.mod_id == "supplementaries").unwrap();
+        assert_eq!(s.certainty, Certainty::Certain, "{:#?}", c.suspects);
+        assert!(c.suspects.iter().all(|s| !s.timing), "{:#?}", c.suspects);
+        assert!(to_turn_off(&c).iter().any(|s| s.mod_id == "supplementaries"));
     }
 
     /// A file another program holds: the computer, not the mod the loader
