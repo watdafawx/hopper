@@ -327,9 +327,8 @@ impl ConfigsTab {
                     let mut out: HashMap<Pick, (usize, Vec<String>)> = HashMap::new();
                     // On a Hopper Server its panel searches (it has the files).
                     let found: Vec<String> = match &panel {
-                        Some(t) => t
-                            .client
-                            .configs_search(t.id(), &q, desc, 2000)
+                        Some(t) => crate::panel_tabs::http(&*t.client)
+                            .and_then(|c| c.configs_search(t.id(), &q, desc, 2000))
                             .map(|v| v["hits"].as_array().into_iter().flatten().filter_map(|h| h["rel"].as_str().map(str::to_string)).collect())
                             .unwrap_or_default(),
                         None => hopper::configindex::search(&root, &rels, &q, desc, 20_000).into_iter().map(|h| h.rel).collect(),
@@ -474,7 +473,7 @@ impl ConfigsTab {
             &t,
             {
                 let id = t.id().to_string();
-                move |c| c.configs_parse(&id, &want)
+                move |c| crate::panel_tabs::http(c)?.configs_parse(&id, &want)
             },
             move |this, r, window, cx| {
                 this.fetching.remove(&pick);

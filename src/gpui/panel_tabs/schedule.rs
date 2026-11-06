@@ -331,10 +331,12 @@ impl Render for ScheduleTab {
                 ))),
             );
 
+        // A server on this PC follows its schedule through Hopper itself.
+        let here = self.target.as_ref().is_some_and(|t| t.local.is_some());
         let startup = form().child(
-            Field::new().label("With the panel").child(
+            Field::new().label(if here { "With Hopper" } else { "With the panel" }).child(
                 Switch::new("sched-start-with-panel")
-                    .label("Start this server when the panel starts")
+                    .label(if here { "Start this server when Hopper starts" } else { "Start this server when the panel starts" })
                     .checked(self.sched.start_with_hopper)
                     .on_change(cx.listener(|this, v: &bool, _, cx| {
                         this.sched.start_with_hopper = *v;
@@ -351,6 +353,12 @@ impl Render for ScheduleTab {
                     .gap_6()
                     .p_4()
                     .pb_6()
+                    .when(here, |c| {
+                        c.child(widgets::caption(
+                            "Hopper runs this schedule while it's open on this PC. Closed, nothing restarts or backs up.",
+                            cx,
+                        ))
+                    })
                     .when_some(gave_up, |c, g| {
                         let place = self.target.as_ref().map(|t| format!("{}#{}", t.remote.panel, t.remote.id)).unwrap_or_default();
                         let key = hopper::settings::notice_key(&place, "restart-gave-up", &g);

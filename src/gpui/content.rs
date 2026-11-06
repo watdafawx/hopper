@@ -1,4 +1,5 @@
-//! An instance's Worlds and Screenshots tabs.
+//! An instance's Worlds and Screenshots tabs; a server's Worlds tab (on
+//! this PC or a Hopper Server) is the same view.
 
 use crate::widgets::Clickable as _;
 use crate::store::{Msg, Store, open_folder, open_path};
@@ -17,12 +18,18 @@ use hopper::instance_ops::{self, World};
 use std::collections::{HashMap, HashSet};
 use crate::addons_extra::{datapacks, is_hopper_file};
 use crate::selection::{self, KeyAct, Selection};
+use crate::panel_tabs::Target;
+use gpui_kit::component::input::{Input, InputState};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 /// What these tabs ask the Library to do.
 pub enum ContentEvent {
     /// Find content of a class; data packs go to `dest` (instance-relative).
     Browse { class: u32, dest: Option<String> },
+    /// A server's folder on a Hopper Server, in its Files tab (relative to
+    /// the server's folder).
+    OpenFiles(String),
 }
 
 /// "1 world", "3 worlds".
@@ -50,31 +57,72 @@ fn card(cx: &App) -> Div {
 
 // ---- Worlds --------------------------------------------------------------
 
+/// Where a Worlds tab reads from: an instance's `saves/`, or a server
+/// through its tabs' API (a Hopper Server's panel, or a folder on this PC
+/// answered in process), so local and remote servers share one path.
+#[derive(Clone)]
+enum WorldsSource {
+    Instance,
+    Server(Target),
+}
+
 pub struct WorldsView {
     store: Entity<Store>,
     root: Option<PathBuf>,
+    source: WorldsSource,
     worlds: Vec<World>,
-    /// Data packs per world folder.
+    /// Data packs per world folder (a server's on a Hopper Server: names).
     packs: HashMap<PathBuf, Vec<PathBuf>>,
+    /// A server's worlds together, in bytes.
+    total: u64,
+    /// The server runs: switching worlds waits for it to stop.
+    running: bool,
+    /// A server's list: None while it's on its way, else whether it came.
+    load: Option<Result<(), String>>,
+    /// What the last server change did (false) or why it failed (true).
+    notice: Option<(bool, String)>,
     open: HashSet<PathBuf>,
     /// Picked worlds, by folder.
     sel: Selection,
     focus: FocusHandle,
+    /// The New world row (servers): open, its name and seed.
+    creating: bool,
+    new_name: Entity<InputState>,
+    new_seed: Entity<InputState>,
 }
 
 impl EventEmitter<ContentEvent> for WorldsView {}
 
 impl WorldsView {
-    pub fn new(store: Entity<Store>, _: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             store,
             root: None,
+            source: WorldsSource::Instance,
             worlds: Vec::new(),
             packs: HashMap::new(),
+            total: 0,
+            running: false,
+            load: None,
+            notice: None,
             open: HashSet::new(),
             sel: Selection::new(),
             focus: cx.focus_handle(),
+            creating: false,
+            new_name: cx.new(|cx| InputState::new(window, cx).placeholder("World name")),
+            new_seed: cx.new(|cx| InputState::new(window, cx).placeholder("Seed (empty: random)")),
         }
+    }
+
+    fn target(&self) -> Option<Target> {
+        match &self.source {
+            WorldsSource::Server(t) => Some(t.clone()),
+            WorldsSource::Instance => None,
+        }
+    }
+
+    fn is_server(&self) -> bool {
+        matches!(self.source, WorldsSource::Server(_))
     }
 
     /// The worlds' keys in the order they're shown.
@@ -86,9 +134,21 @@ impl WorldsView {
         self.worlds.iter().filter(|w| self.sel.contains(&w.dir.display().to_string())).map(|w| w.dir.clone()).collect()
     }
 
-    /// Asks once, then deletes `dirs` the way the setting says (Recycle
-    /// Bin unless it's set to delete for good).
+    fn world_at(&self, dir: &Path) -> Option<&World> {
+        self.worlds.iter().find(|w| w.dir == dir)
+    }
+
+    /// `/worlds/{name}{rest}` on the server's API.
+    fn world_path(t: &Target, name: &str, rest: &str) -> String {
+        t.sp(&format!("/worlds/{}{rest}", hopper::hopperd::enc(name)))
+    }
+
+    /// Asks once, then deletes `dirs`: an instance's the way the setting
+    /// says (Recycle Bin unless it's set to delete for good), a server's
+    /// into its trash (Files › Trash), as Hopper Server does.
     fn ask_delete(&mut self, dirs: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        // A server's active world stays: it's the one it loads.
+        let dirs: Vec<PathBuf> = dirs.into_iter().filter(|d| self.world_at(d).is_none_or(|w| !w.active)).collect();
         let n = dirs.len();
         if n == 0 {
             return;
@@ -98,21 +158,35 @@ impl WorldsView {
             Some(w) => format!("Delete {}?", w.name),
             None => format!("Delete {n} worlds?"),
         };
+        let target = self.target();
+        let names: Vec<String> = dirs.iter().filter_map(|d| self.world_at(d).map(|w| w.name.clone())).collect();
         let view = cx.entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
-            let (dirs, view) = (dirs.clone(), view.clone());
+            let (dirs, view, target, names) = (dirs.clone(), view.clone(), target.clone(), names.clone());
             alert
                 .title(title.clone())
-                .description(match (permanent, n) {
-                    (true, 1) => "The world is deleted for good.",
-                    (true, _) => "The worlds are deleted for good.",
-                    (false, 1) => "The world moves to the Recycle Bin.",
-                    (false, _) => "The worlds move to the Recycle Bin.",
+                .description(match (&target, permanent, n) {
+                    (Some(_), _, 1) => "The world moves to the server's trash (Files › Trash), where it can be put back.",
+                    (Some(_), _, _) => "The worlds move to the server's trash (Files › Trash), where they can be put back.",
+                    (None, true, 1) => "The world is deleted for good.",
+                    (None, true, _) => "The worlds are deleted for good.",
+                    (None, false, 1) => "The world moves to the Recycle Bin.",
+                    (None, false, _) => "The worlds move to the Recycle Bin.",
                 })
                 .confirm()
                 .ok_text(if n == 1 { "Delete world" } else { "Delete worlds" })
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
+                    if let Some(t) = &target {
+                        let paths: Vec<String> = names.iter().map(|n| Self::world_path(t, n, "")).collect();
+                        let t = t.clone();
+                        view.update(cx, |_, cx| {
+                            crate::panel_tabs::call(cx, &t, move |c| paths.iter().try_for_each(|p| c.delete(p).map(|_| ())), |this: &mut Self, r, cx| {
+                                this.after(r, None, cx)
+                            })
+                        });
+                        return true;
+                    }
                     for dir in &dirs {
                         let r = if permanent {
                             hopper::instance_ops::remove_for_good(dir)
@@ -129,9 +203,28 @@ impl WorldsView {
         });
     }
 
-    /// Zips each world into .hopper-backups/worlds, one job per world.
+    /// After a server change: says what failed (or `ok`), then lists again.
+    fn after(&mut self, r: Result<(), String>, ok: Option<String>, cx: &mut Context<Self>) {
+        self.notice = match r {
+            Err(e) => Some((true, e)),
+            Ok(()) => ok.map(|m| (false, m)),
+        };
+        self.reload(cx);
+    }
+
+    /// An instance's worlds zip into .hopper-backups/worlds; a server's go
+    /// to its Backups (restored from there), one job per world.
     fn back_up(&self, dirs: &[PathBuf], cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else { return };
+        if let Some(t) = self.target() {
+            for w in self.worlds.iter().filter(|w| dirs.contains(&w.dir) && w.created) {
+                let (title, path, name) = (format!("Backing up {}", w.name), Self::world_path(&t, &w.name, "/backup"), w.name.clone());
+                crate::panel_tabs::job(cx, &self.store, &t, title, path, Value::Null, move |this: &mut Self, r, cx| {
+                    this.after(r.map(|_| ()), Some(format!("{name} is backed up. It's in Backups.")), cx)
+                });
+            }
+            return;
+        }
         let s = self.store.read(cx);
         let Some(full) = s.instance(&root).cloned() else { return };
         for world in self.worlds.iter().filter(|w| dirs.contains(&w.dir)).cloned() {
@@ -144,13 +237,88 @@ impl WorldsView {
         }
     }
 
+    /// Makes a server's world the one it loads on its next start.
+    fn make_active(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(t) = self.target() else { return };
+        let path = Self::world_path(&t, &name, "/activate");
+        crate::panel_tabs::call(cx, &t, move |c| c.post(&path, Value::Null).map(|_| ()), move |this: &mut Self, r, cx| {
+            this.after(r, Some(format!("{name} loads on the server's next start.")), cx)
+        });
+    }
+
+    fn create(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = self.target() else { return };
+        let name = self.new_name.read(cx).value().trim().to_string();
+        let seed = self.new_seed.read(cx).value().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let path = t.sp("/worlds");
+        let body = json!({ "name": name, "seed": seed, "activate": false });
+        self.creating = false;
+        crate::panel_tabs::call(cx, &t, move |c| c.post(&path, body).map(|_| ()), move |this: &mut Self, r, cx| {
+            this.after(r, Some(format!("{name} is made when the server starts with it active.")), cx)
+        });
+    }
+
+    fn start_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.creating = true;
+        for i in [&self.new_name, &self.new_seed] {
+            i.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        self.new_name.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
     pub fn show_for(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        self.source = WorldsSource::Instance;
+        self.root = Some(root);
+        self.notice = None;
+        self.reload(cx);
+    }
+
+    /// A server's worlds through `target`; `running` holds back switching.
+    /// Read again each time the tab is opened (`again`).
+    pub fn show_server(&mut self, root: PathBuf, target: Target, running: bool, again: bool, cx: &mut Context<Self>) {
+        let same = self.root.as_ref() == Some(&root) && matches!(&self.source, WorldsSource::Server(t) if *t == target);
+        if running != self.running {
+            self.running = running;
+            cx.notify();
+        }
+        if same && !again {
+            return;
+        }
+        if !same {
+            self.worlds.clear();
+            self.packs.clear();
+            self.creating = false;
+            self.notice = None;
+            self.load = None;
+            self.sel.clear();
+        }
+        self.source = WorldsSource::Server(target);
         self.root = Some(root);
         self.reload(cx);
     }
 
-    /// Reads worlds and data packs from disk (quick: folder listings).
+    /// Reads worlds and data packs: an instance's from disk (quick: folder
+    /// listings), a server's from its API.
     fn reload(&mut self, cx: &mut Context<Self>) {
+        if let Some(t) = self.target() {
+            crate::panel_tabs::get(cx, &t, t.sp("/worlds"), |this: &mut Self, r, cx| {
+                match r {
+                    Ok(v) => {
+                        this.take_server_list(&v);
+                        this.load = Some(Ok(()));
+                    }
+                    Err(e) => this.load = Some(Err(e)),
+                }
+                let order = this.order();
+                this.sel.retain(&order);
+                cx.notify();
+            });
+            return;
+        }
         let Some(inst) = self
             .root
             .as_ref()
@@ -176,20 +344,80 @@ impl WorldsView {
         cx.notify();
     }
 
-    fn remove_pack(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// The `/worlds` reply as worlds: folders under the server's folder on
+    /// this PC, or bare names on a Hopper Server.
+    fn take_server_list(&mut self, v: &Value) {
+        let local = self.target().and_then(|t| t.local);
+        let s = |v: &Value| v.as_str().unwrap_or_default().to_string();
+        self.total = v["total_size"].as_u64().unwrap_or(0);
+        if let Some(r) = v["running"].as_bool() {
+            self.running = r;
+        }
+        self.worlds.clear();
+        self.packs.clear();
+        for w in v["worlds"].as_array().into_iter().flatten() {
+            let name = s(&w["name"]);
+            let dir = match &local {
+                Some(root) => root.join(&name),
+                None => PathBuf::from(&name),
+            };
+            let icon = local.as_ref().filter(|_| w["icon"].as_bool() == Some(true)).map(|_| dir.join("icon.png"));
+            let packs = w["datapacks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| match &local {
+                    Some(_) => dir.join("datapacks").join(s(&p["name"])),
+                    None => PathBuf::from(s(&p["name"])),
+                })
+                .collect();
+            self.packs.insert(dir.clone(), packs);
+            self.worlds.push(World {
+                name,
+                icon,
+                last_played: w["last_played"].as_i64().unwrap_or(0),
+                active: w["active"].as_bool().unwrap_or(false),
+                size: w["size"].as_u64().unwrap_or(0),
+                seed: w["seed"].as_str().map(str::to_string).filter(|s| !s.is_empty()),
+                created: w["created"].as_bool().unwrap_or(true),
+                dir,
+            });
+        }
+    }
+
+    fn remove_pack(&mut self, world: &Path, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(root) = self.root.clone() else {
             return;
         };
+        if let Some(t) = self.target() {
+            let Some(name) = self.world_at(world).map(|w| w.name.clone()) else { return };
+            let file = file_name(&path);
+            let p = Self::world_path(&t, &name, &format!("/datapacks/{}", hopper::hopperd::enc(&file)));
+            crate::panel_tabs::call(cx, &t, move |c| c.delete(&p).map(|_| ()), move |this: &mut Self, r, cx| {
+                this.after(r, Some(format!("{file} is in the server's trash (Files › Trash).")), cx)
+            });
+            return;
+        }
         if let Err(e) = hopper::sync::backup_into(&root, &path) {
             window.push_notification(Notification::error(format!("{e:#}")), cx);
         }
         self.reload(cx);
     }
 
-    fn pack_rows(&self, packs: &[PathBuf], cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// Shows `dir` (a world or one of its folders): Explorer for a folder
+    /// on this PC, the Files tab for a server on a Hopper Server.
+    fn open_dir(&self, dir: &Path, cx: &mut Context<Self>) {
+        match self.target() {
+            Some(t) if t.local.is_none() => cx.emit(ContentEvent::OpenFiles(dir.to_string_lossy().replace('\\', "/"))),
+            _ => open_path(dir),
+        }
+    }
+
+    fn pack_rows(&self, world: &Path, packs: &[PathBuf], cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
+        let tip = if self.is_server() { "Remove (to the server's trash)" } else { "Remove (undo from History)" };
         v_flex().gap_0p5().children(packs.iter().map(|p| {
-            let path = p.clone();
+            let (path, world) = (p.clone(), world.to_path_buf());
             h_flex()
                 .id(ElementId::Name(format!("dp:{}", p.display()).into()))
                 .gap_3()
@@ -217,10 +445,12 @@ impl WorldsView {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Trash)
-                        .tooltip("Remove (undo from History)")
+                        .tooltip(tip)
                         .on_click(
                             cx.listener(move |this, _, w, cx| {
-                                this.remove_pack(path.clone(), w, cx)
+                                // A button in the card doesn't pick the world.
+                                cx.stop_propagation();
+                                this.remove_pack(&world, path.clone(), w, cx)
                             }),
                         ),
                 )
@@ -234,32 +464,61 @@ impl WorldsView {
         rel: String,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        // Browse installs into folders on this PC only.
+        let can_add = self.target().is_none_or(|t| t.local.is_some());
         h_flex()
             .gap_2()
-            .child(
-                Button::new(ElementId::Name(format!("dp-add:{id}").into()))
-                    .xsmall()
-                    .outline()
-                    .icon(IconName::Plus)
-                    .label("Add data packs")
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(ContentEvent::Browse {
-                            class: hopper::cf::CLASS_DATAPACKS,
-                            dest: Some(rel.clone()),
-                        })
-                    })),
-            )
+            .when(can_add, |r| {
+                r.child(
+                    Button::new(ElementId::Name(format!("dp-add:{id}").into()))
+                        .xsmall()
+                        .outline()
+                        .icon(IconName::Plus)
+                        .label("Add data packs")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(ContentEvent::Browse {
+                                class: hopper::cf::CLASS_DATAPACKS,
+                                dest: Some(rel.clone()),
+                            })
+                        })),
+                )
+            })
             .child(
                 Button::new(ElementId::Name(format!("dp-open:{id}").into()))
                     .xsmall()
                     .ghost()
                     .icon(IconName::FolderOpen)
                     .label("Open folder")
-                    .on_click(move |_, _, _| open_folder(&dir)),
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if this.target().is_none_or(|t| t.local.is_some()) {
+                            let _ = std::fs::create_dir_all(&dir);
+                        }
+                        this.open_dir(&dir, cx)
+                    })),
             )
     }
 
+    /// "Last played 2 days ago", plus a server world's size and seed.
+    fn world_caption(&self, w: &World) -> String {
+        if !w.created {
+            return "Made when the server next starts with it active".into();
+        }
+        let mut parts = vec![format!("Last played {}", hopper::time::relative_secs(w.last_played))];
+        if self.is_server() {
+            if w.size > 0 {
+                parts.push(hopper::instance_ops::human_bytes(w.size));
+            }
+            if let Some(seed) = &w.seed {
+                parts.push(format!("seed {seed}"));
+            }
+        }
+        parts.join(" · ")
+    }
+
     fn world_card(&self, w: &World, cx: &mut Context<Self>) -> AnyElement {
+        let server = self.is_server();
         let root = self.root.clone().unwrap_or_default();
         let packs = self.packs.get(&w.dir).cloned().unwrap_or_default();
         let expanded = self.open.contains(&w.dir);
@@ -274,17 +533,21 @@ impl WorldsView {
             .strip_prefix(&root)
             .map(|r| r.to_string_lossy().replace('\\', "/"))
             .unwrap_or_default();
-        let theme = cx.theme();
+        let caption = self.world_caption(w);
+        let running = self.running;
+        let name = w.name.clone();
+        let success = cx.theme().success;
         let icon = match &w.icon {
             Some(p) => div()
                 .size_12()
                 .flex_none()
-                .rounded(theme.radius)
+                .rounded(cx.theme().radius)
                 .overflow_hidden()
                 .child(img(p.clone()).size_full())
                 .into_any_element(),
             None => widgets::thumb(None, rems(3.), cx),
         };
+        let (muted, fg) = (cx.theme().muted_foreground, cx.theme().foreground);
         card(cx)
             .id(id("w-card"))
             .clickable(cx)
@@ -309,100 +572,245 @@ impl WorldsView {
                             .min_w_0()
                             .max_w(rems(40.))
                             .gap_0p5()
-                            .child(div().font_semibold().truncate().child(w.name.clone()))
-                            .child(widgets::caption(
-                                format!(
-                                    "Last played {}",
-                                    hopper::time::relative_secs(w.last_played)
-                                ),
-                                cx,
-                            )),
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .min_w_0()
+                                    .child(div().font_semibold().truncate().child(w.name.clone()))
+                                    .when(w.active, |r| r.child(widgets::chip(success).child("Active"))),
+                            )
+                            .child(widgets::caption(caption, cx)),
                     )
-                    .child(
-                        Button::new(id("w-open"))
-                            .ghost()
-                            .small()
-                            .icon(IconName::FolderOpen)
-                            .tooltip("Open world folder")
-                            .on_click(move |_, _, _| open_path(&dir1)),
-                    )
-                    .child(
-                        Button::new(id("w-backup"))
-                            .outline()
-                            .small()
-                            .icon(IconName::Archive)
-                            .label("Back up")
-                            .tooltip("Zip into .hopper-backups/worlds")
-                            .on_click(cx.listener(move |this, _, _, cx| this.back_up(&[dir4.clone()], cx))),
-                    )
+                    .when(server && !w.active, |r| {
+                        r.child(
+                            Button::new(id("w-active"))
+                                .outline()
+                                .small()
+                                .label("Make active")
+                                .disabled(running)
+                                .tooltip(if running { "Stop the server first" } else { "The server loads this world on its next start" })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.make_active(name.clone(), cx)
+                                })),
+                        )
+                    })
+                    .when(w.created, |r| {
+                        r.child(
+                            Button::new(id("w-open"))
+                                .ghost()
+                                .small()
+                                .icon(IconName::FolderOpen)
+                                .tooltip("Open world folder")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.open_dir(&dir1, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(id("w-backup"))
+                                .outline()
+                                .small()
+                                .icon(IconName::Archive)
+                                .label("Back up")
+                                .tooltip(if server { "Back up into the server's Backups" } else { "Zip into .hopper-backups/worlds" })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.back_up(&[dir4.clone()], cx)
+                                })),
+                        )
+                    })
                     .child(
                         Button::new(id("w-delete"))
                             .ghost()
                             .small()
                             .icon(IconName::Trash)
-                            .tooltip(if permanent { "Delete" } else { "Delete (to the Recycle Bin)" })
+                            .disabled(w.active)
+                            .tooltip(match (w.active, server, permanent) {
+                                (true, ..) => "The active world can't be deleted. Make another one active first.",
+                                (_, true, _) => "Delete (to the server's trash)",
+                                (_, false, true) => "Delete",
+                                (_, false, false) => "Delete (to the Recycle Bin)",
+                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
                                 this.ask_delete(vec![dir2.clone()], window, cx)
                             })),
                     ),
             )
-            .child(
-                h_flex()
-                    .id(id("w-packs"))
-                    .gap_2()
-                    .clickable(cx)
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .hover(|s| s.text_color(theme.foreground))
-                    .child(
-                        Icon::new(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .small(),
-                    )
-                    .child(format!("Data packs ({})", packs.len()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        // Folding the packs doesn't pick the world.
-                        cx.stop_propagation();
-                        if !this.open.remove(&dir3) {
-                            this.open.insert(dir3.clone());
-                        }
-                        cx.notify();
-                    })),
-            )
-            .when(expanded, |c| {
+            .when(w.created, |c| {
+                c.child(
+                    h_flex()
+                        .id(id("w-packs"))
+                        .gap_2()
+                        .clickable(cx)
+                        .text_sm()
+                        .text_color(muted)
+                        .hover(|s| s.text_color(fg))
+                        .child(
+                            Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .small(),
+                        )
+                        .child(format!("Data packs ({})", packs.len()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            // Folding the packs doesn't pick the world.
+                            cx.stop_propagation();
+                            if !this.open.remove(&dir3) {
+                                this.open.insert(dir3.clone());
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(expanded && w.created, |c| {
                 let dir = w.dir.join("datapacks");
                 c.child(widgets::enter(
                     id("w-packs-body"),
                     v_flex()
                         .gap_2()
                         .pl_6()
-                        .child(self.pack_rows(&packs, cx))
+                        .child(self.pack_rows(&w.dir, &packs, cx))
                         .child(self.pack_actions(&w.dir.display().to_string(), dir, rel, cx)),
                 ))
             })
+            .into_any_element()
+    }
+
+    /// The row a server's New world opens: name, seed, Create.
+    fn create_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        card(cx)
+            .child(div().font_semibold().child("New world"))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().w_64().child(Input::new(&self.new_name).small()))
+                    .child(div().w_64().child(Input::new(&self.new_seed).small()))
+                    .child(
+                        Button::new("world-create")
+                            .primary()
+                            .small()
+                            .label("Create")
+                            .on_click(cx.listener(|this, _, _, cx| this.create(cx))),
+                    )
+                    .child(
+                        Button::new("world-create-cancel")
+                            .ghost()
+                            .small()
+                            .label("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.creating = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(widgets::caption(
+                "The server makes it on its first start with it active (Make active).",
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// The bar above the list: what's there and the ways to add more.
+    fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(root) = self.root.clone() else { return div().into_any_element() };
+        let count = plural(self.worlds.len(), "world");
+        if let Some(t) = self.target() {
+            let caption = if self.total > 0 { format!("{count} · {}", hopper::instance_ops::human_bytes(self.total)) } else { count };
+            return h_flex()
+                .gap_2()
+                .child(widgets::caption(caption, cx))
+                .child(div().flex_1())
+                .when_some(t.local.clone(), |r, dir| {
+                    r.child(
+                        Button::new("server-folder")
+                            .outline()
+                            .small()
+                            .icon(IconName::FolderOpen)
+                            .label("Server folder")
+                            .on_click(move |_, _, _| open_path(&dir)),
+                    )
+                })
+                .child(
+                    Button::new("new-world")
+                        .primary()
+                        .small()
+                        .icon(IconName::Plus)
+                        .label("New world")
+                        .on_click(cx.listener(|this, _, window, cx| this.start_create(window, cx))),
+                )
+                .into_any_element();
+        }
+        let (saves, backups) = (
+            root.join("saves"),
+            root.join(hopper::sync::BACKUP_DIR).join("worlds"),
+        );
+        h_flex()
+            .gap_2()
+            .child(widgets::caption(count, cx))
+            .child(div().flex_1())
+            .child(
+                Button::new("saves")
+                    .outline()
+                    .small()
+                    .icon(IconName::FolderOpen)
+                    .label("Saves folder")
+                    .on_click(move |_, _, _| open_path(&saves)),
+            )
+            .child(
+                // Only the folder; the instance's Backups dialog is
+                // in the header's menu.
+                Button::new("world-backups")
+                    .outline()
+                    .small()
+                    .icon(IconName::ExternalLink)
+                    .label("Open backups folder")
+                    .on_click(move |_, _, _| {
+                        let _ = std::fs::create_dir_all(&backups);
+                        open_path(&backups)
+                    }),
+            )
+            .child(
+                Button::new("get-worlds")
+                    .primary()
+                    .small()
+                    .icon(IconName::Plus)
+                    .label("Get worlds")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(ContentEvent::Browse {
+                            class: hopper::cf::CLASS_WORLDS,
+                            dest: None,
+                        })
+                    })),
+            )
             .into_any_element()
     }
 }
 
 impl Render for WorldsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(root) = self.root.clone() else {
+        if self.root.is_none() {
             return div().into_any_element();
+        }
+        let server = self.is_server();
+        // A server's list on its way, or why it didn't come.
+        let state: Option<AnyElement> = match &self.load {
+            _ if !server => None,
+            None => Some(widgets::skeleton_rows(4, rems(5.), cx).into_any_element()),
+            Some(Err(e)) => Some(
+                widgets::empty_state(IconName::TriangleAlert, "Couldn't list the worlds", Some(e.clone().into()), cx).into_any_element(),
+            ),
+            Some(Ok(())) => None,
         };
-        let (saves, backups) = (
-            root.join("saves"),
-            root.join(hopper::sync::BACKUP_DIR).join("worlds"),
-        );
-        let worlds: Vec<AnyElement> = self
-            .worlds
-            .clone()
-            .iter()
-            .map(|w| self.world_card(w, cx))
-            .collect();
-        let empty = worlds.is_empty();
+        let worlds: Vec<AnyElement> = if state.is_some() {
+            Vec::new()
+        } else {
+            self.worlds.clone().iter().map(|w| self.world_card(w, cx)).collect()
+        };
+        let empty = worlds.is_empty() && state.is_none();
         let bar = self.sel.many().then(|| {
             let view = cx.entity();
             let v2 = view.clone();
@@ -417,7 +825,7 @@ impl Render for WorldsView {
                             .ghost()
                             .icon(IconName::Archive)
                             .label("Back up")
-                            .tooltip("Zip into .hopper-backups/worlds")
+                            .tooltip(if server { "Back up into the server's Backups" } else { "Zip into .hopper-backups/worlds" })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let dirs = this.picked_dirs();
                                 this.back_up(&dirs, cx)
@@ -443,54 +851,31 @@ impl Render for WorldsView {
                 ),
             )
         });
+        let create = (server && self.creating).then(|| self.create_row(cx));
+        let notice = self.notice.clone().map(|(bad, text)| {
+            let theme = cx.theme();
+            div().text_sm().text_color(if bad { theme.danger } else { theme.muted_foreground }).child(text)
+        });
         let list = v_flex()
             .id("worlds")
             .size_full()
             .px_6()
             .pb_6()
             .gap_4()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(widgets::caption(plural(self.worlds.len(), "world"), cx))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("saves")
-                            .outline()
-                            .small()
-                            .icon(IconName::FolderOpen)
-                            .label("Saves folder")
-                            .on_click(move |_, _, _| open_path(&saves)),
-                    )
-                    .child(
-                        // Only the folder; the instance's Backups dialog is
-                        // in the header's menu.
-                        Button::new("world-backups")
-                            .outline()
-                            .small()
-                            .icon(IconName::ExternalLink)
-                            .label("Open backups folder")
-                            .on_click(move |_, _, _| {
-                                let _ = std::fs::create_dir_all(&backups);
-                                open_path(&backups)
-                            }),
-                    )
-                    .child(
-                        Button::new("get-worlds")
-                            .primary()
-                            .small()
-                            .icon(IconName::Plus)
-                            .label("Get worlds")
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(ContentEvent::Browse {
-                                    class: hopper::cf::CLASS_WORLDS,
-                                    dest: None,
-                                })
-                            })),
-                    ),
-            )
+            .child(self.toolbar(cx))
+            .children(notice)
+            .children(create)
+            .children(state)
             .children(worlds)
             .when(empty, |r| {
+                if server {
+                    return r.child(widgets::empty_state(
+                        IconName::Globe,
+                        "No worlds yet",
+                        Some("The server makes one on its first start, or make one with New world.".into()),
+                        cx,
+                    ));
+                }
                 r.child(
                     widgets::empty_state(
                         IconName::Globe,
@@ -519,6 +904,17 @@ impl Render for WorldsView {
             .size_full()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                if this.creating {
+                    match e.keystroke.key.as_str() {
+                        "enter" => this.create(cx),
+                        "escape" => {
+                            this.creating = false;
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
                 let order = this.order();
                 match selection::on_key(&mut this.sel, e, &order, cx) {
                     KeyAct::None => return,

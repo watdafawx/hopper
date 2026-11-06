@@ -251,6 +251,14 @@ impl FilesTab {
         cx.notify();
     }
 
+    /// Shows `target`'s Files at folder `path` (from a world's Open folder).
+    pub fn show_at(&mut self, target: Target, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.target = Some(target);
+        self.open = None;
+        self.note = None;
+        self.go(path, window, cx);
+    }
+
     fn join(&self, name: &str) -> String {
         if self.path.is_empty() { name.to_string() } else { format!("{}/{name}", self.path) }
     }

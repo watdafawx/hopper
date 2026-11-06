@@ -778,6 +778,8 @@ impl LibraryView {
     fn content_event(&mut self, event: &ContentEvent, cx: &mut Context<Self>) {
         let Some(root) = self.selected.clone() else { return };
         match event {
+            // Only a server on a Hopper Server opens its Files tab.
+            ContentEvent::OpenFiles(_) => {}
             ContentEvent::Browse { class, dest } => cx.emit(LibraryEvent::Browse {
                 root,
                 class: *class,

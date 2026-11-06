@@ -62,7 +62,8 @@ pub fn locations(inst: &Instance, class: u32) -> Vec<Location> {
         if inst.root.join(PAXI_OPTIONAL).is_dir() {
             out.push(loc("paxi-optional", "Paxi optional", inst.root.join(PAXI_OPTIONAL), true, None));
         }
-        for w in ops::worlds(inst) {
+        // A server world made here but not started yet has no folder.
+        for w in ops::worlds(inst).into_iter().filter(|w| w.created) {
             let folder = w.dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
             out.push(loc(
                 &format!("world:{folder}"),
