@@ -66,12 +66,21 @@ pub struct Summary {
     pub address_default: bool,
     /// Sleeps after this many minutes with nobody on; 0: never.
     pub sleep_after_minutes: u32,
+    /// Joining starts it while it sleeps.
+    pub wakes_on_join: bool,
+    /// A join woke it but it didn't come up; joins don't start it again
+    /// until it's started from the panel (or the retry time passes).
+    pub wake_failed: bool,
     /// `server-icon.png`'s modified time (Unix seconds), when it has one;
     /// part of the icon's URL so a new icon shows at once.
     pub icon: Option<u64>,
     /// The mods folder's fingerprint (`hopper_core::server::mods_stamp`):
     /// Hopper desktop compares the pack again when it changes.
     pub mods_stamp: Option<u64>,
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 pub struct Servers {
@@ -255,6 +264,8 @@ impl Servers {
                 .filter(|_| state.is_alive())
                 .and_then(|s| s.elapsed().ok())
                 .map(|d| d.as_secs()),
+            wakes_on_join: route.sleep_after_minutes > 0 && route.wake_on_join,
+            wake_failed: route.sleep_after_minutes > 0 && route.wake_on_join && route.failed_hold(now_secs()).is_some(),
             addresses: route.addresses,
             address_default: false,
             sleep_after_minutes: route.sleep_after_minutes,

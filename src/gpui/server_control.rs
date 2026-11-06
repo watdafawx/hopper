@@ -692,6 +692,8 @@ impl ServerControl {
             (Some(s), None) if s.crashed => (widgets::chip(cx.theme().danger), "Crashed"),
             (Some(s), None) if s.starting => (widgets::chip(cx.theme().warning), "Starting"),
             (Some(s), None) if s.running => (widgets::chip(cx.theme().success), "Running"),
+            (Some(s), None) if s.wake_failed => (widgets::chip(cx.theme().danger), "Couldn't wake"),
+            (Some(s), None) if s.sleeping() => (widgets::chip(cx.theme().warning), "Sleeping"),
             (Some(_), None) => (widgets::chip(cx.theme().muted_foreground), "Stopped"),
             (None, None) => (widgets::chip(cx.theme().muted_foreground), "…"),
         };

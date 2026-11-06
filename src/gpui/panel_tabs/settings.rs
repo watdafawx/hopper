@@ -6,6 +6,7 @@
 use super::motd_editor::{MotdChanged, MotdEditor};
 use super::{Load, Target};
 use crate::java_form::JavaForm;
+use gpui_kit::component::tab::{Tab, TabBar};
 use crate::store::Store;
 use crate::widgets;
 use crate::widgets::Clickable as _;
@@ -105,6 +106,41 @@ struct Addr {
     sleep: u32,
     port: u64,
     router_port: u64,
+    /// The wake settings as saved (see [`Wake`]); None from a Hopper
+    /// Server too old to have them.
+    wake: Option<Wake>,
+    default_message: String,
+    /// "about 2 min", for the preview.
+    estimate: String,
+    /// (who, unix secs, why) of a wake that didn't come up.
+    failed: Option<(String, i64, String)>,
+    /// (who, unix secs) of the last wake.
+    last_wake: Option<(String, i64)>,
+}
+
+/// Whether, by whom and how a sleeping server wakes on join.
+#[derive(Clone, PartialEq)]
+struct Wake {
+    on: bool,
+    /// "anyone", "whitelist" or "ops".
+    who: String,
+    retry: u32,
+    message: String,
+}
+
+const WAKE_WHO: [(&str, &str); 3] = [("anyone", "Anyone"), ("whitelist", "Whitelist"), ("ops", "Ops")];
+const WAKE_RETRY: [(u32, &str); 4] = [(0, "Wait for a start here"), (2, "2 min"), (10, "10 min"), (30, "30 min")];
+
+/// "just now", "4 min ago", "2 h ago", "3 days ago".
+fn since(at: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let s = (now - at).max(0);
+    match s {
+        0..60 => "just now".into(),
+        60..3600 => format!("{} min ago", s / 60),
+        3600..86400 => format!("{} h ago", s / 3600),
+        _ => format!("{} day{} ago", s / 86400, if s / 86400 == 1 { "" } else { "s" }),
+    }
 }
 
 /// `GET /router`.
@@ -207,6 +243,16 @@ fn parse_addr(v: &Value) -> Addr {
         sleep: v["sleep_after_minutes"].as_u64().unwrap_or(0) as u32,
         port: v["port"].as_u64().unwrap_or(0),
         router_port: v["router_port"].as_u64().unwrap_or(0),
+        wake: v["wake_on_join"].as_bool().map(|on| Wake {
+            on,
+            who: v["wake_who"].as_str().unwrap_or("anyone").to_string(),
+            retry: v["retry_after_minutes"].as_u64().unwrap_or(0) as u32,
+            message: s(v, "sleep_message"),
+        }),
+        default_message: s(v, "default_sleep_message"),
+        estimate: s(v, "wake_estimate"),
+        failed: v["wake_failed"]["at"].as_i64().map(|at| (s(&v["wake_failed"], "by"), at, s(&v["wake_failed"], "why"))),
+        last_wake: v["last_wake"]["at"].as_i64().map(|at| (s(&v["last_wake"], "by"), at)),
     }
 }
 
@@ -272,6 +318,10 @@ pub struct SettingsTab {
     addr_inputs: Vec<Entity<InputState>>,
     sleep_on: bool,
     sleep_min: Entity<InputState>,
+    wake_on: bool,
+    wake_who: String,
+    wake_retry: u32,
+    sleep_msg: Entity<InputState>,
     /// DNS check results by address: (points here, note).
     dns: Option<HashMap<String, (bool, String)>>,
     checking: bool,
@@ -286,12 +336,13 @@ impl SettingsTab {
     pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a setting"));
         let sleep_min = cx.new(|cx| InputState::new(window, cx).placeholder("15"));
+        let sleep_msg = cx.new(|cx| InputState::new(window, cx));
         let notify = |_: &mut Self, _: Entity<InputState>, e: &InputEvent, cx: &mut Context<Self>| {
             if matches!(e, InputEvent::Change) {
                 cx.notify();
             }
         };
-        let subs = vec![cx.subscribe(&search, notify), cx.subscribe(&sleep_min, notify)];
+        let subs = vec![cx.subscribe(&search, notify), cx.subscribe(&sleep_min, notify), cx.subscribe(&sleep_msg, notify)];
         Self {
             store,
             target: None,
@@ -308,6 +359,10 @@ impl SettingsTab {
             addr_inputs: Vec::new(),
             sleep_on: false,
             sleep_min,
+            wake_on: true,
+            wake_who: "anyone".into(),
+            wake_retry: 0,
+            sleep_msg,
             dns: None,
             checking: false,
             editor: None,
@@ -469,6 +524,15 @@ impl SettingsTab {
         self.sleep_on = sleep > 0;
         let mins = if sleep > 0 { sleep } else { 15 }.to_string();
         self.sleep_min.update(cx, |s, cx| s.set_value(mins, window, cx));
+        if let Some(a) = d.addr.as_ref() {
+            let w = a.wake.clone().unwrap_or(Wake { on: true, who: "anyone".into(), retry: 0, message: String::new() });
+            (self.wake_on, self.wake_who, self.wake_retry) = (w.on, w.who, w.retry);
+            let placeholder = a.default_message.clone();
+            self.sleep_msg.update(cx, |s, cx| {
+                s.set_value(w.message, window, cx);
+                s.set_placeholder(placeholder, window, cx);
+            });
+        }
         self.addr_inputs.clear();
         let shown: Vec<String> = if addrs.is_empty() { vec![String::new()] } else { addrs };
         for a in shown {
@@ -558,7 +622,13 @@ impl SettingsTab {
 
     fn addr_changed(&self, cx: &App) -> (bool, bool) {
         let Some(a) = self.data.ready().and_then(|d| d.addr.as_ref()) else { return (false, false) };
-        (self.addresses(cx) != a.addresses, self.sleep_minutes(cx) != a.sleep)
+        let wake = a.wake.as_ref().is_some_and(|w| *w != self.wake(cx));
+        (self.addresses(cx) != a.addresses, self.sleep_minutes(cx) != a.sleep || wake)
+    }
+
+    /// The wake settings as the form has them.
+    fn wake(&self, cx: &App) -> Wake {
+        Wake { on: self.wake_on, who: self.wake_who.clone(), retry: self.wake_retry, message: self.sleep_msg.read(cx).value().trim().to_string() }
     }
 
     /// Edits not saved yet (or an editor open): a change made elsewhere
@@ -614,7 +684,19 @@ impl SettingsTab {
             }
         }
         let (a, sl) = self.addr_changed(cx);
-        let addr = (a || sl).then(|| json!({ "addresses": self.addresses(cx), "sleep_after_minutes": self.sleep_minutes(cx) }));
+        // Wake settings only to a Hopper Server that has them.
+        let has_wake = self.data.ready().and_then(|d| d.addr.as_ref()).is_some_and(|a| a.wake.is_some());
+        let w = self.wake(cx);
+        let addr = (a || sl).then(|| {
+            let mut b = json!({ "addresses": self.addresses(cx), "sleep_after_minutes": self.sleep_minutes(cx) });
+            if has_wake {
+                b["wake_on_join"] = json!(w.on);
+                b["wake_who"] = json!(w.who);
+                b["retry_after_minutes"] = json!(w.retry);
+                b["sleep_message"] = json!(w.message);
+            }
+            b
+        });
         let (pp, jp, ap) = (t.sp("/properties"), t.sp("/jvm"), t.sp("/address"));
         self.saving = true;
         self.error = None;
@@ -1256,7 +1338,116 @@ impl SettingsTab {
         out
     }
 
-    /// The Address card: addresses, sleeping, and the router's state.
+    /// The Sleep card: stop when nobody is on, and wake when someone joins.
+    fn sleep(&self, d: &Data, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme().clone();
+        let Some(a) = d.addr.clone() else { return Vec::new() };
+        let mut out = vec![Self::heading("Sleep", cx).into_any_element()];
+        let mut col = v_flex().gap_2().px_2();
+        // A failed wake holds joins back until a start here, or until the
+        // saved retry time has passed.
+        let retry = a.wake.as_ref().map_or(0, |w| w.retry) as i64 * 60;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        if let Some((by, at, why)) = a.failed.clone().filter(|(_, at, _)| self.sleep_on && self.wake_on && (retry == 0 || now < at + retry)) {
+            col = col.child(widgets::notice_bar(theme.danger, IconName::TriangleAlert, cx).child(div().flex_1().text_sm().child(format!(
+                "{by} woke it {}, but it {why}. {}",
+                since(at),
+                if self.wake_retry > 0 { format!("Joining tries again {} min after that.", self.wake_retry) } else { "Joining won't start it again until you start it here.".into() }
+            ))));
+        }
+        col = col.child(
+            h_flex()
+                .gap_2()
+                .child(Switch::new("settings-sleep").label("Sleep when empty for").checked(self.sleep_on).on_click(cx.listener(|this, v: &bool, _, cx| {
+                    this.sleep_on = *v;
+                    cx.notify();
+                })))
+                .child(div().w(rems(4.5)).child(Input::new(&self.sleep_min).small().disabled(!self.sleep_on)))
+                .child(div().text_sm().child("min")),
+        );
+        if !self.sleep_on {
+            out.push(col.child(widgets::caption("Off: it runs until someone stops it.", cx)).into_any_element());
+            return out;
+        }
+        if a.wake.is_none() {
+            // An older Hopper Server: it always wakes on join.
+            out.push(col.child(widgets::caption("Joining starts it again; the server list shows \"Sleeping\" meanwhile.", cx)).into_any_element());
+            return out;
+        }
+        col = col.child(Switch::new("settings-wake").label("Wake when someone joins").checked(self.wake_on).on_click(cx.listener(|this, v: &bool, _, cx| {
+            this.wake_on = *v;
+            cx.notify();
+        })));
+        if !self.wake_on {
+            out.push(col.child(widgets::caption("Joining doesn't start it: players see \"Offline\" until someone starts it here.", cx)).into_any_element());
+            return out;
+        }
+        let label = |t: &str| div().w(rems(9.)).flex_none().text_sm().child(t.to_string());
+        let who_i = WAKE_WHO.iter().position(|(k, _)| *k == self.wake_who);
+        let retry_i = WAKE_RETRY.iter().position(|(m, _)| *m == self.wake_retry);
+        let who_note = match self.wake_who.as_str() {
+            "whitelist" => "Players on the whitelist or the ops list.",
+            "ops" => "Only players on the ops list.",
+            _ => "Anyone who joins starts it.",
+        };
+        col = col
+            .child(
+                h_flex().gap_2().child(label("Who can wake it")).child(
+                    TabBar::new("settings-wake-who")
+                        .segmented()
+                        .xsmall()
+                        .when_some(who_i, |t, i| t.selected_index(i))
+                        .children(WAKE_WHO.iter().map(|(_, l)| Tab::new().label(*l)))
+                        .on_click(cx.listener(|this, i: &usize, _, cx| {
+                            this.wake_who = WAKE_WHO[*i].0.to_string();
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(div().pl(rems(9.5)).child(widgets::caption(
+                format!("{who_note} Names aren't checked until the server is up, so this keeps strangers from waking it by accident, not on purpose."),
+                cx,
+            )))
+            .child(
+                h_flex().gap_2().child(label("After a failed start")).child(
+                    TabBar::new("settings-wake-retry")
+                        .segmented()
+                        .xsmall()
+                        .when_some(retry_i, |t, i| t.selected_index(i))
+                        .children(WAKE_RETRY.iter().map(|(_, l)| Tab::new().label(*l)))
+                        .on_click(cx.listener(|this, i: &usize, _, cx| {
+                            this.wake_retry = WAKE_RETRY[*i].0;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(h_flex().gap_2().child(label("Server list message")).child(div().flex_1().min_w_0().child(Input::new(&self.sleep_msg).small())));
+        // How players see it in their server list while it sleeps.
+        let msg = self.sleep_msg.read(cx).value().trim().to_string();
+        let msg = if msg.is_empty() { a.default_message.clone() } else { msg };
+        let name = d.name.clone();
+        let max = d.players.split('/').nth(1).unwrap_or("20").to_string();
+        col = col.child(
+            v_flex()
+                .p_2()
+                .rounded(theme.radius)
+                .bg(rgb(0x1d1813))
+                .border_1()
+                .border_color(theme.border)
+                .font_family(theme.mono_font_family.clone())
+                .text_xs()
+                .child(h_flex().child(div().text_color(rgb(0xffffff)).child(name.clone())).child(div().flex_1()).child(div().text_color(rgb(0xaaaaaa)).child(format!("0/{max}"))))
+                .child(div().text_color(rgb(0xffffff)).child(name))
+                .child(h_flex().child(div().text_color(rgb(0xffff55)).child(msg)).child(div().text_color(rgb(0xaaaaaa)).child(format!(" ({})", a.estimate)))),
+        );
+        if let Some((by, at)) = a.last_wake {
+            col = col.child(widgets::caption(format!("Last woken by {by}, {}. The console notes each wake.", since(at)), cx));
+        }
+        out.push(col.into_any_element());
+        out
+    }
+
+    /// The Address card: addresses and the router's state.
     fn address(&self, d: &Data, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
         let mut out = vec![Self::heading("Address players join by", cx).into_any_element()];
@@ -1362,27 +1553,7 @@ impl SettingsTab {
                         )
                     }),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .pt_1()
-                    .child(Switch::new("settings-sleep").label("Sleep when empty for").checked(self.sleep_on).on_click(
-                        cx.listener(|this, v: &bool, _, cx| {
-                            this.sleep_on = *v;
-                            cx.notify();
-                        }),
-                    ))
-                    .child(div().w(rems(4.5)).child(Input::new(&self.sleep_min).small().disabled(!self.sleep_on)))
-                    .child(div().text_sm().child("min")),
-            )
-            .child(widgets::caption(
-                if self.sleep_on {
-                    "Joining starts it again; the server list shows \"Sleeping\" meanwhile."
-                } else {
-                    "Off: it runs until someone stops it."
-                },
-                cx,
-            ));
+            ;
         col = if !router.enabled {
             col.child(widgets::caption("Server addresses are off. Turn them on in the panel's Access & devices.", cx))
         } else if let Some(e) = router.error {
@@ -1503,7 +1674,10 @@ impl Render for SettingsTab {
                         body.extend(super::copy_remove::rows(&t, &self.store, d.alive(), cx));
                     }
                 }
-                "network" => body.extend(self.address(&d, cx)),
+                "network" => {
+                    body.extend(self.address(&d, cx));
+                    body.extend(self.sleep(&d, cx));
+                }
                 "java" => body.extend(self.java_page(&d, rem, cx)),
                 "all" => {
                     body.push(

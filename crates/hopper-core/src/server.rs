@@ -225,10 +225,10 @@ pub fn join_target(address: &str) -> Option<(String, u16)> {
 }
 
 /// A reply from Hopper Server's address router standing in for a server
-/// that isn't up ("Sleeping", "Offline"…): it marks those with protocol -1,
-/// which no real server sends.
+/// that isn't up ("Sleeping", "Offline"…): protocol -1, which no real
+/// server sends, or (asleep, with the real version) `hopper.state`.
 fn is_standin(v: &serde_json::Value) -> bool {
-    v["version"]["protocol"].as_i64() == Some(-1)
+    crate::hosting::router::is_standin(v)
 }
 
 /// Server List Ping (the multiplayer screen's request).
@@ -405,6 +405,7 @@ mod tests {
         assert!(is_standin(&serde_json::json!({ "version": { "name": "Sleeping", "protocol": -1 } })));
         assert!(!is_standin(&serde_json::json!({ "version": { "name": "1.21.1", "protocol": 767 } })));
         assert!(!is_standin(&serde_json::json!({})));
+        assert!(is_standin(&serde_json::json!({ "version": { "name": "1.21.1", "protocol": 767 }, "hopper": { "state": "sleeping" } })));
     }
 
     #[test]

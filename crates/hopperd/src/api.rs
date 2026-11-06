@@ -846,6 +846,9 @@ async fn power(
         return Err(ApiError(StatusCode::CONFLICT, format!("{} is being restored from a backup. Start it once that's done.", e.name)));
     }
     log::info!("{} {} by {}", b.action, e.name, who_name(&who));
+    if matches!(action, PanelAction::Start | PanelAction::Restart) {
+        crate::router::started_by_hand(&e);
+    }
     let a = app.clone();
     tokio::task::spawn_blocking(move || a.servers.act(&e, action))
         .await

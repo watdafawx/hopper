@@ -65,6 +65,11 @@ pub struct Router {
     active: Mutex<HashMap<String, Instant>>,
     /// When a server was first seen starting, for the next wake estimate.
     starting: Mutex<HashMap<String, Instant>>,
+    /// Servers a join is waking, and who joined: watched until they're up
+    /// (or didn't make it, which holds further wakes).
+    woken: Mutex<HashMap<String, String>>,
+    /// When each running server's own server list answer was last kept.
+    pinged: Mutex<HashMap<String, Instant>>,
     reload: tokio::sync::Notify,
 }
 
@@ -169,6 +174,7 @@ pub fn start(app: Arc<App>) {
             }
             let a = app.clone();
             let _ = tokio::task::spawn_blocking(move || sleep_and_time(&a)).await;
+            keep_pings(&app);
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
                 _ = app.router.reload.notified() => {}
@@ -209,6 +215,27 @@ fn sleep_and_time(app: &Arc<App>) {
                 }
             }
         }
+        // A wake's outcome: up clears an earlier failure; gone before it was
+        // up holds further wakes (see RouteSettings::retry_after_minutes).
+        let woken = app.router.woken.lock().unwrap().get(&e.id).cloned();
+        match state {
+            ServerState::Running => {
+                app.router.woken.lock().unwrap().remove(&e.id);
+                let mut s = settings(&e);
+                if s.wake_failed.take().is_some() {
+                    let _ = s.save(&e.root);
+                }
+            }
+            ServerState::Starting | ServerState::Stopping => {}
+            _ => {
+                if let Some(by) = woken {
+                    app.router.woken.lock().unwrap().remove(&e.id);
+                    let why = if matches!(state, ServerState::Crashed(_)) { "crashed while starting" } else { "stopped before it was up" };
+                    fail_wake(&e, &by, why);
+                    events.push(event(&e, "problem", format!("**{}** didn't wake up for {by}: it {why}. Joining won't start it again until it's started from the panel.", e.name)));
+                }
+            }
+        }
         // Sleep.
         let s = settings(&e);
         let mut active = app.router.active.lock().unwrap();
@@ -231,6 +258,77 @@ fn sleep_and_time(app: &Arc<App>) {
         }
     }
     crate::webhooks::emit(app, events);
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// Notes a wake that didn't come up, in its settings and its console.
+fn fail_wake(e: &Entry, by: &str, why: &str) {
+    let mut s = settings(e);
+    s.wake_failed = Some(core::WakeFailed { at: unix_now(), by: by.to_string(), why: why.to_string() });
+    let _ = s.save(&e.root);
+    log::warn!("router: {} didn't wake up for {by}: {why}", e.name);
+    e.server.note(&format!("[Hopper] {by} woke the server, but it {why}. Joining won't start it again until it's started from the panel."));
+}
+
+/// A start from the panel (or anywhere but a join): an earlier failed
+/// wake no longer holds joins back.
+pub fn started_by_hand(e: &Entry) {
+    let mut s = settings(e);
+    if s.wake_failed.take().is_some() {
+        let _ = s.save(&e.root);
+    }
+}
+
+/// Keeps each running routed server's own server list answer (version,
+/// mods) every 10 minutes, for its stand-in while it sleeps.
+fn keep_pings(app: &Arc<App>) {
+    let routed: Vec<String> = app.router.routes.read().unwrap().iter().map(|(id, _)| id.clone()).collect();
+    for e in app.servers.list() {
+        if !routed.contains(&e.id) || e.server.state() != ServerState::Running {
+            continue;
+        }
+        {
+            let mut pinged = app.router.pinged.lock().unwrap();
+            if pinged.get(&e.id).is_some_and(|t| t.elapsed() < Duration::from_secs(600)) {
+                continue;
+            }
+            pinged.insert(e.id.clone(), Instant::now());
+        }
+        tokio::spawn(async move {
+            let port = port_of(&e);
+            match tokio::time::timeout(Duration::from_secs(10), own_status(port)).await {
+                Ok(Ok(v)) => {
+                    let root = e.root.clone();
+                    let _ = tokio::task::spawn_blocking(move || core::remember_ping(&root, &v)).await;
+                }
+                Ok(Err(err)) => log::debug!("router: couldn't ask {} for its server list entry: {err:#}", e.name),
+                Err(_) => log::debug!("router: {} didn't answer its server list ping", e.name),
+            }
+        });
+    }
+}
+
+/// A server's own server list answer, asked on this PC.
+async fn own_status(port: u16) -> anyhow::Result<Value> {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await?;
+    let mut out = core::handshake_packet(767, "127.0.0.1", port, 1);
+    out.extend_from_slice(&[1, 0]); // status request
+    s.write_all(&out).await?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Read::Done((0, body), _) = core::read_packet(&buf, 1 << 21)? {
+            return Ok(serde_json::from_str(&core::read_string(body, 1 << 21)?.0)?);
+        }
+        let n = s.read(&mut chunk).await?;
+        if n == 0 {
+            anyhow::bail!("closed before answering");
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
 }
 
 fn event(e: &Entry, kind: &'static str, text: String) -> crate::webhooks::Event {
@@ -311,7 +409,7 @@ async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow
                 if !hs.is_login()
                     && let Some(msg) = crate::motd_live::message(&e).await
                 {
-                    return status_through(&mut sock, &mut up, buf, used, &msg).await;
+                    return status_through(&mut sock, &mut up, buf, used, &msg, &e).await;
                 }
                 up.write_all(&buf).await?;
                 tokio::io::copy_bidirectional(&mut sock, &mut up).await?;
@@ -321,11 +419,13 @@ async fn handle(app: &Arc<App>, mut sock: TcpStream, peer: SocketAddr) -> anyhow
         }
     }
     let s = settings(&e);
+    let now = unix_now();
     let kind = match state {
         ServerState::Starting => Standin::Starting,
         ServerState::Stopping => Standin::Stopping,
+        _ if s.sleep_after_minutes > 0 && s.wake_on_join && s.failed_hold(now).is_some() => Standin::WakeFailed,
         ServerState::Crashed(_) => Standin::Crashed,
-        _ if s.sleep_after_minutes > 0 => Standin::Sleeping,
+        _ if s.wakes(now) => Standin::Sleeping,
         _ => Standin::Stopped,
     };
     standin(app, &mut sock, &buf, used, &hs, kind, Some(&e)).await
@@ -344,17 +444,44 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
     let boot = e.and_then(|e| e.server.boot_status());
     if hs.is_login() {
         let player = read_until(sock, &mut buf, used, core::read_login_name).await.map(|(n, _)| n).unwrap_or_default();
+        if kind == Standin::WakeFailed {
+            return kick(sock, &core::wake_failed_kick(&name, s.retry_in_minutes(unix_now()))).await;
+        }
         if kind == Standin::Sleeping
             && let Some(e) = e
         {
-            match e.server.state() {
-                ServerState::Stopped => {}
-                _ => return kick(sock, &core::standin_kick(Standin::Starting, &name, None, e.server.boot_status().as_ref())).await,
+            if !core::may_wake(&e.root, s.wake_who, &player) {
+                log::info!("router: {player:?} may not wake {}", e.name);
+                return kick(sock, &core::refused_kick(&name, s.wake_who)).await;
             }
-            match app.servers.act(e, PanelAction::Start) {
+            let who = if player.is_empty() { "a player".to_string() } else { player.clone() };
+            // One wake at a time: a second join while it's starting just
+            // hears that it's starting.
+            let busy = {
+                let mut woken = app.router.woken.lock().unwrap();
+                let st = e.server.state();
+                let busy = woken.contains_key(&e.id) || !(st == ServerState::Stopped || matches!(st, ServerState::Crashed(_)));
+                if !busy {
+                    woken.insert(e.id.clone(), who.clone());
+                }
+                busy
+            };
+            if busy {
+                return kick(sock, &core::standin_kick(Standin::Starting, &name, usual, e.server.boot_status().as_ref())).await;
+            }
+            let a = app.clone();
+            let entry = e.clone();
+            let started = match tokio::task::spawn_blocking(move || a.servers.act(&entry, PanelAction::Start)).await {
+                Ok(r) => r,
+                Err(err) => Err(anyhow::anyhow!("{err}")),
+            };
+            match started {
                 Ok(()) => {
-                    let who = if player.is_empty() { "a player".to_string() } else { player.clone() };
                     log::info!("router: {who} woke {}", e.name);
+                    e.server.note(&format!("[Hopper] Woken by {who}, who joined through the server address."));
+                    let mut st = settings(e);
+                    st.last_wake = Some(core::LastWake { by: who.clone(), at: unix_now() });
+                    let _ = st.save(&e.root);
                     // Counts as busy from now: it sleeps again only after its
                     // sleep time with nobody on.
                     app.router.active.lock().unwrap().insert(e.id.clone(), Instant::now());
@@ -362,8 +489,10 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
                     app.refresh.notify_one();
                 }
                 Err(err) => {
-                    log::warn!("router: couldn't wake {}: {err:#}", e.name);
-                    return kick(sock, &json!({ "text": format!("Couldn't start {name}: {err:#}"), "color": "red" })).await;
+                    app.router.woken.lock().unwrap().remove(&e.id);
+                    fail_wake(e, &who, &format!("couldn't start ({err:#})"));
+                    app.refresh.notify_one();
+                    return kick(sock, &core::wake_failed_kick(&name, settings(e).retry_in_minutes(unix_now()))).await;
                 }
             }
         }
@@ -384,7 +513,8 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
         None => (String::new(), 0),
     };
     let icon = e.and_then(|e| core::favicon(&e.root));
-    sock.write_all(&core::status_packet(&core::standin_status(kind, &motd, usual, max, icon.as_deref(), boot.as_ref()))).await?;
+    let real = e.and_then(|e| core::last_ping(&e.root));
+    sock.write_all(&core::status_packet(&core::standin_status(kind, &motd, usual, max, icon.as_deref(), boot.as_ref(), s.message(), real.as_ref()))).await?;
     if let Ok(((1, payload), _)) = read_until(sock, &mut buf, after, |b| packet(b, 64)).await {
         sock.write_all(&core::pong_packet(&payload)).await?;
     }
@@ -394,7 +524,7 @@ async fn standin(app: &Arc<App>, sock: &mut TcpStream, buf: &[u8], used: usize, 
 /// Passes a server list request to a running server and its answer back
 /// with `msg` as the message (the rest, mods and players included, as the
 /// server said), then the ping through as is.
-async fn status_through(sock: &mut TcpStream, up: &mut TcpStream, mut buf: Vec<u8>, used: usize, msg: &str) -> anyhow::Result<()> {
+async fn status_through(sock: &mut TcpStream, up: &mut TcpStream, mut buf: Vec<u8>, used: usize, msg: &str, e: &Arc<Entry>) -> anyhow::Result<()> {
     let (_, after) = read_until(sock, &mut buf, used, |b| packet(b, 16)).await?;
     up.write_all(&buf[..after]).await?;
     let mut answer = Vec::new();
@@ -414,6 +544,9 @@ async fn status_through(sock: &mut TcpStream, up: &mut TcpStream, mut buf: Vec<u
     };
     match serde_json::from_str::<Value>(&status) {
         Ok(mut v) if v.is_object() => {
+            // Kept for when it sleeps (version, mods).
+            let (root, keep) = (e.root.clone(), v.clone());
+            tokio::task::spawn_blocking(move || core::remember_ping(&root, &keep));
             v["description"] = json!({ "text": msg });
             sock.write_all(&core::status_packet(&v)).await?;
         }
@@ -516,12 +649,17 @@ async fn put_router(State(app): State<Arc<App>>, headers: HeaderMap, method: Met
 
 #[derive(Deserialize)]
 struct AddressBody {
-    addresses: Vec<String>,
-    #[serde(default)]
-    sleep_after_minutes: u32,
+    // Each part changes only when sent: the Address and Sleep cards save
+    // their own parts; older clients send addresses and sleep together.
+    addresses: Option<Vec<String>>,
+    sleep_after_minutes: Option<u32>,
     /// No address at all, not even the default.
     #[serde(default)]
     off: bool,
+    wake_on_join: Option<bool>,
+    wake_who: Option<core::WakeWho>,
+    sleep_message: Option<String>,
+    retry_after_minutes: Option<u32>,
 }
 
 async fn get_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
@@ -540,6 +678,10 @@ async fn get_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
         "addresses": s.addresses, "off": s.off, "effective": eff.addresses, "is_default": eff.default,
         "default_address": default, "default_taken": taken,
         "sleep_after_minutes": s.sleep_after_minutes, "last_start_secs": s.last_start_secs,
+        "wake_on_join": s.wake_on_join, "wake_who": s.wake_who, "sleep_message": s.sleep_message,
+        "default_sleep_message": core::SLEEP_MESSAGE, "retry_after_minutes": s.retry_after_minutes,
+        "wake_failed": s.wake_failed, "last_wake": s.last_wake,
+        "wake_estimate": core::wake_estimate(e.server.usual_start_secs().or(s.last_start_secs)),
         "port": port_of(&e), "router_port": router_port, "managed_by": e.managed_by,
     })))
 }
@@ -548,7 +690,7 @@ async fn put_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     require(&app, &headers, &method)?;
     let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
     let mut clean = Vec::new();
-    for a in b.addresses.iter().filter(|a| !a.trim().is_empty()) {
+    for a in b.addresses.iter().flatten().filter(|a| !a.trim().is_empty()) {
         let a = core::clean_address(a).map_err(bad)?;
         if !clean.contains(&a) {
             clean.push(a);
@@ -559,13 +701,36 @@ async fn put_address(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
             return Err(bad(format!("{name} already has {a}.")));
         }
     }
-    if b.sleep_after_minutes > 24 * 60 {
+    if b.sleep_after_minutes.is_some_and(|m| m > 24 * 60) {
         return Err(bad("Sleep after at most a day (1440 minutes)."));
     }
     let mut s = settings(&e);
-    s.off = b.off && clean.is_empty();
-    s.addresses = clean;
-    s.sleep_after_minutes = b.sleep_after_minutes;
+    if b.addresses.is_some() {
+        s.off = b.off && clean.is_empty();
+        s.addresses = clean;
+    }
+    if let Some(m) = b.sleep_after_minutes {
+        s.sleep_after_minutes = m;
+    }
+    if let Some(w) = b.wake_on_join {
+        s.wake_on_join = w;
+    }
+    if let Some(w) = b.wake_who {
+        s.wake_who = w;
+    }
+    if let Some(m) = b.sleep_message {
+        let m = m.trim();
+        if m.chars().count() > 80 {
+            return Err(bad("Keep the server list message under 80 characters: it's one line."));
+        }
+        s.sleep_message = if m == core::SLEEP_MESSAGE { String::new() } else { m.to_string() };
+    }
+    if let Some(r) = b.retry_after_minutes {
+        if r > 24 * 60 {
+            return Err(bad("Try again after at most a day (1440 minutes)."));
+        }
+        s.retry_after_minutes = r;
+    }
     s.save(&e.root).map_err(|e| bad(format!("{e:#}")))?;
     log::info!("{}: addresses {:?}{}, sleep {} min", e.name, s.addresses, if s.off { " (off)" } else { "" }, s.sleep_after_minutes);
     app.router.changed();

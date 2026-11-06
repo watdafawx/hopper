@@ -11,7 +11,7 @@
   import { say } from './lib/toast.svelte.js';
   import { live } from './lib/live.svelte.js';
   import { packUpdates } from './lib/packs.svelte.js';
-  import { stateText, bootText, loaderText } from './lib/format.js';
+  import { stateText, stateKey, stateTip, bootText, loaderText } from './lib/format.js';
   import Avatar from './Avatar.svelte';
   import Progress from './Progress.svelte';
 
@@ -46,7 +46,7 @@
   /** The pill: players while it runs, else its state; none when stopped. */
   function pill(s) {
     if (s.state === 'running') return { text: `${s.players.length}/${s.max_players}`, glow: true };
-    if (s.state === 'starting' || s.state === 'stopping' || s.state === 'crashed') return { text: stateText(s), glow: false };
+    if (s.state === 'starting' || s.state === 'stopping' || s.state === 'crashed' || s.wake_failed) return { text: stateText(s), glow: false };
     return null;
   }
 
@@ -174,7 +174,7 @@
     {#each servers as s (s.id)}
       <a class="tile" class:row-sel={selected === s.id} class:row-hover={selected !== s.id} href={href(s)} title={s.name} oncontextmenu={(e) => openMenu(e, s)}>
         {#if s.icon}<Avatar server={s} cls="sic tic" />{:else}{initials(s.name)}{/if}
-        <span class="dot {s.state} tdot"></span>
+        <span class="dot {stateKey(s)} tdot"></span>
       </a>
     {/each}
   {:else}
@@ -193,11 +193,11 @@
       {@const up = packUpdates.byId[s.id]}
       <a class="srv" class:row-sel={selected === s.id} class:row-hover={selected !== s.id} href={href(s)} oncontextmenu={(e) => openMenu(e, s)}>
         <div class="line">
-          <span class="dot {s.state}"></span>
+          <span class="dot {stateKey(s)}"></span>
           <Avatar server={s} cls="sic" />
           <span class="nm">{s.name}</span>
           {#if up}<span class="upd" title="Pack update: {up.from} → {up.to}"></span>{/if}
-          {#if p}<span class="pill {s.state}" title={bootText(s) || undefined}>{#if p.glow}<span class="glow"></span>{/if}{p.text}</span>{/if}
+          {#if p}<span class="pill {stateKey(s)}" title={bootText(s) || stateTip(s)}>{#if p.glow}<span class="glow"></span>{/if}{p.text}</span>{/if}
         </div>
         {#if s.progress}<Progress server={s} compact />{:else if cap}<div class="cap">{cap}</div>{/if}
       </a>
