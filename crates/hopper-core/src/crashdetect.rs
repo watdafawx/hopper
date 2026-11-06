@@ -794,16 +794,22 @@ fn fabric_signals(lines: &[&str], out: &mut Vec<Raw>) {
 /// error passed through its code: it does work for the mods that call it.
 /// Such a suspect drops to possible, and the first other mod in the chain
 /// becomes the likely one. What the loader itself names stays certain.
-fn demote_libraries(suspects: &mut [Suspect], dependents: &std::collections::HashMap<String, usize>, ids: &impl Fn(&str) -> Vec<String>) {
-    let users = |s: &Suspect| -> usize {
+///
+/// A mod whose own id the error names (`twilightforest:knightmetal_shield`
+/// from Twilight Forest's code) isn't doing work for another mod there, however
+/// many add-ons need it: `named` holds the namespaces the error names.
+fn demote_libraries(suspects: &mut [Suspect], dependents: &std::collections::HashMap<String, usize>, ids: &impl Fn(&str) -> Vec<String>, named: &[String]) {
+    let own_ids = |s: &Suspect| -> Vec<String> {
         let mut own = ids(&s.file_name);
         if !s.mod_id.is_empty() {
             own.push(s.mod_id.clone());
         }
-        own.iter().map(|i| dependents.get(i).copied().unwrap_or(0)).max().unwrap_or(0)
+        own
     };
+    let users = |s: &Suspect| -> usize { own_ids(s).iter().map(|i| dependents.get(i).copied().unwrap_or(0)).max().unwrap_or(0) };
     let pass_through = |s: &Suspect| crate::crashtrace::is_pass_through(&s.mod_id) || ids(&s.file_name).iter().any(|i| crate::crashtrace::is_pass_through(i));
-    let is_library = |s: &Suspect| users(s) >= crate::bisect::LIBRARY_MIN || pass_through(s);
+    let its_own = |s: &Suspect| own_ids(s).iter().any(|i| named.iter().any(|n| n.eq_ignore_ascii_case(i)));
+    let is_library = |s: &Suspect| (users(s) >= crate::bisect::LIBRARY_MIN || pass_through(s)) && !its_own(s);
     let mut library: Option<String> = None;
     for s in suspects.iter_mut().filter(|s| s.certainty == Certainty::Likely) {
         let n = users(s);
@@ -1702,7 +1708,8 @@ fn analyze(
         }
         suspects.push(Suspect { file_name: file, mod_id: r.mod_id, certainty: r.certainty, why: r.why, needs: r.needs, changed: None, client_only: false, facts: Vec::new(), ..Default::default() });
     }
-    demote_libraries(&mut suspects, &crate::deps::dependents(&root.join("mods")), ids);
+    let named: Vec<String> = crate::crashengine::messages(text).iter().flat_map(|m| crate::crashengine::namespaced_ids(m)).map(|(ns, _)| ns).collect();
+    demote_libraries(&mut suspects, &crate::deps::dependents(&root.join("mods")), ids, &named);
     // A loop's mods added lately: the change that likely brought it.
     if !loop_mods.is_empty() {
         let added = crate::instances::added_dates(root);
@@ -2435,18 +2442,30 @@ mod tests {
         let ids = |f: &str| if f.starts_with("arch") { vec!["architectury".to_string()] } else { vec![] };
         // The library first in the chain, a mod that called it next.
         let mut s = vec![sus("architectury.jar", "architectury", Certainty::Likely), sus("caller.jar", "caller", Certainty::Possible)];
-        demote_libraries(&mut s, &deps, &ids);
+        demote_libraries(&mut s, &deps, &ids, &[]);
         assert_eq!((s[0].file_name.as_str(), s[0].certainty), ("caller.jar", Certainty::Likely));
         assert_eq!(s[1].certainty, Certainty::Possible);
         assert!(s[0].why.contains("architectury"));
         // Only the library: nothing is called likely.
         let mut s = vec![sus("architectury.jar", "architectury", Certainty::Likely)];
-        demote_libraries(&mut s, &deps, &ids);
+        demote_libraries(&mut s, &deps, &ids, &[]);
         assert_eq!(s[0].certainty, Certainty::Possible);
         // What the loader names stays certain, library or not.
         let mut s = vec![sus("architectury.jar", "architectury", Certainty::Certain)];
-        demote_libraries(&mut s, &deps, &ids);
+        demote_libraries(&mut s, &deps, &ids, &[]);
         assert_eq!(s[0].certainty, Certainty::Certain);
+    }
+
+    #[test]
+    fn a_mod_with_add_ons_failing_on_its_own_content_is_not_a_library() {
+        // Twilight Forest: four add-ons need it, and the error names its own model layer.
+        let deps: std::collections::HashMap<String, usize> = [("twilightforest".to_string(), 4)].into();
+        let ids = |f: &str| if f.starts_with("twilight") { vec!["twilightforest".to_string()] } else { vec![] };
+        let mut s = vec![sus("twilightforest.jar", "twilightforest", Certainty::Likely), sus("caller.jar", "caller", Certainty::Possible)];
+        demote_libraries(&mut s, &deps, &ids, &["twilightforest".to_string()]);
+        assert_eq!((s[0].mod_id.as_str(), s[0].certainty), ("twilightforest", Certainty::Likely));
+        assert_eq!(s[1].certainty, Certainty::Possible);
+        assert!(s[0].why.is_empty(), "no library sentence: {}", s[0].why);
     }
 
     #[test]

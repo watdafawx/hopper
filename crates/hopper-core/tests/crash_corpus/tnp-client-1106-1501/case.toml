@@ -1,0 +1,9 @@
+side = "client"
+mods = "84bb9cb124"
+report = "crash-2026-11-06_15.01.27-client.txt"
+problem = 15
+expect = ["twilightforest"]
+at_least = "Likely"
+advice = "window"
+note = "No model for layer twilightforest:knightmetal_shield again, but no mod resized the window: it changed size (Ixeris passing the event on) before the first load finished, and Twilight Forest built its item renderers in the screen event that followed. Twilight Forest has four add-ons; that doesn't make it a library."
+pass = true

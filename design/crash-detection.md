@@ -127,6 +127,10 @@ that isn't in the game. MineColonies only rebuilt the tabs.
   take "first" from a mod further down: the first other mod is where it
   happened, the library is possible. A library is still the likely one when
   no other mod is in the trace. `$$Lambda` frames count as their class.
+- **Add-ons don't make a library.** A mod 3+ others need counts as a library,
+  except when the error names its own id (`twilightforest:knightmetal_shield`
+  thrown in Twilight Forest's code, with four Twilight add-ons installed): it
+  failed on its own content, not while working for another mod.
 - **The loader's word isn't final.** A library the loader named drops to
   possible ("it only passed the game's event on"); the mod inside is certain.
   Mods further down (callers) stay possible.
@@ -192,6 +196,7 @@ message. Each leaves a plain-words fact on the mod: the card's "Why?" list.
 | A mod's folder in the error (`libraries-<id>`, `config/<id>`) | +25 |
 | A mod there only as a mixin that wraps a game call (`wrapOperation$`, `redirect$`, `modify…$`), when the error names a mod that wasn't running | down to 3 |
 | "Too early" message (`No model for layer`, `not initialized`, `Registry is already frozen`…), the thrower reached through an event, and below it, above the game's startup frame (`Minecraft.<init>`…), another mod's own code or injected handler | that mod +45, the thrower −20 |
+| Same message, set off by the window changing size (`Window.onFramebufferResize`) while the first load hadn't finished (report's "Last reload": `initial`, `Finished: No`), and no mod's code below it changed the window (`crashengine::resized_too_early`) | the thrower +15; mods only below the resize (Ixeris replaying the event): "only passed it on"; advice: leave the window alone until the title screen |
 | A file another program holds, a full disk, access denied (`crashsigs::environment`) | every mod down to 20 (Possible), the card's advice says what to do |
 | Added or updated after the last game that worked (`.hopper-good-run`, written when a game ends without a crash or a server stops cleanly) | +15 |
 

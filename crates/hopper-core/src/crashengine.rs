@@ -27,6 +27,7 @@ pub const HINT: &str = "hint";
 pub const IN_MESSAGE: &str = "in_message";
 pub const PATH_IN_MESSAGE: &str = "path_in_message";
 pub const TOO_EARLY: &str = "too_early";
+pub const WINDOW: &str = "window";
 pub const WRAPPER: &str = "wrapper";
 pub const ENVIRONMENT: &str = "environment";
 pub const CHANGED: &str = "changed";
@@ -184,6 +185,66 @@ fn is_startup(f: &Frame) -> bool {
         || (f.method == "main" && f.class.ends_with(".Main"))
 }
 
+/// The report says the game's first load of its resources hadn't finished:
+/// its "Last reload" block reads "Reload reason: initial" and "Finished: No".
+fn first_load_unfinished(text: &str) -> bool {
+    let Some(i) = text.find("-- Last reload --") else { return false };
+    let rest = &text[i + "-- Last reload --".len()..];
+    let block = rest.split("\n-- ").next().unwrap_or(rest);
+    block.contains("Reload reason: initial") && block.contains("Finished: No")
+}
+
+/// The game reacting to its window changing size.
+fn is_resize(f: &Frame) -> bool {
+    (f.class.ends_with(".Window") && f.method == "onFramebufferResize") || (f.class.ends_with(".Minecraft") && f.method == "resizeDisplay")
+}
+
+/// A call that changes the game window (size, full screen, monitor).
+fn changes_window(f: &Frame) -> bool {
+    (f.class.ends_with(".Window") && (f.method.starts_with("set") || f.method == "toggleFullScreen" || f.method == "updateDisplay"))
+        || f.method.starts_with("glfwSet")
+}
+
+/// What made the window change size, when that set off the crash.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Resize {
+    /// A mod's code changed the window (its id).
+    ByMod(String),
+    /// No mod's code did: the player, Windows or the screen did, and a mod
+    /// that only passes window events on carried it.
+    Outside,
+}
+
+/// The crash came from the game window changing size while the game was
+/// still starting or loading, and the error says something was asked for
+/// before the game had made it. Who changed the window, if a mod did.
+pub fn resized_too_early(text: &str) -> Option<Resize> {
+    if !messages(text).iter().any(|m| TOO_EARLY_RE.is_match(m)) {
+        return None;
+    }
+    let (_, frames) = report_frames(text);
+    let r = frames.iter().position(is_resize)?;
+    if !first_load_unfinished(text) && !frames.iter().any(is_startup) {
+        return None;
+    }
+    // Below the resize: the call that changed the window, then the mod that
+    // made that call. A mixin that only wraps the game's call is on the way.
+    let below = &frames[r + 1..];
+    let by = below.iter().position(changes_window).and_then(|w| {
+        below[w + 1..].iter().find(|f| is_mod(f.owner()) && !f.wraps()).map(|f| f.owner().to_string())
+    });
+    Some(by.map_or(Resize::Outside, Resize::ByMod))
+}
+
+/// A frame as the "Why" list shows it: `ISTER.<init>` reads "ISTER, while it was made".
+fn frame_label(f: &Frame) -> String {
+    match f.method.as_str() {
+        "<init>" => format!("{}, while it was made", short(&f.class)),
+        "<clinit>" => format!("{}, while it loaded", short(&f.class)),
+        m => format!("{}.{m}", short(&f.class)),
+    }
+}
+
 /// A mod (not the game, not a library that runs others' code).
 fn is_mod(id: &str) -> bool {
     !id.is_empty() && !crate::crashdetect::NOT_MODS.contains(&id) && !crate::crashtrace::is_pass_through(id)
@@ -264,8 +325,12 @@ pub fn weigh(
                 Some((_, how)) => format!(" (its {how} mixin in {})", short(&f.class)),
                 None => String::new(),
             };
-            let at = if i == 0 { "where the error was thrown".to_string() } else { format!("{} frames below the throw", i) };
-            c.fact(FRAME, 0, format!("In the error's trace {at}: {}.{}{how}.", short(&f.class), f.method));
+            let at = match i {
+                0 => "where the error was thrown".to_string(),
+                1 => "1 frame below the throw".to_string(),
+                n => format!("{n} frames below the throw"),
+            };
+            c.fact(FRAME, 0, format!("In the error's trace {at}: {}{how}.", frame_label(f)));
         }
     }
 
@@ -423,6 +488,25 @@ pub fn weigh(
                 if let Some(tc) = cands.iter_mut().find(|c| c.is(&thrower_id)) {
                     tc.fact(TOO_EARLY, -20, format!("Its code asked too early, but only because {early_name} set off that step while the game was still starting."));
                 }
+            }
+        }
+    }
+
+    // The window changed size while the game was still loading and no mod's
+    // code changed it: the mod that asked too early is the one to report,
+    // and a mod that only passed the window's event on didn't cause it.
+    if early_found.is_none()
+        && thrower.is_some()
+        && resized_too_early(inp.text) == Some(Resize::Outside)
+        && let Some(r) = frames.iter().position(is_resize)
+    {
+        if let Some(tc) = cands.iter_mut().find(|c| c.is(&thrower_id)) {
+            tc.fact(TOO_EARLY, 15, "Its code asked for something the game hadn't made yet, because the game window changed size before loading had finished.".into());
+        }
+        for c in cands.iter_mut().filter(|c| !c.is(&thrower_id)) {
+            let mine: Vec<usize> = frames.iter().enumerate().filter(|(_, f)| f.owner().eq_ignore_ascii_case(&c.s.mod_id)).map(|(i, _)| i).collect();
+            if !mine.is_empty() && mine.iter().all(|i| *i > r) {
+                c.fact(WINDOW, 0, "Its code only passed the window's new size on to the game; it didn't change the size.".into());
             }
         }
     }
@@ -867,5 +951,40 @@ mod tests {
         assert_eq!(f[1].owner(), "biolith");
         assert!(f[1].wraps());
         assert_eq!(f[2].class, "java.lang.Thread");
+    }
+
+    // The top of a trace where a screen event asks for a model layer while
+    // the window changes size.
+    const RESIZE_TOP: &str = "Description: Unexpected error\n\njava.lang.IllegalArgumentException: No model for layer twilightforest:knightmetal_shield#main\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.model.geom.EntityModelSet.bakeLayer(EntityModelSet.java:17)\n\
+\tat TRANSFORMER/twilightforest@4.8.3345/twilightforest.client.ISTER.<init>(ISTER.java:106)\n\
+\tat TRANSFORMER/twilightforest@4.8.3345/twilightforest.client.event.ClientGameEvents.handleGameBootup(ClientGameEvents.java:120)\n\
+\tat MC-BOOTSTRAP/net.neoforged.bus/net.neoforged.bus.EventBus.post(EventBus.java:328)\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.gui.screens.Screen.resize(Screen.java:446)\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.resizeDisplay(Minecraft.java:1326)\n\
+\tat TRANSFORMER/minecraft@1.21.1/com.mojang.blaze3d.platform.Window.onFramebufferResize(Window.java:251)\n";
+
+    #[test]
+    fn a_window_resized_while_loading_says_who_resized_it() {
+        // Ixeris only replays the window's event: nobody's code changed the window.
+        let outside = format!(
+            "{RESIZE_TOP}\tat MC-BOOTSTRAP/me.decce.ixeris.core.threading.RenderThreadDispatcher.replayQueue(RenderThreadDispatcher.java:32)\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.handler$ean000$ixeris$replayQueue(Minecraft.java:4059)\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.runTick(Minecraft.java:1224)\n\n\
+-- Last reload --\nDetails:\n\tReload number: 1\n\tReload reason: initial\n\tFinished: No\n-- System Details --\n"
+        );
+        assert_eq!(resized_too_early(&outside), Some(Resize::Outside));
+        // Loading had finished: not this.
+        assert_eq!(resized_too_early(&outside.replace("Finished: No", "Finished: Yes")), None);
+
+        // A mod switches the window mode while the game is made.
+        let by_mod = format!(
+            "{RESIZE_TOP}\tat MC-BOOTSTRAP/org.lwjgl.glfw@3.3.3+5/org.lwjgl.glfw.GLFW.glfwSetWindowMonitor(GLFW.java:3017)\n\
+\tat TRANSFORMER/minecraft@1.21.1/com.mojang.blaze3d.platform.Window.redirect$ngb000$sodiumextras$redirect$glfwSetWindowMonitor(Window.java:5543)\n\
+\tat TRANSFORMER/minecraft@1.21.1/com.mojang.blaze3d.platform.Window.setWindowed(Window.java:365)\n\
+\tat TRANSFORMER/darkwindowbar@1.0.0/toni.darkwindowbar.DarkWindowBar.setDarkWindowBar(DarkWindowBar.java:58)\n\
+\tat TRANSFORMER/minecraft@1.21.1/net.minecraft.client.Minecraft.<init>(Minecraft.java:636)\n"
+        );
+        assert_eq!(resized_too_early(&by_mod), Some(Resize::ByMod("darkwindowbar".into())));
     }
 }
