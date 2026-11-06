@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Changelog with screenshots · Hopper</title>
+<meta name="description" content="Every Hopper and Hopper Server change: what it did before, what it does now, screenshots, and how it was tested.">
+<meta name="theme-color" content="#121214">
+<link rel="icon" href="../favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0c0c0e;--bg2:#121214;--panel:#16161a;--panel2:#1b1b20;--line:#26262c;--fg:#ededef;--mut:#a1a1aa;--dim:#71717a;--acc:#f97316;--acc2:#fb8a3c;--acc-ink:#1c0d02;--r:14px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:16px/1.6 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+img{display:block;max-width:100%}
+.wrap{max-width:900px;margin:0 auto;padding:0 16px}
+nav{position:sticky;top:0;z-index:20;background:rgba(12,12,14,.85);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;gap:24px;height:64px;max-width:1180px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:18px;letter-spacing:-.01em}
+.brand img{width:30px;height:30px;image-rendering:pixelated}
+.links{display:flex;gap:22px;margin-left:auto;font-size:14px;color:var(--mut)}
+.links a:hover,.links a[aria-current]{color:var(--fg)}
+.btn{display:inline-flex;align-items:center;font-weight:600;font-size:14px;border-radius:10px;padding:8px 14px;white-space:nowrap;background:var(--acc);color:var(--acc-ink);transition:background .15s}
+.btn:hover{background:var(--acc2)}
+:focus-visible{outline:2px solid var(--acc2);outline-offset:2px;border-radius:4px}
+main{padding:56px 0 24px}
+main .wrap{display:flex;flex-direction:column;gap:44px}
+.eyebrow{font:500 12px "JetBrains Mono",monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--acc)}
+h1{font-size:clamp(30px,5vw,46px);line-height:1.1;font-weight:800;letter-spacing:-.03em;margin-top:8px;text-wrap:balance}
+.lede{color:var(--mut);font-size:17px;max-width:660px;margin-top:12px}
+.lede a{color:var(--acc)}
+.legend{margin-top:16px;display:flex;gap:8px;flex-wrap:wrap}
+.tag{display:inline-block;font-size:12px;font-weight:600;border-radius:99px;padding:2px 10px;margin-right:8px}
+.tag.ok{background:#22c55e22;color:#4ade80}.tag.warn{background:#eab30822;color:#facc15}.tag.bad{background:#ef444422;color:#f87171}
+.rel{display:flex;flex-direction:column;gap:16px;scroll-margin-top:84px}
+.relhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:10px}
+.relhead h2{font-size:clamp(20px,3vw,26px);letter-spacing:-.02em;font-weight:800}
+.when{color:var(--dim);font:500 13px "JetBrains Mono",monospace}
+.cl{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:22px;display:flex;flex-direction:column;gap:16px;min-width:0}
+.cl h3{font-size:18px;letter-spacing:-.01em;text-wrap:balance}
+.ft{display:grid;grid-template-columns:auto 1fr;gap:6px 16px}
+.ft dt{color:var(--dim);font:500 12px "JetBrains Mono",monospace;letter-spacing:.08em;text-transform:uppercase;padding-top:3px}
+.ft dd{color:#d4d4d8;font-size:15px;min-width:0}
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.cshot{display:flex;flex-direction:column;gap:6px;min-width:0}
+.cshot img{width:100%;height:auto;border:1px solid var(--line);border-radius:10px}
+.cshot a{cursor:zoom-in}
+.cshot figcaption{font-size:13px;color:var(--mut)}
+.files{display:flex;flex-wrap:wrap;gap:6px;list-style:none}
+.files li{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 8px;font:500 12px "JetBrains Mono",monospace;color:var(--mut);overflow-wrap:anywhere}
+.tested{margin:8px 0 0 18px;display:grid;gap:4px;font-size:14.5px;color:var(--mut)}
+footer{padding:40px 0 56px;color:var(--dim);font-size:14px}
+footer .wrap{max-width:1180px;display:flex;gap:20px;flex-wrap:wrap;align-items:center}
+footer .r{margin-left:auto;display:flex;gap:18px}
+footer a:hover{color:var(--fg)}
+@media (max-width:900px){.links a:not([aria-current]){display:none}.btn{display:none}}
+@media (max-width:600px){.ft{grid-template-columns:1fr;gap:2px}.ft dd{margin-bottom:8px}.cl{padding:16px}footer .r{margin-left:0}}
+</style>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="brand" href="../"><img src="../hopper.png" alt="">Hopper</a>
+  <div class="links"><a href="../#features">Features</a><a href="../#server">Hopper Server</a><a href="../#start">Download</a><a href="./" aria-current="page">Changelog</a><a href="https://github.com/watdafawx/hopper">GitHub</a></div>
+  <a class="btn" href="https://github.com/watdafawx/hopper/releases/latest/download/hopper.exe">Download</a>
+</div></nav>
+<main><div class="wrap">
+  <header>
+    <div class="eyebrow">Changelog</div>
+    <h1>What changed, with screenshots</h1>
+    <p class="lede">For each release: what it did before, what it does now, pictures of both, and how it was checked, including what was not. Newest first. Plain release notes are on <a href="https://github.com/watdafawx/hopper/releases">GitHub</a>.</p>
+    <div class="legend"><span class="tag ok">seen on screen</span><span class="tag warn">partly checked</span><span class="tag bad">gap found</span></div>
+  </header>
+  <section class="rel" id="v0-52-2"><div class="relhead"><h2>Hopper 0.52.2 · Hopper Server 0.47.2</h2><span class="when">6 Nov 2026</span></div><article class="cl">
+      <h3>Versions and changelogs: "Other versions" cards trimmed too</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Both.</dd><dt>Before</dt><dd>0.52.1 trimmed the installed and newer cards, but opening a card under "Other versions" (roll back, older files) still showed its whole cumulative text.</dd><dt>After</dt><dd>Those cards show only their own version's notes, with a collapsed "Earlier versions (N)" row. N counts versions, no longer every line that mentions a version number (the odd "36" before).</dd></dl>
+      <div class="shots"><figure class="cshot"><a href="img/0.52.2-desktop-other-before.jpg" target="_blank" rel="noopener"><img src="img/0.52.2-desktop-other-before.jpg" alt="Desktop, 0.52.1: opened Other versions card shows its full cumulative text" loading="lazy"></a><figcaption>Desktop before (0.52.1): the opened 5.3.3 card lists every older version.</figcaption></figure><figure class="cshot"><a href="img/0.52.2-desktop-other-after.jpg" target="_blank" rel="noopener"><img src="img/0.52.2-desktop-other-after.jpg" alt="Desktop, 0.52.2: every card shows only its own notes with an Earlier versions row" loading="lazy"></a><figcaption>Desktop after: newer, installed and Other cards each show their own notes plus "Earlier versions (N)".</figcaption></figure><figure class="cshot"><a href="img/0.52.2-web-other-before.jpg" target="_blank" rel="noopener"><img src="img/0.52.2-web-other-before.jpg" alt="Hopper Server web UI, 0.52.1: opened Other versions card shows full text" loading="lazy"></a><figcaption>Web before (0.52.1), real browser screenshot.</figcaption></figure><figure class="cshot"><a href="img/0.52.2-web-other-after.jpg" target="_blank" rel="noopener"><img src="img/0.52.2-web-other-after.jpg" alt="Hopper Server web UI, 0.52.2: Other versions card trimmed" loading="lazy"></a><figcaption>Web after: same dialog, 5.3.3 opened and trimmed.</figcaption></figure><figure class="cshot"><a href="img/0.52.2-desktop-cards-after.jpg" target="_blank" rel="noopener"><img src="img/0.52.2-desktop-cards-after.jpg" alt="Desktop, 0.52.2: newer, multi-version and installed cards" loading="lazy"></a><figcaption>Desktop after: newer + installed cards (unchanged from 0.52.1 on purpose).</figcaption></figure><figure class="cshot"><a href="img/0.52.2-web-cards-after.jpg" target="_blank" rel="noopener"><img src="img/0.52.2-web-cards-after.jpg" alt="Web UI, 0.52.2: newer, multi-version and installed cards" loading="lazy"></a><figcaption>Web after: the same three cards.</figcaption></figure></div>
+      <ul class="files"><li>crates/hopper-core/src/changelog_trim.rs</li><li>src/gpui/versions.rs</li><li>crates/hopperd/src/mods_more.rs</li><li>crates/hopperd/ui/src/ModVersions.svelte</li><li>crates/hopperd/ui/src/ReviewUpdates.svelte</li></ul>
+      <div><span class="tag ok">seen on screen</span><ul class="tested"><li>Tests: 16 for the trimming function, including the 5.3.5-file case and headings that mention versions.</li><li>Seen on screen in both apps with fake data (installed 5.3.4, newer 5.3.6 and 5.3.5, others 5.3.3 and 5.3.2): desktop test build, and a scratch Hopper Server in a real browser.</li><li>Not checked: real network changelog text, so the count fix is only tested with fixtures; expanding an Other card's "Earlier versions" on desktop; the update review panel (only a parameter added); pack dialogs, which are not trimmed.</li><li>From now on every UI change gets screenshots of every state in both apps before merge.</li></ul></div>
+    </article></section><section class="rel" id="v0-52-1"><div class="relhead"><h2>Hopper 0.52.1 · Hopper Server 0.47.1</h2><span class="when">6 Nov 2026</span></div><article class="cl">
+      <h3>Versions and changelogs: only the notes for each version</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Both: desktop dialog and the Hopper Server web UI. One shared trimming function.</dd><dt>Before</dt><dd>A mod file's changelog that repeats every older release was shown in full. Oh The Trees You'll Grow 5.3.6 listed 5.3.6 down to 5.3.0 and beyond.</dd><dt>After</dt><dd>Each card is cut after its own version's section. The rest sits behind a collapsed "Earlier versions" row. A newer card is also cut at the installed version. If the headings can't be read, the full text is shown, never less.</dd></dl>
+      <div class="shots"><figure class="cshot"><a href="img/0.52.1-changelog-before.jpg" target="_blank" rel="noopener"><img src="img/0.52.1-changelog-before.jpg" alt="Versions and changelogs dialog in 0.51.0: the update card shows 5.3.6 down to 5.3.1" loading="lazy"></a><figcaption>Before (0.51.0): one update card, 5.3.6 through 5.3.1.</figcaption></figure><figure class="cshot"><a href="img/0.52.1-changelog-interim.jpg" target="_blank" rel="noopener"><img src="img/0.52.1-changelog-interim.jpg" alt="Dialog in 0.52.0: the installed card still lists every older version" loading="lazy"></a><figcaption>0.52.0: the installed card still lists 5.3.6 down to 5.3.0. Gap.</figcaption></figure><figure class="cshot"><a href="img/0.52.1-changelog-after.jpg" target="_blank" rel="noopener"><img src="img/0.52.1-changelog-after.jpg" alt="Dialog in 0.52.1: installed card shows only 5.3.6 with an Earlier versions row" loading="lazy"></a><figcaption>0.52.1: installed card shows 5.3.6 only, with "Earlier versions". The "Other versions" cards below are still not cut. Gap, fixed in 0.52.2.</figcaption></figure></div>
+      <ul class="files"><li>crates/hopper-core/src/changelog_trim.rs</li><li>crates/hopper-core/src/install.rs</li><li>crates/hopper-core/src/lib.rs</li><li>crates/hopperd/src/mods_table.rs</li><li>crates/hopperd/ui/src/ModVersions.svelte</li><li>src/gpui/versions.rs</li></ul>
+      <div><span class="tag warn">partly checked</span><ul class="tested"><li>Tests: 11 for the trimming function (headings, no headings, missing version, the Oh The Trees case). Pass.</li><li>Desktop: seen on screen with a fake changelog (hack since reverted), installed card only.</li><li>Web UI: read as page text, no screenshot.</li><li>Not checked: real network data; the "Other versions" cards (found after release); what "Earlier versions (36)" counts.</li></ul></div>
+    </article><article class="cl">
+      <h3>Settings: Sleep moves to General</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Both.</dd><dt>Before</dt><dd>Sleep sat under Network &amp; address.</dd><dt>After</dt><dd>Sleep is under General (searchable by "sleep", "wake", "idle"). Network &amp; address has a pointer strip and a "Change in General" button. The wake note says what joining from Minecraft's server list does, or that an address is still needed.</dd></dl>
+      
+      <ul class="files"><li>src/gpui/panel_tabs/settings.rs</li><li>crates/hopperd/ui/src/Settings.svelte</li><li>crates/hopperd/ui/src/Sleep.svelte</li><li>crates/hopperd/ui/src/Address.svelte</li></ul>
+      <div><span class="tag warn">partly checked</span><ul class="tested"><li>Seen on screen in both apps against a scratch Hopper Server: Sleep in General, the no-address wake line, the Network pointer, the button opening General. It caught and fixed a pointer that claimed "joining wakes it" with no address.</li><li>No screenshots were saved.</li><li>Not checked: the wake wording when an address is set. No tests changed.</li></ul></div>
+    </article></section><section class="rel" id="v0-46-3"><div class="relhead"><h2>Hopper Server 0.46.3</h2><span class="when">6 Nov 2026</span></div><article class="cl">
+      <h3>Clear message while a NeoForge server starts</h3>
+      <dl class="ft"><dt>Apps</dt><dd>Hopper Server.</dd><dt>Before</dt><dd>A NeoForge client joining a sleeping server saw "server is not running NeoForge".</dd><dt>After</dt><dd>It sees "&lt;server&gt; is starting: 1%, starting java. Join again in a moment." The player still has to rejoin once the server is up. The router now keeps NeoForge mod data in its saved server answer, and a server with no saved answer counts as modded.</dd></dl>
+      
+      <ul class="files"><li>crates/hopper-core/src/hosting/router.rs</li><li>crates/hopperd/src/router.rs</li></ul>
+      <div><span class="tag warn">partly checked</span><ul class="tested"><li>A new test covers NeoForge, Forge, old FML, flagged and vanilla answers.</li><li>Live: a real NeoForge client against a scratch vanilla server with no saved answer got the new message, and the router log showed the refuse path.</li><li>No screenshots saved. Not tried on the real TNP-LL8 server: it needs the new build on rig.</li></ul></div>
+    </article></section>
+</div></main>
+<footer><div class="wrap">
+  <span>© 2026 Hopper · MIT License · Built with help from AI</span>
+  <div class="r"><a href="https://github.com/watdafawx/hopper">GitHub</a><a href="https://github.com/watdafawx/hopper/releases">Releases</a><a href="https://github.com/watdafawx/hopper/issues">Issues</a></div>
+</div></footer>
+</body>
+</html>
