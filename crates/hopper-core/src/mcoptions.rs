@@ -116,7 +116,7 @@ pub const SPECS: &[Spec] = &[
     s("simulationDistance", "Simulation distance", VIDEO, Kind::Number { min: 5, max: 32 }, "12", 18),
     s("maxFps", "Max framerate", VIDEO, Kind::MaxFps, "120", 0),
     s("enableVsync", "VSync", VIDEO, Kind::Bool, "true", 0),
-    s("fullscreen", "Fullscreen", VIDEO, Kind::Bool, "false", 0),
+    // Fullscreen is each instance's Window setting ([`apply_window`]).
     s("lang", "Language", START, Kind::Lang, "en_us", 0),
     s("tutorialStep", "Skip the tutorial hints", START, Kind::Fixed("none"), "none", 12),
     s("narrator", "Narrator off", START, Kind::Fixed("0"), "0", 0),
@@ -633,6 +633,39 @@ pub fn apply(
     Ok(out)
 }
 
+/// Sets `fullscreen` in the instance's `options.txt` for its Window setting.
+/// Fullscreen writes it on every start (the game also gets `--fullscreen`).
+/// Window and Maximized only turn off a fullscreen Hopper turned on, so a
+/// player's own F11 keeps working as before. A missing file is left alone:
+/// creating it would skip the pack's default options. True when written.
+pub fn apply_window(
+    root: &Path,
+    mode: crate::instances::WindowMode,
+    applied: &mut BTreeMap<String, String>,
+) -> anyhow::Result<bool> {
+    let full = mode == crate::instances::WindowMode::Fullscreen;
+    if !full && applied.get("fullscreen").map(String::as_str) != Some("true") {
+        return Ok(false);
+    }
+    let want = if full { "true" } else { "false" };
+    applied.insert("fullscreen".into(), want.into());
+    let path = root.join("options.txt");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", path.display()))),
+    };
+    let mut file = OptionsFile::parse(&text);
+    if file.get("fullscreen") == Some(want) {
+        return Ok(false);
+    }
+    file.set("fullscreen", want);
+    let tmp = path.with_extension("txt.hopper-tmp");
+    std::fs::write(&tmp, file.text()).map_err(|e| anyhow::Error::new(e).context(format!("writing {}", tmp.display())))?;
+    std::fs::rename(&tmp, &path).map_err(|e| anyhow::Error::new(e).context(format!("writing {}", path.display())))?;
+    Ok(true)
+}
+
 /// The options and key bindings in an instance's `options.txt`, to copy
 /// into Hopper's settings: (options by key, keys by action).
 pub fn read_instance(root: &Path) -> anyhow::Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
@@ -722,6 +755,31 @@ mod tests {
         assert_eq!(label(Kind::GuiScale, "0"), "Auto");
         assert_eq!(label(Kind::MaxFps, "260"), "Unlimited");
         assert_eq!(stored(Kind::Number { min: 2, max: 32 }, 40.), "32");
+    }
+
+    #[test]
+    fn window_mode_sets_fullscreen() {
+        use crate::instances::WindowMode;
+        let d = dir("window");
+        let read = || std::fs::read_to_string(d.join("options.txt")).unwrap();
+        let mut applied = BTreeMap::new();
+        // No file yet: left for the game (and the pack's defaults) to make.
+        assert!(!apply_window(&d, WindowMode::Fullscreen, &mut applied).unwrap());
+        std::fs::write(d.join("options.txt"), "version:3955\nfullscreen:true\n").unwrap();
+        // A window, but the player's own fullscreen: left alone.
+        let mut applied = BTreeMap::new();
+        assert!(!apply_window(&d, WindowMode::Window, &mut applied).unwrap());
+        assert_eq!(read(), "version:3955\nfullscreen:true\n");
+        std::fs::write(d.join("options.txt"), "version:3955\nfullscreen:false\n").unwrap();
+        assert!(apply_window(&d, WindowMode::Fullscreen, &mut applied).unwrap());
+        assert_eq!(read(), "version:3955\nfullscreen:true\n");
+        // Back to a window: Hopper turned it on, so it turns it off.
+        assert!(apply_window(&d, WindowMode::Maximized, &mut applied).unwrap());
+        assert_eq!(read(), "version:3955\nfullscreen:false\n");
+        // The player's F11 after that stays.
+        std::fs::write(d.join("options.txt"), "version:3955\nfullscreen:true\n").unwrap();
+        assert!(!apply_window(&d, WindowMode::Window, &mut applied).unwrap());
+        assert_eq!(read(), "version:3955\nfullscreen:true\n");
     }
 
     #[test]

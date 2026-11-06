@@ -236,7 +236,6 @@ const ENTRIES: &[Entry] = &[
     e(C::Minecraft, "mc-simulationDistance", "Simulation distance", "In chunks. Minecraft 1.18 and newer.", "simulation distance chunks"),
     e(C::Minecraft, "mc-maxFps", "Max framerate", "", "fps framerate frame limit"),
     e(C::Minecraft, "mc-enableVsync", "VSync", "", "vsync vertical sync tearing"),
-    e(C::Minecraft, "mc-fullscreen", "Fullscreen", "", "fullscreen window"),
     e(C::Minecraft, "mc-lang", "Language", "", "language lang"),
     e(C::Minecraft, "mc-tutorialStep", "Skip the tutorial hints", "No \"Use W, A, S, D to move\" hints in new worlds.", "tutorial toasts hints first start"),
     e(C::Minecraft, "mc-narrator", "Narrator off", "Also skips the accessibility screen of Minecraft 1.20 and newer on the first start.", "narrator accessibility onboarding"),

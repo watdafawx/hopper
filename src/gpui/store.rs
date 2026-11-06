@@ -4378,16 +4378,22 @@ pub(crate) fn sync_cf_pack(inst: &mut hopper::instances::Instance, job: &Job) ->
 /// instance's options.txt before it starts. A failure only goes to the
 /// log: the game should still start with the pack's own options.
 fn apply_mc_options(inst: &mut hopper::instances::Instance, opts: Option<&hopper::mcoptions::McOptions>, job: &Job) {
-    let Some(opts) = opts else { return };
-    match hopper::mcoptions::apply(&inst.root, &inst.game_version, &inst.loader, opts, &mut inst.applied_options) {
-        Ok(r) if r.written > 0 => {
-            job.detail(match r.written {
-                1 => "Set 1 of your Minecraft settings".to_string(),
-                n => format!("Set {n} of your Minecraft settings"),
-            });
+    if let Some(opts) = opts {
+        match hopper::mcoptions::apply(&inst.root, &inst.game_version, &inst.loader, opts, &mut inst.applied_options) {
+            Ok(r) if r.written > 0 => {
+                job.detail(match r.written {
+                    1 => "Set 1 of your Minecraft settings".to_string(),
+                    n => format!("Set {n} of your Minecraft settings"),
+                });
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("Minecraft settings for {}: {e:#}", inst.name),
         }
-        Ok(_) => {}
-        Err(e) => log::warn!("Minecraft settings for {}: {e:#}", inst.name),
+    }
+    // The instance's Window setting, with or without the player's options;
+    // after them, so a freshly made options.txt gets it too.
+    if let Err(e) = hopper::mcoptions::apply_window(&inst.root, inst.settings.window, &mut inst.applied_options) {
+        log::warn!("window setting for {}: {e:#}", inst.name);
     }
 }
 
