@@ -117,6 +117,8 @@
     {:else}
       <label class="row small"><input type="checkbox" bind:checked={wake} />Wake when someone joins</label>
       {#if wake}
+        <!-- Waking goes through the address router: say so when there's no address to join. -->
+        <div class="tiny muted">{info.addresses?.length ? "Joining from Minecraft's server list starts it again. The first join takes about a minute." : 'Players wake it by joining its address, and it has none yet. Add one in Network & address.'}</div>
         <div class="f small"><span class="k">Who can wake it</span>
           <div class="seg" role="group" aria-label="Who can wake it">
             {#each WHO as [v, label] (v)}<button class:on={who === v} aria-pressed={who === v} onclick={() => (who = v)}>{label}</button>{/each}

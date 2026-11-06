@@ -1394,6 +1394,17 @@ impl SettingsTab {
             out.push(col.child(widgets::caption("Joining doesn't start it: players see \"Offline\" until someone starts it here.", cx)).into_any_element());
             return out;
         }
+        // Waking goes through the address router, so say so when players
+        // have no address to wake it by.
+        let reachable = d.router.as_ref().is_some_and(|r| r.enabled && r.error.is_none()) && !a.addresses.is_empty();
+        col = col.child(widgets::caption(
+            if reachable {
+                "Joining from Minecraft's server list starts it again. The first join takes about a minute."
+            } else {
+                "Players wake it by joining its address, and it has none yet. Add one in Network & address."
+            },
+            cx,
+        ));
         let label = |t: &str| div().w(rems(9.)).flex_none().text_sm().child(t.to_string());
         let who_i = WAKE_WHO.iter().position(|(k, _)| *k == self.wake_who);
         let retry_i = WAKE_RETRY.iter().position(|(m, _)| *m == self.wake_retry);
@@ -1476,6 +1487,38 @@ impl SettingsTab {
         }
         out.push(col.into_any_element());
         out
+    }
+
+    /// Sleep lives in General; a line here says joining the address wakes it.
+    fn sleep_pointer(&self, d: &Data, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if d.addr.is_none() || !self.sleep_on {
+            return Vec::new();
+        }
+        let theme = cx.theme().clone();
+        let wakes = d.addr.as_ref().is_some_and(|a| !a.addresses.is_empty() && (self.wake_on || a.wake.is_none()));
+        let text = format!(
+            "Sleeps after {} min with nobody online.{}",
+            self.sleep_minutes(cx),
+            if wakes { " Joining this address wakes it." } else { "" }
+        );
+        let general = PAGES.iter().position(|p| p.0 == "general").unwrap_or(0);
+        vec![
+            h_flex()
+                .mx_2()
+                .mt_2()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .rounded(theme.radius)
+                .bg(theme.muted)
+                .child(Icon::new(IconName::Moon).small().text_color(theme.muted_foreground))
+                .child(div().flex_1().text_sm().child(text))
+                .child(Button::new("settings-sleep-goto").ghost().small().label("Change in General").on_click(cx.listener(move |this, _, _, cx| {
+                    this.page = general;
+                    cx.notify();
+                })))
+                .into_any_element(),
+        ]
     }
 
     /// The Address card: addresses and the router's state.
@@ -1701,13 +1744,14 @@ impl Render for SettingsTab {
             }
             match id {
                 "general" => {
+                    body.extend(self.sleep(&d, cx));
                     if let Some(t) = self.target.clone() {
                         body.extend(super::copy_remove::rows(&t, &self.store, d.alive(), cx));
                     }
                 }
                 "network" => {
                     body.extend(self.address(&d, cx));
-                    body.extend(self.sleep(&d, cx));
+                    body.extend(self.sleep_pointer(&d, cx));
                 }
                 "java" => body.extend(self.java_page(&d, rem, cx)),
                 "all" => {
