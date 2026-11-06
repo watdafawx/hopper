@@ -10,7 +10,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#0c0c0e;--bg2:#121214;--panel:#16161a;--panel2:#1b1b20;--line:#26262c;--fg:#ededef;--mut:#a1a1aa;--dim:#71717a;--acc:#f97316;--acc2:#fb8a3c;--acc-ink:#1c0d02;--r:14px}
+:root{--bg:#0c0c0e;--bg2:#121214;--panel:#16161a;--panel2:#1b1b20;--line:#26262c;--fg:#ededef;--mut:#a1a1aa;--dim:#8b8b95;--acc:#f97316;--acc2:#fb8a3c;--acc-ink:#1c0d02;--r:14px}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--fg);font:16px/1.6 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
 a{color:inherit;text-decoration:none}
@@ -57,6 +57,23 @@ footer .r{margin-left:auto;display:flex;gap:18px}
 footer a:hover{color:var(--fg)}
 @media (max-width:900px){.links a:not([aria-current]){display:none}.btn{display:none}}
 @media (max-width:600px){.ft{grid-template-columns:1fr;gap:2px}.ft dd{margin-bottom:8px}.cl{padding:16px}footer .r{margin-left:0}}
+/* Screenshot viewer: opens over the page, arrows step through the same card's shots. */
+.cshot a{cursor:zoom-in;display:block}
+.cshot a:focus-visible{outline:2px solid var(--acc);outline-offset:3px;border-radius:10px}
+.lb{position:fixed;inset:0;z-index:100;background:rgba(6,6,8,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:56px 16px 20px}
+.lb[hidden]{display:none}
+.lb figure{margin:0;display:flex;flex-direction:column;align-items:center;gap:10px;max-width:100%;min-height:0;flex:1 1 auto;justify-content:center}
+.lb img{max-width:min(100%,1600px);max-height:calc(100vh - 150px);width:auto;height:auto;object-fit:contain;border:1px solid var(--line);border-radius:10px;background:var(--bg2)}
+.lb figcaption{max-width:760px;text-align:center;color:var(--mut);font-size:14px}
+.lb .n{position:absolute;top:18px;left:20px;color:var(--mut);font:500 13px "JetBrains Mono",monospace}
+.lb button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:999px;width:44px;height:44px;font-size:20px;line-height:1;cursor:pointer;display:grid;place-items:center}
+.lb button:hover{background:var(--panel);border-color:var(--mut)}
+.lb button:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.lb .x{position:absolute;top:10px;right:14px}
+.lb .p,.lb .q{position:absolute;top:50%;transform:translateY(-50%)}
+.lb .p{left:14px}.lb .q{right:14px}
+.lb [disabled]{opacity:.3;cursor:default}
+@media (max-width:600px){.lb .p,.lb .q{top:auto;bottom:14px;transform:none}.lb figure{padding-bottom:56px}}
 </style>
 </head>
 <body>
@@ -102,5 +119,43 @@ footer a:hover{color:var(--fg)}
   <span>© 2026 Hopper · MIT License · Built with help from AI</span>
   <div class="r"><a href="https://github.com/watdafawx/hopper">GitHub</a><a href="https://github.com/watdafawx/hopper/releases">Releases</a><a href="https://github.com/watdafawx/hopper/issues">Issues</a></div>
 </div></footer>
+<div class="lb" id="lb" role="dialog" aria-modal="true" aria-label="Screenshot" hidden>
+  <span class="n" id="lbn"></span>
+  <button class="x" type="button" aria-label="Close" id="lbx">&times;</button>
+  <button class="p" type="button" aria-label="Previous screenshot" id="lbp">&#8249;</button>
+  <figure><img id="lbi" alt=""><figcaption id="lbc"></figcaption></figure>
+  <button class="q" type="button" aria-label="Next screenshot" id="lbq">&#8250;</button>
+</div>
+<script>
+// Without this script the links still open the image in a new tab.
+(function(){
+  var lb=document.getElementById('lb'),img=document.getElementById('lbi'),cap=document.getElementById('lbc'),num=document.getElementById('lbn');
+  var prev=document.getElementById('lbp'),next=document.getElementById('lbq'),close=document.getElementById('lbx');
+  var set=[],i=0,opener=null;
+  function show(){var a=set[i];img.src=a.href;img.alt=a.querySelector('img').alt;
+    var c=a.parentNode.querySelector('figcaption');cap.textContent=c?c.textContent:'';
+    num.textContent=set.length>1?(i+1)+' / '+set.length:'';
+    prev.disabled=i===0;next.disabled=i===set.length-1;prev.hidden=next.hidden=set.length<2;}
+  function open(a){opener=a;set=[].slice.call(a.closest('.shots').querySelectorAll('.cshot a'));i=set.indexOf(a);
+    lb.hidden=false;document.body.style.overflow='hidden';show();close.focus();}
+  function shut(){lb.hidden=true;img.removeAttribute('src');document.body.style.overflow='';if(opener)opener.focus();}
+  function step(d){var j=i+d;if(j>=0&&j<set.length){i=j;show();}}
+  document.addEventListener('click',function(e){
+    var a=e.target.closest&&e.target.closest('.cshot a');
+    if(a&&!e.ctrlKey&&!e.metaKey&&!e.shiftKey&&e.button===0){e.preventDefault();open(a);}
+  });
+  lb.addEventListener('click',function(e){if(e.target===lb||e.target.tagName==='FIGURE')shut();});
+  close.addEventListener('click',shut);prev.addEventListener('click',function(){step(-1)});next.addEventListener('click',function(){step(1)});
+  document.addEventListener('keydown',function(e){
+    if(lb.hidden)return;
+    if(e.key==='Escape')shut();else if(e.key==='ArrowLeft')step(-1);else if(e.key==='ArrowRight')step(1);
+    else if(e.key==='Tab'){var f=[close,prev,next].filter(function(b){return !b.hidden&&!b.disabled});
+      if(!f.length)return;var k=f.indexOf(document.activeElement);e.preventDefault();f[(k+(e.shiftKey?-1:1)+f.length)%f.length].focus();}
+  });
+  var sx=null;
+  lb.addEventListener('touchstart',function(e){sx=e.touches[0].clientX},{passive:true});
+  lb.addEventListener('touchend',function(e){if(sx===null)return;var d=e.changedTouches[0].clientX-sx;sx=null;if(Math.abs(d)>50)step(d<0?1:-1)});
+})();
+</script>
 </body>
 </html>
