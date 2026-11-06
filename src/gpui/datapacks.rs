@@ -167,7 +167,7 @@ impl AddonsView {
         if self.where_mode() {
             self.folder = None;
             self.folder_packs = None;
-            self.folder_stamp = (None, mtime(&inst.root.join("saves")));
+            self.folder_stamp = (None, mtime(&hopper::instance_ops::worlds_dir(&inst.root)));
             self.load_where(inst, cx);
             return;
         }
@@ -179,7 +179,7 @@ impl AddonsView {
             self.folder_packs = None;
             self.selected.clear();
         }
-        self.folder_stamp = (self.global_dir().and_then(|d| mtime(&d)), mtime(&inst.root.join("saves")));
+        self.folder_stamp = (self.global_dir().and_then(|d| mtime(&d)), mtime(&hopper::instance_ops::worlds_dir(&inst.root)));
         self.read_folder(cx);
     }
 
@@ -197,7 +197,7 @@ impl AddonsView {
         if self.class != cf::CLASS_DATAPACKS {
             return false;
         }
-        let now = (self.global_dir().and_then(|d| mtime(&d)), mtime(&root.join("saves")));
+        let now = (self.global_dir().and_then(|d| mtime(&d)), mtime(&hopper::instance_ops::worlds_dir(root)));
         now != self.folder_stamp
     }
 

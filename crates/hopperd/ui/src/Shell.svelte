@@ -7,7 +7,7 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     LayoutDashboard, Compass, ChevronLeft, ChevronRight, Search, RefreshCw, Settings as Gear, LogOut,
-    Plus, Play, Square, RotateCw, Server, Terminal, Folder, Puzzle, Earth, Users, Archive, CalendarClock, SlidersHorizontal,
+    Plus, Play, Square, RotateCw, Server, Terminal, Folder, Puzzle, Earth, Database, Users, Archive, CalendarClock, SlidersHorizontal,
     CircleCheck, CircleAlert, FolderOpen, Stethoscope, X as Close,
   } from '@lucide/svelte';
   import { loaderText } from './lib/format.js';
@@ -159,7 +159,7 @@
     { id: 'browse', label: 'Browse', icon: Compass, to: '/browse' },
   ];
   const TABS = [
-    ['console', 'Console', Terminal], ['logs', 'Logs & crashes', Stethoscope], ['files', 'Files', Folder], ['mods', 'Mods', Puzzle], ['configs', 'Configs', SlidersHorizontal], ['worlds', 'Worlds', Earth],
+    ['console', 'Console', Terminal], ['logs', 'Logs & crashes', Stethoscope], ['files', 'Files', Folder], ['mods', 'Mods', Puzzle], ['configs', 'Configs', SlidersHorizontal], ['worlds', 'Worlds', Earth], ['datapacks', 'Data packs', Database],
     ['players', 'Players', Users], ['backups', 'Backups', Archive], ['schedule', 'Schedule', CalendarClock], ['settings', 'Settings', SlidersHorizontal],
   ];
 
