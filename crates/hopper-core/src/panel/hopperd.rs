@@ -46,7 +46,8 @@ impl HopperServer {
 /// or why it has none. Panels older than alerts leave both empty.
 fn add_tps(st: &mut PanelStats, alerts: &Value, id: &str) {
     let t = &alerts["tps"][id];
-    st.tps = t["tps"].as_f64().map(|tps| super::Tps { tps: tps as f32, mspt: t["mspt"].as_f64().map(|m| m as f32) });
+    let source = if t["source"].as_str() == Some("console") { super::TpsSource::Console } else { super::TpsSource::Rcon };
+    st.tps = t["tps"].as_f64().map(|tps| super::Tps { tps: tps as f32, mspt: t["mspt"].as_f64().map(|m| m as f32), source });
     st.no_tps = alerts["no_tps"][id].as_str().map(str::to_string);
 }
 

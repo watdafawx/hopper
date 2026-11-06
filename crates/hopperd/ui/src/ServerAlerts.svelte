@@ -24,7 +24,10 @@
     restart: 'RCON is set up and starts with the server’s next restart. TPS shows then.',
     unsupported: 'No cheap way to read TPS on this loader (add spark to get it).',
     slow: 'The server didn’t answer within 20 seconds: it’s lagging hard (each tick is taking seconds).',
+    spark_console: 'spark answers too late over RCON; TPS shows when spark next prints its report in the console.',
   };
+  const FROM = { console: 'From spark’s report in the console', rcon: 'From the server’s TPS command (RCON)' };
+  const tpsTitle = (t) => [FROM[t.source], t.mspt != null ? `${t.mspt.toFixed(1)} ms a tick` : ''].filter(Boolean).join(' · ');
   let turning = $state(false);
   // Turned on from this page: says so until the page changes server.
   let turnedOn = $state('');
@@ -51,7 +54,7 @@
 
 {#if part === 'chip'}
   {#if running && tps}
-    <span class="chip tps {level}" title={tps.mspt != null ? `${tps.mspt.toFixed(1)} ms a tick` : 'Ticks per second'}>TPS {tps.tps.toFixed(1)}</span>
+    <span class="chip tps {level}" title={tpsTitle(tps) || 'Ticks per second'}>TPS {tps.tps.toFixed(1)}</span>
   {:else if running}
     <span class="chip tps" title={WHY[why] || 'Reading TPS…'}>TPS —</span>
   {/if}
@@ -75,10 +78,11 @@
 {:else if part === 'live'}
   {#if running}
     <div class="t gap">TPS
-      {#if tps}<b class:w={level === 'warn'} class:r={level === 'bad'}>{tps.tps.toFixed(1)}{tps.mspt != null ? ` · ${tps.mspt.toFixed(1)} ms` : ''}</b>
+      {#if tps}<b class:w={level === 'warn'} class:r={level === 'bad'} title={tpsTitle(tps)}>{tps.tps.toFixed(1)}{tps.mspt != null ? ` · ${tps.mspt.toFixed(1)} ms` : ''}</b>
       {:else if why === 'restart'}<b class="muted" title={WHY.restart}>RCON on next restart</b>
       {:else if why === 'rcon_off'}<button class="lnk" disabled={turning} onclick={rcon} title="Gives it a random RCON password; takes effect at the next restart">Turn on RCON to see it</button>
       {:else if why === 'unsupported'}<b class="muted" title="No cheap way to read TPS on this loader (add spark to get it)">n/a</b>
+      {:else if why === 'spark_console'}<b class="muted" title={WHY.spark_console}>Waiting for spark</b>
       {:else if why === 'slow'}<b class="muted" title="The server didn't answer within 20 seconds: it's lagging hard (each tick is taking seconds)">No answer</b>
       {:else}<b class="muted">…</b>{/if}
     </div>

@@ -72,6 +72,20 @@ pub struct Tps {
     pub tps: f32,
     pub mspt: Option<f32>,
     pub at: u64,
+    /// Where it came from: "console" (spark's report in the console, free)
+    /// or "rcon" (a TPS command).
+    pub source: &'static str,
+}
+
+/// spark's latest TPS report in a running server's console, while it's
+/// recent (spark prints one every 30 s or so when set up to).
+fn console_reading(e: &crate::servers::Entry) -> Option<Tps> {
+    if e.server.state() != hopper_core::hosting::process::ServerState::Running {
+        return None;
+    }
+    let t = e.server.console_tps()?;
+    let at = t.at.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    (now().saturating_sub(at) <= 90).then_some(Tps { tps: t.tps, mspt: t.mspt, at, source: "console" })
 }
 
 #[derive(Default)]
@@ -377,6 +391,13 @@ fn auto_rcon(app: &App) {
 /// has RCON.
 fn poll_tps(app: &App) {
     for e in app.servers.list() {
+        // spark's own report in the console: no RCON or command needed.
+        if let Some(t) = console_reading(&e) {
+            let mut st = state().lock().unwrap();
+            st.no_tps.remove(&e.id);
+            st.tps.insert(e.id.clone(), t);
+            continue;
+        }
         // RCON switched on while it ran: nothing listens until it restarts.
         {
             let mut st = state().lock().unwrap();
@@ -418,7 +439,7 @@ fn poll_tps(app: &App) {
         match r.ok().as_deref().and_then(rcon::parse_tps) {
             Some((tps, mspt)) => {
                 st.no_tps.remove(&e.id);
-                st.tps.insert(e.id.clone(), Tps { tps, mspt, at: now() });
+                st.tps.insert(e.id.clone(), Tps { tps, mspt, at: now(), source: "rcon" });
             }
             None => {
                 // RCON not up yet, or a slow answer: keep the last reading
@@ -428,6 +449,10 @@ fn poll_tps(app: &App) {
                 }
                 if timed_out && !st.tps.contains_key(&e.id) {
                     st.no_tps.insert(e.id.clone(), "slow");
+                } else if cmd == "spark tps" && !st.tps.contains_key(&e.id) {
+                    // spark answers RCON after the command returns, so its
+                    // reply is lost there; its console report is read instead.
+                    st.no_tps.insert(e.id.clone(), "spark_console");
                 } else if !timed_out && st.no_tps.get(&e.id) == Some(&"slow") {
                     st.no_tps.remove(&e.id);
                 }
@@ -572,11 +597,17 @@ pub fn routes() -> Router<Arc<App>> {
 async fn list(State(app): State<Arc<App>>, headers: HeaderMap, method: Method) -> ApiResult<Json<Value>> {
     let who = require(&app, &headers, &method)?;
     let owner = require_owner(&app, &headers, &method).is_ok();
+    // A console report shows the moment it's printed, not at the next poll.
+    let fresh: Vec<(String, Tps)> = app.servers.list().iter().filter(|e| who.sees(&e.id)).filter_map(|e| Some((e.id.clone(), console_reading(e)?))).collect();
     let st = state().lock().unwrap();
     let mut active: Vec<&Alert> = st.active.values().filter(|a| a.server_id.is_empty() || who.sees(&a.server_id)).collect();
     active.sort_by_key(|a| a.since);
-    let tps: HashMap<&String, &Tps> = st.tps.iter().filter(|(id, _)| who.sees(id)).collect();
-    let no_tps: HashMap<&String, &&str> = st.no_tps.iter().filter(|(id, _)| who.sees(id)).collect();
+    let mut tps: HashMap<String, Tps> = st.tps.iter().filter(|(id, _)| who.sees(id)).map(|(k, v)| (k.clone(), *v)).collect();
+    let mut no_tps: HashMap<String, &str> = st.no_tps.iter().filter(|(id, _)| who.sees(id)).map(|(k, v)| (k.clone(), *v)).collect();
+    for (id, t) in fresh {
+        no_tps.remove(&id);
+        tps.insert(id, t);
+    }
     Ok(Json(json!({ "active": active, "tps": tps, "no_tps": no_tps, "settings": owner.then(|| settings(&app)) })))
 }
 

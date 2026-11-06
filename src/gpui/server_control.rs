@@ -1133,6 +1133,14 @@ impl ServerControl {
             (s.mem[..split].trim().to_string(), s.mem[split..].trim().to_string())
         };
         let players: Vec<String> = s.players.iter().take(5).cloned().collect();
+        // The figure is the whole Java process; -Xmx only caps its heap, so
+        // it's named as a limit, never as the total the figure is out of.
+        let heap = self
+            .root
+            .as_ref()
+            .and_then(|r| self.store.read(cx).server(r))
+            .and_then(|i| i.max_memory.clone())
+            .filter(|m| !m.trim().is_empty());
         // A sparkline once there are two samples; a note while stopped.
         let (app, state): (&App, &str) = (cx, s.state());
         let trend = |v: Vec<f32>, top: f32, color: Hsla| -> AnyElement {
@@ -1157,6 +1165,13 @@ impl ServerControl {
                 .child(
                     card("card-mem", IconName::MemoryStick, "Memory")
                         .child(value(mem_value.0, mem_value.1))
+                        .when(live, |c| {
+                            let text = match &heap {
+                                Some(h) => format!("Process · heap limit {}", heap_text(h)),
+                                None => "Whole Java process".to_string(),
+                            };
+                            c.child(widgets::caption(text, cx).text_xs())
+                        })
                         .child(trend(mem, 100.0, theme.primary)),
                 )
                 // Only panels that read TPS (Hopper Server) get the card.
@@ -1165,7 +1180,8 @@ impl ServerControl {
                     r.child(match s.tps {
                         Some(t) => {
                             let color = widgets::tps_color(&t, cx);
-                            c.child(
+                            let from = t.source.text();
+                            c.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(from).build(w, cx)).child(
                                 h_flex()
                                     .items_baseline()
                                     .gap_1()
@@ -2279,5 +2295,14 @@ mod console_tests {
         assert!(ConsoleFilter::Errors.fits(LineKind::Frame));
         assert!(!ConsoleFilter::Errors.fits(LineKind::Warn));
         assert!(!ConsoleFilter::Chat.fits(LineKind::Join));
+    }
+}
+
+/// "8G" / "8192M" (as -Xmx writes it) as "8 GB" / "8192 MB".
+fn heap_text(xmx: &str) -> String {
+    let x = xmx.trim();
+    match x.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => format!("{} {}B", &x[..i], c.to_ascii_uppercase()),
+        _ => x.to_string(),
     }
 }

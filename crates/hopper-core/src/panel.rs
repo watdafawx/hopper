@@ -182,6 +182,27 @@ pub fn route_label(via: &str) -> Option<&'static str> {
 pub struct Tps {
     pub tps: f32,
     pub mspt: Option<f32>,
+    /// Where Hopper Server read it, for a tooltip.
+    pub source: TpsSource,
+}
+
+/// Where a TPS reading came from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TpsSource {
+    /// spark's report in the server's console.
+    Console,
+    /// A TPS command over RCON.
+    #[default]
+    Rcon,
+}
+
+impl TpsSource {
+    pub fn text(self) -> &'static str {
+        match self {
+            TpsSource::Console => "From spark's report in the console",
+            TpsSource::Rcon => "From the server's TPS command (RCON)",
+        }
+    }
 }
 
 /// How healthy a TPS reading is: 20 is full speed.
@@ -1023,7 +1044,7 @@ mod tests {
 
     #[test]
     fn tps_levels_and_text() {
-        let t = |tps: f32| Tps { tps, mspt: None };
+        let t = |tps: f32| Tps { tps, mspt: None, source: TpsSource::Rcon };
         assert_eq!(t(20.0).level(), TpsLevel::Good);
         assert_eq!(t(18.0).level(), TpsLevel::Good);
         assert_eq!(t(17.9).level(), TpsLevel::Slow);
@@ -1031,7 +1052,7 @@ mod tests {
         assert_eq!(t(14.9).level(), TpsLevel::Bad);
         assert_eq!(t(19.94).text(), "19.9");
         assert_eq!(t(20.0).mspt_text(), None);
-        assert_eq!(Tps { tps: 20.0, mspt: Some(12.44) }.mspt_text().as_deref(), Some("12.4 ms a tick"));
+        assert_eq!(Tps { tps: 20.0, mspt: Some(12.44), source: TpsSource::Rcon }.mspt_text().as_deref(), Some("12.4 ms a tick"));
     }
 
     #[test]

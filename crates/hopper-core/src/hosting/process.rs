@@ -90,12 +90,16 @@ pub struct Tracker {
     pub boot: Boot,
     /// How far a stop has got.
     pub halt: Halt,
+    /// TPS (and ms per tick) spark printed in the console, and when.
+    pub console_tps: Option<super::rcon::ConsoleTps>,
+    spark: super::rcon::SparkBlock,
 }
 
 impl Tracker {
     pub fn push(&mut self, line: String) {
         let now = Instant::now();
         self.heard_at = Some(now);
+        self.spark.push(&line, &mut self.console_tps);
         self.boot.push(&line, now);
         self.halt.push(&line, now);
         match parse_line(&line) {
@@ -402,6 +406,11 @@ impl LocalServer {
     /// Players online, from joins and leaves (and `list` replies).
     pub fn players(&self) -> Vec<String> {
         self.lock().tracker.players.iter().cloned().collect()
+    }
+
+    /// The last TPS spark printed in the console this run, if any.
+    pub fn console_tps(&self) -> Option<super::rcon::ConsoleTps> {
+        self.lock().tracker.console_tps
     }
 
     /// When each online player joined (only the ones seen joining).
