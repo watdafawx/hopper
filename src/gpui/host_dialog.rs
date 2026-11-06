@@ -20,6 +20,11 @@ use hopper::java::{JavaInstall, Side};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+/// The width of the form's field column (the 44rem dialog less its label
+/// column and padding). The form's rows don't shrink text to fit, so long
+/// lines and boxes in it are held to this.
+const FIELD_W: Rems = Rems(30.);
+
 /// The Java a server should run: detected installs ranked for its
 /// Minecraft version, the picked one, and a download when none fits.
 pub fn java_field(
@@ -265,7 +270,8 @@ impl HostForm {
             None => store
                 .read(cx)
                 .instances()
-                .first()
+                .iter()
+                .find(|i| ServerLoader::from_instance(&i.loader).is_ok())
                 .map_or(Source::Fresh, |i| Source::Instance(i.root.clone())),
         };
         Self {
@@ -299,17 +305,22 @@ impl HostForm {
                 .store
                 .read(cx)
                 .instance(r)
-                .is_some_and(|i| i.pack.is_some()),
+                .is_some_and(hopper::hosting::may_have_server_pack),
             Source::Fresh | Source::Files(_) => false,
         }
     }
 
     /// The name a server from the picked source gets unless one is typed.
     fn default_name(&self, cx: &App) -> String {
-        match &self.source {
+        let name = match &self.source {
             Source::Instance(r) => self.store.read(cx).instance(r).map(|i| format!("{} server", i.name)).unwrap_or_default(),
             Source::Fresh => self.base.read(cx).choice(cx).map(|(n, _, _)| n).unwrap_or_default(),
             Source::Files(p) => format!("{} server", p.name),
+        };
+        // On this PC a taken name gets " 2", " 3"...; a panel checks its own.
+        match self.place {
+            None if !name.is_empty() => hopper::hosting::free_server_name(Path::new(&self.store.read(cx).hosted_root()), &name),
+            _ => name,
         }
     }
 
@@ -672,7 +683,7 @@ impl HostForm {
             .parse()
             .map_err(|_| "The port must be a number.")?;
         if o.folder().exists() {
-            return Err(format!("{} already exists.", o.folder().display()));
+            return Err(format!("A server called {} already exists here. Pick another name.", o.name));
         }
         if !self.eula {
             return Err("Agree to the Minecraft EULA to host a server.".into());
@@ -972,7 +983,13 @@ impl Render for HostForm {
                             .child(Tab::new().label("An instance"))
                             .child(Tab::new().label("Fresh"))
                             .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                let first = this.store.read(cx).instances().first().map(|i| i.root.clone());
+                                let first = this
+                                    .store
+                                    .read(cx)
+                                    .instances()
+                                    .iter()
+                                    .find(|i| ServerLoader::from_instance(&i.loader).is_ok())
+                                    .map(|i| i.root.clone());
                                 this.source = match (*ix, first) {
                                     (0, Some(r)) => Source::Instance(r),
                                     _ => Source::Fresh,
@@ -1074,7 +1091,7 @@ impl Render for HostForm {
             None => source_field,
         };
         let pack_inst = match &self.source {
-            Source::Instance(r) => self.store.read(cx).instance(r).cloned().filter(|i| i.pack.is_some()),
+            Source::Instance(r) => self.store.read(cx).instance(r).cloned().filter(hopper::hosting::may_have_server_pack),
             Source::Fresh | Source::Files(_) => None,
         };
         let pack_field = pack_inst.map(|i| {
@@ -1127,18 +1144,23 @@ impl Render for HostForm {
             .filter(|((p, port), _)| *p == self.place && self.port_value(cx) == Some(*port))
             .and_then(|((_, port), c)| Some((c.message(*port, &host)?, c.suggest)))
             .map(|(msg, suggest)| {
+                // The form's field column doesn't shrink text to fit, so the
+                // box is held to the column's width (the dialog is 44rem).
                 h_flex()
                     .w_full()
+                    .max_w(FIELD_W)
                     .min_w_0()
                     .gap_2()
                     .p_2()
                     .rounded(px(crate::theme::RADIUS))
                     .bg(theme.warning.opacity(0.08))
                     .text_sm()
+                    .items_start()
                     .child(div().flex_1().min_w_0().child(msg))
                     .when_some(suggest, |r, s| {
                         r.child(
                             Button::new("host-port-free")
+                                .flex_none()
                                 .outline()
                                 .small()
                                 .label(format!("Use {s}"))
@@ -1239,17 +1261,20 @@ impl Render for HostForm {
                     .child(
                         Field::new()
                             .label("Port")
-                            .description({
+                            .description_fn({
                                 let auto = self.join.as_ref().filter(|(p, ..)| *p == self.place).and_then(|(_, a, ..)| *a);
                                 let join = self.join_line(cx).map(|j| format!(" {j}")).unwrap_or_default();
-                                match (on_panel, auto) {
+                                let text = match (on_panel, auto) {
                                     (true, Some(a)) => format!("Empty: the panel uses {a}.{join}"),
                                     (true, None) => format!("Empty: the panel picks a free one.{join}"),
-                                    (false, _) => format!("{} Forward the port on your router for friends outside your network.", join.trim()),
-                                }
+                                    (false, _) => format!("{join} Forward the port on your router for friends outside your network.").trim_start().to_string(),
+                                };
+                                move |_, _| div().max_w(FIELD_W).child(text.clone())
                             })
                             .child(
                                 v_flex()
+                                    .w_full()
+                                    .min_w_0()
                                     .gap_1p5()
                                     .child(div().w_32().child(Input::new(&self.port).small()))
                                     .children(port_warning),

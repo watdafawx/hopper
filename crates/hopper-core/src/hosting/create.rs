@@ -177,6 +177,16 @@ impl CreateOptions {
     }
 }
 
+/// `name`, or "name 2", "name 3"... when a server folder of that name is
+/// already in `root`, so a second server from the same pack just works.
+pub fn free_server_name(root: &Path, name: &str) -> String {
+    let taken = |n: &str| root.join(Instance::folder_name(n)).exists();
+    if !taken(name) {
+        return name.to_string();
+    }
+    (2..1000).map(|i| format!("{name} {i}")).find(|n| !taken(n)).unwrap_or_else(|| name.to_string())
+}
+
 /// The Java a server's `mc_version` needs, and the major of `java` when
 /// its release file says (`None` for a bare "java" on PATH).
 pub fn java_check(mc_version: &str, java: &Path) -> (u32, Option<u32>) {
@@ -648,6 +658,25 @@ pub struct CreateReport {
 }
 
 impl CreateReport {
+    /// The finished job's line: "Ready: 5 mods, 7 client-only left out".
+    pub fn ready_line(&self) -> String {
+        let mods = match self.mods_copied {
+            0 => String::new(),
+            1 => "1 mod".to_string(),
+            n => format!("{n} mods"),
+        };
+        let left = match self.skipped.len() {
+            0 => String::new(),
+            n => format!("{n} client-only left out"),
+        };
+        match (mods.is_empty(), left.is_empty()) {
+            (true, true) => "Ready".to_string(),
+            (false, true) => format!("Ready: {mods}"),
+            (true, false) => format!("Ready: {left}"),
+            (false, false) => format!("Ready: {mods}, {left}"),
+        }
+    }
+
     /// One line per missing mod, for a job's notes.
     pub fn missing_notes(&self) -> Vec<String> {
         self.missing
@@ -724,6 +753,12 @@ pub fn create_from_instance(
     // them too, so say which and where to get them.
     let missing = missing_mods(inst);
     write_missing(&root, &missing);
+    // The same finish Hopper Server gives every server it makes: the list
+    // of client-only mods left out, and which pack it came from.
+    write_left_out(&root, &skipped);
+    if let Some(p) = &inst.pack {
+        super::pack_link::link_from_instance(&root, p);
+    }
     Ok(CreateReport {
         root,
         mods_copied,
@@ -848,6 +883,17 @@ fn server_tree_files(src: &Path, rel: &str) -> anyhow::Result<Vec<(PathBuf, Stri
     Ok(out)
 }
 
+/// Writes `left-out-client-mods.txt` into server folder `root` when any
+/// mods were left out; nothing when none were.
+pub fn write_left_out(root: &Path, skipped: &[(String, String)]) {
+    if skipped.is_empty() {
+        return;
+    }
+    if let Err(e) = fs::write(root.join("left-out-client-mods.txt"), left_out_text(skipped)) {
+        log::warn!("writing the left-out list in {}: {e}", root.display());
+    }
+}
+
 /// The text of `left-out-client-mods.txt` (Hopper Server writes the same).
 fn left_out_text(skipped: &[(String, String)]) -> String {
     let lines: Vec<String> = skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
@@ -954,6 +1000,32 @@ pub fn copy_tree(src: &Path, dst: &Path) -> anyhow::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ready_line_counts_mods_and_left_out() {
+        let mut r = CreateReport::default();
+        assert_eq!(r.ready_line(), "Ready");
+        r.mods_copied = 1;
+        assert_eq!(r.ready_line(), "Ready: 1 mod");
+        r.mods_copied = 5;
+        r.skipped = vec![("a.jar".into(), "client".into()); 7];
+        assert_eq!(r.ready_line(), "Ready: 5 mods, 7 client-only left out");
+        r.mods_copied = 0;
+        assert_eq!(r.ready_line(), "Ready: 7 client-only left out");
+    }
+
+    #[test]
+    fn free_server_name_counts_up_past_taken_folders() {
+        let root = std::env::temp_dir().join(format!("hopper-free-name-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(free_server_name(&root, "Pack server"), "Pack server");
+        fs::create_dir_all(root.join(Instance::folder_name("Pack server"))).unwrap();
+        assert_eq!(free_server_name(&root, "Pack server"), "Pack server 2");
+        fs::create_dir_all(root.join(Instance::folder_name("Pack server 2"))).unwrap();
+        assert_eq!(free_server_name(&root, "Pack server"), "Pack server 3");
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn m(file: &str, side: &str, wont: Option<&str>) -> ModInfo {
         ModInfo {

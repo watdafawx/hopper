@@ -1017,6 +1017,7 @@ impl AppView {
                 for j in store.jobs().snapshot() {
                     if j.done && this.told_jobs.insert(j.id) && away {
                         match &j.error {
+                            Some(_) if j.cancelled => {}
                             Some(e) => crate::tray::notify(&j.title, e, true),
                             // One that waited for website downloads says how they went.
                             None if j.announce && j.waited > 0 => crate::tray::notify(&j.title, &format!("{}.", j.detail), j.waits_failed > 0),

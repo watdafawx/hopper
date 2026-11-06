@@ -376,7 +376,8 @@
         busy = 'Starting';
         r = await followJob(job, (st) => (busy = st.detail || 'Working'));
       }
-      say(from === 'folder' && !copy ? 'Added. It runs where it is.' : `Made ${name.trim() || 'the server'}${r?.left_out ? `: ${r.left_out} client-only mods left out (see left-out-client-mods.txt)` : ''}${r?.missing ? `. ${r.missing} mods can only be downloaded from CurseForge: see missing-mods.txt in the server folder` : ''}`);
+      if (from === 'folder' && r?.warnings?.length) say(`${!copy ? 'Added. It runs where it is. ' : ''}${r.warnings.join(' ')}`, true);
+      else say(from === 'folder' && !copy ? 'Added. It runs where it is.' : `Made ${name.trim() || 'the server'}${r?.left_out ? `: ${r.left_out} client-only mods left out (see left-out-client-mods.txt)` : ''}${r?.missing ? `. ${r.missing} mods can only be downloaded from CurseForge: see missing-mods.txt in the server folder` : ''}`);
       close();
       if (r?.id) location.hash = `/server/${encodeURIComponent(r.id)}/console`;
     } catch (e) {
@@ -594,7 +595,7 @@
             <div class="tiny muted">{autoInfo?.auto ? `Empty: the panel uses ${autoInfo.auto}.` : 'Empty: the panel picks a free one.'}{joinAt ? ` Players join at ${joinAt}.` : ''}</div>
           </div>
           <div class="f span">
-            <div class="row"><label class="lbl" for="ns-mem">Memory</label><span class="sp"></span><span class="small"><b>{Number(memory).toFixed(1)} GB</b>{#if hostGb}<span class="muted"> of {Math.round(hostGb)} GB on {hostInfo.hostname || host}</span>{/if}</span></div>
+            <div class="row"><label class="lbl" for="ns-mem">Memory</label><span class="sp"></span><span class="small"><b>{Number(memory).toFixed(1)} GB</b>{#if hostGb}{' '}<span class="muted">of {Math.round(hostGb)} GB on {hostInfo.hostname || host}</span>{/if}</span></div>
             <input id="ns-mem" class="range" type="range" min="1" max={Math.max(memMax, memory)} step="0.5" bind:value={memory} disabled={!!busy} />
             {#if hostGb && memory > hostGb * 0.75}<div class="tiny warn">That leaves little for {hostInfo.hostname || 'the host'} and its other servers.</div>{/if}
           </div>

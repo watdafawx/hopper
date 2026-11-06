@@ -318,11 +318,33 @@ async fn import_folder(State(app): State<Arc<App>>, headers: HeaderMap, method: 
     let src = crate::absolute(FsPath::new(b.path.trim()));
     crate::home::check(&app, &src)?;
     if !src.join("server.properties").is_file() {
-        return Err(bad(format!("{} has no server.properties, so it isn't a server folder.", src.display())));
+        return Err(bad("That folder has no server.properties, so it isn't a server folder."));
     }
     if app.servers.list().iter().any(|e| same_path(&e.root, &src)) {
         return Err(bad("The panel has that server already."));
     }
+    // Added anyway, but said: what would stop it starting, and a port
+    // another server here already uses.
+    let warnings = {
+        let port = hopper_core::hosting::Properties::load(&src.join("server.properties")).unwrap_or_default().port();
+        let mut used: Vec<(String, u16)> = app.servers.list().iter().map(|e| (e.name.clone(), crate::router::port_of(e))).collect();
+        {
+            let c = app.cfg.read().unwrap();
+            if c.router.enabled {
+                used.push(("The address router".into(), c.router.port));
+            }
+        }
+        let (dir, host) = (src.clone(), crate::config::hostname());
+        blocking(move || {
+            let mut w: Vec<String> = hopper_core::hosting::script::folder_problem(&dir).into_iter().collect();
+            let c = hopper_core::hosting::ports::check_here(port, &used);
+            if !c.taken_by.is_empty() {
+                w.extend(c.message(port, &host));
+            }
+            Ok(w)
+        })
+        .await?
+    };
     if !b.copy {
         // RCON for console commands and player info; an owner's own setup
         // is kept. A running server picks it up when it next starts.
@@ -342,7 +364,7 @@ async fn import_folder(State(app): State<Arc<App>>, headers: HeaderMap, method: 
         app.refresh.notify_one();
         let id = app.servers.list().into_iter().find(|e| same_path(&e.root, &src)).map(|e| e.id.clone());
         log::info!("added {} (runs where it is)", src.display());
-        return Ok(Json(json!({ "id": id })));
+        return Ok(Json(json!({ "id": id, "warnings": warnings })));
     }
     let root = servers_root(&app)?;
     let name = if b.name.trim().is_empty() { src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { b.name.trim().to_string() };
@@ -362,7 +384,7 @@ async fn import_folder(State(app): State<Arc<App>>, headers: HeaderMap, method: 
         a.rescan();
         a.refresh.notify_one();
         let id = a.servers.list().into_iter().find(|e| e.root == dest).map(|e| e.id.clone());
-        Ok(json!({ "id": id, "path": dest }))
+        Ok(json!({ "id": id, "path": dest, "warnings": warnings }))
     });
     Ok(Json(json!({ "job": job })))
 }
@@ -531,13 +553,7 @@ fn finish(app: &App, folder: &FsPath, address: Option<String>, skipped: &[(Strin
         hopper_core::hosting::router::RouteSettings { addresses: vec![addr], ..Default::default() }.save(folder)?;
         app.router.changed();
     }
-    if !skipped.is_empty() {
-        let lines: Vec<String> = skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
-        let _ = std::fs::write(
-            folder.join("left-out-client-mods.txt"),
-            format!("Hopper left these mods out of the server as client-only. If the server needs one, copy it from the pack into mods.\n\n{}\n", lines.join("\n")),
-        );
-    }
+    hopper_core::hosting::write_left_out(folder, skipped);
     app.rescan();
     // The job ran after its request: tell open clients the server is here now.
     crate::changes::emit(app, None, &["list"]);

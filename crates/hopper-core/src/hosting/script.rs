@@ -150,6 +150,29 @@ fn swap_java(root: &Path, mut l: Launch, text: &str) -> Launch {
     l
 }
 
+/// Why the server in `root` can't start as it is, when Hopper can tell: no
+/// way to start it, or the jar or args file its start script names is
+/// missing. `None` when it looks runnable.
+pub fn folder_problem(root: &Path) -> Option<String> {
+    let Ok((l, _)) = read_launch(root) else {
+        return Some("Hopper can't tell how this server starts: it has no start script or server jar.".into());
+    };
+    let mut args = l.args.iter();
+    while let Some(a) = args.next() {
+        let file = if a == "-jar" {
+            args.next().cloned()
+        } else {
+            a.strip_prefix('@').map(str::to_string)
+        };
+        if let Some(f) = file.filter(|f| !f.is_empty() && !f.starts_with('-'))
+            && !root.join(&f).is_file()
+        {
+            return Some(format!("{f} is missing, so the server won't start. Copy it back, or reinstall the server's loader."));
+        }
+    }
+    None
+}
+
 /// The command the server's start script runs (run.bat, else start.bat,
 /// else a server jar with `user_jvm_args.txt`), as written: java not
 /// swapped. Also the script's text ("" without one).
@@ -451,6 +474,22 @@ pub fn rewrite_java(text: &str, java: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use crate::hosting::jvm::JvmPreset;
+
+    #[test]
+    fn folder_problem_names_a_missing_jar() {
+        let root = std::env::temp_dir().join(format!("hopper-folder-problem-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        assert!(folder_problem(&root).unwrap().contains("can't tell how this server starts"));
+        fs::write(root.join("run.bat"), "java -Xmx2G -jar server.jar nogui\r\n").unwrap();
+        assert!(folder_problem(&root).unwrap().starts_with("server.jar is missing"));
+        fs::write(root.join("server.jar"), b"PK").unwrap();
+        assert_eq!(folder_problem(&root), None);
+        // NeoForge: the args file under libraries.
+        fs::write(root.join("run.bat"), "java @libraries/net/neoforged/neoforge/21.1.1/win_args.txt %*\r\n").unwrap();
+        assert!(folder_problem(&root).unwrap().contains("win_args.txt is missing"));
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn jvm() -> JvmArgs {
         JvmArgs::new(4096, JvmPreset::Plain, 21)

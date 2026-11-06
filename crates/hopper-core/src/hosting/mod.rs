@@ -17,6 +17,7 @@ pub mod logparse;
 pub mod logshare;
 pub mod motd;
 pub mod motd_edit;
+pub mod pack_link;
 pub mod pack_versions;
 pub mod players;
 pub mod panel_create;
@@ -36,7 +37,7 @@ pub mod zip_import;
 
 pub use create::{
     CreateOptions, CreateReport, ServerLoader, create_from_client_pack, create_from_instance,
-    create_server, java_check, server_content_zip,
+    create_server, free_server_name, java_check, server_content_zip, write_left_out,
 };
 pub use jvm::{JvmArgs, JvmPreset};
 pub use local_panel::LocalPanel;
@@ -45,9 +46,9 @@ pub use properties::{PropKind, PropSpec, Properties};
 pub use schedule::{Schedule, ScheduleEvent, Scheduler};
 pub use script::{Launch, LaunchTarget};
 pub use server_pack::{
-    BUILT_FROM_PACK, BuildChoice, PackCheck, PackTarget, ServerPackReport, WebsiteOnly, check_pack,
-    create_from_server_files, create_from_server_pack, has_server_pack,
-    pack_target, resolve_server_pack,
+    BUILT_FROM_PACK, BuildChoice, NO_SERVER_PACK, PackCheck, PackTarget, ServerPackReport, WebsiteOnly,
+    check_pack, create_from_server_files, create_from_server_pack, find_server_pack, has_server_pack,
+    may_have_server_pack, pack_target, resolve_server_pack,
 };
 
 use std::fs;

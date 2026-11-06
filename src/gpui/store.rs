@@ -101,6 +101,9 @@ pub enum Msg {
     },
     /// Re-read the servers folder (a server was updated).
     ServersChanged,
+    /// A server was made here from an instance: list it and pair the two,
+    /// so Sync and the server's pack don't hang on its name.
+    ServerMade { server: PathBuf, instance: PathBuf },
     Javas(Vec<hopper::java::JavaInstall>),
     Link(String),
     /// Newer modpack files, by pack project.
@@ -1266,6 +1269,10 @@ impl Store {
                 self.discover_servers();
                 self.server_rev += 1;
                 self.settle_server_tools(cx);
+            }
+            Msg::ServerMade { server, instance } => {
+                self.handle(Msg::ServersChanged, cx);
+                self.set_pairing(&server, &instance, cx);
             }
             Msg::Javas(j) => self.javas = Some(j),
             Msg::SelfUpdate(u) => self.self_update = Some(u),
@@ -3541,6 +3548,7 @@ impl Store {
         done: impl FnOnce(PathBuf) + Send + 'static,
     ) {
         let inst = from.and_then(|r| self.instance(&r).cloned());
+        let paired = inst.as_ref().map(|i| i.root.clone());
         let anyway = self.settings.sync_anyway.clone();
         let hidden = self.settings.sync_blacklist.clone();
         let title = format!("Creating {}", opts.name);
@@ -3550,13 +3558,9 @@ impl Store {
                 // The pack author's own server pack: exactly their mod set.
                 Some(i) if server_pack => {
                     let r = hopper::hosting::create_from_server_pack(&i, &opts, job)?;
-                    if r.website_only.is_none() {
-                        job.note(format!(
-                            "From {}: {} mods{}",
-                            r.server_pack,
-                            r.create.mods_copied,
-                            if r.used_server_pack_mods { "" } else { " (from the instance; the server pack downloads its mods itself)" }
-                        ));
+                    job.detail(r.ready_line());
+                    if !r.server_pack.is_empty() && r.website_only.is_none() && !r.used_server_pack_mods {
+                        job.note("The mods came from your instance: the server pack downloads its own when it first starts.");
                     }
                     if let Some(n) = r.create.note.clone() {
                         job.note(n);
@@ -3568,21 +3572,24 @@ impl Store {
                 }
                 Some(i) => {
                     let r = hopper::hosting::create_from_instance(&i, &opts, &anyway, &hidden, job)?;
-                    job.note(format!(
-                        "Copied {} mods; left out {} client-only.",
-                        r.mods_copied,
-                        r.skipped.len()
-                    ));
+                    job.detail(r.ready_line());
                     for n in r.missing_notes() {
                         job.note(n);
                     }
                     r.root
                 }
-                None => hopper::hosting::create_server(&opts, job)?,
+                None => {
+                    let root = hopper::hosting::create_server(&opts, job)?;
+                    job.detail("Ready");
+                    root
+                }
             };
             let _ = meta.save(&root);
-            done(root);
-            Ok(Msg::ServersChanged)
+            done(root.clone());
+            Ok(match paired {
+                Some(instance) => Msg::ServerMade { server: root, instance },
+                None => Msg::ServersChanged,
+            })
         });
     }
 
@@ -3603,14 +3610,8 @@ impl Store {
             let r = hopper::hosting::create_from_server_files(&files, &opts, job)?;
             if r.website_only.is_some() {
                 job.note(hopper::hosting::BUILT_FROM_PACK);
-                job.note(format!(
-                    "{} mods copied, {} left out as client-only.",
-                    r.create.mods_copied,
-                    r.create.skipped.len()
-                ));
-            } else {
-                job.note(format!("From {}: {} mods", r.server_pack, r.create.mods_copied));
             }
+            job.detail(r.ready_line());
             for n in r.create.missing_notes() {
                 job.note(n);
             }
@@ -3645,7 +3646,7 @@ impl Store {
                 opts.loader = hopper::hosting::ServerLoader::from_instance(&t.loader)?;
             }
             let (r, used, note) = hopper::hosting::zip_import::create_from_local_zip(&zip, &opts, job)?;
-            job.note(format!("Made from {}: {} mods", zip.display(), r.mods_copied));
+            job.detail(r.ready_line());
             if let Some(n) = note {
                 job.note(n);
             }
@@ -3673,28 +3674,11 @@ impl Store {
         let title = format!("Creating {}", opts.name);
         self.spawn_job(title, move |job| {
             let (r, used) = hopper::hosting::create_from_client_pack(&pack, &file, &opts, job)?;
-            job.note(format!(
-                "Built from the client pack: {} mods copied, {} left out as client-only.",
-                r.mods_copied,
-                r.skipped.len()
-            ));
+            // The list of client-only mods left out is in
+            // left-out-client-mods.txt in the server folder.
+            job.detail(r.ready_line());
             for n in r.missing_notes() {
                 job.note(n);
-            }
-            if !r.skipped.is_empty() {
-                let lines: Vec<String> = r.skipped.iter().map(|(f, why)| format!("{f}: {why}")).collect();
-                let _ = std::fs::write(
-                    r.root.join("left-out-client-mods.txt"),
-                    format!(
-                        "Hopper left these mods out of the server as client-only. If the server needs one, copy it from the pack into mods.
-
-{}
-",
-                        lines.join("
-")
-                    ),
-                );
-                job.note(format!("Left out: {}", lines.join("; ")));
             }
             if let Some(n) = r.note.clone() {
                 job.note(n);

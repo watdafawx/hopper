@@ -28,15 +28,27 @@ use std::path::Path;
 /// imported from an old CurseForge instance may say 0 although the pack has
 /// one; [`resolve_server_pack`] asks CurseForge in that case.
 pub fn has_server_pack(inst: &Instance) -> bool {
+    curse_pack(inst).is_some_and(|p| p.server_pack_file_id != 0)
+}
+
+/// `inst`'s pack when it came from CurseForge. Modrinth packs have no server
+/// packs, and their ids are hashes CurseForge doesn't know.
+fn curse_pack(inst: &Instance) -> Option<&crate::instances::PackRef> {
     inst.pack
         .as_ref()
-        .is_some_and(|p| p.project_id != 0 && p.server_pack_file_id != 0)
+        .filter(|p| p.project_id != 0 && p.mr_project.is_empty() && !crate::modrinth::is_mr(p.project_id))
+}
+
+/// Whether `inst` may have a server pack: it came from a CurseForge pack,
+/// recorded with one or not recorded either way. No network.
+pub fn may_have_server_pack(inst: &Instance) -> bool {
+    curse_pack(inst).is_some_and(|p| p.server_pack_file_id != 0 || p.file_id != 0)
 }
 
 /// The server pack file of `inst`'s pack version, from CurseForge. Uses the
 /// recorded id, or the pack file's metadata when none was recorded.
 pub fn resolve_server_pack(inst: &Instance) -> anyhow::Result<cf::File> {
-    let Some(p) = inst.pack.as_ref().filter(|p| p.project_id != 0) else {
+    let Some(p) = curse_pack(inst) else {
         bail!(
             "{} wasn't installed from a CurseForge modpack, so it has no server pack.",
             inst.name
@@ -59,6 +71,43 @@ pub fn resolve_server_pack(inst: &Instance) -> anyhow::Result<cf::File> {
     }
     cf::file(p.project_id, id).context("looking up the server pack on CurseForge")
 }
+
+/// Like [`resolve_server_pack`], but `None` when the pack has no server
+/// pack for this version or isn't a CurseForge pack. Errors only when
+/// CurseForge can't be reached.
+pub fn find_server_pack(inst: &Instance) -> anyhow::Result<Option<cf::File>> {
+    let Some(p) = curse_pack(inst) else { return Ok(None) };
+    let mut id = p.server_pack_file_id;
+    if id == 0 && p.file_id != 0 {
+        id = cf::file(p.project_id, p.file_id)
+            .with_context(|| format!("looking up {} on CurseForge", p.name))?
+            .server_pack_file_id
+            .unwrap_or(0);
+    }
+    if id == 0 {
+        return Ok(None);
+    }
+    cf::file(p.project_id, id).context("looking up the server pack on CurseForge").map(Some)
+}
+
+impl ServerPackReport {
+    /// The finished job's line. From the server pack: its mod count (what it
+    /// left out are its own extra files, not client mods); otherwise as
+    /// [`CreateReport::ready_line`].
+    pub fn ready_line(&self) -> String {
+        if self.server_pack.is_empty() || self.website_only.is_some() {
+            return self.create.ready_line();
+        }
+        match self.create.mods_copied {
+            1 => "Ready: 1 mod from the server pack".to_string(),
+            n => format!("Ready: {n} mods from the server pack"),
+        }
+    }
+}
+
+/// What players read when the pack had no server pack and Hopper built
+/// the server from the instance.
+pub const NO_SERVER_PACK: &str = "The pack has no server pack for this version, so Hopper built the server from your instance.";
 
 /// What [`create_from_server_pack`] did.
 #[derive(Clone, Debug, Default)]
@@ -179,7 +228,16 @@ pub fn create_from_server_pack(
 ) -> anyhow::Result<ServerPackReport> {
     check_folder(opts)?;
     job.detail("Finding the pack's server pack");
-    let file = resolve_server_pack(inst)?;
+    // No server pack for this version (or a Modrinth pack): build from the
+    // instance, as the dialog says it will.
+    let Some(file) = find_server_pack(inst)? else {
+        let mut create = create_from_instance(inst, opts, &HashSet::new(), &HashSet::new(), job)?;
+        create.note = Some(match create.note.take() {
+            Some(n) => format!("{NO_SERVER_PACK} {n}"),
+            None => NO_SERVER_PACK.to_string(),
+        });
+        return Ok(ServerPackReport { create, ..Default::default() });
+    };
     let project = inst.pack.as_ref().map_or(0, |p| p.project_id);
     if let Some(w) = blocked(project, &file)?
         && !from_website(&file, job)
@@ -1003,6 +1061,35 @@ mod tests {
         inst.pack.as_mut().unwrap().server_pack_file_id = 2;
         assert!(has_server_pack(&inst));
         assert!(resolve_server_pack(&Instance::default()).is_err());
+    }
+
+    #[test]
+    fn modrinth_packs_never_have_a_server_pack() {
+        // A Modrinth pack's ids are hashes with the top bit set; CurseForge
+        // would answer 404 for them, so nothing may look them up there.
+        let mut inst = Instance::default();
+        inst.pack = Some(crate::instances::PackRef {
+            project_id: 17242318738607869919,
+            file_id: 15275238297986912549,
+            server_pack_file_id: 0,
+            ..Default::default()
+        });
+        assert!(!has_server_pack(&inst));
+        assert!(!may_have_server_pack(&inst));
+        assert!(find_server_pack(&inst).unwrap().is_none());
+        // Same with the Modrinth ids recorded and a stray server pack id.
+        let p = inst.pack.as_mut().unwrap();
+        p.project_id = 12;
+        p.mr_project = "abcd".into();
+        p.server_pack_file_id = 5;
+        assert!(!has_server_pack(&inst));
+        assert!(find_server_pack(&inst).unwrap().is_none());
+        // A CurseForge pack with no recorded server pack may still have one.
+        let p = inst.pack.as_mut().unwrap();
+        p.mr_project.clear();
+        p.server_pack_file_id = 0;
+        assert!(may_have_server_pack(&inst));
+        assert!(!has_server_pack(&inst));
     }
 
     /// A server pack file as CurseForge sends it when the author turned

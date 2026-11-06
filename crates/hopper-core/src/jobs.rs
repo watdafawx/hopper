@@ -33,6 +33,9 @@ pub struct JobState {
     /// A modpack being installed (false) or updated (true), by name, for
     /// what Discord shows (see [`Job::presence`]).
     pub presence: Option<(String, bool)>,
+    /// Stopped because the user cancelled it: `error` is just "Cancelled",
+    /// and lists show it as a quiet grey line, not a failure.
+    pub cancelled: bool,
 }
 
 #[derive(Clone, Default)]
@@ -100,6 +103,7 @@ impl Jobs {
             waits_failed: 0,
             held: false,
             presence: None,
+            cancelled: false,
         });
         drop(g);
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -322,8 +326,15 @@ impl Job {
     /// Marks the job finished with `result`. Work that ended fine while
     /// files it waits for are still coming stays open until they're in.
     pub fn finish<T>(&self, result: &anyhow::Result<T>) {
-        let err = result.as_ref().err().map(|e| format!("{e:#}"));
-        let failed = err.is_some();
+        // A cancel surfaces as whatever step noticed it ("download https://…:
+        // Cancelled"); the player only needs to know they stopped it.
+        let cancelled = result.is_err() && self.is_cancelled();
+        let err = match result {
+            Err(_) if cancelled => Some("Cancelled".to_string()),
+            Err(e) => Some(format!("{e:#}")),
+            Ok(_) => None,
+        };
+        let failed = err.is_some() && !cancelled;
         self.jobs.update(self.id, |j| {
             if !failed && !j.waits.is_empty() {
                 j.held = true;
@@ -336,6 +347,7 @@ impl Job {
             j.done = true;
             j.progress = Some(1.0);
             j.error = err;
+            j.cancelled = cancelled;
             // A quiet job that failed joins the list, with its error.
             if failed {
                 j.quiet = false;
@@ -386,6 +398,23 @@ mod tests {
         bad.wait_for(&["c".into()]);
         bad.finish::<()>(&Err(anyhow::anyhow!("boom")));
         assert!(jobs.snapshot().iter().any(|j| j.title == "bad" && j.done));
+    }
+
+    #[test]
+    fn a_cancelled_job_says_cancelled_not_the_step_that_noticed() {
+        let jobs = Jobs::default();
+        let job = jobs.start("Making a server");
+        job.cancel();
+        job.finish::<()>(&Err(anyhow::anyhow!("Cancelled").context("download https://edge.forgecdn.net/x.zip")));
+        let s = &jobs.snapshot()[0];
+        assert!(s.done && s.cancelled);
+        assert_eq!(s.error.as_deref(), Some("Cancelled"));
+        // A failure that wasn't a cancel keeps its reason.
+        let bad = jobs.start("bad");
+        bad.finish::<()>(&Err(anyhow::anyhow!("disk full")));
+        let s = jobs.snapshot().into_iter().find(|j| j.title == "bad").unwrap();
+        assert!(!s.cancelled);
+        assert_eq!(s.error.as_deref(), Some("disk full"));
     }
 
     #[test]

@@ -378,7 +378,14 @@ pub fn enable(p: &mut super::Properties, taken: &[u16], free: impl Fn(u16) -> bo
     let clash = |n: u16| n == game || taken.contains(&n);
     let port = match own {
         Some(n) if !pass.is_empty() && !clash(n) => n,
-        _ => RCON_PORTS.clone().find(|n| !clash(*n) && free(*n)).ok_or_else(|| anyhow::anyhow!("No free port for RCON."))?,
+        // Game port + 10 first (25565 -> 25575): servers set up apart (this
+        // PC and a Hopper Server on it, say) already have different game
+        // ports, so they get different RCON ports without knowing each other.
+        _ => game
+            .checked_add(10)
+            .filter(|n| RCON_PORTS.contains(n) && !clash(*n) && free(*n))
+            .or_else(|| RCON_PORTS.clone().find(|n| !clash(*n) && free(*n)))
+            .ok_or_else(|| anyhow::anyhow!("No free port for RCON."))?,
     };
     let kept = !pass.is_empty();
     p.set("enable-rcon", "true");
@@ -624,10 +631,16 @@ There are 0 of a max of 16 players online:
     fn enable_picks_a_port_clear_of_other_servers() {
         let mut p = Properties::parse("server-port=25575\n");
         // Its own game port, another server's RCON and a busy port are skipped.
-        let s = enable(&mut p, &[25576], |n| n != 25577, PW).unwrap();
+        let s = enable(&mut p, &[25576, 25585], |n| n != 25577, PW).unwrap();
         assert_eq!(s, Setup::Enabled { port: 25578 });
         assert_eq!(p.get("enable-rcon"), Some("true"));
         assert_eq!(p.get("rcon.port"), Some("25578"));
+        // Free: the game port + 10, so two servers on 25565 and 25566 set up
+        // by apps that don't know each other still differ.
+        let mut a = Properties::parse("server-port=25565\n");
+        let mut b = Properties::parse("server-port=25566\n");
+        assert_eq!(enable(&mut a, &[], |_| true, PW).unwrap(), Setup::Enabled { port: 25575 });
+        assert_eq!(enable(&mut b, &[], |_| true, PW).unwrap(), Setup::Enabled { port: 25576 });
         assert_eq!(p.get("rcon.password"), Some("newpass"));
         assert_eq!(p.get("broadcast-rcon-to-ops"), Some("false"));
     }

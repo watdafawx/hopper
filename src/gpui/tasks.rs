@@ -140,6 +140,8 @@ impl TasksButton {
             let store = store.clone();
             let state: AnyElement = if !j.done {
                 gpui_kit::component::spinner::Spinner::new().small().into_any_element()
+            } else if j.cancelled {
+                Icon::new(IconName::CircleX).small().text_color(theme.muted_foreground).into_any_element()
             } else if j.error.is_some() {
                 Icon::new(IconName::CircleX).small().text_color(theme.danger).into_any_element()
             } else {
@@ -178,7 +180,7 @@ impl TasksButton {
                                     div()
                                         .text_xs()
                                         .truncate()
-                                        .text_color(if j.error.is_some() { theme.danger } else { theme.muted_foreground })
+                                        .text_color(if j.error.is_some() && !j.cancelled { theme.danger } else { theme.muted_foreground })
                                         .child(j.error.clone().unwrap_or(j.detail.clone())),
                                 ),
                         )
@@ -186,7 +188,7 @@ impl TasksButton {
                             // Labelled actions: Cancel while it runs; Dismiss
                             // (and Copy details on a failure) after.
                             let done = j.done;
-                            let detail = j.error.clone().map(|e| format!("{}: {e}", j.title));
+                            let detail = j.error.clone().filter(|_| !j.cancelled).map(|e| format!("{}: {e}", j.title));
                             let store_c = store.clone();
                             // A snapshot this task took to undo it.
                             let snap = done.then(|| hopper::snapshots::of_job(id)).flatten();
@@ -390,9 +392,9 @@ impl Render for TasksButton {
         let running: Vec<_> = jobs.iter().filter(|j| !j.done).collect();
         let attention = jobs
             .iter()
-            .filter(|j| j.done && (j.error.is_some() || !j.notes.is_empty()))
+            .filter(|j| j.done && !j.cancelled && (j.error.is_some() || !j.notes.is_empty()))
             .count();
-        let failed = jobs.iter().any(|j| j.done && j.error.is_some());
+        let failed = jobs.iter().any(|j| j.done && j.error.is_some() && !j.cancelled);
         let dialog = window.has_active_dialog(cx);
         let theme = cx.theme();
         let bounds = self.bounds.clone();
