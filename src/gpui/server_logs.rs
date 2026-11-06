@@ -224,6 +224,20 @@ impl ServerLogsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.run_fix_then(rel, mark_fixed, false, f, window, cx)
+    }
+
+    /// [`Self::run_fix`]; `reread`: the card is read again after it (a
+    /// config setting changed, which the card shows).
+    fn run_fix_then(
+        &mut self,
+        rel: String,
+        mark_fixed: bool,
+        reread: bool,
+        f: impl FnOnce(&Path) -> anyhow::Result<String> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.root.clone() else { return };
         self.fix_busy = true;
         cx.notify();
@@ -239,6 +253,10 @@ impl ServerLogsView {
                     Ok(m) => Notification::success(m.clone()),
                     Err(e) => Notification::warning(format!("{e:#}")),
                 };
+                if done.is_ok() && reread {
+                    this.cards.remove(&rel);
+                    this.pick_report(rel.clone(), cx);
+                }
                 if done.is_ok() && mark_fixed {
                     this.fixed.insert(rel);
                 }
@@ -601,6 +619,65 @@ impl ServerLogsView {
                     2.min(body.len()),
                     crash_view::turn_off_picker("srv-log", &off_mods, &picked, &link, &readable, toggle, confirm, cancel, blocked, "server", cx),
                 );
+            }
+        }
+        // A setting in the crash's mods' configs that works around it: the
+        // same box as an instance's crash card.
+        if !c.switches.is_empty() || !c.switched_off.is_empty() {
+            let who: Vec<AnyElement> = c
+                .switches
+                .iter()
+                .enumerate()
+                .map(|(i, sw)| match c.suspects.iter().find(|s| s.mod_id == sw.mod_id) {
+                    Some(s) => link(&s.file_name, &format!("switch{i}"), cx),
+                    None => div().font_semibold().child(sw.mod_id.clone()).into_any_element(),
+                })
+                .collect();
+            // A Hopper Server's files aren't here to compare: the card says
+            // the new value instead.
+            let remote = hopper::hopperd::is_remote_root(root);
+            let diffs: Vec<Vec<(bool, String)>> =
+                c.switched_off.iter().map(|sw| if remote { Vec::new() } else { hopper::configswitch::applied_diff(root, sw) }).collect();
+            let view = cx.entity().downgrade();
+            let run = move |rel: String, on: bool| -> std::rc::Rc<dyn Fn(hopper::configswitch::Switch, &mut Window, &mut App)> {
+                let view = view.clone();
+                std::rc::Rc::new(move |sw, window, cx| {
+                    let rel = rel.clone();
+                    view.update(cx, |this, cx| {
+                        this.run_fix_then(
+                            rel,
+                            false,
+                            true,
+                            move |root| if on { crate::server_crash::switch_on(root, &sw) } else { crate::server_crash::switch_off(root, &sw) },
+                            window,
+                            cx,
+                        )
+                    })
+                    .ok();
+                })
+            };
+            // The config editor reads files on this PC; a Hopper Server's are
+            // edited in its Configs tab.
+            let open: Option<std::rc::Rc<dyn Fn(hopper::configswitch::Switch, &mut Window, &mut App)>> = (!remote).then(|| {
+                let (store, root) = (self.store.clone(), root.to_path_buf());
+                std::rc::Rc::new(move |sw: hopper::configswitch::Switch, window: &mut Window, cx: &mut App| {
+                    let focus = crate::config_editor::Focus { line: sw.line, note: Some(sw.why.clone()).filter(|w| !w.is_empty()) };
+                    crate::config_editor::open(store.clone(), root.clone(), vec![sw.file.clone()], sw.file.clone(), Some(focus), window, cx)
+                }) as std::rc::Rc<dyn Fn(hopper::configswitch::Switch, &mut Window, &mut App)>
+            });
+            let host = crate::logs::crash_switch::SwitchHost {
+                running: blocked,
+                running_tip: "Stop the server first: it may write its config back when it stops.",
+                check: "Start the server to check the crash is gone.",
+                off: run(r.rel.clone(), false),
+                on: run(r.rel.clone(), true),
+                open,
+                play: None,
+            };
+            let or = changed.is_some() || !off_mods.is_empty();
+            let at = if crate::logs::crash_switch::settings_first(&c) { 1 } else { 2 };
+            if let Some(b) = crate::logs::crash_switch::switch_list(&c, who, diffs, or, None, host, cx) {
+                body.insert(at.min(body.len()), b);
             }
         }
         // The mods: the first two, the rest a click away, so a long list

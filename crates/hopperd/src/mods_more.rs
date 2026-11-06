@@ -223,21 +223,8 @@ async fn backup_list(State(app): State<Arc<App>>, headers: HeaderMap, method: Me
     .await?;
     let (u, would, r) = usage;
     let total: u64 = sets.iter().map(|s| s.size()).sum();
-    let rows: Vec<Value> = sets
-        .iter()
-        .map(|s| {
-            json!({
-                "when": s.when, "size": s.size(),
-                "files": s.files.iter().map(|f| json!({
-                    "name": f.name, "size": f.size, "restore_to": f.restore_to, "download": f.download,
-                    // History: what happened, the mod, its versions.
-                    "change": f.change.label(), "title": f.title(), "detail": f.detail(),
-                    "project_id": f.src.as_ref().map_or(0, |r| r.project_id),
-                    "icon": f.src.as_ref().and_then(|r| r.addon.as_ref()).map(|a| a.icon.clone()).unwrap_or_default(),
-                })).collect::<Vec<_>>(),
-            })
-        })
-        .collect();
+    // History: what happened, the mod, its versions (shared with Hopper desktop).
+    let rows: Vec<Value> = sets.iter().map(backups::Set::to_json).collect();
     Ok(Json(json!({
         "sets": rows, "total_size": total, "copies": copies,
         // The whole folder (snapshots and world zips too) and the clean up rules.
@@ -364,7 +351,7 @@ async fn history_undo(State(app): State<Arc<App>>, headers: HeaderMap, method: M
                 Err(err) => match err.downcast::<hopper_core::undo::Gone>() {
                     Ok(g) if gone.is_none() => {
                         gone = Some(json!({
-                            "name": f.name, "title": g.name, "message": g.to_string(), "closest": g.closest,
+                            "name": f.name, "title": g.name, "message": g.to_string(), "closest": g.closest, "version": g.version, "site": g.site,
                             "choices": g.choices.iter().map(|c| json!({ "id": c.id, "file_name": c.file_name, "version": hopper_core::undo::version_of(&c.file_name), "date": c.file_date })).collect::<Vec<_>>(),
                         }))
                     }

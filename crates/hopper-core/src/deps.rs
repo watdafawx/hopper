@@ -2,7 +2,7 @@
 //! (what the loader checks at startup), not CurseForge's project
 //! relations, which list other loaders' dependencies and stale ones.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ const BUILTIN: &[&str] = &[
     "mixinextras",
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Missing {
     /// The mod that needs it.
     pub mod_name: String,
@@ -618,6 +618,30 @@ pub fn broken_by(mods_dir: &Path, file: &str, from: &str, to: &str) -> Vec<(Stri
     out
 }
 
+/// What the Mods tab warns about: required mods missing, jars that are one
+/// mod twice, what the loader will refuse, and when the game last loaded
+/// these mods fine. Hopper Server sends it for its servers
+/// (`GET /servers/{id}/mods/problems`) so Hopper desktop shows the same
+/// banners for them. Reads every jar: run it off the UI thread.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Problems {
+    pub missing: Vec<Missing>,
+    pub dups: Vec<crate::install::Duplicate>,
+    pub blockers: Vec<Blocker>,
+    pub loaded_fine: Option<i64>,
+}
+
+pub fn problems(inst: &crate::instances::Instance) -> Problems {
+    let dir = inst.mods_dir();
+    Problems {
+        missing: missing(&dir),
+        dups: crate::install::duplicates(inst),
+        blockers: blockers(&dir, &inst.loader, &inst.game_version),
+        loaded_fine: loaded_fine(&inst.root),
+    }
+}
+
 pub fn missing(mods_dir: &Path) -> Vec<Missing> {
     missing_without(mods_dir, &[])
 }
@@ -708,7 +732,7 @@ pub fn missing_without(mods_dir: &Path, without: &[String]) -> Vec<Missing> {
 
 /// Something in a mods folder the loader refuses at startup, besides a
 /// missing mod ([`missing`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Blocker {
     /// The jar at fault, and its mod's name.
     pub file_name: String,
@@ -716,7 +740,7 @@ pub struct Blocker {
     pub kind: BlockerKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockerKind {
     /// The loader or Minecraft isn't a version the mod accepts.
     Loader { id: String, versions: String, have: String },

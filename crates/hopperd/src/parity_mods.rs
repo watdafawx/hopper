@@ -10,6 +10,9 @@
 //! - `GET /servers/{id}/mods/instance`: the server's mod list as Hopper
 //!   desktop keeps an instance's (`hopper.json`), plus the jars it doesn't
 //!   track, so desktop shows a server's mods in its own Mods table.
+//! - `GET /servers/{id}/mods/problems`: what desktop's Mods tab warns about
+//!   (required mods missing, one mod twice, what the loader refuses), read
+//!   from the jars here, so desktop shows the same banners for a server.
 
 use crate::App;
 use crate::api::{ApiResult, bad, not_found, require};
@@ -29,6 +32,20 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/api/v1/servers/{id}/mods/orphans", post(orphans))
         .route("/api/v1/servers/{id}/mods/undo-remove", post(undo_remove))
         .route("/api/v1/servers/{id}/mods/instance", get(as_instance))
+        .route("/api/v1/servers/{id}/mods/problems", get(problems))
+}
+
+/// [`hopper_core::deps::problems`] for the server's mods folder.
+async fn problems(State(app): State<Arc<App>>, headers: HeaderMap, method: Method, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    require(&app, &headers, &method)?;
+    let e = app.servers.get(&id).ok_or_else(|| not_found("server"))?;
+    let p = tokio::task::spawn_blocking(move || -> anyhow::Result<hopper_core::deps::Problems> {
+        Ok(hopper_core::deps::problems(&crate::mods_api::instance_of(&e)?))
+    })
+    .await
+    .map_err(bad)?
+    .map_err(|e| bad(format!("{e:#}")))?;
+    Ok(Json(json!(p)))
 }
 
 /// The server's `hopper.json` (icons as links the client can load) and its
@@ -58,6 +75,8 @@ async fn as_instance(
             "instance": inst,
             "loose": loose,
             "curseforge": hopper_core::cf::api_key().is_some(),
+            // Followed sources the panel doesn't trust yet: desktop offers "Turn on updates from X".
+            "untrusted": inst.addons.iter().filter(|a| a.source.as_ref().is_some_and(|s| !hopper_core::sources::trusted(s))).map(|a| &a.file_name).collect::<Vec<_>>(),
         }))
     })
     .await

@@ -26,7 +26,7 @@ use std::time::Duration;
 
 mod crash_story;
 pub(crate) use crash_story::mod_ref;
-mod crash_switch;
+pub(crate) mod crash_switch;
 
 /// How much of a log to show when it opens.
 const OPEN_BYTES: u64 = 400_000;

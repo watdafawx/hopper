@@ -31,7 +31,7 @@ fn deletes(label: &str) -> String {
 /// Whether the card's settings come before turning mods off: a setting that
 /// keeps the whole mod and loses nothing.
 /// A changed one keeps its place, so the card doesn't jump after the click.
-pub(super) fn settings_first(c: &Crash) -> bool {
+pub(crate) fn settings_first(c: &Crash) -> bool {
     c.switches.iter().chain(&c.switched_off).any(|s| s.kind != SwitchKind::Item)
 }
 
@@ -74,6 +74,23 @@ fn diff_box(file: &str, lines: &[(bool, String)], cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// Where the card is and what its buttons do: an instance's crash card, or
+/// a server's (on this PC or on a Hopper Server).
+pub(crate) struct SwitchHost {
+    /// The game or server is running: the buttons wait.
+    pub running: bool,
+    /// Why they wait.
+    pub running_tip: &'static str,
+    /// After a change: "Play to check the crash is gone."
+    pub check: &'static str,
+    pub off: std::rc::Rc<dyn Fn(Switch, &mut Window, &mut App)>,
+    pub on: std::rc::Rc<dyn Fn(Switch, &mut Window, &mut App)>,
+    /// Opens the file at the setting; `None` where there is no editor for it.
+    pub open: Option<std::rc::Rc<dyn Fn(Switch, &mut Window, &mut App)>>,
+    /// Play after a change (an instance's card only).
+    pub play: Option<std::rc::Rc<dyn Fn(&mut Window, &mut App)>>,
+}
+
 impl LogsView {
     /// The card's config settings, if the crash's mods have one that works
     /// around it. `inside`: in the fix box, `Some(true)` under other fixes
@@ -82,37 +99,95 @@ impl LogsView {
         if c.switches.is_empty() && c.switched_off.is_empty() {
             return None;
         }
-        let theme = cx.theme().clone();
         let running = self.store.read(cx).running(root).is_some();
-        let first = settings_first(c);
         // "Or", when the card offers turning the whole mod off above.
-        let or = !first && self.crash_actions(root, c, cx).is_some();
-        let mut list = v_flex().gap_3();
-        for (i, sw) in c.switches.iter().enumerate() {
-            let who = match jar_of(&self.store, root, c, &sw.mod_id, cx) {
+        let or = !settings_first(c) && self.crash_actions(root, c, cx).is_some();
+        let who: Vec<AnyElement> = c
+            .switches
+            .iter()
+            .enumerate()
+            .map(|(i, sw)| match jar_of(&self.store, root, c, &sw.mod_id, cx) {
                 Some(jar) => mod_ref(&self.store, root, &jar, &format!("switch-{i}"), cx),
                 None => words(sw.mod_id.clone()),
-            };
-            let s_open = sw.clone();
-            let r_open = root.to_path_buf();
-            let open = Button::new(("crash-switch-open", i))
-                .small()
-                .ghost()
-                .icon(IconName::FileText)
-                .label("Open config")
-                .tooltip("Opens the file in Hopper's config editor, at this setting")
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    let note = if s_open.deletes() { Some(deletes(&s_open.label)) } else { Some(s_open.why.clone()).filter(|w| !w.is_empty()) };
-                    let focus = Focus { line: s_open.line, note };
-                    config_editor::open(this.store.clone(), r_open.clone(), vec![s_open.file.clone()], s_open.file.clone(), Some(focus), window, cx)
-                }));
+            })
+            .collect();
+        let diffs: Vec<Vec<(bool, String)>> = c.switched_off.iter().map(|sw| hopper::configswitch::applied_diff(root, sw)).collect();
+        let (s1, s2, s3, s4, r1, r2, r3, r4) = (
+            self.store.clone(),
+            self.store.clone(),
+            self.store.clone(),
+            self.store.clone(),
+            root.to_path_buf(),
+            root.to_path_buf(),
+            root.to_path_buf(),
+            root.to_path_buf(),
+        );
+        let host = SwitchHost {
+            running,
+            running_tip: "Close the game first: it may write its config back when it closes.",
+            check: "Play to check the crash is gone.",
+            off: std::rc::Rc::new(move |sw, window, cx| turn_off(s1.clone(), r1.clone(), sw, window, cx)),
+            on: std::rc::Rc::new(move |sw, window, cx| {
+                let r = s2.update(cx, |s, cx| {
+                    let r = s.crash_switch_on(&r2, &sw);
+                    cx.notify();
+                    r
+                });
+                if let Err(e) = r {
+                    window.push_notification(Notification::warning(e), cx);
+                }
+            }),
+            open: Some(std::rc::Rc::new(move |sw, window, cx| {
+                let note = if sw.deletes() { Some(deletes(&sw.label)) } else { Some(sw.why.clone()).filter(|w| !w.is_empty()) };
+                let focus = Focus { line: sw.line, note };
+                config_editor::open(s3.clone(), r3.clone(), vec![sw.file.clone()], sw.file.clone(), Some(focus), window, cx)
+            })),
+            play: Some(std::rc::Rc::new(move |window, cx| {
+                let native = s4.read(cx).settings().launch_native;
+                if native && !hopper::msauth::has_saved_login() {
+                    crate::dialogs::open_sign_in(s4.clone(), window, cx);
+                    return;
+                }
+                if let Err(e) = s4.update(cx, |s, _| s.play(&r4)) {
+                    window.push_notification(Notification::warning(e), cx);
+                }
+            })),
+        };
+        switch_list(c, who, diffs, or, inside, host, cx)
+    }
+}
+
+/// The card's settings box, shared by instance and server crash cards.
+/// `who`: each switch's mod (a link); `diffs`: what each changed one changed.
+pub(crate) fn switch_list(c: &Crash, who: Vec<AnyElement>, diffs: Vec<Vec<(bool, String)>>, or: bool, inside: Option<bool>, host: SwitchHost, cx: &mut App) -> Option<AnyElement> {
+    if c.switches.is_empty() && c.switched_off.is_empty() {
+        return None;
+    }
+    let theme = cx.theme().clone();
+    let running = host.running;
+    let first = settings_first(c);
+    let mut who = who.into_iter();
+    let mut diffs = diffs.into_iter();
+    let mut list = v_flex().gap_3();
+        for (i, sw) in c.switches.iter().enumerate() {
+            let who = who.next().unwrap_or_else(|| words(sw.mod_id.clone()));
+            let open = host.open.clone().map(|f| {
+                let s_open = sw.clone();
+                Button::new(("crash-switch-open", i))
+                    .small()
+                    .ghost()
+                    .icon(IconName::FileText)
+                    .label("Open config")
+                    .tooltip("Opens the file in Hopper's config editor, at this setting")
+                    .on_click(move |_, window, cx| f(s_open.clone(), window, cx))
+            });
             if sw.kind != SwitchKind::Item {
                 // "Turn off Dynamic resources in [ModernFix] (modernfix-mixins.properties · mixin.perf.dynamic_resources)"
                 let (verb, tail) = match sw.kind {
                     SwitchKind::Limit => (format!("Raise {} in", sw.label), format!("to {}", sw.to_text())),
                     _ => (format!("Turn off {} in", sw.label), String::new()),
                 };
-                let (s_off, r_off) = (sw.clone(), root.to_path_buf());
+                let (s_off, off) = (sw.clone(), host.off.clone());
                 // One filled button per region: the strongest setting's.
                 let mut apply = Button::new(("crash-switch-off", i)).small().icon(if sw.kind == SwitchKind::Limit { IconName::ChevronUp } else { IconName::PowerOff });
                 apply = if i == 0 { apply.primary() } else { apply.outline() };
@@ -138,22 +213,16 @@ impl LogsView {
                                     apply
                                         .label(sw.action())
                                         .disabled(running)
-                                        .tooltip(if running {
-                                            "Close the game first: it may write its config back when it closes."
-                                        } else {
-                                            "Changes this one setting. Undo it from History."
-                                        })
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            turn_off(this.store.clone(), r_off.clone(), s_off.clone(), window, cx)
-                                        })),
+                                        .tooltip(if running { host.running_tip } else { "Changes this one setting. Undo it from History." })
+                                        .on_click(move |_, window, cx| off(s_off.clone(), window, cx)),
                                 )
-                                .child(open),
+                                .children(open),
                         ),
                 );
                 continue;
             }
             let file = sw.file_name().to_string();
-            let (s_off, r_off) = (sw.clone(), root.to_path_buf());
+            let (s_off, off) = (sw.clone(), host.off.clone());
             list = list.child(
                 v_flex()
                     .gap_1p5()
@@ -185,16 +254,10 @@ impl LogsView {
                                     .icon(IconName::PowerOff)
                                     .label(format!("Turn off {}…", sw.label))
                                     .disabled(running)
-                                    .tooltip(if running {
-                                        "Close the game first: it may write its config back when it closes."
-                                    } else {
-                                        "Sets it to false after you confirm. Undo it from History."
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        confirm_off(this.store.clone(), r_off.clone(), s_off.clone(), window, cx)
-                                    })),
+                                    .tooltip(if running { host.running_tip } else { "Sets it to false after you confirm. Undo it from History." })
+                                    .on_click(move |_, window, cx| confirm_off(off.clone(), s_off.clone(), window, cx)),
                             )
-                            .child(open),
+                            .children(open),
                     )
                     .child(
                         h_flex()
@@ -219,8 +282,8 @@ impl LogsView {
         }
         // Changed already: say so with the change, play, or undo.
         for (i, sw) in c.switched_off.iter().enumerate() {
-            let (s_on, r_on, r_play) = (sw.clone(), root.to_path_buf(), root.to_path_buf());
-            let changed = hopper::configswitch::applied_diff(root, sw);
+            let (s_on, on) = (sw.clone(), host.on.clone());
+            let changed = diffs.next().unwrap_or_default();
             let item = sw.kind == SwitchKind::Item;
             list = list.child(
                 v_flex()
@@ -233,9 +296,9 @@ impl LogsView {
                             .child(
                                 widgets::caption(
                                     if changed.is_empty() {
-                                        format!("{} = {} in {}. Play to check the crash is gone.", sw.key, sw.to_text(), sw.file_name())
+                                        format!("{} = {} in {}. {}", sw.key, sw.to_text(), sw.file_name(), host.check)
                                     } else {
-                                        "Play to check the crash is gone. Undo it from History.".to_string()
+                                        format!("{} Undo it from History.", host.check)
                                     },
                                     cx,
                                 )
@@ -246,24 +309,15 @@ impl LogsView {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(
+                            .children(host.play.clone().map(|play| {
                                 Button::new(("crash-switch-play", i))
                                     .small()
                                     .success()
                                     .icon(IconName::Play)
                                     .label("Play")
                                     .disabled(running)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let native = this.store.read(cx).settings().launch_native;
-                                        if native && !hopper::msauth::has_saved_login() {
-                                            crate::dialogs::open_sign_in(this.store.clone(), window, cx);
-                                            return;
-                                        }
-                                        if let Err(e) = this.store.update(cx, |s, _| s.play(&r_play)) {
-                                            window.push_notification(Notification::warning(e), cx);
-                                        }
-                                    })),
-                            )
+                                    .on_click(move |_, window, cx| play(window, cx))
+                            }))
                             .child(
                                 Button::new(("crash-switch-on", i))
                                     .small()
@@ -272,16 +326,7 @@ impl LogsView {
                                     .label(if item { "Turn it back on" } else { "Undo" })
                                     .disabled(running)
                                     .tooltip(format!("Sets {} = {} again. Undo it from History.", s_on.key, s_on.from_text()))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let r = this.store.update(cx, |s, cx| {
-                                            let r = s.crash_switch_on(&r_on, &s_on);
-                                            cx.notify();
-                                            r
-                                        });
-                                        if let Err(e) = r {
-                                            window.push_notification(Notification::warning(e), cx);
-                                        }
-                                    })),
+                                    .on_click(move |_, window, cx| on(s_on.clone(), window, cx)),
                             ),
                     ),
             );
@@ -301,8 +346,9 @@ impl LogsView {
                 .child(list)
                 .into_any_element()
         })
-    }
+}
 
+impl LogsView {
     /// The card's "turn the mod off" buttons under a setting offered first:
     /// "Or" in front.
     pub(super) fn or_actions(&mut self, root: &Path, c: &Crash, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -336,10 +382,10 @@ fn turn_off(store: Entity<crate::store::Store>, root: std::path::PathBuf, sw: Sw
 }
 
 /// Asks, with the warning, then turns the item's switch off.
-fn confirm_off(store: Entity<crate::store::Store>, root: std::path::PathBuf, sw: Switch, window: &mut Window, cx: &mut App) {
+fn confirm_off(off: std::rc::Rc<dyn Fn(Switch, &mut Window, &mut App)>, sw: Switch, window: &mut Window, cx: &mut App) {
     let file = sw.file_name().to_string();
     window.open_alert_dialog(cx, move |alert, _, _| {
-        let (store, root, sw) = (store.clone(), root.clone(), sw.clone());
+        let (off, sw) = (off.clone(), sw.clone());
         alert
             .title(format!("Turn off {}?", sw.label))
             .description(format!(
@@ -351,7 +397,7 @@ fn confirm_off(store: Entity<crate::store::Store>, root: std::path::PathBuf, sw:
             .ok_text(format!("Turn off {}", sw.label))
             .ok_variant(ButtonVariant::Danger)
             .on_ok(move |_, window, cx| {
-                turn_off(store.clone(), root.clone(), sw.clone(), window, cx);
+                off(sw.clone(), window, cx);
                 true
             })
     });

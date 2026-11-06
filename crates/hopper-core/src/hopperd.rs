@@ -990,7 +990,14 @@ impl Client {
 
     /// Downloads `rel` from the server folder to `local`.
     pub fn download(&self, id: &str, rel: &str, local: &Path) -> anyhow::Result<()> {
-        let url = self.url(&format!("/fs/{}/file?path={}", enc(id), enc(rel)));
+        self.save_to(&format!("/fs/{}/file?path={}", enc(id), enc(rel)), local)
+    }
+
+    /// Saves what a GET of `path` answers (a file, a backup's zip) to
+    /// `local`, through a temporary file so a cut-off transfer leaves nothing
+    /// that looks whole.
+    pub fn save_to(&self, path: &str, local: &Path) -> anyhow::Result<()> {
+        let url = self.url(path);
         let mut resp = self.send_via(true, |slow| slow.get(&url).header("Authorization", &self.auth()).call())?;
         if !resp.status().is_success() {
             let text = resp.body_mut().read_to_string().unwrap_or_default();
@@ -1122,6 +1129,10 @@ pub trait PanelApi: Send + Sync {
     fn upload(&self, id: &str, local: &Path, rel: &str) -> anyhow::Result<()>;
     /// Copies `rel` in the server folder to `local`.
     fn download(&self, id: &str, rel: &str, local: &Path) -> anyhow::Result<()>;
+    /// Saves what a GET of `path` answers (e.g. a backup as a zip) to `local`.
+    fn save(&self, path: &str, _local: &Path) -> anyhow::Result<()> {
+        bail!("Hopper can't save {path} here.")
+    }
     /// The HTTP client, for what only a Hopper Server does.
     fn client(&self) -> Option<&Client> {
         None
@@ -1149,6 +1160,9 @@ impl PanelApi for Client {
     }
     fn download(&self, id: &str, rel: &str, local: &Path) -> anyhow::Result<()> {
         Client::download(self, id, rel, local)
+    }
+    fn save(&self, path: &str, local: &Path) -> anyhow::Result<()> {
+        Client::save_to(self, path, local)
     }
     fn client(&self) -> Option<&Client> {
         Some(self)

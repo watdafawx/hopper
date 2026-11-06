@@ -1,5 +1,5 @@
 //! The tabs of a server on a Hopper Server (hopperd) that only a panel
-//! has: Files, Mods, Players, Backups, Schedule and Settings. Each talks to
+//! has: Files, Players, Backups, Schedule and Settings. Each talks to
 //! the panel's API (see crates/hopperd/README.md, "API (v1)") and looks like
 //! the same tab in the panel's web UI.
 //!
@@ -10,7 +10,6 @@
 pub mod backups;
 pub mod copy_remove;
 pub mod files;
-pub mod mods;
 pub mod motd_editor;
 pub mod players;
 pub mod schedule;

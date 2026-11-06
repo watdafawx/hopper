@@ -147,6 +147,10 @@ pub struct ConfigsTab {
     server: Option<ServerSide>,
     /// Mods whose files a server's panel is still sending.
     fetching: std::collections::HashSet<Pick>,
+    /// On a Hopper Server: how many settings players' copies differ in,
+    /// as its panel compares them (the server, the count, whose Hopper sent
+    /// the copy, when).
+    players: Option<(PathBuf, usize, String, i64)>,
     _subs: Vec<Subscription>,
 }
 
@@ -211,6 +215,7 @@ impl ConfigsTab {
             scroll: UniformListScrollHandle::new(),
             server: None,
             fetching: Default::default(),
+            players: None,
             _subs: subs,
         }
     }
@@ -250,8 +255,31 @@ impl ConfigsTab {
         if !same_place {
             self.root = None;
         }
+        if let Source::Panel(t) = &side.source {
+            self.load_players(root.clone(), t.clone(), cx);
+        }
         self.server = Some(side);
         self.show_root(root, cx);
+    }
+
+    /// Asks the panel how far players' copies of the shared configs are
+    /// from the server's (a paired Hopper sends its copy now and then).
+    fn load_players(&mut self, root: PathBuf, t: crate::panel_tabs::Target, cx: &mut Context<Self>) {
+        self.players = None;
+        cx.spawn(async move |this, cx| {
+            let v = cx.background_spawn(async move { t.client.get(&t.sp("/configs/players")) }).await;
+            this.update(cx, |this, cx| {
+                let Ok(v) = v else { return };
+                let n = v["differs"].as_u64().unwrap_or(0) as usize;
+                if n > 0 && this.root.as_ref().is_none_or(|r| *r == root) {
+                    let snap = &v["snapshot"];
+                    this.players = Some((root, n, snap["name"].as_str().unwrap_or_default().to_string(), snap["at"].as_i64().unwrap_or(0)));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn show_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -752,6 +780,59 @@ impl ConfigsTab {
     }
 }
 
+impl ConfigsTab {
+    /// "Players' copies differ in 3 settings · from Alex's Hopper, sent 2 h
+    /// ago · Push in the panel". Pushing is the panel owner's (or a
+    /// manager's): a paired PC opens the panel's page to do it.
+    fn players_line(&self, root: &Path, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (r, n, from, at) = self.players.as_ref()?;
+        if r != root {
+            return None;
+        }
+        let t = match &self.server {
+            Some(ServerSide { source: Source::Panel(t), .. }) => t,
+            _ => return None,
+        };
+        let theme = cx.theme().clone();
+        let url = format!("{}/#/server/{}/configs", t.remote.base, hopper::hopperd::enc(t.id()));
+        let mut said = format!("Players' copies differ in {n} setting{}", if *n == 1 { "" } else { "s" });
+        let mut when = Vec::new();
+        if !from.is_empty() {
+            when.push(format!("from {from}'s Hopper"));
+        }
+        if *at > 0 {
+            let c = hopper::time::clock(*at);
+            when.push(format!("sent {} at {}", hopper::time::relative_secs(*at).to_lowercase(), c.get(..5).unwrap_or(&c)));
+        }
+        if !when.is_empty() {
+            said = format!("{said} · {}", when.join(", "));
+        }
+        Some(
+            h_flex()
+                .mx_6()
+                .mt_2()
+                .px_3()
+                .py_2()
+                .gap_2()
+                .rounded(theme.radius)
+                .bg(theme.secondary)
+                .text_sm()
+                .child(Icon::new(IconName::Users).small().flex_none().text_color(theme.muted_foreground))
+                .child(div().flex_1().min_w_0().child(said))
+                .child(
+                    gpui_kit::component::button::Button::new("cfg-push-panel")
+                        .small()
+                        .outline()
+                        .icon(IconName::ExternalLink)
+                        .label(format!("Push {n} in the panel"))
+                        .tooltip("The panel's owner or a manager sends the server's values to players' Hopper from its Configs page")
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for ConfigsTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
@@ -894,6 +975,7 @@ impl Render for ConfigsTab {
                         .child("The server is running. Settings you save here apply when it restarts."),
                 )
             })
+            .children(self.players_line(&root, cx))
             .child(toolbar)
             .child(
                 h_flex()

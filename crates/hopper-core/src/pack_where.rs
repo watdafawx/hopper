@@ -44,18 +44,20 @@ pub enum Target {
     Worlds(Vec<String>),
 }
 
-/// One copy of a pack, in one location.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+/// One copy of a pack, in one location. Hopper Server's list leaves the
+/// path out (it's on the panel's machine), so it reads back empty.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Copy {
     pub key: String,
     pub label: String,
+    #[serde(default)]
     pub path: PathBuf,
     /// Not ".disabled".
     pub on: bool,
 }
 
 /// A pack, however many places hold it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     /// File name without ".disabled", as the first copy found spells it.
     pub file: String,
@@ -64,6 +66,7 @@ pub struct Entry {
     /// With two or more copies: the label of the one in effect.
     pub using: Option<String>,
     /// A loader's copy came with the modpack.
+    #[serde(default)]
     pub from_pack: bool,
     /// Place in its group's order (1 = first): the game's order for In
     /// game (1 wins), Paxi's load order for Paxi.
@@ -127,6 +130,75 @@ pub fn server_locations(root: &Path) -> Vec<Location> {
         out.push(loc(&format!("world:{}", w.name), &w.name, dir.join("datapacks"), false, Some(dir)));
     }
     out
+}
+
+/// The list as Hopper Server sends it (`GET /servers/{id}/datapacks`):
+/// keys, labels and groups, folders relative to the server's, and no paths
+/// on the panel's disk.
+pub fn to_panel(root: &Path, entries: &[Entry], locs: &[Location]) -> serde_json::Value {
+    use serde_json::json;
+    let entries: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            json!({
+                "file": e.file,
+                "group": e.group,
+                "rank": e.rank,
+                "worlds": e.worlds,
+                "using": e.using,
+                "from_pack": e.from_pack,
+                "copies": e.copies.iter().map(|c| json!({ "key": c.key, "label": c.label, "on": c.on })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let locations: Vec<serde_json::Value> = locs
+        .iter()
+        .map(|l| {
+            let rel = l.dir.strip_prefix(root).unwrap_or(&l.dir).to_string_lossy().replace('\\', "/");
+            json!({ "key": l.key, "label": l.label, "world": l.world.is_some(), "dir": rel, "count": l.count })
+        })
+        .collect();
+    json!({ "entries": entries, "locations": locations })
+}
+
+/// [`to_panel`]'s list read back on desktop, with each folder and copy put
+/// under `root` (the stand-in root of the server on the panel), so the
+/// table works on it as on a folder here. A copy's path is its file in its
+/// location's folder, ".disabled" when it's off.
+pub fn from_panel(root: &Path, v: &serde_json::Value) -> anyhow::Result<(Vec<Entry>, Vec<Location>)> {
+    let mut entries: Vec<Entry> = serde_json::from_value(v["entries"].clone())?;
+    let mut locs = Vec::new();
+    for l in v["locations"].as_array().into_iter().flatten() {
+        let s = |k: &str| l[k].as_str().unwrap_or_default().to_string();
+        let (key, rel) = (s("key"), s("dir"));
+        // Folders come from the panel: nothing may climb out of the server's.
+        if key.is_empty() || rel.split(['/', '\\']).any(|p| p == "..") || Path::new(&rel).is_absolute() {
+            continue;
+        }
+        let dir = rel.split('/').filter(|p| !p.is_empty()).fold(root.to_path_buf(), |d, p| d.join(p));
+        let world = l["world"].as_bool().unwrap_or(false);
+        let count = l["count"].as_u64().map_or_else(
+            || entries.iter().filter(|e| e.copy_in(&key).is_some()).count(),
+            |n| n as usize,
+        );
+        let label = s("label");
+        locs.push(Location {
+            world: world.then(|| dir.parent().unwrap_or(root).to_path_buf()),
+            every_world: !world,
+            key,
+            label,
+            dir,
+            count,
+        });
+    }
+    for e in &mut entries {
+        for c in &mut e.copies {
+            if let Some(l) = locs.iter().find(|l| l.key == c.key) {
+                c.path = l.dir.join(if c.on { e.file.clone() } else { format!("{}.disabled", e.file) });
+            }
+        }
+    }
+    Ok((entries, locs))
 }
 
 /// `path` relative to `root`, lower case with forward slashes.
@@ -651,6 +723,31 @@ mod tests {
         apply(&i, &plan(&entry("Base.zip"), CLASS_DATAPACKS, &Target::Off, &locs)).unwrap();
         assert_eq!(entry("Base.zip").group, Group::Off);
         assert!(entry("Base.zip").copies.iter().all(|c| !c.on));
+        let _ = fs::remove_dir_all(&i.root);
+    }
+
+    #[test]
+    fn panel_list_round_trip() {
+        let i = tmp("panel");
+        touch(&i.root.join("world/level.dat"));
+        touch(&i.root.join("world/datapacks/Loot.zip.disabled"));
+        touch(&i.root.join("config/paxi/datapacks/Base.zip"));
+        let locs = server_locations(&i.root);
+        let v = list(&i, CLASS_DATAPACKS, &locs);
+        let sent = to_panel(&i.root, &v, &locs);
+        assert!(sent["entries"][0]["copies"][0].get("path").is_none(), "no paths on the panel's disk");
+        let stand_in = Path::new(r"hopperd:\TNP");
+        let (back, blocs) = from_panel(stand_in, &sent).unwrap();
+        assert_eq!(back.iter().map(|e| (&e.file, &e.group)).collect::<Vec<_>>(), v.iter().map(|e| (&e.file, &e.group)).collect::<Vec<_>>());
+        assert_eq!(blocs.iter().map(|l| &l.key).collect::<Vec<_>>(), locs.iter().map(|l| &l.key).collect::<Vec<_>>());
+        let w = blocs.iter().find(|l| l.key == "world:world").unwrap();
+        assert_eq!(w.dir, stand_in.join("world").join("datapacks"));
+        assert_eq!(w.world.as_deref(), Some(stand_in.join("world").as_path()));
+        let loot = back.iter().find(|e| e.file == "Loot.zip").unwrap();
+        assert_eq!(loot.copies[0].path, stand_in.join("world").join("datapacks").join("Loot.zip.disabled"));
+        // A folder that climbs out of the server's is dropped.
+        let bad = serde_json::json!({ "entries": [], "locations": [{ "key": "paxi", "label": "Paxi", "world": false, "dir": "../x" }] });
+        assert!(from_panel(stand_in, &bad).unwrap().1.is_empty());
         let _ = fs::remove_dir_all(&i.root);
     }
 }

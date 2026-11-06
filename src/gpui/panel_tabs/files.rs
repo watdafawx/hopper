@@ -16,6 +16,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use hopper::configdiff::{self, LineKind};
 use serde_json::{Value, json};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -99,7 +100,19 @@ struct Open {
     state: Entity<EditorState>,
     dirty: bool,
     saving: bool,
+    /// The file's History, shown in place of the editor while open.
+    history: Option<History>,
     _sub: Subscription,
+}
+
+/// A file's earlier versions (`GET /fs/{id}/history`), one of them compared
+/// with the editor's text. Like the panel's History in its editor.
+struct History {
+    versions: Load<Vec<TrashItem>>,
+    /// The version compared, by id.
+    picked: Option<String>,
+    /// Its whole text, and its lines against the editor's.
+    old: Load<(String, Vec<configdiff::Line>)>,
 }
 
 /// What the name bar is asking for.
@@ -383,6 +396,7 @@ impl FilesTab {
                         state,
                         dirty: false,
                         saving: false,
+                        history: None,
                         _sub: sub,
                     });
                 }
@@ -421,6 +435,10 @@ impl FilesTab {
                     o.dirty = o.state.read(cx).value().as_ref() != content.as_str();
                     o.saved = content;
                     this.note = Some(Ok(format!("Saved {name}")));
+                    // The save put a new version in History.
+                    if o.history.is_some() {
+                        this.load_history(cx);
+                    }
                     this.load(cx);
                 }
                 "invalid" => confirm(
@@ -473,6 +491,74 @@ impl FilesTab {
             },
             None,
         );
+    }
+
+    // ---- history -----------------------------------------------------------
+
+    /// Opens the open file's History, or closes it.
+    fn toggle_history(&mut self, cx: &mut Context<Self>) {
+        let Some(o) = self.open.as_mut() else { return };
+        if o.history.take().is_none() {
+            o.history = Some(History { versions: Load::Waiting, picked: None, old: Load::Waiting });
+            self.load_history(cx);
+        }
+        cx.notify();
+    }
+
+    fn load_history(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = self.target.clone() else { return };
+        let Some(o) = self.open.as_ref() else { return };
+        let path = o.path.clone();
+        super::get(cx, &t, t.fp(&format!("/history?path={}", q(&path))), move |this, r, cx| {
+            let Some(h) = this.open.as_mut().filter(|o| o.path == path).and_then(|o| o.history.as_mut()) else { return };
+            let r = r.map(|v| list_of(&v, "versions", trash_item));
+            // The newest version is compared first, as the panel does; a
+            // reload keeps the one picked while it's still there.
+            let pick = r.as_ref().ok().and_then(|l| {
+                l.iter().find(|v| h.picked.as_ref() == Some(&v.id)).or(l.first()).map(|v| v.id.clone())
+            });
+            h.versions = Load::from(r);
+            h.picked = None;
+            if let Some(id) = pick {
+                this.show_version(id, cx);
+            }
+        });
+    }
+
+    /// Compares version `id` with the editor's text.
+    fn show_version(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(t) = self.target.clone() else { return };
+        let Some(h) = self.open.as_mut().and_then(|o| o.history.as_mut()) else { return };
+        if h.picked.as_ref() == Some(&id) {
+            return;
+        }
+        h.picked = Some(id.clone());
+        h.old = Load::Waiting;
+        cx.notify();
+        let path = t.fp(&format!("/version-text?version={}", q(&id)));
+        super::get(cx, &t, path, move |this, r, cx| {
+            let Some(o) = this.open.as_mut() else { return };
+            let now = o.state.read(cx).value().replace("\r\n", "\n");
+            let Some(h) = o.history.as_mut().filter(|h| h.picked.as_ref() == Some(&id)) else { return };
+            h.old = Load::from(r.map(|v| {
+                let old = v["content"].as_str().unwrap_or("").to_string();
+                let rows = configdiff::line_diff(&old, &now);
+                (old, rows)
+            }));
+        });
+    }
+
+    /// Puts the picked version's text in the editor. Nothing changes on the
+    /// server until Save, which keeps the text there now as a version too.
+    fn use_version(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(o) = self.open.as_mut() else { return };
+        let Some((old, _)) = o.history.as_ref().and_then(|h| h.old.ready()) else { return };
+        let old = old.clone();
+        o.state.update(cx, |s, cx| s.replace_all(old, window, cx));
+        o.dirty = o.state.read(cx).value().as_ref() != o.saved.as_str();
+        o.history = None;
+        self.note = Some(Ok("Loaded the old version. Save to keep it.".into()));
+        cx.notify();
     }
 
     // ---- operations --------------------------------------------------------
@@ -1377,6 +1463,15 @@ impl FilesTab {
                         .when(o.dirty, |r| r.child(widgets::chip(cx.theme().warning).child("Unsaved")))
                         .child(div().flex_1())
                         .child(
+                            Button::new("editor-history")
+                                .small()
+                                .map(|b| if o.history.is_some() { b.outline() } else { b.ghost() })
+                                .icon(IconName::RotateCcwClock)
+                                .label("History")
+                                .tooltip("Earlier versions")
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx))),
+                        )
+                        .child(
                             Button::new("editor-save")
                                 .small()
                                 .primary()
@@ -1394,9 +1489,162 @@ impl FilesTab {
                                 .on_click(cx.listener(|this, _, window, cx| this.close_editor(window, cx))),
                         ),
                 )
-                .child(div().flex_1().min_h_0().child(Editor::new(&o.state).size_full()))
+                .child(match &o.history {
+                    Some(h) => self.history_view(h, cx),
+                    None => div().flex_1().min_h_0().child(Editor::new(&o.state).size_full()).into_any_element(),
+                })
+                .child(widgets::caption("The previous version is kept in the trash each time you save.", cx).text_xs())
                 .into_any_element(),
         )
+    }
+
+    /// The open file's earlier versions beside the picked one's changes.
+    fn history_view(&self, h: &History, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let list = if let Some(el) = super::load_state(&h.versions, cx) {
+            el
+        } else {
+            let versions = h.versions.ready().cloned().unwrap_or_default();
+            if versions.is_empty() {
+                return widgets::empty_state(
+                    IconName::RotateCcwClock,
+                    "No earlier versions",
+                    Some("One is kept in the trash each time the file is saved.".into()),
+                    cx,
+                )
+                .flex_1()
+                .into_any_element();
+            }
+            v_flex()
+                .id("history-list")
+                .size_full()
+                .overflow_y_scrollbar()
+                .children(versions.into_iter().enumerate().map(|(i, v)| {
+                    let picked = h.picked.as_ref() == Some(&v.id);
+                    let what = if v.kind == "deleted" { "deleted" } else { "saved over" };
+                    let id = v.id.clone();
+                    v_flex()
+                        .id(("version", i))
+                        .px_3()
+                        .py_1p5()
+                        .rounded(theme.radius)
+                        .clickable(cx)
+                        .when(picked, |r| widgets::row_selected(r, cx))
+                        .when(!picked, |r| r.hover(|s| widgets::row_hover(s, cx)))
+                        .on_click(cx.listener(move |this, _, _, cx| this.show_version(id.clone(), cx)))
+                        .child(div().text_sm().child(when(v.at)))
+                        .child(widgets::caption(format!("{what} · {}", bytes(v.size)), cx).text_xs())
+                }))
+                .into_any_element()
+        };
+        let diff = match &h.old {
+            _ if h.picked.is_none() => div().into_any_element(),
+            Load::Ready((_, rows)) => self.version_diff(rows, cx),
+            other => super::load_state(other, cx).unwrap_or_else(|| div().into_any_element()),
+        };
+        h_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .items_start()
+            .gap_3()
+            .child(div().w_48().flex_none().h_full().child(list))
+            .child(v_flex().flex_1().min_w_0().h_full().child(diff))
+            .into_any_element()
+    }
+
+    /// The picked version (left) against the editor's text (right): changed
+    /// lines with three lines around them, the rest folded.
+    fn version_diff(&self, rows: &[configdiff::Line], cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let changes = rows.iter().filter(|l| l.kind != LineKind::Same).count();
+        let head = h_flex()
+            .gap_2()
+            .child(div().text_sm().child(match changes {
+                0 => "Same as now".to_string(),
+                1 => "1 changed line".to_string(),
+                n => format!("{n} changed lines"),
+            }))
+            .child(widgets::caption("· old on the left, current on the right", cx))
+            .child(div().flex_1())
+            .child(
+                Button::new("version-use")
+                    .small()
+                    .outline()
+                    .icon(IconName::RotateCcw)
+                    .label("Use this version")
+                    .disabled(changes == 0)
+                    .on_click(cx.listener(|this, _, window, cx| this.use_version(window, cx))),
+            )
+            .child(
+                Button::new("history-close")
+                    .small()
+                    .ghost()
+                    .icon(IconName::X)
+                    .tooltip("Close")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx))),
+            );
+        let near = |i: usize| rows[i.saturating_sub(3)..(i + 4).min(rows.len())].iter().any(|l| l.kind != LineKind::Same);
+        let side = |no: Option<usize>, text: &Option<String>, fill: Option<Hsla>| {
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .when_some(fill, |r, f| r.bg(f.opacity(0.18)))
+                .child(
+                    div()
+                        .w_10()
+                        .flex_none()
+                        .text_right()
+                        .text_color(theme.muted_foreground)
+                        .child(no.map(|n| (n + 1).to_string()).unwrap_or_default()),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child(text.clone().unwrap_or_default().replace('\t', "    ")),
+                )
+        };
+        let mut lines: Vec<AnyElement> = Vec::new();
+        for (i, l) in rows.iter().enumerate() {
+            if l.kind != LineKind::Same || near(i) {
+                // line_diff's "server" side is the first text it was given:
+                // the old version.
+                let (oc, nc) = match l.kind {
+                    LineKind::Same => (None, None),
+                    LineKind::Add => (None, Some(theme.success)),
+                    LineKind::Del => (Some(theme.danger), None),
+                    LineKind::Change => (Some(theme.warning), Some(theme.warning)),
+                };
+                lines.push(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(side(l.server_no, &l.server, oc))
+                        .child(side(l.client_no, &l.client, nc))
+                        .into_any_element(),
+                );
+            } else if i == 0 || rows[i - 1].kind != LineKind::Same || near(i - 1) {
+                lines.push(div().pl_4().text_color(theme.muted_foreground).child("⋯").into_any_element());
+            }
+        }
+        v_flex()
+            .size_full()
+            .gap_2()
+            .child(head)
+            .child(
+                v_flex()
+                    .id("version-diff")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .text_xs()
+                    .font_family(theme.mono_font_family.clone())
+                    .children(lines),
+            )
+            .into_any_element()
     }
 }
 

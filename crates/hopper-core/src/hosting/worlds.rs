@@ -97,6 +97,24 @@ pub fn check_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The folder an uploaded world zip unpacks into: the zip's name made safe
+/// (as Hopper Server's Worlds tab does), with `-2`, `-3`... when a world
+/// in `taken` already has it.
+pub fn upload_name(file: &str, taken: &[String]) -> String {
+    let stem = file.strip_suffix(".zip").or_else(|| file.strip_suffix(".ZIP")).unwrap_or(file);
+    let safe: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-') { c } else { '_' }).collect();
+    let safe: String = safe.trim_matches(|c| c == ' ' || c == '.').chars().take(56).collect();
+    let stem = if safe.is_empty() { "uploaded".to_string() } else { safe };
+    let taken: Vec<String> = taken.iter().map(|t| t.to_lowercase()).collect();
+    let mut name = stem.clone();
+    let mut n = 2;
+    while taken.contains(&name.to_lowercase()) {
+        name = format!("{stem}-{n}");
+        n += 1;
+    }
+    name
+}
+
 fn mtime(p: &Path) -> u64 {
     fs::metadata(p).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
 }
@@ -895,6 +913,17 @@ mod tests {
         let i = read_level(&d.join("world/level.dat"));
         assert_eq!((i.seed, i.last_played), (Some(-42), Some(1_700_000_000_000)));
         let _ = fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn upload_names() {
+        let taken = vec!["world".to_string(), "My_World".to_string(), "my_world-2".to_string()];
+        assert_eq!(upload_name("Survival 1.21.zip", &taken), "Survival 1_21");
+        assert_eq!(upload_name("World.zip", &taken), "World-2");
+        assert_eq!(upload_name("my world!.ZIP", &taken), "my world_");
+        assert_eq!(upload_name("My:World.zip", &taken), "My_World-3");
+        assert_eq!(upload_name(".zip", &taken), "uploaded");
+        assert_eq!(upload_name(&format!("{}.zip", "a".repeat(80)), &[]).len(), 56);
     }
 
     #[test]

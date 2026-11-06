@@ -97,11 +97,31 @@ pub(crate) fn pack_addon(p: &PackFile, class: u32, from_pack: bool) -> (Addon, O
     (a, update)
 }
 
+/// A server's mods as its Hopper Server lists them: files and on / off.
+fn listed_key(inst: &Instance) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for a in &inst.addons {
+        (&a.file_name, a.enabled).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// What a Hopper Server's panel finds wrong with a server's mods.
+fn remote_problems(r: &hopper::hopperd::Remote) -> anyhow::Result<hopper::deps::Problems> {
+    let c = hopper::hopperd::Client::for_remote(r)?;
+    let v = c.get(&hopper::hopperd::Client::server_path(&r.id, "/mods/problems"))?;
+    Ok(serde_json::from_value(v)?)
+}
+
 /// Required mods that are missing, for the mods folder as of `mtime`.
 #[derive(Default)]
 pub struct MissingDeps {
     pub root: Option<PathBuf>,
     pub mtime: Option<std::time::SystemTime>,
+    /// On a Hopper Server (no folder here to date): the mods as listed,
+    /// which change after every change made to them.
+    pub listed: u64,
     pub list: Vec<Missing>,
     /// Jars that are the same mod twice.
     pub dups: Vec<hopper::install::Duplicate>,
@@ -196,12 +216,16 @@ impl AddonsView {
 
     /// Looks for missing required mods when the mods folder changed.
     pub(crate) fn want_missing(&mut self, inst: &Instance, cx: &mut Context<Self>) {
+        // A Hopper Server's jars are read by its panel.
+        let panel = crate::store::on_hopper_server(&inst.root);
         // "Revert X" on the problem notice, worked out in the store.
-        self.store.update(cx, |s, _| s.want_reverts(&inst.root, &inst.loader, &inst.game_version, &inst.addons, true));
-        let dir = inst.mods_dir();
-        let mtime = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+        if panel.is_none() {
+            self.store.update(cx, |s, _| s.want_reverts(&inst.root, &inst.loader, &inst.game_version, &inst.addons, true));
+        }
+        let mtime = std::fs::metadata(inst.mods_dir()).and_then(|m| m.modified()).ok();
+        let listed = if panel.is_some() { listed_key(inst) } else { 0 };
         let against = (inst.loader.clone(), inst.game_version.clone());
-        if self.missing.root.as_ref() == Some(&inst.root) && self.missing.mtime == mtime && self.missing.against == against {
+        if self.missing.root.as_ref() == Some(&inst.root) && self.missing.mtime == mtime && self.missing.listed == listed && self.missing.against == against {
             return;
         }
         // Same instance: the old list stays up while the folder is read
@@ -210,6 +234,7 @@ impl AddonsView {
         self.missing = MissingDeps {
             root: Some(inst.root.clone()),
             mtime,
+            listed,
             list: if same { std::mem::take(&mut self.missing.list) } else { Vec::new() },
             dups: if same { std::mem::take(&mut self.missing.dups) } else { Vec::new() },
             blockers: if same { std::mem::take(&mut self.missing.blockers) } else { Vec::new() },
@@ -221,18 +246,19 @@ impl AddonsView {
         let root = inst.root.clone();
         let snapshot = inst.clone();
         cx.spawn(async move |this, cx| {
-            let (list, dups, blockers, loaded_fine) = cx
+            let hopper::deps::Problems { missing: list, dups, blockers, loaded_fine } = cx
                 .background_spawn(async move {
-                    (
-                        hopper::deps::missing(&dir),
-                        hopper::install::duplicates(&snapshot),
-                        hopper::deps::blockers(&dir, &snapshot.loader, &snapshot.game_version),
-                        hopper::deps::loaded_fine(&snapshot.root),
-                    )
+                    match panel {
+                        Some(r) => remote_problems(&r).unwrap_or_else(|e| {
+                            log::warn!("mod problems of {}: {e:#}", snapshot.root.display());
+                            Default::default()
+                        }),
+                        None => hopper::deps::problems(&snapshot),
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if this.missing.root.as_ref() == Some(&root) && this.missing.mtime == mtime && this.missing.against == against {
+                if this.missing.root.as_ref() == Some(&root) && this.missing.mtime == mtime && this.missing.listed == listed && this.missing.against == against {
                     this.missing.dups = dups;
                     this.want_ghosts(&blockers, cx);
                     this.missing.blockers = blockers;

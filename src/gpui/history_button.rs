@@ -100,7 +100,14 @@ pub fn mark_seen(root: &Path) {
     Source::Folder(root.to_path_buf()).mark_seen();
 }
 
-type OnOpen = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+/// [`mark_seen`] for a server on a Hopper Server (asks its panel, so off the
+/// UI thread).
+pub fn mark_seen_panel(t: &crate::panel_tabs::Target, cx: &mut App) {
+    let s = Source::Panel(t.clone());
+    cx.background_spawn(async move { s.mark_seen() }).detach();
+}
+
+type OnOpen =std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
 pub struct HistoryButton {
     source: Source,
