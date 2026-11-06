@@ -1344,6 +1344,12 @@ pub struct ChangelogEntry {
     pub date: String,
     pub release: &'static str,
     pub blocks: Vec<crate::richtext::Block>,
+    /// A newer mod file's changelog often repeats every earlier release.
+    /// `blocks` then holds only what is newer than the installed file and
+    /// this the cut part (markdown) with its number of versions, for a
+    /// collapsed "Earlier versions" row. Empty when nothing was cut.
+    pub earlier: String,
+    pub earlier_count: usize,
     /// The version the instance has now (always last).
     pub installed: bool,
 }
@@ -1407,12 +1413,30 @@ pub fn changelogs(
             })
             .collect()
     });
+    // What the installed file's own changelog says, to cut the repeats.
+    let installed_md = match (fetched.get(n_new), is_pack) {
+        (Some(Ok(b)), false) => Some(crate::richtext::to_markdown(b)),
+        _ => None,
+    };
+    let installed_versions = between
+        .get(n_new)
+        .map(|f| crate::changelog_trim::installed_versions([f.display_name.as_str(), f.file_name.as_str()]))
+        .unwrap_or_default();
     let entries = between
         .iter()
         .zip(fetched)
         .enumerate()
         .map(|(i, (f, blocks))| {
             let mut blocks = blocks.unwrap_or_default();
+            let (mut earlier, mut earlier_count) = (String::new(), 0);
+            if i < n_new && !is_pack && !blocks.is_empty() && !installed_versions.is_empty() {
+                let md = crate::richtext::to_markdown(&blocks);
+                let t = crate::changelog_trim::trim_to_newer(&md, &installed_versions, installed_md.as_deref());
+                if !t.earlier.is_empty() {
+                    blocks = crate::richtext::parse_markdown(&t.newer);
+                    (earlier, earlier_count) = (t.earlier, t.earlier_count);
+                }
+            }
             if blocks.is_empty() {
                 blocks = crate::richtext::parse("<p><i>No changelog for this version.</i></p>");
             }
@@ -1421,6 +1445,8 @@ pub fn changelogs(
                 date: f.file_date.clone(),
                 release: f.release_name(),
                 blocks,
+                earlier,
+                earlier_count,
                 installed: i >= n_new,
             }
         })

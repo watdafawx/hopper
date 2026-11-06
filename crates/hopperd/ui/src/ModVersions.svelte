@@ -15,6 +15,7 @@
   let error = $state('');
   let busy = $state('');
   let open = $state({});
+  let earlierOpen = $state({});
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
@@ -26,6 +27,7 @@
     info = null;
     error = '';
     open = {};
+    earlierOpen = {};
     if (!mod.source) return;
     try {
       info = await api(`${base}/mods/changelogs?file=${encodeURIComponent(mod.file)}`);
@@ -105,6 +107,10 @@
         {#if e.same_as}<div class="small muted"><i>Same notes as {e.same_as}</i></div>
         {:else if e.markdown.trim()}<div class="notes"><Changelog markdown={e.markdown} /></div>
         {:else}<div class="small muted">No changelog for this version.</div>{/if}
+        {#if e.earlier_count && !e.same_as}
+          <button class="row ohead small muted" onclick={() => (earlierOpen[e.name] = !earlierOpen[e.name])}>{#if earlierOpen[e.name]}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}Earlier versions ({e.earlier_count})</button>
+          {#if earlierOpen[e.name]}<div class="notes"><Changelog markdown={e.earlier} /></div>{/if}
+        {/if}
       </div>
     {/each}
     {#if info.others.length}<div class="lbl">Other versions</div>{/if}

@@ -12,6 +12,7 @@ pub mod browse;
 pub mod cf;
 pub mod cf_instance;
 pub mod changelog;
+pub mod changelog_trim;
 pub mod configdiff;
 pub mod configcompare;
 pub mod configedit;

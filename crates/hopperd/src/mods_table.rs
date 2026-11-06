@@ -125,6 +125,8 @@ async fn changelogs(
                 json!({
                     "name": en.name, "date": en.date, "release": en.release, "installed": en.installed,
                     "markdown": if same.is_some() { String::new() } else { md }, "same_as": same,
+                    // The part the installed version already had, cut from `markdown`.
+                    "earlier": if same.is_some() { "" } else { en.earlier.as_str() }, "earlier_count": en.earlier_count,
                     "file_id": f.map(|f| f.id.to_string()),
                     "version": f.map(|f| hopper_core::scan::short_version(&f.file_name)),
                 })

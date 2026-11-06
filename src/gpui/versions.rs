@@ -38,6 +38,8 @@ pub struct VersionsView {
     all: Vec<cf::File>,
     /// Changelogs of other versions, opened on demand.
     others: HashMap<u64, Option<Result<SharedString, String>>>,
+    /// Cards whose "Earlier versions" row is open, by file name.
+    earlier_open: std::collections::HashSet<String>,
     /// Server mode: the pack's versions for a server paired with it, which
     /// updates from the pack's server packs.
     server: Option<ServerMode>,
@@ -327,6 +329,7 @@ impl Render for VersionsView {
                     let same = (!md.trim().is_empty())
                         .then(|| entries[..i].iter().find(|(_, m)| m == md).map(|(n, _)| n.name.clone()))
                         .flatten();
+                    let is_same = same.is_some();
                     let file = self.all.iter().find(|f| f.display_name == e.name).cloned();
                     let view = cx.entity();
                     // The installed one: the same file again, to get back
@@ -442,6 +445,37 @@ impl Render for VersionsView {
                                 md.clone(),
                                 cx,
                             ),
+                        })
+                        // What the installed version already had, cut from
+                        // this card; still there behind a click.
+                        .when(e.earlier_count > 0 && !is_same, |c| {
+                            let open = self.earlier_open.contains(&e.name);
+                            let name = e.name.clone();
+                            c.child(
+                                h_flex()
+                                    .id(ElementId::Name(format!("earlier:{}", e.name).into()))
+                                    .gap_1()
+                                    .clickable(cx)
+                                    .child(
+                                        Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                                            .small()
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .child(widgets::caption(format!("Earlier versions ({})", e.earlier_count), cx))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this.earlier_open.remove(&name) {
+                                            this.earlier_open.insert(name.clone());
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(open, |c| {
+                                c.child(self.changelog(
+                                    ElementId::Name(format!("earlier-cl:{}", e.name).into()),
+                                    e.earlier.clone().into(),
+                                    cx,
+                                ))
+                            })
                         })
                 });
                 let clean = self.store.read(cx).settings().clean_update(self.mode_root());
@@ -780,6 +814,7 @@ fn show(
             entries: None,
             all: Vec::new(),
             others: HashMap::new(),
+            earlier_open: Default::default(),
             server,
         };
         v.load(update, cx);
