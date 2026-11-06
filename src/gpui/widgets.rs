@@ -661,11 +661,57 @@ pub struct SegItem {
     base: Div,
     label: SharedString,
     disabled: bool,
+    // Rail mode (`Segmented::rail`): the icon, the count, whether this is
+    // an on/off toggle that is on, a count badge while collapsed, and a thin
+    // separator before it.
+    icon: Option<IconName>,
+    count: Option<usize>,
+    on: bool,
+    badge: bool,
+    gap_before: bool,
 }
 
 impl SegItem {
     pub fn new() -> Self {
-        Self { base: div(), label: SharedString::default(), disabled: false }
+        Self {
+            base: div(),
+            label: SharedString::default(),
+            disabled: false,
+            icon: None,
+            count: None,
+            on: false,
+            badge: false,
+            gap_before: false,
+        }
+    }
+
+    pub fn icon(mut self, icon: IconName) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn count(mut self, count: Option<usize>) -> Self {
+        self.count = count;
+        self
+    }
+
+    /// A toggle that is on: shown like a picked option plus a thin ring, so
+    /// it reads as combining with the picked one.
+    pub fn toggled(mut self, on: bool) -> Self {
+        self.on = on;
+        self
+    }
+
+    /// Keep a count badge on the icon while collapsed (Updates).
+    pub fn badge(mut self, badge: bool) -> Self {
+        self.badge = badge;
+        self
+    }
+
+    /// A thin separator before this option.
+    pub fn gap_before(mut self) -> Self {
+        self.gap_before = true;
+        self
     }
 
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
@@ -698,12 +744,21 @@ pub struct Segmented {
     items: Vec<SegItem>,
     selected: Option<usize>,
     xsmall: bool,
+    rail: bool,
     on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App)>>,
 }
 
 impl Segmented {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        Self { id: id.into(), items: Vec::new(), selected: None, xsmall: false, on_click: None }
+        Self { id: id.into(), items: Vec::new(), selected: None, xsmall: false, rail: false, on_click: None }
+    }
+
+    /// Icon buttons in one rounded group: only the picked (or toggled-on)
+    /// option shows its label and count, the rest are icons with a tooltip
+    /// ("Label · count") and an `aria`-style name. Arrow keys move across it.
+    pub fn rail(mut self) -> Self {
+        self.rail = true;
+        self
     }
 
     pub fn child(mut self, item: SegItem) -> Self {
@@ -739,6 +794,9 @@ impl RenderOnce for Segmented {
         let (fg, muted, border, wash) = (theme.foreground, theme.muted_foreground, theme.border, theme.list_hover);
         let tint = theme.primary.opacity(alpha::SELECTED);
         let (id, selected, xsmall, on_click) = (self.id, self.selected, self.xsmall, self.on_click);
+        if self.rail {
+            return rail_view(id, self.items, selected, on_click, cx).into_any_element();
+        }
         // A row around the frame keeps it as wide as its options inside a
         // full-width column (a form field), instead of stretching.
         h_flex().child(
@@ -753,7 +811,7 @@ impl RenderOnce for Segmented {
             .children(self.items.into_iter().enumerate().map(|(i, item)| {
                 let on = selected == Some(i);
                 let pick = on_click.clone();
-                let SegItem { base, label, disabled } = item;
+                let SegItem { base, label, disabled, .. } = item;
                 // Small: 26px options in a 32px frame, an input's height.
                 base.id(ElementId::Integer(i as u64))
                     .flex_none()
@@ -774,7 +832,117 @@ impl RenderOnce for Segmented {
                     .child(label)
             })),
         )
+        .into_any_element()
     }
+}
+
+/// The tooltip and accessible name of a rail option: "Label · count".
+pub fn rail_tip(label: &str, count: Option<usize>) -> String {
+    match count {
+        Some(n) => format!("{label} · {n}"),
+        None => label.to_string(),
+    }
+}
+
+/// [`Segmented::rail`]: see there. The group is one rounded track with a
+/// faint fill and no border; each button is 26px. A picked option (or a
+/// toggle that is on) gets the selected tint and shows icon, label and
+/// count; a toggle that is on also gets a 1px primary ring.
+fn rail_view(
+    id: ElementId,
+    items: Vec<SegItem>,
+    selected: Option<usize>,
+    on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App)>>,
+    cx: &mut App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let (fg, muted, wash, primary) = (theme.foreground, theme.muted_foreground, theme.list_hover, theme.primary);
+    let tint = primary.opacity(alpha::SELECTED);
+    let track = fg.opacity(0.06);
+    let n = items.len();
+    h_flex().child(
+        h_flex()
+            .id(id)
+            .flex_none()
+            .p(px(2.))
+            .gap(px(2.))
+            .rounded(px(crate::theme::RADIUS))
+            .bg(track)
+            .children(items.into_iter().enumerate().flat_map(|(i, item)| {
+                let SegItem { base, label, disabled, icon, count, on: toggled, badge, gap_before } = item;
+                let on = selected == Some(i) || toggled;
+                let pick = on_click.clone();
+                let tip = rail_tip(&label, count);
+                let tip2 = tip.clone();
+                let sep = gap_before.then(|| div().flex_none().w_px().h(px(14.)).mx(px(2.)).bg(fg.opacity(0.18)).into_any_element());
+                let el = base
+                    .id(ElementId::Integer(i as u64))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .h(px(26.))
+                    .px(px(7.))
+                    .text_sm()
+                    .rounded(px(crate::theme::RADIUS_SM))
+                    .when(on, |el| el.bg(tint).text_color(fg).font_weight(FontWeight::MEDIUM))
+                    // A toggle that is on: the same tint plus a 1px ring.
+                    .when(on && toggled, |el| el.shadow(vec![BoxShadow::new(px(0.), px(0.), primary.opacity(0.5)).spread_radius(px(1.)).inset()]))
+                    .when(!on && !disabled, |el| el.text_color(muted).hover(move |s| s.bg(wash).text_color(fg)))
+                    .when(disabled, |el| el.text_color(muted).opacity(0.5))
+                    .when(icon.is_some(), |el| {
+                        el.child(div().relative().child(Icon::new(icon.unwrap()).small()).when(badge && !on && count.is_some_and(|c| c > 0), |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .top(px(-5.))
+                                    .right(px(-8.))
+                                    .px(px(3.))
+                                    .rounded(px(6.))
+                                    .bg(primary)
+                                    .text_color(theme_on_primary())
+                                    .text_size(px(9.))
+                                    .line_height(px(11.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(count.unwrap_or(0).to_string()),
+                            )
+                        }))
+                    })
+                    .when(on, |el| {
+                        el.child(label.clone())
+                            .when_some(count, |el, c| el.child(div().text_xs().text_color(muted).child(c.to_string())))
+                    })
+                    .when(!on, |el| {
+                        el.tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip2.clone()).build(w, cx))
+                    })
+                    .when(!disabled, |el| {
+                        el.clickable(cx)
+                            .on_click(move |_, window, cx| {
+                                if let Some(f) = &pick {
+                                    f(&i, window, cx)
+                                }
+                            })
+                            // Arrow keys move across the rail; Enter / Space press.
+                            .on_key_down(move |ev, window, cx| match ev.keystroke.key.as_str() {
+                                "right" | "down" if i + 1 < n => {
+                                    window.focus_next(cx);
+                                    cx.stop_propagation();
+                                }
+                                "left" | "up" if i > 0 => {
+                                    window.focus_prev(cx);
+                                    cx.stop_propagation();
+                                }
+                                _ => {}
+                            })
+                    });
+                [sep, Some(el.into_any_element())].into_iter().flatten()
+            })),
+    )
+}
+
+/// Text on a count badge: white on the primary fill.
+fn theme_on_primary() -> Hsla {
+    gpui_kit::white()
 }
 
 /// Buttons inside a clickable header that opens and closes its section
