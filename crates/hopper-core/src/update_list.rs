@@ -57,6 +57,9 @@ pub struct UpdateList {
     pub checking: bool,
     /// Why the last check failed (cleared when the next one starts).
     pub error: Option<String>,
+    /// When the last check in this run finished (not saved), for "checked
+    /// 3 min ago".
+    pub checked: Option<std::time::Instant>,
 }
 
 impl UpdateList {
@@ -68,6 +71,11 @@ impl UpdateList {
     /// The offers to show: the last known ones, also while checking.
     pub fn ready(&self) -> Option<&Vec<Update>> {
         self.list.as_ref()
+    }
+
+    /// "checked 3 min ago" for the last finished check of this run.
+    pub fn checked_ago(&self) -> Option<String> {
+        Some(ago_text(self.checked?.elapsed().as_secs()))
     }
 
     /// A check starts: everything listed stays listed.
@@ -84,6 +92,7 @@ impl UpdateList {
             Ok(u) => {
                 self.list = Some(u);
                 self.error = None;
+                self.checked = Some(std::time::Instant::now());
             }
             Err(e) => self.error = Some(e),
         }
@@ -207,6 +216,16 @@ pub fn save(root: &Path, list: Option<&[Update]>) {
     }
 }
 
+/// A short "how long ago" for a number of seconds.
+pub fn ago_text(secs: u64) -> String {
+    match secs {
+        0..=59 => "just now".into(),
+        60..=3599 => format!("{} min ago", secs / 60),
+        3600..=86399 => format!("{} h ago", secs / 3600),
+        _ => format!("{} d ago", secs / 86400),
+    }
+}
+
 fn same(a: &[Update], b: &[Update]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(x, y)| (x.project_id, x.file.id, &x.from) == (y.project_id, y.file.id, &y.from))
@@ -219,6 +238,14 @@ mod tests {
 
     fn addon(pid: u64, file: &str) -> Addon {
         Addon { project_id: pid, file_name: file.into(), ..Addon::default() }
+    }
+
+    #[test]
+    fn ago_text_picks_a_unit() {
+        assert_eq!(ago_text(5), "just now");
+        assert_eq!(ago_text(125), "2 min ago");
+        assert_eq!(ago_text(7300), "2 h ago");
+        assert_eq!(ago_text(200000), "2 d ago");
     }
 
     #[test]

@@ -17,6 +17,8 @@
 
   const name = $derived(choices.find(([c]) => c === sort.col)?.[1] || 'Name');
   const order = $derived(updatesFirst ? `Updates first, then ${name}` : name);
+  // Icon only while the order is the default (newest added, updates first); it names itself once changed.
+  const isDefault = $derived(updatesFirst && sort.col === 'added' && sort.desc);
 
   function toggleOpen(e) {
     e.stopPropagation();
@@ -27,8 +29,8 @@
 <svelte:window onclick={() => (open = false)} onkeydown={(e) => e.key === 'Escape' && open && (open = false)} />
 
 <div class="wrapp">
-  <button class="btn sm" aria-haspopup="menu" aria-expanded={open} onclick={toggleOpen}>
-    <span class="m"><ArrowUpDown size={13} /></span><span class="m">Sort:</span>{order}{#if sort.desc}<ArrowDown size={12} />{:else}<ArrowUp size={12} />{/if}<span class="m"><ChevronDown size={12} /></span>
+  <button class="btn sm" class:icon={isDefault} aria-label="Sort: {order}" title="Sort: {order}" aria-haspopup="menu" aria-expanded={open} onclick={toggleOpen}>
+    <span class="m"><ArrowUpDown size={13} /></span>{#if !isDefault}<span class="m">Sort:</span>{order}{#if sort.desc}<ArrowDown size={12} />{:else}<ArrowUp size={12} />{/if}<span class="m"><ChevronDown size={12} /></span>{/if}
   </button>
   {#if open}
     <div class="pop popover menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === 'Escape' && (open = false)}>

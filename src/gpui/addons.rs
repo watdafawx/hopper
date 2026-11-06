@@ -28,7 +28,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Show {
     All,
     Updates,
@@ -43,6 +43,51 @@ enum Show {
     ClientOnly,
     /// Mods Hopper can't name: no CurseForge / Modrinth project or source.
     Unknown,
+}
+
+/// One button of the Mods filter rail: a pick (what the list shows) or a
+/// toggle that combines with the pick.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Rail {
+    Show(Show),
+    /// "Added by you": only what is not from the modpack.
+    Added,
+    /// "Config changed": only mods whose config is off its defaults.
+    Cfg,
+}
+
+impl Rail {
+    /// The filter state after pressing this button: a pick replaces the pick
+    /// and keeps the toggles; a toggle flips and keeps the pick.
+    fn apply(self, show: Show, added: bool, cfg: bool) -> (Show, bool, bool) {
+        match self {
+            Rail::Show(s) => (s, added, cfg),
+            Rail::Added => (show, !added, cfg),
+            Rail::Cfg => (show, added, !cfg),
+        }
+    }
+}
+
+struct RailItem {
+    kind: Rail,
+    label: &'static str,
+    icon: IconName,
+    count: Option<usize>,
+    /// Keeps an orange count on the icon while collapsed (Updates).
+    badge: bool,
+    /// A thin separator before it (the first toggle).
+    gap: bool,
+}
+
+impl RailItem {
+    fn show(show: Show, label: &'static str, icon: IconName, count: Option<usize>) -> Self {
+        Self { kind: Rail::Show(show), label, icon, count, badge: false, gap: false }
+    }
+
+    fn badged(mut self) -> Self {
+        self.badge = true;
+        self
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2467,12 +2512,18 @@ impl AddonsView {
         let order = if first { format!("Updates first, then {name}") } else { name.to_string() };
         let muted = cx.theme().muted_foreground;
         let view = cx.entity();
+        // Icon only while the order is the default; it names itself once
+        // changed, so a different order is never a surprise.
+        let is_default = first && (sort, asc) == (SortCol::Added, false);
         Button::new("sort")
             .small()
             .outline()
             .icon(Icon::new(IconName::ArrowUpDown).text_color(muted))
-            .child(h_flex().gap_1().child(div().text_color(muted).child("Sort:")).child(order).child(arrow(asc)))
-            .dropdown_caret(true)
+            .tooltip(format!("Sort: {order}"))
+            .when(!is_default, |b| {
+                b.child(h_flex().gap_1().child(div().text_color(muted).child("Sort:")).child(order.clone()).child(arrow(asc)))
+            })
+            .dropdown_caret(!is_default)
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.label("Sort by");
                 for (col, label) in choices.clone() {
@@ -2526,6 +2577,7 @@ impl AddonsView {
         inst: &Instance,
         updates: &HashMap<u64, Update>,
         hint: bool,
+        narrow: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let pending: HashMap<u64, Update> = updates
@@ -2542,49 +2594,55 @@ impl AddonsView {
         let n_added = of_class().filter(|a| !a.from_pack).count();
         // Packs filter by where they count; the rest by Updates / Disabled.
         let packs = self.where_mode();
-        let show_order: Vec<Show> = if packs {
-            vec![Show::All, Show::InGame, Show::AlwaysOn, Show::Disabled, Show::Updates]
-        } else {
-            vec![Show::All, Show::Updates, Show::Disabled]
-        };
         let n_group = |f: &dyn Fn(&hopper::pack_where::Group) -> bool| {
             of_class().filter(|a| f(&self.where_group(&a.file_name))).count()
         };
         use hopper::pack_where::Group as G;
-        let show_tabs: Vec<(SharedString, Option<usize>)> = if packs {
-            let dp = self.class == cf::CLASS_DATAPACKS;
-            vec![
-                ("All".into(), None),
-                (if dp { "In worlds" } else { "In game" }.into(), Some(n_group(&|g| matches!(g, G::InGame | G::InWorlds)))),
-                ("Always on".into(), Some(n_group(&|g| matches!(g, G::Global(_))))),
-                ("Off".into(), Some(n_off)),
-                ("Updates".into(), Some(n_up)),
-            ]
-        } else {
-            vec![("All".into(), None), ("Updates".into(), Some(n_up)), ("Disabled".into(), Some(n_off))]
-        };
-        // Only offered when something here is archived (or is being viewed).
         let n_arch = of_class().filter(|a| self.table.archived.contains(&a.project_id)).count();
-        let show_arch = n_arch > 0 || self.show == Show::Archived;
-        let mut show_order = show_order;
-        let mut show_tabs = show_tabs;
-        if show_arch {
-            show_order.push(Show::Archived);
-            show_tabs.push(("Archived".into(), Some(n_arch)));
+        let mut rail: Vec<RailItem> = vec![RailItem::show(Show::All, "All", IconName::Layers, Some(of_class().count() + if self.class == cf::CLASS_MODS { hopper::install::loose_jars(inst).len() } else { 0 }))];
+        if packs {
+            let dp = self.class == cf::CLASS_DATAPACKS;
+            rail.push(RailItem::show(
+                Show::InGame,
+                if dp { "In worlds" } else { "In game" },
+                IconName::CircleCheck,
+                Some(n_group(&|g| matches!(g, G::InGame | G::InWorlds))),
+            ));
+            rail.push(RailItem::show(Show::AlwaysOn, "Always on", IconName::Check, Some(n_group(&|g| matches!(g, G::Global(_))))));
+            rail.push(RailItem::show(Show::Disabled, "Off", IconName::CircleOff, Some(n_off)));
+            rail.push(RailItem::show(Show::Updates, "Updates", IconName::CircleArrowUp, Some(n_up)).badged());
+        } else {
+            rail.push(RailItem::show(Show::Updates, "Updates", IconName::CircleArrowUp, Some(n_up)).badged());
+            rail.push(RailItem::show(Show::Disabled, "Disabled", IconName::CircleOff, Some(n_off)));
         }
-        // Mods: Client-only and Unknown, as Hopper Server's web UI has them,
-        // when there are any (or one is being viewed).
+        // Only offered when something here is archived (or is being viewed).
+        if n_arch > 0 || self.show == Show::Archived {
+            rail.push(RailItem::show(Show::Archived, "Archived", IconName::Archive, Some(n_arch)));
+        }
+        // Mods: Unknown, when there are any (or it is being viewed); Client-only
+        // on server pages, where it says what a server can leave out.
         if self.class == cf::CLASS_MODS && !packs {
-            let n_client = of_class().filter(|a| a.env == "client").count();
             let n_unknown = of_class().filter(|a| a.project_id == 0 && a.source.is_none()).count();
-            for (show, label, n) in [(Show::ClientOnly, "Client-only", n_client), (Show::Unknown, "Unknown", n_unknown)] {
-                if n > 0 || self.show == show {
-                    show_order.push(show);
-                    show_tabs.push((label.into(), Some(n)));
-                }
+            if n_unknown > 0 || self.show == Show::Unknown {
+                rail.push(RailItem::show(Show::Unknown, "Unknown", IconName::Info, Some(n_unknown)));
+            }
+            let n_client = of_class().filter(|a| a.env == "client").count();
+            if self.server && (n_client > 0 || self.show == Show::ClientOnly) {
+                rail.push(RailItem::show(Show::ClientOnly, "Client-only", IconName::Monitor, Some(n_client)));
             }
         }
-        let show_ix = show_order.iter().position(|s| *s == self.show).unwrap_or(0);
+        // Then the toggles, which combine with the pick.
+        let mut first_toggle = true;
+        let mut toggle = |kind: Rail, label: &'static str, icon: IconName, n: usize| {
+            rail.push(RailItem { kind, label, icon, count: Some(n), badge: false, gap: first_toggle });
+            first_toggle = false;
+        };
+        if inst.pack.is_some() && self.global_dir().is_none() {
+            toggle(Rail::Added, "Added by you", IconName::UserPlus, n_added);
+        }
+        if let Some(n) = self.cfg_index.as_ref().filter(|_| self.class == cf::CLASS_MODS).map(|_| self.cfg_changed_keys().len()).filter(|n| *n > 0 || self.cfg_changed_only) {
+            toggle(Rail::Cfg, "Config changed", IconName::Settings2, n);
+        }
         // The last check's results stay up while a new check runs or after
         // one fails; the spinner or the error sits beside them.
         let (checking, error, listed) = self
@@ -2615,15 +2673,8 @@ impl AddonsView {
             })
         };
         let quiet = checking || error.is_some();
-        let result: AnyElement = match listed {
-            true if updates.is_empty() && quiet => div().into_any_element(),
-            true if updates.is_empty() => h_flex()
-                .gap_1p5()
-                .text_sm()
-                .text_color(cx.theme().success)
-                .child(Icon::new(IconName::CircleCheck).small())
-                .child("Up to date")
-                .into_any_element(),
+        let result: Option<AnyElement> = match listed {
+            true if updates.is_empty() => None,
             true => {
                 let store = self.store.read(cx);
                 // What isn't already updating or queued.
@@ -2651,11 +2702,52 @@ impl AddonsView {
                             format!("Review {n} updates, then update")
                         }
                     }))
+                    .rounded_tr(px(0.))
+                    .rounded_br(px(0.))
                     .on_click(cx.listener(move |this, _, window, cx| this.review_updates(all.clone(), window, cx)))
                     .into_any_element()
+                    .into()
             }
-            false => div().into_any_element(),
+            false => None,
         };
+        let rail_el = widgets::Segmented::new("show")
+            .rail()
+            .children(rail.iter().map(|r| {
+                let on = match r.kind {
+                    Rail::Show(_) => false,
+                    Rail::Added => self.added_only,
+                    Rail::Cfg => self.cfg_changed_only,
+                };
+                let item = widgets::SegItem::new()
+                    .label(r.label)
+                    .icon(r.icon)
+                    .count(r.count)
+                    .badge(r.badge)
+                    .toggled(on);
+                if r.gap { item.gap_before() } else { item }
+            }))
+            .selected_index(rail.iter().position(|r| matches!(r.kind, Rail::Show(s) if s == self.show)).unwrap_or(0))
+            .on_click({
+                let view = cx.entity();
+                let kinds: Vec<Rail> = rail.iter().map(|r| r.kind).collect();
+                move |ix, _, cx| {
+                    let Some(kind) = kinds.get(*ix).copied() else { return };
+                    view.update(cx, |this, cx| {
+                        let (show, added, cfg) = kind.apply(this.show, this.added_only, this.cfg_changed_only);
+                        this.show = show;
+                        this.added_only = added;
+                        this.cfg_changed_only = cfg;
+                        cx.notify();
+                    });
+                }
+            }).into_any_element();
+        let search_el = div().flex_1().min_w(rems(12.)).max_w(rems(26.)).child(
+            widgets::search_input(&self.search)
+                .small()
+                .prefix(Icon::new(IconName::Search).small())
+                .cleanable(true),
+        ).into_any_element();
+        let (first, second) = if narrow { (search_el, rail_el) } else { (rail_el, search_el) };
         let root = inst.root.clone();
         h_flex()
             .px_6()
@@ -2722,79 +2814,64 @@ impl AddonsView {
             )
             // Update all and its refresh sit by Add content. The note (checking,
             // errors) goes after them so they don't move.
-            .child(
-                h_flex().flex_none().gap_2().child(result).child(
-                    Button::new("recheck")
-                        .ghost()
-                        .small()
-                        .icon(IconName::RefreshCw)
-                        .loading(checking)
-                        .tooltip(if checking { "Checking for updates" } else { "Check for updates again" })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.store.update(cx, |s, cx| {
-                                s.check_updates(&root, true);
-                                cx.notify();
-                            })
-                        })),
-                ).children(note),
-            )
-            .child(div().w_px().h_5().flex_none().bg(cx.theme().border))
-            .child(
-                div().flex_1().min_w(rems(12.)).max_w(rems(26.)).child(
-                    widgets::search_input(&self.search)
-                        .small()
-                        .prefix(Icon::new(IconName::Search).small())
-                        .cleanable(true),
-                ),
-            )
-            // What's listed (the filters) and in what order (the sort), each
-            // labelled so they don't read as more action buttons.
-            .child(
-                h_flex()
-                    .flex_none()
-                    .gap_2()
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .text_xs()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(Icon::new(IconName::Funnel).xsmall())
-                            .child("Filter"),
-                    )
-                    .child(widgets::underline_tabs(
-                        "show",
-                        show_tabs,
-                        show_ix,
-                        cx.listener(move |this, ix: &usize, _, cx| {
-                            this.show = show_order.get(*ix).copied().unwrap_or(Show::All);
+            .child({
+                // Update all and the check button are one split button; with
+                // nothing to update the check button stands alone.
+                let recheck_tip = if checking {
+            "Checking for updates".to_string()
+        } else {
+            match self.store.read(cx).updates(&inst.root).and_then(|u| u.checked_ago()) {
+                Some(ago) => format!("Check for updates · checked {ago}"),
+                None => "Check for updates".to_string(),
+            }
+        };
+                let recheck = Button::new("recheck")
+                    .small()
+                    .icon(IconName::RefreshCw)
+                    .loading(checking)
+                    .tooltip(recheck_tip)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.store.update(cx, |s, cx| {
+                            s.check_updates(&root, true);
                             cx.notify();
-                        }),
-                        cx,
-                    ))
-                    .when(inst.pack.is_some() && self.global_dir().is_none(), |r| {
-                        let on = self.added_only;
-                        r.child(
-                            widgets::toggle_chip("added-only", format!("Added by you ({n_added})"), on, cx)
-                                .tooltip("Only what you added on top of the modpack")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.added_only = !on;
-                                    cx.notify();
-                                })),
+                        })
+                    }));
+                match result {
+                    Some(lead) => h_flex()
+                        .flex_none()
+                        .child(lead)
+                        .child(
+                            recheck
+                                .primary()
+                                .border_l_1()
+                                .border_color(cx.theme().background.opacity(0.35))
+                                .rounded_tl(px(0.))
+                                .rounded_bl(px(0.)),
                         )
-                    })
-                    .when_some(self.cfg_index.as_ref().filter(|_| self.class == cf::CLASS_MODS).map(|_| self.cfg_changed_keys().len()).filter(|n| *n > 0 || self.cfg_changed_only), |r, n| {
-                        let on = self.cfg_changed_only;
-                        r.child(
-                            widgets::toggle_chip("cfg-changed-only", format!("Config changed ({n})"), on, cx)
-                                .tooltip("Only mods whose config has settings that aren't at their default")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.cfg_changed_only = !on;
-                                    cx.notify();
-                                })),
-                        )
-                    }),
-            )
+                        .children(note)
+                        .into_any_element(),
+                    None => h_flex()
+                        .flex_none()
+                        .gap_2()
+                        .child(match listed {
+                            true if !quiet => h_flex()
+                                .gap_1p5()
+                                .text_sm()
+                                .text_color(cx.theme().success)
+                                .child(Icon::new(IconName::CircleCheck).small())
+                                .child("Up to date")
+                                .into_any_element(),
+                            _ => div().into_any_element(),
+                        })
+                        .child(recheck.ghost())
+                        .children(note)
+                        .into_any_element(),
+                }
+            })
+            .child(div().w_px().h_5().flex_none().bg(cx.theme().border))
+            // Narrow: the search goes first and the rail wraps under it.
+            .child(first)
+            .child(second)
             // No divider before Sort: when the bar wraps, it would be left
             // hanging at the end of a line.
             .child(self.sort_button(cx))
@@ -5682,7 +5759,7 @@ impl Render for AddonsView {
             && !self.hint_gone
             && self.room.is_some()
             && window.viewport_size().width < px(1100.);
-        let toolbar = self.toolbar(&inst, &updates, hint, cx);
+        let toolbar = self.toolbar(&inst, &updates, hint, window.viewport_size().width < px(1000.), cx);
         let bulk = self.bulk_bar(&inst, &updates, cx);
         let header = self.header(&rows, &inst, cx);
         let count = rows.len();
@@ -5825,7 +5902,22 @@ impl Render for AddonsView {
 
 #[cfg(test)]
 mod tests {
-    use super::find_backup;
+    use super::{find_backup, Rail, Show};
+
+    #[test]
+    fn rail_pick_keeps_toggles_and_toggle_keeps_pick() {
+        // Updates picked, then Added by you on: both hold.
+        let (s, a, c) = Rail::Show(Show::Updates).apply(Show::All, false, false);
+        let (s, a, c) = Rail::Added.apply(s, a, c);
+        assert_eq!((s, a, c), (Show::Updates, true, false));
+        // Config changed on too, then another pick keeps both toggles.
+        let (s, a, c) = Rail::Cfg.apply(s, a, c);
+        let (s, a, c) = Rail::Show(Show::Disabled).apply(s, a, c);
+        assert_eq!((s, a, c), (Show::Disabled, true, true));
+        // A toggle flips off again without touching the pick.
+        let (s, a, c) = Rail::Added.apply(s, a, c);
+        assert_eq!((s, a, c), (Show::Disabled, false, true));
+    }
 
     #[test]
     fn finds_the_newest_backup_of_a_removed_file() {

@@ -24,7 +24,7 @@
   import {
     Search, Plus, ScanSearch, RefreshCw, X, Settings2, Lock, LockOpen, Download, ScrollText, Ellipsis, Trash2,
     Monitor, Server as ServerIcon, ArrowLeftRight, ArrowDown, ArrowUp, ExternalLink, Shuffle, FolderOpen, CircleCheck, Clock,
-    CircleOff, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info, Link, Unlink, SlidersHorizontal,
+    CircleOff, Layers, CircleArrowUp, Archive, UserPlus, TriangleAlert, ArrowRight, ChevronDown, Pencil, Package, Funnel, Check, Columns3, RotateCcw, Info, Link, Unlink, SlidersHorizontal,
   } from '@lucide/svelte';
   import ModConfigPanel from './ModConfigPanel.svelte';
   import { cfg, loadIndex, modForFile } from './lib/configs.svelte.js';
@@ -61,6 +61,18 @@
   // Projects whose installed file the author archived (from the update check).
   let archived = $state(new Set());
   let checking = $state(false);
+  let checkedAt = $state(0);
+  const checkedAgo = $derived.by(() => {
+    if (!checkedAt) return '';
+    const s = Math.max(0, Math.round((tick - checkedAt) / 1000));
+    return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : `${Math.floor(s / 86400)} d ago`;
+  });
+  // Moves on every minute so "checked N min ago" stays right.
+  let tick = $state(Date.now());
+  $effect(() => {
+    const t = setInterval(() => (tick = Date.now()), 30000);
+    return () => clearInterval(t);
+  });
   // The review's updates (all pending, or the selected rows'), or null.
   let reviewing = $state(null);
   // The side panel's mod: its jar, and its project so it stays open when
@@ -133,6 +145,9 @@
     }
   };
   let onlyYours = $state(pref('yours', false));
+  // "Config changed" combines with the pick, as "Added by you" does.
+  let onlyCfg = $state(pref('cfg', false));
+  $effect(() => keep('cfg', onlyCfg));
   let updatesFirst = $state(pref('updates-first', true));
   // Desktop's default: newest added first.
   let sort = $state(pref('sort', { col: 'added', desc: true }));
@@ -181,10 +196,30 @@
     yours: mods.filter(yours).length,
   });
   // Desktop's All / Updates / Off, then the server's own two when any.
-  const CHIPS = [['all', 'All'], ['updates', 'Updates'], ['off', 'Disabled'], ['archived', 'Archived'], ['client', 'Client-only'], ['unknown', 'Unknown'], ['config', 'Config changed']];
+  const CHIPS = [['all', 'All', Layers], ['updates', 'Updates', CircleArrowUp], ['off', 'Disabled', CircleOff], ['archived', 'Archived', Archive], ['client', 'Client-only', Monitor], ['unknown', 'Unknown', Info]];
+  // The rail: the picks (what is listed) that apply, then the toggles that combine with the pick.
+  const rail = $derived([
+    ...CHIPS.filter(([k]) => k === 'all' || k === 'updates' || k === 'off' || counts[k] || chip === k).map(([k, label, icon]) => ({ k, label, icon, n: k === 'all' ? mods.length : counts[k], tog: false, on: chip === k })),
+    ...(hasPack ? [{ k: 'yours', label: 'Added by you', icon: UserPlus, n: counts.yours, tog: true, on: onlyYours }] : []),
+    ...(counts.config || onlyCfg ? [{ k: 'config', label: 'Config changed', icon: Settings2, n: counts.config, tog: true, on: onlyCfg }] : []),
+  ]);
+  function railPick(k) {
+    if (k === 'yours') onlyYours = !onlyYours;
+    else if (k === 'config') onlyCfg = !onlyCfg;
+    else chip = k;
+  }
+  // Arrow keys move across the rail.
+  function railKey(e) {
+    const dir = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (!dir) return;
+    const bs = [...e.currentTarget.querySelectorAll('button')];
+    const at = bs.indexOf(document.activeElement);
+    bs[Math.max(0, Math.min(bs.length - 1, at + dir))]?.focus();
+    e.preventDefault();
+  }
   const fits = {
     all: () => true, updates: pending, off: (m) => !m.enabled, archived: isArchived,
-    client: (m) => m.side === 'client', unknown: (m) => !m.source, config: cfgChanged,
+    client: (m) => m.side === 'client', unknown: (m) => !m.source,
   };
   // The orders the list can take, named as their column headers are.
   const SORTS = $derived([['name', 'Name'], ['author', 'Author'], ...(hasSide ? [['side', 'Side']] : []), ['on', 'Enabled'], ['added', 'Added']]);
@@ -197,7 +232,7 @@
   };
   const shown = $derived.by(() => {
     const q = filter.trim();
-    const rows = base0.filter((m) => fits[chip](m) && (!q || wordsMatch(q, [m.name, m.file, m.author])));
+    const rows = base0.filter((m) => fits[chip](m) && (!onlyCfg || cfgChanged(m)) && (!q || wordsMatch(q, [m.name, m.file, m.author])));
     const cmp = by[sort.col] || by.name;
     rows.sort((a, b) => {
       if (updatesFirst) {
@@ -346,6 +381,8 @@
     try {
       const r = await api(`${base}/mods/updates${force ? '?force=1' : ''}`);
       updates = r.updates;
+      checkedAt = Date.now();
+      tick = checkedAt;
       archived = new Set(r.archived || []);
       await load();
       if (force && !updates.length) say(hasPack ? 'Every mod added on top of the pack is up to date.' : 'Every mod is up to date.');
@@ -624,6 +661,7 @@
     filter = '';
     chip = 'all';
     onlyYours = false;
+    onlyCfg = false;
   }
 
   // The ⋯ button opens it under itself; right-click at the pointer.
@@ -783,26 +821,26 @@
     <ModBackups {server} onChanged={() => { load(); loadBackupCount(); checkUpdates(false); }} />
   {:else}
     <!-- Laid out as desktop's: actions, search, what's listed (Filter), in what order (Sort). -->
-    <div class="row wrap toolbar">
+    <div class="row wrap toolbar" class:tight={listW > 0 && listW <= 760}>
       <!-- The arrow only shows with mods from links on: Browse is then the only way to add. -->
       {#if srcOn}<span class="addsplit"><a class="btn sm" href="#{browseHash('mods', server.id)}" oncontextmenu={openAdd}><Plus size={13} />Add content</a><button class="btn sm" title="Other ways to add" aria-label="Other ways to add" aria-haspopup="menu" aria-expanded={!!addMenu} onclick={openAdd}><ChevronDown size={12} /></button></span>{:else}<a class="btn sm" href="#{browseHash('mods', server.id)}"><Plus size={13} />Add content</a>{/if}
       <span class="row upd">
         <!-- The last check's results stay up while a new one runs; with results on screen the refresh button spins instead, so nothing moves. -->
-        {#if pendingUpdates.length}<button class="btn sm pri" disabled={!!busy} title="Review {pendingUpdates.length === 1 ? '1 update' : `${pendingUpdates.length} updates`}, then update" onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Update all ({pendingUpdates.length})</button>
-        {:else if updates && !checking}<span class="small okt row"><CircleCheck size={14} />Up to date</span>{/if}
-        <button class="btn sm ghost icon" disabled={checking} title={checking ? 'Checking for updates' : 'Check for updates again'} onclick={() => checkUpdates(true)}>{#if checking && pendingUpdates.length}<span class="spinner blue"></span>{:else}<RefreshCw size={13} />{/if}</button>
+        <!-- Update all and the check button are one split button; with nothing to update the check button stands alone. -->
+        {#if pendingUpdates.length}<span class="usplit"><button class="btn sm pri" disabled={!!busy} title="Review {pendingUpdates.length === 1 ? '1 update' : `${pendingUpdates.length} updates`}, then update" onclick={() => (reviewing = pendingUpdates)}><Download size={13} />Update all ({pendingUpdates.length})</button><button class="btn sm pri icon" disabled={checking} aria-label="Check for updates" title={checking ? 'Checking for updates' : `Check for updates${checkedAgo ? ` · checked ${checkedAgo}` : ''}`} onclick={() => checkUpdates(true)}><span class:spin={checking} class="rf"><RefreshCw size={13} /></span></button></span>
+        {:else}{#if updates && !checking}<span class="small okt row"><CircleCheck size={14} />Up to date</span>{/if}
+        <button class="btn sm ghost icon" disabled={checking} aria-label="Check for updates" title={checking ? 'Checking for updates' : `Check for updates${checkedAgo ? ` · checked ${checkedAgo}` : ''}`} onclick={() => checkUpdates(true)}><span class:spin={checking} class="rf"><RefreshCw size={13} /></span></button>{/if}
         {#if checking && !pendingUpdates.length}<span class="small muted row"><span class="spinner blue"></span>Checking for updates</span>{/if}
       </span>
       <span class="vr"></span>
       <div class="input find"><Search size={13} /><input use:rightClear placeholder="Search" bind:value={filter} />{#if filter}<button class="clr" title="Clear" onclick={() => (filter = '')}><X size={12} /></button>{/if}</div>
-      <div class="row fgroup">
-        <span class="glabel"><Funnel size={12} />Filter</span>
-        <div class="utabs" role="tablist">
-          {#each CHIPS as [k, label] (k)}
-            {#if k === 'all' || k === 'updates' || k === 'off' || counts[k] || chip === k}<button role="tab" aria-selected={chip === k} class:tab-sel={chip === k} onclick={() => (chip = k)}>{label}{k === 'all' ? '' : ` ${counts[k]}`}</button>{/if}
-          {/each}
-        </div>
-        {#if hasPack}<button class="tpill" aria-pressed={onlyYours} title="Only what you added on top of the modpack" onclick={() => (onlyYours = !onlyYours)}>{#if onlyYours}<Check size={13} />{/if}Added by you ({counts.yours})</button>{/if}
+      <div class="seg icons fr" role="group" aria-label="Filter" onkeydown={railKey}>
+        {#each rail as r, i (r.k)}
+          {#if r.tog && !rail[i - 1]?.tog}<span class="sep"></span>{/if}
+          <button class="si" class:tog={r.tog} aria-pressed={r.on} aria-label="{r.label}, {r.n}" data-tip="{r.label} · {r.n}" onclick={() => railPick(r.k)}>
+            <span class="ico"><r.icon size={14} />{#if r.k === 'updates' && r.n && !r.on}<span class="bdg">{r.n}</span>{/if}</span><span class="lbw"><span>{r.label}<span class="ct">{r.n}</span></span></span>
+          </button>
+        {/each}
       </div>
       <SortMenu choices={SORTS} {sort} bind:updatesFirst onSort={setSort} />
       <span class="sp"></span>
@@ -912,7 +950,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
         {#if !data}
           <div class="skels">{#each [0, 1, 2, 3, 4, 5] as i (i)}<div class="skel"><i></i></div>{/each}</div>
         {:else if !shown.length}
-          {@const filtered = !!filter.trim() || chip !== 'all' || (onlyYours && hasPack)}
+          {@const filtered = !!filter.trim() || chip !== 'all' || onlyCfg || (onlyYours && hasPack)}
           {#if chip === 'updates' && !filter.trim() && !(onlyYours && hasPack)}
             <div class="empty-state"><span class="es-ic"><CircleCheck size={20} /></span><b>All up to date</b><p>Every item here is on its newest version.</p><button class="btn sm" onclick={() => (chip = 'all')}>Show all</button></div>
           {:else if filtered}
@@ -1013,7 +1051,16 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   .tab:hover { color: var(--text); }
   .subtabs .chip { margin-bottom: 6px; }
   .toolbar { gap: 6px 10px; }
-  .fgroup { gap: 8px; flex: none; }
+  .usplit { display: inline-flex; flex: none; }
+  .usplit .btn:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .usplit .btn:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid #1c0d0240; }
+  .rf { display: inline-flex; }
+  .rf.spin { animation: rf-spin 1s linear infinite; }
+  @keyframes rf-spin { to { transform: rotate(360deg); } }
+  /* A narrow list: the search goes first, the rail wraps under it. */
+  .toolbar.tight > :global(a.btn), .toolbar.tight .addsplit, .toolbar.tight .upd { order: -2; }
+  .toolbar.tight .find { order: -1; flex: 1 0 250px; width: auto; }
+  .toolbar.tight .vr { display: none; }
   .toolbar .vr { margin: 0; }
   .cbl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--subtle); cursor: pointer; padding: 0 4px; }
   .cbl input, .c-ck input { width: 15px; height: 15px; accent-color: var(--acc); }
