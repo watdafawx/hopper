@@ -1059,7 +1059,7 @@ Change version`} onclick={(e) => { e.stopPropagation(); versionsFor = m; }}><spa
   @keyframes rf-spin { to { transform: rotate(360deg); } }
   /* A narrow list: the search goes first, the rail wraps under it. */
   .toolbar.tight > :global(a.btn), .toolbar.tight .addsplit, .toolbar.tight .upd { order: -2; }
-  .toolbar.tight .find { order: -1; flex: 1 0 340px; width: auto; }
+  .toolbar.tight .find { order: -1; flex: 1 0 250px; width: auto; }
   .toolbar.tight .vr { display: none; }
   .toolbar .vr { margin: 0; }
   .cbl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--subtle); cursor: pointer; padding: 0 4px; }
