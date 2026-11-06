@@ -680,7 +680,7 @@ async fn job(
     }
     Ok(Json(json!({
         "id": st.id, "title": st.title, "detail": st.detail, "progress": st.progress,
-        "done": st.done, "error": st.error, "notes": st.notes, "result": result,
+        "done": st.done, "error": st.error, "cancelled": st.cancelled, "notes": st.notes, "result": result,
     })))
 }
 

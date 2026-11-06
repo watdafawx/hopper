@@ -192,6 +192,9 @@ pub enum StoreEvent {
     PanelChanged(PathBuf, Vec<String>),
     /// Something to tell the user in a notice: (text, is a problem).
     Notice(String, bool),
+    /// Open Browse on modpacks to host one (New server's Modpack tab):
+    /// None on this PC, else on that paired Hopper Server.
+    BrowsePacksFor(Option<String>),
 }
 
 impl EventEmitter<StoreEvent> for Store {}
@@ -353,6 +356,30 @@ struct StartedWith {
     dismissed: bool,
 }
 
+/// A server being made, for its row in the server list: the job making
+/// it, and where it goes.
+#[derive(Clone, Debug)]
+pub struct Making {
+    pub job: u64,
+    pub name: String,
+    /// None: this PC; else a paired Hopper Server's id.
+    pub place: Option<String>,
+    /// Its folder once made (a Hopper Server's: as this PC lists it).
+    pub root: Option<PathBuf>,
+    /// Its id on the Hopper Server, once made there.
+    pub panel_id: Option<String>,
+    /// The player ticked "Start it when it's ready".
+    pub start: bool,
+}
+
+/// [`Making`] rows, and where each job's server went (filled in by the
+/// job's thread, which may finish before its row is listed).
+#[derive(Default)]
+struct MakingList {
+    rows: Vec<Making>,
+    made: HashMap<u64, (PathBuf, Option<String>)>,
+}
+
 pub struct Store {
     settings: Settings,
     instances: Vec<Instance>,
@@ -426,6 +453,9 @@ pub struct Store {
     pending: HashMap<PathBuf, Vec<hopper::modpack::Pending>>,
     /// Servers Hopper hosts on this PC, and the panel that runs them.
     local: Arc<hopper::hosting::LocalPanel>,
+    /// Servers being made (New server, Browse's Make a server): a row in
+    /// the server list each, with progress and Cancel, then Start or Open.
+    making: Arc<Mutex<MakingList>>,
     /// Daily restarts, crash restarts and autostart for hosted servers.
     scheduler: Option<hopper::hosting::Scheduler>,
     /// What each running game started with, to tell whether its content
@@ -630,6 +660,7 @@ impl Store {
             fetching: Default::default(),
             pending: HashMap::new(),
             local: Arc::new(hopper::hosting::LocalPanel::new()),
+            making: Default::default(),
             scheduler: None,
             image_queue: Default::default(),
             self_update: None,
@@ -3538,6 +3569,87 @@ impl Store {
         self.local.clone()
     }
 
+    /// Lists a server being made by job `m.job` in the server list.
+    pub fn track_making(&self, m: Making) {
+        let mut l = self.making.lock().unwrap_or_else(|e| e.into_inner());
+        l.rows.retain(|r| r.job != m.job);
+        l.rows.push(m);
+    }
+
+    /// The servers being made, with where each ended up once known.
+    pub fn making(&self) -> Vec<Making> {
+        let l = self.making.lock().unwrap_or_else(|e| e.into_inner());
+        l.rows
+            .iter()
+            .map(|r| {
+                let mut r = r.clone();
+                if let Some((root, id)) = l.made.get(&r.job) {
+                    r.root = Some(root.clone());
+                    r.panel_id = id.clone();
+                }
+                r
+            })
+            .collect()
+    }
+
+    /// Takes a made server's row off the list (opened, started or dismissed).
+    pub fn forget_making(&self, job: u64) {
+        let mut l = self.making.lock().unwrap_or_else(|e| e.into_inner());
+        l.rows.retain(|r| r.job != job);
+        l.made.remove(&job);
+    }
+
+    /// A `done` for `create_hosted*`: records where job `job`'s server went
+    /// and, when the player asked, starts it.
+    pub fn made_here(&self, start: bool) -> impl Fn(u64, PathBuf) + Send + Sync + 'static {
+        let (making, local) = (self.making.clone(), self.local.clone());
+        move |job, root| {
+            if start && let Err(e) = local.add(&root).start() {
+                log::warn!("starting {}: {e:#}", root.display());
+            }
+            making.lock().unwrap_or_else(|e| e.into_inner()).made.insert(job, (root, None));
+        }
+    }
+
+    /// Records where a server made on a Hopper Server went: its root as
+    /// this PC lists it, and its id there.
+    pub fn made_on_panel(&self, job: u64, root: PathBuf, id: Option<String>) {
+        self.making.lock().unwrap_or_else(|e| e.into_inner()).made.insert(job, (root, id));
+    }
+
+    /// Starts a server that was just made (its row's Start button).
+    pub fn start_made(&self, m: &Making, cx: &mut Context<Self>) {
+        let Some(root) = m.root.clone() else { return };
+        let action: Box<dyn FnOnce() -> anyhow::Result<()> + Send> = match &m.place {
+            None => {
+                let local = self.local.clone();
+                Box::new(move || local.add(&root).start())
+            }
+            Some(panel) => {
+                let client = self.settings.hopper_panels.iter().find(|p| &p.id == panel).and_then(hopper::hopperd::Client::for_panel);
+                let id = m.panel_id.clone();
+                Box::new(move || {
+                    let (Some(c), Some(id)) = (client, id) else { anyhow::bail!("The panel isn't connected.") };
+                    use hopper::panel::ServerPanel as _;
+                    hopper::panel::HopperServer::from_client(c).act(&id, hopper::panel::PanelAction::Start)
+                })
+            }
+        };
+        let name = m.name.clone();
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_spawn(async move { action() }).await;
+            if let Err(e) = r {
+                log::warn!("starting {name}: {e:#}");
+            }
+            this.update(cx, |s, cx| {
+                s.rediscover_servers();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Makes a server to host here (from an instance or from scratch), then
     /// lists it.
     pub fn create_hosted(
@@ -3545,15 +3657,15 @@ impl Store {
         opts: hopper::hosting::CreateOptions,
         from: Option<PathBuf>,
         server_pack: bool,
-        done: impl FnOnce(PathBuf) + Send + 'static,
-    ) {
+        done: impl FnOnce(u64, PathBuf) + Send + 'static,
+    ) -> u64 {
         let inst = from.and_then(|r| self.instance(&r).cloned());
         let paired = inst.as_ref().map(|i| i.root.clone());
         let anyway = self.settings.sync_anyway.clone();
         let hidden = self.settings.sync_blacklist.clone();
         let title = format!("Creating {}", opts.name);
         let meta = opts.hosted_meta();
-        self.spawn_job(title, move |job| {
+        self.spawn_job_id(title, move |job| {
             let root = match inst {
                 // The pack author's own server pack: exactly their mod set.
                 Some(i) if server_pack => {
@@ -3585,12 +3697,12 @@ impl Store {
                 }
             };
             let _ = meta.save(&root);
-            done(root.clone());
+            done(job.id(), root.clone());
             Ok(match paired {
                 Some(instance) => Msg::ServerMade { server: root, instance },
                 None => Msg::ServersChanged,
             })
-        });
+        })
     }
 
     /// Makes a server to host here straight from a pack's server files
@@ -3600,10 +3712,10 @@ impl Store {
         &self,
         mut opts: hopper::hosting::CreateOptions,
         files: hopper::browse::ServerFiles,
-        done: impl FnOnce(PathBuf) + Send + 'static,
-    ) {
+        done: impl FnOnce(u64, PathBuf) + Send + 'static,
+    ) -> u64 {
         let title = format!("Creating {}", opts.name);
-        self.spawn_job(title, move |job| {
+        self.spawn_job_id(title, move |job| {
             let t = hopper::hosting::pack_target(&files, job)?;
             opts.mc_version = t.mc_version;
             opts.loader = hopper::hosting::ServerLoader::from_instance(&t.loader)?;
@@ -3620,9 +3732,9 @@ impl Store {
                 job.note(n);
             }
             let _ = opts.hosted_meta().save(&r.create.root);
-            done(r.create.root);
+            done(job.id(), r.create.root);
             Ok(Msg::ServersChanged)
-        });
+        })
     }
 
     /// Makes a server to host here from a zip the player downloaded from
@@ -3634,10 +3746,10 @@ impl Store {
         mut opts: hopper::hosting::CreateOptions,
         zip: PathBuf,
         files: Option<hopper::browse::ServerFiles>,
-        done: impl FnOnce(PathBuf) + Send + 'static,
-    ) {
+        done: impl FnOnce(u64, PathBuf) + Send + 'static,
+    ) -> u64 {
         let title = format!("Creating {}", opts.name);
-        self.spawn_job(title, move |job| {
+        self.spawn_job_id(title, move |job| {
             job.detail("Reading the zip");
             let info = hopper::hosting::zip_import::inspect(&zip)?;
             let recommended = info.target.as_ref().map_or(0, |t| t.recommended_mb);
@@ -3662,9 +3774,9 @@ impl Store {
                 job.note(n);
             }
             let _ = used.hosted_meta().save(&r.root);
-            done(r.root);
+            done(job.id(), r.root);
             Ok(Msg::ServersChanged)
-        });
+        })
     }
 
     /// Makes a server to host here from a modpack that has no server
@@ -3672,18 +3784,55 @@ impl Store {
     /// `hosting::create_from_client_pack`), then lists it. The mods left
     /// out as client-only are listed in the task and in
     /// `left-out-client-mods.txt` in the server folder.
+    pub fn create_hosted_from_folder(
+        &self,
+        opts: hopper::hosting::CreateOptions,
+        src: PathBuf,
+        done: impl FnOnce(u64, PathBuf) + Send + 'static,
+    ) -> u64 {
+        let title = format!("Copying {}", opts.name);
+        self.spawn_job_id(title, move |job| {
+            let dest = opts.folder();
+            anyhow::ensure!(!dest.exists(), "A server called {} already exists here. Pick another name.", opts.name);
+            job.detail(format!("Copying {}", src.display()));
+            if let Err(e) = hopper::hosting::create::copy_tree(&src, &dest) {
+                let _ = std::fs::remove_dir_all(&dest);
+                return Err(e);
+            }
+            // The form's port, line in the server list and memory; the
+            // folder keeps everything else, its start script included.
+            let path = dest.join("server.properties");
+            let mut p = hopper::hosting::Properties::load(&path)?;
+            p.set("server-port", opts.port.to_string());
+            if !opts.motd.trim().is_empty() {
+                p.set("motd", opts.motd.trim());
+            }
+            p.save(&path)?;
+            if let Err(e) = hopper::hosting::script::set_script_memory(&dest, opts.memory_mb) {
+                log::warn!("setting {}'s memory: {e:#}", dest.display());
+            }
+            hopper::hosting::rcon::set_up_new_or_log(&dest);
+            job.detail(match hopper::hosting::script::folder_problem(&dest) {
+                Some(p) => p,
+                None => "Ready".to_string(),
+            });
+            done(job.id(), dest);
+            Ok(Msg::ServersChanged)
+        })
+    }
+
     pub fn create_hosted_from_client_pack(
         &self,
         mut opts: hopper::hosting::CreateOptions,
         pack: hopper::cf::Mod,
         file: hopper::cf::File,
-        done: impl FnOnce(PathBuf) + Send + 'static,
-    ) {
+        done: impl FnOnce(u64, PathBuf) + Send + 'static,
+    ) -> u64 {
         let title = format!("Creating {}", opts.name);
         if opts.memory_mb == 0 {
             opts.memory_mb = hopper::hosting::default_memory_mb(true, 0);
         }
-        self.spawn_job(title, move |job| {
+        self.spawn_job_id(title, move |job| {
             let (r, used) = hopper::hosting::create_from_client_pack(&pack, &file, &opts, job)?;
             // The list of client-only mods left out is in
             // left-out-client-mods.txt in the server folder.
@@ -3695,9 +3844,9 @@ impl Store {
                 job.note(n);
             }
             let _ = used.hosted_meta().save(&r.root);
-            done(r.root);
+            done(job.id(), r.root);
             Ok(Msg::ServersChanged)
-        });
+        })
     }
 
     /// Downloads Java `major` (Temurin) into Hopper's runtimes, then looks

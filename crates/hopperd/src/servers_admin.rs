@@ -497,6 +497,9 @@ struct ZipBody {
     motd: String,
     #[serde(default)]
     accept_eula: bool,
+    /// Start it once it's made.
+    #[serde(default)]
+    start: bool,
     /// For a server pack that doesn't say what it runs on.
     #[serde(default)]
     mc_version: String,
@@ -555,7 +558,19 @@ fn options(c: &Common, name: &str, mc: &str, loader: ServerLoader, java: &FsPath
 }
 
 /// After any create: the address, the client-only mods left out, the list.
-fn finish(app: &App, folder: &FsPath, address: Option<String>, skipped: &[(String, String)]) -> anyhow::Result<Value> {
+/// Starts a server just made in `folder`, when the player asked to.
+pub(crate) fn start_new(app: &App, folder: &FsPath) {
+    match app.servers.list().into_iter().find(|e| e.root == folder) {
+        Some(e) => {
+            if let Err(err) = app.servers.act(&e, hopper_core::panel::PanelAction::Start) {
+                log::warn!("starting {}: {err:#}", folder.display());
+            }
+        }
+        None => log::warn!("starting {}: the panel doesn't list it yet", folder.display()),
+    }
+}
+
+fn finish(app: &App, folder: &FsPath, address: Option<String>, skipped: &[(String, String)], start: bool) -> anyhow::Result<Value> {
     if let Some(addr) = address {
         hopper_core::hosting::router::RouteSettings { addresses: vec![addr], ..Default::default() }.save(folder)?;
         app.router.changed();
@@ -567,6 +582,9 @@ fn finish(app: &App, folder: &FsPath, address: Option<String>, skipped: &[(Strin
     app.refresh.notify_one();
     let id = app.servers.list().into_iter().find(|e| e.root == folder).map(|e| e.id.clone());
     log::info!("made {}", folder.display());
+    if start {
+        start_new(app, folder);
+    }
     Ok(json!({ "id": id, "path": folder, "left_out": skipped.len() }))
 }
 
@@ -603,7 +621,7 @@ fn start_zip_job(app: &Arc<App>, b: ZipBody) -> ApiResult<u64> {
         if zip.starts_with(a.data_dir.join(INCOMING)) {
             let _ = std::fs::remove_file(&zip);
         }
-        finish(&a, &r.root, c.address, &r.skipped)
+        finish(&a, &r.root, c.address, &r.skipped, b.start)
     }))
 }
 
@@ -738,6 +756,9 @@ struct PackBody {
     motd: String,
     #[serde(default)]
     accept_eula: bool,
+    /// Start it once it's made.
+    #[serde(default)]
+    start: bool,
 }
 
 /// A server from a pack version: its server files when it has them (the
@@ -790,7 +811,7 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
                 job.note(n);
             }
             crate::pack_api::link_new_server(&r.create.root, mr, project, file_id);
-            let mut v = finish(&a, &r.create.root, c.address, &r.create.skipped)?;
+            let mut v = finish(&a, &r.create.root, c.address, &r.create.skipped, b.start)?;
             v["built_from_pack"] = json!(r.website_only.is_some());
             v["missing"] = json!(r.create.missing.len());
             return Ok(v);
@@ -812,7 +833,7 @@ async fn create_from_pack(State(app): State<Arc<App>>, headers: HeaderMap, metho
             job.note(n);
         }
         crate::pack_api::link_new_server(&r.root, mr, project, file_id);
-        let mut v = finish(&a, &r.root, c.address, &r.skipped)?;
+        let mut v = finish(&a, &r.root, c.address, &r.skipped, b.start)?;
         v["missing"] = json!(r.missing.len());
         Ok(v)
     });

@@ -7,7 +7,7 @@ use hopper::hopperd::is_remote_root;
 use crate::rigsync::SyncPanel;
 use crate::server_control::{ControlEvent, ServerControl};
 use crate::server_settings::ServerSettings;
-use crate::store::Store;
+use crate::store::{Making, Store};
 use crate::widgets;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -468,19 +468,32 @@ fn server_list(
         row.into_any_element()
     };
     let mut rows: Vec<AnyElement> = Vec::new();
+    // Servers being made show in their group at once, with progress.
+    let making = s.making();
     for g in groups(s) {
         let folded = s.settings().collapsed_groups.contains(&g.key);
+        let mine: Vec<&Making> = making
+            .iter()
+            .filter(|m| match &g.kind {
+                GroupKind::Local => m.place.is_none(),
+                GroupKind::Panel(id) => m.place.as_ref() == Some(id),
+                GroupKind::Folder | GroupKind::Site(_) => false,
+            })
+            .collect();
         let mut members: Vec<&ServerInfo> = s.servers().iter().filter(|x| g.has(s, x)).collect();
-        if members.is_empty() && matches!(g.kind, GroupKind::Folder) {
+        // A server whose Ready row is still up shows once, as that row.
+        members.retain(|srv| !mine.iter().any(|m| m.root.as_ref() == Some(&srv.root)));
+        if members.is_empty() && mine.is_empty() && matches!(g.kind, GroupKind::Folder) {
             continue;
         }
         members.sort_by_key(|srv| !running(srv));
-        rows.push(group_head(&g, members.len(), folded, store, on_host.clone(), on_browse.clone(), cx));
+        rows.push(group_head(&g, members.len() + mine.len(), folded, store, on_host.clone(), on_browse.clone(), cx));
         if !folded {
+            rows.extend(mine.into_iter().filter_map(|m| making_row(m, store, on_pick.clone(), cx)));
             rows.extend(members.into_iter().map(|srv| row_for(srv)));
         }
     }
-    let empty = s.servers().is_empty();
+    let empty = s.servers().is_empty() && making.is_empty();
     let collapse = {
         let store = store.clone();
         Button::new("servers-collapse")
@@ -738,6 +751,120 @@ fn group_head(
             c.child(div().px_3().pb_1().text_xs().text_color(theme.danger).child(e))
         })
         .into_any_element()
+}
+
+/// A server being made: its name, what the job is doing with a progress
+/// bar and Cancel; then Ready with Start and Open, or a grey Cancelled, or
+/// what went wrong. It stays until opened, started or dismissed.
+fn making_row(
+    m: &Making,
+    store: &Entity<Store>,
+    on_pick: Rc<dyn Fn(PathBuf, &mut Window, &mut App)>,
+    cx: &App,
+) -> Option<AnyElement> {
+    let s = store.read(cx);
+    // Its task was cleared from Tasks: the row goes too.
+    let Some(j) = s.job_state(m.job) else {
+        s.forget_making(m.job);
+        return None;
+    };
+    let theme = cx.theme();
+    let ok = j.done && j.error.is_none();
+    let (line, color) = if !j.done {
+        (if j.detail.is_empty() { "Getting ready".to_string() } else { j.detail.clone() }, theme.muted_foreground)
+    } else if j.cancelled {
+        ("Cancelled. Nothing was made.".to_string(), theme.muted_foreground)
+    } else if let Some(e) = &j.error {
+        (e.lines().next().unwrap_or_default().to_string(), theme.danger)
+    } else if m.start {
+        (format!("{} · starting", j.detail), theme.success)
+    } else {
+        (j.detail.clone(), theme.success)
+    };
+    let job = m.job;
+    let key = |what: &str| ElementId::Name(format!("making-{what}:{job}").into());
+    let buttons = h_flex().flex_none().gap_1().map(|r| {
+        if !j.done {
+            let store = store.clone();
+            return r.child(
+                Button::new(key("cancel"))
+                    .outline()
+                    .xsmall()
+                    .label("Cancel")
+                    .on_click(move |_, _, cx| store.read(cx).jobs().cancel(job)),
+            );
+        }
+        if ok {
+            let open = {
+                let (store, pick, root) = (store.clone(), on_pick.clone(), m.root.clone());
+                Button::new(key("open")).outline().xsmall().label("Open").on_click(move |_, window, cx| {
+                    store.read(cx).forget_making(job);
+                    if let Some(r) = &root {
+                        pick(r.clone(), window, cx);
+                    }
+                    cx.refresh_windows();
+                })
+            };
+            let start = (!m.start && m.root.is_some()).then(|| {
+                let (store, pick, made) = (store.clone(), on_pick.clone(), m.clone());
+                // Start is green, as everywhere.
+                Button::new(key("start")).success().xsmall().icon(IconName::Play).label("Start").on_click(move |_, window, cx| {
+                    store.update(cx, |s, cx| {
+                        s.start_made(&made, cx);
+                        s.forget_making(job);
+                    });
+                    if let Some(r) = &made.root {
+                        pick(r.clone(), window, cx);
+                    }
+                })
+            });
+            return r.children(start).child(open);
+        }
+        let failed = j.error.clone().filter(|_| !j.cancelled).map(|e| format!("{}: {e}", j.title));
+        let store = store.clone();
+        r.children(failed.map(|d| {
+            Button::new(key("copy")).ghost().xsmall().label("Copy details").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(d.clone()))
+            })
+        }))
+        .child(Button::new(key("dismiss")).ghost().xsmall().label("Dismiss").on_click(move |_, _, cx| {
+            let s = store.read(cx);
+            s.forget_making(job);
+            s.jobs().dismiss(job);
+            cx.refresh_windows();
+        }))
+    });
+    let progress = (!j.done).then(|| {
+        let fill = j.progress.unwrap_or(0.0).clamp(0.0, 1.0);
+        div()
+            .mt_1()
+            .h(px(3.))
+            .w_full()
+            .rounded_full()
+            .bg(theme.border)
+            .child(div().h_full().rounded_full().bg(theme.primary).w(relative(fill.max(0.03))))
+    });
+    Some(
+        h_flex()
+            .id(key("row"))
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded(theme.radius)
+            .when(ok, |r| r.bg(theme.success.opacity(widgets::alpha::SELECTED)))
+            .when(!ok, |r| r.hover(|st| widgets::row_hover(st, cx)))
+            .child(server_thumb(None, &m.name, rems(2.25), None, cx).when(!j.done, |t| t.opacity(0.6)))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().font_medium().truncate().child(m.name.clone()))
+                    .child(div().text_xs().truncate().text_color(color).child(line))
+                    .children(progress),
+            )
+            .child(buttons)
+            .into_any_element(),
+    )
 }
 
 /// The quiet line under a server's name: its address on a Hopper Server,

@@ -12,6 +12,7 @@
   import { followJob } from './lib/jobs.js';
   import { session } from './lib/me.svelte.js';
   import { bytes } from './lib/format.js';
+  import { track } from './lib/making.svelte.js';
   import { uploadIncoming } from './lib/upload.js';
   import { dialog } from './lib/dialog.svelte.js';
   import { rightClear } from './lib/rightclear.js';
@@ -67,6 +68,8 @@
   let memTouched = $state(false);
   // The line in players' server lists; empty: the name.
   let motd = $state('');
+  // Start it once it's made (the server list does, when its row says Ready).
+  let startNow = $state(false);
   let port = $state('');
   let router = $state(null);
   let hostInfo = $state(null);
@@ -408,8 +411,11 @@
         else if (from === 'zip') req = post('/servers/import-zip', { ...common, upload: upload || null, path: zipPath || null, ...(needsPick ? { mc_version: mc, loader: loaderId() } : {}) });
         else req = post('/servers/create-from-pack', { ...common, source: pack.source, project: pack.id, file: packFile });
         const { job } = await req;
-        busy = 'Starting';
-        r = await followJob(job, (st) => (busy = st.detail || 'Working'));
+        // The server list shows it from here, with progress and Cancel, as
+        // desktop does; the dialog is done.
+        track(job, name.trim() || pack?.name || 'New server', startNow);
+        close();
+        return;
       }
       if (from === 'folder' && r?.warnings?.length) say(`${!copy ? 'Added. It runs where it is. ' : ''}${r.warnings.join(' ')}`, true);
       else say(from === 'folder' && !copy ? 'Added. It runs where it is.' : `Made ${name.trim() || 'the server'}${r?.left_out ? `: ${r.left_out} client-only mods left out (see left-out-client-mods.txt)` : ''}${r?.missing ? `. ${r.missing} mods can only be downloaded from CurseForge: see missing-mods.txt in the server folder` : ''}`);
@@ -666,6 +672,7 @@
         <div class="f"><span class="lbl">EULA</span>
           <div class="row eula small"><label class="row"><input type="checkbox" bind:checked={eula} disabled={!!busy} /><span>I agree to the Minecraft EULA</span></label>
             <a class="btn sm ghost" href="https://aka.ms/MinecraftEULA" target="_blank" rel="noreferrer">Read it</a></div>
+          <div class="row eula small"><label class="row"><input type="checkbox" bind:checked={startNow} disabled={!!busy} /><span>Start it when it's ready</span></label></div>
         </div>
       {/if}
     </div>

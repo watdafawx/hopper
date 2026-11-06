@@ -197,6 +197,11 @@ impl AppView {
             cx.observe_window_activation(window, |_, _, cx| cx.notify()),
             cx.observe(&tasks, |_, _, cx| cx.notify()),
             cx.subscribe_in(&store, window, |this, _, event, window, cx| match event {
+                StoreEvent::BrowsePacksFor(place) => {
+                    let place = place.clone();
+                    this.browse.update(cx, |b, cx| b.browse_packs_for_server(place, cx));
+                    this.go(Page::Browse, cx);
+                }
                 StoreEvent::GameStarted => {
                     if this.store.read(cx).settings().minimize_while_playing {
                         window.minimize_window();

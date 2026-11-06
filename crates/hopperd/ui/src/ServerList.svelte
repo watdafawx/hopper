@@ -14,6 +14,7 @@
   import { stateText, stateKey, stateTip, bootText, loaderText } from './lib/format.js';
   import Avatar from './Avatar.svelte';
   import Progress from './Progress.svelte';
+  import { making, cancel, forget } from './lib/making.svelte.js';
 
   let { selected = null, owner = false, canPower = true, onNew, onRescan } = $props();
 
@@ -41,6 +42,10 @@
 
   const alive = (s) => s.state === 'running' || s.state === 'starting' || s.state === 'stopping';
   const servers = $derived([...live.servers].sort((a, b) => Number(alive(b)) - Number(alive(a))));
+  // A server whose Ready row is up shows once, as that row.
+  const shown = $derived(servers.filter((s) => !making.some((m) => m.state === 'ready' && m.id === s.id)));
+  const openMade = (m) => { forget(m.job); if (m.id) location.hash = `/server/${encodeURIComponent(m.id)}/console`; };
+  const startMade = (m) => { forget(m.job); if (m.id) { power({ id: m.id, name: m.name, state: 'stopped' }, 'start'); location.hash = `/server/${encodeURIComponent(m.id)}/console`; } };
   const loading = $derived(!live.connected && !live.servers.length);
 
   /** The pill: players while it runs, else its state; none when stopped. */
@@ -188,7 +193,27 @@
     {#if loading}
       <div class="skels">{#each [0, 1, 2] as i (i)}<div class="skel"><i></i></div>{/each}</div>
     {/if}
-    {#each servers as s (s.id)}
+    {#each making as m (m.job)}
+      <div class="srv making" class:ready={m.state === 'ready'}>
+        <div class="line">
+          <span class="dot {m.state === 'failed' ? 'crashed' : m.state === 'ready' ? 'running' : 'starting'}"></span>
+          <Avatar server={{ name: m.name }} cls="sic" />
+          <span class="nm">{m.name}</span>
+        </div>
+        <div class="cap mk" class:bad={m.state === 'failed'} class:ok={m.state === 'ready'} title={m.error || m.detail}>
+          {m.state === 'running' ? m.detail || 'Getting ready' : m.state === 'cancelled' ? 'Cancelled. Nothing was made.' : m.state === 'failed' ? m.error.split('\n')[0] : `${m.detail || 'Ready'}${m.start ? ' · starting' : ''}`}
+        </div>
+        {#if m.state === 'running'}<div class="mkbar"><i style:width="{Math.max(3, (m.progress || 0) * 100)}%"></i></div>{/if}
+        <div class="mkact">
+          {#if m.state === 'running'}<button class="btn sm" onclick={() => cancel(m.job)}>Cancel</button>
+          {:else if m.state === 'ready'}
+            {#if !m.start && canPower}<button class="btn sm go" onclick={() => startMade(m)}><Play size={12} />Start</button>{/if}
+            <button class="btn sm" onclick={() => openMade(m)}>Open</button>
+          {:else}<button class="btn sm ghost" onclick={() => forget(m.job)}>Dismiss</button>{/if}
+        </div>
+      </div>
+    {/each}
+    {#each shown as s (s.id)}
       {@const p = pill(s)}
       {@const cap = caption(s)}
       {@const up = packUpdates.byId[s.id]}
@@ -203,7 +228,7 @@
         {#if s.progress}<Progress server={s} compact />{:else if cap}<div class="cap">{cap}</div>{/if}
       </a>
     {:else}
-      {#if !loading}
+      {#if !loading && !making.length}
         <div class="empty-state">
           <span class="es-ic"><Server size={18} /></span>
           <b>No servers yet</b>
@@ -253,6 +278,13 @@
   .nm { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cap { padding-left: 44px; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .upd { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 0 2px var(--acc-dim); flex: none; }
+  /* A server being made: desktop's making row. */
+  .making.ready { background: #22c55e14; }
+  .mk.bad { color: var(--red); }
+  .mk.ok { color: var(--green); }
+  .mkbar { margin-left: 44px; height: 3px; border-radius: 2px; background: var(--line2); overflow: hidden; }
+  .mkbar i { display: block; height: 100%; background: var(--acc); }
+  .mkact { display: flex; gap: 6px; padding-left: 44px; }
   .skels { display: flex; flex-direction: column; }
   .rmenu { position: fixed; z-index: 66; }
   .tile { position: relative; width: 44px; height: 44px; flex: none; display: grid; place-items: center; border: 1px solid var(--line); border-radius: var(--radius-lg); color: var(--text); font-size: 12.5px; font-weight: 600; }
