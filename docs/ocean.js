@@ -11,7 +11,7 @@
 
   const CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   const CELL_H = 16, FONT = 11, GAP = 3; // GAP: extra px between letters
-  const FONT_CSS = `500 ${FONT}px "JetBrains Mono", ui-monospace, Consolas, monospace`;
+  const FONT_CSS = `500 ${FONT}px "IBM Plex Mono", ui-monospace, Consolas, monospace`;
   // Brightness bands for the letters, then two for ripples.
   const INK = [.035, .06, .09, .13, .18].map(a => `rgba(200,205,215,${a})`);
   const GLOW = ['rgba(249,115,22,.45)', 'rgba(253,170,100,.75)'];

@@ -13,7 +13,7 @@
 <link rel="icon" href="favicon.png">
 <script>document.documentElement.className="js"</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#0c0c0e;--bg2:#121214;--panel:#16161a;--panel2:#1b1b20;--line:#26262c;
@@ -23,11 +23,12 @@
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html{scroll-behavior:smooth}
-body{background:var(--bg);color:var(--fg);font:16px/1.6 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+body{background:var(--bg);color:var(--fg);font:16px/1.6 "IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+h1,h2,h3,.brand,.strip b,.step::before{font-family:Archivo,"IBM Plex Sans",system-ui,"Segoe UI",sans-serif}
 a{color:inherit;text-decoration:none}
 img{display:block;max-width:100%}
 .wrap{max-width:var(--max);margin:0 auto;padding:0 16px}
-code,.mono{font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;font-size:.88em}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,Consolas,monospace;font-size:.88em}
 code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px}
 
 /* ascii ocean */
@@ -75,7 +76,7 @@ h1 em{font-style:normal;background:linear-gradient(90deg,#fb923c,#f97316 50%,#ea
 
 /* sections */
 section{padding:96px 0 0}
-.eyebrow{font:500 12px "JetBrains Mono",monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--acc)}
+.eyebrow{font:500 12px "IBM Plex Mono",ui-monospace,Consolas,monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--acc)}
 h2{font-size:clamp(28px,4vw,42px);line-height:1.12;letter-spacing:-.025em;font-weight:800;margin-top:10px}
 .sub{color:var(--mut);font-size:18px;max-width:640px;margin-top:12px}
 .head{margin-bottom:40px}
@@ -160,7 +161,7 @@ footer a:hover{color:var(--fg)}
 .limits li::before{content:"";position:absolute;left:0;top:10px;width:6px;height:6px;border-radius:50%;background:var(--dim)}
 .limits b{color:#d4d4d8;font-weight:600}
 .hack{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
-.hack pre{margin-top:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;font:13px/1.6 "JetBrains Mono",monospace;color:#d4d4d8}
+.hack pre{margin-top:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;font:13px/1.6 "IBM Plex Mono",ui-monospace,Consolas,monospace;color:#d4d4d8}
 @media (max-width:900px){.hack,.limits{grid-template-columns:minmax(0,1fr)}}
 
 /* hopper server */
@@ -173,9 +174,9 @@ footer a:hover{color:var(--fg)}
 .dl .plat{font-size:13.5px;color:var(--dim);margin-bottom:16px}
 .dl ol{margin:16px 0 0 18px;display:grid;gap:8px;font-size:14.5px;color:var(--mut)}
 .dl ol a,.dl p a{color:var(--acc)}
-.dl pre{margin-top:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;font:12.5px/1.6 "JetBrains Mono",monospace;color:#d4d4d8;white-space:pre}
+.dl pre{margin-top:12px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px 14px;overflow-x:auto;font:12.5px/1.6 "IBM Plex Mono",ui-monospace,Consolas,monospace;color:#d4d4d8;white-space:pre}
 .ptabs{display:flex;gap:22px;border-bottom:1px solid var(--line);margin-top:18px}
-.ptabs button{background:none;border:0;color:var(--mut);font:600 14px Inter,system-ui,sans-serif;padding:8px 0;cursor:pointer;box-shadow:inset 0 -2px transparent}
+.ptabs button{background:none;border:0;color:var(--mut);font:600 14px "IBM Plex Sans",system-ui,"Segoe UI",sans-serif;padding:8px 0;cursor:pointer;box-shadow:inset 0 -2px transparent}
 .ptabs button[aria-selected=true]{color:var(--fg);box-shadow:inset 0 -2px var(--acc)}
 .ptabs button:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
 .ppane{display:none;padding-top:6px}.ppane.on{display:block}
