@@ -495,6 +495,11 @@ pub fn advice(text: &str, log: &str, native: &str, server: bool) -> String {
             "This error came while the loader was undoing the {what}'s registries after an earlier error, so it isn't the cause. The first error is in the log of that start (logs/latest.log, or debug.log): look for \"Caught exception during event\" and the mod it names."
         );
     }
+    // The window changed size while the game was loading, and no mod did it:
+    // the player (or Windows) can avoid it next time.
+    if !server && crate::crashengine::resized_too_early(text) == Some(crate::crashengine::Resize::Outside) {
+        return "The game window changed size (resized, maximized or moved to another screen) while the game was still loading, and a mod wasn't ready for that. Start the game again and leave the window alone until the title screen shows.".into();
+    }
     // A loop no report frame explains, and no mod in the log either: say
     // what happened and where to look.
     if let Some(l) = crate::crashloop::truncated(text)
