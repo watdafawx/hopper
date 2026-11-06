@@ -47,6 +47,36 @@ pub fn turn_off(root: &Path, files: Vec<String>) -> anyhow::Result<String> {
     Ok(if n == 1 { "Turned off 1 mod.".into() } else { format!("Turned off {n} mods.") })
 }
 
+/// Changes the config setting the crash points at (through Hopper Server
+/// when it manages the folder; it only does the last start's crash). Says
+/// what happened in a sentence.
+pub fn switch_off(root: &Path, sw: &hopper::configswitch::Switch) -> anyhow::Result<String> {
+    match hopper::hopperd::locate(root) {
+        Some(r) => {
+            let (c, id, _) = r?;
+            c.post(&format!("/servers/{}/crash/switch-off", hopper::hopperd::enc(&id)), serde_json::json!({ "file": sw.file, "key": sw.key }))?;
+        }
+        None => {
+            hopper::configswitch::turn_off(root, sw)?;
+        }
+    }
+    Ok(format!("{}. Start the server to check the crash is gone.", sw.done()))
+}
+
+/// Undoes [`switch_off`]: the setting is what it was at the crash again.
+pub fn switch_on(root: &Path, sw: &hopper::configswitch::Switch) -> anyhow::Result<String> {
+    match hopper::hopperd::locate(root) {
+        Some(r) => {
+            let (c, id, _) = r?;
+            c.post(&format!("/servers/{}/crash/switch-on", hopper::hopperd::enc(&id)), serde_json::json!({ "file": sw.file, "key": sw.key }))?;
+        }
+        None => {
+            hopper::configswitch::turn_on(root, sw)?;
+        }
+    }
+    Ok(format!("{} = {} in {} again.", sw.key, sw.from_text(), sw.file_name()))
+}
+
 /// The report's path under the server folder ("crash-reports/crash-….txt"),
 /// whether the crash came from a folder or from Hopper Server.
 pub fn report_rel(c: &Crash) -> Option<String> {
