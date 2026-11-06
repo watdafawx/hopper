@@ -607,6 +607,11 @@ pub fn command(
     } else if let Some(s) = v["minecraftArguments"].as_str() {
         args.extend(s.split_whitespace().map(&sub));
     }
+    if inst.settings.window == crate::instances::WindowMode::Fullscreen
+        && !args.iter().any(|a| a == "--fullscreen")
+    {
+        args.push("--fullscreen".into());
+    }
     args
 }
 
@@ -633,7 +638,82 @@ pub fn launch(
         .stderr(Stdio::from(log))
         .spawn()
         .with_context(|| format!("starting {}", p.java.display()))?;
+    if inst.settings.window == crate::instances::WindowMode::Maximized {
+        maximize_when_shown(child.id());
+    }
     Ok(child)
+}
+
+/// Minecraft has no "start maximized" option, so this maximizes the game's
+/// windows as they appear. Forge and older NeoForge show a loading window
+/// before the game's own, so it keeps watching (each window once, so a
+/// player who restores one keeps it) until the game exits or ten minutes
+/// pass.
+#[cfg(windows)]
+fn maximize_when_shown(pid: u32) {
+    use std::collections::HashSet;
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::core::BOOL;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId, GW_OWNER, IsWindowVisible,
+        SW_MAXIMIZE, ShowWindow,
+    };
+    struct Find {
+        pid: u32,
+        found: Vec<isize>,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, l: LPARAM) -> BOOL {
+        let f = unsafe { &mut *(l.0 as *mut Find) };
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        // Visible, titled, top-level game windows; not tool or owned popups.
+        let owned = unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|o| !o.is_invalid());
+        if pid == f.pid
+            && unsafe { IsWindowVisible(hwnd) }.as_bool()
+            && unsafe { GetWindowTextLengthW(hwnd) } > 0
+            && !owned
+        {
+            f.found.push(hwnd.0 as isize);
+        }
+        BOOL(1)
+    }
+    std::thread::spawn(move || {
+        let mut done: HashSet<isize> = HashSet::new();
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(600) {
+            if !alive(pid) {
+                return;
+            }
+            let mut f = Find { pid, found: Vec::new() };
+            unsafe {
+                let _ = EnumWindows(Some(each), LPARAM(&mut f as *mut Find as isize));
+            }
+            for h in f.found {
+                if done.insert(h) {
+                    unsafe {
+                        let _ = ShowWindow(HWND(h as *mut _), SW_MAXIMIZE);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn maximize_when_shown(_pid: u32) {}
+
+/// The process is still running.
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else { return false };
+        let running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+        let _ = CloseHandle(h);
+        running
+    }
 }
 
 #[cfg(test)]

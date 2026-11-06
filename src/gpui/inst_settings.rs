@@ -1,5 +1,5 @@
 //! An instance's Settings tab: name, Minecraft and loader, memory and Java,
-//! window size and which updates to offer.
+//! how the game's window opens and which updates to offer.
 
 use crate::java_form::{FIELD_W, FORM_W, JavaForm, settings_form};
 use crate::store::{Msg, Store, loader_label, open_path};
@@ -35,6 +35,7 @@ pub struct InstanceSettings {
     name: Entity<InputState>,
     width: Entity<InputState>,
     height: Entity<InputState>,
+    window_mode: hopper::instances::WindowMode,
     java: Entity<JavaForm>,
     game_version: String,
     loader: String,
@@ -77,6 +78,7 @@ impl InstanceSettings {
             name,
             width,
             height,
+            window_mode: Default::default(),
             java,
             game_version: String::new(),
             loader: String::new(),
@@ -132,6 +134,7 @@ impl InstanceSettings {
         self.loader = inst.loader.clone();
         self.channel = s.release_channel;
         self.use_my_options = s.use_my_options;
+        self.window_mode = s.window;
         self.has_pack = inst.pack.is_some();
         self.want_loaders(cx);
         self.check_cf(inst, cx);
@@ -402,6 +405,7 @@ impl InstanceSettings {
         inst.settings.java_args = args;
         inst.settings.release_channel = self.channel;
         inst.settings.use_my_options = self.use_my_options;
+        inst.settings.window = self.window_mode;
         if !self.has_pack {
             inst.game_version = self.game_version.clone();
         }
@@ -423,8 +427,8 @@ impl InstanceSettings {
         edited.name != saved.name
             || edited.game_version != saved.game_version
             || edited.loader != saved.loader
-            || (a.memory_mb, a.width, a.height, a.release_channel, a.use_my_options)
-                != (b.memory_mb, b.width, b.height, b.release_channel, b.use_my_options)
+            || (a.memory_mb, a.width, a.height, a.window, a.release_channel, a.use_my_options)
+                != (b.memory_mb, b.width, b.height, b.window, b.release_channel, b.use_my_options)
             || a.java_path != b.java_path
             || a.java_args.trim() != b.java_args.trim()
     }
@@ -632,15 +636,41 @@ impl Render for InstanceSettings {
             .child(Field::new().label("Minecraft").child(minecraft))
             .child(Field::new().label("Loader").items_start().child(loader));
         let bottom = settings_form(rem)
-            .child(
-                Field::new().label("Window size").child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().w_24().child(Input::new(&self.width)))
-                        .child(widgets::caption("×", cx))
-                        .child(div().w_24().child(Input::new(&self.height))),
-                ),
-            )
+            .child({
+                use hopper::instances::WindowMode as W;
+                const MODES: [W; 3] = [W::Window, W::Maximized, W::Fullscreen];
+                let mode = self.window_mode;
+                let hint = match mode {
+                    W::Window => "Minecraft opens in a window this size.",
+                    W::Maximized => "Minecraft opens filling the screen, with the taskbar showing.",
+                    W::Fullscreen => "Minecraft opens fullscreen. F11 switches to a window.",
+                };
+                Field::new().label("Window").items_start().child(
+                    v_flex()
+                        .gap_1p5()
+                        .child(
+                            widgets::Segmented::new("window-mode")
+                                .selected_index(MODES.iter().position(|m| *m == mode).unwrap_or(0))
+                                .child(widgets::SegItem::new().label("Window"))
+                                .child(widgets::SegItem::new().label("Maximized"))
+                                .child(widgets::SegItem::new().label("Fullscreen"))
+                                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                    this.window_mode = MODES[*ix];
+                                    cx.notify();
+                                })),
+                        )
+                        .when(mode == W::Window, |c| {
+                            c.child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().w_24().child(Input::new(&self.width)))
+                                    .child(widgets::caption("×", cx))
+                                    .child(div().w_24().child(Input::new(&self.height))),
+                            )
+                        })
+                        .child(widgets::caption(hint, cx).text_xs()),
+                )
+            })
             .child(
                 Field::new()
                     .label("Updates")

@@ -181,6 +181,9 @@ pub struct LaunchSettings {
     pub java_path: String,
     pub width: u32,
     pub height: u32,
+    /// How the game's window opens; `width` × `height` is its size as a
+    /// window (and when leaving fullscreen).
+    pub window: WindowMode,
     /// Least stable file type updates may offer: 1 release, 2 beta, 3 alpha.
     pub release_channel: u32,
     /// Apply the player's Minecraft settings (Settings > Minecraft) here.
@@ -196,9 +199,22 @@ impl Default for LaunchSettings {
             width: 1280,
             release_channel: 1,
             height: 720,
+            window: WindowMode::Window,
             use_my_options: true,
         }
     }
+}
+
+/// How Minecraft's window opens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowMode {
+    /// A window of the instance's width × height.
+    #[default]
+    Window,
+    /// Maximized once it shows (Windows only; elsewhere a window).
+    Maximized,
+    Fullscreen,
 }
 
 impl Instance {
