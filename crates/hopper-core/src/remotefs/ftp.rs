@@ -111,6 +111,27 @@ mod tests {
     use crate::model::SyncOp;
     use crate::remotefs::{Mirror, refresh_with, servers};
 
+    /// A free port for the test server. Fixed ports made two test runs at once
+    /// (several sessions, or a run and CI-like reruns) talk to each other's
+    /// server and hang or fail.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
+    }
+
+    /// `n` free ports in a row for passive data connections, starting at a
+    /// spot that depends on this process so parallel runs rarely overlap.
+    fn free_range(n: u16) -> std::ops::RangeInclusive<u16> {
+        // The tests of this process run side by side: each takes its own slice.
+        static TAKEN: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        let mut start = 30000 + (std::process::id() % 20000) as u16 + TAKEN.fetch_add(n + 1, std::sync::atomic::Ordering::Relaxed);
+        loop {
+            if (start..start + n).all(|p| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()) {
+                return start..=start + n - 1;
+            }
+            start += n + 1;
+        }
+    }
+
     /// An FTP server on localhost over `root` (any user and password), with
     /// TLS when `cert` is given.
     fn serve(root: std::path::PathBuf, port: u16, passive: std::ops::RangeInclusive<u16>, cert: Option<(std::path::PathBuf, std::path::PathBuf)>) {
@@ -183,8 +204,9 @@ mod tests {
 
     #[test]
     fn plain_ftp_round_trip() {
-        serve(server_tree("plain"), 32121, 32200..=32220, None);
-        round_trip(Ftp::connect("127.0.0.1", 32121, "u", "p", None).unwrap(), "plain");
+        let port = free_port();
+        serve(server_tree("plain"), port, free_range(21), None);
+        round_trip(Ftp::connect("127.0.0.1", port, "u", "p", None).unwrap(), "plain");
     }
 
     #[test]
@@ -194,10 +216,11 @@ mod tests {
         let (c, k) = (dir.join("cert.pem"), dir.join("key.pem"));
         std::fs::write(&c, ck.cert.pem()).unwrap();
         std::fs::write(&k, ck.key_pair.serialize_pem()).unwrap();
-        serve(server_tree("tls"), 32122, 32230..=32250, Some((c, k)));
+        let port = free_port();
+        serve(server_tree("tls"), port, free_range(21), Some((c, k)));
         // Its own certificate: refused unless the site says self-signed.
-        assert!(Ftp::connect("127.0.0.1", 32122, "u", "p", Some(false)).is_err());
-        round_trip(Ftp::connect("127.0.0.1", 32122, "u", "p", Some(true)).unwrap(), "tls");
+        assert!(Ftp::connect("127.0.0.1", port, "u", "p", Some(false)).is_err());
+        round_trip(Ftp::connect("127.0.0.1", port, "u", "p", Some(true)).unwrap(), "tls");
     }
 }
 
