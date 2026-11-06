@@ -103,7 +103,7 @@ impl russh::server::Handler for SshSession {
     type Error = anyhow::Error;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-        if !self.app.limiter.allow(self.ip, true) {
+        if !self.app.limiter.allow(self.ip, self.ip, true) {
             log::info!("SFTP sign-in from {}: too many tries, wait a minute", self.ip);
             return Ok(retry());
         }
@@ -115,6 +115,7 @@ impl russh::server::Handler for SshSession {
             who: res.as_ref().map_or_else(|_| "-".into(), |w| w.name()),
             role: res.as_ref().map_or_else(|_| String::new(), |w| w.role_name().into()),
             ip: self.ip.to_string(),
+            proxy: String::new(),
             net: crate::net::Net::of(self.ip),
             method: "SFTP".into(),
             path: "sign-in".into(),
@@ -264,6 +265,7 @@ impl Sftp {
             who: self.who.name(),
             role: self.who.role_name().into(),
             ip: self.ip.to_string(),
+            proxy: String::new(),
             net: crate::net::Net::of(self.ip),
             method: "SFTP".into(),
             path: format!("{what} {server}/{rel}"),

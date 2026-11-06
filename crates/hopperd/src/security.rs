@@ -23,28 +23,52 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const LIMIT_ALL: u32 = 1200;
 /// Sign-in, setup and pairing requests per minute from one address.
 const LIMIT_AUTH: u32 = 20;
+/// A reverse proxy on this PC or the LAN (Nginx Proxy Manager, Caddy)
+/// sends everyone's requests from its own address, so each person is
+/// counted by the address it passes on. The proxy as a whole still gets
+/// a ceiling, because a LAN device can make that header up to look like
+/// many people: requests per minute through one proxy address...
+const PROXY_ALL: u32 = LIMIT_ALL * 10;
+/// ...and sign-in, setup and pairing requests through it.
+const PROXY_AUTH: u32 = LIMIT_AUTH * 3;
+
+/// When a minute's count started, all requests, guessable ones.
+type Count = (Instant, u32, u32);
 
 #[derive(Default)]
 pub struct Limiter {
-    seen: Mutex<HashMap<IpAddr, (Instant, u32, u32)>>,
+    seen: Mutex<HashMap<IpAddr, Count>>,
+    proxies: Mutex<HashMap<IpAddr, Count>>,
+}
+
+/// Adds a request to `ip`'s count for this minute and returns the count.
+fn bump(m: &mut HashMap<IpAddr, Count>, ip: IpAddr, auth: bool) -> (u32, u32) {
+    if m.len() > 10_000 {
+        m.retain(|_, (at, _, _)| at.elapsed() < Duration::from_secs(60));
+    }
+    let e = m.entry(ip).or_insert((Instant::now(), 0, 0));
+    if e.0.elapsed() >= Duration::from_secs(60) {
+        *e = (Instant::now(), 0, 0);
+    }
+    e.1 += 1;
+    if auth {
+        e.2 += 1;
+    }
+    (e.1, e.2)
 }
 
 impl Limiter {
-    /// Counts a request; false when the address is over its limit.
-    pub fn allow(&self, ip: IpAddr, auth: bool) -> bool {
-        let mut m = self.seen.lock().unwrap();
-        if m.len() > 10_000 {
-            m.retain(|_, (at, _, _)| at.elapsed() < Duration::from_secs(60));
+    /// Counts a request from `client` (the address a private proxy passed
+    /// on, else the peer); false when it's over its limit, or the proxy
+    /// it came through is over the proxy's.
+    pub fn allow(&self, peer: IpAddr, client: IpAddr, auth: bool) -> bool {
+        let (all, guess) = bump(&mut self.seen.lock().unwrap(), client, auth);
+        let mut ok = all <= LIMIT_ALL && (!auth || guess <= LIMIT_AUTH);
+        if client != peer {
+            let (all, guess) = bump(&mut self.proxies.lock().unwrap(), peer, auth);
+            ok &= all <= PROXY_ALL && (!auth || guess <= PROXY_AUTH);
         }
-        let e = m.entry(ip).or_insert((Instant::now(), 0, 0));
-        if e.0.elapsed() >= Duration::from_secs(60) {
-            *e = (Instant::now(), 0, 0);
-        }
-        e.1 += 1;
-        if auth {
-            e.2 += 1;
-        }
-        e.1 <= LIMIT_ALL && (!auth || e.2 <= LIMIT_AUTH)
+        ok
     }
 }
 
@@ -62,7 +86,12 @@ pub struct Event {
     /// token (empty for anonymous requests and older lines).
     #[serde(default)]
     pub role: String,
+    /// The person's address: the one a reverse proxy on this PC or the LAN
+    /// passed on, else the connection's.
     pub ip: String,
+    /// The proxy the request came through, when it came through one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy: String,
     pub net: Net,
     pub method: String,
     pub path: String,
@@ -200,16 +229,21 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
         );
     }
 
-    if api && !app.limiter.allow(ip, is_guessable(&path)) {
+    let from = crate::net::client_ip(ip, req.headers());
+    if api && !app.limiter.allow(ip, from, is_guessable(&path)) {
         return deny(StatusCode::TOO_MANY_REQUESTS, "Too many requests. Wait a minute.");
     }
+
+    // Where the log says a request came from: the person, and the proxy
+    // in between when there is one.
+    let (log_ip, log_net, proxy) = (from.to_string(), Net::of(from), if from == ip { String::new() } else { ip.to_string() });
 
     // Who's asking, for scopes and the log.
     let token = crate::api::token(req.headers()).0;
     let who = if token.is_empty() { None } else { app.auth.check(&token) };
     if let Some(w) = &who {
         if let Some(msg) = refusal(w, &method, &path) {
-            app.audit.record(&Event { at: now(), who: w.name(), role: w.role_name().into(), ip: ip.to_string(), net, method: method.to_string(), path, status: 403 });
+            app.audit.record(&Event { at: now(), who: w.name(), role: w.role_name().into(), ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status: 403 });
             return deny(StatusCode::FORBIDDEN, msg);
         }
     }
@@ -237,7 +271,7 @@ pub async fn guard(State(app): State<Arc<App>>, req: Request, next: Next) -> Res
         let (who_name, role) = who.as_ref().map(|w| (w.name(), w.role_name().to_string())).unwrap_or_else(|| {
             res.extensions().get::<SignedIn>().map(|s| (s.0.clone(), s.1.clone())).unwrap_or_else(|| ("-".into(), String::new()))
         });
-        app.audit.record(&Event { at: now(), who: who_name, role, ip: ip.to_string(), net, method: method.to_string(), path, status });
+        app.audit.record(&Event { at: now(), who: who_name, role, ip: log_ip, proxy, net: log_net, method: method.to_string(), path, status });
     }
     res
 }
@@ -287,10 +321,36 @@ mod tests {
         let l = Limiter::default();
         let ip: IpAddr = "8.8.8.8".parse().unwrap();
         for _ in 0..LIMIT_AUTH {
-            assert!(l.allow(ip, true));
+            assert!(l.allow(ip, ip, true));
         }
-        assert!(!l.allow(ip, true), "sign-ins are limited");
-        assert!(l.allow("8.8.4.4".parse().unwrap(), true), "per address");
+        assert!(!l.allow(ip, ip, true), "sign-ins are limited");
+        let other: IpAddr = "8.8.4.4".parse().unwrap();
+        assert!(l.allow(other, other, true), "per address");
+    }
+
+    #[test]
+    fn limits_behind_a_proxy() {
+        let l = Limiter::default();
+        let proxy: IpAddr = "192.168.50.3".parse().unwrap();
+        let (fox, kimiko): (IpAddr, IpAddr) = ("192.168.50.2".parse().unwrap(), "84.196.98.52".parse().unwrap());
+        // One busy person doesn't use up everyone else's share.
+        for _ in 0..LIMIT_ALL {
+            assert!(l.allow(proxy, fox, false));
+        }
+        assert!(!l.allow(proxy, fox, false), "each person still has a limit");
+        assert!(l.allow(proxy, kimiko, false), "someone else through the same proxy");
+        // Something on the proxy's own PC talking to the panel directly
+        // keeps its own share too.
+        assert!(l.allow(proxy, proxy, false));
+
+        // Made-up addresses don't buy endless sign-in tries.
+        let l = Limiter::default();
+        let mut allowed = 0;
+        for i in 0..PROXY_AUTH * 2 {
+            let fake = IpAddr::from([10, 9, (i / 256) as u8, (i % 256) as u8]);
+            allowed += l.allow(proxy, fake, true) as u32;
+        }
+        assert_eq!(allowed, PROXY_AUTH);
     }
 
     #[test]
@@ -300,7 +360,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let a = Audit::new(&dir);
         for i in 0..3 {
-            a.record(&Event { at: i, who: "owner".into(), role: "owner".into(), ip: "1.2.3.4".into(), net: Net::Internet, method: "POST".into(), path: format!("/p{i}"), status: 200 });
+            a.record(&Event { at: i, who: "owner".into(), role: "owner".into(), ip: "1.2.3.4".into(), proxy: String::new(), net: Net::Internet, method: "POST".into(), path: format!("/p{i}"), status: 200 });
         }
         let r = a.recent(2);
         assert_eq!(r.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["/p2", "/p1"]);

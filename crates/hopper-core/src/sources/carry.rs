@@ -174,7 +174,7 @@ pub fn carry(from: &Path, to: &Path, files: &[String]) {
     }
     let r = match crate::hopperd::locate(to) {
         Some(c) => c.and_then(|(client, id, _)| {
-            client.put(&format!("/api/v1/servers/{}/mods/sources", super::enc(&id)), serde_json::json!({ "pins": pins }))?;
+            client.put(&format!("/servers/{}/mods/sources", super::enc(&id)), serde_json::json!({ "pins": pins }))?;
             Ok(())
         }),
         None => apply(to, &pins).map(|_| ()),

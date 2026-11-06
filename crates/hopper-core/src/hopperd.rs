@@ -532,6 +532,8 @@ impl Client {
     }
 
     fn url(&self, path: &str) -> String {
+        // Paths are relative to /api/v1; passing the prefix too 404s.
+        debug_assert!(!path.starts_with("/api/"), "hopperd path {path} already has the /api/v1 prefix");
         format!("{}/api/v1{path}", self.base)
     }
 

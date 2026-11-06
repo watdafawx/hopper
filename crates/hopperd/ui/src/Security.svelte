@@ -206,7 +206,7 @@
           <tr class:bad={e.status >= 400}>
             <td class="muted nw">{when(e.at)}</td><td>{e.who}{#if e.role && e.role !== 'owner' && e.role !== 'device' && e.role !== 'token'} <span class="tiny muted">{roleLabel(e.role)}</span>{/if}</td>
             <td><span class="chip" class:acc={e.net === 'internet'} class:ts={e.net === 'tailscale'}>{netLabel[e.net]}</span></td>
-            <td class="mono tiny">{e.method} {e.path}</td><td class="muted">{e.status}</td><td class="muted tiny">{e.ip}</td>
+            <td class="mono tiny">{e.method} {e.path}</td><td class="muted">{e.status}</td><td class="muted tiny">{e.ip}{#if e.proxy}{' '}<span title="Came in through the proxy at {e.proxy}">via {e.proxy}</span>{/if}</td>
           </tr>
         {:else}
           <tr><td class="muted small">Nothing yet.</td></tr>

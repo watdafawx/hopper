@@ -187,6 +187,7 @@ fn allowed(app: &App, who: &Who, method: Method, path: String) -> Result<(), Str
             who: who.name(),
             role: who.role_name().into(),
             ip: "mcp".into(),
+            proxy: String::new(),
             net: crate::net::Net::Local,
             method: method.to_string(),
             path,

@@ -67,12 +67,18 @@ impl Net {
     /// peer is itself private: from the internet those headers are just
     /// text anyone can send. Display only; security checks use the peer.
     pub fn client(peer: IpAddr, headers: &axum::http::HeaderMap) -> Net {
-        let direct = Net::of(peer);
-        if !direct.private() {
-            return direct;
-        }
-        forwarded_for(headers).map_or(direct, Net::of)
+        Net::of(client_ip(peer, headers))
     }
+}
+
+/// The address of the person behind a request: the one a private proxy
+/// passed on, else the peer. Only for display and for sharing out rate
+/// limits fairly; anything that grants access uses the peer.
+pub fn client_ip(peer: IpAddr, headers: &axum::http::HeaderMap) -> IpAddr {
+    if !Net::of(peer).private() {
+        return peer;
+    }
+    forwarded_for(headers).unwrap_or(peer)
 }
 
 /// The client address a proxy passed on: the last X-Forwarded-For entry
@@ -207,5 +213,10 @@ mod tests {
         // Junk in the header: fall back to the peer.
         assert_eq!(c("192.168.50.3", &[("x-forwarded-for", "unknown")]), Net::Lan);
         assert_eq!(c("127.0.0.1", &[("x-forwarded-for", "\"[::1]:5000\"")]), Net::Local);
+        // The address itself, for rate limits.
+        let ip = |peer: &str, pairs: &[(&str, &str)]| client_ip(peer.parse().unwrap(), &h(pairs)).to_string();
+        assert_eq!(ip("192.168.50.3", &[("x-forwarded-for", "192.168.50.2")]), "192.168.50.2");
+        assert_eq!(ip("81.2.69.160", &[("x-forwarded-for", "192.168.1.5")]), "81.2.69.160");
+        assert_eq!(ip("192.168.50.3", &[("x-forwarded-for", "unknown")]), "192.168.50.3");
     }
 }
