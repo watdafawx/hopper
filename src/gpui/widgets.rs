@@ -1415,8 +1415,12 @@ pub fn is_primary_click(event: &ClickEvent) -> bool {
 pub fn aux_link_click(url: &str, event: &ClickEvent, in_app: Option<InApp>, window: &mut Window, cx: &mut App) -> bool {
     let ClickEvent::Mouse(c) = event else { return false };
     match c.up.button {
-        MouseButton::Middle => cx.open_url(url),
+        MouseButton::Middle => {
+            log::info!("link: middle-click opens {url} in the browser");
+            cx.open_url(url)
+        }
         MouseButton::Right => {
+            log::info!("link: menu for {url}");
             LINK_MENU.with(|m| *m.borrow_mut() = Some(LinkMenu { url: url.to_string(), at: c.up.position, in_app }));
             window.refresh();
         }
