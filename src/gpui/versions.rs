@@ -37,7 +37,7 @@ pub struct VersionsView {
     entries: Option<Result<Vec<(ChangelogEntry, SharedString)>, String>>,
     all: Vec<cf::File>,
     /// Changelogs of other versions, opened on demand.
-    others: HashMap<u64, Option<Result<SharedString, String>>>,
+    others: HashMap<u64, Option<Result<hopper::changelog_trim::Trimmed, String>>>,
     /// Cards whose "Earlier versions" row is open, by file name.
     earlier_open: std::collections::HashSet<String>,
     /// Server mode: the pack's versions for a server paired with it, which
@@ -136,9 +136,12 @@ impl VersionsView {
         cx.spawn(async move |this, cx| {
             let id = f.id;
             let r = cx
-                .background_spawn(async move { hopper::source::changelog(&f) })
+                .background_spawn(async move {
+                    let md = hopper::richtext::to_markdown(&hopper::source::changelog(&f)?);
+                    // Only its own version's notes; the repeats go behind "Earlier versions".
+                    anyhow::Ok(hopper::changelog_trim::trim_file(&md, &f))
+                })
                 .await
-                .map(|b| SharedString::from(hopper::richtext::to_markdown(&b)))
                 .map_err(|e| format!("{e:#}"));
             this.update(cx, |this, cx| {
                 this.others.insert(id, Some(r));
@@ -192,6 +195,42 @@ impl VersionsView {
     /// own choice in server mode.
     fn mode_root(&self) -> &Path {
         self.server.as_ref().map_or(&self.root, |m| m.info.root.as_path())
+    }
+
+    /// The collapsed "Earlier versions (N)" row of a card, with the cut text
+    /// under it when open. `key` names the card.
+    fn earlier_row(&self, key: String, t: &hopper::changelog_trim::Trimmed, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme().clone();
+        let open = self.earlier_open.contains(&key);
+        let k2 = key.clone();
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .id(ElementId::Name(format!("earlier:{key}").into()))
+                    .gap_1()
+                    .clickable(cx)
+                    .child(
+                        Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
+                            .small()
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(widgets::caption(format!("Earlier versions ({})", t.earlier_count), cx))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.earlier_open.remove(&k2) {
+                            this.earlier_open.insert(k2.clone());
+                        }
+                        cx.notify();
+                    })),
+            )
+            .when(open, |c| {
+                c.child(self.changelog(
+                    ElementId::Name(format!("earlier-cl:{key}").into()),
+                    t.earlier.clone().into(),
+                    cx,
+                ))
+            })
+            .into_any_element()
     }
 
     fn changelog(&self, id: ElementId, md: SharedString, cx: &App) -> AnyElement {
@@ -449,33 +488,12 @@ impl Render for VersionsView {
                         // What the installed version already had, cut from
                         // this card; still there behind a click.
                         .when(e.earlier_count > 0 && !is_same, |c| {
-                            let open = self.earlier_open.contains(&e.name);
-                            let name = e.name.clone();
-                            c.child(
-                                h_flex()
-                                    .id(ElementId::Name(format!("earlier:{}", e.name).into()))
-                                    .gap_1()
-                                    .clickable(cx)
-                                    .child(
-                                        Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight })
-                                            .small()
-                                            .text_color(theme.muted_foreground),
-                                    )
-                                    .child(widgets::caption(format!("Earlier versions ({})", e.earlier_count), cx))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if !this.earlier_open.remove(&name) {
-                                            this.earlier_open.insert(name.clone());
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(open, |c| {
-                                c.child(self.changelog(
-                                    ElementId::Name(format!("earlier-cl:{}", e.name).into()),
-                                    e.earlier.clone().into(),
-                                    cx,
-                                ))
-                            })
+                            let t = hopper::changelog_trim::Trimmed {
+                                earlier: e.earlier.clone(),
+                                earlier_count: e.earlier_count,
+                                ..Default::default()
+                            };
+                            c.child(self.earlier_row(e.name.clone(), &t, cx))
                         })
                 });
                 let clean = self.store.read(cx).settings().clean_update(self.mode_root());
@@ -491,11 +509,15 @@ impl Render for VersionsView {
                             .child(Spinner::new().xsmall())
                             .child(widgets::caption("Loading the changelog", cx))
                             .into_any_element(),
-                        Some(Ok(md)) => self.changelog(
-                            ElementId::Name(format!("other-cl:{}", f.id).into()),
-                            md.clone(),
-                            cx,
-                        ),
+                        Some(Ok(t)) => v_flex()
+                            .gap_2()
+                            .child(self.changelog(
+                                ElementId::Name(format!("other-cl:{}", f.id).into()),
+                                t.newer.clone().into(),
+                                cx,
+                            ))
+                            .when(t.earlier_count > 0, |c| c.child(self.earlier_row(format!("other:{}", f.id), t, cx)))
+                            .into_any_element(),
                         Some(Err(e)) => div()
                             .text_sm()
                             .text_color(theme.danger)
@@ -665,7 +687,7 @@ impl Render for VersionsView {
             Some(Ok(entries)) => entries.iter().map(|(_, md)| md.clone()).collect(),
             _ => Vec::new(),
         };
-        texts.extend(self.others.values().filter_map(|o| o.as_ref()?.as_ref().ok().cloned()));
+        texts.extend(self.others.values().filter_map(|o| o.as_ref()?.as_ref().ok().map(|t| SharedString::from(t.newer.clone()))));
         let bar = widgets::translate_bar("versions-tr", "This changelog", texts, &self.store, cx);
         v_flex()
             .when(loaded, |c| c.h(total_h))

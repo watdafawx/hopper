@@ -34,7 +34,7 @@
     if (open && notes[u.project_id] == null) {
       notes[u.project_id] = '…';
       try {
-        notes[u.project_id] = (await api(`${base}/mods/changelog?project=${u.project_id}&file=${u.file_id}`)).markdown || '';
+        notes[u.project_id] = (await api(`${base}/mods/changelog?full=1&project=${u.project_id}&file=${u.file_id}`)).markdown || '';
       } catch {
         notes[u.project_id] = '';
       }

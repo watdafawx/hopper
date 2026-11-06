@@ -16,6 +16,8 @@
   let busy = $state('');
   let open = $state({});
   let earlierOpen = $state({});
+  // "Other versions" cards: what a file's own changelog repeats of older releases.
+  let otherEarlier = $state({});
 
   const base = $derived(`/servers/${encodeURIComponent(server.id)}`);
   const alive = $derived(['running', 'starting', 'stopping'].includes(server.state));
@@ -28,6 +30,7 @@
     error = '';
     open = {};
     earlierOpen = {};
+    otherEarlier = {};
     if (!mod.source) return;
     try {
       info = await api(`${base}/mods/changelogs?file=${encodeURIComponent(mod.file)}`);
@@ -43,7 +46,9 @@
     }
     open[o.file_id] = null;
     try {
-      open[o.file_id] = (await api(`${base}/mods/changelog?project=${info.project_id}&file=${o.file_id}`)).markdown || '';
+      const r = await api(`${base}/mods/changelog?project=${info.project_id}&file=${o.file_id}`);
+      open[o.file_id] = r.markdown || '';
+      if (r.earlier_count) otherEarlier[o.file_id] = { text: r.earlier, count: r.earlier_count };
     } catch (e) {
       open[o.file_id] = `!${e.message}`;
     }
@@ -126,6 +131,10 @@
           {#if open[o.file_id].startsWith('!')}<div class="err small">{open[o.file_id].slice(1)}</div>
           {:else if open[o.file_id].trim()}<div class="notes"><Changelog markdown={open[o.file_id]} /></div>
           {:else}<div class="small muted">No changelog for this version.</div>{/if}
+          {#if otherEarlier[o.file_id]}
+            <button class="row ohead small muted" onclick={() => (earlierOpen['o' + o.file_id] = !earlierOpen['o' + o.file_id])}>{#if earlierOpen['o' + o.file_id]}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}Earlier versions ({otherEarlier[o.file_id].count})</button>
+            {#if earlierOpen['o' + o.file_id]}<div class="notes"><Changelog markdown={otherEarlier[o.file_id].text} /></div>{/if}
+          {/if}
         {/if}
       </div>
     {/each}

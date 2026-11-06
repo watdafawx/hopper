@@ -59,19 +59,49 @@ pub fn installed_versions<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<S
     out
 }
 
-/// A heading line's version numbers, or `None` when the line isn't a
-/// version heading: a `#` line, a line that is all bold, or a short bare
-/// line like `5.3.6` or `v5.3.6 Release`.
-fn heading_versions(line: &str) -> Option<Vec<String>> {
+/// How a heading is marked: the kind (`#` lines, bold lines, bare lines) and
+/// how many `#`. Sections are the headings of one level, so a sub-heading
+/// that mentions a version ("### Fixes for 1.21.1") stays inside its section.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Level(u8, usize);
+
+struct Head {
+    line: usize,
+    level: Level,
+    versions: Vec<String>,
+}
+
+fn heads_of(lines: &[&str]) -> Vec<Head> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(line, l)| heading_versions(l).map(|(level, versions)| Head { line, level, versions }))
+        .collect()
+}
+
+/// The headings that start a section like `heads[k]` does: its kind, with
+/// as many `#` or fewer.
+fn same_level(heads: &[Head], k: usize) -> Vec<&Head> {
+    let me = heads[k].level;
+    heads.iter().filter(|h| h.level.0 == me.0 && h.level.1 <= me.1).collect()
+}
+
+/// A heading line's level and version numbers, or `None` when the line
+/// isn't a version heading: a `#` line, a line that is all bold, or a short
+/// bare line like `5.3.6` or `v5.3.6 Release`.
+fn heading_versions(line: &str) -> Option<(Level, Vec<String>)> {
     let t = line.trim();
     if t.is_empty() {
         return None;
     }
+    let mut level = Level(0, t.len() - t.trim_start_matches('#').len());
     let text = if t.starts_with('#') {
         t.trim_start_matches('#').trim()
     } else if (t.starts_with("**") && t.ends_with("**") && t.len() > 4) || (t.starts_with("__") && t.ends_with("__") && t.len() > 4) {
+        level = Level(1, 0);
         t[2..t.len() - 2].trim()
     } else {
+        level = Level(2, 0);
         // Bare: short, no list marker, no sentence.
         if t.starts_with(['-', '*', '+', '•', '>']) || t.split_whitespace().count() > 4 || t.ends_with(['.', ':', ';', ',']) && version_tokens(t).is_empty() {
             return None;
@@ -79,7 +109,7 @@ fn heading_versions(line: &str) -> Option<Vec<String>> {
         t
     };
     let v = version_tokens(text);
-    (!v.is_empty()).then_some(v)
+    (!v.is_empty()).then_some((level, v))
 }
 
 fn join(lines: &[&str]) -> String {
@@ -115,21 +145,20 @@ fn overlap_start(lines: &[&str], installed: &str) -> Option<usize> {
 /// [`installed_versions`]) and `installed_text` its own changelog, if any.
 pub fn trim_to_newer(text: &str, installed_versions: &[String], installed_text: Option<&str>) -> Trimmed {
     let lines: Vec<&str> = text.lines().collect();
-    let heads: Vec<(usize, Vec<String>)> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, l)| heading_versions(l).map(|v| (i, v)))
-        .collect();
+    let heads = heads_of(&lines);
 
     let mut end = lines.len();
     let mut earlier_count = 0;
     // 1. By headings: the installed version's section and everything below.
-    if heads.len() >= 2
-        && let Some(k) = heads.iter().position(|(_, v)| v.iter().any(|t| installed_versions.contains(t)))
-        && k > 0
-    {
-        end = heads[k].0;
-        earlier_count = heads.len() - k;
+    if let Some(k) = heads.iter().position(|h| h.versions.iter().any(|t| installed_versions.contains(t))) {
+        let secs = same_level(&heads, k);
+        if let Some(pos) = secs.iter().position(|h| h.line == heads[k].line)
+            && secs.len() >= 2
+            && pos > 0
+        {
+            end = heads[k].line;
+            earlier_count = secs.len() - pos;
+        }
     }
     // 2. By overlap: the installed file's own text sits inside this one.
     if let Some(it) = installed_text
@@ -137,7 +166,11 @@ pub fn trim_to_newer(text: &str, installed_versions: &[String], installed_text: 
         && i < end
         && lines[..i].iter().any(|l| !l.trim().is_empty())
     {
-        earlier_count = earlier_count.max(heads.iter().filter(|(h, _)| *h >= i).count()).max(1);
+        // Sections in what is cut: the headings of the shallowest level in it.
+        let below: Vec<&Head> = heads.iter().filter(|h| h.line >= i).collect();
+        let top = below.iter().map(|h| (h.level.0, h.level.1)).min();
+        let n = below.iter().filter(|h| Some((h.level.0, h.level.1)) == top).count();
+        earlier_count = earlier_count.max(n).max(1);
         end = i;
     }
     if end == lines.len() {
@@ -157,21 +190,25 @@ pub fn trim_to_newer(text: &str, installed_versions: &[String], installed_text: 
 /// fewer than 2 sections, or the own section is the last.
 pub fn trim_to_own(text: &str, own_versions: &[String]) -> Trimmed {
     let lines: Vec<&str> = text.lines().collect();
-    let heads: Vec<(usize, Vec<String>)> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, l)| heading_versions(l).map(|v| (i, v)))
-        .collect();
-    if heads.len() < 2 {
-        return Trimmed::whole(text);
-    }
-    let Some(k) = heads.iter().position(|(_, v)| v.iter().any(|t| own_versions.contains(t))) else {
+    let heads = heads_of(&lines);
+    let Some(k) = heads.iter().position(|h| h.versions.iter().any(|t| own_versions.contains(t))) else {
         return Trimmed::whole(text);
     };
-    let Some(&(end, _)) = heads.get(k + 1) else {
+    let secs = same_level(&heads, k);
+    let pos = secs.iter().position(|h| h.line == heads[k].line).unwrap_or(0);
+    // Fewer than 2 sections, or its own is the last: nothing below to cut.
+    let Some(next) = secs.get(pos + 1).filter(|_| secs.len() >= 2) else {
         return Trimmed::whole(text);
     };
-    Trimmed { newer: join(&lines[..end]), earlier: join(&lines[end..]), earlier_count: heads.len() - k - 1 }
+    let end = next.line;
+    Trimmed { newer: join(&lines[..end]), earlier: join(&lines[end..]), earlier_count: secs.len() - pos - 1 }
+}
+
+/// A file's changelog (markdown) for a card opened on its own, as in the
+/// "Other versions" list: only its own version's notes, the rest in `earlier`.
+pub fn trim_file(md: &str, file: &crate::cf::File) -> Trimmed {
+    let own = installed_versions([file.display_name.as_str(), file.file_name.as_str()]);
+    trim_to_own(md, &own)
 }
 
 /// What to show for a file's card: only its own version's notes (see
@@ -334,6 +371,39 @@ mod tests {
         let t = trim_card(&text, &v("5.3.7"), Some((&v("5.3.5"), None)));
         assert!(t.newer.contains("seven") && !t.newer.contains("six"));
         assert!(t.earlier.contains("six") && t.earlier.contains("First release"));
+    }
+
+    #[test]
+    fn version_mentions_in_subheadings_are_not_sections() {
+        // Sections are the `##` headings; "### 1.21.1" lines inside them are not.
+        let mut txt = String::new();
+        for v in ["5.3.6", "5.3.5", "5.3.4", "5.3.3"] {
+            txt += &format!("## {v}
+### Fixes for 1.21.1
+- x
+### Added in 1.20.1
+- y
+
+");
+        }
+        let t = trim_card(txt.trim_end(), &v("5.3.5"), None);
+        assert!(t.newer.contains("## 5.3.6") && t.newer.contains("## 5.3.5") && !t.newer.contains("5.3.4"));
+        assert_eq!(t.earlier_count, 2);
+        // And against the installed 5.3.5 from a newer file.
+        let t = trim_to_newer(txt.trim_end(), &v("5.3.5"), None);
+        assert_eq!(t.earlier_count, 3);
+        assert!(t.newer.contains("5.3.6") && !t.newer.contains("## 5.3.5"));
+    }
+
+    #[test]
+    fn older_file_case() {
+        // "Roll back to 5.3.5" card, installed 5.3.6: its own text is 5.3.5 down to 5.3.1.
+        let file = TREES.split_once("
+
+").unwrap().1;
+        let t = trim_card(file, &v("5.3.5"), None);
+        assert!(t.newer.contains("birch") && !t.newer.contains("5.3.4"));
+        assert_eq!(t.earlier_count, 4);
     }
 
     #[test]

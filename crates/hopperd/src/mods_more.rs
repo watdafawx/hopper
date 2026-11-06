@@ -108,12 +108,16 @@ async fn changelog(
     entry(&app, &headers, &method, &id)?;
     let project: u64 = q.get("project").and_then(|p| p.parse().ok()).ok_or_else(|| bad("Which mod?"))?;
     let file: u64 = q.get("file").and_then(|p| p.parse().ok()).ok_or_else(|| bad("Which file?"))?;
-    let md = blocking(move || {
+    let full = q.get("full").is_some_and(|v| v == "1");
+    let t = blocking(move || {
         let f = source::file(project, file)?;
-        Ok(richtext::to_markdown(&source::changelog(&f)?))
+        let md = richtext::to_markdown(&source::changelog(&f)?);
+        // The update review wants the whole text.
+        Ok(if full { hopper_core::changelog_trim::Trimmed { newer: md, ..Default::default() } } else { hopper_core::changelog_trim::trim_file(&md, &f) })
     })
     .await?;
-    Ok(Json(json!({ "markdown": md })))
+    // Only its own version's notes; the older releases a cumulative text repeats are `earlier`.
+    Ok(Json(json!({ "markdown": t.newer, "earlier": t.earlier, "earlier_count": t.earlier_count })))
 }
 
 #[derive(Deserialize)]
