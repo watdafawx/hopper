@@ -1429,9 +1429,13 @@ pub fn changelogs(
         .map(|(i, (f, blocks))| {
             let mut blocks = blocks.unwrap_or_default();
             let (mut earlier, mut earlier_count) = (String::new(), 0);
-            if i < n_new && !is_pack && !blocks.is_empty() && !installed_versions.is_empty() {
+            if !is_pack && !blocks.is_empty() {
                 let md = crate::richtext::to_markdown(&blocks);
-                let t = crate::changelog_trim::trim_to_newer(&md, &installed_versions, installed_md.as_deref());
+                // Its own version's notes only; a newer file also drops what
+                // the installed one had.
+                let own = crate::changelog_trim::installed_versions([f.display_name.as_str(), f.file_name.as_str()]);
+                let against = (i < n_new && !installed_versions.is_empty()).then_some((installed_versions.as_slice(), installed_md.as_deref()));
+                let t = crate::changelog_trim::trim_card(&md, &own, against);
                 if !t.earlier.is_empty() {
                     blocks = crate::richtext::parse_markdown(&t.newer);
                     (earlier, earlier_count) = (t.earlier, t.earlier_count);

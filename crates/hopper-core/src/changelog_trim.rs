@@ -150,6 +150,47 @@ pub fn trim_to_newer(text: &str, installed_versions: &[String], installed_text: 
     Trimmed { newer, earlier, earlier_count }
 }
 
+/// A file's own changelog: what sits below its own version's section
+/// (older releases a cumulative text repeats) is cut into `earlier`, so the
+/// installed file, or a newest one with no older file to compare to, shows
+/// just its own notes. Whole when `own_versions` isn't a heading or there are
+/// fewer than 2 sections, or the own section is the last.
+pub fn trim_to_own(text: &str, own_versions: &[String]) -> Trimmed {
+    let lines: Vec<&str> = text.lines().collect();
+    let heads: Vec<(usize, Vec<String>)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| heading_versions(l).map(|v| (i, v)))
+        .collect();
+    if heads.len() < 2 {
+        return Trimmed::whole(text);
+    }
+    let Some(k) = heads.iter().position(|(_, v)| v.iter().any(|t| own_versions.contains(t))) else {
+        return Trimmed::whole(text);
+    };
+    let Some(&(end, _)) = heads.get(k + 1) else {
+        return Trimmed::whole(text);
+    };
+    Trimmed { newer: join(&lines[..end]), earlier: join(&lines[end..]), earlier_count: heads.len() - k - 1 }
+}
+
+/// What to show for a file's card: only its own version's notes (see
+/// [`trim_to_own`]), and for a file newer than the installed one also
+/// nothing the installed file had (see [`trim_to_newer`]). `installed` is
+/// that file's versions and changelog; `None` for the installed file itself.
+pub fn trim_card(text: &str, own_versions: &[String], installed: Option<(&[String], Option<&str>)>) -> Trimmed {
+    let own = trim_to_own(text, own_versions);
+    let Some((inst_versions, inst_text)) = installed else { return own };
+    let n = trim_to_newer(&own.newer, inst_versions, inst_text);
+    if n.earlier.is_empty() {
+        return own;
+    }
+    let earlier = [n.earlier, own.earlier].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("
+
+");
+    Trimmed { newer: n.newer, earlier, earlier_count: n.earlier_count + own.earlier_count }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +294,46 @@ mod tests {
         let t = trim_to_newer(txt, &v("1.0"), None);
         assert_eq!(t.newer, "## 2.0\n### Fixes\n- x");
         assert_eq!(t.earlier_count, 1);
+    }
+
+    #[test]
+    fn installed_card_cut_at_own_section() {
+        // Installed 5.3.6 is the newest: nothing to compare to, cut below its own section.
+        let text = TREES;
+        let inst = installed_versions(["Oh-The-Trees-You'll-Grow-NeoForge-1.21.1-5.3.6.jar"]);
+        let t = trim_card(text, &inst, None);
+        assert!(t.newer.contains("nether") && !t.newer.contains("5.3.5"));
+        assert!(t.earlier.contains("5.3.5") && t.earlier.contains("First release"));
+        assert_eq!(t.earlier_count, 5);
+    }
+
+    #[test]
+    fn own_cut_exact_trees() {
+        // The file's own version is the top section of a cumulative text.
+        let t = trim_card(TREES, &v("5.3.6"), None);
+        assert!(t.newer.contains("nether") && !t.newer.contains("5.3.5"));
+        assert_eq!(t.earlier_count, 5);
+        // Own section last, missing, or only one section: whole.
+        assert_eq!(trim_card(TREES, &v("5.3.1"), None), Trimmed::whole(TREES));
+        assert_eq!(trim_card(TREES, &v("7.0.0"), None), Trimmed::whole(TREES));
+        assert_eq!(trim_card("## 1.0
+- a", &v("1.0"), None), Trimmed::whole("## 1.0
+- a"));
+    }
+
+    #[test]
+    fn newer_card_cut_both_ways() {
+        // 5.3.7 over installed 5.3.5: own cut and installed cut agree; nothing between is lost.
+        let text = format!("## x-5.3.7
+- seven
+
+## x-5.3.6
+- six
+
+{}", TREES.replace("-NeoForge-1.21.1", ""));
+        let t = trim_card(&text, &v("5.3.7"), Some((&v("5.3.5"), None)));
+        assert!(t.newer.contains("seven") && !t.newer.contains("six"));
+        assert!(t.earlier.contains("six") && t.earlier.contains("First release"));
     }
 
     #[test]
