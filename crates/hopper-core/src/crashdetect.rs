@@ -3285,6 +3285,12 @@ java.lang.IllegalStateException: Forbidden & Arcanus machine content requires 2.
         let report = root.join("crash-reports/crash-2026-11-06_00.12.42-client.txt");
         fs::write(&report, TNP_UNBOUND_REPORT).unwrap();
         fs::write(root.join("logs/latest.log"), TNP_UNBOUND_LOG).unwrap();
+        // Written when the game crashed, not now: a log that starts after
+        // its report isn't the report's (CI ran before 00:07 on that day).
+        let start = crate::runlog::first_time(TNP_UNBOUND_LOG).unwrap();
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs((start + 300) as u64);
+        set_mtime(&report, at);
+        set_mtime(&root.join("logs/latest.log"), at);
         let mods: Vec<String> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         let c = from_report(&root, &report, &mods, |f| crate::deps::own_ids(&dir.join(f)).0).unwrap();
         let got: Vec<(&str, Certainty)> = c.suspects.iter().map(|s| (s.file_name.as_str(), s.certainty)).collect();
