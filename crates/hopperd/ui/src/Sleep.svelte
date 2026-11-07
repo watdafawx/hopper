@@ -1,6 +1,7 @@
 <script>
   // Settings › Sleep: stop the server when nobody is on, and start it when
   // someone joins through its address (the router answers meanwhile).
+  import { untrack } from 'svelte';
   import { Moon, Save, TriangleAlert } from '@lucide/svelte';
   import { api } from './lib/api.js';
   import { say } from './lib/toast.svelte.js';
@@ -95,9 +96,13 @@
     load();
   });
   // A wake or a start changes what the card says (failure, last woken).
+  // Only the state is watched: reading `info` here would re-run this each time
+  // load() sets it, an endless loop of requests that also wiped unsaved edits.
   $effect(() => {
     server.state;
-    if (info) load();
+    untrack(() => {
+      if (info && !dirty) load();
+    });
   });
 </script>
 
